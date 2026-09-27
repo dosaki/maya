@@ -21,7 +21,7 @@ export const COLUMNS: { state: CardState; title: string }[] = [
 ];
 
 export interface Turn {
-  kind: "user" | "assistant" | "tool";
+  kind: "user" | "assistant" | "tool" | "peer";
   text: string;
 }
 

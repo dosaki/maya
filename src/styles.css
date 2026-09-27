@@ -76,3 +76,4 @@ body { margin: 0; background: var(--bg); }
 .modal__status { padding: 6px 16px 12px; font-size: 12.5px; }
 .modal__status--ok { color: var(--completed); }
 .modal__status--error { color: #dc2626; }
+.turn--peer { align-self: flex-end; background: color-mix(in srgb, var(--completed) 16%, var(--panel)); }

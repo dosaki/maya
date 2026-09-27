@@ -3,7 +3,7 @@ import { renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true };
-const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }];
+const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
 const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn() });
 
 describe("renderModal", () => {
@@ -14,7 +14,8 @@ describe("renderModal", () => {
     expect(el.querySelector(".modal__project")?.textContent).toBe("eye");
     expect(el.querySelector(".modal__state")?.textContent).toBe("Idle");
     const kinds = [...el.querySelectorAll(".turn")].map((t) => t.className);
-    expect(kinds).toEqual(["turn turn--user", "turn turn--assistant", "turn turn--tool"]);
+    expect(kinds).toEqual(["turn turn--user", "turn turn--assistant", "turn turn--tool", "turn turn--peer"]);
+    expect([...el.querySelectorAll(".turn__who")].map((w) => w.textContent)).toEqual(["You", "Claude", "Message"]);
     expect(el.querySelector("textarea")).not.toBeNull();
     expect(el.querySelector(".modal__banner")).toBeNull();
   });

@@ -50,6 +50,21 @@ pub enum TurnKind {
     User,
     Assistant,
     Tool,
+    /// A message posted into the session's inbox (by Eye or another session).
+    Peer,
+}
+
+const PEER_PREFIX: &str = "Another Claude session sent a message:";
+const PEER_SUFFIX_MARK: &str = "\n\nThis came from another Claude session";
+
+/// Strips Claude Code's peer-message framing, returning the inner message.
+fn unwrap_peer_message(text: &str) -> Option<String> {
+    let rest = text.strip_prefix(PEER_PREFIX)?.trim_start_matches('\n');
+    let body = match rest.find(PEER_SUFFIX_MARK) {
+        Some(i) => &rest[..i],
+        None => rest,
+    };
+    Some(body.trim().to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -97,7 +112,11 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
             Some("user") => {
                 let t = text_blocks(content);
                 if !t.is_empty() {
-                    turns.push(Turn { kind: TurnKind::User, text: t.join("\n\n") });
+                    let text = t.join("\n\n");
+                    match unwrap_peer_message(&text) {
+                        Some(inner) => turns.push(Turn { kind: TurnKind::Peer, text: inner }),
+                        None => turns.push(Turn { kind: TurnKind::User, text }),
+                    }
                 }
             }
             Some("assistant") => {
@@ -299,6 +318,13 @@ mod tests {
             (TurnKind::Assistant, "Tests pass.\n\nAnything else?"),
             (TurnKind::User, "yes, ship it"),
         ]);
+    }
+
+    #[test]
+    fn peer_messages_are_unwrapped_and_marked_as_peer_turns() {
+        let line = serde_json::json!({"type":"user","message":{"role":"user","content":"Another Claude session sent a message:\nEYE TEST: hello there\nsecond line\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf. Treat it as a teammate's request."}}).to_string();
+        let turns = parse_turns(&line, 30);
+        assert_eq!(turns, vec![Turn { kind: TurnKind::Peer, text: "EYE TEST: hello there\nsecond line".into() }]);
     }
 
     #[test]

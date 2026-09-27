@@ -56,7 +56,8 @@ export function renderModal(m: ModalModel, h: ModalHandlers): HTMLElement {
   if (m.turns.length === 0) history.append(el("div", "modal__empty", "No transcript found."));
   for (const t of m.turns) {
     const turn = el("div", `turn turn--${t.kind}`);
-    if (t.kind !== "tool") turn.append(el("div", "turn__who", t.kind === "user" ? "You" : "Claude"));
+    const who = { user: "You", assistant: "Claude", peer: "Message", tool: "" }[t.kind];
+    if (who) turn.append(el("div", "turn__who", who));
     turn.append(el("div", "turn__text", t.text));
     history.append(turn);
   }
