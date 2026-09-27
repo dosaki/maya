@@ -2,17 +2,26 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "./actions";
 import { renderBoard } from "./board";
+import { makeClickGuard } from "./clickguard";
 import { openModal, refreshModal } from "./modal";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
 import type { Card } from "./types";
 
 let cards: Card[] = [];
+const guard = makeClickGuard(300);
+let paintPending = false;
 
 function paint(): void {
+  if (!guard.canPaint()) {
+    paintPending = true; // repaint once the pointer button is released
+    return;
+  }
+  paintPending = false;
   const host = document.getElementById("board");
   if (!host) return;
   host.replaceChildren(renderBoard(cards, Date.now()));
+  guard.markPaint(Date.now());
   const meta = document.getElementById("meta");
   if (meta) meta.textContent = `${cards.length} session${cards.length === 1 ? "" : "s"}`;
 }
@@ -37,7 +46,17 @@ function act(target: Element): void {
 async function start(): Promise<void> {
   void initSettings();
   const board = document.getElementById("board");
-  board?.addEventListener("click", (ev) => act(ev.target as Element));
+  board?.addEventListener("pointerdown", () => guard.setPointerDown(true));
+  window.addEventListener("pointerup", () => {
+    guard.setPointerDown(false);
+    if (paintPending) setTimeout(paint, 50);
+  });
+  board?.addEventListener("click", (ev) => {
+    // The board may have just repainted under the cursor; ignore the click
+    // rather than act on whichever card moved into place.
+    if (!guard.allowClick(Date.now())) return;
+    act(ev.target as Element);
+  });
   board?.addEventListener("keydown", (ev) => {
     // Only the card itself: buttons already turn Enter into a click.
     const target = ev.target as Element;

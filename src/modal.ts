@@ -94,6 +94,34 @@ export function renderModal(m: ModalModel, h: ModalHandlers): HTMLElement {
   return root;
 }
 
+/**
+ * Updates an already-rendered modal from a fresh render without touching the
+ * composer, so focus, caret, selection and a half-typed draft survive
+ * background refreshes. History, state badge, banner and status line are
+ * transplanted from `fresh`.
+ */
+export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
+  const panel = root.querySelector(".modal__panel");
+  const freshPanel = fresh.querySelector(".modal__panel");
+  if (!panel || !freshPanel) return;
+
+  const swap = (selector: string, before?: string) => {
+    const old = panel.querySelector(selector);
+    const next = freshPanel.querySelector(selector);
+    if (old && next) old.replaceWith(next);
+    else if (old && !next) old.remove();
+    else if (!old && next) {
+      const anchor = before ? panel.querySelector(before) : null;
+      if (anchor) anchor.before(next);
+      else panel.append(next);
+    }
+  };
+  swap(".modal__state");
+  swap(".modal__banner", ".modal__history");
+  swap(".modal__history");
+  swap(".modal__status");
+}
+
 /** True when both lists hold the same turns in the same order. */
 export function sameTurns(a: Turn[], b: Turn[]): boolean {
   return a.length === b.length && a.every((t, i) => t.kind === b[i].kind && t.text === b[i].text);
@@ -131,13 +159,15 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   const wasAtBottom = !oldHist || oldHist.scrollTop + oldHist.clientHeight >= oldHist.scrollHeight - 8;
   const oldScroll = oldHist?.scrollTop ?? 0;
 
-  host.replaceChildren(
-    renderModal(m, {
-      onSend: (text) => void guardedSend(text),
-      onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
-      onClose: closeModal,
-    }),
-  );
+  const fresh = renderModal(m, {
+    onSend: (text) => void guardedSend(text),
+    onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
+    onClose: closeModal,
+  });
+  const existing = host.querySelector<HTMLElement>(".modal");
+  const composerUnchanged = !!existing && !!existing.querySelector("textarea") === m.card.hasInbox;
+  if (existing && composerUnchanged) patchModal(existing, fresh);
+  else host.replaceChildren(fresh);
   const hist = host.querySelector(".modal__history");
   if (hist) hist.scrollTop = wasAtBottom ? hist.scrollHeight : oldScroll;
   if (opts.focusInput) host.querySelector<HTMLTextAreaElement>("textarea")?.focus();
