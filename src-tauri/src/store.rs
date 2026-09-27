@@ -50,6 +50,19 @@ impl Store {
         registry::list(&self.claude_dir.join("sessions"), &*self.alive)
     }
 
+    /// The live registry entry for a session id, if it is still running.
+    pub fn session(&self, session_id: &str) -> Option<RegistrySession> {
+        self.registry().into_iter().find(|s| s.session_id == session_id)
+    }
+
+    /// Hook-supplied transcript path when we have one, else the derived path.
+    pub fn transcript_path_for(&self, s: &RegistrySession) -> PathBuf {
+        match self.events.transcript_path_for(&s.session_id) {
+            Some(p) => PathBuf::from(p),
+            None => registry::transcript_path(&self.claude_dir, s),
+        }
+    }
+
     /// Drops event-log lines for sessions no longer in the registry.
     pub fn compact_events(&mut self) {
         let keep: HashSet<String> = self.registry().into_iter().map(|s| s.session_id).collect();
@@ -65,10 +78,7 @@ impl Store {
         let mut cards = Vec::with_capacity(sessions.len());
         let mut paths = Vec::with_capacity(sessions.len());
         for s in &sessions {
-            let path = match self.events.transcript_path_for(&s.session_id) {
-                Some(p) => PathBuf::from(p),
-                None => registry::transcript_path(&self.claude_dir, s),
-            };
+            let path = self.transcript_path_for(s);
             let tail = self.tails.get(&path);
             paths.push(path);
             cards.push(derive(&DeriveInput {
@@ -113,6 +123,21 @@ mod tests {
         store.refresh(300);
         let after = std::fs::read_to_string(claude.join("eye/events.jsonl")).unwrap();
         assert!(after.is_empty(), "log should have been compacted: {} bytes", after.len());
+    }
+
+    #[test]
+    fn session_lookup_and_transcript_path_prefer_hook_supplied_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("eye")).unwrap();
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle"}"#).unwrap();
+        std::fs::write(claude.join("eye/events.jsonl"), "{\"session_id\":\"s7\",\"hook_event_name\":\"Stop\",\"transcript_path\":\"/hooked/s7.jsonl\",\"received_at\":1}\n").unwrap();
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.refresh(2);
+        let s = store.session("s7").expect("live session");
+        assert_eq!(store.transcript_path_for(&s), PathBuf::from("/hooked/s7.jsonl"));
+        assert!(store.session("nope").is_none());
     }
 
     #[test]

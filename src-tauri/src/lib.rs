@@ -45,6 +45,27 @@ fn focus_session(pid: i32) -> Result<(), String> {
 }
 
 #[tauri::command(async)]
+fn session_history(state: TauriState<AppState>, session_id: String) -> Result<Vec<transcript::Turn>, String> {
+    let path = {
+        let store = state.store.lock().unwrap();
+        let s = store.session(&session_id).ok_or("Session is no longer running.")?;
+        store.transcript_path_for(&s)
+    };
+    Ok(transcript::read_turns(&path, 30))
+}
+
+#[tauri::command(async)]
+fn send_reply(state: TauriState<AppState>, session_id: String, text: String) -> Result<(), String> {
+    let (socket, pid) = {
+        let store = state.store.lock().unwrap();
+        let s = store.session(&session_id).ok_or("Session is no longer running.")?;
+        let socket = s.messaging_socket_path.clone().ok_or("This session has no inbox. Use the terminal.")?;
+        (socket, s.pid)
+    };
+    inbox::send(std::path::Path::new(&socket), pid, &text)
+}
+
+#[tauri::command(async)]
 fn hook_status(state: TauriState<AppState>) -> Result<bool, String> {
     let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
     hook_install::status(&dir)
@@ -94,6 +115,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             focus_session,
+            session_history,
+            send_reply,
             hook_status,
             install_hook,
             remove_hook,
