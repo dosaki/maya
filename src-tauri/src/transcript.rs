@@ -42,6 +42,46 @@ pub fn read_tail(path: &Path, max_bytes: u64) -> TranscriptTail {
     }
 }
 
+/// Caches parsed tails per path, re-reading only when size or mtime changes.
+#[derive(Default)]
+pub struct TailCache {
+    entries: std::collections::HashMap<std::path::PathBuf, (u64, Option<std::time::SystemTime>, TranscriptTail)>,
+    /// Number of real reads performed (for tests and diagnostics).
+    pub reads: usize,
+}
+
+impl TailCache {
+    pub fn get(&mut self, path: &Path) -> TranscriptTail {
+        let Ok(meta) = std::fs::metadata(path) else {
+            self.entries.remove(path);
+            return TranscriptTail::default();
+        };
+        let key = (meta.len(), meta.modified().ok());
+        if let Some((len, mtime, tail)) = self.entries.get(path) {
+            if (*len, *mtime) == key {
+                return tail.clone();
+            }
+        }
+        self.reads += 1;
+        let tail = read_tail(path, TAIL_BYTES);
+        self.entries.insert(path.to_path_buf(), (key.0, key.1, tail.clone()));
+        tail
+    }
+
+    /// Drops entries for paths no longer in use.
+    pub fn retain(&mut self, live: &[std::path::PathBuf]) {
+        self.entries.retain(|p, _| live.contains(p));
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 pub fn parse_tail(text: &str) -> TranscriptTail {
     let mut last_text: Option<String> = None;
     let mut open: Vec<(String, OpenQuestion)> = Vec::new();
@@ -144,6 +184,25 @@ mod tests {
     fn empty_or_missing_file_is_default() {
         assert_eq!(parse_tail(""), TranscriptTail::default());
         assert_eq!(read_tail(Path::new("/nonexistent/x.jsonl"), TAIL_BYTES), TranscriptTail::default());
+    }
+
+    #[test]
+    fn tail_cache_rereads_only_when_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        std::fs::write(&p, fixture("question-open.jsonl")).unwrap();
+        let mut cache = TailCache::default();
+        assert!(cache.get(&p).open_question.is_some());
+        assert!(cache.get(&p).open_question.is_some());
+        assert_eq!(cache.reads, 1);
+
+        std::fs::write(&p, fixture("question-answered.jsonl")).unwrap();
+        assert!(cache.get(&p).open_question.is_none());
+        assert_eq!(cache.reads, 2);
+
+        assert_eq!(cache.get(Path::new("/nonexistent/x.jsonl")), TranscriptTail::default());
+        cache.retain(&[p.clone()]);
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]

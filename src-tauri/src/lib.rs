@@ -33,30 +33,30 @@ fn refresh_and_emit(app: &AppHandle) {
     let _ = app.emit("sessions", &cards);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_sessions(state: TauriState<AppState>) -> Vec<Card> {
     state.store.lock().unwrap().refresh(now_ms())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn focus_session(pid: i32) -> Result<(), String> {
     focus::focus_pid(pid)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn hook_status(state: TauriState<AppState>) -> Result<bool, String> {
     let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
     hook_install::status(&dir)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn install_hook(state: TauriState<AppState>) -> Result<bool, String> {
     let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
     hook_install::install_to(&dir)?;
     hook_install::status(&dir)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn remove_hook(state: TauriState<AppState>) -> Result<bool, String> {
     let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
     hook_install::remove_from(&dir)?;
@@ -68,7 +68,7 @@ fn get_config(state: TauriState<AppState>) -> Config {
     state.store.lock().unwrap().config.clone()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Result<Config, String> {
     if config.completed_timeout_minutes == 0 {
         return Err("Completed timeout must be at least 1 minute".into());

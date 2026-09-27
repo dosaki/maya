@@ -45,37 +45,46 @@ fn question_detail(e: &HookEvent) -> String {
         .to_string()
 }
 
+fn awaiting_for_tool(e: &HookEvent) -> Awaiting {
+    match e.tool_name.as_deref() {
+        Some("AskUserQuestion") => Awaiting { kind: AwaitKind::Question, detail: question_detail(e) },
+        Some("ExitPlanMode") => Awaiting { kind: AwaitKind::Plan, detail: "Plan approval".to_string() },
+        _ => Awaiting { kind: AwaitKind::Permission, detail: permission_detail(e) },
+    }
+}
+
 pub fn derive(i: &DeriveInput) -> Card {
     let r = i.registry;
-    let mut awaiting: Option<(Awaiting, u64)> = None;
-    // (is_stop, timestamp) of the most recent Stop or UserPromptSubmit.
+    // (what is awaited, when, which agent asked: None = the main agent)
+    let mut awaiting: Option<(Awaiting, u64, Option<String>)> = None;
+    // (is_stop, timestamp) of the most recent main-agent Stop or UserPromptSubmit.
     let mut last_turn: Option<(bool, u64)> = None;
 
     for e in i.events {
         match e.hook_event_name.as_str() {
             "PermissionRequest" => {
-                awaiting = Some((Awaiting { kind: AwaitKind::Permission, detail: permission_detail(e) }, e.received_at));
+                awaiting = Some((awaiting_for_tool(e), e.received_at, e.agent_id.clone()));
             }
-            "PreToolUse" => match e.tool_name.as_deref() {
-                Some("AskUserQuestion") => {
-                    awaiting = Some((Awaiting { kind: AwaitKind::Question, detail: question_detail(e) }, e.received_at));
-                }
-                Some("ExitPlanMode") => {
-                    awaiting = Some((Awaiting { kind: AwaitKind::Plan, detail: "Plan approval".to_string() }, e.received_at));
-                }
-                _ => {}
-            },
+            "PreToolUse" if matches!(e.tool_name.as_deref(), Some("AskUserQuestion") | Some("ExitPlanMode")) => {
+                awaiting = Some((awaiting_for_tool(e), e.received_at, e.agent_id.clone()));
+            }
             "Notification" if e.notification_type.as_deref() == Some("permission_prompt") => {
                 if awaiting.is_none() {
-                    awaiting = Some((Awaiting { kind: AwaitKind::Permission, detail: "Permission prompt".to_string() }, e.received_at));
+                    awaiting = Some((Awaiting { kind: AwaitKind::Permission, detail: "Permission prompt".to_string() }, e.received_at, e.agent_id.clone()));
                 }
             }
-            "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => awaiting = None,
-            "Stop" => {
+            // A tool finishing only resolves a prompt raised by the same agent:
+            // a background subagent's tool calls must not hide the main agent's prompt.
+            "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
+                if awaiting.as_ref().map_or(false, |(_, _, agent)| *agent == e.agent_id) {
+                    awaiting = None;
+                }
+            }
+            "Stop" if e.agent_id.is_none() => {
                 awaiting = None;
                 last_turn = Some((true, e.received_at));
             }
-            "UserPromptSubmit" => {
+            "UserPromptSubmit" if e.agent_id.is_none() => {
                 awaiting = None;
                 last_turn = Some((false, e.received_at));
             }
@@ -85,13 +94,13 @@ pub fn derive(i: &DeriveInput) -> Card {
 
     if i.events.is_empty() {
         if let Some(q) = &i.transcript.open_question {
-            awaiting = Some((Awaiting { kind: q.kind, detail: q.detail.clone() }, r.status_updated_at));
+            awaiting = Some((Awaiting { kind: q.kind, detail: q.detail.clone() }, r.status_updated_at, None));
         }
     }
 
     let is_busy = matches!(r.status.as_str(), "busy" | "shell");
 
-    let (state, state_since, aw) = if let Some((a, ts)) = awaiting {
+    let (state, state_since, aw) = if let Some((a, ts, _)) = awaiting {
         (State::Awaiting, ts, Some(a))
     } else if is_busy {
         (State::Working, r.status_updated_at, None)
@@ -148,6 +157,7 @@ mod tests {
             tool_input: None,
             notification_type: None,
             transcript_path: None,
+            agent_id: None,
             received_at: ts,
         }
     }
@@ -195,6 +205,50 @@ mod tests {
         let c = run(&reg("busy", 1000), &approved, &TranscriptTail::default(), 3000);
         assert_eq!(c.state, State::Working);
         assert!(c.awaiting.is_none());
+    }
+
+    #[test]
+    fn subagent_post_tool_use_does_not_clear_main_agent_awaiting() {
+        let mut sub = tool_ev("PostToolUse", "Bash", serde_json::json!({}), 2500);
+        sub.agent_id = Some("agent-x".into());
+        let evs = [tool_ev("PermissionRequest", "Bash", serde_json::json!({"command": "rm -rf build"}), 2000), sub];
+        let c = run(&reg("busy", 1000), &evs, &TranscriptTail::default(), 3000);
+        assert_eq!(c.state, State::Awaiting);
+        assert_eq!(c.awaiting.unwrap().detail, "Bash: rm -rf build");
+    }
+
+    #[test]
+    fn subagent_permission_is_cleared_by_that_subagent_post_tool_use() {
+        let mut ask = tool_ev("PermissionRequest", "Bash", serde_json::json!({"command": "ls"}), 2000);
+        ask.agent_id = Some("agent-x".into());
+        let mut done = tool_ev("PostToolUse", "Bash", serde_json::json!({}), 2500);
+        done.agent_id = Some("agent-x".into());
+        assert_eq!(run(&reg("busy", 1000), &[ask.clone()], &TranscriptTail::default(), 3000).state, State::Awaiting);
+        assert_eq!(run(&reg("busy", 1000), &[ask, done], &TranscriptTail::default(), 3000).state, State::Working);
+    }
+
+    #[test]
+    fn permission_request_for_ask_user_question_keeps_the_question_text() {
+        let evs = [
+            tool_ev("PreToolUse", "AskUserQuestion", serde_json::json!({"questions": [{"question": "Which stack?"}]}), 10),
+            tool_ev("PermissionRequest", "AskUserQuestion", serde_json::json!({"questions": [{"question": "Which stack?"}]}), 11),
+        ];
+        let aw = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 20).awaiting.unwrap();
+        assert_eq!(aw.kind, AwaitKind::Question);
+        assert_eq!(aw.detail, "Which stack?");
+
+        let evs = [tool_ev("PermissionRequest", "ExitPlanMode", serde_json::json!({"plan": "x"}), 11)];
+        let aw = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 20).awaiting.unwrap();
+        assert_eq!(aw.kind, AwaitKind::Plan);
+        assert_eq!(aw.detail, "Plan approval");
+    }
+
+    #[test]
+    fn subagent_stop_does_not_complete_the_main_session() {
+        let mut stop = ev("Stop", 2000);
+        stop.agent_id = Some("agent-x".into());
+        let c = run(&reg("idle", 2100), &[ev("UserPromptSubmit", 1000), stop], &TranscriptTail::default(), 3000);
+        assert_eq!(c.state, State::Idle);
     }
 
     #[test]

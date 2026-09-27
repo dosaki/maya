@@ -3,7 +3,7 @@ use crate::events::EventLog;
 use crate::model::Card;
 use crate::registry::{self, RegistrySession};
 use crate::state::{derive, DeriveInput};
-use crate::transcript::{self, TAIL_BYTES};
+use crate::transcript::TailCache;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,12 @@ pub struct Store {
     events: EventLog,
     pub config: Config,
     alive: Box<dyn Fn(i32) -> bool + Send>,
+    tails: TailCache,
+    /// Compact the event log during refresh once it exceeds this many bytes.
+    pub compact_threshold_bytes: u64,
 }
+
+pub const DEFAULT_COMPACT_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
 
 impl Store {
     pub fn new(claude_dir: PathBuf) -> Self {
@@ -22,6 +27,8 @@ impl Store {
             claude_dir,
             config,
             alive: Box::new(registry::pid_alive),
+            tails: TailCache::default(),
+            compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
         }
     }
 
@@ -50,15 +57,20 @@ impl Store {
     }
 
     pub fn refresh(&mut self, now_ms: u64) -> Vec<Card> {
+        if self.events.file_len() > self.compact_threshold_bytes {
+            self.compact_events();
+        }
         let _ = self.events.read_new();
         let sessions = self.registry();
         let mut cards = Vec::with_capacity(sessions.len());
+        let mut paths = Vec::with_capacity(sessions.len());
         for s in &sessions {
             let path = match self.events.transcript_path_for(&s.session_id) {
                 Some(p) => PathBuf::from(p),
                 None => registry::transcript_path(&self.claude_dir, s),
             };
-            let tail = transcript::read_tail(&path, TAIL_BYTES);
+            let tail = self.tails.get(&path);
+            paths.push(path);
             cards.push(derive(&DeriveInput {
                 registry: s,
                 events: self.events.events_for(&s.session_id),
@@ -67,6 +79,7 @@ impl Store {
                 completed_timeout_ms: self.config.completed_timeout_ms(),
             }));
         }
+        self.tails.retain(&paths);
         cards
     }
 }
@@ -79,6 +92,28 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::model::State;
+
+    #[test]
+    fn refresh_compacts_the_log_when_it_grows_past_the_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("eye")).unwrap();
+        std::fs::write(
+            claude.join("sessions/7.json"),
+            r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle","startedAt":1,"statusUpdatedAt":100}"#,
+        ).unwrap();
+        let mut log = String::new();
+        for i in 0..50 {
+            log.push_str(&format!("{{\"session_id\":\"gone\",\"hook_event_name\":\"PostToolUse\",\"received_at\":{i}}}\n"));
+        }
+        std::fs::write(claude.join("eye/events.jsonl"), &log).unwrap();
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.compact_threshold_bytes = 1024;
+        store.refresh(300);
+        let after = std::fs::read_to_string(claude.join("eye/events.jsonl")).unwrap();
+        assert!(after.is_empty(), "log should have been compacted: {} bytes", after.len());
+    }
 
     #[test]
     fn refresh_builds_cards_from_a_fake_claude_dir() {

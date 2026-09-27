@@ -10,7 +10,15 @@ pub const HOOK_SCRIPT: &str = r#"#!/bin/sh
 dir="$HOME/.claude/eye"
 mkdir -p "$dir" 2>/dev/null
 t=$(date +%s000)
-jq -c --arg t "$t" '. + {received_at: ($t|tonumber)}' >> "$dir/events.jsonl" 2>/dev/null
+# Keep only the fields Eye reads; tool_response and the rest are dropped so
+# the log stays small and every append fits in one atomic write.
+jq -c --arg t "$t" '{
+  session_id, hook_event_name, tool_name, notification_type, transcript_path, agent_id,
+  tool_input: ((.tool_input // {}) | {command, file_path, path, questions}
+    | with_entries(select(.value != null))
+    | with_entries(if (.value | type) == "string" then .value |= .[0:400] else . end)),
+  received_at: ($t|tonumber)
+} | with_entries(select(.value != null))' >> "$dir/events.jsonl" 2>/dev/null
 exit 0
 "#;
 
@@ -213,6 +221,62 @@ mod tests {
         let err = install_to(bad.path()).unwrap_err();
         assert!(err.contains("settings.json"));
         assert_eq!(std::fs::read_to_string(bad.path().join("settings.json")).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn hook_script_projects_only_needed_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hook.sh");
+        std::fs::write(&script, HOOK_SCRIPT).unwrap();
+        let payload = br#"{"session_id":"s1","hook_event_name":"PostToolUse","agent_id":"ag","transcript_path":"/t.jsonl","cwd":"/x","tool_name":"Bash","tool_input":{"command":"ls","description":"list","questions":null},"tool_response":{"stdout":"HUGE"},"permission_mode":"auto"}"#;
+        let out = std::process::Command::new("sh")
+            .arg(&script)
+            .env("HOME", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(payload).unwrap();
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(out.status.success());
+        let log = std::fs::read_to_string(dir.path().join(".claude/eye/events.jsonl")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
+        assert!(v.get("tool_response").is_none(), "{log}");
+        assert!(v.get("permission_mode").is_none(), "{log}");
+        assert_eq!(v["agent_id"], "ag");
+        assert_eq!(v["transcript_path"], "/t.jsonl");
+        assert_eq!(v["tool_input"]["command"], "ls");
+        assert!(v["tool_input"].get("description").is_none(), "{log}");
+        assert!(v["tool_input"].get("questions").is_none(), "null members dropped: {log}");
+        assert!(v["received_at"].as_u64().unwrap() > 1_700_000_000_000);
+    }
+
+    #[test]
+    fn hook_script_caps_long_command_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hook.sh");
+        std::fs::write(&script, HOOK_SCRIPT).unwrap();
+        let payload = format!(r#"{{"session_id":"s1","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#, "x".repeat(20_000));
+        let out = std::process::Command::new("sh")
+            .arg(&script)
+            .env("HOME", dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(out.status.success());
+        let log = std::fs::read_to_string(dir.path().join(".claude/eye/events.jsonl")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
+        assert_eq!(v["tool_input"]["command"].as_str().unwrap().len(), 400);
+        assert!(log.len() < 1000, "line should be small: {}", log.len());
     }
 
     #[test]
