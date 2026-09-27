@@ -91,3 +91,17 @@ body { margin: 0; background: var(--bg); }
 .modal__banner .options { flex-basis: 100%; }
 .options__warn { font-size: 11.5px; color: var(--awaiting); margin-top: 6px; }
 .settings input[name=projectsDir] { width: 160px; }
+
+.column__head { gap: 8px; }
+.column__add { margin-left: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; width: 24px; height: 24px; line-height: 1; font-size: 16px; color: var(--text); cursor: pointer; padding: 0; }
+.column__add:hover { border-color: var(--working); color: var(--working); }
+.column__count { margin-left: auto; }
+.column__count + .column__add { margin-left: 0; }
+.modal__panel--compact { height: auto; max-height: 80vh; }
+.newsession { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; }
+.newsession__field { display: flex; flex-direction: column; gap: 4px; }
+.newsession__label { font-size: 12px; color: var(--muted); }
+.newsession__select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; }
+.newsession__actions { display: flex; justify-content: flex-end; }
+.modal__setup { padding: 16px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+.modal__setup p { margin: 0; color: var(--muted); }

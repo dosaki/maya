@@ -19,6 +19,15 @@ export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) =>
     count.className = "column__count";
     count.textContent = String(inCol.length);
     head.append(title, count);
+    if (col.state === "idle") {
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "column__add";
+      add.dataset.action = "new-session";
+      add.title = "New session";
+      add.textContent = "+";
+      head.append(add);
+    }
 
     const list = document.createElement("div");
     list.className = "column__cards";

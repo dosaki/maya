@@ -5,6 +5,7 @@ import { answerGuard } from "./answer";
 import { renderBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
 import { openModal, refreshModal, setProgress } from "./modal";
+import { closeNewSession, openNewSession } from "./newsession";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
 import { initSettings } from "./settings";
@@ -53,7 +54,10 @@ function act(target: Element): void {
   if (!card) return;
   if (action.kind === "terminal") void focus(card.pid);
   else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex, target);
-  else void openModal(card);
+  else {
+    closeNewSession();
+    void openModal(card);
+  }
 }
 
 async function answer(card: Card, questionIndex: number, optionIndex: number, button: Element): Promise<void> {
@@ -75,10 +79,15 @@ async function start(): Promise<void> {
   board?.addEventListener("pointermove", () => guard.markPointerMove(Date.now()));
   board?.addEventListener("pointerleave", () => guard.markPointerLeave());
   board?.addEventListener("click", (ev) => {
+    const target = ev.target as Element;
+    if (target.closest("[data-action=new-session]")) {
+      void openNewSession();
+      return;
+    }
     // The board may have just repainted under the cursor; ignore the click
     // rather than act on whichever card moved into place.
     if (!guard.allowClick(Date.now())) return;
-    act(ev.target as Element);
+    act(target);
   });
   board?.addEventListener("keydown", (ev) => {
     // Only the card itself: buttons already turn Enter into a click.

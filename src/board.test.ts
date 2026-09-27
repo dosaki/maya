@@ -85,6 +85,13 @@ describe("renderBoard", () => {
     expect([...cols[1].querySelectorAll(".card")].map((c) => (c as HTMLElement).dataset.sessionId)).toEqual(["a", "e"]);
   });
 
+  it("puts a new-session button only in the Idle column header", () => {
+    const board = renderBoard([], NOW);
+    const withAdd = [...board.querySelectorAll<HTMLElement>(".column")].filter((c) => c.querySelector("button[data-action=new-session]"));
+    expect(withAdd.map((c) => c.dataset.state)).toEqual(["idle"]);
+    expect(board.querySelector("button[data-action=new-session]")?.textContent).toBe("+");
+  });
+
   it("orders cards in a column by most recent state change first", () => {
     const cards: Card[] = [
       card({ sessionId: "old", state: "idle", stateSince: NOW - 10_000 }),
