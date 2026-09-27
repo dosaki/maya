@@ -1,0 +1,258 @@
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+pub const CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Names of the visible subfolders of `root`, sorted. Missing root gives none.
+pub fn list_project_dirs(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else { return vec![] };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    out.sort();
+    out
+}
+
+pub fn classifier_prompt(user_prompt: &str, dirs: &[String]) -> String {
+    format!(
+        "The user submitted this prompt without choosing a directory:\n==========\n{}\n==========\nThese are the folders in the projects directory: {}\nReply with exactly one folder name from that list that this prompt most likely belongs to, or NONE if none clearly fits. Reply with the name only, nothing else.",
+        user_prompt.trim(),
+        dirs.join(", ")
+    )
+}
+
+/// The folder the classifier named, if its reply is exactly one known name
+/// (ignoring case, surrounding quotes/backticks and a trailing period).
+pub fn pick_dir(reply: &str, dirs: &[String]) -> Option<String> {
+    let cleaned = reply.trim().trim_matches(|c| c == '"' || c == '\'' || c == '`').trim_end_matches('.').trim();
+    if cleaned.is_empty() || cleaned.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    dirs.iter().find(|d| d.eq_ignore_ascii_case(cleaned)).cloned()
+}
+
+/// Environment for spawned `claude` processes: Eye's own, minus the variables
+/// a nested Claude session exports (they break auth and mark the run as a child).
+pub fn clean_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
+    vars.filter(|(k, _)| k != "ANTHROPIC_API_KEY" && k != "CLAUDECODE" && !k.starts_with("CLAUDE_CODE_")).collect()
+}
+
+/// The `claude` binary, from the usual install locations or the login shell.
+pub fn claude_binary() -> Option<PathBuf> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let candidates = [home.join(".local/bin/claude"), PathBuf::from("/opt/homebrew/bin/claude"), PathBuf::from("/usr/local/bin/claude")];
+    if let Some(p) = candidates.iter().find(|p| p.is_file()) {
+        return Some(p.clone());
+    }
+    let out = Command::new("zsh").args(["-lc", "command -v claude"]).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !s.is_empty() {
+        Some(PathBuf::from(s))
+    } else {
+        None
+    }
+}
+
+/// Runs the headless picker; None on NONE, no match, timeout or any error.
+pub fn classify(binary: &Path, root: &Path, user_prompt: &str, dirs: &[String], timeout: Duration) -> Option<String> {
+    let mut child = Command::new(binary)
+        .args(["-p", "--strict-mcp-config", "--disable-slash-commands", "--model", "haiku", "--output-format", "text", "--no-session-persistence", "--max-turns", "1"])
+        .arg(classifier_prompt(user_prompt, dirs))
+        .current_dir(root)
+        .env_clear()
+        .envs(clean_env(std::env::vars()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    pick_dir(&String::from_utf8_lossy(&out.stdout), dirs)
+}
+
+/// Saves the first prompt to `<eye_dir>/prompts/<epoch-millis>.txt`.
+pub fn write_prompt_file(eye_dir: &Path, prompt: &str) -> Result<PathBuf, String> {
+    let dir = eye_dir.join("prompts");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let path = dir.join(format!("{stamp}.txt"));
+    std::fs::write(&path, prompt).map_err(|e| format!("cannot write the prompt file: {e}"))?;
+    Ok(path)
+}
+
+/// Single-quotes `s` for a POSIX shell.
+pub fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn applescript_string(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Opens a new Terminal window running the session and brings Terminal forward.
+pub fn applescript_launch(target: &Path, prompt_file: &Path) -> String {
+    let cmd = format!(
+        "cd {} && claude \"$(cat {})\"",
+        shell_single_quote(&target.to_string_lossy()),
+        shell_single_quote(&prompt_file.to_string_lossy())
+    );
+    format!(
+        "tell application \"Terminal\"\n  do script \"{}\"\n  activate\nend tell",
+        applescript_string(&cmd)
+    )
+}
+
+pub fn open_terminal(target: &Path, prompt_file: &Path) -> Result<(), String> {
+    let out = Command::new("osascript")
+        .arg("-e")
+        .arg(applescript_launch(target, prompt_file))
+        .output()
+        .map_err(|e| format!("could not run osascript: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("osascript failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
+/// Where the session starts and why: the user's choice, the classifier's pick,
+/// or the projects directory itself.
+pub fn resolve_target(root: &Path, dirs: &[String], dir: Option<&str>, picked: Option<&str>) -> Result<(PathBuf, &'static str), String> {
+    match (dir, picked) {
+        (Some(d), _) => {
+            if dirs.iter().any(|x| x == d) {
+                Ok((root.join(d), "chosen"))
+            } else {
+                Err("That folder is not in the projects directory.".into())
+            }
+        }
+        (None, Some(p)) => Ok((root.join(p), "classifier")),
+        (None, None) => Ok((root.to_path_buf(), "fallback")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn dirs() -> Vec<String> {
+        vec!["a".into(), "b".into(), "sonarqube".into()]
+    }
+
+    fn fake_binary(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("claude");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[test]
+    fn lists_visible_subfolders_sorted() {
+        let t = tempfile::tempdir().unwrap();
+        for d in ["b", "a", ".hidden"] {
+            std::fs::create_dir(t.path().join(d)).unwrap();
+        }
+        std::fs::write(t.path().join("file.txt"), "x").unwrap();
+        assert_eq!(list_project_dirs(t.path()), vec!["a".to_string(), "b".to_string()]);
+        assert!(list_project_dirs(Path::new("/nonexistent")).is_empty());
+    }
+
+    #[test]
+    fn prompt_template_wraps_the_prompt_and_lists_folders() {
+        let p = classifier_prompt("fix the CI", &dirs());
+        assert!(p.contains("==========\nfix the CI\n=========="));
+        assert!(p.contains("a, b, sonarqube"));
+        assert!(p.contains("NONE"));
+    }
+
+    #[test]
+    fn pick_dir_matches_loosely_but_only_real_names() {
+        let d = dirs();
+        assert_eq!(pick_dir("sonarqube", &d).as_deref(), Some("sonarqube"));
+        assert_eq!(pick_dir("  Sonarqube.\n", &d).as_deref(), Some("sonarqube"));
+        assert_eq!(pick_dir("`sonarqube`", &d).as_deref(), Some("sonarqube"));
+        assert_eq!(pick_dir("\"b\"", &d).as_deref(), Some("b"));
+        assert_eq!(pick_dir("NONE", &d), None);
+        assert_eq!(pick_dir("", &d), None);
+        assert_eq!(pick_dir("I think sonarqube fits best", &d), None);
+    }
+
+    #[test]
+    fn clean_env_drops_nested_session_variables() {
+        let vars = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("ANTHROPIC_API_KEY".to_string(), "x".to_string()),
+            ("CLAUDECODE".to_string(), "1".to_string()),
+            ("CLAUDE_CODE_SESSION_ID".to_string(), "s".to_string()),
+            ("HOME".to_string(), "/h".to_string()),
+        ];
+        let kept: Vec<String> = clean_env(vars.into_iter()).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(kept, vec!["PATH", "HOME"]);
+    }
+
+    #[test]
+    fn shell_quoting_and_applescript_escaping() {
+        assert_eq!(shell_single_quote("it's"), "'it'\\''s'");
+        let s = applescript_launch(Path::new("/Users/x/dev/it's-here"), Path::new("/Users/x/.claude/eye/prompts/1.txt"));
+        assert!(s.contains("tell application \"Terminal\""));
+        assert!(s.contains("do script \"cd '/Users/x/dev/it'\\\\''s-here' && claude \\\"$(cat '/Users/x/.claude/eye/prompts/1.txt')\\\"\""), "{s}");
+        assert!(s.contains("activate"));
+    }
+
+    #[test]
+    fn classify_uses_the_reply_and_ignores_none() {
+        let t = tempfile::tempdir().unwrap();
+        let bin = fake_binary(t.path(), "echo b");
+        assert_eq!(classify(&bin, t.path(), "p", &dirs(), Duration::from_secs(5)).as_deref(), Some("b"));
+        let bin = fake_binary(t.path(), "echo NONE");
+        assert_eq!(classify(&bin, t.path(), "p", &dirs(), Duration::from_secs(5)), None);
+    }
+
+    #[test]
+    fn classify_times_out_and_falls_back() {
+        let t = tempfile::tempdir().unwrap();
+        let bin = fake_binary(t.path(), "sleep 5; echo b");
+        let start = Instant::now();
+        assert_eq!(classify(&bin, t.path(), "p", &dirs(), Duration::from_secs(1)), None);
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn writes_the_prompt_file_under_prompts() {
+        let t = tempfile::tempdir().unwrap();
+        let p = write_prompt_file(t.path(), "hello\nworld").unwrap();
+        assert!(p.starts_with(t.path().join("prompts")));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello\nworld");
+    }
+
+    #[test]
+    fn resolve_target_honours_choice_classifier_and_fallback() {
+        let root = Path::new("/r");
+        let d = dirs();
+        assert_eq!(resolve_target(root, &d, Some("b"), None).unwrap(), (PathBuf::from("/r/b"), "chosen"));
+        assert!(resolve_target(root, &d, Some("../.."), None).unwrap_err().contains("not in the projects directory"));
+        assert_eq!(resolve_target(root, &d, None, Some("sonarqube")).unwrap(), (PathBuf::from("/r/sonarqube"), "classifier"));
+        assert_eq!(resolve_target(root, &d, None, None).unwrap(), (PathBuf::from("/r"), "fallback"));
+    }
+}

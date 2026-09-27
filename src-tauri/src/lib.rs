@@ -4,6 +4,7 @@ pub mod events;
 pub mod focus;
 pub mod hook_install;
 pub mod inbox;
+pub mod launch;
 pub mod model;
 pub mod registry;
 pub mod state;
