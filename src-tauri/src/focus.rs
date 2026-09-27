@@ -27,14 +27,19 @@ return "not found""#
     )
 }
 
-/// Brings the Terminal tab hosting `pid` to the front.
-pub fn focus_pid(pid: i32) -> Result<(), String> {
+/// `/dev/ttysNNN` of the terminal hosting `pid`.
+pub fn tty_for_pid(pid: i32) -> Result<String, String> {
     let ps = Command::new("ps")
         .args(["-o", "tty=", "-p", &pid.to_string()])
         .output()
         .map_err(|e| format!("could not run ps: {e}"))?;
     let stdout = String::from_utf8_lossy(&ps.stdout);
-    let tty = tty_from_ps(&stdout).ok_or_else(|| format!("no tty for process {pid}"))?;
+    tty_from_ps(&stdout).ok_or_else(|| format!("no tty for process {pid}"))
+}
+
+/// Brings the Terminal tab hosting `pid` to the front.
+pub fn focus_pid(pid: i32) -> Result<(), String> {
+    let tty = tty_for_pid(pid)?;
 
     let out = Command::new("osascript")
         .arg("-e")
@@ -72,6 +77,11 @@ mod tests {
         assert!(s.contains("set selected tab of w to t"));
         assert!(s.contains("activate"));
         assert!(s.contains("return \"not found\""));
+    }
+
+    #[test]
+    fn tty_for_pid_of_dead_process_is_an_error() {
+        assert!(tty_for_pid(2_000_000_000).is_err());
     }
 
     #[test]

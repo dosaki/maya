@@ -63,6 +63,11 @@ impl Store {
         }
     }
 
+    /// The current card for one session, or None when it is not running.
+    pub fn card_for(&mut self, session_id: &str, now_ms: u64) -> Option<Card> {
+        self.refresh(now_ms).into_iter().find(|c| c.session_id == session_id)
+    }
+
     /// Drops event-log lines for sessions no longer in the registry.
     pub fn compact_events(&mut self) {
         let keep: HashSet<String> = self.registry().into_iter().map(|s| s.session_id).collect();
@@ -138,6 +143,17 @@ mod tests {
         let s = store.session("s7").expect("live session");
         assert_eq!(store.transcript_path_for(&s), PathBuf::from("/hooked/s7.jsonl"));
         assert!(store.session("nope").is_none());
+    }
+
+    #[test]
+    fn card_for_returns_the_derived_card_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle"}"#).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        assert_eq!(store.card_for("s7", 1).unwrap().name, "eye-7");
+        assert!(store.card_for("nope", 1).is_none());
     }
 
     #[test]

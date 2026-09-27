@@ -1,3 +1,4 @@
+pub mod answer;
 pub mod config;
 pub mod events;
 pub mod focus;
@@ -66,6 +67,23 @@ fn send_reply(state: TauriState<AppState>, session_id: String, text: String) -> 
 }
 
 #[tauri::command(async)]
+fn answer_question(state: TauriState<AppState>, session_id: String, question_index: usize, option_index: usize) -> Result<(), String> {
+    let card = {
+        let mut store = state.store.lock().unwrap();
+        store.card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?
+    };
+    answer::check(&card, question_index, option_index, now_ms())?;
+    let count = card.awaiting.as_ref().map(|a| a.questions.len()).unwrap_or(0);
+    let tty = focus::tty_for_pid(card.pid)?;
+    answer::type_into_tty(&tty, &answer::keys_for_option(option_index))?;
+    if answer::needs_submit(question_index, count) {
+        std::thread::sleep(Duration::from_millis(answer::SUBMIT_DELAY_MS));
+        answer::type_into_tty(&tty, "")?;
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
 fn hook_status(state: TauriState<AppState>) -> Result<bool, String> {
     let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
     hook_install::status(&dir)
@@ -117,6 +135,7 @@ pub fn run() {
             focus_session,
             session_history,
             send_reply,
+            answer_question,
             hook_status,
             install_hook,
             remove_hook,
