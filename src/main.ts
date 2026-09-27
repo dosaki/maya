@@ -10,17 +10,18 @@ import { showToast } from "./toast";
 import type { Card } from "./types";
 
 let cards: Card[] = [];
-const guard = makeClickGuard(300);
+const guard = makeClickGuard();
 const progress = makeProgress();
 setProgress(progress);
-let paintPending = false;
+let retry: ReturnType<typeof setTimeout> | undefined;
 
 function paint(): void {
-  if (!guard.canPaint()) {
-    paintPending = true; // repaint once the pointer button is released
+  if (!guard.canPaint(Date.now())) {
+    // The pointer is busy over the board; try again shortly rather than
+    // moving cards under it.
+    if (!retry) retry = setTimeout(() => { retry = undefined; paint(); }, 200);
     return;
   }
-  paintPending = false;
   const host = document.getElementById("board");
   if (!host) return;
   host.replaceChildren(renderBoard(cards, Date.now(), (c) => progress.next(c)));
@@ -61,10 +62,9 @@ async function start(): Promise<void> {
   void initSettings();
   const board = document.getElementById("board");
   board?.addEventListener("pointerdown", () => guard.setPointerDown(true));
-  window.addEventListener("pointerup", () => {
-    guard.setPointerDown(false);
-    if (paintPending) setTimeout(paint, 50);
-  });
+  window.addEventListener("pointerup", () => guard.setPointerDown(false));
+  board?.addEventListener("pointermove", () => guard.markPointerMove(Date.now()));
+  board?.addEventListener("pointerleave", () => guard.markPointerLeave());
   board?.addEventListener("click", (ev) => {
     // The board may have just repainted under the cursor; ignore the click
     // rather than act on whichever card moved into place.
