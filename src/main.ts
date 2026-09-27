@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { cardActionFor } from "./actions";
 import { renderBoard } from "./board";
 import { openModal, refreshModal } from "./modal";
 import { initSettings } from "./settings";
@@ -24,27 +25,23 @@ async function focus(pid: number): Promise<void> {
   }
 }
 
+function act(target: Element): void {
+  const action = cardActionFor(target);
+  if (!action) return;
+  const card = cards.find((c) => c.sessionId === action.sessionId);
+  if (!card) return;
+  if (action.kind === "terminal") void focus(card.pid);
+  else void openModal(card);
+}
+
 async function start(): Promise<void> {
   void initSettings();
   const board = document.getElementById("board");
-  board?.addEventListener("click", (ev) => {
-    const target = ev.target as HTMLElement;
-    const cardEl = target.closest<HTMLElement>(".card");
-    if (!cardEl) return;
-    const card = cards.find((c) => c.sessionId === cardEl.dataset.sessionId);
-    if (!card) return;
-    const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
-    if (action === "terminal") {
-      void focus(card.pid);
-      return;
-    }
-    void openModal(card);
-  });
+  board?.addEventListener("click", (ev) => act(ev.target as Element));
   board?.addEventListener("keydown", (ev) => {
-    if (ev.key !== "Enter") return;
-    const cardEl = (ev.target as HTMLElement).closest<HTMLElement>(".card");
-    const card = cards.find((c) => c.sessionId === cardEl?.dataset.sessionId);
-    if (card) void openModal(card);
+    // Only the card itself: buttons already turn Enter into a click.
+    const target = ev.target as Element;
+    if (ev.key === "Enter" && target.classList.contains("card")) act(target);
   });
 
   await listen<Card[]>("sessions", (e) => {

@@ -34,7 +34,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers): HTMLElement {
   const titles = el("div", "modal__titles");
   titles.append(el("h2", "modal__title", m.card.name), el("span", "modal__project", projectName(m.card.cwd)));
   const state = el("span", `modal__state modal__state--${m.card.state}`, STATE_LABEL[m.card.state]);
-  const close = el("button", "modal__close", "\u00d7");
+  const close = el("button", "modal__close", "×");
   close.type = "button";
   close.dataset.action = "close";
   close.setAttribute("aria-label", "Close");
@@ -66,7 +66,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers): HTMLElement {
   if (m.card.hasInbox) {
     const form = el("div", "modal__composer");
     const ta = el("textarea", "modal__input");
-    ta.placeholder = "Message this session\u2026 (\u2318\u21b5 to send)";
+    ta.placeholder = "Message this session… (⌘↵ to send)";
     ta.value = m.draft;
     ta.rows = 3;
     const trySend = () => {
@@ -94,24 +94,53 @@ export function renderModal(m: ModalModel, h: ModalHandlers): HTMLElement {
   return root;
 }
 
+/** True when both lists hold the same turns in the same order. */
+export function sameTurns(a: Turn[], b: Turn[]): boolean {
+  return a.length === b.length && a.every((t, i) => t.kind === b[i].kind && t.text === b[i].text);
+}
+
+/** Wraps an async send so that calls made while one is in flight are dropped. */
+export function makeSendGuard(send: (text: string) => Promise<void>): (text: string) => Promise<void> {
+  let inFlight = false;
+  return async (text: string) => {
+    if (inFlight) return;
+    inFlight = true;
+    try {
+      await send(text);
+    } finally {
+      inFlight = false;
+    }
+  };
+}
+
 let current: { model: ModalModel; keyHandler: (e: KeyboardEvent) => void } | null = null;
 
-function paint(): void {
+/**
+ * Re-renders the open modal. Keeps the draft, keeps the history scroll
+ * position unless it was at the bottom, and focuses the composer only when
+ * asked (opening, or after a send), so a background refresh never steals
+ * focus or a text selection.
+ */
+function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   const host = document.getElementById("modal-host");
   if (!host || !current) return;
   const m = current.model;
   const ta = host.querySelector<HTMLTextAreaElement>("textarea");
   if (ta) m.draft = ta.value;
+  const oldHist = host.querySelector(".modal__history");
+  const wasAtBottom = !oldHist || oldHist.scrollTop + oldHist.clientHeight >= oldHist.scrollHeight - 8;
+  const oldScroll = oldHist?.scrollTop ?? 0;
+
   host.replaceChildren(
     renderModal(m, {
-      onSend: (text) => void send(text),
+      onSend: (text) => void guardedSend(text),
       onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
       onClose: closeModal,
     }),
   );
   const hist = host.querySelector(".modal__history");
-  if (hist) hist.scrollTop = hist.scrollHeight;
-  host.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+  if (hist) hist.scrollTop = wasAtBottom ? hist.scrollHeight : oldScroll;
+  if (opts.focusInput) host.querySelector<HTMLTextAreaElement>("textarea")?.focus();
 }
 
 function setStatus(ok: boolean, text: string): void {
@@ -120,32 +149,37 @@ function setStatus(ok: boolean, text: string): void {
   paint();
 }
 
-async function send(text: string): Promise<void> {
+const guardedSend = makeSendGuard(async (text: string) => {
   if (!current) return;
   const { card } = current.model;
   try {
     await invoke("send_reply", { sessionId: card.sessionId, text });
-    current.model.draft = "";
-    const host = document.getElementById("modal-host");
-    const ta = host?.querySelector<HTMLTextAreaElement>("textarea");
+    const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea");
     if (ta) ta.value = "";
-    setStatus(true, "Delivered");
-    await loadTurns();
+    current.model.draft = "";
+    current.model.status = { ok: true, text: "Delivered" };
+    await loadTurns({ force: true, focusInput: true });
   } catch (e) {
     setStatus(false, String(e));
   }
-}
+});
 
-async function loadTurns(): Promise<void> {
+/** Fetches history; repaints only when something visible changed (or `force`). */
+async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): Promise<void> {
   if (!current) return;
   const { card } = current.model;
+  let turns: Turn[];
   try {
-    current.model.turns = await invoke<Turn[]>("session_history", { sessionId: card.sessionId });
+    turns = await invoke<Turn[]>("session_history", { sessionId: card.sessionId });
   } catch (e) {
-    current.model.turns = [];
+    turns = [];
     current.model.status = { ok: false, text: String(e) };
+    opts = { ...opts, force: true };
   }
-  paint();
+  if (!current || current.model.card.sessionId !== card.sessionId) return;
+  const changed = !sameTurns(current.model.turns, turns);
+  current.model.turns = turns;
+  if (changed || opts.force) paint({ focusInput: opts.focusInput ?? false });
 }
 
 export async function openModal(card: Card): Promise<void> {
@@ -155,8 +189,8 @@ export async function openModal(card: Card): Promise<void> {
   };
   current = { model: { card, turns: [], status: null, draft: "" }, keyHandler };
   document.addEventListener("keydown", keyHandler);
-  paint();
-  await loadTurns();
+  paint({ focusInput: true });
+  await loadTurns({ force: true, focusInput: true });
 }
 
 export function closeModal(): void {
@@ -175,6 +209,7 @@ export function refreshModal(cards: Card[]): void {
     setStatus(false, "Session is no longer running.");
     return;
   }
+  const stateChanged = fresh.state !== current.model.card.state || fresh.hasInbox !== current.model.card.hasInbox;
   current.model.card = fresh;
-  void loadTurns();
+  void loadTurns({ force: stateChanged });
 }
