@@ -3,13 +3,16 @@ import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "./actions";
 import { renderBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
-import { openModal, refreshModal } from "./modal";
+import { openModal, refreshModal, setProgress } from "./modal";
+import { makeProgress } from "./progress";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
 import type { Card } from "./types";
 
 let cards: Card[] = [];
 const guard = makeClickGuard(300);
+const progress = makeProgress();
+setProgress(progress);
 let paintPending = false;
 
 function paint(): void {
@@ -20,7 +23,7 @@ function paint(): void {
   paintPending = false;
   const host = document.getElementById("board");
   if (!host) return;
-  host.replaceChildren(renderBoard(cards, Date.now()));
+  host.replaceChildren(renderBoard(cards, Date.now(), (c) => progress.next(c)));
   guard.markPaint(Date.now());
   const meta = document.getElementById("meta");
   if (meta) meta.textContent = `${cards.length} session${cards.length === 1 ? "" : "s"}`;
@@ -40,7 +43,18 @@ function act(target: Element): void {
   const card = cards.find((c) => c.sessionId === action.sessionId);
   if (!card) return;
   if (action.kind === "terminal") void focus(card.pid);
+  else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex);
   else void openModal(card);
+}
+
+async function answer(card: Card, questionIndex: number, optionIndex: number): Promise<void> {
+  try {
+    await invoke("answer_question", { sessionId: card.sessionId, questionIndex, optionIndex });
+    progress.advance(card);
+    paint();
+  } catch (e) {
+    showToast(String(e));
+  }
 }
 
 async function start(): Promise<void> {
@@ -65,6 +79,7 @@ async function start(): Promise<void> {
 
   await listen<Card[]>("sessions", (e) => {
     cards = e.payload;
+    for (const c of cards) if (c.state !== "awaiting") progress.reset(c.sessionId);
     paint();
     refreshModal(cards);
   });

@@ -57,6 +57,11 @@ describe("renderCard", () => {
     expect(el.querySelector(".card__awaiting")?.getAttribute("data-kind")).toBe("permission");
   });
 
+  it("renders option buttons for an open question", () => {
+    const el = renderCard(card({ state: "awaiting", stateSince: NOW - 5000, awaiting: { kind: "question", detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "" }] }] } }), NOW);
+    expect(el.querySelector("button[data-action=answer]")?.textContent).toBe("A");
+  });
+
   it("escapes text content", () => {
     const el = renderCard(card({ snippet: "<img src=x onerror=alert(1)>" }), NOW);
     expect(el.querySelector("img")).toBeNull();

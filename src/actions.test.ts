@@ -14,4 +14,13 @@ describe("cardActionFor", () => {
     expect(cardActionFor(el.querySelector(".card__name")!)).toEqual({ kind: "open", sessionId: "s1" });
     expect(cardActionFor(document.body)).toBeNull();
   });
+
+  it("routes option buttons to an answer action with indices", () => {
+    const el = document.createElement("article");
+    el.className = "card";
+    el.dataset.sessionId = "s1";
+    el.innerHTML = '<button data-action="answer" data-q="1" data-opt="2">x</button>';
+    document.body.replaceChildren(el);
+    expect(cardActionFor(el.querySelector("button")!)).toEqual({ kind: "answer", sessionId: "s1", questionIndex: 1, optionIndex: 2 });
+  });
 });

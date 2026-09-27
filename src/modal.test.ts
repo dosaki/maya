@@ -4,7 +4,7 @@ import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true };
 const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn() });
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn() });
 
 describe("renderModal", () => {
   it("shows header, turns with kind classes and a composer", () => {
@@ -36,6 +36,10 @@ describe("renderModal", () => {
     const h = handlers();
     const el = renderModal({ card: { ...base, state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm", questions: [] } }, turns: [], status: { ok: false, text: "boom" }, draft: "" }, h);
     expect(el.querySelector(".modal__banner")?.textContent).toContain("waiting for a decision");
+    const q = renderModal({ card: { ...base, state: "awaiting", stateSince: 0, awaiting: { kind: "question", detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "desc a" }] }] } }, turns: [], status: null, draft: "", next: 0 }, h);
+    expect(q.querySelector(".modal__banner .options__desc")?.textContent).toBe("desc a");
+    q.querySelector<HTMLButtonElement>(".modal__banner button[data-action=answer]")!.click();
+    expect(h.onAnswer).toHaveBeenCalledWith(0, 0);
     el.querySelector<HTMLButtonElement>(".modal__banner button")!.click();
     expect(h.onTerminal).toHaveBeenCalled();
     expect(el.querySelector(".modal__status")?.textContent).toBe("boom");

@@ -1,4 +1,5 @@
 import { formatAge, projectName } from "./format";
+import { renderOptions } from "./options";
 import type { Card } from "./types";
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -8,7 +9,9 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return node;
 }
 
-export function renderCard(card: Card, nowMs: number): HTMLElement {
+export const OPEN_DELAY_MS = 1000;
+
+export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   const root = el("article", `card card--${card.state}`);
   root.dataset.sessionId = card.sessionId;
   root.dataset.pid = String(card.pid);
@@ -24,6 +27,8 @@ export function renderCard(card: Card, nowMs: number): HTMLElement {
     a.dataset.kind = card.awaiting.kind;
     root.append(a);
   }
+  const options = renderOptions(card, next, { descriptions: false, enabled: nowMs - card.stateSince >= OPEN_DELAY_MS });
+  if (options) root.append(options);
   if (card.snippet) root.append(el("p", "card__snippet", card.snippet));
 
   const actions = el("div", "card__actions");

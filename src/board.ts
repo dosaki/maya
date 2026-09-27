@@ -1,7 +1,7 @@
 import { renderCard } from "./card";
 import { COLUMNS, type Card } from "./types";
 
-export function renderBoard(cards: Card[], nowMs: number): HTMLElement {
+export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) => number): HTMLElement {
   const board = document.createElement("main");
   board.className = "board";
   for (const col of COLUMNS) {
@@ -28,7 +28,7 @@ export function renderBoard(cards: Card[], nowMs: number): HTMLElement {
       empty.textContent = "Nothing here";
       list.append(empty);
     }
-    for (const c of inCol) list.append(renderCard(c, nowMs));
+    for (const c of inCol) list.append(renderCard(c, nowMs, nextFor?.(c) ?? 0));
 
     section.append(head, list);
     board.append(section);
