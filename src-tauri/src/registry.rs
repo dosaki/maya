@@ -15,6 +15,22 @@ pub struct RegistrySession {
     pub started_at: u64,
     #[serde(rename = "statusUpdatedAt", default)]
     pub status_updated_at: u64,
+    /// "cli" for terminal sessions; "sdk-cli" for headless `claude -p` runs
+    /// (e.g. plugin helpers). Missing means an older registry entry: treat as cli.
+    #[serde(default = "default_entrypoint")]
+    pub entrypoint: String,
+}
+
+fn default_entrypoint() -> String {
+    "cli".to_string()
+}
+
+impl RegistrySession {
+    /// True for sessions a person is driving from a terminal. Headless SDK
+    /// runs can never wait on the user, so the board hides them.
+    pub fn is_interactive_cli(&self) -> bool {
+        self.entrypoint == "cli"
+    }
 }
 
 pub fn parse(json: &str) -> Result<RegistrySession, serde_json::Error> {
@@ -39,7 +55,8 @@ pub fn pid_alive(pid: i32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Every parseable `*.json` in `dir` whose pid passes `alive`, sorted by name.
+/// Every parseable `*.json` in `dir` whose pid passes `alive` and which is a
+/// terminal (`cli`) session, sorted by name.
 pub fn list(dir: &Path, alive: &dyn Fn(i32) -> bool) -> Vec<RegistrySession> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else { return out };
@@ -50,7 +67,7 @@ pub fn list(dir: &Path, alive: &dyn Fn(i32) -> bool) -> Vec<RegistrySession> {
         }
         let Ok(text) = std::fs::read_to_string(&path) else { continue };
         let Ok(session) = parse(&text) else { continue };
-        if alive(session.pid) {
+        if session.is_interactive_cli() && alive(session.pid) {
             out.push(session);
         }
     }
@@ -104,6 +121,21 @@ mod tests {
         let live = list(dir.path(), &|pid| pid == 49643);
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].name, "eye-3b");
+    }
+
+    #[test]
+    fn list_hides_headless_sdk_runs_but_keeps_entries_without_entrypoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::read_to_string(fixtures().join("49643.json")).unwrap();
+        std::fs::write(dir.path().join("49643.json"), &base).unwrap();
+        let headless = base.replace("\"entrypoint\":\"cli\"", "\"entrypoint\":\"sdk-cli\"").replace("eye-3b", "t-c4").replace("\"pid\":49643", "\"pid\":2");
+        std::fs::write(dir.path().join("2.json"), headless).unwrap();
+        let legacy = base.replace("\"entrypoint\":\"cli\",", "").replace("eye-3b", "legacy-1").replace("\"pid\":49643", "\"pid\":3");
+        assert!(!legacy.contains("entrypoint"));
+        std::fs::write(dir.path().join("3.json"), legacy).unwrap();
+
+        let names: Vec<String> = list(dir.path(), &|_| true).into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["eye-3b", "legacy-1"]);
     }
 
     #[test]

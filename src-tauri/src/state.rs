@@ -146,6 +146,7 @@ mod tests {
             status: status.into(),
             started_at: 0,
             status_updated_at,
+            entrypoint: "cli".into(),
         }
     }
 
