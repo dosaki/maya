@@ -16,6 +16,7 @@ function card(over: Partial<Card>): Card {
     stateSince: NOW - 90_000,
     snippet: "",
     awaiting: null,
+    hasInbox: true,
     ...over,
   };
 }

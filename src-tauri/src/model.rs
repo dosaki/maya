@@ -36,6 +36,8 @@ pub struct Card {
     /// Last assistant text, trimmed to 200 chars.
     pub snippet: String,
     pub awaiting: Option<Awaiting>,
+    /// True when the session has an inbox socket the app can post replies to.
+    pub has_inbox: bool,
 }
 
 #[cfg(test)]
@@ -53,6 +55,7 @@ mod tests {
             state_since: 1000,
             snippet: "hi".into(),
             awaiting: Some(Awaiting { kind: AwaitKind::Permission, detail: "Bash: rm -rf".into() }),
+            has_inbox: false,
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["sessionId"], "s1");

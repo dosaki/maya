@@ -19,6 +19,9 @@ pub struct RegistrySession {
     /// (e.g. plugin helpers). Missing means an older registry entry: treat as cli.
     #[serde(default = "default_entrypoint")]
     pub entrypoint: String,
+    /// Unix socket where other processes can post messages to this session.
+    #[serde(rename = "messagingSocketPath", default)]
+    pub messaging_socket_path: Option<String>,
 }
 
 fn default_entrypoint() -> String {
@@ -94,6 +97,7 @@ mod tests {
         assert_eq!(s.status, "busy");
         assert_eq!(s.status_updated_at, 1790587602132);
         assert_eq!(s.started_at, 1790587340040);
+        assert_eq!(s.messaging_socket_path.as_deref(), Some("/tmp/cc-socks/49643.sock"));
     }
 
     #[test]

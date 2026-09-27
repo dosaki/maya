@@ -10,6 +10,7 @@ export interface Card {
   stateSince: number;
   snippet: string;
   awaiting: { kind: AwaitKind; detail: string } | null;
+  hasInbox: boolean;
 }
 
 export const COLUMNS: { state: CardState; title: string }[] = [

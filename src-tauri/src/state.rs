@@ -123,6 +123,7 @@ pub fn derive(i: &DeriveInput) -> Card {
         state_since,
         snippet: truncate(i.transcript.last_assistant_text.as_deref().unwrap_or(""), SNIPPET_CHARS),
         awaiting: aw,
+        has_inbox: r.messaging_socket_path.is_some(),
     }
 }
 
@@ -147,6 +148,7 @@ mod tests {
             started_at: 0,
             status_updated_at,
             entrypoint: "cli".into(),
+            messaging_socket_path: None,
         }
     }
 
@@ -250,6 +252,14 @@ mod tests {
         stop.agent_id = Some("agent-x".into());
         let c = run(&reg("idle", 2100), &[ev("UserPromptSubmit", 1000), stop], &TranscriptTail::default(), 3000);
         assert_eq!(c.state, State::Idle);
+    }
+
+    #[test]
+    fn card_reports_whether_the_session_has_an_inbox() {
+        let mut r = reg("idle", 0);
+        assert!(!run(&r, &[], &TranscriptTail::default(), 1).has_inbox);
+        r.messaging_socket_path = Some("/tmp/cc-socks/7.sock".into());
+        assert!(run(&r, &[], &TranscriptTail::default(), 1).has_inbox);
     }
 
     #[test]
