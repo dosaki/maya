@@ -89,10 +89,31 @@ pub fn classify(binary: &Path, root: &Path, user_prompt: &str, dirs: &[String], 
     pick_dir(&String::from_utf8_lossy(&out.stdout), dirs)
 }
 
+/// Prompt files older than this are removed whenever a new one is written.
+/// The launched command deletes its own file; this catches the ones left
+/// behind when a launch failed part-way.
+pub const PROMPT_FILE_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
+
+fn prune_prompt_files(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let now = std::time::SystemTime::now();
+    for e in entries.flatten() {
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|m| now.duration_since(m).map(|age| age > PROMPT_FILE_MAX_AGE).unwrap_or(false))
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Saves the first prompt to `<eye_dir>/prompts/<epoch-millis>.txt`.
 pub fn write_prompt_file(eye_dir: &Path, prompt: &str) -> Result<PathBuf, String> {
     let dir = eye_dir.join("prompts");
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    prune_prompt_files(&dir);
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     let path = dir.join(format!("{stamp}.txt"));
     std::fs::write(&path, prompt).map_err(|e| format!("cannot write the prompt file: {e}"))?;
@@ -109,11 +130,13 @@ fn applescript_string(text: &str) -> String {
 }
 
 /// Opens a new Terminal window running the session and brings Terminal forward.
+/// The shell reads the prompt file into a variable, deletes the file, and
+/// passes the prompt after `--` so a prompt starting with `-` is not an option.
 pub fn applescript_launch(target: &Path, prompt_file: &Path) -> String {
+    let file = shell_single_quote(&prompt_file.to_string_lossy());
     let cmd = format!(
-        "cd {} && claude \"$(cat {})\"",
-        shell_single_quote(&target.to_string_lossy()),
-        shell_single_quote(&prompt_file.to_string_lossy())
+        "cd {} && p=\"$(cat {file})\" && rm -f {file} && claude -- \"$p\"",
+        shell_single_quote(&target.to_string_lossy())
     );
     format!(
         "tell application \"Terminal\"\n  do script \"{}\"\n  activate\nend tell",
@@ -216,7 +239,8 @@ mod tests {
         assert_eq!(shell_single_quote("it's"), "'it'\\''s'");
         let s = applescript_launch(Path::new("/Users/x/dev/it's-here"), Path::new("/Users/x/.claude/eye/prompts/1.txt"));
         assert!(s.contains("tell application \"Terminal\""));
-        assert!(s.contains("do script \"cd '/Users/x/dev/it'\\\\''s-here' && claude \\\"$(cat '/Users/x/.claude/eye/prompts/1.txt')\\\"\""), "{s}");
+        // The prompt file is consumed and deleted, and `--` protects prompts that start with `-`.
+        assert!(s.contains("do script \"cd '/Users/x/dev/it'\\\\''s-here' && p=\\\"$(cat '/Users/x/.claude/eye/prompts/1.txt')\\\" && rm -f '/Users/x/.claude/eye/prompts/1.txt' && claude -- \\\"$p\\\"\""), "{s}");
         assert!(s.contains("activate"));
     }
 
@@ -239,11 +263,22 @@ mod tests {
     }
 
     #[test]
-    fn writes_the_prompt_file_under_prompts() {
+    fn writes_the_prompt_file_under_prompts_and_prunes_old_ones() {
         let t = tempfile::tempdir().unwrap();
+        let prompts = t.path().join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        let old = prompts.join("1.txt");
+        std::fs::write(&old, "old").unwrap();
+        let stale = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 3600);
+        std::fs::File::open(&old).unwrap().set_modified(stale).unwrap();
+        let fresh = prompts.join("2.txt");
+        std::fs::write(&fresh, "fresh").unwrap();
+
         let p = write_prompt_file(t.path(), "hello\nworld").unwrap();
-        assert!(p.starts_with(t.path().join("prompts")));
+        assert!(p.starts_with(&prompts));
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello\nworld");
+        assert!(!old.exists(), "files older than a day are pruned");
+        assert!(fresh.exists());
     }
 
     #[test]

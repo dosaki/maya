@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { showToast } from "./toast";
 
 export interface NewSessionModel {
   dirs: string[];
@@ -7,6 +8,8 @@ export interface NewSessionModel {
   status: { ok: boolean; text: string } | null;
   busy: boolean;
   needsSetup: boolean;
+  /** Set once a start succeeded: the prompt is spent and must not come back as a draft. */
+  done?: boolean;
 }
 
 export interface NewSessionHandlers {
@@ -121,12 +124,19 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
 let current: { model: NewSessionModel; keyHandler: (e: KeyboardEvent) => void } | null = null;
 let draft = "";
 
+function startedText(r: StartResult): string {
+  const name = r.dir.split("/").filter(Boolean).pop() ?? r.dir;
+  if (r.how === "chosen") return `Started in ${name}`;
+  if (r.how === "classifier") return `Started in ${name} (chosen by Claude)`;
+  return `Started in ${name} (no clear match, Claude will work it out)`;
+}
+
 function paint(): void {
   const host = document.getElementById("modal-host");
   if (!host || !current) return;
   const m = current.model;
   const ta = host.querySelector<HTMLTextAreaElement>("textarea[name=prompt]");
-  if (ta) m.prompt = ta.value;
+  if (ta && !m.done) m.prompt = ta.value;
   const sel = host.querySelector<HTMLSelectElement>("select[name=dir]");
   if (sel) m.dir = sel.value || null;
   host.replaceChildren(
@@ -152,20 +162,25 @@ async function start(dir: string | null, prompt: string): Promise<void> {
   paint();
   try {
     const r = await invoke<StartResult>("start_session", { dir, prompt });
-    if (current !== me) return;
-    const name = r.dir.split("/").filter(Boolean).pop() ?? r.dir;
-    const text =
-      r.how === "chosen" ? `Started in ${name}` : r.how === "classifier" ? `Started in ${name} (chosen by Claude)` : `Started in ${name} (no clear match, Claude will work it out)`;
-    me.model.status = { ok: true, text };
-    me.model.busy = false;
-    me.model.prompt = "";
     draft = "";
+    if (current !== me) {
+      showToast(startedText(r));
+      return;
+    }
+    // The prompt is spent: clear it everywhere and keep Start disabled until the modal closes.
+    me.model.done = true;
+    me.model.busy = true;
+    me.model.prompt = "";
+    me.model.status = { ok: true, text: startedText(r) };
     paint();
     setTimeout(() => {
       if (current === me) closeNewSession();
     }, 1500);
   } catch (e) {
-    if (current !== me) return;
+    if (current !== me) {
+      showToast(String(e));
+      return;
+    }
     me.model.busy = false;
     me.model.status = { ok: false, text: String(e) };
     paint();
@@ -196,7 +211,8 @@ export async function openNewSession(): Promise<void> {
 export function closeNewSession(): void {
   if (!current) return;
   const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea[name=prompt]");
-  if (ta && !current.model.busy) draft = ta.value;
+  // Keep the draft even mid-start; only a successful start spends it.
+  if (ta && !current.model.done) draft = ta.value;
   document.removeEventListener("keydown", current.keyHandler);
   current = null;
   document.getElementById("modal-host")?.replaceChildren();
