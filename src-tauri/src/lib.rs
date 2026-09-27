@@ -113,6 +113,11 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
     if config.completed_timeout_minutes == 0 {
         return Err("Completed timeout must be at least 1 minute".into());
     }
+    if let Some(dir) = config.projects_dir_path() {
+        if !dir.is_dir() {
+            return Err(format!("Projects directory does not exist: {}.", dir.display()));
+        }
+    }
     {
         let mut store = state.store.lock().unwrap();
         config::save(&store.config_path(), &config)?;

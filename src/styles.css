@@ -90,3 +90,4 @@ body { margin: 0; background: var(--bg); }
 .modal__banner { flex-wrap: wrap; }
 .modal__banner .options { flex-basis: 100%; }
 .options__warn { font-size: 11.5px; color: var(--awaiting); margin-top: 6px; }
+.settings input[name=projectsDir] { width: 160px; }

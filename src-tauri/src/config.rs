@@ -1,21 +1,41 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     pub completed_timeout_minutes: u64,
+    /// Folder whose subfolders are offered when starting a new session, e.g. `~/dev`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projects_dir: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { completed_timeout_minutes: 30 }
+        Self { completed_timeout_minutes: 30, projects_dir: None }
     }
 }
 
 impl Config {
     pub fn completed_timeout_ms(&self) -> u64 {
         self.completed_timeout_minutes * 60_000
+    }
+
+    /// The projects directory with `~` expanded, if configured.
+    pub fn projects_dir_path(&self) -> Option<PathBuf> {
+        self.projects_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(expand_home)
+    }
+}
+
+/// Expands a leading `~` or `~/` to the home directory.
+pub fn expand_home(s: &str) -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    if s == "~" {
+        home
+    } else if let Some(rest) = s.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        PathBuf::from(s)
     }
 }
 
@@ -44,10 +64,23 @@ mod tests {
     }
 
     #[test]
+    fn expands_home_and_round_trips_projects_dir() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(expand_home("~/dev"), home.join("dev"));
+        assert_eq!(expand_home("/abs/path"), Path::new("/abs/path"));
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5}"#).unwrap();
+        assert!(c.projects_dir.is_none());
+        let c = Config { completed_timeout_minutes: 5, projects_dir: Some("~/dev".into()) };
+        let text = serde_json::to_string(&c).unwrap();
+        assert!(text.contains("\"projectsDir\":\"~/dev\""));
+        assert_eq!(c.projects_dir_path(), Some(home.join("dev")));
+    }
+
+    #[test]
     fn round_trips_and_uses_camel_case() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("nested/config.json");
-        save(&p, &Config { completed_timeout_minutes: 5 }).unwrap();
+        save(&p, &Config { completed_timeout_minutes: 5, projects_dir: None }).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("completedTimeoutMinutes"));
         assert_eq!(load(&p).completed_timeout_minutes, 5);
     }

@@ -26,10 +26,10 @@ export interface Card {
 }
 
 export const COLUMNS: { state: CardState; title: string }[] = [
-  { state: "awaiting", title: "Awaiting Decision" },
-  { state: "working", title: "Working" },
-  { state: "completed", title: "Completed" },
   { state: "idle", title: "Idle" },
+  { state: "working", title: "Working" },
+  { state: "awaiting", title: "Awaiting Decision" },
+  { state: "completed", title: "Completed" },
 ];
 
 export interface Turn {

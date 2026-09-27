@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface SettingsModel {
   hookInstalled: boolean | null;
   completedTimeoutMinutes: number;
+  projectsDir: string;
   error: string | null;
 }
 
@@ -10,6 +11,12 @@ export interface SettingsHandlers {
   onInstall(): void;
   onRemove(): void;
   onTimeout(minutes: number): void;
+  onProjectsDir(path: string): void;
+}
+
+interface ConfigJson {
+  completedTimeoutMinutes: number;
+  projectsDir?: string | null;
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLElement {
@@ -54,6 +61,17 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   label.append(input);
   root.append(label);
 
+  const dirLabel = document.createElement("label");
+  dirLabel.textContent = "Projects directory";
+  const dirInput = document.createElement("input");
+  dirInput.type = "text";
+  dirInput.name = "projectsDir";
+  dirInput.placeholder = "~/dev";
+  dirInput.value = model.projectsDir;
+  dirInput.addEventListener("change", () => h.onProjectsDir(dirInput.value.trim()));
+  dirLabel.append(dirInput);
+  root.append(dirLabel);
+
   if (model.error) {
     const err = document.createElement("div");
     err.className = "settings__error";
@@ -68,7 +86,15 @@ export async function initSettings(): Promise<void> {
   const toggle = document.getElementById("settings-toggle");
   if (!panel || !toggle) return;
 
-  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, error: null };
+  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", error: null };
+
+  const saveConfig = async (patch: Partial<ConfigJson>) => {
+    const c = await invoke<ConfigJson>("set_config", {
+      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, ...patch },
+    });
+    model.completedTimeoutMinutes = c.completedTimeoutMinutes;
+    model.projectsDir = c.projectsDir ?? "";
+  };
 
   const paint = () => panel.replaceChildren(renderSettings(model, handlers));
 
@@ -85,11 +111,8 @@ export async function initSettings(): Promise<void> {
   const handlers: SettingsHandlers = {
     onInstall: () => void run(async () => { model.hookInstalled = await invoke<boolean>("install_hook"); }),
     onRemove: () => void run(async () => { model.hookInstalled = await invoke<boolean>("remove_hook"); }),
-    onTimeout: (minutes) =>
-      void run(async () => {
-        const c = await invoke<{ completedTimeoutMinutes: number }>("set_config", { config: { completedTimeoutMinutes: minutes } });
-        model.completedTimeoutMinutes = c.completedTimeoutMinutes;
-      }),
+    onTimeout: (minutes) => void run(() => saveConfig({ completedTimeoutMinutes: minutes })),
+    onProjectsDir: (path) => void run(() => saveConfig({ projectsDir: path || null })),
   };
 
   toggle.addEventListener("click", () => {
@@ -97,11 +120,9 @@ export async function initSettings(): Promise<void> {
   });
 
   await run(async () => {
-    const [installed, config] = await Promise.all([
-      invoke<boolean>("hook_status"),
-      invoke<{ completedTimeoutMinutes: number }>("get_config"),
-    ]);
+    const [installed, config] = await Promise.all([invoke<boolean>("hook_status"), invoke<ConfigJson>("get_config")]);
     model.hookInstalled = installed;
     model.completedTimeoutMinutes = config.completedTimeoutMinutes;
+    model.projectsDir = config.projectsDir ?? "";
   });
 }

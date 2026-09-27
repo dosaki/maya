@@ -79,8 +79,8 @@ describe("renderBoard", () => {
     ];
     const board = renderBoard(cards, NOW);
     const cols = [...board.querySelectorAll<HTMLElement>(".column")];
-    expect(cols.map((c) => c.dataset.state)).toEqual(["awaiting", "working", "completed", "idle"]);
-    expect(cols.map((c) => c.querySelector(".column__title")?.textContent)).toEqual(["Awaiting Decision", "Working", "Completed", "Idle"]);
+    expect(cols.map((c) => c.dataset.state)).toEqual(["idle", "working", "awaiting", "completed"]);
+    expect(cols.map((c) => c.querySelector(".column__title")?.textContent)).toEqual(["Idle", "Working", "Awaiting Decision", "Completed"]);
     expect(cols.map((c) => c.querySelector(".column__count")?.textContent)).toEqual(["1", "2", "1", "1"]);
     expect([...cols[1].querySelectorAll(".card")].map((c) => (c as HTMLElement).dataset.sessionId)).toEqual(["a", "e"]);
   });
