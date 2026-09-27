@@ -1,6 +1,7 @@
 pub mod events;
 pub mod model;
 pub mod registry;
+pub mod state;
 pub mod transcript;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
