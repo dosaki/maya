@@ -164,6 +164,17 @@ mod tests {
     }
 
     #[test]
+    fn install_and_remove_preserve_existing_key_order() {
+        let existing: Value = serde_json::from_str(r#"{"zeta":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]},"alpha":2}"#).unwrap();
+        let installed = install(existing, "x/.claude/eye/hook.sh");
+        let out = serde_json::to_string(&installed).unwrap();
+        assert!(out.starts_with(r#"{"zeta":1,"hooks":"#), "{out}");
+        assert!(out.ends_with(r#""alpha":2}"#), "{out}");
+        let out = serde_json::to_string(&remove(installed)).unwrap();
+        assert_eq!(out, r#"{"zeta":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]},"alpha":2}"#);
+    }
+
+    #[test]
     fn is_installed_false_without_hooks() {
         assert!(!is_installed(&json!({})));
         assert!(!is_installed(&json!({"hooks": {}})));

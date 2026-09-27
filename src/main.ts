@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { renderBoard } from "./board";
+import { initSettings } from "./settings";
 import { showToast } from "./toast";
 import type { Card } from "./types";
 
@@ -23,6 +24,7 @@ async function focus(pid: number): Promise<void> {
 }
 
 async function start(): Promise<void> {
+  void initSettings();
   document.getElementById("board")?.addEventListener("click", (ev) => {
     const card = (ev.target as HTMLElement).closest<HTMLElement>(".card");
     if (card?.dataset.pid) void focus(Number(card.dataset.pid));
