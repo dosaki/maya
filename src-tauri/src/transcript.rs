@@ -18,28 +18,110 @@ pub struct TranscriptTail {
     pub open_question: Option<OpenQuestion>,
 }
 
+/// The last `max_bytes` of `path` as text, with the first (possibly partial)
+/// line dropped when the read did not start at offset zero. None when the
+/// file cannot be read.
+fn tail_text(path: &Path, max_bytes: u64) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    let start = meta.len().saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    if start > 0 {
+        let i = text.find('\n')?;
+        Some(text[i + 1..].to_string())
+    } else {
+        Some(text)
+    }
+}
+
 /// Reads at most `max_bytes` from the end of `path` and parses it.
 pub fn read_tail(path: &Path, max_bytes: u64) -> TranscriptTail {
-    let Ok(mut file) = std::fs::File::open(path) else { return TranscriptTail::default() };
-    let Ok(meta) = file.metadata() else { return TranscriptTail::default() };
-    let start = meta.len().saturating_sub(max_bytes);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return TranscriptTail::default();
+    tail_text(path, max_bytes).map(|t| parse_tail(&t)).unwrap_or_default()
+}
+
+pub const TURNS_TAIL_BYTES: u64 = 1_048_576;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TurnKind {
+    User,
+    Assistant,
+    Tool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Turn {
+    pub kind: TurnKind,
+    pub text: String,
+}
+
+/// `<name>: <first useful argument>` for a tool_use block, or just the name.
+pub fn tool_summary(name: &str, input: &Value) -> String {
+    let arg = ["command", "file_path", "path", "prompt", "description"]
+        .iter()
+        .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
+        .or_else(|| input["questions"][0]["question"].as_str());
+    match arg {
+        Some(a) if !a.trim().is_empty() => format!("{name}: {}", crate::state::truncate(a.trim(), 120)),
+        _ => name.to_string(),
     }
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return TranscriptTail::default();
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    if start > 0 {
-        // Drop the first, possibly partial, line.
-        match text.find('\n') {
-            Some(i) => parse_tail(&text[i + 1..]),
-            None => TranscriptTail::default(),
+}
+
+fn text_blocks(content: &Value) -> Vec<String> {
+    let texts: Vec<String> = match content {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str().map(|t| t.to_string()))
+            .collect(),
+        _ => vec![],
+    };
+    texts.into_iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
+}
+
+/// Conversation turns (user prompts, assistant text, tool calls) in order,
+/// keeping only the last `max_turns`. Subagent sidechain lines are skipped.
+pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
+    let mut turns = Vec::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v["isSidechain"].as_bool() == Some(true) {
+            continue;
         }
-    } else {
-        parse_tail(&text)
+        let content = &v["message"]["content"];
+        match v["type"].as_str() {
+            Some("user") => {
+                let t = text_blocks(content);
+                if !t.is_empty() {
+                    turns.push(Turn { kind: TurnKind::User, text: t.join("\n\n") });
+                }
+            }
+            Some("assistant") => {
+                let t = text_blocks(content);
+                if !t.is_empty() {
+                    turns.push(Turn { kind: TurnKind::Assistant, text: t.join("\n\n") });
+                }
+                if let Some(blocks) = content.as_array() {
+                    for b in blocks.iter().filter(|b| b["type"] == "tool_use") {
+                        let name = b["name"].as_str().unwrap_or("tool");
+                        turns.push(Turn { kind: TurnKind::Tool, text: tool_summary(name, &b["input"]) });
+                    }
+                }
+            }
+            _ => {}
+        }
     }
+    let skip = turns.len().saturating_sub(max_turns);
+    turns.split_off(skip)
+}
+
+/// Last `max_turns` turns from the last 1 MB of the transcript.
+pub fn read_turns(path: &Path, max_turns: usize) -> Vec<Turn> {
+    tail_text(path, TURNS_TAIL_BYTES).map(|t| parse_turns(&t, max_turns)).unwrap_or_default()
 }
 
 /// Caches parsed tails per path, re-reading only when size or mtime changes.
@@ -203,6 +285,42 @@ mod tests {
         assert_eq!(cache.get(Path::new("/nonexistent/x.jsonl")), TranscriptTail::default());
         cache.retain(&[p.clone()]);
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn parses_turns_in_order_skipping_tool_results_and_sidechains() {
+        let turns = parse_turns(&fixture("turns.jsonl"), 30);
+        let got: Vec<(TurnKind, &str)> = turns.iter().map(|t| (t.kind, t.text.as_str())).collect();
+        assert_eq!(got, vec![
+            (TurnKind::User, "build me a board"),
+            (TurnKind::Assistant, "Sure."),
+            (TurnKind::Tool, "Bash: pnpm test"),
+            (TurnKind::Tool, "ListAgents"),
+            (TurnKind::Assistant, "Tests pass.\n\nAnything else?"),
+            (TurnKind::User, "yes, ship it"),
+        ]);
+    }
+
+    #[test]
+    fn caps_to_the_last_n_turns() {
+        let turns = parse_turns(&fixture("turns.jsonl"), 2);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1].text, "yes, ship it");
+    }
+
+    #[test]
+    fn tool_summary_prefers_command_then_paths_then_question() {
+        use serde_json::json;
+        assert_eq!(tool_summary("Bash", &json!({"command": "ls", "description": "d"})), "Bash: ls");
+        assert_eq!(tool_summary("Edit", &json!({"file_path": "/a.rs"})), "Edit: /a.rs");
+        assert_eq!(tool_summary("Agent", &json!({"prompt": "x".repeat(300)})).chars().count(), "Agent: ".len() + 120);
+        assert_eq!(tool_summary("AskUserQuestion", &json!({"questions": [{"question": "Which?"}]})), "AskUserQuestion: Which?");
+        assert_eq!(tool_summary("ListAgents", &json!({})), "ListAgents");
+    }
+
+    #[test]
+    fn read_turns_missing_file_is_empty() {
+        assert!(read_turns(Path::new("/nonexistent/x.jsonl"), 30).is_empty());
     }
 
     #[test]
