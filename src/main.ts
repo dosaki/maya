@@ -1,22 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
-let greetInputEl: HTMLInputElement | null;
-let greetMsgEl: HTMLElement | null;
+const pre = document.createElement("pre");
+pre.style.cssText = "font: 12px Menlo, monospace; white-space: pre-wrap; padding: 12px;";
+pre.textContent = "waiting for sessions event…";
+document.body.replaceChildren(pre);
 
-async function greet() {
-  if (greetMsgEl && greetInputEl) {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsgEl.textContent = await invoke("greet", {
-      name: greetInputEl.value,
-    });
-  }
-}
-
-window.addEventListener("DOMContentLoaded", () => {
-  greetInputEl = document.querySelector("#greet-input");
-  greetMsgEl = document.querySelector("#greet-msg");
-  document.querySelector("#greet-form")?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    greet();
-  });
+void listen("sessions", (e) => {
+  const cards = e.payload as Array<Record<string, unknown>>;
+  pre.textContent = `sessions event: ${cards.length} cards @ ${new Date().toISOString()}\n\n` + JSON.stringify(cards, null, 1).slice(0, 6000);
 });
