@@ -109,7 +109,7 @@ fn start_session(state: TauriState<AppState>, dir: Option<String>, prompt: Strin
         return Err("Type a prompt first.".into());
     }
     let root = projects_root(&state)?;
-    let eye_dir = state.store.lock().unwrap().claude_dir().join("eye");
+    let maya_dir = state.store.lock().unwrap().claude_dir().join("maya");
     let dirs = launch::list_project_dirs(&root);
     let picked = match dir {
         Some(_) => None,
@@ -119,7 +119,7 @@ fn start_session(state: TauriState<AppState>, dir: Option<String>, prompt: Strin
         }
     };
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
-    let file = launch::write_prompt_file(&eye_dir, &prompt)?;
+    let file = launch::write_prompt_file(&maya_dir, &prompt)?;
     launch::open_terminal(&target, &file)?;
     Ok(StartResult { dir: target.to_string_lossy().into_owned(), how })
 }
@@ -193,9 +193,9 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             let sessions_dir = dir.join("sessions");
-            let eye_dir = dir.join("eye");
+            let maya_dir = dir.join("maya");
             std::thread::spawn(move || {
-                watcher::run(&sessions_dir, &eye_dir, Duration::from_secs(5), || refresh_and_emit(&handle));
+                watcher::run(&sessions_dir, &maya_dir, Duration::from_secs(5), || refresh_and_emit(&handle));
             });
             Ok(())
         })

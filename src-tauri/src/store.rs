@@ -21,9 +21,9 @@ pub const DEFAULT_COMPACT_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
 
 impl Store {
     pub fn new(claude_dir: PathBuf) -> Self {
-        let config = config::load(&claude_dir.join("eye/config.json"));
+        let config = config::load(&claude_dir.join("maya/config.json"));
         Self {
-            events: EventLog::new(claude_dir.join("eye/events.jsonl")),
+            events: EventLog::new(claude_dir.join("maya/events.jsonl")),
             claude_dir,
             config,
             alive: Box::new(registry::pid_alive),
@@ -39,7 +39,7 @@ impl Store {
     }
 
     pub fn config_path(&self) -> PathBuf {
-        self.claude_dir.join("eye/config.json")
+        self.claude_dir.join("maya/config.json")
     }
 
     pub fn claude_dir(&self) -> &Path {
@@ -113,7 +113,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().to_path_buf();
         std::fs::create_dir_all(claude.join("sessions")).unwrap();
-        std::fs::create_dir_all(claude.join("eye")).unwrap();
+        std::fs::create_dir_all(claude.join("maya")).unwrap();
         std::fs::write(
             claude.join("sessions/7.json"),
             r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle","startedAt":1,"statusUpdatedAt":100}"#,
@@ -122,11 +122,11 @@ mod tests {
         for i in 0..50 {
             log.push_str(&format!("{{\"session_id\":\"gone\",\"hook_event_name\":\"PostToolUse\",\"received_at\":{i}}}\n"));
         }
-        std::fs::write(claude.join("eye/events.jsonl"), &log).unwrap();
+        std::fs::write(claude.join("maya/events.jsonl"), &log).unwrap();
         let mut store = Store::new(claude.clone()).with_alive(|_| true);
         store.compact_threshold_bytes = 1024;
         store.refresh(300);
-        let after = std::fs::read_to_string(claude.join("eye/events.jsonl")).unwrap();
+        let after = std::fs::read_to_string(claude.join("maya/events.jsonl")).unwrap();
         assert!(after.is_empty(), "log should have been compacted: {} bytes", after.len());
     }
 
@@ -135,9 +135,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().to_path_buf();
         std::fs::create_dir_all(claude.join("sessions")).unwrap();
-        std::fs::create_dir_all(claude.join("eye")).unwrap();
+        std::fs::create_dir_all(claude.join("maya")).unwrap();
         std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle"}"#).unwrap();
-        std::fs::write(claude.join("eye/events.jsonl"), "{\"session_id\":\"s7\",\"hook_event_name\":\"Stop\",\"transcript_path\":\"/hooked/s7.jsonl\",\"received_at\":1}\n").unwrap();
+        std::fs::write(claude.join("maya/events.jsonl"), "{\"session_id\":\"s7\",\"hook_event_name\":\"Stop\",\"transcript_path\":\"/hooked/s7.jsonl\",\"received_at\":1}\n").unwrap();
         let mut store = Store::new(claude.clone()).with_alive(|_| true);
         store.refresh(2);
         let s = store.session("s7").expect("live session");
@@ -161,7 +161,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().to_path_buf();
         std::fs::create_dir_all(claude.join("sessions")).unwrap();
-        std::fs::create_dir_all(claude.join("eye")).unwrap();
+        std::fs::create_dir_all(claude.join("maya")).unwrap();
         std::fs::create_dir_all(claude.join("projects/-Users-x-dev-eye")).unwrap();
 
         std::fs::write(
@@ -173,7 +173,7 @@ mod tests {
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"All done."}]}}"#,
         ).unwrap();
         std::fs::write(
-            claude.join("eye/events.jsonl"),
+            claude.join("maya/events.jsonl"),
             "{\"session_id\":\"s7\",\"hook_event_name\":\"Stop\",\"received_at\":200}\n{\"session_id\":\"gone\",\"hook_event_name\":\"Stop\",\"received_at\":201}\n",
         ).unwrap();
 
@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(cards[0].state, State::Completed);
         assert_eq!(cards[0].snippet, "All done.");
 
-        let log = std::fs::read_to_string(claude.join("eye/events.jsonl")).unwrap();
+        let log = std::fs::read_to_string(claude.join("maya/events.jsonl")).unwrap();
         assert!(!log.contains("gone"));
     }
 }

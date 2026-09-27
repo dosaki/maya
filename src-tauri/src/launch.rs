@@ -35,7 +35,7 @@ pub fn pick_dir(reply: &str, dirs: &[String]) -> Option<String> {
     dirs.iter().find(|d| d.eq_ignore_ascii_case(cleaned)).cloned()
 }
 
-/// Environment for spawned `claude` processes: Eye's own, minus the variables
+/// Environment for spawned `claude` processes: Maya's own, minus the variables
 /// a nested Claude session exports (they break auth and mark the run as a child).
 pub fn clean_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, String)> {
     vars.filter(|(k, _)| k != "ANTHROPIC_API_KEY" && k != "CLAUDECODE" && !k.starts_with("CLAUDE_CODE_")).collect()
@@ -237,10 +237,10 @@ mod tests {
     #[test]
     fn shell_quoting_and_applescript_escaping() {
         assert_eq!(shell_single_quote("it's"), "'it'\\''s'");
-        let s = applescript_launch(Path::new("/Users/x/dev/it's-here"), Path::new("/Users/x/.claude/eye/prompts/1.txt"));
+        let s = applescript_launch(Path::new("/Users/x/dev/it's-here"), Path::new("/Users/x/.claude/maya/prompts/1.txt"));
         assert!(s.contains("tell application \"Terminal\""));
         // The prompt file is consumed and deleted, and `--` protects prompts that start with `-`.
-        assert!(s.contains("do script \"cd '/Users/x/dev/it'\\\\''s-here' && p=\\\"$(cat '/Users/x/.claude/eye/prompts/1.txt')\\\" && rm -f '/Users/x/.claude/eye/prompts/1.txt' && claude -- \\\"$p\\\"\""), "{s}");
+        assert!(s.contains("do script \"cd '/Users/x/dev/it'\\\\''s-here' && p=\\\"$(cat '/Users/x/.claude/maya/prompts/1.txt')\\\" && rm -f '/Users/x/.claude/maya/prompts/1.txt' && claude -- \\\"$p\\\"\""), "{s}");
         assert!(s.contains("activate"));
     }
 

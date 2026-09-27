@@ -1,16 +1,18 @@
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
-pub const HOOK_MARKER: &str = ".claude/eye/hook.sh";
+pub const HOOK_MARKER: &str = ".claude/maya/hook.sh";
+/// Markers of earlier releases; removed on install, never counted as installed.
+pub const LEGACY_MARKERS: &[&str] = &[".claude/eye/hook.sh"];
 
 pub const HOOK_SCRIPT: &str = r#"#!/bin/sh
-# Installed by Eye (Claude session board). Appends each hook payload to
-# ~/.claude/eye/events.jsonl with a received_at timestamp. Never blocks,
+# Installed by Maya (Manage All Your Agents). Appends each hook payload to
+# ~/.claude/maya/events.jsonl with a received_at timestamp. Never blocks,
 # never prints, always exits 0.
-dir="$HOME/.claude/eye"
+dir="$HOME/.claude/maya"
 mkdir -p "$dir" 2>/dev/null
 t=$(date +%s000)
-# Keep only the fields Eye reads; tool_response and the rest are dropped so
+# Keep only the fields Maya reads; tool_response and the rest are dropped so
 # the log stays small and every append fits in one atomic write.
 jq -c --arg t "$t" '{
   session_id, hook_event_name, tool_name, notification_type, transcript_path, agent_id,
@@ -35,17 +37,22 @@ pub const HOOK_EVENTS: &[(&str, Option<&str>)] = &[
     ("Notification", Some("permission_prompt")),
 ];
 
-fn group_is_ours(group: &Value) -> bool {
+fn group_matches(group: &Value, markers: &[&str]) -> bool {
     group["hooks"]
         .as_array()
-        .map(|hs| hs.iter().any(|h| h["command"].as_str().map_or(false, |c| c.contains(HOOK_MARKER))))
+        .map(|hs| hs.iter().any(|h| h["command"].as_str().map_or(false, |c| markers.iter().any(|m| c.contains(m)))))
         .unwrap_or(false)
+}
+
+/// Ours, current or legacy: what `remove` strips.
+fn group_is_ours(group: &Value) -> bool {
+    group_matches(group, &[HOOK_MARKER]) || group_matches(group, LEGACY_MARKERS)
 }
 
 pub fn is_installed(settings: &Value) -> bool {
     settings["hooks"]
         .as_object()
-        .map(|hooks| hooks.values().any(|groups| groups.as_array().map_or(false, |g| g.iter().any(group_is_ours))))
+        .map(|hooks| hooks.values().any(|groups| groups.as_array().map_or(false, |g| g.iter().any(|g| group_matches(g, &[HOOK_MARKER])))))
         .unwrap_or(false)
 }
 
@@ -98,7 +105,7 @@ fn write_settings_with_backup(claude_dir: &Path, settings: &Value) -> Result<(),
     let path = claude_dir.join("settings.json");
     if path.exists() {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let backup = claude_dir.join(format!("settings.json.eye-backup-{stamp}"));
+        let backup = claude_dir.join(format!("settings.json.maya-backup-{stamp}"));
         std::fs::copy(&path, &backup).map_err(|e| format!("cannot back up settings.json: {e}"))?;
     }
     let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
@@ -107,15 +114,15 @@ fn write_settings_with_backup(claude_dir: &Path, settings: &Value) -> Result<(),
 
 pub fn install_to(claude_dir: &Path) -> Result<(), String> {
     let settings = read_settings(claude_dir)?;
-    let eye_dir = claude_dir.join("eye");
-    std::fs::create_dir_all(&eye_dir).map_err(|e| format!("cannot create {}: {e}", eye_dir.display()))?;
-    let script = eye_dir.join("hook.sh");
+    let maya_dir = claude_dir.join("maya");
+    std::fs::create_dir_all(&maya_dir).map_err(|e| format!("cannot create {}: {e}", maya_dir.display()))?;
+    let script = maya_dir.join("hook.sh");
     std::fs::write(&script, HOOK_SCRIPT).map_err(|e| format!("cannot write hook.sh: {e}"))?;
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     }
-    let command = "\"$HOME/.claude/eye/hook.sh\"";
+    let command = "\"$HOME/.claude/maya/hook.sh\"";
     write_settings_with_backup(claude_dir, &install(settings, command))
 }
 
@@ -135,7 +142,7 @@ mod tests {
 
     #[test]
     fn install_adds_every_event_with_marker_command() {
-        let out = install(json!({"model": "opus"}), "\"$HOME/.claude/eye/hook.sh\"");
+        let out = install(json!({"model": "opus"}), "\"$HOME/.claude/maya/hook.sh\"");
         assert_eq!(out["model"], "opus");
         let hooks = out["hooks"].as_object().unwrap();
         for (event, matcher) in HOOK_EVENTS {
@@ -153,8 +160,8 @@ mod tests {
     #[test]
     fn install_is_idempotent_and_preserves_other_hooks() {
         let existing = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}});
-        let once = install(existing, "\"$HOME/.claude/eye/hook.sh\"");
-        let twice = install(once.clone(), "\"$HOME/.claude/eye/hook.sh\"");
+        let once = install(existing, "\"$HOME/.claude/maya/hook.sh\"");
+        let twice = install(once.clone(), "\"$HOME/.claude/maya/hook.sh\"");
         assert_eq!(once, twice);
         let stop = twice["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2);
@@ -164,7 +171,7 @@ mod tests {
     #[test]
     fn remove_strips_only_marker_entries() {
         let existing = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}});
-        let installed = install(existing, "\"$HOME/.claude/eye/hook.sh\"");
+        let installed = install(existing, "\"$HOME/.claude/maya/hook.sh\"");
         let removed = remove(installed);
         assert!(!is_installed(&removed));
         assert_eq!(removed["hooks"]["Stop"].as_array().unwrap().len(), 1);
@@ -174,12 +181,22 @@ mod tests {
     #[test]
     fn install_and_remove_preserve_existing_key_order() {
         let existing: Value = serde_json::from_str(r#"{"zeta":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]},"alpha":2}"#).unwrap();
-        let installed = install(existing, "x/.claude/eye/hook.sh");
+        let installed = install(existing, "x/.claude/maya/hook.sh");
         let out = serde_json::to_string(&installed).unwrap();
         assert!(out.starts_with(r#"{"zeta":1,"hooks":"#), "{out}");
         assert!(out.ends_with(r#""alpha":2}"#), "{out}");
         let out = serde_json::to_string(&remove(installed)).unwrap();
         assert_eq!(out, r#"{"zeta":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]},"alpha":2}"#);
+    }
+
+    #[test]
+    fn install_replaces_legacy_eye_entries() {
+        let legacy = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "\"$HOME/.claude/eye/hook.sh\""}]}], "PostToolUse": [{"hooks": [{"type": "command", "command": "\"$HOME/.claude/eye/hook.sh\""}]}]}});
+        let out = install(legacy, "\"$HOME/.claude/maya/hook.sh\"");
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(!text.contains(".claude/eye/hook.sh"), "{text}");
+        assert!(is_installed(&out));
+        assert!(!is_installed(&json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "\"$HOME/.claude/eye/hook.sh\""}]}]}})), "a legacy-only install does not count as installed");
     }
 
     #[test]
@@ -194,12 +211,12 @@ mod tests {
         std::fs::write(dir.path().join("settings.json"), "{\"model\":\"opus\"}").unwrap();
         install_to(dir.path()).unwrap();
 
-        let script = dir.path().join("eye/hook.sh");
+        let script = dir.path().join("maya/hook.sh");
         assert!(script.exists());
         let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&script).unwrap().permissions());
         assert!(mode & 0o100 != 0, "script must be executable");
 
-        let backups: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.eye-backup-")).collect();
+        let backups: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.maya-backup-")).collect();
         assert_eq!(backups.len(), 1);
 
         assert!(status(dir.path()).unwrap());
@@ -242,7 +259,7 @@ mod tests {
             })
             .unwrap();
         assert!(out.status.success());
-        let log = std::fs::read_to_string(dir.path().join(".claude/eye/events.jsonl")).unwrap();
+        let log = std::fs::read_to_string(dir.path().join(".claude/maya/events.jsonl")).unwrap();
         let v: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
         assert!(v.get("tool_response").is_none(), "{log}");
         assert!(v.get("permission_mode").is_none(), "{log}");
@@ -273,7 +290,7 @@ mod tests {
             })
             .unwrap();
         assert!(out.status.success());
-        let log = std::fs::read_to_string(dir.path().join(".claude/eye/events.jsonl")).unwrap();
+        let log = std::fs::read_to_string(dir.path().join(".claude/maya/events.jsonl")).unwrap();
         let v: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
         assert_eq!(v["tool_input"]["command"].as_str().unwrap().len(), 400);
         assert!(log.len() < 1000, "line should be small: {}", log.len());
@@ -298,7 +315,7 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
         assert!(out.stdout.is_empty(), "hook must print nothing");
-        let log = std::fs::read_to_string(dir.path().join(".claude/eye/events.jsonl")).unwrap();
+        let log = std::fs::read_to_string(dir.path().join(".claude/maya/events.jsonl")).unwrap();
         let v: serde_json::Value = serde_json::from_str(log.trim()).unwrap();
         assert_eq!(v["session_id"], "s1");
         assert!(v["received_at"].as_u64().unwrap() > 1_700_000_000_000);

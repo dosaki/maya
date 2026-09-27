@@ -51,7 +51,7 @@ pub enum TurnKind {
     User,
     Assistant,
     Tool,
-    /// A message posted into the session's inbox (by Eye or another session).
+    /// A message posted into the session's inbox (by Maya or another session).
     Peer,
 }
 

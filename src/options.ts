@@ -54,7 +54,7 @@ export function renderOptions(card: Card, next: number, opts: { descriptions: bo
     root.append(note);
   }
   if (aw.questions.length > 1) {
-    // Eye cannot see answers given in the terminal mid-ask; its key
+    // Maya cannot see answers given in the terminal mid-ask; its key
     // sequences assume the picker is on the question shown here.
     const warn = document.createElement("div");
     warn.className = "options__warn";

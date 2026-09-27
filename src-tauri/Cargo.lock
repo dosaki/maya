@@ -751,20 +751,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "eye"
-version = "0.1.0"
-dependencies = [
- "dirs 6.0.0",
- "libc",
- "notify",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tempfile",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1823,6 +1809,20 @@ dependencies = [
  "log",
  "tendril",
  "web_atoms",
+]
+
+[[package]]
+name = "maya"
+version = "0.1.0"
+dependencies = [
+ "dirs 6.0.0",
+ "libc",
+ "notify",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tempfile",
 ]
 
 [[package]]
