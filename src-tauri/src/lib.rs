@@ -1,4 +1,5 @@
 pub mod events;
+pub mod focus;
 pub mod model;
 pub mod registry;
 pub mod state;
