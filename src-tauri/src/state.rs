@@ -1,5 +1,5 @@
 use crate::events::HookEvent;
-use crate::model::{AwaitKind, Awaiting, Card, State};
+use crate::model::{parse_questions, AwaitKind, Awaiting, Card, State};
 use crate::registry::RegistrySession;
 use crate::transcript::TranscriptTail;
 
@@ -47,9 +47,13 @@ fn question_detail(e: &HookEvent) -> String {
 
 fn awaiting_for_tool(e: &HookEvent) -> Awaiting {
     match e.tool_name.as_deref() {
-        Some("AskUserQuestion") => Awaiting { kind: AwaitKind::Question, detail: question_detail(e) },
-        Some("ExitPlanMode") => Awaiting { kind: AwaitKind::Plan, detail: "Plan approval".to_string() },
-        _ => Awaiting { kind: AwaitKind::Permission, detail: permission_detail(e) },
+        Some("AskUserQuestion") => Awaiting {
+            kind: AwaitKind::Question,
+            detail: question_detail(e),
+            questions: e.tool_input.as_ref().map(parse_questions).unwrap_or_default(),
+        },
+        Some("ExitPlanMode") => Awaiting { kind: AwaitKind::Plan, detail: "Plan approval".to_string(), questions: vec![] },
+        _ => Awaiting { kind: AwaitKind::Permission, detail: permission_detail(e), questions: vec![] },
     }
 }
 
@@ -70,7 +74,7 @@ pub fn derive(i: &DeriveInput) -> Card {
             }
             "Notification" if e.notification_type.as_deref() == Some("permission_prompt") => {
                 if awaiting.is_none() {
-                    awaiting = Some((Awaiting { kind: AwaitKind::Permission, detail: "Permission prompt".to_string() }, e.received_at, e.agent_id.clone()));
+                    awaiting = Some((Awaiting { kind: AwaitKind::Permission, detail: "Permission prompt".to_string(), questions: vec![] }, e.received_at, e.agent_id.clone()));
                 }
             }
             // A tool finishing only resolves a prompt raised by the same agent:
@@ -94,7 +98,7 @@ pub fn derive(i: &DeriveInput) -> Card {
 
     if i.events.is_empty() {
         if let Some(q) = &i.transcript.open_question {
-            awaiting = Some((Awaiting { kind: q.kind, detail: q.detail.clone() }, r.status_updated_at, None));
+            awaiting = Some((Awaiting { kind: q.kind, detail: q.detail.clone(), questions: q.questions.clone() }, r.status_updated_at, None));
         }
     }
 
@@ -276,12 +280,21 @@ mod tests {
 
     #[test]
     fn ask_user_question_is_awaiting_with_question_text() {
-        let evs = [tool_ev("PreToolUse", "AskUserQuestion", serde_json::json!({"questions": [{"question": "Which stack?"}]}), 10)];
+        let evs = [tool_ev("PreToolUse", "AskUserQuestion", serde_json::json!({"questions": [{"question": "Which stack?", "header": "Stack", "options": [{"label": "Tauri", "description": "Rust"}]}]}), 10)];
         let c = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 20);
         assert_eq!(c.state, State::Awaiting);
         let aw = c.awaiting.unwrap();
         assert_eq!(aw.kind, AwaitKind::Question);
         assert_eq!(aw.detail, "Which stack?");
+        assert_eq!(aw.questions[0].options[0].label, "Tauri");
+    }
+
+    #[test]
+    fn question_without_options_is_still_awaiting_with_no_buttons() {
+        let evs = [tool_ev("PreToolUse", "AskUserQuestion", serde_json::json!({}), 10)];
+        let aw = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 20).awaiting.unwrap();
+        assert_eq!(aw.kind, AwaitKind::Question);
+        assert!(aw.questions.is_empty());
     }
 
     #[test]
@@ -344,7 +357,7 @@ mod tests {
     fn transcript_fallback_detects_question_only_without_events() {
         let t = TranscriptTail {
             last_assistant_text: Some("One question first.".into()),
-            open_question: Some(OpenQuestion { kind: AwaitKind::Question, detail: "What?".into() }),
+            open_question: Some(OpenQuestion { kind: AwaitKind::Question, detail: "What?".into(), questions: vec![] }),
         };
         let c = run(&reg("busy", 500), &[], &t, 600);
         assert_eq!(c.state, State::Awaiting);

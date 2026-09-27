@@ -52,7 +52,7 @@ describe("renderCard", () => {
   });
 
   it("shows the awaiting detail with its kind", () => {
-    const el = renderCard(card({ state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm -rf build" } }), NOW);
+    const el = renderCard(card({ state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm -rf build", questions: [] } }), NOW);
     expect(el.querySelector(".card__awaiting")?.textContent).toBe("Bash: rm -rf build");
     expect(el.querySelector(".card__awaiting")?.getAttribute("data-kind")).toBe("permission");
   });
@@ -67,7 +67,7 @@ describe("renderBoard", () => {
   it("renders four columns in order with counts and cards in the right column", () => {
     const cards: Card[] = [
       card({ sessionId: "a", name: "a", state: "working" }),
-      card({ sessionId: "b", name: "b", state: "awaiting", awaiting: { kind: "question", detail: "Which?" } }),
+      card({ sessionId: "b", name: "b", state: "awaiting", awaiting: { kind: "question", detail: "Which?", questions: [] } }),
       card({ sessionId: "c", name: "c", state: "idle" }),
       card({ sessionId: "d", name: "d", state: "completed" }),
       card({ sessionId: "e", name: "e", state: "working" }),

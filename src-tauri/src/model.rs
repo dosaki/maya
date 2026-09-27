@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -17,10 +17,43 @@ pub enum AwaitKind {
     Permission,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Choice {
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Question {
+    pub question: String,
+    #[serde(default)]
+    pub header: String,
+    #[serde(default)]
+    pub options: Vec<Choice>,
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+/// Reads `input["questions"]` from an AskUserQuestion tool input. Anything
+/// missing or malformed yields an empty list rather than an error.
+pub fn parse_questions(input: &serde_json::Value) -> Vec<Question> {
+    input
+        .get("questions")
+        .and_then(|q| q.as_array())
+        .map(|arr| arr.iter().filter_map(|q| serde_json::from_value::<Question>(q.clone()).ok()).collect())
+        .unwrap_or_default()
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Awaiting {
     pub kind: AwaitKind,
     pub detail: String,
+    /// The questions being asked, with their options; empty unless `kind` is `Question`.
+    #[serde(default)]
+    pub questions: Vec<Question>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -45,6 +78,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_questions_from_tool_input_tolerantly() {
+        let v = serde_json::json!({"questions": [
+            {"question": "Size?", "header": "Size", "options": [{"label": "S", "description": "small"}, {"label": "L"}]},
+            {"question": "Toppings?", "header": "Top", "multiSelect": true, "options": [{"label": "A", "description": "a"}]}
+        ]});
+        let q = parse_questions(&v);
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].options[1], Choice { label: "L".into(), description: "".into() });
+        assert!(!q[0].multi_select);
+        assert!(q[1].multi_select);
+        assert!(parse_questions(&serde_json::json!({})).is_empty());
+        assert!(parse_questions(&serde_json::json!({"questions": "nope"})).is_empty());
+        let json = serde_json::to_value(&q[1]).unwrap();
+        assert_eq!(json["multiSelect"], true);
+    }
+
+    #[test]
     fn card_serialises_camel_case_and_lowercase_enums() {
         let card = Card {
             session_id: "s1".into(),
@@ -54,7 +104,7 @@ mod tests {
             state: State::Awaiting,
             state_since: 1000,
             snippet: "hi".into(),
-            awaiting: Some(Awaiting { kind: AwaitKind::Permission, detail: "Bash: rm -rf".into() }),
+            awaiting: Some(Awaiting { kind: AwaitKind::Permission, detail: "Bash: rm -rf".into(), questions: vec![] }),
             has_inbox: false,
         };
         let json = serde_json::to_value(&card).unwrap();

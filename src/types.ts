@@ -1,6 +1,18 @@
 export type CardState = "awaiting" | "working" | "completed" | "idle";
 export type AwaitKind = "question" | "plan" | "permission";
 
+export interface Choice {
+  label: string;
+  description: string;
+}
+
+export interface Question {
+  question: string;
+  header: string;
+  options: Choice[];
+  multiSelect: boolean;
+}
+
 export interface Card {
   sessionId: string;
   pid: number;
@@ -9,7 +21,7 @@ export interface Card {
   state: CardState;
   stateSince: number;
   snippet: string;
-  awaiting: { kind: AwaitKind; detail: string } | null;
+  awaiting: { kind: AwaitKind; detail: string; questions: Question[] } | null;
   hasInbox: boolean;
 }
 

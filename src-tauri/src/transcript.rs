@@ -1,4 +1,4 @@
-use crate::model::AwaitKind;
+use crate::model::{parse_questions, AwaitKind, Question};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
@@ -10,6 +10,7 @@ pub const TAIL_BYTES: u64 = 262_144;
 pub struct OpenQuestion {
     pub kind: AwaitKind,
     pub detail: String,
+    pub questions: Vec<Question>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -208,10 +209,10 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
                             match block["name"].as_str() {
                                 Some("AskUserQuestion") => {
                                     let q = block["input"]["questions"][0]["question"].as_str().unwrap_or("Question").to_string();
-                                    open.push((id, OpenQuestion { kind: AwaitKind::Question, detail: q }));
+                                    open.push((id, OpenQuestion { kind: AwaitKind::Question, detail: q, questions: parse_questions(&block["input"]) }));
                                 }
                                 Some("ExitPlanMode") => {
-                                    open.push((id, OpenQuestion { kind: AwaitKind::Plan, detail: "Plan approval".to_string() }));
+                                    open.push((id, OpenQuestion { kind: AwaitKind::Plan, detail: "Plan approval".to_string(), questions: vec![] }));
                                 }
                                 _ => {}
                             }
@@ -254,6 +255,8 @@ mod tests {
         let q = t.open_question.unwrap();
         assert_eq!(q.kind, AwaitKind::Question);
         assert_eq!(q.detail, "What should Completed mean?");
+        assert_eq!(q.questions[0].header, "Completed");
+        assert_eq!(q.questions[0].options[0].label, "Finished");
     }
 
     #[test]

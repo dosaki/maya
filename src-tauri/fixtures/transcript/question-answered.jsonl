@@ -1,5 +1,5 @@
 {"type":"user","message":{"role":"user","content":"build me a board"},"timestamp":"2026-09-28T09:26:00.000Z"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I have enough context. One question first."}]},"timestamp":"2026-09-28T09:27:00.000Z"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"AskUserQuestion","input":{"questions":[{"question":"What should Completed mean?","header":"Completed","options":[]}]}}]},"timestamp":"2026-09-28T09:27:01.000Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"AskUserQuestion","input":{"questions":[{"question":"What should Completed mean?","header":"Completed","options":[{"label":"Finished","description":"Claude finished its turn"}]}]}}]},"timestamp":"2026-09-28T09:27:01.000Z"}
 {"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"Finished a task, unreviewed"}]},"timestamp":"2026-09-28T09:28:00.000Z"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Great, writing the spec now."}]},"timestamp":"2026-09-28T09:28:05.000Z"}

@@ -34,7 +34,7 @@ describe("renderModal", () => {
 
   it("shows the awaiting banner with a terminal button, and a status line", () => {
     const h = handlers();
-    const el = renderModal({ card: { ...base, state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm" } }, turns: [], status: { ok: false, text: "boom" }, draft: "" }, h);
+    const el = renderModal({ card: { ...base, state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm", questions: [] } }, turns: [], status: { ok: false, text: "boom" }, draft: "" }, h);
     expect(el.querySelector(".modal__banner")?.textContent).toContain("waiting for a decision");
     el.querySelector<HTMLButtonElement>(".modal__banner button")!.click();
     expect(h.onTerminal).toHaveBeenCalled();

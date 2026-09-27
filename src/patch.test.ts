@@ -16,7 +16,7 @@ describe("patchModal", () => {
     ta.setSelectionRange(4, 4);
 
     const fresh = renderModal(
-      { card: { ...base, state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm" } }, turns: [{ kind: "user", text: "old" }, { kind: "assistant", text: "new" }], status: { ok: true, text: "Delivered" }, draft: "" },
+      { card: { ...base, state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm", questions: [] } }, turns: [{ kind: "user", text: "old" }, { kind: "assistant", text: "new" }], status: { ok: true, text: "Delivered" }, draft: "" },
       handlers(),
     );
     patchModal(root, fresh);
@@ -32,7 +32,7 @@ describe("patchModal", () => {
   });
 
   it("removes the banner and status when the fresh render has none", () => {
-    const root = renderModal({ card: { ...base, state: "awaiting", awaiting: { kind: "plan", detail: "x" } }, turns: [], status: { ok: false, text: "e" }, draft: "" }, handlers());
+    const root = renderModal({ card: { ...base, state: "awaiting", awaiting: { kind: "plan", detail: "x", questions: [] } }, turns: [], status: { ok: false, text: "e" }, draft: "" }, handlers());
     patchModal(root, renderModal({ card: base, turns: [], status: null, draft: "" }, handlers()));
     expect(root.querySelector(".modal__banner")).toBeNull();
     expect(root.querySelector(".modal__status")).toBeNull();
