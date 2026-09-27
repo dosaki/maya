@@ -84,6 +84,46 @@ fn answer_question(state: TauriState<AppState>, session_id: String, ask_id: u64,
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+pub struct StartResult {
+    pub dir: String,
+    pub how: &'static str,
+}
+
+fn projects_root(state: &TauriState<AppState>) -> Result<std::path::PathBuf, String> {
+    let root = state.store.lock().unwrap().config.projects_dir_path().ok_or("Set a projects directory in Settings first.")?;
+    if !root.is_dir() {
+        return Err(format!("Projects directory does not exist: {}.", root.display()));
+    }
+    Ok(root)
+}
+
+#[tauri::command(async)]
+fn list_project_dirs(state: TauriState<AppState>) -> Result<Vec<String>, String> {
+    Ok(launch::list_project_dirs(&projects_root(&state)?))
+}
+
+#[tauri::command(async)]
+fn start_session(state: TauriState<AppState>, dir: Option<String>, prompt: String) -> Result<StartResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("Type a prompt first.".into());
+    }
+    let root = projects_root(&state)?;
+    let eye_dir = state.store.lock().unwrap().claude_dir().join("eye");
+    let dirs = launch::list_project_dirs(&root);
+    let picked = match dir {
+        Some(_) => None,
+        None => {
+            let binary = launch::claude_binary().ok_or("Could not find the claude command.")?;
+            launch::classify(&binary, &root, &prompt, &dirs, launch::CLASSIFIER_TIMEOUT)
+        }
+    };
+    let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
+    let file = launch::write_prompt_file(&eye_dir, &prompt)?;
+    launch::open_terminal(&target, &file)?;
+    Ok(StartResult { dir: target.to_string_lossy().into_owned(), how })
+}
+
 #[tauri::command(async)]
 fn hook_status(state: TauriState<AppState>) -> Result<bool, String> {
     let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
@@ -142,6 +182,8 @@ pub fn run() {
             session_history,
             send_reply,
             answer_question,
+            list_project_dirs,
+            start_session,
             hook_status,
             install_hook,
             remove_hook,
