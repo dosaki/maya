@@ -4,6 +4,65 @@ use std::time::{Duration, Instant};
 
 pub const CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(90);
 
+/// Model aliases `claude --model` accepts. Fixed lists keep the launch command
+/// free of anything the user typed.
+pub const MODELS: &[&str] = &["fable", "opus", "sonnet", "haiku"];
+pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+pub const MODES: &[&str] = &["manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
+
+/// Per-session choices for `claude`. None or "" means "use the defaults".
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub struct LaunchOptions {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub mode: Option<String>,
+}
+
+fn chosen(v: &Option<String>) -> Option<&str> {
+    v.as_deref().map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// `value` if it is one of `allowed`; a message naming `what` otherwise.
+pub fn check_choice(what: &str, value: &str, allowed: &[&str]) -> Result<(), String> {
+    if allowed.contains(&value) {
+        Ok(())
+    } else {
+        Err(format!("Unknown {what}: {value}"))
+    }
+}
+
+impl LaunchOptions {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(m) = chosen(&self.model) {
+            check_choice("model", m, MODELS)?;
+        }
+        if let Some(e) = chosen(&self.effort) {
+            check_choice("effort", e, EFFORTS)?;
+        }
+        if let Some(m) = chosen(&self.mode) {
+            check_choice("mode", m, MODES)?;
+        }
+        Ok(())
+    }
+
+    /// The `claude` flags for the chosen options, each preceded by a space.
+    /// Only valid values are rendered; call `validate` first.
+    pub fn flags(&self) -> String {
+        let mut out = String::new();
+        if let Some(m) = chosen(&self.model) {
+            out.push_str(&format!(" --model {m}"));
+        }
+        if let Some(e) = chosen(&self.effort) {
+            out.push_str(&format!(" --effort {e}"));
+        }
+        if let Some(m) = chosen(&self.mode) {
+            out.push_str(&format!(" --permission-mode {m}"));
+        }
+        out
+    }
+}
+
 /// Names of the visible subfolders of `root`, sorted. Missing root gives none.
 pub fn list_project_dirs(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else { return vec![] };
@@ -132,11 +191,12 @@ fn applescript_string(text: &str) -> String {
 /// Opens a new Terminal window running the session and brings Terminal forward.
 /// The shell reads the prompt file into a variable, deletes the file, and
 /// passes the prompt after `--` so a prompt starting with `-` is not an option.
-pub fn applescript_launch(target: &Path, prompt_file: &Path) -> String {
+pub fn applescript_launch(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> String {
     let file = shell_single_quote(&prompt_file.to_string_lossy());
     let cmd = format!(
-        "cd {} && p=\"$(cat {file})\" && rm -f {file} && claude -- \"$p\"",
-        shell_single_quote(&target.to_string_lossy())
+        "cd {} && p=\"$(cat {file})\" && rm -f {file} && claude{} -- \"$p\"",
+        shell_single_quote(&target.to_string_lossy()),
+        opts.flags()
     );
     format!(
         "tell application \"Terminal\"\n  do script \"{}\"\n  activate\nend tell",
@@ -144,10 +204,10 @@ pub fn applescript_launch(target: &Path, prompt_file: &Path) -> String {
     )
 }
 
-pub fn open_terminal(target: &Path, prompt_file: &Path) -> Result<(), String> {
+pub fn open_terminal(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> Result<(), String> {
     let out = Command::new("osascript")
         .arg("-e")
-        .arg(applescript_launch(target, prompt_file))
+        .arg(applescript_launch(target, prompt_file, opts))
         .output()
         .map_err(|e| format!("could not run osascript: {e}"))?;
     if out.status.success() {
@@ -235,9 +295,42 @@ mod tests {
     }
 
     #[test]
+    fn launch_options_accept_only_known_values() {
+        assert!(LaunchOptions::default().validate().is_ok());
+        let ok = LaunchOptions { model: Some("opus".into()), effort: Some("xhigh".into()), mode: Some("acceptEdits".into()) };
+        assert!(ok.validate().is_ok());
+        let bad_model = LaunchOptions { model: Some("gpt; rm -rf /".into()), ..Default::default() };
+        assert!(bad_model.validate().unwrap_err().contains("model"));
+        let bad_effort = LaunchOptions { effort: Some("turbo".into()), ..Default::default() };
+        assert!(bad_effort.validate().unwrap_err().contains("effort"));
+        let bad_mode = LaunchOptions { mode: Some("yolo".into()), ..Default::default() };
+        assert!(bad_mode.validate().unwrap_err().contains("mode"));
+        // Empty strings mean "default": no flag.
+        let empty = LaunchOptions { model: Some("".into()), effort: Some("".into()), mode: Some("".into()) };
+        assert!(empty.validate().is_ok());
+        assert_eq!(empty.flags(), "");
+    }
+
+    #[test]
+    fn launch_options_render_as_claude_flags() {
+        assert_eq!(LaunchOptions::default().flags(), "");
+        let all = LaunchOptions { model: Some("sonnet".into()), effort: Some("low".into()), mode: Some("plan".into()) };
+        assert_eq!(all.flags(), " --model sonnet --effort low --permission-mode plan");
+        let one = LaunchOptions { effort: Some("max".into()), ..Default::default() };
+        assert_eq!(one.flags(), " --effort max");
+    }
+
+    #[test]
+    fn launch_command_carries_the_flags_before_the_prompt() {
+        let opts = LaunchOptions { model: Some("haiku".into()), mode: Some("bypassPermissions".into()), ..Default::default() };
+        let s = applescript_launch(Path::new("/r/a"), Path::new("/p/1.txt"), &opts);
+        assert!(s.contains("claude --model haiku --permission-mode bypassPermissions -- \\\"$p\\\""), "{s}");
+    }
+
+    #[test]
     fn shell_quoting_and_applescript_escaping() {
         assert_eq!(shell_single_quote("it's"), "'it'\\''s'");
-        let s = applescript_launch(Path::new("/Users/x/dev/it's-here"), Path::new("/Users/x/.claude/maya/prompts/1.txt"));
+        let s = applescript_launch(Path::new("/Users/x/dev/it's-here"), Path::new("/Users/x/.claude/maya/prompts/1.txt"), &LaunchOptions::default());
         assert!(s.contains("tell application \"Terminal\""));
         // The prompt file is consumed and deleted, and `--` protects prompts that start with `-`.
         assert!(s.contains("do script \"cd '/Users/x/dev/it'\\\\''s-here' && p=\\\"$(cat '/Users/x/.claude/maya/prompts/1.txt')\\\" && rm -f '/Users/x/.claude/maya/prompts/1.txt' && claude -- \\\"$p\\\"\""), "{s}");

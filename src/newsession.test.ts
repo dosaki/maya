@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { renderNewSession } from "./newsession";
 
 const handlers = () => ({ onStart: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn() });
-const base = { dirs: ["a", "sonarqube"], dir: null, prompt: "", status: null, busy: false, needsSetup: false };
+const base = { dirs: ["a", "sonarqube"], dir: null, prompt: "", status: null, busy: false, needsSetup: false, options: {} };
+const defaults = { model: "", effort: "", mode: "" };
 
 describe("renderNewSession", () => {
   it("lists Let Claude choose first, then the folders", () => {
@@ -22,10 +23,35 @@ describe("renderNewSession", () => {
     ta.dispatchEvent(new Event("input"));
     expect(start.disabled).toBe(false);
     start.click();
-    expect(h.onStart).toHaveBeenCalledWith(null, "fix ci");
+    expect(h.onStart).toHaveBeenCalledWith(null, "fix ci", defaults);
     el.querySelector<HTMLSelectElement>("select[name=dir]")!.value = "sonarqube";
     ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
-    expect(h.onStart).toHaveBeenLastCalledWith("sonarqube", "fix ci");
+    expect(h.onStart).toHaveBeenLastCalledWith("sonarqube", "fix ci", defaults);
+  });
+
+  it("offers model, effort and mode with Default first and passes the choices to start", () => {
+    const h = handlers();
+    const el = renderNewSession(base, h);
+    const texts = (name: string) => [...el.querySelectorAll<HTMLOptionElement>(`select[name=${name}] option`)].map((o) => o.textContent);
+    expect(texts("model")).toEqual(["Default", "Fable", "Opus", "Sonnet", "Haiku"]);
+    expect(texts("effort")).toEqual(["Default", "low", "medium", "high", "xhigh", "max"]);
+    expect(texts("mode")).toEqual(["Default", "manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"]);
+    for (const name of ["model", "effort", "mode"]) expect(el.querySelector<HTMLSelectElement>(`select[name=${name}]`)!.value).toBe("");
+    el.querySelector<HTMLSelectElement>("select[name=model]")!.value = "opus";
+    el.querySelector<HTMLSelectElement>("select[name=effort]")!.value = "high";
+    el.querySelector<HTMLSelectElement>("select[name=mode]")!.value = "plan";
+    const ta = el.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")!;
+    ta.value = "go";
+    ta.dispatchEvent(new Event("input"));
+    el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    expect(h.onStart).toHaveBeenCalledWith(null, "go", { model: "opus", effort: "high", mode: "plan" });
+  });
+
+  it("preselects the remembered options", () => {
+    const el = renderNewSession({ ...base, options: { model: "sonnet", effort: "max", mode: "acceptEdits" } }, handlers());
+    expect(el.querySelector<HTMLSelectElement>("select[name=model]")!.value).toBe("sonnet");
+    expect(el.querySelector<HTMLSelectElement>("select[name=effort]")!.value).toBe("max");
+    expect(el.querySelector<HTMLSelectElement>("select[name=mode]")!.value).toBe("acceptEdits");
   });
 
   it("disables Start while busy and ignores clicks, showing the status", () => {

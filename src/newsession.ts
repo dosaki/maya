@@ -1,10 +1,50 @@
 import { invoke } from "@tauri-apps/api/core";
 import { showToast } from "./toast";
 
+/** Choices for a new `claude` session; "" means "use the defaults". */
+export interface SessionOptions {
+  model: string;
+  effort: string;
+  mode: string;
+}
+
+/** Value/label pairs, in the order the dropdowns show them. */
+export const MODEL_CHOICES: [string, string][] = [["fable", "Fable"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]];
+export const EFFORT_CHOICES: [string, string][] = ["low", "medium", "high", "xhigh", "max"].map((v) => [v, v]);
+export const MODE_CHOICES: [string, string][] = ["manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"].map((v) => [v, v]);
+
+export const OPTION_FIELDS: { name: keyof SessionOptions; label: string; choices: [string, string][] }[] = [
+  { name: "model", label: "Model", choices: MODEL_CHOICES },
+  { name: "effort", label: "Effort", choices: EFFORT_CHOICES },
+  { name: "mode", label: "Mode", choices: MODE_CHOICES },
+];
+
+/** A labelled select with a "Default" (empty) entry first. */
+export function renderChoice(name: string, label: string, choices: [string, string][], value: string, first = "Default"): HTMLLabelElement {
+  const field = el("label", "newsession__field");
+  field.append(el("span", "newsession__label", label));
+  const select = el("select", "newsession__select");
+  select.name = name;
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = first;
+  select.append(def);
+  for (const [v, text] of choices) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = text;
+    select.append(o);
+  }
+  select.value = choices.some(([v]) => v === value) ? value : "";
+  field.append(select);
+  return field;
+}
+
 export interface NewSessionModel {
   dirs: string[];
   dir: string | null;
   prompt: string;
+  options: Partial<SessionOptions>;
   status: { ok: boolean; text: string } | null;
   busy: boolean;
   needsSetup: boolean;
@@ -13,7 +53,7 @@ export interface NewSessionModel {
 }
 
 export interface NewSessionHandlers {
-  onStart(dir: string | null, prompt: string): void;
+  onStart(dir: string | null, prompt: string, options: SessionOptions): void;
   onClose(): void;
   onOpenSettings(): void;
 }
@@ -89,6 +129,19 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   ta.value = m.prompt;
   promptLabel.append(ta);
 
+  const optionRow = el("div", "newsession__options");
+  const optionSelects: [keyof SessionOptions, HTMLSelectElement][] = [];
+  for (const f of OPTION_FIELDS) {
+    const field = renderChoice(f.name, f.label, f.choices, m.options[f.name] ?? "");
+    optionSelects.push([f.name, field.querySelector("select")!]);
+    optionRow.append(field);
+  }
+  const readOptions = (): SessionOptions => {
+    const o: SessionOptions = { model: "", effort: "", mode: "" };
+    for (const [name, sel] of optionSelects) o[name] = sel.value;
+    return o;
+  };
+
   const start = el("button", "card__btn card__btn--primary", m.busy ? "Starting…" : "Start");
   start.type = "button";
   start.dataset.action = "start";
@@ -99,7 +152,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
     if (start.disabled) return;
     const prompt = ta.value.trim();
     if (!prompt) return;
-    h.onStart(select.value || null, prompt);
+    h.onStart(select.value || null, prompt, readOptions());
   };
   ta.addEventListener("input", sync);
   ta.addEventListener("keydown", (ev) => {
@@ -113,7 +166,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
 
   const actions = el("div", "newsession__actions");
   actions.append(start);
-  form.append(dirLabel, promptLabel, actions);
+  form.append(dirLabel, optionRow, promptLabel, actions);
   panel.append(form);
   if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.ok ? "ok" : "error"}`, m.status.text));
 
@@ -123,6 +176,17 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
 
 let current: { model: NewSessionModel; keyHandler: (e: KeyboardEvent) => void } | null = null;
 let draft = "";
+/** The last chosen options; unlike the prompt they are kept after a start. */
+let lastOptions: SessionOptions = { model: "", effort: "", mode: "" };
+
+function readOptionsFrom(host: ParentNode): SessionOptions | null {
+  const sel = (name: string) => host.querySelector<HTMLSelectElement>(`select[name=${name}]`);
+  const model = sel("model");
+  const effort = sel("effort");
+  const mode = sel("mode");
+  if (!model || !effort || !mode) return null;
+  return { model: model.value, effort: effort.value, mode: mode.value };
+}
 
 function startedText(r: StartResult): string {
   const name = r.dir.split("/").filter(Boolean).pop() ?? r.dir;
@@ -139,9 +203,11 @@ function paint(): void {
   if (ta && !m.done) m.prompt = ta.value;
   const sel = host.querySelector<HTMLSelectElement>("select[name=dir]");
   if (sel) m.dir = sel.value || null;
+  const opts = readOptionsFrom(host);
+  if (opts) m.options = lastOptions = opts;
   host.replaceChildren(
     renderNewSession(m, {
-      onStart: (dir, prompt) => void start(dir, prompt),
+      onStart: (dir, prompt, options) => void start(dir, prompt, options),
       onClose: closeNewSession,
       onOpenSettings: () => {
         closeNewSession();
@@ -152,16 +218,17 @@ function paint(): void {
   host.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")?.focus();
 }
 
-async function start(dir: string | null, prompt: string): Promise<void> {
+async function start(dir: string | null, prompt: string, options: SessionOptions): Promise<void> {
   if (!current || current.model.busy) return;
   const me = current;
   me.model.busy = true;
   me.model.dir = dir;
   me.model.prompt = prompt;
+  me.model.options = lastOptions = options;
   me.model.status = { ok: true, text: dir ? "Starting…" : "Choosing a repository…" };
   paint();
   try {
-    const r = await invoke<StartResult>("start_session", { dir, prompt });
+    const r = await invoke<StartResult>("start_session", { dir, prompt, options });
     draft = "";
     if (current !== me) {
       showToast(startedText(r));
@@ -192,7 +259,7 @@ export async function openNewSession(): Promise<void> {
   const keyHandler = (e: KeyboardEvent) => {
     if (e.key === "Escape") closeNewSession();
   };
-  current = { model: { dirs: [], dir: null, prompt: draft, status: null, busy: false, needsSetup: false }, keyHandler };
+  current = { model: { dirs: [], dir: null, prompt: draft, options: { ...lastOptions }, status: null, busy: false, needsSetup: false }, keyHandler };
   document.addEventListener("keydown", keyHandler);
   paint();
   try {
@@ -210,9 +277,12 @@ export async function openNewSession(): Promise<void> {
 
 export function closeNewSession(): void {
   if (!current) return;
-  const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea[name=prompt]");
+  const host = document.getElementById("modal-host");
+  const ta = host?.querySelector<HTMLTextAreaElement>("textarea[name=prompt]");
   // Keep the draft even mid-start; only a successful start spends it.
   if (ta && !current.model.done) draft = ta.value;
+  const opts = host ? readOptionsFrom(host) : null;
+  if (opts) lastOptions = opts;
   document.removeEventListener("keydown", current.keyHandler);
   current = null;
   document.getElementById("modal-host")?.replaceChildren();

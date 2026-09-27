@@ -7,6 +7,46 @@ import { closeNewSession, openNewSession } from "./newsession";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
+describe("new-session options", () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="modal-host"></div><div id="toast" class="toast" hidden></div>';
+    invoke.mockReset();
+  });
+  afterEach(() => closeNewSession());
+
+  it("sends the chosen options and remembers them for the next open", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "start_session") return Promise.resolve({ dir: "/x/dev/a", how: "chosen" });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    document.querySelector<HTMLSelectElement>("select[name=model]")!.value = "opus";
+    document.querySelector<HTMLSelectElement>("select[name=mode]")!.value = "plan";
+    // Options survive a close before any start, like the prompt draft.
+    closeNewSession();
+    await openNewSession();
+    await flush();
+    expect(document.querySelector<HTMLSelectElement>("select[name=model]")!.value).toBe("opus");
+    document.querySelector<HTMLSelectElement>("select[name=dir]")!.value = "a";
+    const ta = document.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")!;
+    ta.value = "fix ci";
+    ta.dispatchEvent(new Event("input"));
+    document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    expect(invoke).toHaveBeenCalledWith("start_session", { dir: "a", prompt: "fix ci", options: { model: "opus", effort: "", mode: "plan" } });
+    await flush();
+    await flush();
+    closeNewSession();
+    await openNewSession();
+    await flush();
+    expect(document.querySelector<HTMLSelectElement>("select[name=model]")!.value).toBe("opus");
+    expect(document.querySelector<HTMLSelectElement>("select[name=mode]")!.value).toBe("plan");
+    // Remembered options are module state: put them back to Default for the other tests.
+    for (const sel of document.querySelectorAll<HTMLSelectElement>("select")) sel.value = "";
+  });
+});
+
 describe("new-session flow", () => {
   beforeEach(() => {
     document.body.innerHTML = '<div id="modal-host"></div><div id="toast" class="toast" hidden></div>';
@@ -31,7 +71,7 @@ describe("new-session flow", () => {
     ta.value = "fix ci";
     ta.dispatchEvent(new Event("input"));
     document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(invoke).toHaveBeenCalledWith("start_session", { dir: null, prompt: "fix ci" });
+    expect(invoke).toHaveBeenCalledWith("start_session", { dir: null, prompt: "fix ci", options: { model: "", effort: "", mode: "" } });
     resolveStart({ dir: "/x/dev/a", how: "classifier" });
     await flush();
     await flush();

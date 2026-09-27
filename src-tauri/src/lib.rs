@@ -84,6 +84,29 @@ fn answer_question(state: TauriState<AppState>, session_id: String, ask_id: u64,
     Ok(())
 }
 
+/// Types `/model x` or `/effort y` into the session's Terminal tab.
+#[tauri::command(async)]
+fn set_session_option(state: TauriState<AppState>, session_id: String, setting: String, value: String) -> Result<(), String> {
+    let text = answer::slash_command(&setting, &value)?;
+    type_into_session(&state, &session_id, &text)
+}
+
+/// Sends Shift+Tab to the session's Terminal tab, cycling its permission mode.
+#[tauri::command(async)]
+fn cycle_session_mode(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+    type_into_session(&state, &session_id, answer::SHIFT_TAB)
+}
+
+fn type_into_session(state: &TauriState<AppState>, session_id: &str, text: &str) -> Result<(), String> {
+    let card = {
+        let mut store = state.store.lock().unwrap();
+        store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?
+    };
+    answer::check_free(&card)?;
+    let tty = focus::tty_for_pid(card.pid)?;
+    answer::type_into_tty(&tty, text)
+}
+
 #[derive(serde::Serialize)]
 pub struct StartResult {
     pub dir: String,
@@ -104,10 +127,11 @@ fn list_project_dirs(state: TauriState<AppState>) -> Result<Vec<String>, String>
 }
 
 #[tauri::command(async)]
-fn start_session(state: TauriState<AppState>, dir: Option<String>, prompt: String) -> Result<StartResult, String> {
+fn start_session(state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions) -> Result<StartResult, String> {
     if prompt.trim().is_empty() {
         return Err("Type a prompt first.".into());
     }
+    options.validate()?;
     let root = projects_root(&state)?;
     let maya_dir = state.store.lock().unwrap().claude_dir().join("maya");
     let dirs = launch::list_project_dirs(&root);
@@ -120,7 +144,7 @@ fn start_session(state: TauriState<AppState>, dir: Option<String>, prompt: Strin
     };
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
     let file = launch::write_prompt_file(&maya_dir, &prompt)?;
-    launch::open_terminal(&target, &file)?;
+    launch::open_terminal(&target, &file, &options)?;
     Ok(StartResult { dir: target.to_string_lossy().into_owned(), how })
 }
 
@@ -182,6 +206,8 @@ pub fn run() {
             session_history,
             send_reply,
             answer_question,
+            set_session_option,
+            cycle_session_mode,
             list_project_dirs,
             start_session,
             hook_status,

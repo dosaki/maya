@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { answerGuard } from "./answer";
 import { projectName } from "./format";
+import { EFFORT_CHOICES, MODEL_CHOICES, renderChoice } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
 import { STATE_LABEL, type Card, type Turn } from "./types";
@@ -19,6 +20,48 @@ export interface ModalHandlers {
   onTerminal(): void;
   onClose(): void;
   onAnswer(questionIndex: number, optionIndex: number, button: HTMLElement): void;
+  /** Change the running session's model or effort (typed as a slash command). */
+  onSetOption(setting: "model" | "effort", value: string): void;
+  /** Send Shift+Tab to the session to move it to its next permission mode. */
+  onCycleMode(): void;
+}
+
+/**
+ * Model and effort pickers plus a Cycle mode button. The pickers start blank
+ * so a background repaint never re-applies a choice; Apply sends each one
+ * that was changed and clears them.
+ */
+function renderTweaks(h: ModalHandlers): HTMLElement {
+  const row = el("div", "modal__tweaks");
+  const model = renderChoice("model", "", MODEL_CHOICES, "", "Model");
+  const effort = renderChoice("effort", "", EFFORT_CHOICES, "", "Effort");
+  const selects: ["model" | "effort", HTMLSelectElement][] = [
+    ["model", model.querySelector("select")!],
+    ["effort", effort.querySelector("select")!],
+  ];
+  const apply = el("button", "card__btn", "Apply");
+  apply.type = "button";
+  apply.dataset.action = "apply";
+  const sync = () => {
+    apply.disabled = selects.every(([, sel]) => sel.value === "");
+  };
+  for (const [, sel] of selects) sel.addEventListener("change", sync);
+  apply.addEventListener("click", () => {
+    if (apply.disabled) return;
+    for (const [name, sel] of selects) {
+      if (sel.value) h.onSetOption(name, sel.value);
+      sel.value = "";
+    }
+    sync();
+  });
+  sync();
+  const cycle = el("button", "card__btn", "Cycle mode");
+  cycle.type = "button";
+  cycle.dataset.action = "cycle-mode";
+  cycle.title = "Sends Shift+Tab to the terminal: the next permission mode. Check the terminal to see which.";
+  cycle.addEventListener("click", () => h.onCycleMode());
+  row.append(model, effort, apply, cycle);
+  return row;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -78,6 +121,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     history.append(turn);
   }
   panel.append(history);
+  panel.append(renderTweaks(h));
 
   if (m.card.hasInbox) {
     const form = el("div", "modal__composer");
@@ -188,6 +232,8 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
     onClose: closeModal,
     onAnswer: (q, opt, btn) => void answer(q, opt, btn),
+    onSetOption: (setting, value) => void setOption(setting, value),
+    onCycleMode: () => void cycleMode(),
   });
   // Buttons rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay([m.card], Date.now());
@@ -212,6 +258,28 @@ async function answer(questionIndex: number, optionIndex: number, button: HTMLEl
     progress?.advance(card);
     me.model.status = { ok: true, text: "Answer sent to the terminal" };
     paint();
+  } catch (e) {
+    if (current === me) setStatus(false, String(e));
+  }
+}
+
+async function setOption(setting: "model" | "effort", value: string): Promise<void> {
+  if (!current) return;
+  const me = current;
+  try {
+    await invoke("set_session_option", { sessionId: me.model.card.sessionId, setting, value });
+    if (current === me) setStatus(true, `Sent /${setting} ${value} to the terminal`);
+  } catch (e) {
+    if (current === me) setStatus(false, String(e));
+  }
+}
+
+async function cycleMode(): Promise<void> {
+  if (!current) return;
+  const me = current;
+  try {
+    await invoke("cycle_session_mode", { sessionId: me.model.card.sessionId });
+    if (current === me) setStatus(true, "Sent Shift+Tab to the terminal; check which mode it shows now");
   } catch (e) {
     if (current === me) setStatus(false, String(e));
   }

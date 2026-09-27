@@ -3,7 +3,7 @@ import { patchModal, renderModal } from "./modal";
 import type { Card } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "working", stateSince: 0, snippet: "", awaiting: null, hasInbox: true };
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn() });
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn() });
 
 describe("patchModal", () => {
   it("keeps the composer node, its focus and text while history, badge and status change", () => {
@@ -14,6 +14,8 @@ describe("patchModal", () => {
     ta.focus();
     ta.value = "half typed";
     ta.setSelectionRange(4, 4);
+    const model = root.querySelector<HTMLSelectElement>(".modal__tweaks select[name=model]")!;
+    model.value = "opus";
 
     const fresh = renderModal(
       { card: { ...base, state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm", questions: [] } }, turns: [{ kind: "user", text: "old" }, { kind: "assistant", text: "new" }], status: { ok: true, text: "Delivered" }, draft: "" },
@@ -23,6 +25,9 @@ describe("patchModal", () => {
 
     expect(root.querySelector("textarea")).toBe(ta);
     expect(document.activeElement).toBe(ta);
+    // A half-chosen model in the tweaks row survives too.
+    expect(root.querySelector<HTMLSelectElement>(".modal__tweaks select[name=model]")).toBe(model);
+    expect(model.value).toBe("opus");
     expect(ta.value).toBe("half typed");
     expect(ta.selectionStart).toBe(4);
     expect([...root.querySelectorAll(".turn")].length).toBe(2);

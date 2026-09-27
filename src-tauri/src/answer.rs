@@ -1,5 +1,30 @@
+use crate::launch::{check_choice, EFFORTS, MODELS};
 use crate::model::{AwaitKind, Card, State};
 use std::process::Command;
+
+/// Shift+Tab, which cycles the permission mode in a running session.
+pub const SHIFT_TAB: &str = "\x1b[Z";
+
+/// The slash command that changes `setting` to `value` in a running session.
+/// Only the model and effort have such a command; both values are checked
+/// against the same lists the launcher uses.
+pub fn slash_command(setting: &str, value: &str) -> Result<String, String> {
+    match setting {
+        "model" => check_choice("model", value, MODELS)?,
+        "effort" => check_choice("effort", value, EFFORTS)?,
+        _ => return Err(format!("Unknown setting: {setting}")),
+    }
+    Ok(format!("/{setting} {value}"))
+}
+
+/// Typing into a session that is waiting on a prompt would answer it (the
+/// Enter after the text lands on the picker), so refuse until it moves on.
+pub fn check_free(card: &Card) -> Result<(), String> {
+    if card.state == State::Awaiting {
+        return Err("This session is waiting for a decision; answer it first.".into());
+    }
+    Ok(())
+}
 
 /// The picker must be on screen before any key is sent; PreToolUse fires just before it renders.
 pub const OPEN_DELAY_MS: u64 = 1000;
@@ -106,6 +131,31 @@ mod tests {
             awaiting: Some(Awaiting { kind: AwaitKind::Question, detail: "Q?".into(), questions }),
             has_inbox: true,
         }
+    }
+
+    #[test]
+    fn slash_commands_only_for_known_settings() {
+        assert_eq!(slash_command("model", "opus"), Ok("/model opus".to_string()));
+        assert_eq!(slash_command("effort", "xhigh"), Ok("/effort xhigh".to_string()));
+        assert!(slash_command("model", "gpt").unwrap_err().contains("model"));
+        assert!(slash_command("effort", "turbo").unwrap_err().contains("effort"));
+        assert!(slash_command("mode", "plan").unwrap_err().contains("setting"));
+    }
+
+    #[test]
+    fn shift_tab_is_the_reverse_tab_sequence() {
+        assert_eq!(SHIFT_TAB, "\x1b[Z");
+    }
+
+    #[test]
+    fn typing_is_refused_while_the_session_awaits_a_decision() {
+        let mut c = card(vec![q(2, false)], 1000);
+        assert!(check_free(&c).unwrap_err().contains("waiting"));
+        c.state = State::Working;
+        c.awaiting = None;
+        assert_eq!(check_free(&c), Ok(()));
+        c.state = State::Idle;
+        assert_eq!(check_free(&c), Ok(()));
     }
 
     #[test]
