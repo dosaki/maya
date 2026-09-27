@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "./actions";
+import { answerGuard } from "./answer";
 import { renderBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
 import { openModal, refreshModal, setProgress } from "./modal";
+import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
@@ -14,6 +16,8 @@ const guard = makeClickGuard();
 const progress = makeProgress();
 setProgress(progress);
 let retry: ReturnType<typeof setTimeout> | undefined;
+let enableTimer: ReturnType<typeof setTimeout> | undefined;
+let known = new Set<string>();
 
 function paint(): void {
   if (!guard.canPaint(Date.now())) {
@@ -26,6 +30,10 @@ function paint(): void {
   if (!host) return;
   host.replaceChildren(renderBoard(cards, Date.now(), (c) => progress.next(c)));
   guard.markPaint(Date.now());
+  // Option buttons rendered inside the open delay: repaint once it has elapsed.
+  const delay = nextEnableDelay(cards, Date.now());
+  if (enableTimer) clearTimeout(enableTimer);
+  enableTimer = delay === null ? undefined : setTimeout(() => { enableTimer = undefined; paint(); }, delay + 50);
   const meta = document.getElementById("meta");
   if (meta) meta.textContent = `${cards.length} session${cards.length === 1 ? "" : "s"}`;
 }
@@ -44,13 +52,14 @@ function act(target: Element): void {
   const card = cards.find((c) => c.sessionId === action.sessionId);
   if (!card) return;
   if (action.kind === "terminal") void focus(card.pid);
-  else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex);
+  else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex, target);
   else void openModal(card);
 }
 
-async function answer(card: Card, questionIndex: number, optionIndex: number): Promise<void> {
+async function answer(card: Card, questionIndex: number, optionIndex: number, button: Element): Promise<void> {
   try {
-    await invoke("answer_question", { sessionId: card.sessionId, questionIndex, optionIndex });
+    const outcome = await answerGuard.answer(card, questionIndex, optionIndex, button as HTMLElement);
+    if (outcome === "dropped") return;
     progress.advance(card);
     paint();
   } catch (e) {
@@ -80,6 +89,8 @@ async function start(): Promise<void> {
   await listen<Card[]>("sessions", (e) => {
     cards = e.payload;
     for (const c of cards) if (c.state !== "awaiting") progress.reset(c.sessionId);
+    for (const id of known) if (!cards.some((c) => c.sessionId === id)) progress.reset(id);
+    known = new Set(cards.map((c) => c.sessionId));
     paint();
     refreshModal(cards);
   });

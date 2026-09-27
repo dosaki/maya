@@ -19,8 +19,8 @@ describe("cardActionFor", () => {
     const el = document.createElement("article");
     el.className = "card";
     el.dataset.sessionId = "s1";
-    el.innerHTML = '<button data-action="answer" data-q="1" data-opt="2">x</button>';
+    el.innerHTML = '<button data-action="answer" data-ask="77" data-q="1" data-opt="2">x</button>';
     document.body.replaceChildren(el);
-    expect(cardActionFor(el.querySelector("button")!)).toEqual({ kind: "answer", sessionId: "s1", questionIndex: 1, optionIndex: 2 });
+    expect(cardActionFor(el.querySelector("button")!)).toEqual({ kind: "answer", sessionId: "s1", askId: 77, questionIndex: 1, optionIndex: 2 });
   });
 });

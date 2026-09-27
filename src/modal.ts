@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { OPEN_DELAY_MS } from "./card";
+import { answerGuard } from "./answer";
 import { projectName } from "./format";
-import { renderOptions } from "./options";
+import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
 import { STATE_LABEL, type Card, type Turn } from "./types";
 
@@ -18,7 +18,7 @@ export interface ModalHandlers {
   onSend(text: string): void;
   onTerminal(): void;
   onClose(): void;
-  onAnswer(questionIndex: number, optionIndex: number): void;
+  onAnswer(questionIndex: number, optionIndex: number, button: HTMLElement): void;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -28,7 +28,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return n;
 }
 
-export function renderModal(m: ModalModel, h: ModalHandlers): HTMLElement {
+export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = el("div", "modal");
   const backdrop = el("div", "modal__backdrop");
   backdrop.addEventListener("click", () => h.onClose());
@@ -50,7 +50,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers): HTMLElement {
 
   if (m.card.state === "awaiting") {
     const banner = el("div", "modal__banner");
-    const options = renderOptions(m.card, m.next ?? 0, { descriptions: true, enabled: Date.now() - m.card.stateSince >= OPEN_DELAY_MS });
+    const options = renderOptions(m.card, m.next ?? 0, { descriptions: true, enabled: nowMs - m.card.stateSince >= OPEN_DELAY_MS });
     banner.append(
       el("span", "", options ? "This session is asking a question. Pick an answer here or in its terminal." : "This session is waiting for a decision in its terminal. A reply will queue behind it."),
     );
@@ -61,7 +61,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers): HTMLElement {
     if (options) {
       options.addEventListener("click", (ev) => {
         const btn = (ev.target as HTMLElement).closest<HTMLElement>("button[data-action=answer]");
-        if (btn && !(btn as HTMLButtonElement).disabled) h.onAnswer(Number(btn.dataset.q), Number(btn.dataset.opt));
+        if (btn && !(btn as HTMLButtonElement).disabled) h.onAnswer(Number(btn.dataset.q), Number(btn.dataset.opt), btn);
       });
       banner.append(options);
     }
@@ -159,6 +159,7 @@ export function makeSendGuard(send: (text: string) => Promise<void>): (text: str
 
 let current: { model: ModalModel; keyHandler: (e: KeyboardEvent) => void } | null = null;
 let progress: Progress | null = null;
+let enableTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** Share the board's question-progress tracker with the modal. */
 export function setProgress(p: Progress): void {
@@ -186,8 +187,12 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     onSend: (text) => void guardedSend(text),
     onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
     onClose: closeModal,
-    onAnswer: (q, opt) => void answer(q, opt),
+    onAnswer: (q, opt, btn) => void answer(q, opt, btn),
   });
+  // Buttons rendered inside the open delay: repaint once it has elapsed.
+  const delay = nextEnableDelay([m.card], Date.now());
+  if (enableTimer) clearTimeout(enableTimer);
+  enableTimer = delay === null ? undefined : setTimeout(() => { enableTimer = undefined; paint(); }, delay + 50);
   const existing = host.querySelector<HTMLElement>(".modal");
   const composerUnchanged = !!existing && !!existing.querySelector("textarea") === m.card.hasInbox;
   if (existing && composerUnchanged) patchModal(existing, fresh);
@@ -197,13 +202,13 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   if (opts.focusInput) host.querySelector<HTMLTextAreaElement>("textarea")?.focus();
 }
 
-async function answer(questionIndex: number, optionIndex: number): Promise<void> {
+async function answer(questionIndex: number, optionIndex: number, button: HTMLElement): Promise<void> {
   if (!current) return;
   const me = current;
   const { card } = me.model;
   try {
-    await invoke("answer_question", { sessionId: card.sessionId, questionIndex, optionIndex });
-    if (current !== me) return;
+    const outcome = await answerGuard.answer(card, questionIndex, optionIndex, button);
+    if (current !== me || outcome === "dropped") return;
     progress?.advance(card);
     me.model.status = { ok: true, text: "Answer sent to the terminal" };
     paint();
@@ -264,6 +269,8 @@ export async function openModal(card: Card): Promise<void> {
 
 export function closeModal(): void {
   if (!current) return;
+  if (enableTimer) clearTimeout(enableTimer);
+  enableTimer = undefined;
   document.removeEventListener("keydown", current.keyHandler);
   current = null;
   document.getElementById("modal-host")?.replaceChildren();
@@ -278,7 +285,8 @@ export function refreshModal(cards: Card[]): void {
     setStatus(false, "Session is no longer running.");
     return;
   }
-  const stateChanged = fresh.state !== current.model.card.state || fresh.hasInbox !== current.model.card.hasInbox;
+  const stateChanged =
+    fresh.state !== current.model.card.state || fresh.stateSince !== current.model.card.stateSince || fresh.hasInbox !== current.model.card.hasInbox;
   current.model.card = fresh;
   void loadTurns({ force: stateChanged });
 }

@@ -36,10 +36,15 @@ describe("renderModal", () => {
     const h = handlers();
     const el = renderModal({ card: { ...base, state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm", questions: [] } }, turns: [], status: { ok: false, text: "boom" }, draft: "" }, h);
     expect(el.querySelector(".modal__banner")?.textContent).toContain("waiting for a decision");
-    const q = renderModal({ card: { ...base, state: "awaiting", stateSince: 0, awaiting: { kind: "question", detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "desc a" }] }] } }, turns: [], status: null, draft: "", next: 0 }, h);
+    const asking = { ...base, state: "awaiting" as const, stateSince: 5000, awaiting: { kind: "question" as const, detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "desc a" }] }] } };
+    const early = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 5500);
+    expect(early.querySelector<HTMLButtonElement>(".modal__banner button[data-action=answer]")!.disabled).toBe(true);
+    const q = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000);
     expect(q.querySelector(".modal__banner .options__desc")?.textContent).toBe("desc a");
-    q.querySelector<HTMLButtonElement>(".modal__banner button[data-action=answer]")!.click();
-    expect(h.onAnswer).toHaveBeenCalledWith(0, 0);
+    const btn = q.querySelector<HTMLButtonElement>(".modal__banner button[data-action=answer]")!;
+    expect(btn.disabled).toBe(false);
+    btn.click();
+    expect(h.onAnswer).toHaveBeenCalledWith(0, 0, btn);
     el.querySelector<HTMLButtonElement>(".modal__banner button")!.click();
     expect(h.onTerminal).toHaveBeenCalled();
     expect(el.querySelector(".modal__status")?.textContent).toBe("boom");

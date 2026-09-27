@@ -38,12 +38,13 @@ pub struct Question {
 }
 
 /// Reads `input["questions"]` from an AskUserQuestion tool input. Anything
-/// missing or malformed yields an empty list rather than an error.
+/// missing or malformed yields an empty list rather than an error. All or
+/// nothing: a partial list would shift indices away from the terminal's picker.
 pub fn parse_questions(input: &serde_json::Value) -> Vec<Question> {
     input
         .get("questions")
         .and_then(|q| q.as_array())
-        .map(|arr| arr.iter().filter_map(|q| serde_json::from_value::<Question>(q.clone()).ok()).collect())
+        .map(|arr| arr.iter().map(|q| serde_json::from_value::<Question>(q.clone())).collect::<Result<Vec<_>, _>>().unwrap_or_default())
         .unwrap_or_default()
 }
 
@@ -90,6 +91,9 @@ mod tests {
         assert!(q[1].multi_select);
         assert!(parse_questions(&serde_json::json!({})).is_empty());
         assert!(parse_questions(&serde_json::json!({"questions": "nope"})).is_empty());
+        // One bad element must not shift the indices of the others: all or nothing.
+        let mixed = serde_json::json!({"questions": [{"header": "no question field"}, {"question": "ok?", "options": []}]});
+        assert!(parse_questions(&mixed).is_empty());
         let json = serde_json::to_value(&q[1]).unwrap();
         assert_eq!(json["multiSelect"], true);
     }

@@ -67,12 +67,12 @@ fn send_reply(state: TauriState<AppState>, session_id: String, text: String) -> 
 }
 
 #[tauri::command(async)]
-fn answer_question(state: TauriState<AppState>, session_id: String, question_index: usize, option_index: usize) -> Result<(), String> {
+fn answer_question(state: TauriState<AppState>, session_id: String, ask_id: u64, question_index: usize, option_index: usize) -> Result<(), String> {
     let card = {
         let mut store = state.store.lock().unwrap();
         store.card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?
     };
-    answer::check(&card, question_index, option_index, now_ms())?;
+    answer::check(&card, ask_id, question_index, option_index, now_ms())?;
     let count = card.awaiting.as_ref().map(|a| a.questions.len()).unwrap_or(0);
     let tty = focus::tty_for_pid(card.pid)?;
     answer::type_into_tty(&tty, &answer::keys_for_option(option_index))?;

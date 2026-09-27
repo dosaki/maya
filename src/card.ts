@@ -1,5 +1,5 @@
 import { formatAge, projectName } from "./format";
-import { renderOptions } from "./options";
+import { OPEN_DELAY_MS, renderOptions } from "./options";
 import type { Card } from "./types";
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -8,8 +8,6 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   if (text !== undefined) node.textContent = text;
   return node;
 }
-
-export const OPEN_DELAY_MS = 1000;
 
 export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   const root = el("article", `card card--${card.state}`);

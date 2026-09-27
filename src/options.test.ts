@@ -15,6 +15,8 @@ describe("renderOptions", () => {
     const btns = [...el.querySelectorAll<HTMLButtonElement>("button[data-action=answer]")];
     expect(btns.map((b) => b.textContent)).toEqual(["S", "L"]);
     expect(btns.map((b) => [b.dataset.q, b.dataset.opt])).toEqual([["0", "0"], ["0", "1"]]);
+    expect(btns.every((b) => b.dataset.ask === "0")).toBe(true);
+    expect(el.querySelector(".options__warn")?.textContent).toContain("not both");
     expect(btns[1].title).toBe("large");
     expect(btns.every((b) => !b.disabled)).toBe(true);
     expect(el.querySelector(".options__desc")).toBeNull();
@@ -24,6 +26,11 @@ describe("renderOptions", () => {
     const el = renderOptions(two, 0, { descriptions: true, enabled: false })!;
     expect([...el.querySelectorAll(".options__desc")].map((d) => d.textContent)).toEqual(["small", "large"]);
     expect([...el.querySelectorAll<HTMLButtonElement>("button")].every((b) => b.disabled)).toBe(true);
+  });
+
+  it("has no mixed-answer warning for a single question", () => {
+    const one: Card = { ...two, awaiting: { kind: "question", detail: "Q", questions: [two.awaiting!.questions[0]] } };
+    expect(renderOptions(one, 0, { descriptions: false, enabled: true })!.querySelector(".options__warn")).toBeNull();
   });
 
   it("disables multi-select questions with a note", () => {

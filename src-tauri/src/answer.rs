@@ -39,14 +39,17 @@ return "not found""#,
     )
 }
 
-/// Refuses unless the card is still waiting on that exact question, the
-/// option exists, the question is single-select and the picker has had time
-/// to appear.
-pub fn check(card: &Card, question_index: usize, option_index: usize, now_ms: u64) -> Result<(), String> {
+/// Refuses unless the card is still waiting on the ask the buttons were
+/// rendered for (`ask_id` is that ask's awaiting timestamp), the option
+/// exists, the question is single-select and the picker has had time to appear.
+pub fn check(card: &Card, ask_id: u64, question_index: usize, option_index: usize, now_ms: u64) -> Result<(), String> {
     let aw = match (&card.state, &card.awaiting) {
         (State::Awaiting, Some(aw)) if aw.kind == AwaitKind::Question => aw,
         _ => return Err("This session is not waiting for a question.".into()),
     };
+    if card.state_since != ask_id {
+        return Err("The question has changed; look again.".into());
+    }
     let Some(q) = aw.questions.get(question_index) else {
         return Err("That question has no such option.".into());
     };
@@ -129,22 +132,24 @@ mod tests {
 
     #[test]
     fn check_accepts_an_open_question_after_one_second() {
-        assert_eq!(check(&card(vec![q(3, false)], 1000), 0, 2, 2000), Ok(()));
+        assert_eq!(check(&card(vec![q(3, false)], 1000), 1000, 0, 2, 2000), Ok(()));
     }
 
     #[test]
     fn check_refuses_every_bad_case() {
         let c = card(vec![q(3, false), q(2, true)], 1000);
-        assert!(check(&c, 0, 1, 1500).unwrap_err().contains("second"));
-        assert!(check(&c, 0, 3, 2000).unwrap_err().contains("no such option"));
-        assert!(check(&c, 2, 0, 2000).unwrap_err().contains("no such option"));
-        assert!(check(&c, 1, 0, 2000).unwrap_err().contains("Multi-select"));
+        assert!(check(&c, 1000, 0, 1, 1500).unwrap_err().contains("second"));
+        assert!(check(&c, 1000, 0, 3, 2000).unwrap_err().contains("no such option"));
+        assert!(check(&c, 1000, 2, 0, 2000).unwrap_err().contains("no such option"));
+        assert!(check(&c, 1000, 1, 0, 2000).unwrap_err().contains("Multi-select"));
+        // The board rendered an earlier ask; the session has since moved to a new one.
+        assert!(check(&c, 900, 0, 0, 2000).unwrap_err().contains("changed"));
         let mut working = c.clone();
         working.state = State::Working;
         working.awaiting = None;
-        assert!(check(&working, 0, 0, 2000).unwrap_err().contains("not waiting"));
+        assert!(check(&working, 1000, 0, 0, 2000).unwrap_err().contains("not waiting"));
         let mut perm = c.clone();
         perm.awaiting = Some(Awaiting { kind: AwaitKind::Permission, detail: "Bash".into(), questions: vec![] });
-        assert!(check(&perm, 0, 0, 2000).unwrap_err().contains("not waiting"));
+        assert!(check(&perm, 1000, 0, 0, 2000).unwrap_err().contains("not waiting"));
     }
 }
