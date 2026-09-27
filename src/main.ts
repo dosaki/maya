@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { renderBoard } from "./board";
+import { openModal, refreshModal } from "./modal";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
 import type { Card } from "./types";
@@ -25,19 +26,31 @@ async function focus(pid: number): Promise<void> {
 
 async function start(): Promise<void> {
   void initSettings();
-  document.getElementById("board")?.addEventListener("click", (ev) => {
-    const card = (ev.target as HTMLElement).closest<HTMLElement>(".card");
-    if (card?.dataset.pid) void focus(Number(card.dataset.pid));
+  const board = document.getElementById("board");
+  board?.addEventListener("click", (ev) => {
+    const target = ev.target as HTMLElement;
+    const cardEl = target.closest<HTMLElement>(".card");
+    if (!cardEl) return;
+    const card = cards.find((c) => c.sessionId === cardEl.dataset.sessionId);
+    if (!card) return;
+    const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
+    if (action === "terminal") {
+      void focus(card.pid);
+      return;
+    }
+    void openModal(card);
   });
-  document.getElementById("board")?.addEventListener("keydown", (ev) => {
+  board?.addEventListener("keydown", (ev) => {
     if (ev.key !== "Enter") return;
-    const card = (ev.target as HTMLElement).closest<HTMLElement>(".card");
-    if (card?.dataset.pid) void focus(Number(card.dataset.pid));
+    const cardEl = (ev.target as HTMLElement).closest<HTMLElement>(".card");
+    const card = cards.find((c) => c.sessionId === cardEl?.dataset.sessionId);
+    if (card) void openModal(card);
   });
 
   await listen<Card[]>("sessions", (e) => {
     cards = e.payload;
     paint();
+    refreshModal(cards);
   });
   cards = await invoke<Card[]>("list_sessions");
   paint();

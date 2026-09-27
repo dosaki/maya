@@ -19,3 +19,15 @@ export const COLUMNS: { state: CardState; title: string }[] = [
   { state: "completed", title: "Completed" },
   { state: "idle", title: "Idle" },
 ];
+
+export interface Turn {
+  kind: "user" | "assistant" | "tool";
+  text: string;
+}
+
+export const STATE_LABEL: Record<CardState, string> = {
+  awaiting: "Awaiting Decision",
+  working: "Working",
+  completed: "Completed",
+  idle: "Idle",
+};

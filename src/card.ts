@@ -25,5 +25,15 @@ export function renderCard(card: Card, nowMs: number): HTMLElement {
     root.append(a);
   }
   if (card.snippet) root.append(el("p", "card__snippet", card.snippet));
+
+  const actions = el("div", "card__actions");
+  const terminal = el("button", "card__btn", "Terminal");
+  terminal.type = "button";
+  terminal.dataset.action = "terminal";
+  const reply = el("button", "card__btn card__btn--primary", "Reply");
+  reply.type = "button";
+  reply.dataset.action = "reply";
+  actions.append(terminal, reply);
+  root.append(actions);
   return root;
 }

@@ -102,3 +102,11 @@ describe("renderBoard", () => {
     expect(board.querySelectorAll(".column__empty").length).toBe(4);
   });
 });
+
+describe("card actions", () => {
+  it("renders Terminal and Reply buttons", () => {
+    const el = renderCard(card({}), NOW);
+    expect(el.querySelector("button[data-action=terminal]")?.textContent).toBe("Terminal");
+    expect(el.querySelector("button[data-action=reply]")?.textContent).toBe("Reply");
+  });
+});
