@@ -24,6 +24,49 @@ export interface PullRequest {
   state: string;
 }
 
+export interface ContextUsage {
+  used: number;
+  window: number;
+  /** 0 to 100. */
+  percent: number;
+}
+
+/** From this percentage the board offers to compact the session. */
+export const COMPACT_AT = 75;
+
+export function contextBand(percent: number): "low" | "mid" | "high" {
+  return percent >= COMPACT_AT ? "high" : percent >= 50 ? "mid" : "low";
+}
+
+/** "124k" or "1M": tokens rounded for a tooltip. */
+export function formatTokens(n: number): string {
+  if (n >= 1_000_000 && n % 1_000_000 === 0) return `${n / 1_000_000}M`;
+  return `${Math.round(n / 1000)}k`;
+}
+
+/** A vertical meter along a card's edge, filled to the context percentage. */
+export function contextMeter(ctx: ContextUsage): HTMLElement {
+  const meter = document.createElement("div");
+  meter.className = "card__meter";
+  meter.dataset.band = contextBand(ctx.percent);
+  meter.title = `Context ${ctx.percent}% · ${formatTokens(ctx.used)} of ${formatTokens(ctx.window)}`;
+  const fill = document.createElement("div");
+  fill.className = "card__meter-fill";
+  fill.style.height = `${ctx.percent}%`;
+  meter.append(fill);
+  return meter;
+}
+
+export function compactButton(className = "card__btn"): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = className;
+  b.dataset.action = "compact";
+  b.textContent = "Compact";
+  b.title = "Types /compact into the session's terminal";
+  return b;
+}
+
 export interface Card {
   sessionId: string;
   pid: number;
@@ -37,6 +80,8 @@ export interface Card {
   harness: Harness;
   /** The PR for the session directory's branch, once looked up. */
   pr: PullRequest | null;
+  /** Context window usage after the last assistant turn. */
+  context: ContextUsage | null;
 }
 
 /** The PR button: "PR #12", with the state and URL in its tooltip. */

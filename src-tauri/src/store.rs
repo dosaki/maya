@@ -91,10 +91,16 @@ impl Store {
         self.prs.set(dir, pr, now_ms);
     }
 
+    /// True when the user's settings pick a 1M-context model by default.
+    fn default_window_is_1m(&self) -> bool {
+        std::fs::read_to_string(self.claude_dir.join("settings.json")).map(|t| crate::context::default_is_1m(&t)).unwrap_or(false)
+    }
+
     pub fn refresh(&mut self, now_ms: u64) -> Vec<Card> {
         if self.events.file_len() > self.compact_threshold_bytes {
             self.compact_events();
         }
+        let default_1m = self.default_window_is_1m();
         let _ = self.events.read_new();
         let sessions = self.registry();
         let mut cards = Vec::with_capacity(sessions.len());
@@ -111,6 +117,7 @@ impl Store {
                 completed_timeout_ms: self.config.completed_timeout_ms(),
             });
             card.pr = self.prs.get(&s.cwd);
+            card.context = tail.context_tokens.map(|used| crate::context::usage(tail.model.as_deref().unwrap_or(""), used, default_1m));
             cards.push(card);
         }
         self.tails.retain(&paths);
@@ -186,6 +193,25 @@ mod tests {
         assert!(cards.iter().find(|c| c.session_id == "s8").unwrap().pr.is_none());
         assert!(store.pr_dirs_due(2).is_empty(), "a known result, including none, is not retried at once");
         assert_eq!(store.pr_dirs_due(2 + crate::pr::TTL_MS).len(), 2);
+    }
+
+    #[test]
+    fn refresh_attaches_context_usage_using_the_settings_default_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("projects/-Users-x-dev-eye")).unwrap();
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle"}"#).unwrap();
+        std::fs::write(
+            claude.join("projects/-Users-x-dev-eye/s7.jsonl"),
+            r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":0,"cache_read_input_tokens":150000,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"hi"}]}}"#,
+        ).unwrap();
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        let ctx = store.refresh(1)[0].context.clone().unwrap();
+        assert_eq!((ctx.used, ctx.window, ctx.percent), (150_000, 200_000, 75));
+        std::fs::write(claude.join("settings.json"), r#"{"model": "claude-opus-5[1m]"}"#).unwrap();
+        let ctx = store.refresh(2)[0].context.clone().unwrap();
+        assert_eq!((ctx.window, ctx.percent), (1_000_000, 15));
     }
 
     #[test]

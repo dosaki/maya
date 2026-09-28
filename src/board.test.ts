@@ -19,9 +19,31 @@ function card(over: Partial<Card>): Card {
     hasInbox: true,
     harness: "claude-code",
     pr: null,
+    context: null,
     ...over,
   };
 }
+
+describe("context meter", () => {
+  it("shows a meter with the percent, colour band and tooltip, or nothing before the first turn", () => {
+    expect(renderCard(card({}), NOW).querySelector(".card__meter")).toBeNull();
+    const el = renderCard(card({ context: { used: 124_000, window: 200_000, percent: 62 } }), NOW);
+    const meter = el.querySelector<HTMLElement>(".card__meter")!;
+    expect(meter.title).toBe("Context 62% · 124k of 200k");
+    expect(meter.dataset.band).toBe("mid");
+    expect(el.querySelector<HTMLElement>(".card__meter-fill")!.style.height).toBe("62%");
+    expect(renderCard(card({ context: { used: 10_000, window: 200_000, percent: 5 } }), NOW).querySelector<HTMLElement>(".card__meter")!.dataset.band).toBe("low");
+    expect(renderCard(card({ context: { used: 900_000, window: 1_000_000, percent: 90 } }), NOW).querySelector<HTMLElement>(".card__meter")!.title).toBe("Context 90% · 900k of 1M");
+  });
+
+  it("offers Compact from 75 percent", () => {
+    expect(renderCard(card({ context: { used: 148_000, window: 200_000, percent: 74 } }), NOW).querySelector("button[data-action=compact]")).toBeNull();
+    const el = renderCard(card({ context: { used: 150_000, window: 200_000, percent: 75 } }), NOW);
+    const btn = el.querySelector<HTMLButtonElement>("button[data-action=compact]")!;
+    expect(btn.textContent).toBe("Compact");
+    expect(el.querySelector<HTMLElement>(".card__meter")!.dataset.band).toBe("high");
+  });
+});
 
 describe("card badges and PR button", () => {
   it("names the harness and the PR, and hides the PR button when none is known", () => {

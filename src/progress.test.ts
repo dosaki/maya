@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { makeProgress } from "./progress";
 import type { Card } from "./types";
 
-const c = (stateSince: number): Card => ({ sessionId: "s", pid: 1, name: "n", cwd: "/x", state: "awaiting", stateSince, snippet: "", hasInbox: true, harness: "claude-code", pr: null,
+const c = (stateSince: number): Card => ({ sessionId: "s", pid: 1, name: "n", cwd: "/x", state: "awaiting", stateSince, snippet: "", hasInbox: true, harness: "claude-code", pr: null, context: null,
   awaiting: { kind: "question", detail: "q", questions: [] } });
 
 describe("makeProgress", () => {

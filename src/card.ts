@@ -1,7 +1,7 @@
 import { formatAge, projectName } from "./format";
 import { OPEN_DELAY_MS, renderOptions } from "./options";
 import { harnessBadge } from "./harness";
-import { prButton, type Card } from "./types";
+import { COMPACT_AT, compactButton, contextMeter, prButton, type Card } from "./types";
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -16,6 +16,7 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   root.dataset.pid = String(card.pid);
   root.tabIndex = 0;
   root.title = card.cwd;
+  if (card.context) root.append(contextMeter(card.context));
 
   const head = el("header", "card__head");
   head.append(el("span", "card__name", card.name), el("span", "card__age", formatAge(card.stateSince, nowMs)));
@@ -41,6 +42,7 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   reply.dataset.action = "reply";
   actions.append(terminal);
   if (card.pr) actions.append(prButton(card.pr));
+  if (card.context && card.context.percent >= COMPACT_AT) actions.append(compactButton());
   actions.append(reply);
   root.append(actions);
   return root;

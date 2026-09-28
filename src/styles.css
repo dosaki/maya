@@ -46,8 +46,8 @@ body { margin: 0; background: var(--bg); }
 .settings__error { color: #dc2626; font-size: 12.5px; }
 .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 20; }
 
-.card__actions { display: flex; gap: 6px; margin-top: 10px; }
-.card__btn { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; color: var(--text); cursor: pointer; font-size: 12px; }
+.card__actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.card__btn { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; color: var(--text); cursor: pointer; font-size: 12px; white-space: nowrap; }
 .card__btn:hover { border-color: var(--working); }
 .card__btn--primary { background: var(--working); border-color: var(--working); color: #fff; }
 .modal { position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center; }
@@ -73,6 +73,12 @@ body { margin: 0; background: var(--bg); }
 .turn--assistant { align-self: flex-start; background: color-mix(in srgb, var(--panel) 70%, var(--bg)); border: 1px solid var(--border); }
 .turn--tool { align-self: flex-start; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; padding: 2px 8px; }
 .turn__who { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+.card { position: relative; }
+.card__meter { position: absolute; left: 0; top: 8px; bottom: 8px; width: 4px; border-radius: 2px; background: color-mix(in srgb, var(--border) 60%, transparent); overflow: hidden; }
+.card__meter-fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; background: var(--completed); }
+.card__meter[data-band="mid"] .card__meter-fill { background: var(--awaiting); }
+.card__meter[data-band="high"] .card__meter-fill { background: #e5484d; }
+.modal__context { font-size: 12px; color: var(--muted); }
 .card__meta { display: flex; align-items: center; gap: 6px; }
 .card__harness, .modal__harness { width: 14px; height: 14px; border-radius: 3px; flex: none; }
 .modal__harness { align-self: center; }

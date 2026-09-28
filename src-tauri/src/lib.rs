@@ -1,5 +1,6 @@
 pub mod answer;
 pub mod config;
+pub mod context;
 pub mod events;
 pub mod focus;
 pub mod hook_install;
@@ -136,6 +137,12 @@ fn rename_session(state: TauriState<AppState>, session_id: String, name: String)
     type_into_session(&state, &session_id, &text)
 }
 
+/// Types `/compact` into the session's Terminal tab.
+#[tauri::command(async)]
+fn compact_session(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+    type_into_session(&state, &session_id, answer::COMPACT)
+}
+
 /// Sends Shift+Tab to the session's Terminal tab, cycling its permission mode.
 #[tauri::command(async)]
 fn cycle_session_mode(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
@@ -254,6 +261,7 @@ pub fn run() {
             set_session_option,
             cycle_session_mode,
             rename_session,
+            compact_session,
             open_pr,
             list_project_dirs,
             start_session,

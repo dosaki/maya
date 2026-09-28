@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { renderOptions } from "./options";
 import type { Card } from "./types";
 
-const two: Card = { sessionId: "s", pid: 1, name: "n", cwd: "/x", state: "awaiting", stateSince: 0, snippet: "", hasInbox: true, harness: "claude-code", pr: null,
+const two: Card = { sessionId: "s", pid: 1, name: "n", cwd: "/x", state: "awaiting", stateSince: 0, snippet: "", hasInbox: true, harness: "claude-code", pr: null, context: null,
   awaiting: { kind: "question", detail: "Size?", questions: [
     { question: "Size?", header: "Size", multiSelect: false, options: [{ label: "S", description: "small" }, { label: "L", description: "large" }] },
     { question: "Top?", header: "Top", multiSelect: true, options: [{ label: "A", description: "" }] },

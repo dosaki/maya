@@ -17,6 +17,11 @@ pub struct OpenQuestion {
 pub struct TranscriptTail {
     pub last_assistant_text: Option<String>,
     pub open_question: Option<OpenQuestion>,
+    /// Context in use after the last real assistant message: input plus
+    /// cache-read plus cache-creation tokens. None before the first turn.
+    pub context_tokens: Option<u64>,
+    /// Model id of that message, e.g. `claude-opus-5[1m]`.
+    pub model: Option<String>,
 }
 
 /// The last `max_bytes` of `path` as text, with the first (possibly partial)
@@ -188,6 +193,8 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
     let mut last_text: Option<String> = None;
     let mut open: Vec<(String, OpenQuestion)> = Vec::new();
     let mut answered: HashSet<String> = HashSet::new();
+    let mut context_tokens: Option<u64> = None;
+    let mut model: Option<String> = None;
 
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
@@ -195,6 +202,14 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
         let Some(content) = v["message"]["content"].as_array() else { continue };
         match kind {
             "assistant" => {
+                // Synthetic records (interruptions, errors) carry no real usage.
+                let m = v["message"]["model"].as_str().unwrap_or("");
+                let u = &v["message"]["usage"];
+                let total = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].iter().map(|k| u[k].as_u64().unwrap_or(0)).sum::<u64>();
+                if !m.is_empty() && !m.starts_with('<') && total > 0 {
+                    context_tokens = Some(total);
+                    model = Some(m.to_string());
+                }
                 for block in content {
                     match block["type"].as_str() {
                         Some("text") => {
@@ -235,7 +250,7 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
     }
 
     let open_question = open.into_iter().rev().find(|(id, _)| !answered.contains(id)).map(|(_, q)| q);
-    TranscriptTail { last_assistant_text: last_text, open_question }
+    TranscriptTail { last_assistant_text: last_text, open_question, context_tokens, model }
 }
 
 #[cfg(test)]
@@ -257,6 +272,19 @@ mod tests {
         assert_eq!(q.detail, "What should Completed mean?");
         assert_eq!(q.questions[0].header, "Completed");
         assert_eq!(q.questions[0].options[0].label, "Finished");
+    }
+
+    #[test]
+    fn reads_context_tokens_and_model_from_the_last_real_assistant_message() {
+        let text = concat!(
+            r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":10,"cache_read_input_tokens":1000,"cache_creation_input_tokens":90,"output_tokens":5},"content":[{"type":"text","text":"a"}]}}"#, "\n",
+            r#"{"type":"assistant","message":{"model":"claude-opus-5","usage":{"input_tokens":20,"cache_read_input_tokens":2000,"cache_creation_input_tokens":180,"output_tokens":5},"content":[{"type":"text","text":"b"}]}}"#, "\n",
+            r#"{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0},"content":[{"type":"text","text":"Request interrupted"}]}}"#, "\n",
+        );
+        let t = parse_tail(text);
+        assert_eq!(t.context_tokens, Some(2200));
+        assert_eq!(t.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(parse_tail("").context_tokens, None);
     }
 
     #[test]

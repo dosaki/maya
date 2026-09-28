@@ -95,6 +95,8 @@ pub struct Card {
     pub harness: Harness,
     /// The PR for the directory's branch, once the background lookup has run.
     pub pr: Option<PullRequest>,
+    /// Context window usage after the last assistant turn.
+    pub context: Option<crate::context::ContextUsage>,
 }
 
 #[cfg(test)]
@@ -135,8 +137,11 @@ mod tests {
             has_inbox: false,
             harness: Harness::ClaudeCode,
             pr: Some(PullRequest { number: 781, url: "https://github.com/o/r/pull/781".into(), state: "merged".into() }),
+            context: Some(crate::context::ContextUsage { used: 124_000, window: 200_000, percent: 62 }),
         };
         let json = serde_json::to_value(&card).unwrap();
+        assert_eq!(json["context"]["percent"], 62);
+        assert_eq!(json["context"]["window"], 200_000);
         assert_eq!(json["harness"], "claude-code");
         assert_eq!(json["pr"]["number"], 781);
         assert_eq!(json["pr"]["state"], "merged");

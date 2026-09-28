@@ -2,6 +2,9 @@ use crate::launch::{check_choice, EFFORTS, MODELS};
 use crate::model::{AwaitKind, Card, State};
 use std::process::Command;
 
+/// The slash command that compacts a running session's context.
+pub const COMPACT: &str = "/compact";
+
 /// Shift+Tab, which cycles the permission mode in a running session.
 pub const SHIFT_TAB: &str = "\x1b[Z";
 
@@ -152,6 +155,7 @@ mod tests {
             has_inbox: true,
             harness: crate::model::Harness::ClaudeCode,
             pr: None,
+            context: None,
         }
     }
 
@@ -172,6 +176,11 @@ mod tests {
         assert!(rename_command("tab\there").unwrap_err().contains("one line"));
         assert!(rename_command(&"x".repeat(61)).unwrap_err().contains("60"));
         assert!(rename_command(&"x".repeat(60)).is_ok());
+    }
+
+    #[test]
+    fn compact_is_the_compact_slash_command() {
+        assert_eq!(COMPACT, "/compact");
     }
 
     #[test]

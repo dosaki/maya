@@ -3,7 +3,7 @@ import { cardActionFor } from "./actions";
 import { renderCard } from "./card";
 import type { Card } from "./types";
 
-const card: Card = { sessionId: "s1", pid: 9, name: "n", cwd: "/x/y", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null };
+const card: Card = { sessionId: "s1", pid: 9, name: "n", cwd: "/x/y", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
 
 describe("cardActionFor", () => {
   it("routes the Terminal button to focus and everything else on the card to the modal", () => {
@@ -19,6 +19,12 @@ describe("cardActionFor", () => {
     const el = renderCard({ ...card, pr: { number: 3, url: "https://github.com/o/r/pull/3", state: "open" } }, 0);
     document.body.replaceChildren(el);
     expect(cardActionFor(el.querySelector("button[data-action=pr]")!)).toEqual({ kind: "pr", sessionId: "s1" });
+  });
+
+  it("routes the Compact button to a compact action", () => {
+    const el = renderCard({ ...card, context: { used: 160_000, window: 200_000, percent: 80 } }, 0);
+    document.body.replaceChildren(el);
+    expect(cardActionFor(el.querySelector("button[data-action=compact]")!)).toEqual({ kind: "compact", sessionId: "s1" });
   });
 
   it("routes option buttons to an answer action with indices", () => {

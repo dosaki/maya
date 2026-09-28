@@ -186,6 +186,7 @@ pub fn derive(i: &DeriveInput) -> Card {
         has_inbox: r.messaging_socket_path.is_some(),
         harness: Harness::ClaudeCode,
         pr: None,
+        context: None,
     }
 }
 
@@ -420,7 +421,7 @@ mod tests {
     #[test]
     fn stop_with_a_question_in_the_text_is_awaiting_a_reply_and_never_decays() {
         let evs = [ev("UserPromptSubmit", 1000), ev("Stop", 2000)];
-        let tail = TranscriptTail { last_assistant_text: Some("PR body here.\n\nCreate it as drafted?".into()), open_question: None };
+        let tail = TranscriptTail { last_assistant_text: Some("PR body here.\n\nCreate it as drafted?".into()), ..Default::default() };
         let c = run(&reg("idle", 2100), &evs, &tail, 3000);
         assert_eq!(c.state, State::Awaiting);
         assert_eq!(c.state_since, 2000);
@@ -434,7 +435,7 @@ mod tests {
         let answered = [ev("UserPromptSubmit", 1000), ev("Stop", 2000), ev("UserPromptSubmit", 4000)];
         assert_eq!(run(&reg("busy", 4001), &answered, &tail, 5000).state, State::Working);
         // A Stop whose text does not ask stays Completed.
-        let plain = TranscriptTail { last_assistant_text: Some("All done.".into()), open_question: None };
+        let plain = TranscriptTail { last_assistant_text: Some("All done.".into()), ..Default::default() };
         assert_eq!(run(&reg("idle", 2100), &evs, &plain, 3000).state, State::Completed);
     }
 
@@ -468,6 +469,7 @@ mod tests {
         let t = TranscriptTail {
             last_assistant_text: Some("One question first.".into()),
             open_question: Some(OpenQuestion { kind: AwaitKind::Question, detail: "What?".into(), questions: vec![] }),
+            ..Default::default()
         };
         let c = run(&reg("busy", 500), &[], &t, 600);
         assert_eq!(c.state, State::Awaiting);
@@ -480,7 +482,7 @@ mod tests {
 
     #[test]
     fn snippet_is_truncated_to_200_chars() {
-        let t = TranscriptTail { last_assistant_text: Some("y".repeat(500)), open_question: None };
+        let t = TranscriptTail { last_assistant_text: Some("y".repeat(500)), ..Default::default() };
         let c = run(&reg("idle", 0), &[], &t, 1);
         assert_eq!(c.snippet.chars().count(), 200);
         assert!(c.snippet.ends_with('…'));

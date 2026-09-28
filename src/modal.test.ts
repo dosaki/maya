@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
-const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null };
+const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
 const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn() });
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCompact: vi.fn() });
 
 describe("renderModal", () => {
   it("shows header, turns with kind classes and a composer", () => {
@@ -56,6 +56,17 @@ describe("renderModal", () => {
     expect(h.onClose).not.toHaveBeenCalled();
     expect(h.onRename).not.toHaveBeenCalled();
     expect(el.querySelector(".modal__title")?.textContent).toBe("eye-1");
+  });
+
+  it("shows context usage in the header and a Compact button from 75 percent", () => {
+    const h = handlers();
+    const low = renderModal({ card: { ...base, context: { used: 20_000, window: 200_000, percent: 10 } }, turns: [], status: null, draft: "" }, h);
+    expect(low.querySelector(".modal__context")?.textContent).toBe("ctx 10%");
+    expect(low.querySelector("button[data-action=compact]")).toBeNull();
+    const high = renderModal({ card: { ...base, context: { used: 160_000, window: 200_000, percent: 80 } }, turns: [], status: null, draft: "" }, h);
+    const btn = high.querySelector<HTMLButtonElement>(".modal__head button[data-action=compact]")!;
+    btn.click();
+    expect(h.onCompact).toHaveBeenCalledTimes(1);
   });
 
   it("tells the user to reply when the session asked in prose", () => {

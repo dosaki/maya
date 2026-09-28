@@ -5,7 +5,7 @@ import { EFFORT_CHOICES, MODEL_CHOICES, renderChoice } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
 import { harnessBadge } from "./harness";
-import { STATE_LABEL, prButton, type Card, type Turn } from "./types";
+import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, type Card, type Turn } from "./types";
 
 export interface ModalModel {
   card: Card;
@@ -29,6 +29,8 @@ export interface ModalHandlers {
   onOpenPr(): void;
   /** Give the session a new name (typed as `/rename`). */
   onRename(name: string): void;
+  /** Compact the session's context (typed as `/compact`). */
+  onCompact(): void;
 }
 
 /**
@@ -137,6 +139,16 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const pr = prButton(m.card.pr);
     pr.addEventListener("click", () => h.onOpenPr());
     titles.append(pr);
+  }
+  if (m.card.context) {
+    const ctx = el("span", "modal__context", `ctx ${m.card.context.percent}%`);
+    ctx.title = `Context ${m.card.context.percent}% · ${formatTokens(m.card.context.used)} of ${formatTokens(m.card.context.window)}`;
+    titles.append(ctx);
+    if (m.card.context.percent >= COMPACT_AT) {
+      const compact = compactButton();
+      compact.addEventListener("click", () => h.onCompact());
+      titles.append(compact);
+    }
   }
   const state = el("span", `modal__state modal__state--${m.card.state}`, STATE_LABEL[m.card.state]);
   const close = el("button", "modal__close", "×");
@@ -298,6 +310,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     onCycleMode: () => void cycleMode(),
     onOpenPr: () => void invoke("open_pr", { sessionId: m.card.sessionId }).catch((e) => setStatus(false, String(e))),
     onRename: (name) => void rename(name),
+    onCompact: () => void invoke("compact_session", { sessionId: m.card.sessionId }).then(() => setStatus(true, "Sent /compact to the terminal")).catch((e) => setStatus(false, String(e))),
   });
   // Buttons rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay([m.card], Date.now());

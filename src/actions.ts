@@ -1,5 +1,5 @@
 export type CardAction =
-  | { kind: "terminal" | "open" | "pr"; sessionId: string }
+  | { kind: "terminal" | "open" | "pr" | "compact"; sessionId: string }
   | { kind: "answer"; sessionId: string; askId: number; questionIndex: number; optionIndex: number };
 
 /**
@@ -15,6 +15,7 @@ export function cardActionFor(target: Element): CardAction | null {
   const action = actionEl?.dataset.action;
   if (action === "terminal") return { kind: "terminal", sessionId };
   if (action === "pr") return { kind: "pr", sessionId };
+  if (action === "compact") return { kind: "compact", sessionId };
   if (action === "answer" && actionEl) {
     return {
       kind: "answer",
