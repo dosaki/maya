@@ -44,3 +44,21 @@ export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) =>
   }
   return board;
 }
+
+/**
+ * Replaces the board inside `host` with `fresh`, carrying each column's
+ * scroll position over so a repaint does not jump the lists back to the top.
+ */
+export function swapBoard(host: HTMLElement, fresh: HTMLElement): void {
+  const scroll = new Map<string, number>();
+  for (const col of host.querySelectorAll<HTMLElement>(".column")) {
+    const list = col.querySelector<HTMLElement>(".column__cards");
+    if (list && col.dataset.state) scroll.set(col.dataset.state, list.scrollTop);
+  }
+  host.replaceChildren(fresh);
+  for (const col of fresh.querySelectorAll<HTMLElement>(".column")) {
+    const list = col.querySelector<HTMLElement>(".column__cards");
+    const top = col.dataset.state ? scroll.get(col.dataset.state) : undefined;
+    if (list && top) list.scrollTop = top;
+  }
+}

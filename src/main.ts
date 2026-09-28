@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "./actions";
 import { answerGuard } from "./answer";
-import { renderBoard } from "./board";
+import { renderBoard, swapBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
 import { openModal, refreshModal, setProgress } from "./modal";
 import { closeNewSession, openNewSession } from "./newsession";
@@ -40,7 +40,7 @@ function paint(): void {
   const host = document.getElementById("board");
   if (!host) return;
   const before = targetUnderPointer();
-  host.replaceChildren(renderBoard(cards, Date.now(), (c) => progress.next(c)));
+  swapBoard(host, renderBoard(cards, Date.now(), (c) => progress.next(c)));
   guard.markPaint(Date.now(), { movedUnderPointer: targetUnderPointer() !== before });
   // Option buttons rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay(cards, Date.now());

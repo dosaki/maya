@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderBoard } from "./board";
+import { renderBoard, swapBoard } from "./board";
 import { renderCard } from "./card";
 import { formatAge, projectName } from "./format";
 import type { Card } from "./types";
@@ -108,6 +108,21 @@ describe("renderCard", () => {
     expect(el.querySelector(".card__snippet")?.textContent).toBe("<img src=x onerror=alert(1)>");
     // The only image is the harness icon.
     expect([...el.querySelectorAll("img")].map((i) => i.className)).toEqual(["card__harness"]);
+  });
+});
+
+describe("swapBoard", () => {
+  it("keeps each column's scroll position across a repaint", () => {
+    const host = document.createElement("div");
+    host.append(renderBoard([card({ state: "idle" }), card({ sessionId: "w", state: "working" })], NOW));
+    const idle = host.querySelector<HTMLElement>(".column--idle .column__cards")!;
+    const working = host.querySelector<HTMLElement>(".column--working .column__cards")!;
+    idle.scrollTop = 120;
+    working.scrollTop = 40;
+    swapBoard(host, renderBoard([card({ state: "idle" }), card({ sessionId: "w", state: "working" })], NOW + 1000));
+    expect(host.querySelector<HTMLElement>(".column--idle .column__cards")!.scrollTop).toBe(120);
+    expect(host.querySelector<HTMLElement>(".column--working .column__cards")!.scrollTop).toBe(40);
+    expect(host.querySelector<HTMLElement>(".column--completed .column__cards")!.scrollTop).toBe(0);
   });
 });
 
