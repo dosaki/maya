@@ -19,6 +19,16 @@ setProgress(progress);
 let retry: ReturnType<typeof setTimeout> | undefined;
 let enableTimer: ReturnType<typeof setTimeout> | undefined;
 let known = new Set<string>();
+let pointer: { x: number; y: number } | null = null;
+
+/** Which card and button sit under the pointer, as a comparable key. */
+function targetUnderPointer(): string {
+  if (!pointer) return "";
+  const el = document.elementFromPoint(pointer.x, pointer.y);
+  const card = el?.closest<HTMLElement>(".card");
+  const action = el?.closest<HTMLElement>("[data-action]");
+  return `${card?.dataset.sessionId ?? ""}:${action?.dataset.action ?? ""}`;
+}
 
 function paint(): void {
   if (!guard.canPaint(Date.now())) {
@@ -29,8 +39,9 @@ function paint(): void {
   }
   const host = document.getElementById("board");
   if (!host) return;
+  const before = targetUnderPointer();
   host.replaceChildren(renderBoard(cards, Date.now(), (c) => progress.next(c)));
-  guard.markPaint(Date.now());
+  guard.markPaint(Date.now(), { movedUnderPointer: targetUnderPointer() !== before });
   // Option buttons rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay(cards, Date.now());
   if (enableTimer) clearTimeout(enableTimer);
@@ -85,8 +96,14 @@ async function start(): Promise<void> {
   const board = document.getElementById("board");
   board?.addEventListener("pointerdown", () => guard.setPointerDown(true));
   window.addEventListener("pointerup", () => guard.setPointerDown(false));
-  board?.addEventListener("pointermove", () => guard.markPointerMove(Date.now()));
-  board?.addEventListener("pointerleave", () => guard.markPointerLeave());
+  board?.addEventListener("pointermove", (ev) => {
+    pointer = { x: ev.clientX, y: ev.clientY };
+    guard.markPointerMove(Date.now());
+  });
+  board?.addEventListener("pointerleave", () => {
+    pointer = null;
+    guard.markPointerLeave();
+  });
   board?.addEventListener("click", (ev) => {
     const target = ev.target as Element;
     if (target.closest("[data-action=new-session]")) {
