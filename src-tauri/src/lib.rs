@@ -128,6 +128,14 @@ fn set_session_option(state: TauriState<AppState>, session_id: String, setting: 
     type_into_session(&state, &session_id, &text)
 }
 
+/// Types `/rename <name>` into the session's Terminal tab. The new name comes
+/// back through the session registry on the next refresh.
+#[tauri::command(async)]
+fn rename_session(state: TauriState<AppState>, session_id: String, name: String) -> Result<(), String> {
+    let text = answer::rename_command(&name)?;
+    type_into_session(&state, &session_id, &text)
+}
+
 /// Sends Shift+Tab to the session's Terminal tab, cycling its permission mode.
 #[tauri::command(async)]
 fn cycle_session_mode(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
@@ -245,6 +253,7 @@ pub fn run() {
             answer_question,
             set_session_option,
             cycle_session_mode,
+            rename_session,
             open_pr,
             list_project_dirs,
             start_session,

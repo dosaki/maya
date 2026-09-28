@@ -27,6 +27,53 @@ export interface ModalHandlers {
   onCycleMode(): void;
   /** Open the session's pull request in the browser. */
   onOpenPr(): void;
+  /** Give the session a new name (typed as `/rename`). */
+  onRename(name: string): void;
+}
+
+/**
+ * The session name as a heading that turns into an input on click. Enter
+ * commits a changed, non-blank name; Escape, or leaving the field, cancels.
+ * Escape is stopped here so the modal's own Escape handler does not close it.
+ */
+function renderTitle(name: string, h: ModalHandlers): HTMLElement {
+  const title = el("h2", "modal__title", name);
+  title.title = "Click to rename this session";
+  title.tabIndex = 0;
+  const edit = () => {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "modal__title-input";
+    input.value = name;
+    input.maxLength = 60;
+    let done = false;
+    const finish = (commit: boolean) => {
+      if (done) return;
+      done = true;
+      const next = input.value.trim();
+      input.replaceWith(title);
+      if (commit && next && next !== name) h.onRename(next);
+    };
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        finish(true);
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        finish(false);
+      }
+    });
+    input.addEventListener("blur", () => finish(false));
+    title.replaceWith(input);
+    input.focus();
+    input.select();
+  };
+  title.addEventListener("click", edit);
+  title.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") edit();
+  });
+  return title;
 }
 
 /**
@@ -84,7 +131,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
 
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");
-  titles.append(el("h2", "modal__title", m.card.name), el("span", "modal__project", projectName(m.card.cwd)));
+  titles.append(renderTitle(m.card.name, h), el("span", "modal__project", projectName(m.card.cwd)));
   titles.append(harnessBadge(m.card.harness, "modal__harness"));
   if (m.card.pr) {
     const pr = prButton(m.card.pr);
@@ -189,6 +236,8 @@ export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
       else panel.append(next);
     }
   };
+  // A rename in progress keeps its input; otherwise the name follows the registry.
+  if (!panel.querySelector(".modal__title-input")) swap(".modal__title");
   swap(".modal__state");
   swap(".modal__banner", ".modal__history");
   swap(".modal__history");
@@ -248,6 +297,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     onSetOption: (setting, value) => void setOption(setting, value),
     onCycleMode: () => void cycleMode(),
     onOpenPr: () => void invoke("open_pr", { sessionId: m.card.sessionId }).catch((e) => setStatus(false, String(e))),
+    onRename: (name) => void rename(name),
   });
   // Buttons rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay([m.card], Date.now());
@@ -283,6 +333,17 @@ async function setOption(setting: "model" | "effort", value: string): Promise<vo
   try {
     await invoke("set_session_option", { sessionId: me.model.card.sessionId, setting, value });
     if (current === me) setStatus(true, `Sent /${setting} ${value} to the terminal`);
+  } catch (e) {
+    if (current === me) setStatus(false, String(e));
+  }
+}
+
+async function rename(name: string): Promise<void> {
+  if (!current) return;
+  const me = current;
+  try {
+    await invoke("rename_session", { sessionId: me.model.card.sessionId, name });
+    if (current === me) setStatus(true, `Renamed to ${name}. The board will catch up shortly.`);
   } catch (e) {
     if (current === me) setStatus(false, String(e));
   }

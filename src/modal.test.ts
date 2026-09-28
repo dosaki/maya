@@ -4,7 +4,7 @@ import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null };
 const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn() });
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn() });
 
 describe("renderModal", () => {
   it("shows header, turns with kind classes and a composer", () => {
@@ -18,6 +18,44 @@ describe("renderModal", () => {
     expect([...el.querySelectorAll(".turn__who")].map((w) => w.textContent)).toEqual(["You", "Claude", "Message"]);
     expect(el.querySelector("textarea")).not.toBeNull();
     expect(el.querySelector(".modal__banner")).toBeNull();
+  });
+
+  it("renames on Enter from the clicked title, and only when the name changed", () => {
+    const h = handlers();
+    const el = renderModal({ card: base, turns: [], status: null, draft: "" }, h);
+    document.body.replaceChildren(el);
+    const title = el.querySelector<HTMLElement>(".modal__title")!;
+    expect(title.title).toContain("rename");
+    title.click();
+    const input = el.querySelector<HTMLInputElement>("input.modal__title-input")!;
+    expect(input.value).toBe("eye-1");
+    expect(document.activeElement).toBe(input);
+    input.value = "  eye-1  ";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(h.onRename).not.toHaveBeenCalled();
+    expect(el.querySelector(".modal__title")?.textContent).toBe("eye-1");
+    el.querySelector<HTMLElement>(".modal__title")!.click();
+    const again = el.querySelector<HTMLInputElement>("input.modal__title-input")!;
+    again.value = "board work";
+    again.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(h.onRename).toHaveBeenCalledWith("board work");
+    expect(el.querySelector("input.modal__title-input")).toBeNull();
+  });
+
+  it("cancels the rename on Escape without closing the modal", () => {
+    const h = handlers();
+    const el = renderModal({ card: base, turns: [], status: null, draft: "" }, h);
+    document.body.replaceChildren(el);
+    const closeOnEscape = vi.fn((e: KeyboardEvent) => { if (e.key === "Escape") h.onClose(); });
+    document.addEventListener("keydown", closeOnEscape);
+    el.querySelector<HTMLElement>(".modal__title")!.click();
+    const input = el.querySelector<HTMLInputElement>("input.modal__title-input")!;
+    input.value = "changed";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    document.removeEventListener("keydown", closeOnEscape);
+    expect(h.onClose).not.toHaveBeenCalled();
+    expect(h.onRename).not.toHaveBeenCalled();
+    expect(el.querySelector(".modal__title")?.textContent).toBe("eye-1");
   });
 
   it("tells the user to reply when the session asked in prose", () => {

@@ -17,6 +17,25 @@ pub fn slash_command(setting: &str, value: &str) -> Result<String, String> {
     Ok(format!("/{setting} {value}"))
 }
 
+/// The longest session name the board will type.
+pub const MAX_NAME_CHARS: usize = 60;
+
+/// The slash command that renames a running session, after checking the name
+/// is one non-blank line of at most `MAX_NAME_CHARS` characters.
+pub fn rename_command(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("The name is empty.".into());
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err("The name must be one line.".into());
+    }
+    if name.chars().count() > MAX_NAME_CHARS {
+        return Err(format!("The name is too long (over {MAX_NAME_CHARS} characters)."));
+    }
+    Ok(format!("/rename {name}"))
+}
+
 /// Typing into a session that is waiting on a prompt would answer it (the
 /// Enter after the text lands on the picker), so refuse until it moves on.
 pub fn check_free(card: &Card) -> Result<(), String> {
@@ -143,6 +162,16 @@ mod tests {
         assert!(slash_command("model", "gpt").unwrap_err().contains("model"));
         assert!(slash_command("effort", "turbo").unwrap_err().contains("effort"));
         assert!(slash_command("mode", "plan").unwrap_err().contains("setting"));
+    }
+
+    #[test]
+    fn rename_command_takes_a_single_clean_line() {
+        assert_eq!(rename_command("  maya board  "), Ok("/rename maya board".to_string()));
+        assert!(rename_command("   ").unwrap_err().contains("empty"));
+        assert!(rename_command("a\nb").unwrap_err().contains("one line"));
+        assert!(rename_command("tab\there").unwrap_err().contains("one line"));
+        assert!(rename_command(&"x".repeat(61)).unwrap_err().contains("60"));
+        assert!(rename_command(&"x".repeat(60)).is_ok());
     }
 
     #[test]
