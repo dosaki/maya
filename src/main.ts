@@ -47,12 +47,21 @@ async function focus(pid: number): Promise<void> {
   }
 }
 
+async function openPr(sessionId: string): Promise<void> {
+  try {
+    await invoke("open_pr", { sessionId });
+  } catch (e) {
+    showToast(String(e));
+  }
+}
+
 function act(target: Element): void {
   const action = cardActionFor(target);
   if (!action) return;
   const card = cards.find((c) => c.sessionId === action.sessionId);
   if (!card) return;
   if (action.kind === "terminal") void focus(card.pid);
+  else if (action.kind === "pr") void openPr(card.sessionId);
   else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex, target);
   else {
     closeNewSession();

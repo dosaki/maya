@@ -6,6 +6,7 @@ pub mod hook_install;
 pub mod inbox;
 pub mod launch;
 pub mod model;
+pub mod pr;
 pub mod registry;
 pub mod state;
 pub mod store;
@@ -82,6 +83,42 @@ fn answer_question(state: TauriState<AppState>, session_id: String, ask_id: u64,
         answer::type_into_tty(&tty, "")?;
     }
     Ok(())
+}
+
+/// Opens the session's pull request in the browser. The URL comes from the
+/// PR cache, never from the page.
+#[tauri::command(async)]
+fn open_pr(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+    let card = {
+        let mut store = state.store.lock().unwrap();
+        store.card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?
+    };
+    let pr = card.pr.ok_or("No pull request is known for this session yet.")?;
+    let ok = std::process::Command::new("open").arg(&pr.url).status().map_err(|e| format!("could not open the browser: {e}"))?;
+    if ok.success() {
+        Ok(())
+    } else {
+        Err("The browser refused to open the pull request.".into())
+    }
+}
+
+/// Looks up PRs for session directories whose result is missing or stale,
+/// outside the store lock, and repaints when anything was learned.
+fn poll_pull_requests(app: &AppHandle) {
+    let due = {
+        let state = app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        store.pr_dirs_due(now_ms())
+    };
+    if due.is_empty() {
+        return;
+    }
+    for dir in due {
+        let pr = pr::lookup(std::path::Path::new(&dir));
+        let state = app.state::<AppState>();
+        state.store.lock().unwrap().set_pr(&dir, pr, now_ms());
+    }
+    refresh_and_emit(app);
 }
 
 /// Types `/model x` or `/effort y` into the session's Terminal tab.
@@ -208,6 +245,7 @@ pub fn run() {
             answer_question,
             set_session_option,
             cycle_session_mode,
+            open_pr,
             list_project_dirs,
             start_session,
             hook_status,
@@ -222,6 +260,11 @@ pub fn run() {
             let maya_dir = dir.join("maya");
             std::thread::spawn(move || {
                 watcher::run(&sessions_dir, &maya_dir, Duration::from_secs(5), || refresh_and_emit(&handle));
+            });
+            let pr_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                poll_pull_requests(&pr_handle);
+                std::thread::sleep(Duration::from_secs(10));
             });
             Ok(())
         })

@@ -4,7 +4,8 @@ import { projectName } from "./format";
 import { EFFORT_CHOICES, MODEL_CHOICES, renderChoice } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
-import { STATE_LABEL, type Card, type Turn } from "./types";
+import { harnessBadge } from "./harness";
+import { STATE_LABEL, prButton, type Card, type Turn } from "./types";
 
 export interface ModalModel {
   card: Card;
@@ -24,6 +25,8 @@ export interface ModalHandlers {
   onSetOption(setting: "model" | "effort", value: string): void;
   /** Send Shift+Tab to the session to move it to its next permission mode. */
   onCycleMode(): void;
+  /** Open the session's pull request in the browser. */
+  onOpenPr(): void;
 }
 
 /**
@@ -82,6 +85,12 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");
   titles.append(el("h2", "modal__title", m.card.name), el("span", "modal__project", projectName(m.card.cwd)));
+  titles.append(harnessBadge(m.card.harness, "modal__harness"));
+  if (m.card.pr) {
+    const pr = prButton(m.card.pr);
+    pr.addEventListener("click", () => h.onOpenPr());
+    titles.append(pr);
+  }
   const state = el("span", `modal__state modal__state--${m.card.state}`, STATE_LABEL[m.card.state]);
   const close = el("button", "modal__close", "×");
   close.type = "button";
@@ -234,6 +243,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     onAnswer: (q, opt, btn) => void answer(q, opt, btn),
     onSetOption: (setting, value) => void setOption(setting, value),
     onCycleMode: () => void cycleMode(),
+    onOpenPr: () => void invoke("open_pr", { sessionId: m.card.sessionId }).catch((e) => setStatus(false, String(e))),
   });
   // Buttons rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay([m.card], Date.now());

@@ -2,9 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
-const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true };
+const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null };
 const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn() });
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn() });
 
 describe("renderModal", () => {
   it("shows header, turns with kind classes and a composer", () => {
@@ -18,6 +18,21 @@ describe("renderModal", () => {
     expect([...el.querySelectorAll(".turn__who")].map((w) => w.textContent)).toEqual(["You", "Claude", "Message"]);
     expect(el.querySelector("textarea")).not.toBeNull();
     expect(el.querySelector(".modal__banner")).toBeNull();
+  });
+
+  it("shows the harness in the header and a PR button only when a PR is known", () => {
+    const h = handlers();
+    const none = renderModal({ card: base, turns: [], status: null, draft: "" }, h);
+    const badge = none.querySelector<HTMLImageElement>("img.modal__harness")!;
+    expect(badge.alt).toBe("Claude Code");
+    expect(badge.src).toContain("claude-code");
+    expect(none.querySelector("button[data-action=pr]")).toBeNull();
+    const el = renderModal({ card: { ...base, pr: { number: 12, url: "https://github.com/o/r/pull/12", state: "draft" } }, turns: [], status: null, draft: "" }, h);
+    const btn = el.querySelector<HTMLButtonElement>(".modal__head button[data-action=pr]")!;
+    expect(btn.textContent).toBe("PR #12");
+    expect(btn.title).toContain("draft");
+    btn.click();
+    expect(h.onOpenPr).toHaveBeenCalledTimes(1);
   });
 
   it("applies only the model and effort that were changed, then resets the pickers", () => {

@@ -13,6 +13,16 @@ export interface Question {
   multiSelect: boolean;
 }
 
+/** The agent runner behind a session. Only Claude Code has a source today. */
+export type Harness = "claude-code" | "codex" | "antigravity";
+
+export interface PullRequest {
+  number: number;
+  url: string;
+  /** "open", "draft", "merged" or "closed". */
+  state: string;
+}
+
 export interface Card {
   sessionId: string;
   pid: number;
@@ -23,6 +33,20 @@ export interface Card {
   snippet: string;
   awaiting: { kind: AwaitKind; detail: string; questions: Question[] } | null;
   hasInbox: boolean;
+  harness: Harness;
+  /** The PR for the session directory's branch, once looked up. */
+  pr: PullRequest | null;
+}
+
+/** The PR button: "PR #12", with the state and URL in its tooltip. */
+export function prButton(pr: PullRequest, className = "card__btn"): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = className;
+  b.dataset.action = "pr";
+  b.textContent = `PR #${pr.number}`;
+  b.title = `${pr.state} · ${pr.url}`;
+  return b;
 }
 
 export const COLUMNS: { state: CardState; title: string }[] = [

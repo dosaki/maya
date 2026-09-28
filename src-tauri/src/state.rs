@@ -1,5 +1,5 @@
 use crate::events::HookEvent;
-use crate::model::{parse_questions, AwaitKind, Awaiting, Card, State};
+use crate::model::{parse_questions, AwaitKind, Awaiting, Card, Harness, State};
 use crate::registry::RegistrySession;
 use crate::transcript::TranscriptTail;
 
@@ -128,6 +128,8 @@ pub fn derive(i: &DeriveInput) -> Card {
         snippet: truncate(i.transcript.last_assistant_text.as_deref().unwrap_or(""), SNIPPET_CHARS),
         awaiting: aw,
         has_inbox: r.messaging_socket_path.is_some(),
+        harness: Harness::ClaudeCode,
+        pr: None,
     }
 }
 
@@ -184,6 +186,13 @@ mod tests {
         assert_eq!(c.state_since, 1000);
         assert_eq!(c.name, "eye-1");
         assert_eq!(c.pid, 7);
+    }
+
+    #[test]
+    fn registry_sessions_run_under_claude_code() {
+        let c = run(&reg("idle", 1), &[], &TranscriptTail::default(), 5);
+        assert_eq!(c.harness, crate::model::Harness::ClaudeCode);
+        assert_eq!(c.pr, None, "the PR comes from the cache, not from derive");
     }
 
     #[test]

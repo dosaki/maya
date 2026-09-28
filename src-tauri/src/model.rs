@@ -48,6 +48,24 @@ pub fn parse_questions(input: &serde_json::Value) -> Vec<Question> {
         .unwrap_or_default()
 }
 
+/// The agent runner a session belongs to. Only Claude Code has a session
+/// source today; a new harness adds a variant here and its own reader.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Harness {
+    ClaudeCode,
+}
+
+/// The pull request for a session directory's current branch.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequest {
+    pub number: u64,
+    pub url: String,
+    /// "open", "draft", "merged" or "closed".
+    pub state: String,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Awaiting {
     pub kind: AwaitKind,
@@ -72,6 +90,9 @@ pub struct Card {
     pub awaiting: Option<Awaiting>,
     /// True when the session has an inbox socket the app can post replies to.
     pub has_inbox: bool,
+    pub harness: Harness,
+    /// The PR for the directory's branch, once the background lookup has run.
+    pub pr: Option<PullRequest>,
 }
 
 #[cfg(test)]
@@ -110,8 +131,13 @@ mod tests {
             snippet: "hi".into(),
             awaiting: Some(Awaiting { kind: AwaitKind::Permission, detail: "Bash: rm -rf".into(), questions: vec![] }),
             has_inbox: false,
+            harness: Harness::ClaudeCode,
+            pr: Some(PullRequest { number: 781, url: "https://github.com/o/r/pull/781".into(), state: "merged".into() }),
         };
         let json = serde_json::to_value(&card).unwrap();
+        assert_eq!(json["harness"], "claude-code");
+        assert_eq!(json["pr"]["number"], 781);
+        assert_eq!(json["pr"]["state"], "merged");
         assert_eq!(json["sessionId"], "s1");
         assert_eq!(json["stateSince"], 1000);
         assert_eq!(json["state"], "awaiting");

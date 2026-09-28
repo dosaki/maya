@@ -130,6 +130,8 @@ mod tests {
             snippet: "".into(),
             awaiting: Some(Awaiting { kind: AwaitKind::Question, detail: "Q?".into(), questions }),
             has_inbox: true,
+            harness: crate::model::Harness::ClaudeCode,
+            pr: None,
         }
     }
 

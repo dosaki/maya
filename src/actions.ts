@@ -1,10 +1,11 @@
 export type CardAction =
-  | { kind: "terminal" | "open"; sessionId: string }
+  | { kind: "terminal" | "open" | "pr"; sessionId: string }
   | { kind: "answer"; sessionId: string; askId: number; questionIndex: number; optionIndex: number };
 
 /**
- * What a click inside a card means: the Terminal button focuses the tab, an
- * option button answers a question, anything else opens the modal.
+ * What a click inside a card means: the Terminal button focuses the tab, the
+ * PR button opens the pull request, an option button answers a question,
+ * anything else opens the modal.
  */
 export function cardActionFor(target: Element): CardAction | null {
   const cardEl = target.closest<HTMLElement>(".card");
@@ -13,6 +14,7 @@ export function cardActionFor(target: Element): CardAction | null {
   const actionEl = target.closest<HTMLElement>("[data-action]");
   const action = actionEl?.dataset.action;
   if (action === "terminal") return { kind: "terminal", sessionId };
+  if (action === "pr") return { kind: "pr", sessionId };
   if (action === "answer" && actionEl) {
     return {
       kind: "answer",

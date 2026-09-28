@@ -1,6 +1,7 @@
 import { formatAge, projectName } from "./format";
 import { OPEN_DELAY_MS, renderOptions } from "./options";
-import type { Card } from "./types";
+import { harnessBadge } from "./harness";
+import { prButton, type Card } from "./types";
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -18,7 +19,9 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
 
   const head = el("header", "card__head");
   head.append(el("span", "card__name", card.name), el("span", "card__age", formatAge(card.stateSince, nowMs)));
-  root.append(head, el("div", "card__project", projectName(card.cwd)));
+  const meta = el("div", "card__meta");
+  meta.append(el("div", "card__project", projectName(card.cwd)), harnessBadge(card.harness, "card__harness"));
+  root.append(head, meta);
 
   if (card.awaiting) {
     const a = el("div", "card__awaiting", card.awaiting.detail);
@@ -36,7 +39,9 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   const reply = el("button", "card__btn card__btn--primary", "Reply");
   reply.type = "button";
   reply.dataset.action = "reply";
-  actions.append(terminal, reply);
+  actions.append(terminal);
+  if (card.pr) actions.append(prButton(card.pr));
+  actions.append(reply);
   root.append(actions);
   return root;
 }

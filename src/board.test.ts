@@ -17,9 +17,27 @@ function card(over: Partial<Card>): Card {
     snippet: "",
     awaiting: null,
     hasInbox: true,
+    harness: "claude-code",
+    pr: null,
     ...over,
   };
 }
+
+describe("card badges and PR button", () => {
+  it("names the harness and the PR, and hides the PR button when none is known", () => {
+    const plain = renderCard(card({}), NOW);
+    const badge = plain.querySelector<HTMLImageElement>("img.card__harness")!;
+    expect(badge.alt).toBe("Claude Code");
+    expect(badge.title).toContain("Claude Code");
+    expect(badge.src).toContain("claude-code");
+    expect(plain.querySelector("button[data-action=pr]")).toBeNull();
+    const withPr = renderCard(card({ pr: { number: 781, url: "https://github.com/o/r/pull/781", state: "merged" } }), NOW);
+    const btn = withPr.querySelector<HTMLButtonElement>("button[data-action=pr]")!;
+    expect(btn.textContent).toBe("PR #781");
+    expect(btn.title).toContain("merged");
+    expect(btn.title).toContain("https://github.com/o/r/pull/781");
+  });
+});
 
 describe("formatAge", () => {
   it("formats seconds, minutes, hours and days", () => {
@@ -64,7 +82,10 @@ describe("renderCard", () => {
 
   it("escapes text content", () => {
     const el = renderCard(card({ snippet: "<img src=x onerror=alert(1)>" }), NOW);
-    expect(el.querySelector("img")).toBeNull();
+    expect(el.querySelector(".card__snippet img")).toBeNull();
+    expect(el.querySelector(".card__snippet")?.textContent).toBe("<img src=x onerror=alert(1)>");
+    // The only image is the harness icon.
+    expect([...el.querySelectorAll("img")].map((i) => i.className)).toEqual(["card__harness"]);
   });
 });
 

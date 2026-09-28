@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { nextEnableDelay } from "./options";
 import type { Card } from "./types";
 
-const asking = (stateSince: number): Card => ({ sessionId: "s", pid: 1, name: "n", cwd: "/x", state: "awaiting", stateSince, snippet: "", hasInbox: true,
+const asking = (stateSince: number): Card => ({ sessionId: "s", pid: 1, name: "n", cwd: "/x", state: "awaiting", stateSince, snippet: "", hasInbox: true, harness: "claude-code", pr: null,
   awaiting: { kind: "question", detail: "Q", questions: [{ question: "Q", header: "H", multiSelect: false, options: [{ label: "A", description: "" }] }] } });
 
 describe("nextEnableDelay", () => {

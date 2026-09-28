@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { patchModal, renderModal } from "./modal";
 import type { Card } from "./types";
 
-const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "working", stateSince: 0, snippet: "", awaiting: null, hasInbox: true };
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn() });
+const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "working", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null };
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn() });
 
 describe("patchModal", () => {
   it("keeps the composer node, its focus and text while history, badge and status change", () => {

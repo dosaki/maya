@@ -1,6 +1,7 @@
 use crate::config::{self, Config};
 use crate::events::EventLog;
-use crate::model::Card;
+use crate::model::{Card, PullRequest};
+use crate::pr::PrCache;
 use crate::registry::{self, RegistrySession};
 use crate::state::{derive, DeriveInput};
 use crate::transcript::TailCache;
@@ -13,6 +14,7 @@ pub struct Store {
     pub config: Config,
     alive: Box<dyn Fn(i32) -> bool + Send>,
     tails: TailCache,
+    prs: PrCache,
     /// Compact the event log during refresh once it exceeds this many bytes.
     pub compact_threshold_bytes: u64,
 }
@@ -28,6 +30,7 @@ impl Store {
             config,
             alive: Box::new(registry::pid_alive),
             tails: TailCache::default(),
+            prs: PrCache::default(),
             compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
         }
     }
@@ -74,6 +77,20 @@ impl Store {
         let _ = self.events.compact(&keep);
     }
 
+    /// Directories of live sessions whose PR lookup is missing or stale.
+    /// Dead sessions' directories are forgotten at the same time.
+    pub fn pr_dirs_due(&mut self, now_ms: u64) -> Vec<String> {
+        let mut dirs: Vec<String> = self.registry().into_iter().map(|s| s.cwd).collect();
+        dirs.sort();
+        dirs.dedup();
+        self.prs.retain(&dirs);
+        self.prs.due(&dirs, now_ms)
+    }
+
+    pub fn set_pr(&mut self, dir: &str, pr: Option<PullRequest>, now_ms: u64) {
+        self.prs.set(dir, pr, now_ms);
+    }
+
     pub fn refresh(&mut self, now_ms: u64) -> Vec<Card> {
         if self.events.file_len() > self.compact_threshold_bytes {
             self.compact_events();
@@ -86,13 +103,15 @@ impl Store {
             let path = self.transcript_path_for(s);
             let tail = self.tails.get(&path);
             paths.push(path);
-            cards.push(derive(&DeriveInput {
+            let mut card = derive(&DeriveInput {
                 registry: s,
                 events: self.events.events_for(&s.session_id),
                 transcript: &tail,
                 now_ms,
                 completed_timeout_ms: self.config.completed_timeout_ms(),
-            }));
+            });
+            card.pr = self.prs.get(&s.cwd);
+            cards.push(card);
         }
         self.tails.retain(&paths);
         cards
@@ -143,6 +162,30 @@ mod tests {
         let s = store.session("s7").expect("live session");
         assert_eq!(store.transcript_path_for(&s), PathBuf::from("/hooked/s7.jsonl"));
         assert!(store.session("nope").is_none());
+    }
+
+    #[test]
+    fn refresh_attaches_the_cached_pull_request_by_directory() {
+        use crate::model::PullRequest;
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle"}"#).unwrap();
+        std::fs::write(claude.join("sessions/8.json"), r#"{"pid":8,"sessionId":"s8","cwd":"/Users/x/dev/other","name":"o-8","status":"idle"}"#).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        assert!(store.refresh(1).iter().all(|c| c.pr.is_none()));
+        // Both live directories are due for a lookup at first.
+        let mut due = store.pr_dirs_due(1);
+        due.sort();
+        assert_eq!(due, vec!["/Users/x/dev/eye".to_string(), "/Users/x/dev/other".to_string()]);
+        let pr = PullRequest { number: 5, url: "https://github.com/o/r/pull/5".into(), state: "open".into() };
+        store.set_pr("/Users/x/dev/eye", Some(pr.clone()), 1);
+        store.set_pr("/Users/x/dev/other", None, 1);
+        let cards = store.refresh(2);
+        assert_eq!(cards.iter().find(|c| c.session_id == "s7").unwrap().pr, Some(pr));
+        assert!(cards.iter().find(|c| c.session_id == "s8").unwrap().pr.is_none());
+        assert!(store.pr_dirs_due(2).is_empty(), "a known result, including none, is not retried at once");
+        assert_eq!(store.pr_dirs_due(2 + crate::pr::TTL_MS).len(), 2);
     }
 
     #[test]

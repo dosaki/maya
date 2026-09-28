@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { makeAnswerGuard } from "./answer";
 import type { Card } from "./types";
 
-const card: Card = { sessionId: "s", pid: 1, name: "n", cwd: "/x", state: "awaiting", stateSince: 500, snippet: "", hasInbox: true,
+const card: Card = { sessionId: "s", pid: 1, name: "n", cwd: "/x", state: "awaiting", stateSince: 500, snippet: "", hasInbox: true, harness: "claude-code", pr: null,
   awaiting: { kind: "question", detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "" }, { label: "B", description: "" }] }] } };
 
 describe("makeAnswerGuard", () => {
