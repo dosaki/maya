@@ -20,6 +20,16 @@ describe("renderModal", () => {
     expect(el.querySelector(".modal__banner")).toBeNull();
   });
 
+  it("tells the user to reply when the session asked in prose", () => {
+    const h = handlers();
+    const asked = { ...base, state: "awaiting" as const, awaiting: { kind: "text" as const, detail: "Create it as drafted?", questions: [] } };
+    const el = renderModal({ card: asked, turns: [], status: null, draft: "" }, h);
+    expect(el.querySelector(".modal__banner")?.textContent).toContain("asked you something");
+    expect(el.querySelector(".modal__banner")?.textContent).toContain("Create it as drafted?");
+    expect(el.querySelector(".options")).toBeNull();
+    expect(el.querySelector("textarea")).not.toBeNull();
+  });
+
   it("shows the harness in the header and a PR button only when a PR is known", () => {
     const h = handlers();
     const none = renderModal({ card: base, turns: [], status: null, draft: "" }, h);

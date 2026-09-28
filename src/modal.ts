@@ -103,9 +103,13 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   if (m.card.state === "awaiting") {
     const banner = el("div", "modal__banner");
     const options = renderOptions(m.card, m.next ?? 0, { descriptions: true, enabled: nowMs - m.card.stateSince >= OPEN_DELAY_MS });
-    banner.append(
-      el("span", "", options ? "This session is asking a question. Pick an answer here or in its terminal." : "This session is waiting for a decision in its terminal. A reply will queue behind it."),
-    );
+    const prose = m.card.awaiting?.kind === "text";
+    const text = options
+      ? "This session is asking a question. Pick an answer here or in its terminal."
+      : prose
+        ? `This session asked you something. Reply below or in its terminal. "${m.card.awaiting?.detail ?? ""}"`
+        : "This session is waiting for a decision in its terminal. A reply will queue behind it.";
+    banner.append(el("span", "", text));
     const open = el("button", "card__btn", "Open terminal");
     open.type = "button";
     open.addEventListener("click", () => h.onTerminal());

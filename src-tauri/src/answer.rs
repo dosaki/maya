@@ -20,7 +20,8 @@ pub fn slash_command(setting: &str, value: &str) -> Result<String, String> {
 /// Typing into a session that is waiting on a prompt would answer it (the
 /// Enter after the text lands on the picker), so refuse until it moves on.
 pub fn check_free(card: &Card) -> Result<(), String> {
-    if card.state == State::Awaiting {
+    let prose_ask = card.awaiting.as_ref().map_or(false, |a| a.kind == AwaitKind::Text);
+    if card.state == State::Awaiting && !prose_ask {
         return Err("This session is waiting for a decision; answer it first.".into());
     }
     Ok(())
@@ -157,6 +158,10 @@ mod tests {
         c.awaiting = None;
         assert_eq!(check_free(&c), Ok(()));
         c.state = State::Idle;
+        assert_eq!(check_free(&c), Ok(()));
+        // A question asked in prose leaves the terminal at its prompt: typing is safe.
+        c.state = State::Awaiting;
+        c.awaiting = Some(Awaiting { kind: AwaitKind::Text, detail: "Go ahead?".into(), questions: vec![] });
         assert_eq!(check_free(&c), Ok(()));
     }
 

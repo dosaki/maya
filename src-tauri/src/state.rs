@@ -24,6 +24,59 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
     out
 }
 
+/// Phrases that mark the end of a turn as waiting on the user, even without
+/// a question mark. Matched on whole words in the last line.
+const DECISION_PHRASES: &[&str] = &["let me know", "say the word", "which do you", "do you want", "should i", "shall i", "want me to", "your call", "tell me which"];
+
+/// The last non-empty line of an assistant message, with a trailing code
+/// fence dropped so a pasted block does not hide the line before it.
+fn last_line(text: &str) -> Option<&str> {
+    let mut lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if lines.last().map_or(false, |l| l.starts_with("```")) {
+        lines.pop();
+        while let Some(l) = lines.pop() {
+            if l.starts_with("```") {
+                break;
+            }
+        }
+    }
+    lines.last().copied()
+}
+
+/// `line` without any bracketed asides at its end, such as `(e.g. "skip #2")`
+/// or `[y/n]`, so the question mark before them is seen.
+fn strip_trailing_asides(line: &str) -> &str {
+    let mut s = line.trim_end();
+    loop {
+        let Some(close) = s.chars().last() else { return s };
+        let open = match close {
+            ')' => '(',
+            ']' => '[',
+            _ => return s,
+        };
+        let Some(start) = s.rfind(open) else { return s };
+        s = s[..start].trim_end();
+    }
+}
+
+/// The closing line of `text` when it asks the user for a decision: it ends
+/// with a question mark (ignoring trailing markdown, quotes or emoji) or
+/// contains one of `DECISION_PHRASES`. Questions earlier in the message do
+/// not count.
+pub fn asking_line(text: &str) -> Option<String> {
+    let line = last_line(text)?;
+    let core = strip_trailing_asides(line).trim_end_matches(|c: char| !c.is_alphanumeric() && c != '?');
+    if core.ends_with('?') {
+        return Some(line.to_string());
+    }
+    let words: Vec<String> = line.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect();
+    let padded = format!(" {} ", words.join(" "));
+    if DECISION_PHRASES.iter().any(|p| padded.contains(&format!(" {p} "))) {
+        return Some(line.to_string());
+    }
+    None
+}
+
 fn permission_detail(e: &HookEvent) -> String {
     let tool = e.tool_name.clone().unwrap_or_else(|| "Tool".to_string());
     let input = e.tool_input.as_ref();
@@ -109,7 +162,10 @@ pub fn derive(i: &DeriveInput) -> Card {
     } else if is_busy {
         (State::Working, r.status_updated_at, None)
     } else if let Some((true, ts)) = last_turn {
-        if i.now_ms.saturating_sub(ts) < i.completed_timeout_ms {
+        // A turn that ended by asking in prose waits for a reply, however long ago.
+        if let Some(line) = i.transcript.last_assistant_text.as_deref().and_then(asking_line) {
+            (State::Awaiting, ts, Some(Awaiting { kind: AwaitKind::Text, detail: truncate(&line, SNIPPET_CHARS), questions: vec![] }))
+        } else if i.now_ms.saturating_sub(ts) < i.completed_timeout_ms {
             (State::Completed, ts, None)
         } else {
             (State::Idle, ts + i.completed_timeout_ms, None)
@@ -335,6 +391,51 @@ mod tests {
             ev("UserPromptSubmit", 11),
         ];
         assert_eq!(run(&reg("busy", 0), &evs, &TranscriptTail::default(), 20).state, State::Working);
+    }
+
+    #[test]
+    fn asking_line_spots_questions_and_decision_phrases_at_the_tail_only() {
+        assert_eq!(asking_line("Done.\n\nCreate it as drafted?"), Some("Create it as drafted?".to_string()));
+        assert_eq!(asking_line("Which option do you prefer? "), Some("Which option do you prefer?".to_string()));
+        // Trailing markdown, quotes or emoji after the question mark are ignored.
+        assert_eq!(asking_line("Does this look right?** 🙂"), Some("Does this look right?** 🙂".to_string()));
+        // A code fence at the end does not hide the question before it, and one before the question is skipped.
+        assert_eq!(asking_line("Ready?\n```\ncode\n```"), Some("Ready?".to_string()));
+        assert_eq!(asking_line("```\nx?\n```\nSay the word and I will commit it."), Some("Say the word and I will commit it.".to_string()));
+        // Decision phrases without a question mark.
+        assert_eq!(asking_line("Two options.\n\nLet me know which you want."), Some("Let me know which you want.".to_string()));
+        assert_eq!(asking_line("I can do A or B. Your call."), Some("I can do A or B. Your call.".to_string()));
+        assert_eq!(asking_line("Should I go ahead"), Some("Should I go ahead".to_string()));
+        // A parenthetical example after the question mark does not hide it.
+        let aside = "Approve this plan, or amend any rows? (e.g. \"flip #1 to address\", \"skip #2\")";
+        assert_eq!(asking_line(aside), Some(aside.to_string()));
+        assert_eq!(asking_line("Go ahead? [y/n]"), Some("Go ahead? [y/n]".to_string()));
+        // A question earlier in the message does not count.
+        assert_eq!(asking_line("Why did it fail? Because of X.\n\nFixed and pushed."), None);
+        assert_eq!(asking_line("Is it done? Yes (mostly)."), None);
+        assert_eq!(asking_line("All done."), None);
+        assert_eq!(asking_line(""), None);
+    }
+
+    #[test]
+    fn stop_with_a_question_in_the_text_is_awaiting_a_reply_and_never_decays() {
+        let evs = [ev("UserPromptSubmit", 1000), ev("Stop", 2000)];
+        let tail = TranscriptTail { last_assistant_text: Some("PR body here.\n\nCreate it as drafted?".into()), open_question: None };
+        let c = run(&reg("idle", 2100), &evs, &tail, 3000);
+        assert_eq!(c.state, State::Awaiting);
+        assert_eq!(c.state_since, 2000);
+        let aw = c.awaiting.unwrap();
+        assert_eq!(aw.kind, AwaitKind::Text);
+        assert_eq!(aw.detail, "Create it as drafted?");
+        assert!(aw.questions.is_empty());
+        let later = run(&reg("idle", 2100), &evs, &tail, 2000 + TIMEOUT * 10);
+        assert_eq!(later.state, State::Awaiting);
+        // A reply clears it.
+        let answered = [ev("UserPromptSubmit", 1000), ev("Stop", 2000), ev("UserPromptSubmit", 4000)];
+        assert_eq!(run(&reg("busy", 4001), &answered, &tail, 5000).state, State::Working);
+        // A Stop whose text does not ask stays Completed.
+        let plain = TranscriptTail { last_assistant_text: Some("All done.".into()), open_question: None };
+        assert_eq!(run(&reg("idle", 2100), &evs, &plain, 3000).state, State::Completed);
     }
 
     #[test]

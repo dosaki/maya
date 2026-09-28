@@ -34,6 +34,7 @@ body { margin: 0; background: var(--bg); }
 .card__project { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .card__awaiting { margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--awaiting) 14%, transparent); border-left: 3px solid var(--awaiting); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 .card__awaiting[data-kind="question"] { background: color-mix(in srgb, var(--working) 12%, transparent); border-left-color: var(--working); font-family: inherit; }
+.card__awaiting[data-kind="text"] { font-family: inherit; }
 .card__awaiting[data-kind="plan"] { background: color-mix(in srgb, var(--completed) 12%, transparent); border-left-color: var(--completed); font-family: inherit; }
 .card__snippet { margin: 8px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .settings { position: absolute; top: 48px; right: 16px; width: 320px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; box-shadow: 0 8px 30px rgba(0,0,0,.18); display: flex; flex-direction: column; gap: 10px; z-index: 10; }

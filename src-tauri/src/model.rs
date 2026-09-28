@@ -15,6 +15,8 @@ pub enum AwaitKind {
     Question,
     Plan,
     Permission,
+    /// A question asked in prose at the end of a turn, with no picker in the terminal.
+    Text,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -142,5 +144,6 @@ mod tests {
         assert_eq!(json["stateSince"], 1000);
         assert_eq!(json["state"], "awaiting");
         assert_eq!(json["awaiting"]["kind"], "permission");
+        assert_eq!(serde_json::to_value(AwaitKind::Text).unwrap(), "text");
     }
 }

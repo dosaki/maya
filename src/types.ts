@@ -1,5 +1,6 @@
 export type CardState = "awaiting" | "working" | "completed" | "idle";
-export type AwaitKind = "question" | "plan" | "permission";
+/** "text" is a question asked in prose at the end of a turn: no picker, reply through the inbox. */
+export type AwaitKind = "question" | "plan" | "permission" | "text";
 
 export interface Choice {
   label: string;
