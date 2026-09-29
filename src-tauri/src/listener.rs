@@ -121,7 +121,7 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
 }
 
 /// Runs a validated action through the same paths as the page's buttons;
-/// the Ok text is what Maya says when the interpreter gave no line of its own.
+/// the Ok text is what Maya says after a confirmed action.
 fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String, String> {
     let state = app.state::<AppState>();
     let kind = action["kind"].as_str().unwrap_or("");
@@ -234,7 +234,9 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str) {
     match interpreter::validate(proposed, &cards, &dirs) {
         Err(why) => reply_then_idle(app, generation, &why),
         Ok(action) if interpreter::needs_confirm(&action) => {
-            let say = if reply.say.trim().is_empty() { "Shall I?".to_string() } else { reply.say.clone() };
+            // The read-back is what will run, never the model's `say`, so a
+            // yes always confirms the action the user heard.
+            let say = spoken_for(&action).unwrap_or_else(|| "Shall I?".into());
             let pending = wake::Pending { say: say.clone(), action };
             // Stored before the read-back so a tap on the page can answer it.
             let accepted = {
@@ -272,9 +274,9 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str) {
             }
         }
         Ok(action) => {
+            // Focus and compact run at once and say what they did.
             let said = match execute_action(app, &action) {
-                Ok(s) if reply.say.trim().is_empty() => s,
-                Ok(_) => reply.say.clone(),
+                Ok(s) => spoken_for(&action).unwrap_or(s),
                 Err(e) => e,
             };
             reply_then_idle(app, generation, &said);
@@ -539,4 +541,55 @@ pub(crate) fn voice_selftest() -> Result<String, String> {
     let path = ear::sidecar_path().ok_or("The listener (maya-ear) is not built. Run `pnpm ear:build`.")?;
     let out = std::process::Command::new(path).arg("--selftest").output().map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `text` closed with a full stop unless it already ends a sentence.
+fn sentence(text: &str) -> String {
+    let t = text.trim();
+    if t.ends_with(['.', '!', '?']) {
+        t.to_string()
+    } else {
+        format!("{t}.")
+    }
+}
+
+/// What Maya says for a validated action, built from the action itself and
+/// never from the model's `say`: the read-back for actions that need a yes,
+/// the line for focus and compact. None for a report, whose answer is the
+/// model's `say`.
+pub(crate) fn spoken_for(action: &serde_json::Value) -> Option<String> {
+    let s = |k: &str| action[k].as_str().unwrap_or("").trim().to_string();
+    Some(match action["kind"].as_str()? {
+        "reply" => format!("Telling {}: {} Yes?", s("name"), sentence(&s("text"))),
+        "answer" => format!("Answering {} with \"{}\". Yes?", s("name"), s("label")),
+        "start" => format!("Starting a session in {}: {} Yes?", s("dir"), sentence(&s("prompt"))),
+        // Resume always picks the newest session that is not running.
+        "resume" => format!("Resuming the latest {} session. Yes?", s("dir")),
+        "focus" => format!("Focusing {}.", s("name")),
+        "compact" => format!("Compacting {}.", s("name")),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn read_backs_come_from_the_validated_action() {
+        let reply = json!({"kind":"reply","session":"id-1","name":"hexgrid-d3","text":"go ahead and ship it"});
+        assert_eq!(spoken_for(&reply).unwrap(), "Telling hexgrid-d3: go ahead and ship it. Yes?");
+        let asked = json!({"kind":"reply","session":"id-1","name":"coral","text":"ready?"});
+        assert_eq!(spoken_for(&asked).unwrap(), "Telling coral: ready? Yes?");
+        let answer = json!({"kind":"answer","session":"id-1","name":"hexgrid","option":2,"label":"SQLite","askId":5});
+        assert_eq!(spoken_for(&answer).unwrap(), "Answering hexgrid with \"SQLite\". Yes?");
+        let start = json!({"kind":"start","dir":"maya","prompt":"fix the build"});
+        assert_eq!(spoken_for(&start).unwrap(), "Starting a session in maya: fix the build. Yes?");
+        let resume = json!({"kind":"resume","dir":"maya"});
+        assert_eq!(spoken_for(&resume).unwrap(), "Resuming the latest maya session. Yes?");
+        assert_eq!(spoken_for(&json!({"kind":"focus","session":"id-1","name":"coral"})).unwrap(), "Focusing coral.");
+        assert_eq!(spoken_for(&json!({"kind":"compact","session":"id-1","name":"coral"})).unwrap(), "Compacting coral.");
+        assert_eq!(spoken_for(&json!({"kind":"report"})), None, "a report speaks the model's own answer");
+    }
 }
