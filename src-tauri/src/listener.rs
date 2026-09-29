@@ -489,6 +489,36 @@ pub(crate) fn builtin_model_check(claude_dir: &std::path::Path, c: &config::Conf
     Ok(crate::models::model_path(claude_dir, m.id).unwrap())
 }
 
+/// Whether a model download that just finished should (re)start the
+/// listener: the user wants to listen, has chosen the built-in recogniser,
+/// and downloaded the model it is configured to use.
+pub(crate) fn should_start_after_download(config: &config::Config, id: &str) -> bool {
+    config.listen && config.recognizer == config::Recognizer::Builtin && config.whisper_model == id
+}
+
+/// Shows `why` as an error and clears whatever a previous run left behind
+/// (a pending confirmation, partial transcript, last spoken line) so nothing
+/// stale can still be answered while the listener is not running; mirrors
+/// what `stop_listening` clears. A no-op once `generation` is no longer
+/// current.
+fn fail_to_start(app: &AppHandle, generation: u64, why: &str) {
+    {
+        let state = app.state::<AppState>();
+        let mut v = state.voice.lock().unwrap();
+        if v.generation != generation {
+            return;
+        }
+        v.flow = None;
+        v.status.listening = false;
+        v.status.state = "error".into();
+        v.status.detail = why.to_string();
+        v.status.pending = None;
+        v.status.heard.clear();
+        v.status.said.clear();
+    }
+    emit_voice(app);
+}
+
 /// Starts the sidecar and the thread that reads it, replacing any running one.
 pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
     let (generation, old) = {
@@ -511,12 +541,7 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
                 Err(why) => {
                     drop(store);
                     log::line("listener", format!("built-in recogniser cannot start: {why}"));
-                    set_voice(app, generation, |s| {
-                        s.listening = false;
-                        s.state = "error".into();
-                        s.detail = why.clone();
-                    });
-                    emit_voice(app);
+                    fail_to_start(app, generation, &why);
                     return Err(why);
                 }
             }
@@ -540,11 +565,7 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
         Ok(pair) => pair,
         Err(e) => {
             log::line("listener", format!("could not start the sidecar: {e}"));
-            set_voice(app, generation, |s| {
-                s.listening = false;
-                s.state = "error".into();
-                s.detail = e.clone();
-            });
+            fail_to_start(app, generation, &e);
             return Err(e);
         }
     };
@@ -583,6 +604,10 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
         // so the log shows whether the microphone hears anything at all.
         let mut peak = 0.0f64;
         let mut peak_since = std::time::Instant::now();
+        // Remembered so the "loading the model…" and "listening" details
+        // still name the microphone instead of losing it, the way the
+        // System engine's detail never does.
+        let mut device_name: Option<String> = None;
         let inbox = Inbox::new(rx);
         while let Some(ev) = inbox.next() {
             if !is_current(&handle, generation) {
@@ -666,19 +691,24 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
                 }
                 ear::EarEvent::Device(name) => {
                     log::line("ear", format!("microphone: {name}"));
+                    device_name = Some(name.clone());
                     set_voice(&handle, generation, |s| s.detail = format!("microphone: {name}"));
                 }
-                ear::EarEvent::State { state, detail } if state == "loading" => {
+                ear::EarEvent::State { state, .. } if state == "loading" => {
                     log::line("ear", "loading the model");
-                    set_voice(&handle, generation, |s| s.detail = "loading the model…".into());
-                    let _ = detail;
+                    let detail = match &device_name {
+                        Some(d) => format!("microphone: {d} (loading the model…)"),
+                        None => "loading the model…".into(),
+                    };
+                    set_voice(&handle, generation, |s| s.detail = detail);
                 }
                 ear::EarEvent::State { state, detail } => {
                     log::line("ear", if detail.is_empty() { state.clone() } else { format!("{state}: {detail}") });
                     if state == "listening" {
+                        let restored = device_name.as_ref().map(|d| format!("microphone: {d}")).unwrap_or_default();
                         set_voice(&handle, generation, |s| {
-                            if s.detail.starts_with("loading") {
-                                s.detail.clear();
+                            if s.detail.contains("loading the model") {
+                                s.detail = restored.clone();
                             }
                         });
                     }
@@ -933,5 +963,29 @@ mod tests {
         assert!(builtin_model_check(dir.path(), &c).is_err(), "a truncated file is refused");
         let sys = Config::default();
         assert!(builtin_model_check(dir.path(), &sys).is_err(), "system recogniser has no model path");
+    }
+
+    #[test]
+    fn builtin_model_check_accepts_an_exact_size_file_and_rejects_an_unknown_model() {
+        use crate::config::{Config, Recognizer};
+        let dir = tempfile::tempdir().unwrap();
+        let c = Config { recognizer: Recognizer::Builtin, ..Default::default() };
+        let p = crate::models::model_path(dir.path(), "base.en-q5_1").unwrap();
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::File::create(&p).unwrap().set_len(59_721_011).unwrap();
+        assert_eq!(builtin_model_check(dir.path(), &c), Ok(p));
+        let unknown = Config { recognizer: Recognizer::Builtin, whisper_model: "nope".into(), ..Default::default() };
+        let err = builtin_model_check(dir.path(), &unknown).unwrap_err();
+        assert!(err.contains("Unknown model"), "{err}");
+    }
+
+    #[test]
+    fn should_start_after_download_needs_listening_builtin_and_a_matching_model() {
+        use crate::config::{Config, Recognizer};
+        let base = Config { listen: true, recognizer: Recognizer::Builtin, whisper_model: "tiny.en".into(), ..Default::default() };
+        assert!(should_start_after_download(&base, "tiny.en"));
+        assert!(!should_start_after_download(&Config { listen: false, ..base.clone() }, "tiny.en"), "not while off");
+        assert!(!should_start_after_download(&Config { recognizer: Recognizer::System, ..base.clone() }, "tiny.en"), "not for the system recogniser");
+        assert!(!should_start_after_download(&base, "base.en-q5_1"), "not for a different model");
     }
 }

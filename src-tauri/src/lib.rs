@@ -118,7 +118,18 @@ fn download_whisper_model(app: AppHandle, state: TauriState<AppState>, id: Strin
     models::download(&claude, &id, &move |received, total| {
         let _ = handle.emit("voice-model", ModelProgress { id: name.clone(), received, total });
     })
-    .map(|_| log::line("app", format!("whisper model {id} ready")))
+    .map(|_| {
+        log::line("app", format!("whisper model {id} ready"));
+        let config = state.store.lock().unwrap().config.clone();
+        if listener::should_start_after_download(&config, &id) {
+            log::line("app", "model downloaded; starting the listener");
+            state.voice.lock().unwrap().failures = 0;
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                let _ = listener::start_listening(&handle);
+            });
+        }
+    })
     .map_err(|e| {
         log::line("app", format!("whisper model {id}: {e}"));
         e
@@ -559,12 +570,14 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
     match listener::listening_change(&before, &config) {
         listener::ListenChange::Restart => {
             log::line("listener", "settings changed; restarting");
+            state.voice.lock().unwrap().failures = 0;
             let handle = app.clone();
             std::thread::spawn(move || {
                 let _ = listener::start_listening(&handle);
             });
         }
         listener::ListenChange::Start => {
+            state.voice.lock().unwrap().failures = 0;
             let handle = app.clone();
             std::thread::spawn(move || {
                 let _ = listener::start_listening(&handle);

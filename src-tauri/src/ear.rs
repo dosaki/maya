@@ -177,6 +177,8 @@ mod tests {
         assert!(!managed_dictation_off(""));
         assert!(dictation_advice(true).contains("IT admin"));
         assert!(dictation_advice(false).contains("System Settings"));
+        assert!(dictation_advice(true).ends_with("or switch Speech recognition to Built-in in Settings."));
+        assert!(dictation_advice(false).ends_with("or switch Speech recognition to Built-in in Settings."));
     }
 
     use super::*;
