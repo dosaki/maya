@@ -566,9 +566,21 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
                     if let Some(mut e) = dead {
                         e.stop();
                     }
+                    // A locked Dictation switch needs a different message from an off one.
+                    let shown = if detail.starts_with(ear::DICTATION_OFF) {
+                        let managed = ear::dictation_managed_off();
+                        if managed {
+                            log::line("listener", "a management profile sets allowDictation to false");
+                        }
+                        ear::dictation_advice(managed).to_string()
+                    } else if detail.is_empty() {
+                        "the listener stopped".into()
+                    } else {
+                        detail.clone()
+                    };
                     set_voice(&handle, generation, |s| {
                         s.state = "error".into();
-                        s.detail = if detail.is_empty() { "the listener stopped".into() } else { detail.clone() };
+                        s.detail = shown;
                     });
                     if wants {
                         if let Some(delay) = ear::restart_delay_ms(failures - 1) {

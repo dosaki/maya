@@ -30,6 +30,35 @@ pub fn parse_line(line: &str) -> Option<EarEvent> {
     })
 }
 
+/// The message the sidecar sends when macOS refuses recognition because
+/// Dictation is off; the listener looks for it to tell a locked switch apart.
+pub const DICTATION_OFF: &str = "Dictation is off.";
+
+/// What to tell the user when Dictation is off: a locked switch (a management
+/// profile sets `allowDictation` to false) needs their IT admin, not a click.
+pub fn dictation_advice(managed_off: bool) -> &'static str {
+    if managed_off {
+        "Dictation is disabled by a management profile on this Mac, so on-device speech recognition cannot run. Ask your IT admin to allow Dictation (allowDictation)."
+    } else {
+        "Dictation is off. Turn it on in System Settings \u{203A} Keyboard \u{203A} Dictation, then listen again."
+    }
+}
+
+/// True when `defaults read` of the managed applicationaccess domain says
+/// Dictation is not allowed (the output is `0`).
+pub fn managed_dictation_off(defaults_output: &str) -> bool {
+    defaults_output.trim() == "0"
+}
+
+/// Asks macOS whether a management profile forbids Dictation.
+pub fn dictation_managed_off() -> bool {
+    Command::new("defaults")
+        .args(["read", "/Library/Managed Preferences/com.apple.applicationaccess", "allowDictation"])
+        .output()
+        .map(|o| o.status.success() && managed_dictation_off(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or(false)
+}
+
 const VIRTUAL: &[&str] = &["blackhole", "remote sound", "soundflower", "loopback"];
 
 /// The preferred device when present, else the built-in microphone, else
@@ -124,6 +153,16 @@ impl Ear {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_managed_zero_means_dictation_is_locked_off() {
+        use super::*;
+        assert!(managed_dictation_off("0\n"));
+        assert!(!managed_dictation_off("1\n"));
+        assert!(!managed_dictation_off(""));
+        assert!(dictation_advice(true).contains("IT admin"));
+        assert!(dictation_advice(false).contains("System Settings"));
+    }
+
     use super::*;
 
     #[test]
