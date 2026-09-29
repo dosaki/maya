@@ -509,6 +509,10 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
     let handle = app.clone();
     std::thread::spawn(move || {
         let mut heard_any = false;
+        // Sound is logged as a peak per few seconds, only when there was some,
+        // so the log shows whether the microphone hears anything at all.
+        let mut peak = 0.0f64;
+        let mut peak_since = std::time::Instant::now();
         let inbox = Inbox::new(rx);
         while let Some(ev) = inbox.next() {
             if !is_current(&handle, generation) {
@@ -518,8 +522,17 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
                 ear::EarEvent::Level(l) => {
                     handle.state::<AppState>().voice.lock().unwrap().status.level = l;
                     let _ = handle.emit("voice-level", l);
+                    peak = peak.max(l);
+                    if peak_since.elapsed() >= Duration::from_secs(3) {
+                        if peak >= 0.05 {
+                            log::line("ear", format!("sound: peak level {peak:.2}"));
+                        }
+                        peak = 0.0;
+                        peak_since = std::time::Instant::now();
+                    }
                 }
                 ear::EarEvent::Partial(t) => {
+                    log::line("ear", format!("partial: {t:?}"));
                     set_voice(&handle, generation, |s| s.heard = t);
                 }
                 ear::EarEvent::Final(t) => {

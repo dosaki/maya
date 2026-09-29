@@ -64,7 +64,9 @@ a session.
   back first and needs a "yes" (or the Yes button in the panel).
 - Listening pauses while Maya speaks, so she does not hear herself.
 
-Voice needs macOS 14 or later; the rest of the board runs without it.
+Voice needs macOS 14 or later and Dictation turned on (System Settings ›
+Keyboard › Dictation), which is what provides on-device recognition; the
+rest of the board runs without it.
 
 The Debug tab shows what Maya heard, what she made of it, what she asked
 Claude, what came back, what ran and what she said, plus errors from the

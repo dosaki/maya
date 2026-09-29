@@ -52,6 +52,12 @@ final class Ear {
     /// Set by the 50 s timer; the rotation waits for a quiet moment.
     var rotateDue = false
     var restartTimer: Timer?
+    /// When the current request began, and how many requests in a row died
+    /// within two seconds: recognition that fails instantly (Dictation off,
+    /// a missing on-device model) is reported, then given up on.
+    var requestBegan = Date()
+    var instantFailures = 0
+    var lastErrorMessage = ""
     var endpointTimer: Timer?
     var lastLevelAt: TimeInterval = 0
     let endpointAfter: TimeInterval = 1.2
@@ -138,6 +144,7 @@ final class Ear {
         request = req
         lastPartial = ""
         lastChangeAt = Date()
+        requestBegan = Date()
         // Captured by the completion handler below so it can tell whether it belongs to
         // the still-current task. A superseded task (rotate() clears self.task before
         // cancelling) must not emit or restart anything: its late final would repeat
@@ -146,6 +153,7 @@ final class Ear {
         newTask = recognizer.recognitionTask(with: req) { result, error in
             guard self.task === newTask else { return }
             if let r = result {
+                self.instantFailures = 0
                 let text = r.bestTranscription.formattedString
                 if r.isFinal {
                     if !text.isEmpty { Out.emit(["type": "final", "text": text]) }
@@ -160,8 +168,25 @@ final class Ear {
                     Out.emit(["type": "partial", "text": text])
                 }
             }
-            if error != nil {
-                // The request ended (silence timeout): flush the partial as final and start again.
+            if let e = error {
+                // The request ended: a silence timeout after a long life is
+                // routine; an instant failure is not, and five in a row is fatal.
+                let lived = Date().timeIntervalSince(self.requestBegan)
+                let ns = e as NSError
+                let message = "\(ns.domain) \(ns.code): \(e.localizedDescription)"
+                // On-device recognition rides on Dictation: with it off, every
+                // request fails at once. Say what to do and stop.
+                if ns.domain == "kLSRErrorDomain" && ns.code == 201 {
+                    Out.emit(["type": "state", "state": "error", "detail": "Dictation is off. Turn it on in System Settings \u{203A} Keyboard \u{203A} Dictation, then listen again."]); exit(6)
+                }
+                if lived < 2 { self.instantFailures += 1 } else { self.instantFailures = 0 }
+                if self.instantFailures >= 5 {
+                    Out.emit(["type": "state", "state": "error", "detail": "speech recognition keeps failing: \(message)"]); exit(5)
+                }
+                if message != self.lastErrorMessage || lived < 2 {
+                    self.lastErrorMessage = message
+                    Out.emit(["type": "state", "state": "warning", "detail": "recognition ended after \(String(format: "%.1f", lived)) s: \(message)"])
+                }
                 if !self.lastPartial.isEmpty { Out.emit(["type": "final", "text": self.lastPartial]) }
                 self.lastPartial = ""
                 self.task = nil
