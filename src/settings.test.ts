@@ -188,6 +188,35 @@ describe("renderSettings", () => {
     expect(bar.value).toBe(38852357);
     expect(bar.max).toBe(77704715);
     expect(el.querySelector<HTMLButtonElement>("button[data-action=download-model]")!.disabled).toBe(true);
+    // The progress text names the model in flight, so it's never ambiguous which one.
+    expect(el.querySelector(".settings__progress")?.textContent).toContain("Tiny");
     expect(el.querySelector(".settings__progress")?.textContent).toContain("50%");
+  });
+
+  it("says to wait when a different model is the one downloading", () => {
+    const el = renderSettings({ ...voiceBase, recognizer: "builtin", whisperModel: "tiny.en", models, downloading: { id: "base.en-q5_1", received: 1, total: 2 } }, handlers());
+    const dl = el.querySelector<HTMLButtonElement>("button[data-action=download-model]")!;
+    expect(dl.disabled).toBe(true);
+    expect(dl.textContent).toBe("Wait for the current download");
+  });
+
+  it("removes a downloaded model that isn't the one in use, and disables the one in use", () => {
+    const h = handlers();
+    const twoDownloaded = [
+      { id: "tiny.en", label: "Tiny (78 MB, fastest)", bytes: 77704715, downloaded: true },
+      { id: "base.en-q5_1", label: "Base, quantised (60 MB, recommended)", bytes: 59721011, downloaded: true },
+    ];
+    const el = renderSettings({ ...voiceBase, recognizer: "builtin", whisperModel: "base.en-q5_1", models: twoDownloaded }, h);
+    const removeButtons = [...el.querySelectorAll<HTMLButtonElement>("button[data-action=remove-model]")];
+    expect(removeButtons).toHaveLength(2);
+
+    const inUse = removeButtons.find((b) => b.dataset.model === "base.en-q5_1")!;
+    expect(inUse.disabled).toBe(true);
+
+    const other = removeButtons.filter((b) => !b.disabled);
+    expect(other).toHaveLength(1);
+    expect(other[0].dataset.model).toBe("tiny.en");
+    other[0].click();
+    expect(h.onRemoveModel).toHaveBeenCalledWith("tiny.en");
   });
 });

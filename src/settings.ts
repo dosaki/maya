@@ -233,7 +233,13 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
       const dl = document.createElement("button");
       dl.type = "button";
       dl.dataset.action = "download-model";
-      dl.textContent = `Download (${mb(chosen.bytes)})`;
+      if (model.downloading?.id === chosen.id) {
+        dl.textContent = `Downloading ${chosen.label}…`;
+      } else if (model.downloading) {
+        dl.textContent = "Wait for the current download";
+      } else {
+        dl.textContent = `Download (${mb(chosen.bytes)})`;
+      }
       dl.disabled = model.downloading !== null;
       dl.addEventListener("click", () => h.onDownloadModel(chosen.id));
       row.append(dl);
@@ -248,6 +254,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
       const rm = document.createElement("button");
       rm.type = "button";
       rm.dataset.action = "remove-model";
+      rm.dataset.model = chosen.id;
       rm.textContent = "Remove";
       rm.disabled = true;
       rm.title = "The model in use cannot be removed; pick another first.";
@@ -269,9 +276,10 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
       bar.setAttribute("name", "modelDownload");
       bar.max = model.downloading.total;
       bar.value = model.downloading.received;
+      const downloadingLabel = model.models.find((m) => m.id === model.downloading!.id)?.label ?? model.downloading.id;
       const pct = document.createElement("div");
       pct.className = "settings__progress";
-      pct.textContent = `Downloading… ${Math.round((100 * model.downloading.received) / Math.max(1, model.downloading.total))}%`;
+      pct.textContent = `Downloading ${downloadingLabel}… ${Math.round((100 * model.downloading.received) / Math.max(1, model.downloading.total))}%`;
       assistant.append(bar, pct);
     }
   }
@@ -474,6 +482,9 @@ export async function initSettings(): Promise<void> {
   });
 
   await listen<{ id: string; received: number; total: number }>("voice-model", (e) => {
+    // Only one model downloads at a time; ignore stray events for any other
+    // id (e.g. a late event from a download that was superseded).
+    if (model.downloading === null || e.payload.id !== model.downloading.id) return;
     model.downloading = e.payload.received >= e.payload.total ? null : e.payload;
     if (!panel.hidden) paint();
   });

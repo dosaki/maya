@@ -92,7 +92,38 @@ describe("settings flow", () => {
     expect(document.querySelector<HTMLInputElement>("input[name=listen]")!.checked).toBe(false);
   });
 
-  it("applies voice-model progress events to the picker", async () => {
+  it("applies voice-model progress events to the picker, scoped to the model in flight", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "builtin", whisperModel: "tiny.en" };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([{ id: "tiny.en", label: "Tiny", bytes: 100, downloaded: false }]);
+      // Never resolves in this test: we only need the download to be "in flight".
+      if (cmd === "download_whisper_model") return new Promise(() => {});
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+    // Start the download the way the UI does, so `model.downloading` is set
+    // before any event arrives (mirrors clicking Download in the picker).
+    document.querySelector<HTMLButtonElement>("button[data-action=download-model]")!.click();
+    await flush();
+    const onProgress = eventListen.mock.calls.find((c) => c[0] === "voice-model")![1] as (e: { payload: { id: string; received: number; total: number } }) => void;
+    onProgress({ payload: { id: "tiny.en", received: 25, total: 100 } });
+    expect(document.querySelector<HTMLProgressElement>("progress[name=modelDownload]")!.value).toBe(25);
+
+    // (a) an event for a different id is ignored: the bar in flight doesn't move.
+    onProgress({ payload: { id: "base.en-q5_1", received: 99, total: 100 } });
+    expect(document.querySelector<HTMLProgressElement>("progress[name=modelDownload]")!.value).toBe(25);
+
+    // (b) once the download in flight completes, the progress bar disappears.
+    onProgress({ payload: { id: "tiny.en", received: 100, total: 100 } });
+    expect(document.querySelector("progress[name=modelDownload]")).toBeNull();
+  });
+
+  it("ignores a voice-model event for another id when nothing is downloading", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "builtin", whisperModel: "tiny.en" };
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "hook_status") return Promise.resolve(true);
@@ -105,7 +136,7 @@ describe("settings flow", () => {
     await flush();
     document.getElementById("settings")!.hidden = false;
     const onProgress = eventListen.mock.calls.find((c) => c[0] === "voice-model")![1] as (e: { payload: { id: string; received: number; total: number } }) => void;
-    onProgress({ payload: { id: "tiny.en", received: 25, total: 100 } });
-    expect(document.querySelector<HTMLProgressElement>("progress[name=modelDownload]")!.value).toBe(25);
+    onProgress({ payload: { id: "some-other-model", received: 10, total: 100 } });
+    expect(document.querySelector("progress[name=modelDownload]")).toBeNull();
   });
 });
