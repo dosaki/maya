@@ -1,4 +1,5 @@
 pub mod answer;
+pub mod attachments;
 pub mod config;
 pub mod context;
 pub mod events;
@@ -204,6 +205,28 @@ fn poll_pull_requests(app: &AppHandle) {
     refresh_and_emit(app);
 }
 
+/// Saves a pasted file under the Maya directory and returns its path.
+#[tauri::command(async)]
+fn save_attachment(state: TauriState<AppState>, name: String, bytes: Vec<u8>) -> Result<String, String> {
+    let maya_dir = state.store.lock().unwrap().claude_dir().join("maya");
+    let path = attachments::save(&maya_dir, &name, &bytes, now_ms())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Opens an http(s) link from a rendered message in the browser.
+#[tauri::command(async)]
+fn open_url(url: String) -> Result<(), String> {
+    if !attachments::is_web_url(&url) {
+        return Err("Only web links can be opened.".into());
+    }
+    let ok = std::process::Command::new("open").arg(url.trim()).status().map_err(|e| format!("could not open the browser: {e}"))?;
+    if ok.success() {
+        Ok(())
+    } else {
+        Err("The browser refused to open the link.".into())
+    }
+}
+
 /// Types `/model x` or `/effort y` into the session's Terminal tab.
 #[tauri::command(async)]
 fn set_session_option(state: TauriState<AppState>, session_id: String, setting: String, value: String) -> Result<(), String> {
@@ -381,6 +404,8 @@ pub fn run() {
             cycle_session_mode,
             rename_session,
             compact_session,
+            save_attachment,
+            open_url,
             open_pr,
             list_review_prs,
             clones_dir,

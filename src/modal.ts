@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { answerGuard } from "./answer";
+import { composeMessage, makeAttachments, pastedFiles, renderChips, type Attachment } from "./attachments";
+import { renderMarkdown } from "./markdown";
 import { projectName } from "./format";
 import { EFFORT_CHOICES, MODEL_CHOICES, renderChoice } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
@@ -14,6 +17,8 @@ export interface ModalModel {
   draft: string;
   /** Index of the next unanswered question when the session is asking one. */
   next?: number;
+  /** Files the next message will point the session at. */
+  attachments?: Attachment[];
 }
 
 export interface ModalHandlers {
@@ -31,6 +36,12 @@ export interface ModalHandlers {
   onRename(name: string): void;
   /** Compact the session's context (typed as `/compact`). */
   onCompact(): void;
+  /** Open an http(s) link from a rendered turn in the browser. */
+  onOpenLink(url: string): void;
+  /** Drop an attachment from the composer. */
+  onRemoveAttachment?(path: string): void;
+  /** Files pasted into the composer, to be saved and attached. */
+  onPasteFiles?(files: { name: string; file: File }[]): void;
 }
 
 /**
@@ -189,22 +200,41 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const turn = el("div", `turn turn--${t.kind}`);
     const who = { user: "You", assistant: "Claude", peer: "Message", tool: "" }[t.kind];
     if (who) turn.append(el("div", "turn__who", who));
-    turn.append(el("div", "turn__text", t.text));
+    const text = el("div", "turn__text");
+    if (t.kind === "tool") text.textContent = t.text;
+    else text.append(renderMarkdown(t.text));
+    turn.append(text);
     history.append(turn);
   }
+  history.addEventListener("click", (ev) => {
+    const a = (ev.target as Element).closest("a[href]");
+    if (!a) return;
+    ev.preventDefault();
+    h.onOpenLink(a.getAttribute("href") ?? "");
+  });
   panel.append(history);
   panel.append(renderTweaks(h));
 
   if (m.card.hasInbox) {
+    const attachments = m.attachments ?? [];
+    panel.append(renderChips(attachments, (path) => h.onRemoveAttachment?.(path)));
     const form = el("div", "modal__composer");
     const ta = el("textarea", "modal__input");
-    ta.placeholder = "Message this session… (⌘↵ to send)";
+    ta.placeholder = "Message this session… (⌘↵ to send, paste or drop files to attach)";
     ta.value = m.draft;
     ta.rows = 3;
     const trySend = () => {
-      const text = ta.value.trim();
+      const text = composeMessage(ta.value, attachments);
       if (text) h.onSend(text);
     };
+    ta.addEventListener("paste", (ev) => {
+      const items = ev.clipboardData?.items;
+      if (!items) return;
+      const files = pastedFiles(items, Date.now());
+      if (files.length === 0) return;
+      ev.preventDefault();
+      h.onPasteFiles?.(files);
+    });
     ta.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
         ev.preventDefault();
@@ -253,6 +283,7 @@ export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
   swap(".modal__state");
   swap(".modal__banner", ".modal__history");
   swap(".modal__history");
+  swap(".modal__chips", ".modal__composer");
   swap(".modal__status");
 }
 
@@ -277,6 +308,42 @@ export function makeSendGuard(send: (text: string) => Promise<void>): (text: str
 
 let current: { model: ModalModel; keyHandler: (e: KeyboardEvent) => void } | null = null;
 let progress: Progress | null = null;
+const attachments = makeAttachments();
+let unlistenDrop: (() => void) | null = null;
+
+/** Saves pasted files through the backend and attaches the saved paths. */
+async function attachPasted(files: { name: string; file: File }[]): Promise<void> {
+  if (!current) return;
+  const me = current;
+  for (const { name, file } of files) {
+    try {
+      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+      const path = await invoke<string>("save_attachment", { name, bytes });
+      attachments.add({ name, path });
+    } catch (e) {
+      if (current === me) setStatus(false, String(e));
+      return;
+    }
+  }
+  if (current === me) paint();
+}
+
+function attachDropped(paths: string[]): void {
+  if (!current) return;
+  for (const p of paths) attachments.add({ name: p.split("/").filter(Boolean).pop() ?? p, path: p });
+  paint();
+}
+
+async function watchDrops(): Promise<void> {
+  if (unlistenDrop) return;
+  try {
+    unlistenDrop = await getCurrentWebview().onDragDropEvent((ev) => {
+      if (ev.payload.type === "drop" && current) attachDropped(ev.payload.paths);
+    });
+  } catch {
+    unlistenDrop = null;
+  }
+}
 let enableTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** Share the board's question-progress tracker with the modal. */
@@ -301,6 +368,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   const oldScroll = oldHist?.scrollTop ?? 0;
 
   m.next = progress?.next(m.card) ?? 0;
+  m.attachments = attachments.list();
   const fresh = renderModal(m, {
     onSend: (text) => void guardedSend(text),
     onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
@@ -311,6 +379,12 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     onOpenPr: () => void invoke("open_pr", { sessionId: m.card.sessionId }).catch((e) => setStatus(false, String(e))),
     onRename: (name) => void rename(name),
     onCompact: () => void invoke("compact_session", { sessionId: m.card.sessionId }).then(() => setStatus(true, "Sent /compact to the terminal")).catch((e) => setStatus(false, String(e))),
+    onOpenLink: (url) => void invoke("open_url", { url }).catch((e) => setStatus(false, String(e))),
+    onRemoveAttachment: (path) => {
+      attachments.remove(path);
+      paint();
+    },
+    onPasteFiles: (files) => void attachPasted(files),
   });
   // Buttons rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay([m.card], Date.now());
@@ -387,6 +461,7 @@ const guardedSend = makeSendGuard(async (text: string) => {
     const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea");
     if (ta) ta.value = "";
     current.model.draft = "";
+    attachments.clear();
     current.model.status = { ok: true, text: "Delivered" };
     await loadTurns({ force: true, focusInput: true });
   } catch (e) {
@@ -418,7 +493,9 @@ export async function openModal(card: Card): Promise<void> {
     if (e.key === "Escape") closeModal();
   };
   current = { model: { card, turns: [], status: null, draft: "" }, keyHandler };
+  attachments.clear();
   document.addEventListener("keydown", keyHandler);
+  void watchDrops();
   paint({ focusInput: true });
   await loadTurns({ force: true, focusInput: true });
 }
@@ -429,6 +506,7 @@ export function closeModal(): void {
   enableTimer = undefined;
   document.removeEventListener("keydown", current.keyHandler);
   current = null;
+  attachments.clear();
   document.getElementById("modal-host")?.replaceChildren();
 }
 
