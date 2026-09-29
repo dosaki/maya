@@ -3,6 +3,7 @@ pub mod antigravity;
 pub mod attachments;
 pub mod codex;
 pub mod config;
+pub mod dock;
 pub mod foreign;
 pub mod context;
 pub mod events;
@@ -454,6 +455,7 @@ pub fn run() {
         ])
         .setup(move |app| {
             focus::install_app_handle(app.handle().clone());
+            dock::set_dock_icon();
             let handle = app.handle().clone();
             let sessions_dir = dir.join("sessions");
             let maya_dir = dir.join("maya");
