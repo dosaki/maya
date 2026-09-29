@@ -57,6 +57,27 @@ pub fn spoken_line(card: &Card) -> Option<String> {
     }
 }
 
+/// Maya's voice: the first of these installed, all female English voices
+/// that ship with macOS. Never the system default, which may be anything.
+pub const VOICES: &[&str] = &["Samantha", "Karen", "Moira", "Tessa", "Kate", "Serena", "Ava", "Allison", "Zoe"];
+
+/// The voice to use, from `say -v ?` output.
+pub fn pick_voice(installed: &str) -> Option<String> {
+    let names: Vec<&str> = installed.lines().filter_map(|l| l.split_whitespace().next()).collect();
+    VOICES.iter().find(|v| names.contains(v)).map(|v| v.to_string())
+}
+
+static VOICE: OnceLock<Option<String>> = OnceLock::new();
+
+fn voice() -> Option<String> {
+    VOICE
+        .get_or_init(|| {
+            let out = Command::new("say").args(["-v", "?"]).output().ok()?;
+            pick_voice(&String::from_utf8_lossy(&out.stdout))
+        })
+        .clone()
+}
+
 static SPEECH: OnceLock<Mutex<mpsc::Sender<String>>> = OnceLock::new();
 
 /// Queues `text` for the system voice. Lines are spoken one after another
@@ -66,7 +87,11 @@ pub fn speak(text: String) {
         let (tx, rx) = mpsc::channel::<String>();
         std::thread::spawn(move || {
             for line in rx {
-                let _ = Command::new("say").arg(&line).status();
+                let mut cmd = Command::new("say");
+                if let Some(v) = voice() {
+                    cmd.args(["-v", &v]);
+                }
+                let _ = cmd.arg(&line).status();
             }
         });
         Mutex::new(tx)
@@ -173,6 +198,14 @@ mod tests {
         let mut named = card("x", State::Awaiting, 1, "q");
         named.name = "review bedrock #451".into();
         assert_eq!(spoken_line(&named).as_deref(), Some("review bedrock 451 needs a decision"));
+    }
+
+    #[test]
+    fn voice_is_the_first_installed_female_english_voice() {
+        let list = "Daniel              en_GB    # Hello! My name is Daniel.\nKaren               en_AU    # Hello!\nSamantha            en_US    # Hello!\n";
+        assert_eq!(pick_voice(list).as_deref(), Some("Samantha"));
+        assert_eq!(pick_voice("Daniel en_GB # x\nTessa en_ZA # y\n").as_deref(), Some("Tessa"));
+        assert_eq!(pick_voice("Daniel en_GB # x\n"), None);
     }
 
     #[test]
