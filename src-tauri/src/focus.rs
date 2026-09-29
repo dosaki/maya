@@ -9,6 +9,9 @@ pub fn tty_from_ps(output: &str) -> Option<String> {
     Some(format!("/dev/{t}"))
 }
 
+/// Selects the tab on `tty` and puts its window first in Terminal's stack,
+/// without activating: AppleScript's `activate` raises every Terminal
+/// window and often does nothing when the caller is not frontmost.
 pub fn applescript_for(tty: &str) -> String {
     format!(
         r#"tell application "Terminal"
@@ -17,7 +20,6 @@ pub fn applescript_for(tty: &str) -> String {
       if tty of t is "{tty}" then
         set selected tab of w to t
         set index of w to 1
-        activate
         return "ok"
       end if
     end repeat
@@ -25,6 +27,29 @@ pub fn applescript_for(tty: &str) -> String {
 end tell
 return "not found""#
     )
+}
+
+/// JavaScript for Automation that brings Terminal forward the way a click on
+/// one of its windows does: only the window at the top of its stack comes up,
+/// the rest stay where they are (no `NSApplicationActivateAllWindows`).
+pub fn activate_script() -> String {
+    "ObjC.import('AppKit');\n\
+     const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier('com.apple.Terminal');\n\
+     if (apps.count > 0) apps.objectAtIndex(0).activateWithOptions($.NSApplicationActivateIgnoringOtherApps);"
+        .to_string()
+}
+
+/// Brings Terminal forward with only its front window.
+pub fn activate_terminal() -> Result<(), String> {
+    let out = Command::new("osascript")
+        .args(["-l", "JavaScript", "-e", &activate_script()])
+        .output()
+        .map_err(|e| format!("could not run osascript: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("could not activate Terminal: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
 }
 
 /// `/dev/ttysNNN` of the terminal hosting `pid`.
@@ -51,7 +76,7 @@ pub fn focus_pid(pid: i32) -> Result<(), String> {
     }
     let result = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if result == "ok" {
-        Ok(())
+        activate_terminal()
     } else {
         Err(format!("no Terminal tab found for {tty}"))
     }
@@ -70,13 +95,24 @@ mod tests {
     }
 
     #[test]
-    fn applescript_targets_the_tty_and_activates() {
+    fn applescript_targets_the_tty_without_activating() {
         let s = applescript_for("/dev/ttys021");
         assert!(s.contains("tell application \"Terminal\""));
         assert!(s.contains("if tty of t is \"/dev/ttys021\""));
         assert!(s.contains("set selected tab of w to t"));
-        assert!(s.contains("activate"));
+        assert!(s.contains("set index of w to 1"));
+        // AppleScript's `activate` raises every Terminal window and is flaky
+        // from a background caller; activation is done separately via AppKit.
+        assert!(!s.contains("activate"));
         assert!(s.contains("return \"not found\""));
+    }
+
+    #[test]
+    fn activation_uses_appkit_without_the_all_windows_option() {
+        let s = activate_script();
+        assert!(s.contains("com.apple.Terminal"));
+        assert!(s.contains("NSApplicationActivateIgnoringOtherApps"));
+        assert!(!s.contains("NSApplicationActivateAllWindows"));
     }
 
     #[test]

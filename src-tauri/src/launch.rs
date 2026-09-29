@@ -188,10 +188,11 @@ fn applescript_string(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Opens a new Terminal window running `cmd` and brings Terminal forward.
+/// Opens a new Terminal window running `cmd`. Terminal is brought forward
+/// afterwards via AppKit so only the new window comes up.
 pub fn applescript_run(cmd: &str) -> String {
     format!(
-        "tell application \"Terminal\"\n  do script \"{}\"\n  activate\nend tell",
+        "tell application \"Terminal\"\n  do script \"{}\"\nend tell",
         applescript_string(cmd)
     )
 }
@@ -219,11 +220,10 @@ pub fn open_terminal_with(cmd: &str) -> Result<(), String> {
         .arg(applescript_run(cmd))
         .output()
         .map_err(|e| format!("could not run osascript: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!("osascript failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    if !out.status.success() {
+        return Err(format!("osascript failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
+    crate::focus::activate_terminal()
 }
 
 pub fn open_terminal(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> Result<(), String> {
@@ -336,7 +336,8 @@ mod tests {
     #[test]
     fn any_shell_command_can_be_opened_in_a_terminal_window() {
         let s = applescript_run("cd '/r' && echo \"hi\"");
-        assert_eq!(s, "tell application \"Terminal\"\n  do script \"cd '/r' && echo \\\"hi\\\"\"\n  activate\nend tell");
+        // No `activate`: the new window is raised via AppKit afterwards, on its own.
+        assert_eq!(s, "tell application \"Terminal\"\n  do script \"cd '/r' && echo \\\"hi\\\"\"\nend tell");
     }
 
     #[test]
@@ -353,7 +354,7 @@ mod tests {
         assert!(s.contains("tell application \"Terminal\""));
         // The prompt file is consumed and deleted, and `--` protects prompts that start with `-`.
         assert!(s.contains("do script \"cd '/Users/x/dev/it'\\\\''s-here' && p=\\\"$(cat '/Users/x/.claude/maya/prompts/1.txt')\\\" && rm -f '/Users/x/.claude/maya/prompts/1.txt' && claude -- \\\"$p\\\"\""), "{s}");
-        assert!(s.contains("activate"));
+        assert!(!s.contains("activate"), "activation happens via AppKit, not AppleScript");
     }
 
     #[test]
