@@ -40,9 +40,9 @@ pub const DICTATION_OFF: &str = "Dictation is off.";
 /// profile sets `allowDictation` to false) needs their IT admin, not a click.
 pub fn dictation_advice(managed_off: bool) -> &'static str {
     if managed_off {
-        "Dictation is disabled by a management profile on this Mac, so on-device speech recognition cannot run. Ask your IT admin to allow Dictation (allowDictation)."
+        "Dictation is disabled by a management profile on this Mac, so on-device speech recognition cannot run. Ask your IT admin to allow Dictation (allowDictation), or switch Speech recognition to Built-in in Settings."
     } else {
-        "Dictation is off. Turn it on in System Settings \u{203A} Keyboard \u{203A} Dictation, then listen again."
+        "Dictation is off. Turn it on in System Settings \u{203A} Keyboard \u{203A} Dictation, then listen again, or switch Speech recognition to Built-in in Settings."
     }
 }
 
@@ -104,6 +104,12 @@ pub fn restart_delay_ms(failures: u32) -> Option<u64> {
     (failures < 5).then(|| 1_000u64 << failures)
 }
 
+/// Which recogniser the sidecar runs, and the model file when it is whisper.
+pub enum EngineArgs {
+    System,
+    Whisper { model: PathBuf },
+}
+
 pub struct Ear {
     child: Child,
     stdin: ChildStdin,
@@ -111,11 +117,19 @@ pub struct Ear {
 
 impl Ear {
     /// Starts the sidecar; events arrive on the returned channel until it exits.
-    pub fn spawn(device: Option<&str>) -> Result<(Ear, mpsc::Receiver<EarEvent>), String> {
+    pub fn spawn(device: Option<&str>, engine: EngineArgs) -> Result<(Ear, mpsc::Receiver<EarEvent>), String> {
         let path = sidecar_path().ok_or("The listener (maya-ear) is not built. Run `pnpm ear:build`.")?;
         let mut cmd = Command::new(path);
         if let Some(d) = device {
             cmd.args(["--device", d]);
+        }
+        match engine {
+            EngineArgs::System => {
+                cmd.args(["--engine", "system"]);
+            }
+            EngineArgs::Whisper { model } => {
+                cmd.args(["--engine", "whisper", "--model"]).arg(model);
+            }
         }
         let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("could not start the listener: {e}"))?;
         let stdin = child.stdin.take().ok_or("no stdin for the listener")?;

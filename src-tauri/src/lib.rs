@@ -549,10 +549,29 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
             return Err(format!("Projects directory does not exist: {}.", dir.display()));
         }
     }
-    {
+    let before = {
         let mut store = state.store.lock().unwrap();
+        let before = store.config.clone();
         config::save(&store.config_path(), &config)?;
         store.config = config.clone();
+        before
+    };
+    match listener::listening_change(&before, &config) {
+        listener::ListenChange::Restart => {
+            log::line("listener", "settings changed; restarting");
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                let _ = listener::start_listening(&handle);
+            });
+        }
+        listener::ListenChange::Start => {
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                let _ = listener::start_listening(&handle);
+            });
+        }
+        listener::ListenChange::Stop => listener::stop_listening(&app),
+        listener::ListenChange::None => {}
     }
     refresh_and_emit(&app);
     Ok(config)
