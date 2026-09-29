@@ -103,6 +103,21 @@ pub fn answer(segment: &str) -> Answer {
     }
 }
 
+/// Words that may sit beside a no-word in a plain refusal ("never mind",
+/// "not now", "don't do it", "cancel that").
+const NO_COMPANIONS: &[&str] = &["mind", "now", "it", "that", "do"];
+
+/// True when a command spoken after the wake word is only a yes or a no
+/// ("Maya, yes", "Maya, cancel"), not a new request that happens to contain
+/// a no-word ("Maya tell coral stop").
+fn plain_answer(command: &str) -> bool {
+    match answer(command) {
+        Answer::Yes => true,
+        Answer::No => normalise(command).split_whitespace().filter(|w| !FILLER_WORDS.contains(w)).all(|w| NO_WORDS.contains(&w) || NO_COMPANIONS.contains(&w)),
+        Answer::Other => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pending {
     pub say: String,
@@ -175,6 +190,14 @@ impl Flow {
         if let Some(ignored) = self.ignore.take() {
             if ignored == normalise(text) {
                 return vec![];
+            }
+        }
+        // With the wake word and a command, the command wins over a no-word
+        // inside it: "Maya tell coral stop" is a new command, not a cancel.
+        if let (State::AwaitingConfirm { .. }, Wake::Command(c)) = (&self.state, extract(text)) {
+            if !plain_answer(&c) {
+                self.state = State::Idle;
+                return vec![Effect::Interpret(c)];
             }
         }
         match std::mem::replace(&mut self.state, State::Idle) {
@@ -294,6 +317,24 @@ mod tests {
         assert_eq!(f.state(6000 + CONFIRM_WAIT_MS + 1), "idle");
         f.set_pending(pending(), 6000 + CONFIRM_WAIT_MS + 5);
         assert_eq!(f.on_segment("yes", 6000 + CONFIRM_WAIT_MS + 10), vec![Effect::Execute(pending().action)], "a restarted window confirms");
+    }
+
+    #[test]
+    fn a_wake_word_with_a_command_replaces_the_pending_action_even_with_a_no_word() {
+        let mut f = Flow::new();
+        f.set_pending(pending(), 1000);
+        assert_eq!(f.on_segment("Maya tell coral stop", 1500), vec![Effect::Interpret("tell coral stop".into())]);
+        f.set_pending(pending(), 2000);
+        assert_eq!(f.on_segment("Maya, don't touch hexgrid", 2500), vec![Effect::Interpret("don't touch hexgrid".into())]);
+        // The wake word in front of a plain answer still answers.
+        f.set_pending(pending(), 3000);
+        assert_eq!(f.on_segment("Maya, cancel", 3500), vec![Effect::Cancelled]);
+        f.set_pending(pending(), 4000);
+        assert_eq!(f.on_segment("Maya yes", 4500), vec![Effect::Execute(pending().action)]);
+        f.set_pending(pending(), 5000);
+        assert_eq!(f.on_segment("no Maya", 5500), vec![Effect::Cancelled]);
+        f.set_pending(pending(), 6000);
+        assert_eq!(f.on_segment("stop", 6500), vec![Effect::Cancelled], "without the wake word a no-word still cancels");
     }
 
     #[test]
