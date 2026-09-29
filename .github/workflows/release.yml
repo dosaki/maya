@@ -46,6 +46,7 @@ jobs:
       - name: Test
         run: |
           pnpm test
+          sh scripts/test-ear.sh
           cd src-tauri && cargo test
 
       - name: Read version

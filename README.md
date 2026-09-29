@@ -64,9 +64,12 @@ a session.
   back first and needs a "yes" (or the Yes button in the panel).
 - Listening pauses while Maya speaks, so she does not hear herself.
 
-Voice needs macOS 14 or later and Dictation turned on (System Settings ›
-Keyboard › Dictation), which is what provides on-device recognition; the
-rest of the board runs without it.
+Voice needs macOS 14 or later. Speech recognition is Apple's by default, which needs Dictation turned on
+(System Settings › Keyboard › Dictation). On a Mac where that switch is
+locked by a management profile, choose **Built-in (Whisper)** under
+Settings › Voice assistant › Speech recognition and download a model
+(60 MB recommended). Recognition then runs on this Mac through whisper.cpp;
+the one-off model download from Hugging Face is its only network access.
 
 The Debug tab shows what Maya heard, what she made of it, what she asked
 Claude, what came back, what ran and what she said, plus errors from the
@@ -77,6 +80,7 @@ starts afresh on every launch.
 
     pnpm install
     pnpm ear:build      # build the voice listener sidecar (once, and after ear/ changes)
+    pnpm ear:test       # run sidecar tests
     pnpm tauri dev      # run
     pnpm test           # frontend tests
     cd src-tauri && cargo test   # Rust tests
@@ -84,14 +88,15 @@ starts afresh on every launch.
 Requires Rust (rustup), Node 20+, pnpm, `jq` on PATH for the hook, and the
 Xcode Command Line Tools (`xcode-select --install`) for `swiftc`.
 
-`pnpm ear:build` compiles `ear/main.swift` into
-`src-tauri/binaries/maya-ear-<target>`. That file is not in git, and
+`pnpm ear:build` also fetches whisper.cpp's framework (53 MB, once, into
+`vendor/`), then compiles `ear/main.swift` into
+`src-tauri/binaries/maya-ear-<target>`. That binary is not in git, and
 `pnpm tauri dev`, `pnpm tauri build` and `cargo test` all fail until it
 exists, because Tauri bundles it as a sidecar.
 
 ## Build
 
-    pnpm ear:build
+    pnpm ear:build      # fetches whisper.cpp framework (53 MB, once, into vendor/)
     pnpm tauri build
 
 The app bundle lands in `src-tauri/target/release/bundle/`. The build fails
