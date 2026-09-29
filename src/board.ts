@@ -1,4 +1,5 @@
 import { renderCard } from "./card";
+import { iconElement } from "./icons";
 import { COLUMNS, type Card } from "./types";
 
 export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) => number): HTMLElement {
@@ -33,7 +34,7 @@ export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) =>
       resume.title = "Resume a past session";
       resume.setAttribute("aria-label", "Resume a past session");
       // A bar and a play triangle, like a cassette deck's resume key.
-      resume.innerHTML = '<svg class="icon-resume" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="2" y="3" width="2.5" height="10" rx="0.5"/><path d="M6.5 3 L14 8 L6.5 13 Z"/></svg>';
+      resume.replaceChildren(iconElement("resume", 12));
       head.append(add, resume);
     }
 

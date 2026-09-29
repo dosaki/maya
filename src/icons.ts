@@ -1,14 +1,29 @@
-/** Inline SVG icons for card buttons. Each is 14px, drawn with currentColor. */
-const ICONS = {
-  terminal:
-    '<svg class="icon icon-terminal" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M4.5 6 L7 8 L4.5 10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 10.5 H11.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>',
-  reply:
-    '<svg class="icon icon-reply" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 2.5 C4.4 2.5 1.8 4.7 1.8 7.4 c0 1.5 0.8 2.8 2.1 3.7 L3.2 13.8 L6.4 12.1 c0.5 0.1 1 0.2 1.6 0.2 c3.6 0 6.2-2.2 6.2-4.9 S11.6 2.5 8 2.5 Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>',
-  compact:
-    '<svg class="icon icon-compact" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="5.5" y="4.5" width="5" height="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M1 4.5 L4 8 L1 11.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 4.5 L12 8 L15 11.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-} as const;
+import compact from "./assets/icons/compact.svg?raw";
+import reply from "./assets/icons/reply.svg?raw";
+import resume from "./assets/icons/resume.svg?raw";
+import terminal from "./assets/icons/terminal.svg?raw";
 
-export type IconName = keyof typeof ICONS;
+/**
+ * Card icons, kept as plain SVG files in src/assets/icons so they can be
+ * edited in Inkscape. Draw strokes and fills with `currentColor` so the
+ * icon takes the button's text colour.
+ */
+const FILES = { terminal, reply, compact, resume } as const;
+
+export type IconName = keyof typeof FILES;
+
+/** The icon's `<svg>` element, sized and classed for a button. */
+export function iconElement(name: IconName, size = 14): SVGSVGElement {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = FILES[name].replace(/<\?xml[^>]*\?>/, "").trim();
+  const svg = tpl.content.querySelector("svg");
+  if (!svg) throw new Error(`icon ${name} has no <svg> root`);
+  svg.classList.add("icon", `icon-${name}`);
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("aria-hidden", "true");
+  return svg as SVGSVGElement;
+}
 
 /** A button showing only an icon, with the label as tooltip and accessible name. */
 export function iconButton(icon: IconName, label: string, className = "card__btn"): HTMLButtonElement {
@@ -17,6 +32,6 @@ export function iconButton(icon: IconName, label: string, className = "card__btn
   b.className = `${className} card__btn--icon`;
   b.title = label;
   b.setAttribute("aria-label", label);
-  b.innerHTML = ICONS[icon];
+  b.replaceChildren(iconElement(icon));
   return b;
 }
