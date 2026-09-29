@@ -51,9 +51,11 @@ protocol Recogniser: AnyObject {
     /// Called once the audio engine runs; the recogniser emits `listening` when ready.
     func begin(format: AVAudioFormat)
     func accept(_ buffer: AVAudioPCMBuffer)
-    /// Called just before the process exits, as a courtesy: the exit itself
-    /// does not wait on this and does not run static destructors.
-    func shutdown()
+    /// True once `begin` has finished getting ready to transcribe.
+    var ready: Bool { get }
+    /// Called on pause: clears anything buffered so a stale VAD state (an
+    /// utterance half-heard before the gap) doesn't carry into what's said after.
+    func reset()
 }
 
 /// Apple's on-device recogniser: today's behaviour, unchanged.
@@ -62,30 +64,41 @@ final class SystemRecogniser: Recogniser {
     var request: SFSpeechAudioBufferRecognitionRequest?
     var task: SFSpeechRecognitionTask?
     var lastPartial = ""
+    /// When `lastPartial` last changed; a transcript quiet for `endpointAfter` is an utterance.
     var lastChangeAt = Date()
+    /// Set by the 50 s timer; the rotation waits for a quiet moment.
     var rotateDue = false
     var restartTimer: Timer?
     var endpointTimer: Timer?
+    /// When the current request began, and how many requests in a row died
+    /// within two seconds: recognition that fails instantly (Dictation off,
+    /// a missing on-device model) is reported, then given up on.
     var requestBegan = Date()
     var instantFailures = 0
     var lastErrorMessage = ""
     let endpointAfter: TimeInterval = 1.2
+    var ready = false
 
     func begin(format: AVAudioFormat) {
         beginRequest()
+        // On-device requests are capped around a minute: rotate before the cap,
+        // but only at a quiet moment so a sentence is never split.
         restartTimer = Timer.scheduledTimer(withTimeInterval: 50, repeats: true) { _ in
             self.rotateDue = true
             self.tick()
         }
+        // The recogniser keeps one growing transcript across pauses, so Maya
+        // end-points utterances herself: a partial unchanged for 1.2 s is final.
         endpointTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in self.tick() }
         Out.emit(["type": "state", "state": "listening"])
+        ready = true
     }
 
     func accept(_ buffer: AVAudioPCMBuffer) {
         request?.append(buffer)
     }
 
-    func shutdown() {}
+    func reset() {}
 
     /// Emits a quiet partial as final and starts a new request; also performs
     /// a due rotation once nothing is being said.
@@ -192,11 +205,10 @@ final class WhisperRecogniser: Recogniser {
 
     init(modelPath: String) { self.modelPath = modelPath }
 
+    var ready: Bool { ctx != nil }
+
     func begin(format: AVAudioFormat) {
         converter = AVAudioConverter(from: format, to: target)
-        guard FileManager.default.fileExists(atPath: modelPath) else {
-            Out.emit(["type": "state", "state": "error", "detail": "model file not found: \(modelPath)"]); exit(7)
-        }
         Out.emit(["type": "state", "state": "loading"])
         work.async {
             var cparams = whisper_context_default_params()
@@ -211,10 +223,14 @@ final class WhisperRecogniser: Recogniser {
         }
     }
 
-    /// Frees the whisper.cpp context, as a courtesy before `_exit`; costs
-    /// nothing if it never loaded.
-    func shutdown() {
-        if let c = ctx { whisper_free(c) }
+    /// Clears anything buffered on pause: the VAD's notion of speaking, its
+    /// pre-roll, and any partial utterance, so nothing said during the gap
+    /// bleeds into what's transcribed after resuming.
+    func reset() {
+        pending = []
+        preRoll = []
+        utterance = []
+        vad = Vad()
     }
 
     func accept(_ buffer: AVAudioPCMBuffer) {
@@ -283,9 +299,11 @@ final class WhisperRecogniser: Recogniser {
             params.single_segment = true
             params.suppress_blank = true
             params.n_threads = 4
-            params.language = UnsafePointer(strdup("en"))
             let t0 = Date()
-            let rc = audio.withUnsafeBufferPointer { whisper_full(ctx, params, $0.baseAddress, Int32(audio.count)) }
+            let rc: Int32 = "en".withCString { lang in
+                params.language = lang
+                return audio.withUnsafeBufferPointer { whisper_full(ctx, params, $0.baseAddress, Int32(audio.count)) }
+            }
             guard rc == 0 else {
                 Out.emit(["type": "state", "state": "warning", "detail": "whisper_full failed: \(rc)"]); return
             }
@@ -372,7 +390,12 @@ final class Ear {
 
     func setPaused(_ p: Bool) {
         paused = p
-        Out.emit(["type": "state", "state": p ? "paused" : "listening"])
+        if p {
+            recogniser.reset()
+            Out.emit(["type": "state", "state": "paused"])
+        } else {
+            Out.emit(["type": "state", "state": recogniser.ready ? "listening" : "loading"])
+        }
     }
 }
 
@@ -381,6 +404,12 @@ switch engineName {
 case "whisper":
     guard let m = modelPath else {
         Out.emit(["type": "state", "state": "error", "detail": "--engine whisper needs --model <path>"]); exit(7)
+    }
+    // Checked here, before the microphone (and so the audio engine) ever
+    // starts: a missing model is always fatal, so there is no reason to ask
+    // for the mic first.
+    guard FileManager.default.fileExists(atPath: m) else {
+        Out.emit(["type": "state", "state": "error", "detail": "model file not found: \(m)"]); exit(7)
     }
     recogniser = WhisperRecogniser(modelPath: m)
 default:
@@ -391,10 +420,10 @@ ear.start()
 
 // _exit(0), not exit(0): whisper.cpp's Metal backend aborts inside its own
 // static destructors when exit() runs them, so quitting skips that path
-// entirely, after flushing the one thing this process buffers (stdout) and
-// giving the recogniser a chance to free what it can.
+// entirely (no teardown needed: nothing here holds anything worth freeing
+// once the process is going away), after flushing the one thing this
+// process buffers (stdout).
 func quit() -> Never {
-    recogniser.shutdown()
     fflush(stdout)
     _exit(0)
 }
