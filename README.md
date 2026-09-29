@@ -45,17 +45,47 @@ macOS only because it drives Terminal through AppleScript and AppKit.
 Settings and data live in `~/.claude/maya/` (`config.json`, `events.jsonl`,
 `hook.sh`, short-lived `prompts/`).
 
+## Voice (macOS 14+)
+
+Maya can listen for her name and act on what you say: "Maya, what's
+waiting?", "Maya, tell hexgrid to go ahead", focus, compact, resume or start
+a session.
+
+- Off by default. Turn on "Listen for 'Maya'" in Settings or in the voice
+  panel (click the microphone in the top bar). macOS asks for microphone and
+  speech recognition access the first time.
+- The wake word is "Maya". Say it with the command, or say it alone and she
+  answers "Yes?" and waits for the command.
+- Audio never leaves the Mac: speech recognition runs on the device. Only
+  the command text and a summary of the board go to Claude (`claude -p`,
+  Haiku by default, with no tools).
+- Sending text, answering a question, starting or resuming a session is read
+  back first and needs a "yes" (or the Yes button in the panel).
+- Listening pauses while Maya speaks, so she does not hear herself.
+
+Voice needs macOS 14 or later; the rest of the board runs without it.
+
 ## Develop
 
     pnpm install
+    pnpm ear:build      # build the voice listener sidecar (once, and after ear/ changes)
     pnpm tauri dev      # run
     pnpm test           # frontend tests
     cd src-tauri && cargo test   # Rust tests
 
-Requires Rust (rustup), Node 20+, pnpm, and `jq` on PATH for the hook.
+Requires Rust (rustup), Node 20+, pnpm, `jq` on PATH for the hook, and the
+Xcode Command Line Tools (`xcode-select --install`) for `swiftc`.
+
+`pnpm ear:build` compiles `ear/main.swift` into
+`src-tauri/binaries/maya-ear-<target>`. That file is not in git, and
+`pnpm tauri dev`, `pnpm tauri build` and `cargo test` all fail until it
+exists, because Tauri bundles it as a sidecar.
 
 ## Build
 
+    pnpm ear:build
     pnpm tauri build
 
-The app bundle lands in `src-tauri/target/release/bundle/`.
+The app bundle lands in `src-tauri/target/release/bundle/`. The build fails
+without the sidecar binary, so run `pnpm ear:build` first (it needs the
+Xcode Command Line Tools).
