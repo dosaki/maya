@@ -315,7 +315,9 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str) {
         emit_voice(app);
         return;
     }
-    remember(app, "user", text);
+    if let Some(turn) = user_turn(&effects) {
+        remember(app, "user", &turn);
+    }
     for e in effects {
         match e {
             wake::Effect::Say(s) => {
@@ -543,6 +545,19 @@ pub(crate) fn voice_selftest() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// The user's turn to remember for a heard segment's effects: the command
+/// after the wake word, or the yes or no she recognised. Never the raw
+/// segment, which can hold talk from before the wake word; the history goes
+/// to the model, and only the command text may.
+pub(crate) fn user_turn(effects: &[wake::Effect]) -> Option<String> {
+    effects.iter().find_map(|e| match e {
+        wake::Effect::Interpret(cmd) => Some(cmd.clone()),
+        wake::Effect::Say(_) => Some("Maya".into()),
+        wake::Effect::Execute(_) => Some("yes".into()),
+        wake::Effect::Cancelled => Some("no".into()),
+    })
+}
+
 /// `text` closed with a full stop unless it already ends a sentence.
 fn sentence(text: &str) -> String {
     let t = text.trim();
@@ -591,5 +606,18 @@ mod tests {
         assert_eq!(spoken_for(&json!({"kind":"focus","session":"id-1","name":"coral"})).unwrap(), "Focusing coral.");
         assert_eq!(spoken_for(&json!({"kind":"compact","session":"id-1","name":"coral"})).unwrap(), "Compacting coral.");
         assert_eq!(spoken_for(&json!({"kind":"report"})), None, "a report speaks the model's own answer");
+    }
+
+    #[test]
+    fn only_the_command_or_the_answer_is_remembered_never_the_segment() {
+        use wake::{Effect, Flow};
+        let mut f = Flow::new();
+        // Talk before the wake word stays out of the history.
+        let heard = f.on_segment("the password is hunter2 anyway Maya what's waiting", 1000);
+        assert_eq!(user_turn(&heard).as_deref(), Some("what's waiting"));
+        assert_eq!(user_turn(&[Effect::Say("Yes?".into())]).as_deref(), Some("Maya"));
+        assert_eq!(user_turn(&[Effect::Execute(json!({"kind":"reply"}))]).as_deref(), Some("yes"));
+        assert_eq!(user_turn(&[Effect::Cancelled]).as_deref(), Some("no"));
+        assert_eq!(user_turn(&[]), None);
     }
 }
