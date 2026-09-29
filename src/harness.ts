@@ -1,4 +1,4 @@
-import antigravityIcon from "./assets/icons/antigravity.svg";
+import antigravityIcon from "./assets/icons/antigravity.png";
 import claudeCodeIcon from "./assets/claude-code.png";
 import codexIcon from "./assets/icons/codex.svg";
 import type { Harness } from "./types";
