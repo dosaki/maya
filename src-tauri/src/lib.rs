@@ -4,6 +4,7 @@ pub mod attachments;
 pub mod codex;
 pub mod config;
 pub mod dock;
+pub mod ear;
 pub mod foreign;
 pub mod grok;
 pub mod context;
