@@ -6,6 +6,7 @@ use crate::model::Card;
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub struct Reply {
@@ -177,19 +178,74 @@ pub fn validate(action: &Value, cards: &[Card], dirs: &[String]) -> Result<Value
     }
 }
 
-/// Runs the interpreter. `binary` is the claude executable.
-pub fn run(binary: &Path, model: &str, command: &str, cards: &[Card], history: &[(String, String)]) -> Result<Reply, String> {
-    let out = Command::new(binary)
-        .args(["-p", "--model", model, "--output-format", "json", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--max-turns", "1", "--append-system-prompt"])
-        .arg(system_prompt())
-        .arg(user_prompt(command, &board_summary(cards), history))
-        .env_clear()
-        .envs(crate::launch::clean_env(std::env::vars()))
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|e| format!("could not run claude: {e}"))?;
-    parse_reply(&String::from_utf8_lossy(&out.stdout))
+/// How long a spoken command may take before Maya gives up on it.
+pub const TIMEOUT: Duration = Duration::from_secs(25);
+
+#[derive(Debug, PartialEq)]
+pub enum RunError {
+    /// The deadline passed; the run was killed.
+    TimedOut,
+    Failed(String),
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunError::TimedOut => write!(f, "timed out"),
+            RunError::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// The `claude -p` arguments. The run is sandboxed: no tools, no user or
+/// project settings (so no hooks), and Maya's system prompt in place of
+/// Claude Code's, since board text is written by other agents.
+pub fn claude_args(model: &str, system: &str, user: &str) -> Vec<String> {
+    let flags = [
+        "-p", "--model", model, "--output-format", "json", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--max-turns", "1", "--tools", "", "--setting-sources", "", "--system-prompt", system,
+    ];
+    flags.iter().map(|s| s.to_string()).chain(std::iter::once(user.to_string())).collect()
+}
+
+/// Runs `cmd` and returns its stdout, killing it once `timeout` passes.
+/// Stdout is read on its own thread so a large reply cannot stall the child.
+pub fn output_within(mut cmd: Command, timeout: Duration) -> Result<String, RunError> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| RunError::Failed(format!("could not run claude: {e}")))?;
+    let mut stdout = child.stdout.take().ok_or_else(|| RunError::Failed("no stdout".into()))?;
+    let reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut s);
+        s
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RunError::TimedOut);
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RunError::Failed(e.to_string()));
+            }
+        }
+    }
+    reader.join().map_err(|_| RunError::Failed("could not read claude's output".into()))
+}
+
+/// Runs the interpreter. `binary` is the claude executable; `cwd` is a
+/// neutral directory (Maya's data dir), so no project's CLAUDE.md or
+/// settings load.
+pub fn run(binary: &Path, model: &str, command: &str, cards: &[Card], history: &[(String, String)], cwd: &Path, timeout: Duration) -> Result<Reply, RunError> {
+    std::fs::create_dir_all(cwd).map_err(|e| RunError::Failed(format!("could not create {}: {e}", cwd.display())))?;
+    let mut cmd = Command::new(binary);
+    cmd.args(claude_args(model, &system_prompt(), &user_prompt(command, &board_summary(cards), history))).current_dir(cwd).env_clear().envs(crate::launch::clean_env(std::env::vars()));
+    let out = output_within(cmd, timeout)?;
+    parse_reply(&out).map_err(RunError::Failed)
 }
 
 #[cfg(test)]
@@ -313,6 +369,31 @@ mod tests {
         assert_eq!(f["name"], "hexgrid-d3");
         let st = validate(&serde_json::json!({"kind":"start","dir":"MAYA","prompt":"fix the build"}), &cards, &dirs).unwrap();
         assert_eq!((st["dir"].as_str(), st["prompt"].as_str()), (Some("maya"), Some("fix the build")));
+    }
+
+    #[test]
+    fn the_run_has_no_tools_no_settings_and_only_its_own_system_prompt() {
+        let a = claude_args("haiku", "SYSTEM", "USER");
+        let pair = |flag: &str, value: &str| a.windows(2).any(|w| w[0] == flag && w[1] == value);
+        assert!(pair("--tools", ""), "{a:?}");
+        assert!(pair("--setting-sources", ""), "{a:?}");
+        assert!(pair("--system-prompt", "SYSTEM"), "{a:?}");
+        assert!(pair("--model", "haiku"));
+        assert!(!a.iter().any(|x| x == "--append-system-prompt"), "the Claude Code system prompt must not ride along");
+        assert_eq!(a.last().map(String::as_str), Some("USER"));
+    }
+
+    #[test]
+    fn a_run_past_its_deadline_is_killed_and_reported() {
+        let started = std::time::Instant::now();
+        let mut slow = Command::new("sleep");
+        slow.arg("5");
+        assert_eq!(output_within(slow, Duration::from_millis(200)), Err(RunError::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(2), "the child was killed, not waited for");
+        let mut quick = Command::new("echo");
+        quick.arg("hi");
+        assert_eq!(output_within(quick, Duration::from_secs(5)).unwrap(), "hi\n");
+        assert!(matches!(output_within(Command::new("/no/such/binary"), Duration::from_secs(1)), Err(RunError::Failed(_))));
     }
 
     #[test]

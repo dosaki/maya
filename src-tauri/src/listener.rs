@@ -222,20 +222,25 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     if !started {
         return;
     }
-    let (cards, dirs, model) = {
+    let (cards, dirs, model, maya_dir) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
         let cards = store.refresh(now_ms());
         let dirs = store.config.projects_dir_path().map(|r| launch::list_project_dirs(&r)).unwrap_or_default();
-        (cards, dirs, store.config.interpreter_model.clone())
+        (cards, dirs, store.config.interpreter_model.clone(), store.claude_dir().join("maya"))
     };
     let history = recent_exchanges(app);
     let Some(binary) = launch::claude_binary() else {
         reply_then_idle(app, generation, "I can't find the claude command.");
         return;
     };
-    let reply = match interpreter::run(&binary, &model, cmd, &cards, &history) {
+    let reply = match interpreter::run(&binary, &model, cmd, &cards, &history, &maya_dir, interpreter::TIMEOUT) {
         Ok(r) => r,
+        Err(interpreter::RunError::TimedOut) => {
+            eprintln!("interpreter: timed out");
+            reply_then_idle(app, generation, "Sorry, that took too long.");
+            return;
+        }
         Err(e) => {
             eprintln!("interpreter: {e}");
             reply_then_idle(app, generation, "Sorry, I didn't catch that.");
