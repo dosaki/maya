@@ -56,4 +56,29 @@ describe("settings flow", () => {
     expect(invoke).toHaveBeenCalledWith("set_config", { config: expect.objectContaining({ completedTimeoutMinutes: 45, listen: false }) });
     expect(document.querySelector<HTMLInputElement>("input[name=timeout]")!.value).toBe("45");
   });
+
+  it("repaints on a voice event only when listening changes, so typing survives", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: true, microphone: null, interpreterModel: "haiku" };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+    const onVoice = eventListen.mock.calls.find((c) => c[0] === "voice")![1] as (e: { payload: { listening: boolean } }) => void;
+
+    const typing = document.querySelector<HTMLInputElement>("input[name=projectsDir]")!;
+    typing.value = "/Users/me/de";
+    // Partials arrive several times a second while someone talks nearby.
+    onVoice({ payload: { listening: true } });
+    onVoice({ payload: { listening: true } });
+    expect(document.querySelector("input[name=projectsDir]")).toBe(typing);
+    expect(typing.value).toBe("/Users/me/de");
+
+    onVoice({ payload: { listening: false } });
+    expect(document.querySelector<HTMLInputElement>("input[name=listen]")!.checked).toBe(false);
+  });
 });

@@ -317,7 +317,10 @@ export async function initSettings(): Promise<void> {
 
   // The voice panel can turn listening on or off on its own; mirror that
   // into the model so the Settings checkbox doesn't show a stale state.
+  // Every partial transcript emits `voice`: repaint only when listening
+  // actually changed, or a repaint would wipe a field being typed in.
   await listen<VoiceStatus>("voice", (e) => {
+    if (model.listen === e.payload.listening) return;
     model.listen = e.payload.listening;
     if (!panel.hidden) paint();
   });
