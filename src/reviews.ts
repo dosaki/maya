@@ -1,7 +1,30 @@
 import { formatAge } from "./format";
-import type { ReviewPr, ReviewState } from "./types";
+import { STATE_LABEL, type Card, type ReviewPr, type ReviewState } from "./types";
 
-export type ReviewAction = { kind: "open-pr" | "review"; repo: string; number: number };
+export type ReviewAction = { kind: "open-pr" | "review"; repo: string; number: number } | { kind: "terminal"; repo: string; number: number; pid: number };
+
+/** What the pane needs beyond the PR list to link PRs to live sessions. */
+export interface ReviewContext {
+  cards: Card[];
+  /** The clones directory with `~` expanded, or null when unknown. */
+  clonesDir: string | null;
+}
+
+/**
+ * The live session working on `pr`, if any: one started from the Review
+ * button (named `review <repo> #<n>`), one whose branch has this PR, or one
+ * inside the PR's clone folder. The most recently active match wins.
+ */
+export function relatedSession(pr: ReviewPr, cards: Card[], clonesDir: string | null): Card | null {
+  const repoName = pr.repo.split("/").pop() ?? pr.repo;
+  const name = `review ${repoName} #${pr.number}`;
+  const cloneDir = clonesDir ? `${clonesDir.replace(/\/+$/, "")}/${repoName}-${pr.number}` : null;
+  const matches = cards.filter(
+    (c) => c.name === name || c.pr?.url === pr.url || (cloneDir !== null && (c.cwd === cloneDir || c.cwd.startsWith(`${cloneDir}/`))),
+  );
+  if (matches.length === 0) return null;
+  return matches.sort((a, b) => b.stateSince - a.stateSince)[0];
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const n = document.createElement(tag);
@@ -12,7 +35,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
 
 const REASON_LABEL: Record<ReviewPr["reasons"][number], string> = { review: "review requested", assigned: "assigned" };
 
-export function renderReviewCard(pr: ReviewPr, nowMs: number): HTMLElement {
+export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | null = null): HTMLElement {
   const root = el("article", "pr");
   root.dataset.repo = pr.repo;
   root.dataset.number = String(pr.number);
@@ -26,6 +49,14 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number): HTMLElement {
   const updated = Date.parse(pr.updatedAt);
   root.append(el("div", "pr__meta", `${pr.author} · updated ${Number.isFinite(updated) ? formatAge(updated, nowMs) : "?"} ago · ${pr.repo}`));
   const actions = el("div", "card__actions");
+  if (related) {
+    const term = el("button", "card__btn", "Terminal");
+    term.type = "button";
+    term.dataset.action = "terminal";
+    term.dataset.pid = String(related.pid);
+    term.title = `${related.name} · ${STATE_LABEL[related.state]}`;
+    actions.append(term);
+  }
   const open = el("button", "card__btn", "Open");
   open.type = "button";
   open.dataset.action = "open-pr";
@@ -39,7 +70,7 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number): HTMLElement {
   return root;
 }
 
-export function renderReviews(state: ReviewState, nowMs: number): HTMLElement {
+export function renderReviews(state: ReviewState, nowMs: number, ctx: ReviewContext = { cards: [], clonesDir: null }): HTMLElement {
   const root = el("section", "reviews");
   if (state.error) root.append(el("div", "reviews__error", `GitHub check failed: ${state.error}`));
   if (state.prs.length === 0) {
@@ -47,7 +78,7 @@ export function renderReviews(state: ReviewState, nowMs: number): HTMLElement {
     return root;
   }
   const list = el("div", "reviews__list");
-  for (const pr of state.prs) list.append(renderReviewCard(pr, nowMs));
+  for (const pr of state.prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir)));
   root.append(list);
   return root;
 }
@@ -58,6 +89,9 @@ export function reviewActionFor(target: Element): ReviewAction | null {
   const card = target.closest<HTMLElement>(".pr");
   if (!btn || !card?.dataset.repo || !card.dataset.number) return null;
   const kind = btn.dataset.action;
+  const repo = card.dataset.repo;
+  const number = Number(card.dataset.number);
+  if (kind === "terminal") return { kind, repo, number, pid: Number(btn.dataset.pid) };
   if (kind !== "open-pr" && kind !== "review") return null;
-  return { kind, repo: card.dataset.repo, number: Number(card.dataset.number) };
+  return { kind, repo, number };
 }

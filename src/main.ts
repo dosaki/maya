@@ -23,12 +23,13 @@ let enableTimer: ReturnType<typeof setTimeout> | undefined;
 let known = new Set<string>();
 let pointer: { x: number; y: number } | null = null;
 let reviews: ReviewState = { prs: [], error: null, fetchedAt: null };
+let clonesDir: string | null = null;
 let tabs: ReturnType<typeof makeTabs> | null = null;
 
 function paintReviews(): void {
   const host = document.getElementById("reviews");
   if (!host) return;
-  host.replaceChildren(renderReviews(reviews, Date.now()));
+  host.replaceChildren(renderReviews(reviews, Date.now(), { cards, clonesDir }));
   tabs?.setCount(reviews.prs.length);
 }
 
@@ -36,7 +37,9 @@ async function reviewAction(target: Element): Promise<void> {
   const action = reviewActionFor(target);
   if (!action) return;
   try {
-    if (action.kind === "open-pr") {
+    if (action.kind === "terminal") {
+      await focus(action.pid);
+    } else if (action.kind === "open-pr") {
       await invoke("open_review_pr", { repo: action.repo, number: action.number });
     } else {
       const dir = await invoke<string>("review_pr", { repo: action.repo, number: action.number });
@@ -140,6 +143,10 @@ async function start(): Promise<void> {
     reviews = r;
     paintReviews();
   });
+  void invoke<string>("clones_dir").then((d) => {
+    clonesDir = d;
+    paintReviews();
+  }).catch(() => undefined);
   const board = document.getElementById("board");
   board?.addEventListener("pointerdown", () => guard.setPointerDown(true));
   window.addEventListener("pointerup", () => guard.setPointerDown(false));
@@ -174,6 +181,7 @@ async function start(): Promise<void> {
     for (const id of known) if (!cards.some((c) => c.sessionId === id)) progress.reset(id);
     known = new Set(cards.map((c) => c.sessionId));
     paint();
+    paintReviews();
     refreshModal(cards);
   });
   cards = await invoke<Card[]>("list_sessions");

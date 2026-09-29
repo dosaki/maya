@@ -153,10 +153,21 @@ pub fn resolve_target(projects_root: &Path, clones_root: &Path, name_with_owner:
     ReviewTarget { dir, clone }
 }
 
+/// The name a review session is started with, so the board can tie it back
+/// to its PR: `review <repo> #<number>`.
+pub fn session_name(name_with_owner: &str, number: u64) -> String {
+    let repo_name = name_with_owner.rsplit('/').next().unwrap_or(name_with_owner);
+    format!("review {repo_name} #{number}")
+}
+
 /// The shell line the review terminal runs.
 pub fn shell_command(target: &ReviewTarget, name_with_owner: &str, number: u64) -> String {
     let dir = shell_single_quote(&target.dir.to_string_lossy());
-    let start = format!("cd {dir} && claude -- {}", shell_single_quote(&format!("/should-i-approve PR #{number}")));
+    let start = format!(
+        "cd {dir} && claude --name {} -- {}",
+        shell_single_quote(&session_name(name_with_owner, number)),
+        shell_single_quote(&format!("/should-i-approve PR #{number}"))
+    );
     if target.clone {
         let parent = shell_single_quote(&target.dir.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
         format!("mkdir -p {parent} && gh repo clone {} {dir} && {start}", shell_single_quote(name_with_owner))
@@ -256,8 +267,13 @@ mod tests {
     #[test]
     fn shell_command_clones_when_needed_then_starts_the_review() {
         let plain = shell_command(&ReviewTarget { dir: "/Users/x/dev/bedrock".into(), clone: false }, "Org/bedrock", 451);
-        assert_eq!(plain, "cd '/Users/x/dev/bedrock' && claude -- '/should-i-approve PR #451'");
+        assert_eq!(plain, "cd '/Users/x/dev/bedrock' && claude --name 'review bedrock #451' -- '/should-i-approve PR #451'");
         let cloned = shell_command(&ReviewTarget { dir: "/Users/x/dev/reviews/bedrock-451".into(), clone: true }, "Org/bedrock", 451);
-        assert_eq!(cloned, "mkdir -p '/Users/x/dev/reviews' && gh repo clone 'Org/bedrock' '/Users/x/dev/reviews/bedrock-451' && cd '/Users/x/dev/reviews/bedrock-451' && claude -- '/should-i-approve PR #451'");
+        assert_eq!(cloned, "mkdir -p '/Users/x/dev/reviews' && gh repo clone 'Org/bedrock' '/Users/x/dev/reviews/bedrock-451' && cd '/Users/x/dev/reviews/bedrock-451' && claude --name 'review bedrock #451' -- '/should-i-approve PR #451'");
+    }
+
+    #[test]
+    fn review_session_name_is_predictable() {
+        assert_eq!(session_name("Org/bedrock", 451), "review bedrock #451");
     }
 }

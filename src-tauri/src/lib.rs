@@ -56,6 +56,12 @@ fn poll_reviews(app: &AppHandle) {
     let _ = app.emit("reviews", &snapshot);
 }
 
+/// The clones directory with `~` expanded, so the page can recognise review clones.
+#[tauri::command]
+fn clones_dir(state: TauriState<AppState>) -> String {
+    state.store.lock().unwrap().config.clones_dir_path().to_string_lossy().into_owned()
+}
+
 #[tauri::command(async)]
 fn list_review_prs(state: TauriState<AppState>) -> ReviewState {
     state.reviews.lock().unwrap().clone()
@@ -339,6 +345,7 @@ pub fn run() {
             compact_session,
             open_pr,
             list_review_prs,
+            clones_dir,
             open_review_pr,
             review_pr,
             list_project_dirs,
