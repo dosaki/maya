@@ -540,13 +540,20 @@ fn emit_voice(app: &AppHandle) {
     let _ = app.emit("voice", &status);
 }
 
-fn set_voice(app: &AppHandle, f: impl FnOnce(&mut VoiceStatus)) {
+/// Updates the status and emits it, but only while listener run `generation`
+/// is still current; false means the run was stopped or replaced, and the
+/// caller drops the rest of its turn quietly.
+fn set_voice(app: &AppHandle, generation: u64, f: impl FnOnce(&mut VoiceStatus)) -> bool {
     {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
+        if v.generation != generation {
+            return false;
+        }
         f(&mut v.status);
     }
     emit_voice(app);
+    true
 }
 
 fn remember(app: &AppHandle, who: &str, text: &str) {
@@ -560,10 +567,18 @@ fn remember(app: &AppHandle, who: &str, text: &str) {
 }
 
 /// Speaks a reply to the user now (blocking), with listening paused around it.
-fn reply_aloud(app: &AppHandle, text: &str) {
+/// Blank text says nothing. False when run `generation` is no longer current,
+/// before or after speaking.
+fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
+    if text.trim().is_empty() {
+        return is_current(app, generation);
+    }
     {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
+        if v.generation != generation {
+            return false;
+        }
         if let Some(e) = v.ear.as_mut() {
             e.pause();
         }
@@ -583,9 +598,13 @@ fn reply_aloud(app: &AppHandle, text: &str) {
     notify::speak_now(text, eleven);
     let state = app.state::<AppState>();
     let mut v = state.voice.lock().unwrap();
+    if v.generation != generation {
+        return false;
+    }
     if let Some(e) = v.ear.as_mut() {
         e.resume();
     }
+    true
 }
 
 /// Runs a validated action through the same paths as the page's buttons;
@@ -611,9 +630,10 @@ fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String,
             Ok("Sent.".into())
         }
         "answer" => {
-            let card = state.store.lock().unwrap().card_for(&session, now_ms()).ok_or("Session is no longer running.")?;
+            // The ask the user confirmed, captured at validation: a newer ask is refused.
+            let ask_id = action["askId"].as_u64().ok_or("The question has changed; ask me again.")?;
             let n = action["option"].as_u64().unwrap_or(1) as usize;
-            answer_question(state.clone(), session, card.state_since, 0, n.saturating_sub(1))?;
+            answer_question(state.clone(), session, ask_id, 0, n.saturating_sub(1))?;
             Ok("Answered.".into())
         }
         "resume" => {
@@ -652,12 +672,24 @@ fn recent_exchanges(app: &AppHandle) -> Vec<(String, String)> {
     pairs.split_off(skip)
 }
 
-/// Sends a spoken command to the interpreter and acts on its reply.
-fn interpret(app: &AppHandle, cmd: &str) {
-    set_voice(app, |st| {
+/// Says `text`, then shows idle; both only while run `generation` is current.
+fn reply_then_idle(app: &AppHandle, generation: u64, text: &str) {
+    if reply_aloud(app, generation, text) {
+        set_voice(app, generation, |st| st.state = "idle".into());
+    }
+}
+
+/// Sends a spoken command to the interpreter and acts on its reply. Every
+/// step after the interpreter returns checks that run `generation` is still
+/// current, so a stop while she thinks leaves nothing behind.
+fn interpret(app: &AppHandle, generation: u64, cmd: &str) {
+    let started = set_voice(app, generation, |st| {
         st.state = "thinking".into();
         st.pending = None;
     });
+    if !started {
+        return;
+    }
     let (cards, dirs, model) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
@@ -667,60 +699,85 @@ fn interpret(app: &AppHandle, cmd: &str) {
     };
     let history = recent_exchanges(app);
     let Some(binary) = launch::claude_binary() else {
-        reply_aloud(app, "I can't find the claude command.");
-        set_voice(app, |st| st.state = "idle".into());
+        reply_then_idle(app, generation, "I can't find the claude command.");
         return;
     };
     let reply = match interpreter::run(&binary, &model, cmd, &cards, &history) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("interpreter: {e}");
-            reply_aloud(app, "Sorry, I didn't catch that.");
-            set_voice(app, |st| st.state = "idle".into());
+            reply_then_idle(app, generation, "Sorry, I didn't catch that.");
             return;
         }
     };
+    if !is_current(app, generation) {
+        return;
+    }
     // No action, or only a report: the spoken reply is the whole answer.
     let Some(proposed) = reply.action.as_ref().filter(|a| a["kind"] != "report") else {
-        reply_aloud(app, &reply.say);
-        set_voice(app, |st| st.state = "idle".into());
+        reply_then_idle(app, generation, &reply.say);
         return;
     };
     match interpreter::validate(proposed, &cards, &dirs) {
-        Err(why) => {
-            reply_aloud(app, &why);
-            set_voice(app, |st| st.state = "idle".into());
-        }
+        Err(why) => reply_then_idle(app, generation, &why),
         Ok(action) if interpreter::needs_confirm(&action) => {
-            let say = if reply.say.is_empty() { "Shall I?".to_string() } else { reply.say.clone() };
-            {
+            let say = if reply.say.trim().is_empty() { "Shall I?".to_string() } else { reply.say.clone() };
+            let pending = wake::Pending { say: say.clone(), action };
+            // Stored before the read-back so a tap on the page can answer it.
+            let accepted = {
                 let state = app.state::<AppState>();
                 let mut v = state.voice.lock().unwrap();
-                if let Some(f) = v.flow.as_mut() {
-                    f.set_pending(wake::Pending { say: say.clone(), action }, now_ms());
+                if v.generation != generation {
+                    return;
                 }
-                v.status.pending = Some(say.clone());
+                match v.flow.as_mut() {
+                    Some(f) => {
+                        f.set_pending(pending.clone(), now_ms());
+                        v.status.pending = Some(say.clone());
+                        v.status.state = "awaiting-confirm".into();
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if !accepted {
+                return;
             }
-            set_voice(app, |st| st.state = "awaiting-confirm".into());
-            reply_aloud(app, &say);
+            emit_voice(app);
+            if !reply_aloud(app, generation, &say) {
+                return;
+            }
+            // The confirmation window starts when the read-back ends (the ear
+            // was paused while she spoke), unless it was answered meanwhile.
+            let state = app.state::<AppState>();
+            let mut v = state.voice.lock().unwrap();
+            if v.generation == generation {
+                let now = now_ms();
+                if let Some(f) = v.flow.as_mut().filter(|f| f.state(now) == "awaiting-confirm") {
+                    f.set_pending(pending, now);
+                }
+            }
         }
         Ok(action) => {
             let said = match execute_action(app, &action) {
-                Ok(s) if reply.say.is_empty() => s,
+                Ok(s) if reply.say.trim().is_empty() => s,
                 Ok(_) => reply.say.clone(),
                 Err(e) => e,
             };
-            reply_aloud(app, &said);
-            set_voice(app, |st| st.state = "idle".into());
+            reply_then_idle(app, generation, &said);
         }
     }
 }
 
-/// Handles one final segment from the listener (or a yes/no from the page).
-fn on_heard(app: &AppHandle, text: &str) {
+/// Handles one final segment heard during listener run `generation` (or a
+/// yes/no from the page). Nothing happens once that run is stopped or replaced.
+fn on_heard(app: &AppHandle, generation: u64, text: &str) {
     let effects = {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
+        if v.generation != generation {
+            return;
+        }
         v.status.heard = text.to_string();
         let now = now_ms();
         let effects = match v.flow.as_mut() {
@@ -747,28 +804,35 @@ fn on_heard(app: &AppHandle, text: &str) {
     for e in effects {
         match e {
             wake::Effect::Say(s) => {
-                set_voice(app, |st| st.state = "awaiting-command".into());
-                reply_aloud(app, &s);
+                if !set_voice(app, generation, |st| st.state = "awaiting-command".into()) {
+                    return;
+                }
+                reply_aloud(app, generation, &s);
             }
-            wake::Effect::Interpret(cmd) => interpret(app, &cmd),
+            wake::Effect::Interpret(cmd) => interpret(app, generation, &cmd),
             wake::Effect::Execute(action) => {
-                set_voice(app, |st| {
+                let go = set_voice(app, generation, |st| {
                     st.pending = None;
                     st.state = "thinking".into();
                 });
+                if !go {
+                    return;
+                }
                 let said = match execute_action(app, &action) {
                     Ok(s) => s,
                     Err(e) => e,
                 };
-                reply_aloud(app, &said);
-                set_voice(app, |st| st.state = "idle".into());
+                reply_then_idle(app, generation, &said);
             }
             wake::Effect::Cancelled => {
-                set_voice(app, |st| {
+                let shown = set_voice(app, generation, |st| {
                     st.pending = None;
                     st.state = "idle".into();
                 });
-                reply_aloud(app, "Cancelled.");
+                if !shown {
+                    return;
+                }
+                reply_aloud(app, generation, "Cancelled.");
             }
         }
     }
@@ -781,11 +845,11 @@ fn is_current(app: &AppHandle, generation: u64) -> bool {
 
 /// Starts the sidecar and the thread that reads it, replacing any running one.
 fn start_listening(app: &AppHandle) -> Result<(), String> {
-    let old = {
+    let (generation, old) = {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
         v.generation += 1;
-        v.ear.take()
+        (v.generation, v.ear.take())
     };
     // Ear has no Drop: stop the one being replaced.
     if let Some(mut e) = old {
@@ -795,7 +859,7 @@ fn start_listening(app: &AppHandle) -> Result<(), String> {
     let (ear, rx) = match ear::Ear::spawn(device.as_deref()) {
         Ok(pair) => pair,
         Err(e) => {
-            set_voice(app, |s| {
+            set_voice(app, generation, |s| {
                 s.listening = false;
                 s.state = "error".into();
                 s.detail = e.clone();
@@ -803,17 +867,33 @@ fn start_listening(app: &AppHandle) -> Result<(), String> {
             return Err(e);
         }
     };
-    let generation = {
+    // Install it only if no other start or stop happened while it spawned.
+    let (installed, displaced) = {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
-        v.generation += 1;
-        v.ear = Some(ear);
-        v.flow = Some(wake::Flow::new());
-        v.status.listening = true;
-        v.status.state = "idle".into();
-        v.status.detail.clear();
-        v.generation
+        if v.generation != generation {
+            (Some(ear), None)
+        } else {
+            let displaced = v.ear.replace(ear);
+            v.flow = Some(wake::Flow::new());
+            v.status.listening = true;
+            v.status.state = "idle".into();
+            v.status.detail.clear();
+            v.status.pending = None;
+            v.status.heard.clear();
+            v.status.said.clear();
+            v.status.level = 0.0;
+            (None, displaced)
+        }
     };
+    // Ear has no Drop: stop whichever one is not kept, outside the lock.
+    if let Some(mut e) = displaced {
+        e.stop();
+    }
+    if let Some(mut superseded) = installed {
+        superseded.stop();
+        return Ok(());
+    }
     emit_voice(app);
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -823,11 +903,13 @@ fn start_listening(app: &AppHandle) -> Result<(), String> {
             }
             match ev {
                 ear::EarEvent::Level(l) => {
-                    let state = handle.state::<AppState>();
-                    state.voice.lock().unwrap().status.level = l;
+                    handle.state::<AppState>().voice.lock().unwrap().status.level = l;
+                    let _ = handle.emit("voice-level", l);
                 }
-                ear::EarEvent::Partial(t) => set_voice(&handle, |s| s.heard = t),
-                ear::EarEvent::Final(t) => on_heard(&handle, &t),
+                ear::EarEvent::Partial(t) => {
+                    set_voice(&handle, generation, |s| s.heard = t);
+                }
+                ear::EarEvent::Final(t) => on_heard(&handle, generation, &t),
                 ear::EarEvent::State { state, detail } if state == "error" || state == "exited" => {
                     let wants = handle.state::<AppState>().store.lock().unwrap().config.listen;
                     let (dead, failures) = {
@@ -844,7 +926,7 @@ fn start_listening(app: &AppHandle) -> Result<(), String> {
                     if let Some(mut e) = dead {
                         e.stop();
                     }
-                    set_voice(&handle, |s| {
+                    set_voice(&handle, generation, |s| {
                         s.state = "error".into();
                         s.detail = if detail.is_empty() { "the listener stopped".into() } else { detail.clone() };
                     });
@@ -859,7 +941,17 @@ fn start_listening(app: &AppHandle) -> Result<(), String> {
                     }
                     break;
                 }
-                ear::EarEvent::Device(name) => set_voice(&handle, |s| s.detail = format!("microphone: {name}")),
+                ear::EarEvent::State { state, .. } if state == "listening" => {
+                    // A healthy listener: crashes are counted afresh from here.
+                    let st = handle.state::<AppState>();
+                    let mut v = st.voice.lock().unwrap();
+                    if v.generation == generation {
+                        v.failures = 0;
+                    }
+                }
+                ear::EarEvent::Device(name) => {
+                    set_voice(&handle, generation, |s| s.detail = format!("microphone: {name}"));
+                }
                 _ => {}
             }
         }
@@ -892,6 +984,7 @@ fn voice_listen(app: AppHandle, state: TauriState<AppState>, on: bool) -> Result
         config::save(&store.config_path(), &store.config)?;
     }
     if on {
+        state.voice.lock().unwrap().failures = 0;
         start_listening(&app)
     } else {
         stop_listening(&app);
@@ -899,9 +992,18 @@ fn voice_listen(app: AppHandle, state: TauriState<AppState>, on: bool) -> Result
     }
 }
 
+/// The page's yes/no buttons; ignored unless a confirmation is waiting.
 #[tauri::command(async)]
 fn voice_confirm(app: AppHandle, yes: bool) {
-    on_heard(&app, if yes { "yes" } else { "no" });
+    let generation = {
+        let state = app.state::<AppState>();
+        let v = state.voice.lock().unwrap();
+        match v.flow.as_ref() {
+            Some(f) if f.state(now_ms()) == "awaiting-confirm" => v.generation,
+            _ => return,
+        }
+    };
+    on_heard(&app, generation, if yes { "yes" } else { "no" });
 }
 
 #[tauri::command]

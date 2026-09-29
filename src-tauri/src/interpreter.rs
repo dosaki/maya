@@ -129,6 +129,8 @@ pub fn validate(action: &Value, cards: &[Card], dirs: &[String]) -> Result<Value
                 if n == 0 || n > count {
                     return Err(format!("{} has no option {n}", c.name));
                 }
+                // The ask this answer was meant for; a newer ask refuses it later.
+                a["askId"] = Value::from(c.state_since);
             }
             if kind == "reply" && a["text"].as_str().map_or(true, |t| t.trim().is_empty()) {
                 return Err("There was nothing to send".into());
@@ -233,8 +235,10 @@ mod tests {
         let mut c = card("a", "hexgrid-d3", State::Awaiting, Some("Which?"));
         c.awaiting.as_mut().unwrap().kind = AwaitKind::Question;
         c.awaiting.as_mut().unwrap().questions = vec![Question { question: "Which?".into(), header: "H".into(), multi_select: false, options: vec![Choice { label: "A".into(), description: "".into() }, Choice { label: "B".into(), description: "".into() }] }];
+        c.state_since = 1234;
         let cards = vec![c];
         assert_eq!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &[]).unwrap()["option"], 2);
+        assert_eq!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &[]).unwrap()["askId"], 1234, "the ask id is captured when the action is validated");
         assert!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":3}), &cards, &[]).unwrap_err().contains("option"));
     }
 
