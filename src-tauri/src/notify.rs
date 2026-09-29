@@ -78,26 +78,45 @@ fn voice() -> Option<String> {
         .clone()
 }
 
-static SPEECH: OnceLock<Mutex<mpsc::Sender<String>>> = OnceLock::new();
+/// A line to speak and the voice to use for it, decided when it is queued.
+pub struct Utterance {
+    pub text: String,
+    /// ElevenLabs (maya dir, key, voice id) when configured; None for the built-in voice.
+    pub eleven: Option<(std::path::PathBuf, String, String)>,
+}
 
-/// Queues `text` for the system voice. Lines are spoken one after another
-/// on a background thread, so the board never waits and voices never overlap.
-pub fn speak(text: String) {
+static SPEECH: OnceLock<Mutex<mpsc::Sender<Utterance>>> = OnceLock::new();
+
+/// Speaks with the built-in female voice.
+pub fn say_builtin(line: &str) {
+    let mut cmd = Command::new("say");
+    if let Some(v) = voice() {
+        cmd.args(["-v", &v]);
+    }
+    let _ = cmd.arg(line).status();
+}
+
+/// Queues an utterance. Lines are spoken one after another on a background
+/// thread, so the board never waits and voices never overlap. An ElevenLabs
+/// failure falls back to the built-in voice for that line.
+pub fn speak(u: Utterance) {
     let tx = SPEECH.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<String>();
+        let (tx, rx) = mpsc::channel::<Utterance>();
         std::thread::spawn(move || {
-            for line in rx {
-                let mut cmd = Command::new("say");
-                if let Some(v) = voice() {
-                    cmd.args(["-v", &v]);
+            for u in rx {
+                let spoken = match &u.eleven {
+                    Some((dir, key, voice_id)) => crate::voice::speak(dir, key, voice_id, &u.text).is_ok(),
+                    None => false,
+                };
+                if !spoken {
+                    say_builtin(&u.text);
                 }
-                let _ = cmd.arg(&line).status();
             }
         });
         Mutex::new(tx)
     });
     if let Ok(tx) = tx.lock() {
-        let _ = tx.send(text);
+        let _ = tx.send(u);
     }
 }
 

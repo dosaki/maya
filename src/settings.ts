@@ -7,7 +7,17 @@ export interface SettingsModel {
   clonesDir: string;
   notifyOnAwaiting: boolean;
   speakNotifications: boolean;
+  voiceProvider: VoiceProvider;
+  elevenKeySet: boolean;
+  elevenVoices: ElevenVoice[];
+  elevenVoiceId: string;
   error: string | null;
+}
+
+export type VoiceProvider = "builtin" | "elevenlabs";
+export interface ElevenVoice {
+  voiceId: string;
+  name: string;
 }
 
 export interface SettingsHandlers {
@@ -18,6 +28,10 @@ export interface SettingsHandlers {
   onNotify(enabled: boolean): void;
   onClonesDir(path: string): void;
   onSpeak(enabled: boolean): void;
+  onVoiceProvider(provider: VoiceProvider): void;
+  onElevenKey(key: string): void;
+  onElevenVoice(voiceId: string): void;
+  onTryVoice(): void;
 }
 
 interface ConfigJson {
@@ -26,6 +40,8 @@ interface ConfigJson {
   clonesDir?: string | null;
   notifyOnAwaiting: boolean;
   speakNotifications: boolean;
+  voiceProvider: VoiceProvider;
+  elevenlabsVoiceId?: string | null;
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLElement {
@@ -112,6 +128,61 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
   root.append(speakLabel);
 
+  const providerLabel = document.createElement("label");
+  providerLabel.textContent = "Voice";
+  const provider = document.createElement("select");
+  provider.name = "voiceProvider";
+  for (const [v, text] of [["builtin", "Samantha (built in)"], ["elevenlabs", "ElevenLabs"]] as const) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = text;
+    provider.append(o);
+  }
+  provider.value = model.voiceProvider;
+  provider.addEventListener("change", () => h.onVoiceProvider(provider.value === "elevenlabs" ? "elevenlabs" : "builtin"));
+  providerLabel.append(provider);
+  root.append(providerLabel);
+
+  if (model.voiceProvider === "elevenlabs") {
+    const keyLabel = document.createElement("label");
+    keyLabel.textContent = "ElevenLabs API key";
+    const key = document.createElement("input");
+    key.type = "password";
+    key.name = "elevenKey";
+    key.placeholder = model.elevenKeySet ? "saved in Keychain; paste to replace" : "paste your key";
+    key.autocomplete = "off";
+    key.addEventListener("change", () => {
+      const k = key.value.trim();
+      if (k) h.onElevenKey(k);
+      key.value = "";
+    });
+    keyLabel.append(key);
+    root.append(keyLabel);
+
+    const voiceLabel = document.createElement("label");
+    voiceLabel.textContent = "ElevenLabs voice";
+    const voice = document.createElement("select");
+    voice.name = "elevenVoice";
+    for (const v of model.elevenVoices) {
+      const o = document.createElement("option");
+      o.value = v.voiceId;
+      o.textContent = v.name;
+      voice.append(o);
+    }
+    voice.value = model.elevenVoices.some((v) => v.voiceId === model.elevenVoiceId) ? model.elevenVoiceId : (model.elevenVoices[0]?.voiceId ?? "");
+    voice.disabled = model.elevenVoices.length === 0;
+    voice.addEventListener("change", () => h.onElevenVoice(voice.value));
+    voiceLabel.append(voice);
+    root.append(voiceLabel);
+  }
+
+  const tryBtn = document.createElement("button");
+  tryBtn.type = "button";
+  tryBtn.dataset.action = "try-voice";
+  tryBtn.textContent = "Try the voice";
+  tryBtn.addEventListener("click", () => h.onTryVoice());
+  root.append(tryBtn);
+
   if (model.error) {
     const err = document.createElement("div");
     err.className = "settings__error";
@@ -126,17 +197,26 @@ export async function initSettings(): Promise<void> {
   const toggle = document.getElementById("settings-toggle");
   if (!panel || !toggle) return;
 
-  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, error: null };
+  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null };
+
+  const loadVoices = async () => {
+    if (model.voiceProvider !== "elevenlabs") return;
+    model.elevenKeySet = await invoke<boolean>("has_elevenlabs_key");
+    if (!model.elevenKeySet) return;
+    model.elevenVoices = await invoke<ElevenVoice[]>("list_elevenlabs_voices");
+  };
 
   const saveConfig = async (patch: Partial<ConfigJson>) => {
     const c = await invoke<ConfigJson>("set_config", {
-      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, clonesDir: model.clonesDir || null, notifyOnAwaiting: model.notifyOnAwaiting, speakNotifications: model.speakNotifications, ...patch },
+      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, clonesDir: model.clonesDir || null, notifyOnAwaiting: model.notifyOnAwaiting, speakNotifications: model.speakNotifications, voiceProvider: model.voiceProvider, elevenlabsVoiceId: model.elevenVoiceId || null, ...patch },
     });
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
     model.clonesDir = c.clonesDir ?? "";
     model.notifyOnAwaiting = c.notifyOnAwaiting;
     model.speakNotifications = c.speakNotifications;
+    model.voiceProvider = c.voiceProvider;
+    model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
   };
 
   const paint = () => panel.replaceChildren(renderSettings(model, handlers));
@@ -159,6 +239,10 @@ export async function initSettings(): Promise<void> {
     onNotify: (enabled) => void run(() => saveConfig({ notifyOnAwaiting: enabled })),
     onClonesDir: (path) => void run(() => saveConfig({ clonesDir: path || null })),
     onSpeak: (enabled) => void run(() => saveConfig({ speakNotifications: enabled })),
+    onVoiceProvider: (provider) => void run(async () => { await saveConfig({ voiceProvider: provider }); await loadVoices(); }),
+    onElevenKey: (key) => void run(async () => { await invoke("set_elevenlabs_key", { key }); await loadVoices(); }),
+    onElevenVoice: (voiceId) => void run(() => saveConfig({ elevenlabsVoiceId: voiceId || null })),
+    onTryVoice: () => void run(() => invoke("try_voice")),
   };
 
   toggle.addEventListener("click", () => {
@@ -173,5 +257,8 @@ export async function initSettings(): Promise<void> {
     model.clonesDir = config.clonesDir ?? "";
     model.notifyOnAwaiting = config.notifyOnAwaiting;
     model.speakNotifications = config.speakNotifications;
+    model.voiceProvider = config.voiceProvider;
+    model.elevenVoiceId = config.elevenlabsVoiceId ?? "";
+    await loadVoices();
   });
 }

@@ -109,7 +109,8 @@ body { margin: 0; background: var(--bg); }
 .modal__banner { flex-wrap: wrap; }
 .modal__banner .options { flex-basis: 100%; }
 .options__warn { font-size: 11.5px; color: var(--awaiting); margin-top: 6px; }
-.settings input[name=projectsDir] { width: 160px; }
+.settings input[name=projectsDir], .settings input[name=elevenKey], .settings select[name=elevenVoice] { width: 160px; }
+.settings select { padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
 
 .column__head { gap: 8px; }
 .column__add { margin-left: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; width: 24px; height: 24px; line-height: 1; font-size: 16px; color: var(--text); cursor: pointer; padding: 0; }

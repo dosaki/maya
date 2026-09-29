@@ -15,6 +15,12 @@ pub struct Config {
     /// voice instead of playing the notification sound.
     #[serde(default = "default_true")]
     pub speak_notifications: bool,
+    /// Which voice speaks: the built-in one or ElevenLabs.
+    #[serde(default)]
+    pub voice_provider: crate::voice::VoiceProvider,
+    /// The ElevenLabs voice to use; the key itself lives in the Keychain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_voice_id: Option<String>,
     /// Where PR review clones go when the project checkout is missing or busy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clones_dir: Option<String>,
@@ -28,7 +34,7 @@ fn default_true() -> bool {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { completed_timeout_minutes: 30, projects_dir: None, notify_on_awaiting: true, speak_notifications: true, clones_dir: None }
+        Self { completed_timeout_minutes: 30, projects_dir: None, notify_on_awaiting: true, speak_notifications: true, voice_provider: Default::default(), elevenlabs_voice_id: None, clones_dir: None }
     }
 }
 
@@ -115,6 +121,18 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "speakNotifications": false}"#).unwrap();
         assert!(!c.speak_notifications);
         assert!(serde_json::to_string(&c).unwrap().contains("\"speakNotifications\":false"));
+    }
+
+    #[test]
+    fn voice_provider_defaults_to_builtin_and_round_trips() {
+        assert_eq!(Config::default().voice_provider, crate::voice::VoiceProvider::Builtin);
+        assert!(Config::default().elevenlabs_voice_id.is_none());
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "voiceProvider": "elevenlabs", "elevenlabsVoiceId": "abc"}"#).unwrap();
+        assert_eq!(c.voice_provider, crate::voice::VoiceProvider::Elevenlabs);
+        assert_eq!(c.elevenlabs_voice_id.as_deref(), Some("abc"));
+        let text = serde_json::to_string(&c).unwrap();
+        assert!(text.contains("\"voiceProvider\":\"elevenlabs\""));
+        assert!(text.contains("\"elevenlabsVoiceId\":\"abc\""));
     }
 
     #[test]

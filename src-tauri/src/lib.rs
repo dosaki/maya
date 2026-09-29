@@ -21,6 +21,7 @@ pub mod reviews;
 pub mod state;
 pub mod store;
 pub mod transcript;
+pub mod voice;
 pub mod watcher;
 
 use config::Config;
@@ -110,11 +111,24 @@ fn claude_dir() -> std::path::PathBuf {
     dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")).join(".claude")
 }
 
+/// The ElevenLabs settings for one utterance, when the provider is chosen
+/// and both a key and a voice exist; else None for the built-in voice.
+fn eleven_settings(store: &Store) -> Option<(std::path::PathBuf, String, String)> {
+    let cfg = &store.config;
+    let key = voice::load_key();
+    if !voice::use_elevenlabs(cfg.voice_provider, key.is_some(), cfg.elevenlabs_voice_id.as_deref()) {
+        return None;
+    }
+    Some((store.claude_dir().join("maya"), key?, cfg.elevenlabs_voice_id.clone()?))
+}
+
 fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify, speak) = {
+    let (cards, wants_notify, speak, eleven) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
-        (store.refresh(now_ms()), store.config.notify_on_awaiting, store.config.speak_notifications)
+        let cards = store.refresh(now_ms());
+        let eleven = if store.config.speak_notifications { eleven_settings(&store) } else { None };
+        (cards, store.config.notify_on_awaiting, store.config.speak_notifications, eleven)
     };
     // Track every refresh so a toggle-on later does not replay old events.
     let (fresh, finished) = {
@@ -128,14 +142,14 @@ fn refresh_and_emit(app: &AppHandle) {
             notify::notify(c, !speak);
             if speak {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(line);
+                    notify::speak(notify::Utterance { text: line, eleven: eleven.clone() });
                 }
             }
         }
         if speak {
             for c in &finished {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(line);
+                    notify::speak(notify::Utterance { text: line, eleven: eleven.clone() });
                 }
             }
         }
@@ -409,6 +423,41 @@ fn remove_hook(state: TauriState<AppState>) -> Result<bool, String> {
     hook_install::status(&dir)
 }
 
+/// Stores the ElevenLabs key in the Keychain.
+#[tauri::command(async)]
+fn set_elevenlabs_key(key: String) -> Result<(), String> {
+    voice::store_key(&key)
+}
+
+#[tauri::command(async)]
+fn has_elevenlabs_key() -> bool {
+    voice::load_key().is_some()
+}
+
+/// The account's voices, needing a stored key.
+#[tauri::command(async)]
+fn list_elevenlabs_voices() -> Result<Vec<voice::Voice>, String> {
+    let key = voice::load_key().ok_or("Save an ElevenLabs API key first.")?;
+    voice::list_voices(&key)
+}
+
+/// Speaks a sample line with the current voice settings.
+#[tauri::command(async)]
+fn try_voice(state: TauriState<AppState>) -> Result<(), String> {
+    let eleven = {
+        let store = state.store.lock().unwrap();
+        eleven_settings(&store)
+    };
+    let line = "Maya here. hexgrid needs a decision".to_string();
+    match eleven {
+        Some((dir, key, voice_id)) => voice::speak(&dir, &key, &voice_id, &line),
+        None => {
+            notify::say_builtin(&line);
+            Ok(())
+        }
+    }
+}
+
 #[tauri::command]
 fn get_config(state: TauriState<AppState>) -> Config {
     state.store.lock().unwrap().config.clone()
@@ -466,7 +515,11 @@ pub fn run() {
             install_hook,
             remove_hook,
             get_config,
-            set_config
+            set_config,
+            set_elevenlabs_key,
+            has_elevenlabs_key,
+            list_elevenlabs_voices,
+            try_voice
         ])
         .setup(move |app| {
             focus::install_app_handle(app.handle().clone());
