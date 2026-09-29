@@ -15,14 +15,17 @@
             <span class="tab__count tab__count--idle" data-count="idle"></span><span class="tab__count tab__count--working" data-count="working"></span><span class="tab__count tab__count--awaiting" data-count="awaiting"></span><span class="tab__count tab__count--completed" data-count="completed"></span>
           </button>
           <button class="tab" type="button" role="tab" data-tab="reviews">Pull Requests <span class="tab__count" id="reviews-count"></span></button>
+          <span class="tabs__spacer"></span>
+          <span id="voice-host"></span>
+          <button class="tab" type="button" role="tab" data-tab="debug">Debug</button>
+          <button class="tab" type="button" role="tab" data-tab="settings">Settings</button>
         </nav>
-        <span id="voice-host"></span>
-        <button class="topbar__settings" id="settings-toggle" type="button">Settings</button>
       </header>
       <div id="board"></div>
       <div id="reviews" hidden></div>
-      <aside id="settings" class="settings" hidden></aside>
-      <aside id="voice-panel" class="settings" hidden></aside>
+      <div id="debug" class="pane" hidden></div>
+      <div id="settings" class="settings pane" hidden></div>
+      <aside id="voice-panel" class="settings popover" hidden></aside>
       <div id="modal-host"></div>
       <div id="toast" class="toast" hidden></div>
     </div>

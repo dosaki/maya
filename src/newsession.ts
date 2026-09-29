@@ -211,7 +211,7 @@ function paint(): void {
       onClose: closeNewSession,
       onOpenSettings: () => {
         closeNewSession();
-        document.getElementById("settings-toggle")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        document.querySelector<HTMLElement>("[data-tab=settings]")?.click();
       },
     }),
   );

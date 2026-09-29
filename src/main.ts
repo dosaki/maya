@@ -15,6 +15,7 @@ import { initSettings } from "./settings";
 import { showToast } from "./toast";
 import type { Card, ReviewState } from "./types";
 import { initVoice } from "./voice";
+import { initDebug } from "./debug";
 
 let cards: Card[] = [];
 const guard = makeClickGuard();
@@ -136,6 +137,7 @@ async function answer(card: Card, questionIndex: number, optionIndex: number, bu
 async function start(): Promise<void> {
   void initSettings();
   void initVoice();
+  void initDebug();
   tabs = makeTabs();
   document.getElementById("reviews")?.addEventListener("click", (ev) => void reviewAction(ev.target as Element));
   await listen<ReviewState>("reviews", (e) => {

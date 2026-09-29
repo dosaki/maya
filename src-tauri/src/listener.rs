@@ -5,7 +5,7 @@
 //! while the interpreter runs; take what is needed, release, then act.
 
 use crate::store::now_ms;
-use crate::{answer, config, ear, eleven_settings, focus, interpreter, launch, notify, wake};
+use crate::{answer, config, ear, eleven_settings, focus, interpreter, launch, log, notify, wake};
 use crate::{answer_question, list_resumable_sessions, resume_session, send_reply, start_session, type_into_session, AppState};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
@@ -246,30 +246,34 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     let reply = match interpreter::run(&binary, &model, cmd, &cards, &history, &maya_dir, interpreter::TIMEOUT) {
         Ok(r) => r,
         Err(interpreter::RunError::TimedOut) => {
-            eprintln!("interpreter: timed out");
             reply_then_idle(app, generation, "Sorry, that took too long.");
             return;
         }
-        Err(e) => {
-            eprintln!("interpreter: {e}");
+        Err(_) => {
             reply_then_idle(app, generation, "Sorry, I didn't catch that.");
             return;
         }
     };
     if !is_current(app, generation) {
+        log::line("listener", "run replaced while thinking; reply dropped");
         return;
     }
     // No action, or only a report: the spoken reply is the whole answer.
     let Some(proposed) = reply.action.as_ref().filter(|a| a["kind"] != "report") else {
+        log::line("action", "report only; nothing to run");
         reply_then_idle(app, generation, &reply.say);
         return;
     };
     match interpreter::validate(proposed, &cards, &dirs) {
-        Err(why) => reply_then_idle(app, generation, &why),
+        Err(why) => {
+            log::line("action", format!("rejected: {why}"));
+            reply_then_idle(app, generation, &why)
+        }
         Ok(action) if interpreter::needs_confirm(&action) => {
             // The read-back is what will run, never the model's `say`, so a
             // yes always confirms the action the user heard.
             let say = spoken_for(&action).unwrap_or_else(|| "Shall I?".into());
+            log::line("action", format!("needs confirmation: {action}"));
             let pending = wake::Pending { say: say.clone(), action };
             // Stored before the read-back so a tap on the page can answer it.
             let accepted = {
@@ -301,7 +305,10 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
             // who spoke before the read-back must say it again, which is
             // safer than a stray word confirming.
             if let Some(inbox) = inbox {
-                inbox.discard_heard();
+                let n = inbox.discard_heard();
+                if n > 0 {
+                    log::line("listener", format!("discarded {n} segment(s) heard before the read-back ended"));
+                }
             }
             // The confirmation window starts when the read-back ends (the ear
             // was paused while she spoke), unless it was answered meanwhile.
@@ -316,9 +323,13 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
         }
         Ok(action) => {
             // Focus and compact run at once and say what they did.
+            log::line("action", format!("running now: {action}"));
             let said = match execute_action(app, &action) {
                 Ok(s) => spoken_for(&action).unwrap_or(s),
-                Err(e) => e,
+                Err(e) => {
+                    log::line("action", format!("failed: {e}"));
+                    e
+                }
             };
             reply_then_idle(app, generation, &said);
         }
@@ -336,10 +347,12 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>)
         }
         v.status.heard = text.to_string();
         let now = now_ms();
+        let before = v.flow.as_ref().map_or("none", |f| f.state(now)).to_string();
         let effects = match v.flow.as_mut() {
             Some(f) => f.on_segment(text, now),
             None => vec![],
         };
+        log::line("wake", format!("heard ({before}): {text:?} → {}", describe_effects(&effects)));
         // Nothing to do, but a pending confirmation may still be waiting
         // (chatter, or her own line heard back): show the flow's state.
         // When not listening, "off" or "error" stays as it is.
@@ -376,9 +389,13 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>)
                 if !go {
                     return;
                 }
+                log::line("action", format!("confirmed, running: {action}"));
                 let said = match execute_action(app, &action) {
                     Ok(s) => s,
-                    Err(e) => e,
+                    Err(e) => {
+                        log::line("action", format!("failed: {e}"));
+                        e
+                    }
                 };
                 reply_then_idle(app, generation, &said);
             }
@@ -416,13 +433,17 @@ impl Inbox {
 
     /// Discards every transcript and level event queued so far; state and
     /// device events are kept for `next`.
-    pub(crate) fn discard_heard(&self) {
+    /// Returns how many final segments were thrown away.
+    pub(crate) fn discard_heard(&self) -> usize {
+        let mut finals = 0;
         while let Ok(ev) = self.rx.try_recv() {
             match ev {
-                ear::EarEvent::Partial(_) | ear::EarEvent::Final(_) | ear::EarEvent::Level(_) => {}
+                ear::EarEvent::Final(_) => finals += 1,
+                ear::EarEvent::Partial(_) | ear::EarEvent::Level(_) => {}
                 other => self.kept.borrow_mut().push_back(other),
             }
         }
+        finals
     }
 }
 
@@ -444,9 +465,11 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
         e.stop();
     }
     let device = app.state::<AppState>().store.lock().unwrap().config.microphone.clone();
+    log::line("listener", format!("starting run {generation} (microphone: {})", device.as_deref().unwrap_or("automatic")));
     let (ear, rx) = match ear::Ear::spawn(device.as_deref()) {
         Ok(pair) => pair,
         Err(e) => {
+            log::line("listener", format!("could not start the sidecar: {e}"));
             set_voice(app, generation, |s| {
                 s.listening = false;
                 s.state = "error".into();
@@ -500,6 +523,7 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
                     set_voice(&handle, generation, |s| s.heard = t);
                 }
                 ear::EarEvent::Final(t) => {
+                    log::line("ear", format!("final: {t:?}"));
                     if !heard_any {
                         // The first segment of a run shows it is healthy:
                         // crashes are counted afresh from here.
@@ -513,6 +537,7 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
                     on_heard(&handle, generation, &t, Some(&inbox));
                 }
                 ear::EarEvent::State { state, detail } if state == "error" || state == "exited" => {
+                    log::line("ear", format!("{state}: {}", if detail.is_empty() { "(no detail)" } else { detail.as_str() }));
                     let wants = handle.state::<AppState>().store.lock().unwrap().config.listen;
                     let (dead, failures) = {
                         let st = handle.state::<AppState>();
@@ -534,6 +559,7 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
                     });
                     if wants {
                         if let Some(delay) = ear::restart_delay_ms(failures - 1) {
+                            log::line("listener", format!("restart {failures} in {delay} ms"));
                             std::thread::sleep(Duration::from_millis(delay));
                             let still_wanted = handle.state::<AppState>().store.lock().unwrap().config.listen;
                             if still_wanted && is_current(&handle, generation) {
@@ -544,7 +570,11 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
                     break;
                 }
                 ear::EarEvent::Device(name) => {
+                    log::line("ear", format!("microphone: {name}"));
                     set_voice(&handle, generation, |s| s.detail = format!("microphone: {name}"));
+                }
+                ear::EarEvent::State { state, detail } => {
+                    log::line("ear", if detail.is_empty() { state } else { format!("{state}: {detail}") });
                 }
                 _ => {}
             }
@@ -554,6 +584,7 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
 }
 
 fn stop_listening(app: &AppHandle) {
+    log::line("listener", "stopping");
     let dead = {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
@@ -634,6 +665,23 @@ pub(crate) fn voice_selftest() -> Result<String, String> {
 /// after the wake word, or the yes or no she recognised. Never the raw
 /// segment, which can hold talk from before the wake word; the history goes
 /// to the model, and only the command text may.
+/// One line for the log: what the flow decided to do with a segment.
+pub(crate) fn describe_effects(effects: &[wake::Effect]) -> String {
+    if effects.is_empty() {
+        return "nothing".into();
+    }
+    effects
+        .iter()
+        .map(|e| match e {
+            wake::Effect::Say(s) => format!("say {s:?}"),
+            wake::Effect::Interpret(c) => format!("command {c:?}"),
+            wake::Effect::Execute(a) => format!("confirmed {}", a["kind"].as_str().unwrap_or("?")),
+            wake::Effect::Cancelled => "cancelled".into(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub(crate) fn user_turn(effects: &[wake::Effect]) -> Option<String> {
     effects.iter().find_map(|e| match e {
         wake::Effect::Interpret(cmd) => Some(cmd.clone()),

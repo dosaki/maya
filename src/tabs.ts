@@ -1,21 +1,25 @@
 import { STATE_LABEL, type CardState } from "./types";
 
-export type Tab = "sessions" | "reviews";
+export type Tab = "sessions" | "reviews" | "debug" | "settings";
 
 const KEY = "maya.tab";
-const PANES: Record<Tab, string> = { sessions: "board", reviews: "reviews" };
+const PANES: Record<Tab, string> = { sessions: "board", reviews: "reviews", debug: "debug", settings: "settings" };
+
+function asTab(v: string | null | undefined): Tab {
+  return v === "reviews" || v === "debug" || v === "settings" ? v : "sessions";
+}
 
 function stored(): Tab {
   try {
-    const v = localStorage.getItem(KEY);
-    return v === "reviews" ? "reviews" : "sessions";
+    return asTab(localStorage.getItem(KEY));
   } catch {
     return "sessions";
   }
 }
 
 /**
- * Two panes, one visible. Sessions is the default; the choice is remembered
+ * Four panes, one visible: Sessions and Pull Requests on the left, Debug and
+ * Settings on the right. Sessions is the default; the choice is remembered
  * per browser. Switching only toggles `hidden`, so the board keeps its
  * scroll positions and the session watcher keeps running underneath.
  */
@@ -38,7 +42,7 @@ export function makeTabs() {
     }
   };
   for (const btn of document.querySelectorAll<HTMLElement>("[data-tab]")) {
-    btn.addEventListener("click", () => show(btn.dataset.tab === "reviews" ? "reviews" : "sessions"));
+    btn.addEventListener("click", () => show(asTab(btn.dataset.tab)));
   }
   show(current);
   return {

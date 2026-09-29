@@ -250,8 +250,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
 
 export async function initSettings(): Promise<void> {
   const panel = document.getElementById("settings");
-  const toggle = document.getElementById("settings-toggle");
-  if (!panel || !toggle) return;
+  if (!panel) return;
 
   const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" };
 
@@ -310,10 +309,6 @@ export async function initSettings(): Promise<void> {
     onMicrophone: (name) => void run(() => saveConfig({ microphone: name || null })),
     onInterpreter: (m) => void run(() => saveConfig({ interpreterModel: m })),
   };
-
-  toggle.addEventListener("click", () => {
-    panel.hidden = !panel.hidden;
-  });
 
   // The voice panel can turn listening on or off on its own; mirror that
   // into the model so the Settings checkbox doesn't show a stale state.

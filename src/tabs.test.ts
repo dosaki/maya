@@ -3,8 +3,8 @@ import { makeTabs } from "./tabs";
 
 function dom() {
   document.body.innerHTML = `
-    <nav><button data-tab="sessions">Sessions <span class="tab__count tab__count--idle" data-count="idle"></span><span class="tab__count tab__count--working" data-count="working"></span><span class="tab__count tab__count--awaiting" data-count="awaiting"></span><span class="tab__count tab__count--completed" data-count="completed"></span></button><button data-tab="reviews">Pull Requests <span id="reviews-count"></span></button></nav>
-    <div id="board"></div><div id="reviews" hidden></div>`;
+    <nav><button data-tab="sessions">Sessions <span class="tab__count tab__count--idle" data-count="idle"></span><span class="tab__count tab__count--working" data-count="working"></span><span class="tab__count tab__count--awaiting" data-count="awaiting"></span><span class="tab__count tab__count--completed" data-count="completed"></span></button><button data-tab="reviews">Pull Requests <span id="reviews-count"></span></button><button data-tab="debug">Debug</button><button data-tab="settings">Settings</button></nav>
+    <div id="board"></div><div id="reviews" hidden></div><div id="debug" hidden></div><div id="settings" hidden></div>`;
 }
 
 describe("makeTabs", () => {
@@ -24,6 +24,21 @@ describe("makeTabs", () => {
     expect(document.getElementById("board")!.hidden).toBe(true);
     expect(document.getElementById("reviews")!.hidden).toBe(false);
     expect(document.querySelector("[data-tab=reviews]")?.classList.contains("tab--active")).toBe(true);
+  });
+
+  it("shows the Debug and Settings panes as tabs, hiding the others", () => {
+    const tabs = makeTabs();
+    document.querySelector<HTMLButtonElement>("[data-tab=settings]")!.click();
+    expect(tabs.current()).toBe("settings");
+    expect(document.getElementById("settings")!.hidden).toBe(false);
+    expect(document.getElementById("board")!.hidden).toBe(true);
+    expect(document.getElementById("debug")!.hidden).toBe(true);
+    document.querySelector<HTMLButtonElement>("[data-tab=debug]")!.click();
+    expect(tabs.current()).toBe("debug");
+    expect(document.getElementById("debug")!.hidden).toBe(false);
+    expect(document.getElementById("settings")!.hidden).toBe(true);
+    dom();
+    expect(makeTabs().current()).toBe("debug");
   });
 
   it("remembers the chosen tab across restarts, but never a bad value", () => {

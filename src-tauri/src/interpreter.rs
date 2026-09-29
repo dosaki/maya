@@ -244,10 +244,20 @@ pub fn output_within(mut cmd: Command, timeout: Duration) -> Result<String, RunE
 /// settings load.
 pub fn run(binary: &Path, model: &str, command: &str, cards: &[Card], history: &[(String, String)], cwd: &Path, timeout: Duration) -> Result<Reply, RunError> {
     std::fs::create_dir_all(cwd).map_err(|e| RunError::Failed(format!("could not create {}: {e}", cwd.display())))?;
+    let summary = board_summary(cards);
+    let prompt = user_prompt(command, &summary, history);
+    crate::log::line("interpreter", format!("asking {model}: {command}\nboard:\n{summary}\nrecent exchanges: {}", history.len()));
     let mut cmd = Command::new(binary);
-    cmd.args(claude_args(model, &system_prompt(), &user_prompt(command, &board_summary(cards), history))).current_dir(cwd).env_clear().envs(crate::launch::clean_env(std::env::vars()));
-    let out = output_within(cmd, timeout)?;
-    parse_reply(&out).map_err(RunError::Failed)
+    cmd.args(claude_args(model, &system_prompt(), &prompt)).current_dir(cwd).env_clear().envs(crate::launch::clean_env(std::env::vars()));
+    let started = std::time::Instant::now();
+    let out = output_within(cmd, timeout).inspect_err(|e| crate::log::line("interpreter", format!("failed after {:.1}s: {e}", started.elapsed().as_secs_f32())))?;
+    let ms = started.elapsed().as_millis();
+    let reply = parse_reply(&out).map_err(RunError::Failed);
+    match &reply {
+        Ok(r) => crate::log::line("interpreter", format!("reply in {ms} ms: say={:?} action={} confirm={}", r.say, r.action.as_ref().map_or("null".to_string(), |a| a.to_string()), r.confirm)),
+        Err(e) => crate::log::line("interpreter", format!("unusable reply in {ms} ms: {e}\nraw: {}", crate::log::clip(&out, 1500))),
+    }
+    reply
 }
 
 #[cfg(test)]

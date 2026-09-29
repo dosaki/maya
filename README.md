@@ -66,6 +66,11 @@ a session.
 
 Voice needs macOS 14 or later; the rest of the board runs without it.
 
+The Debug tab shows what Maya heard, what she made of it, what she asked
+Claude, what came back, what ran and what she said, plus errors from the
+pull-request poller. The same lines go to `~/.claude/maya/maya.log`, which
+starts afresh on every launch.
+
 ## Develop
 
     pnpm install

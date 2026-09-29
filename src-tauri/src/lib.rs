@@ -15,6 +15,7 @@ pub mod inbox;
 pub mod interpreter;
 pub mod launch;
 pub mod listener;
+pub mod log;
 pub mod model;
 pub mod notify;
 pub mod pr;
@@ -63,11 +64,32 @@ fn poll_reviews(app: &AppHandle) {
                 r.error = None;
                 r.fetched_at = Some(now_ms());
             }
-            Err(e) => r.error = Some(e),
+            Err(e) => {
+                log::line("app", format!("pull requests: {e}"));
+                r.error = Some(e);
+            }
         }
         r.clone()
     };
     let _ = app.emit("reviews", &snapshot);
+}
+
+/// The lines kept for the Debug tab, oldest first.
+#[tauri::command]
+fn log_lines() -> Vec<log::Line> {
+    log::lines()
+}
+
+/// Forgets the lines shown on the Debug tab; the file keeps everything.
+#[tauri::command]
+fn log_clear() {
+    log::clear();
+}
+
+/// Where this launch's log file is.
+#[tauri::command]
+fn log_path(state: TauriState<AppState>) -> String {
+    state.store.lock().unwrap().claude_dir().join("maya").join("maya.log").display().to_string()
 }
 
 /// The clones directory with `~` expanded, so the page can recognise review clones.
@@ -144,7 +166,11 @@ fn refresh_and_emit(app: &AppHandle) {
     };
     // A Focus mode (Do Not Disturb and friends) keeps Maya quiet; banners are
     // left to macOS, which filters them by the Focus's own rules.
-    let speak = speak && !((!fresh.is_empty() || !finished.is_empty()) && notify::focus_active());
+    let focus = (!fresh.is_empty() || !finished.is_empty()) && notify::focus_active();
+    if focus {
+        log::line("app", "focus mode is on: announcements stay silent");
+    }
+    let speak = speak && !focus;
     if wants_notify {
         for c in &fresh {
             // With a voice the banner stays silent; the sound is replaced, not doubled.
@@ -529,9 +555,21 @@ pub fn run() {
             listener::voice_confirm,
             listener::voice_status,
             listener::voice_history,
-            listener::voice_selftest
+            listener::voice_selftest,
+            log_lines,
+            log_clear,
+            log_path
         ])
         .setup(move |app| {
+            let log_path = dir.join("maya").join("maya.log");
+            if let Err(e) = log::init(&log_path) {
+                eprintln!("{e}");
+            }
+            let log_handle = app.handle().clone();
+            log::install_emitter(move |l| {
+                let _ = log_handle.emit("log", l);
+            });
+            log::line("app", format!("Maya {} started; log at {}", env!("CARGO_PKG_VERSION"), log_path.display()));
             focus::install_app_handle(app.handle().clone());
             listener::install_speech_hook(app.handle().clone());
             dock::set_dock_icon();

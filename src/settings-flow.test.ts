@@ -12,7 +12,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("settings flow", () => {
   beforeEach(() => {
-    document.body.innerHTML = '<aside id="settings" class="settings" hidden></aside><button id="settings-toggle"></button>';
+    document.body.innerHTML = '<div id="settings" class="settings pane" hidden></div>';
     invoke.mockReset();
     eventListen.mockClear();
   });

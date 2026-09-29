@@ -165,7 +165,11 @@ fn deliver(u: Utterance, hook: Option<&dyn Fn(SpeechPhase)>, speak: &dyn Fn(&Utt
     if let Some(h) = hook {
         h(SpeechPhase::Starting(u.text.clone()));
     }
+    crate::log::line("speech", format!("saying: {}", u.text));
     let result = speak(&u);
+    if let Err(e) = &result {
+        crate::log::line("speech", format!("failed: {e}"));
+    }
     if let Some(h) = hook {
         h(SpeechPhase::Finished);
     }
