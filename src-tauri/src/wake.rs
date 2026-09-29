@@ -149,6 +149,12 @@ impl Flow {
         self.state = State::AwaitingConfirm { pending: p, until: now_ms + CONFIRM_WAIT_MS };
     }
 
+    /// True while a pending action is held, whether or not its window has run
+    /// out; the next segment (or a new `set_pending`) settles it.
+    pub fn has_pending(&self) -> bool {
+        matches!(self.state, State::AwaitingConfirm { .. })
+    }
+
     pub fn state(&self, now_ms: u64) -> &'static str {
         match &self.state {
             State::Idle => "idle",
@@ -279,8 +285,15 @@ mod tests {
         // Anything else is a new command and drops the pending one.
         assert_eq!(f.on_segment("Maya tell coral yes instead", 4500), vec![Effect::Interpret("tell coral yes instead".into())]);
         f.set_pending(pending(), 6000);
-        assert_eq!(f.on_segment("yes", 6000 + CONFIRM_WAIT_MS + 1), vec![], "a late yes confirms nothing");
+        assert!(f.has_pending());
+        // Past its window but before any segment: expired for state(), still held.
         assert_eq!(f.state(6000 + CONFIRM_WAIT_MS + 1), "idle");
+        assert!(f.has_pending(), "the variant is still held until a segment or a restart clears it");
+        assert_eq!(f.on_segment("yes", 6000 + CONFIRM_WAIT_MS + 1), vec![], "a late yes confirms nothing");
+        assert!(!f.has_pending(), "the late segment settled it");
+        assert_eq!(f.state(6000 + CONFIRM_WAIT_MS + 1), "idle");
+        f.set_pending(pending(), 6000 + CONFIRM_WAIT_MS + 5);
+        assert_eq!(f.on_segment("yes", 6000 + CONFIRM_WAIT_MS + 10), vec![Effect::Execute(pending().action)], "a restarted window confirms");
     }
 
     #[test]

@@ -749,12 +749,12 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str) {
             }
             // The confirmation window starts when the read-back ends (the ear
             // was paused while she spoke), unless it was answered meanwhile.
+            // A read-back longer than the window must still restart it.
             let state = app.state::<AppState>();
             let mut v = state.voice.lock().unwrap();
             if v.generation == generation {
-                let now = now_ms();
-                if let Some(f) = v.flow.as_mut().filter(|f| f.state(now) == "awaiting-confirm") {
-                    f.set_pending(pending, now);
+                if let Some(f) = v.flow.as_mut().filter(|f| f.has_pending()) {
+                    f.set_pending(pending, now_ms());
                 }
             }
         }
@@ -897,6 +897,7 @@ fn start_listening(app: &AppHandle) -> Result<(), String> {
     emit_voice(app);
     let handle = app.clone();
     std::thread::spawn(move || {
+        let mut heard_any = false;
         for ev in rx {
             if !is_current(&handle, generation) {
                 break;
@@ -909,7 +910,19 @@ fn start_listening(app: &AppHandle) -> Result<(), String> {
                 ear::EarEvent::Partial(t) => {
                     set_voice(&handle, generation, |s| s.heard = t);
                 }
-                ear::EarEvent::Final(t) => on_heard(&handle, generation, &t),
+                ear::EarEvent::Final(t) => {
+                    if !heard_any {
+                        // The first segment of a run shows it is healthy:
+                        // crashes are counted afresh from here.
+                        heard_any = true;
+                        let st = handle.state::<AppState>();
+                        let mut v = st.voice.lock().unwrap();
+                        if v.generation == generation {
+                            v.failures = 0;
+                        }
+                    }
+                    on_heard(&handle, generation, &t);
+                }
                 ear::EarEvent::State { state, detail } if state == "error" || state == "exited" => {
                     let wants = handle.state::<AppState>().store.lock().unwrap().config.listen;
                     let (dead, failures) = {
@@ -940,14 +953,6 @@ fn start_listening(app: &AppHandle) -> Result<(), String> {
                         }
                     }
                     break;
-                }
-                ear::EarEvent::State { state, .. } if state == "listening" => {
-                    // A healthy listener: crashes are counted afresh from here.
-                    let st = handle.state::<AppState>();
-                    let mut v = st.voice.lock().unwrap();
-                    if v.generation == generation {
-                        v.failures = 0;
-                    }
                 }
                 ear::EarEvent::Device(name) => {
                     set_voice(&handle, generation, |s| s.detail = format!("microphone: {name}"));
@@ -999,7 +1004,7 @@ fn voice_confirm(app: AppHandle, yes: bool) {
         let state = app.state::<AppState>();
         let v = state.voice.lock().unwrap();
         match v.flow.as_ref() {
-            Some(f) if f.state(now_ms()) == "awaiting-confirm" => v.generation,
+            Some(f) if f.has_pending() => v.generation,
             _ => return,
         }
     };
