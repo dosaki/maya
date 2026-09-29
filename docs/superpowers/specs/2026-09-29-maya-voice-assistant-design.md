@@ -51,10 +51,10 @@ except the listener, which is plain speech recognition.
 - If the wake word ends the segment ("Maya." then a pause), she says "Yes?"
   and takes the next `final` segment as the command, giving up after eight
   seconds of silence with no reply.
-- The indicator in the top bar shows grey while idle, amber while she is
-  waiting for a command or a confirmation, blue while she thinks, and a
-  muted icon when listening is off. Clicking it opens the voice panel, which
-  holds the listen toggle.
+- The indicator in the top bar appears only while listening is on (the
+  switch lives in Settings). It shows grey while idle, amber while she is
+  waiting for a command or a confirmation, and blue while she thinks.
+  Clicking it opens the voice panel.
 
 ### Understanding
 

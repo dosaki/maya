@@ -21,11 +21,10 @@ export interface VoiceTurn {
 
 export interface VoiceHandlers {
   onConfirm(yes: boolean): void;
-  onListen(on: boolean): void;
 }
 
 const LABEL: Record<VoiceStatus["state"], string> = {
-  off: "Not listening. Click to open.",
+  off: "Not listening.",
   idle: "Listening for \"Maya\".",
   "awaiting-command": "Yes? Say your command.",
   "awaiting-confirm": "Waiting for yes or no.",
@@ -33,8 +32,13 @@ const LABEL: Record<VoiceStatus["state"], string> = {
   error: "Listener stopped",
 };
 
-/** The top-bar microphone button; its class carries the state, --level the input level. */
-export function renderIndicator(s: VoiceStatus): HTMLButtonElement {
+/**
+ * The top-bar microphone button; its class carries the state, --level the
+ * input level. Nothing is shown while listening is off: the switch lives in
+ * Settings, and the microphone appears once it is on.
+ */
+export function renderIndicator(s: VoiceStatus): HTMLButtonElement | null {
+  if (!s.listening) return null;
   const b = document.createElement("button");
   b.type = "button";
   b.dataset.action = "voice";
@@ -50,15 +54,6 @@ export function renderIndicator(s: VoiceStatus): HTMLButtonElement {
 export function renderVoicePanel(s: VoiceStatus, turns: VoiceTurn[], h: VoiceHandlers): HTMLElement {
   const root = document.createElement("div");
   root.className = "voice-panel";
-  const head = document.createElement("label");
-  head.className = "settings__check";
-  const toggle = document.createElement("input");
-  toggle.type = "checkbox";
-  toggle.name = "listen";
-  toggle.checked = s.listening;
-  toggle.addEventListener("change", () => h.onListen(toggle.checked));
-  head.append(toggle, document.createTextNode(" Listen for \"Maya\""));
-  root.append(head);
   if (s.state === "error" && s.detail) {
     const err = document.createElement("div");
     err.className = "voice__error";
@@ -111,10 +106,14 @@ export async function initVoice(): Promise<void> {
   let turns: VoiceTurn[] = [];
   const handlers: VoiceHandlers = {
     onConfirm: (yes) => void invoke("voice_confirm", { yes }),
-    onListen: (on) => void invoke("voice_listen", { on }).catch((e) => { status = { ...status, state: "error", detail: String(e) }; paint(); }),
+  };
+  const paintIndicator = () => {
+    const b = renderIndicator(status);
+    if (b) host.replaceChildren(b); else host.replaceChildren();
   };
   const paint = () => {
-    host.replaceChildren(renderIndicator(status));
+    if (!status.listening) panel.hidden = true;
+    paintIndicator();
     if (!panel.hidden) panel.replaceChildren(renderVoicePanel(status, turns, handlers));
   };
   host.addEventListener("click", () => {
@@ -131,7 +130,7 @@ export async function initVoice(): Promise<void> {
   });
   await listen<number>("voice-level", (e) => {
     status = { ...status, level: e.payload };
-    host.replaceChildren(renderIndicator(status));
+    paintIndicator();
   });
   status = await invoke<VoiceStatus>("voice_status");
   paint();

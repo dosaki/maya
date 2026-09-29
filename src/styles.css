@@ -192,7 +192,6 @@ body { margin: 0; background: var(--bg); }
 .voice--awaiting { color: var(--awaiting); }
 .voice--thinking { color: var(--working); }
 .voice--error { color: #e5484d; }
-.voice--off { color: var(--muted); opacity: .6; }
 .voice-panel { display: flex; flex-direction: column; gap: 10px; }
 .voice__turns { display: flex; flex-direction: column; gap: 6px; max-height: 40vh; overflow-y: auto; }
 .voice__turn { padding: 6px 10px; border-radius: 8px; font-size: 13px; }

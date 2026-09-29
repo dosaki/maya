@@ -43,11 +43,23 @@ describe("voice flow", () => {
     expect(fetches()).toBe(2);
   });
 
-  it("says that a click opens the panel when listening is off", async () => {
+  it("shows the microphone only while listening, and closes the panel when listening stops", async () => {
     invoke.mockImplementation((cmd: string) => (cmd === "voice_status" ? Promise.resolve(status({ listening: false, state: "off" })) : Promise.resolve([])));
     await initVoice();
-    const button = document.querySelector<HTMLButtonElement>("#voice-host button")!;
-    expect(button.title).toContain("Click to open");
-    expect(button.title).not.toContain("Click to listen");
+    const host = document.getElementById("voice-host")!;
+    const panel = document.getElementById("voice-panel")!;
+    expect(host.querySelector("button")).toBeNull();
+
+    const onVoice = eventListen.mock.calls.find((c) => c[0] === "voice")![1] as (e: { payload: VoiceStatus }) => void;
+    onVoice({ payload: status() });
+    const button = host.querySelector<HTMLButtonElement>("button")!;
+    expect(button.title).toContain("Listening");
+    button.click();
+    await flush();
+    expect(panel.hidden).toBe(false);
+
+    onVoice({ payload: status({ listening: false, state: "off" }) });
+    expect(panel.hidden).toBe(true);
+    expect(host.querySelector("button")).toBeNull();
   });
 });

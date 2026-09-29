@@ -51,9 +51,9 @@ Maya can listen for her name and act on what you say: "Maya, what's
 waiting?", "Maya, tell hexgrid to go ahead", focus, compact, resume or start
 a session.
 
-- Off by default. Turn on "Listen for 'Maya'" in Settings or in the voice
-  panel (click the microphone in the top bar). macOS asks for microphone and
-  speech recognition access the first time.
+- Off by default. Turn on "Listen for 'Maya'" in Settings; a microphone
+  then appears in the top bar, and clicking it opens the voice panel. macOS
+  asks for microphone and speech recognition access the first time.
 - The wake word is "Maya". Say it with the command, or say it alone and she
   answers "Yes?" and waits for the command.
 - Audio never leaves the Mac: speech recognition runs on the device. Only
