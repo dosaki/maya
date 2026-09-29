@@ -2,6 +2,7 @@
 import AVFoundation
 import Foundation
 import Speech
+import whisper
 
 struct Out {
     static let lock = NSLock()
