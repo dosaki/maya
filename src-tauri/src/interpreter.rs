@@ -14,7 +14,18 @@ pub struct Reply {
     pub confirm: bool,
 }
 
-/// One line per session: name | harness | state | id | project [| asks: …].
+/// The first question's choices as ` [1 Postgres, 2 SQLite]`, or nothing.
+/// Only the first question can be answered by voice, so only it is listed.
+fn options_of(a: &crate::model::Awaiting) -> String {
+    let labels: Vec<String> = a.questions.first().map(|q| q.options.iter().enumerate().map(|(i, o)| format!("{} {}", i + 1, o.label)).collect()).unwrap_or_default();
+    if labels.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", labels.join(", "))
+    }
+}
+
+/// One line per session: name | harness | state | id | project [| asks: … [1 A, 2 B]].
 pub fn board_summary(cards: &[Card]) -> String {
     cards
         .iter()
@@ -22,7 +33,7 @@ pub fn board_summary(cards: &[Card]) -> String {
             let harness = serde_json::to_value(c.harness).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
             let state = serde_json::to_value(c.state).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
             let project = c.cwd.rsplit('/').find(|s| !s.is_empty()).unwrap_or("");
-            let ask = c.awaiting.as_ref().map(|a| format!(" | asks: {}", a.detail)).unwrap_or_default();
+            let ask = c.awaiting.as_ref().map(|a| format!(" | asks: {}{}", a.detail, options_of(a))).unwrap_or_default();
             format!("{} | {harness} | {state} | {} | {project}{ask}", c.name, c.session_id)
         })
         .collect::<Vec<_>>()
@@ -53,7 +64,7 @@ pub fn user_prompt(command: &str, summary: &str, history: &[(String, String)]) -
         }
         p.push('\n');
     }
-    p.push_str("Board (name | harness | state | id | project | asks):\n");
+    p.push_str("Board (name | harness | state | id | project | asks [numbered options]):\n");
     p.push_str(summary);
     p.push_str("\n\nCommand: ");
     p.push_str(command);
@@ -88,8 +99,13 @@ fn loose(s: &str) -> String {
     s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
-/// Exact id, then exact loose name, then a substring match — ambiguous when
-/// more than one session matches by substring.
+/// Shorter than this, a name (or the request) is too generic to match inside
+/// another: "api" must not pick "rapid fix".
+const MIN_SUBSTRING: usize = 4;
+
+/// Exact id, then exact loose name, then a substring match in either direction
+/// when the shorter side has at least `MIN_SUBSTRING` characters — ambiguous
+/// when more than one session matches by substring.
 fn find_session<'a>(cards: &'a [Card], wanted: &str) -> Result<&'a Card, String> {
     let w = loose(wanted);
     let not_found = || format!("I couldn't find a session called {wanted}");
@@ -102,7 +118,13 @@ fn find_session<'a>(cards: &'a [Card], wanted: &str) -> Result<&'a Card, String>
     if let Some(c) = cards.iter().find(|c| loose(&c.name) == w) {
         return Ok(c);
     }
-    let matches: Vec<&Card> = cards.iter().filter(|c| loose(&c.name).contains(&w) || w.contains(&loose(&c.name))).collect();
+    let matches: Vec<&Card> = cards
+        .iter()
+        .filter(|c| {
+            let n = loose(&c.name);
+            n.len().min(w.len()) >= MIN_SUBSTRING && (n.contains(&w) || w.contains(&n))
+        })
+        .collect();
     match matches[..] {
         [] => Err(not_found()),
         [c] => Ok(c),
@@ -115,6 +137,8 @@ pub fn needs_confirm(action: &Value) -> bool {
 }
 
 /// The action with its session resolved to an id, or why it cannot run.
+/// It also carries what the spoken read-back needs: the resolved card's
+/// `name`, and for an answer the chosen option's `label`.
 pub fn validate(action: &Value, cards: &[Card], dirs: &[String]) -> Result<Value, String> {
     let mut a = action.clone();
     let kind = a["kind"].as_str().unwrap_or("").to_string();
@@ -125,10 +149,11 @@ pub fn validate(action: &Value, cards: &[Card], dirs: &[String]) -> Result<Value
             let c = find_session(cards, &wanted)?;
             if kind == "answer" {
                 let n = a["option"].as_u64().unwrap_or(0) as usize;
-                let count = c.awaiting.as_ref().and_then(|w| w.questions.first()).map(|q| q.options.len()).unwrap_or(0);
-                if n == 0 || n > count {
+                let options = c.awaiting.as_ref().and_then(|w| w.questions.first()).map(|q| q.options.as_slice()).unwrap_or(&[]);
+                if n == 0 || n > options.len() {
                     return Err(format!("{} has no option {n}", c.name));
                 }
+                a["label"] = Value::String(options[n - 1].label.clone());
                 // The ask this answer was meant for; a newer ask refuses it later.
                 a["askId"] = Value::from(c.state_since);
             }
@@ -136,6 +161,7 @@ pub fn validate(action: &Value, cards: &[Card], dirs: &[String]) -> Result<Value
                 return Err("There was nothing to send".into());
             }
             a["session"] = Value::String(c.session_id.clone());
+            a["name"] = Value::String(c.name.clone());
             Ok(a)
         }
         "resume" | "start" => {
@@ -240,6 +266,53 @@ mod tests {
         assert_eq!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &[]).unwrap()["option"], 2);
         assert_eq!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &[]).unwrap()["askId"], 1234, "the ask id is captured when the action is validated");
         assert!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":3}), &cards, &[]).unwrap_err().contains("option"));
+    }
+
+    fn asking(id: &str, name: &str, labels: &[&str]) -> Card {
+        use crate::model::{Choice, Question};
+        let mut c = card(id, name, State::Awaiting, Some("Which stack?"));
+        let aw = c.awaiting.as_mut().unwrap();
+        aw.kind = AwaitKind::Question;
+        aw.questions = vec![Question { question: "Which stack?".into(), header: "H".into(), multi_select: false, options: labels.iter().map(|l| Choice { label: l.to_string(), description: "".into() }).collect() }];
+        c
+    }
+
+    #[test]
+    fn summary_lists_the_options_of_an_open_ask() {
+        let s = board_summary(&[asking("a", "hexgrid", &["Postgres", "SQLite"])]);
+        assert!(s.contains("| asks: Which stack? [1 Postgres, 2 SQLite]"), "{s}");
+        let plain = board_summary(&[card("b", "coral", State::Awaiting, Some("Push now?"))]);
+        assert!(plain.ends_with("| asks: Push now?"), "no options, no brackets: {plain}");
+    }
+
+    #[test]
+    fn a_substring_match_needs_four_characters_on_the_shorter_side() {
+        let dirs: Vec<String> = vec![];
+        let cards = vec![card("a", "api", State::Working, None), card("b", "rapid fix", State::Working, None)];
+        // "api" is inside "rapid fix", but three letters are too few to count.
+        assert_eq!(validate(&serde_json::json!({"kind":"focus","session":"rapid fix"}), &cards, &dirs).unwrap()["session"], "b");
+        assert!(validate(&serde_json::json!({"kind":"focus","session":"rapid"}), &cards, &dirs).is_ok_and(|a| a["session"] == "b"));
+        assert!(validate(&serde_json::json!({"kind":"focus","session":"ap"}), &cards, &dirs).is_err());
+        // A card with no usable name matches nothing.
+        let blank = vec![card("c", "--", State::Working, None)];
+        assert!(validate(&serde_json::json!({"kind":"focus","session":"anything at all"}), &blank, &dirs).is_err());
+        // Ambiguity still asks.
+        let two = vec![card("a", "hexgrid-one", State::Working, None), card("b", "hexgrid-two", State::Working, None)];
+        assert_eq!(validate(&serde_json::json!({"kind":"focus","session":"hexgrid"}), &two, &dirs).unwrap_err(), "Which one: hexgrid-one or hexgrid-two?");
+    }
+
+    #[test]
+    fn the_validated_action_carries_what_the_read_back_needs() {
+        let cards = vec![asking("a", "hexgrid-d3", &["Postgres", "SQLite"]), card("b", "Coral4 Loop", State::Working, None)];
+        let dirs = vec!["maya".to_string()];
+        let r = validate(&serde_json::json!({"kind":"reply","session":"coral","text":"go ahead"}), &cards, &dirs).unwrap();
+        assert_eq!((r["name"].as_str(), r["text"].as_str()), (Some("Coral4 Loop"), Some("go ahead")));
+        let a = validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &dirs).unwrap();
+        assert_eq!((a["name"].as_str(), a["label"].as_str()), (Some("hexgrid-d3"), Some("SQLite")));
+        let f = validate(&serde_json::json!({"kind":"focus","session":"a"}), &cards, &dirs).unwrap();
+        assert_eq!(f["name"], "hexgrid-d3");
+        let st = validate(&serde_json::json!({"kind":"start","dir":"MAYA","prompt":"fix the build"}), &cards, &dirs).unwrap();
+        assert_eq!((st["dir"].as_str(), st["prompt"].as_str()), (Some("maya"), Some("fix the build")));
     }
 
     #[test]
