@@ -47,8 +47,14 @@ final class Ear {
     var task: SFSpeechRecognitionTask?
     var paused = false
     var lastPartial = ""
+    /// When `lastPartial` last changed; a transcript quiet for `endpointAfter` is an utterance.
+    var lastChangeAt = Date()
+    /// Set by the 50 s timer; the rotation waits for a quiet moment.
+    var rotateDue = false
     var restartTimer: Timer?
+    var endpointTimer: Timer?
     var lastLevelAt: TimeInterval = 0
+    let endpointAfter: TimeInterval = 1.2
 
     func start() {
         SFSpeechRecognizer.requestAuthorization { status in
@@ -60,7 +66,11 @@ final class Ear {
     }
 
     func startAudio() {
-        if let name = pickDevice(names, preferred: preferred), let dev = inputDevices().first(where: { $0.localizedName == name }) {
+        // Never fall back to the system default input: it may be a virtual device.
+        guard let name = pickDevice(names, preferred: preferred) else {
+            Out.emit(["type": "state", "state": "error", "detail": "no non-virtual microphone"]); exit(4)
+        }
+        if let dev = inputDevices().first(where: { $0.localizedName == name }) {
             var id = AudioDeviceID(0)
             var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslateUIDToDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
             var uidRef: CFString = dev.uniqueID as CFString
@@ -98,9 +108,27 @@ final class Ear {
             Out.emit(["type": "state", "state": "error", "detail": "audio engine: \(error.localizedDescription)"]); exit(3)
         }
         beginRequest()
-        // On-device requests are capped around a minute: rotate before the cap.
-        restartTimer = Timer.scheduledTimer(withTimeInterval: 50, repeats: true) { _ in self.rotate() }
+        // On-device requests are capped around a minute: rotate before the cap,
+        // but only at a quiet moment so a sentence is never split.
+        restartTimer = Timer.scheduledTimer(withTimeInterval: 50, repeats: true) { _ in
+            self.rotateDue = true
+            self.tick()
+        }
+        // The recogniser keeps one growing transcript across pauses, so Maya
+        // end-points utterances herself: a partial unchanged for 1.2 s is final.
+        endpointTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in self.tick() }
         Out.emit(["type": "state", "state": "listening"])
+    }
+
+    /// Emits a quiet partial as final and starts a new request; also performs
+    /// a due rotation once nothing is being said.
+    func tick() {
+        let quiet = Date().timeIntervalSince(lastChangeAt) >= endpointAfter
+        if !lastPartial.isEmpty {
+            if quiet { rotate() }
+        } else if rotateDue {
+            rotate()
+        }
     }
 
     func beginRequest() {
@@ -109,31 +137,43 @@ final class Ear {
         req.requiresOnDeviceRecognition = true
         request = req
         lastPartial = ""
+        lastChangeAt = Date()
         // Captured by the completion handler below so it can tell whether it belongs to
-        // the still-current task; a handler whose task has since been superseded (by
-        // rotate(), which clears self.task before cancelling) must not restart anything.
+        // the still-current task. A superseded task (rotate() clears self.task before
+        // cancelling) must not emit or restart anything: its late final would repeat
+        // the segment rotate() already emitted. Handlers run on the main queue.
         var newTask: SFSpeechRecognitionTask?
         newTask = recognizer.recognitionTask(with: req) { result, error in
+            guard self.task === newTask else { return }
             if let r = result {
                 let text = r.bestTranscription.formattedString
                 if r.isFinal {
                     if !text.isEmpty { Out.emit(["type": "final", "text": text]) }
                     self.lastPartial = ""
+                    // This request is finished: listen on with a new one.
+                    self.task = nil
+                    DispatchQueue.main.async { self.beginRequest() }
+                    return
                 } else if text != self.lastPartial {
                     self.lastPartial = text
+                    self.lastChangeAt = Date()
                     Out.emit(["type": "partial", "text": text])
                 }
             }
-            if error != nil && self.task === newTask {
+            if error != nil {
                 // The request ended (silence timeout): flush the partial as final and start again.
                 if !self.lastPartial.isEmpty { Out.emit(["type": "final", "text": self.lastPartial]) }
+                self.lastPartial = ""
+                self.task = nil
                 DispatchQueue.main.async { self.beginRequest() }
             }
         }
         task = newTask
     }
 
+    /// Ends the current request, emitting its partial as final, and begins a new one.
     func rotate() {
+        rotateDue = false
         if !lastPartial.isEmpty { Out.emit(["type": "final", "text": lastPartial]) }
         request?.endAudio()
         let old = task
