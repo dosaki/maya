@@ -12,6 +12,10 @@ export interface SettingsModel {
   elevenVoices: ElevenVoice[];
   elevenVoiceId: string;
   error: string | null;
+  listen: boolean;
+  microphone: string;
+  microphones: string[];
+  interpreterModel: string;
 }
 
 export type VoiceProvider = "builtin" | "elevenlabs";
@@ -32,6 +36,9 @@ export interface SettingsHandlers {
   onElevenKey(key: string): void;
   onElevenVoice(voiceId: string): void;
   onTryVoice(): void;
+  onListen(on: boolean): void;
+  onMicrophone(name: string): void;
+  onInterpreter(model: string): void;
 }
 
 interface ConfigJson {
@@ -42,6 +49,9 @@ interface ConfigJson {
   speakNotifications: boolean;
   voiceProvider: VoiceProvider;
   elevenlabsVoiceId?: string | null;
+  listen: boolean;
+  microphone?: string | null;
+  interpreterModel: string;
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLElement {
@@ -128,6 +138,50 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
   root.append(speakLabel);
 
+  const listenLabel = document.createElement("label");
+  listenLabel.className = "settings__check";
+  const listenBox = document.createElement("input");
+  listenBox.type = "checkbox";
+  listenBox.name = "listen";
+  listenBox.checked = model.listen;
+  listenBox.addEventListener("change", () => h.onListen(listenBox.checked));
+  listenLabel.append(listenBox, document.createTextNode(' Listen for "Maya" (on-device speech recognition)'));
+  root.append(listenLabel);
+
+  const micLabel = document.createElement("label");
+  micLabel.textContent = "Microphone";
+  const mic = document.createElement("select");
+  mic.name = "microphone";
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "Built-in (recommended)";
+  mic.append(auto);
+  for (const name of model.microphones) {
+    const o = document.createElement("option");
+    o.value = name;
+    o.textContent = name;
+    mic.append(o);
+  }
+  mic.value = model.microphones.includes(model.microphone) ? model.microphone : "";
+  mic.addEventListener("change", () => h.onMicrophone(mic.value));
+  micLabel.append(mic);
+  root.append(micLabel);
+
+  const modelLabel = document.createElement("label");
+  modelLabel.textContent = "Voice interpreter";
+  const modelSel = document.createElement("select");
+  modelSel.name = "interpreterModel";
+  for (const [v, text] of [["haiku", "Haiku (fast)"], ["sonnet", "Sonnet"], ["opus", "Opus"]] as const) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = text;
+    modelSel.append(o);
+  }
+  modelSel.value = model.interpreterModel;
+  modelSel.addEventListener("change", () => h.onInterpreter(modelSel.value));
+  modelLabel.append(modelSel);
+  root.append(modelLabel);
+
   const providerLabel = document.createElement("label");
   providerLabel.textContent = "Voice";
   const provider = document.createElement("select");
@@ -197,7 +251,7 @@ export async function initSettings(): Promise<void> {
   const toggle = document.getElementById("settings-toggle");
   if (!panel || !toggle) return;
 
-  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null };
+  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" };
 
   const loadVoices = async () => {
     if (model.voiceProvider !== "elevenlabs") return;
@@ -208,7 +262,7 @@ export async function initSettings(): Promise<void> {
 
   const saveConfig = async (patch: Partial<ConfigJson>) => {
     const c = await invoke<ConfigJson>("set_config", {
-      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, clonesDir: model.clonesDir || null, notifyOnAwaiting: model.notifyOnAwaiting, speakNotifications: model.speakNotifications, voiceProvider: model.voiceProvider, elevenlabsVoiceId: model.elevenVoiceId || null, ...patch },
+      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, clonesDir: model.clonesDir || null, notifyOnAwaiting: model.notifyOnAwaiting, speakNotifications: model.speakNotifications, voiceProvider: model.voiceProvider, elevenlabsVoiceId: model.elevenVoiceId || null, listen: model.listen, microphone: model.microphone || null, interpreterModel: model.interpreterModel, ...patch },
     });
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
@@ -217,6 +271,9 @@ export async function initSettings(): Promise<void> {
     model.speakNotifications = c.speakNotifications;
     model.voiceProvider = c.voiceProvider;
     model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
+    model.listen = c.listen;
+    model.microphone = c.microphone ?? "";
+    model.interpreterModel = c.interpreterModel;
   };
 
   const paint = () => panel.replaceChildren(renderSettings(model, handlers));
@@ -243,6 +300,9 @@ export async function initSettings(): Promise<void> {
     onElevenKey: (key) => void run(async () => { await invoke("set_elevenlabs_key", { key }); await loadVoices(); }),
     onElevenVoice: (voiceId) => void run(() => saveConfig({ elevenlabsVoiceId: voiceId || null })),
     onTryVoice: () => void run(() => invoke("try_voice")),
+    onListen: (on) => void run(async () => { await invoke("voice_listen", { on }); model.listen = on; }),
+    onMicrophone: (name) => void run(() => saveConfig({ microphone: name || null })),
+    onInterpreter: (m) => void run(() => saveConfig({ interpreterModel: m })),
   };
 
   toggle.addEventListener("click", () => {
@@ -259,6 +319,16 @@ export async function initSettings(): Promise<void> {
     model.speakNotifications = config.speakNotifications;
     model.voiceProvider = config.voiceProvider;
     model.elevenVoiceId = config.elevenlabsVoiceId ?? "";
+    model.listen = config.listen;
+    model.microphone = config.microphone ?? "";
+    model.interpreterModel = config.interpreterModel;
     await loadVoices();
+    try {
+      const raw = await invoke<string>("voice_selftest");
+      const parsed = JSON.parse(raw) as { devices?: string[] };
+      model.microphones = parsed.devices ?? [];
+    } catch {
+      // ignore: the microphone list is a nicety, not required to use settings
+    }
   });
 }

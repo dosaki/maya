@@ -185,3 +185,20 @@ body { margin: 0; background: var(--bg); }
 
 .card__btn--icon { display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; }
 .card__btn--icon .icon { display: block; }
+
+.voice { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); cursor: pointer; position: relative; margin-left: 8px; }
+.voice::after { content: ""; position: absolute; inset: -3px; border-radius: 999px; border: 2px solid currentColor; opacity: calc(var(--level, 0) * 0.9); pointer-events: none; }
+.voice--idle { color: var(--completed); }
+.voice--awaiting { color: var(--awaiting); }
+.voice--thinking { color: var(--working); }
+.voice--error { color: #e5484d; }
+.voice--off { color: var(--muted); opacity: .6; }
+.voice-panel { display: flex; flex-direction: column; gap: 10px; }
+.voice__turns { display: flex; flex-direction: column; gap: 6px; max-height: 40vh; overflow-y: auto; }
+.voice__turn { padding: 6px 10px; border-radius: 8px; font-size: 13px; }
+.voice__turn--user { background: color-mix(in srgb, var(--working) 14%, transparent); align-self: flex-end; }
+.voice__turn--maya { background: var(--bg); align-self: flex-start; }
+.voice__pending { padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--awaiting) 14%, transparent); font-size: 13px; }
+.voice__pending button { margin: 6px 6px 0 0; }
+.voice__empty, .voice__error { color: var(--muted); font-size: 13px; }
+.voice__error { color: #e5484d; }

@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderSettings } from "./settings";
 
-const voiceBase = { hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null };
-const handlers = () => ({ onInstall: vi.fn(), onRemove: vi.fn(), onTimeout: vi.fn(), onProjectsDir: vi.fn(), onNotify: vi.fn(), onClonesDir: vi.fn(), onSpeak: vi.fn(), onVoiceProvider: vi.fn(), onElevenKey: vi.fn(), onElevenVoice: vi.fn(), onTryVoice: vi.fn() });
+const voiceBase = { hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" };
+const handlers = () => ({ onInstall: vi.fn(), onRemove: vi.fn(), onTimeout: vi.fn(), onProjectsDir: vi.fn(), onNotify: vi.fn(), onClonesDir: vi.fn(), onSpeak: vi.fn(), onVoiceProvider: vi.fn(), onElevenKey: vi.fn(), onElevenVoice: vi.fn(), onTryVoice: vi.fn(), onListen: vi.fn(), onMicrophone: vi.fn(), onInterpreter: vi.fn() });
 
 describe("renderSettings", () => {
   it("offers install when the hook is missing", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: false, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null }, h);
+    const el = renderSettings({ hookInstalled: false, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" }, h);
     expect(el.querySelector(".settings__status")?.textContent).toContain("not installed");
     const btn = el.querySelector<HTMLButtonElement>("button[data-action=install]")!;
     btn.click();
@@ -17,7 +17,7 @@ describe("renderSettings", () => {
 
   it("offers remove when the hook is installed", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" }, h);
     expect(el.querySelector(".settings__status")?.textContent).toContain("installed");
     el.querySelector<HTMLButtonElement>("button[data-action=remove]")!.click();
     expect(h.onRemove).toHaveBeenCalled();
@@ -25,7 +25,7 @@ describe("renderSettings", () => {
 
   it("reports timeout changes and shows errors", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: "boom" }, h);
+    const el = renderSettings({ hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: "boom", listen: false, microphone: "", microphones: [], interpreterModel: "haiku" }, h);
     const input = el.querySelector<HTMLInputElement>("input[name=timeout]")!;
     expect(input.value).toBe("30");
     input.value = "45";
@@ -36,7 +36,7 @@ describe("renderSettings", () => {
 
   it("has a notification toggle that reports changes", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" }, h);
     const box = el.querySelector<HTMLInputElement>("input[name=notify]")!;
     expect(box.type).toBe("checkbox");
     expect(box.checked).toBe(true);
@@ -44,7 +44,7 @@ describe("renderSettings", () => {
     box.checked = false;
     box.dispatchEvent(new Event("change"));
     expect(h.onNotify).toHaveBeenCalledWith(false);
-    expect(renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: false, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null }, h).querySelector<HTMLInputElement>("input[name=notify]")!.checked).toBe(false);
+    expect(renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: false, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" }, h).querySelector<HTMLInputElement>("input[name=notify]")!.checked).toBe(false);
   });
 
   it("offers ElevenLabs as a voice, revealing key, voice list and Try when chosen", () => {
@@ -76,7 +76,7 @@ describe("renderSettings", () => {
 
   it("has a speak toggle that reports changes", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" }, h);
     const box = el.querySelector<HTMLInputElement>("input[name=speak]")!;
     expect(box.checked).toBe(true);
     expect(box.closest("label")?.textContent).toContain("Speak");
@@ -87,7 +87,7 @@ describe("renderSettings", () => {
 
   it("shows the clones directory with the default as placeholder and reports changes", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" }, h);
     const input = el.querySelector<HTMLInputElement>("input[name=clonesDir]")!;
     expect(input.placeholder).toBe("~/dev/reviews");
     expect(input.value).toBe("");
@@ -98,11 +98,33 @@ describe("renderSettings", () => {
 
   it("shows the projects directory and reports changes", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" }, h);
     const input = el.querySelector<HTMLInputElement>("input[name=projectsDir]")!;
     expect(input.value).toBe("~/dev");
     input.value = "~/code";
     input.dispatchEvent(new Event("change"));
     expect(h.onProjectsDir).toHaveBeenCalledWith("~/code");
+  });
+
+  it("has the listen toggle, a microphone picker and an interpreter model", () => {
+    const h = handlers();
+    const el = renderSettings({ ...voiceBase, listen: true, microphone: "USB Mic", microphones: ["MacBook Pro Microphone", "USB Mic"], interpreterModel: "haiku" }, h);
+    const listen = el.querySelector<HTMLInputElement>("input[name=listen]")!;
+    expect(listen.checked).toBe(true);
+    expect(listen.closest("label")?.textContent).toContain("Listen for");
+    listen.checked = false;
+    listen.dispatchEvent(new Event("change"));
+    expect(h.onListen).toHaveBeenCalledWith(false);
+    const mic = el.querySelector<HTMLSelectElement>("select[name=microphone]")!;
+    expect([...mic.options].map((o) => o.textContent)).toEqual(["Built-in (recommended)", "MacBook Pro Microphone", "USB Mic"]);
+    expect(mic.value).toBe("USB Mic");
+    mic.value = "";
+    mic.dispatchEvent(new Event("change"));
+    expect(h.onMicrophone).toHaveBeenCalledWith("");
+    const model = el.querySelector<HTMLSelectElement>("select[name=interpreterModel]")!;
+    expect([...model.options].map((o) => o.value)).toEqual(["haiku", "sonnet", "opus"]);
+    model.value = "sonnet";
+    model.dispatchEvent(new Event("change"));
+    expect(h.onInterpreter).toHaveBeenCalledWith("sonnet");
   });
 });
