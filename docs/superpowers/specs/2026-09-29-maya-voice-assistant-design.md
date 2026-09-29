@@ -53,7 +53,8 @@ except the listener, which is plain speech recognition.
   seconds of silence with no reply.
 - The indicator in the top bar shows grey while idle, amber while she is
   waiting for a command or a confirmation, blue while she thinks, and a
-  muted icon when listening is off. Clicking it toggles listening.
+  muted icon when listening is off. Clicking it opens the voice panel, which
+  holds the listen toggle.
 
 ### Understanding
 
