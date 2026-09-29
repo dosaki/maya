@@ -4,6 +4,7 @@ export interface SettingsModel {
   hookInstalled: boolean | null;
   completedTimeoutMinutes: number;
   projectsDir: string;
+  notifyOnAwaiting: boolean;
   error: string | null;
 }
 
@@ -12,11 +13,13 @@ export interface SettingsHandlers {
   onRemove(): void;
   onTimeout(minutes: number): void;
   onProjectsDir(path: string): void;
+  onNotify(enabled: boolean): void;
 }
 
 interface ConfigJson {
   completedTimeoutMinutes: number;
   projectsDir?: string | null;
+  notifyOnAwaiting: boolean;
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLElement {
@@ -72,6 +75,16 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   dirLabel.append(dirInput);
   root.append(dirLabel);
 
+  const notifyLabel = document.createElement("label");
+  notifyLabel.className = "settings__check";
+  const notifyBox = document.createElement("input");
+  notifyBox.type = "checkbox";
+  notifyBox.name = "notify";
+  notifyBox.checked = model.notifyOnAwaiting;
+  notifyBox.addEventListener("change", () => h.onNotify(notifyBox.checked));
+  notifyLabel.append(notifyBox, document.createTextNode(" Notify me when a session awaits a decision"));
+  root.append(notifyLabel);
+
   if (model.error) {
     const err = document.createElement("div");
     err.className = "settings__error";
@@ -86,14 +99,15 @@ export async function initSettings(): Promise<void> {
   const toggle = document.getElementById("settings-toggle");
   if (!panel || !toggle) return;
 
-  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", error: null };
+  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", notifyOnAwaiting: true, error: null };
 
   const saveConfig = async (patch: Partial<ConfigJson>) => {
     const c = await invoke<ConfigJson>("set_config", {
-      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, ...patch },
+      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, notifyOnAwaiting: model.notifyOnAwaiting, ...patch },
     });
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
+    model.notifyOnAwaiting = c.notifyOnAwaiting;
   };
 
   const paint = () => panel.replaceChildren(renderSettings(model, handlers));
@@ -113,6 +127,7 @@ export async function initSettings(): Promise<void> {
     onRemove: () => void run(async () => { model.hookInstalled = await invoke<boolean>("remove_hook"); }),
     onTimeout: (minutes) => void run(() => saveConfig({ completedTimeoutMinutes: minutes })),
     onProjectsDir: (path) => void run(() => saveConfig({ projectsDir: path || null })),
+    onNotify: (enabled) => void run(() => saveConfig({ notifyOnAwaiting: enabled })),
   };
 
   toggle.addEventListener("click", () => {
@@ -124,5 +139,6 @@ export async function initSettings(): Promise<void> {
     model.hookInstalled = installed;
     model.completedTimeoutMinutes = config.completedTimeoutMinutes;
     model.projectsDir = config.projectsDir ?? "";
+    model.notifyOnAwaiting = config.notifyOnAwaiting;
   });
 }

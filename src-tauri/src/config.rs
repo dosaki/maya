@@ -8,11 +8,18 @@ pub struct Config {
     /// Folder whose subfolders are offered when starting a new session, e.g. `~/dev`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projects_dir: Option<String>,
+    /// Post a system notification when a session starts waiting on the user.
+    #[serde(default = "default_true")]
+    pub notify_on_awaiting: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { completed_timeout_minutes: 30, projects_dir: None }
+        Self { completed_timeout_minutes: 30, projects_dir: None, notify_on_awaiting: true }
     }
 }
 
@@ -70,17 +77,27 @@ mod tests {
         assert_eq!(expand_home("/abs/path"), Path::new("/abs/path"));
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5}"#).unwrap();
         assert!(c.projects_dir.is_none());
-        let c = Config { completed_timeout_minutes: 5, projects_dir: Some("~/dev".into()) };
+        let c = Config { completed_timeout_minutes: 5, projects_dir: Some("~/dev".into()), ..Default::default() };
         let text = serde_json::to_string(&c).unwrap();
         assert!(text.contains("\"projectsDir\":\"~/dev\""));
         assert_eq!(c.projects_dir_path(), Some(home.join("dev")));
     }
 
     #[test]
+    fn notifications_default_on_and_round_trip() {
+        assert!(Config::default().notify_on_awaiting);
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5}"#).unwrap();
+        assert!(c.notify_on_awaiting, "older config files without the field keep notifying");
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "notifyOnAwaiting": false}"#).unwrap();
+        assert!(!c.notify_on_awaiting);
+        assert!(serde_json::to_string(&c).unwrap().contains("\"notifyOnAwaiting\":false"));
+    }
+
+    #[test]
     fn round_trips_and_uses_camel_case() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("nested/config.json");
-        save(&p, &Config { completed_timeout_minutes: 5, projects_dir: None }).unwrap();
+        save(&p, &Config { completed_timeout_minutes: 5, projects_dir: None, ..Default::default() }).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("completedTimeoutMinutes"));
         assert_eq!(load(&p).completed_timeout_minutes, 5);
     }

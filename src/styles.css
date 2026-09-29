@@ -122,3 +122,6 @@ body { margin: 0; background: var(--bg); }
 .newsession__actions { display: flex; justify-content: flex-end; }
 .modal__setup { padding: 16px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .modal__setup p { margin: 0; color: var(--muted); }
+
+.settings__check { display: flex; align-items: center; gap: 8px; }
+.settings__check input { width: auto; }

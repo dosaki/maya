@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderSettings } from "./settings";
 
-const handlers = () => ({ onInstall: vi.fn(), onRemove: vi.fn(), onTimeout: vi.fn(), onProjectsDir: vi.fn() });
+const handlers = () => ({ onInstall: vi.fn(), onRemove: vi.fn(), onTimeout: vi.fn(), onProjectsDir: vi.fn(), onNotify: vi.fn() });
 
 describe("renderSettings", () => {
   it("offers install when the hook is missing", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: false, completedTimeoutMinutes: 30, projectsDir: "", error: null }, h);
+    const el = renderSettings({ hookInstalled: false, completedTimeoutMinutes: 30, projectsDir: "", notifyOnAwaiting: true, error: null }, h);
     expect(el.querySelector(".settings__status")?.textContent).toContain("not installed");
     const btn = el.querySelector<HTMLButtonElement>("button[data-action=install]")!;
     btn.click();
@@ -16,7 +16,7 @@ describe("renderSettings", () => {
 
   it("offers remove when the hook is installed", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", error: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", notifyOnAwaiting: true, error: null }, h);
     expect(el.querySelector(".settings__status")?.textContent).toContain("installed");
     el.querySelector<HTMLButtonElement>("button[data-action=remove]")!.click();
     expect(h.onRemove).toHaveBeenCalled();
@@ -24,7 +24,7 @@ describe("renderSettings", () => {
 
   it("reports timeout changes and shows errors", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "~/dev", error: "boom" }, h);
+    const el = renderSettings({ hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "~/dev", notifyOnAwaiting: true, error: "boom" }, h);
     const input = el.querySelector<HTMLInputElement>("input[name=timeout]")!;
     expect(input.value).toBe("30");
     input.value = "45";
@@ -33,9 +33,22 @@ describe("renderSettings", () => {
     expect(el.querySelector(".settings__error")?.textContent).toBe("boom");
   });
 
+  it("has a notification toggle that reports changes", () => {
+    const h = handlers();
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", notifyOnAwaiting: true, error: null }, h);
+    const box = el.querySelector<HTMLInputElement>("input[name=notify]")!;
+    expect(box.type).toBe("checkbox");
+    expect(box.checked).toBe(true);
+    expect(box.closest("label")?.textContent).toContain("awaits a decision");
+    box.checked = false;
+    box.dispatchEvent(new Event("change"));
+    expect(h.onNotify).toHaveBeenCalledWith(false);
+    expect(renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", notifyOnAwaiting: false, error: null }, h).querySelector<HTMLInputElement>("input[name=notify]")!.checked).toBe(false);
+  });
+
   it("shows the projects directory and reports changes", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", error: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", notifyOnAwaiting: true, error: null }, h);
     const input = el.querySelector<HTMLInputElement>("input[name=projectsDir]")!;
     expect(input.value).toBe("~/dev");
     input.value = "~/code";

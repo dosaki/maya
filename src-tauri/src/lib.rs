@@ -7,6 +7,7 @@ pub mod hook_install;
 pub mod inbox;
 pub mod launch;
 pub mod model;
+pub mod notify;
 pub mod pr;
 pub mod registry;
 pub mod state;
@@ -23,6 +24,7 @@ use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 
 pub struct AppState {
     pub store: Mutex<Store>,
+    pub notifier: Mutex<notify::Notifier>,
 }
 
 fn claude_dir() -> std::path::PathBuf {
@@ -30,11 +32,18 @@ fn claude_dir() -> std::path::PathBuf {
 }
 
 fn refresh_and_emit(app: &AppHandle) {
-    let cards = {
+    let (cards, wants_notify) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
-        store.refresh(now_ms())
+        (store.refresh(now_ms()), store.config.notify_on_awaiting)
     };
+    // Track every refresh so a toggle-on later does not replay old asks.
+    let fresh = app.state::<AppState>().notifier.lock().unwrap().take_new(&cards);
+    if wants_notify {
+        for c in &fresh {
+            notify::notify(c);
+        }
+    }
     let _ = app.emit("sessions", &cards);
 }
 
@@ -251,7 +260,7 @@ pub fn run() {
     store.compact_events();
 
     tauri::Builder::default()
-        .manage(AppState { store: Mutex::new(store) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()) })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             focus_session,
