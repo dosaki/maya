@@ -26,7 +26,13 @@ export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) =>
       add.dataset.action = "new-session";
       add.title = "New session";
       add.textContent = "+";
-      head.append(add);
+      const resume = document.createElement("button");
+      resume.type = "button";
+      resume.className = "column__add";
+      resume.dataset.action = "resume-session";
+      resume.title = "Resume a past session";
+      resume.textContent = "▶";
+      head.append(add, resume);
     }
 
     const list = document.createElement("div");

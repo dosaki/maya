@@ -53,6 +53,11 @@ impl Store {
         registry::list(&self.claude_dir.join("sessions"), &*self.alive)
     }
 
+    /// Ids of every live session.
+    pub fn live_session_ids(&self) -> Vec<String> {
+        self.registry().into_iter().map(|s| s.session_id).collect()
+    }
+
     /// Working directories of every live session.
     pub fn live_cwds(&self) -> Vec<String> {
         self.registry().into_iter().map(|s| s.cwd).collect()

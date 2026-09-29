@@ -111,6 +111,18 @@ describe("renderCard", () => {
   });
 });
 
+describe("column header buttons", () => {
+  it("puts a resume button next to the new-session button on the Idle column only", () => {
+    const board = renderBoard([], NOW);
+    const idle = board.querySelector(".column--idle")!;
+    const resume = idle.querySelector<HTMLButtonElement>("button[data-action=resume-session]")!;
+    expect(resume.textContent).toBe("▶");
+    expect(resume.title).toContain("Resume");
+    expect(idle.querySelector("button[data-action=new-session]")).not.toBeNull();
+    expect(board.querySelector(".column--working button[data-action=resume-session]")).toBeNull();
+  });
+});
+
 describe("swapBoard", () => {
   it("keeps each column's scroll position across a repaint", () => {
     const host = document.createElement("div");

@@ -6,6 +6,7 @@ import { renderBoard, swapBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
 import { openModal, refreshModal, setProgress } from "./modal";
 import { closeNewSession, openNewSession } from "./newsession";
+import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
 import { renderReviews, reviewActionFor } from "./reviews";
@@ -162,7 +163,13 @@ async function start(): Promise<void> {
   board?.addEventListener("click", (ev) => {
     const target = ev.target as Element;
     if (target.closest("[data-action=new-session]")) {
+      closeResume();
       void openNewSession();
+      return;
+    }
+    if (target.closest("[data-action=resume-session]")) {
+      closeNewSession();
+      void openResume();
       return;
     }
     // The board may have just repainted under the cursor; ignore the click

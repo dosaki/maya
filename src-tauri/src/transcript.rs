@@ -27,7 +27,7 @@ pub struct TranscriptTail {
 /// The last `max_bytes` of `path` as text, with the first (possibly partial)
 /// line dropped when the read did not start at offset zero. None when the
 /// file cannot be read.
-fn tail_text(path: &Path, max_bytes: u64) -> Option<String> {
+pub(crate) fn tail_text(path: &Path, max_bytes: u64) -> Option<String> {
     let mut file = std::fs::File::open(path).ok()?;
     let meta = file.metadata().ok()?;
     let start = meta.len().saturating_sub(max_bytes);

@@ -113,6 +113,16 @@ body { margin: 0; background: var(--bg); }
 .column__add:hover { border-color: var(--working); color: var(--working); }
 .column__count { margin-left: auto; }
 .column__count + .column__add { margin-left: 0; }
+.column__add + .column__add { margin-left: 4px; font-size: 11px; }
+.resume__hint { color: var(--muted); font-style: italic; margin: 4px 0; }
+.resume__list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.resume__row { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); cursor: pointer; font: inherit; }
+.resume__row:hover:not(:disabled) { border-color: var(--working); }
+.resume__row:disabled { opacity: .55; cursor: default; }
+.resume__top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.resume__title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.resume__chip { padding: 1px 6px; border: 1px solid var(--working); border-radius: 999px; font-size: 10px; color: var(--working); white-space: nowrap; }
+.resume__age { font-size: 12px; color: var(--muted); }
 .modal__panel--compact { height: auto; max-height: 80vh; }
 .newsession { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; }
 .newsession__field { display: flex; flex-direction: column; gap: 4px; }

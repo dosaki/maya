@@ -10,6 +10,7 @@ pub mod model;
 pub mod notify;
 pub mod pr;
 pub mod registry;
+pub mod resume;
 pub mod reviews;
 pub mod state;
 pub mod store;
@@ -254,6 +255,43 @@ fn projects_root(state: &TauriState<AppState>) -> Result<std::path::PathBuf, Str
     Ok(root)
 }
 
+/// The project folder `dir` as an absolute path, refusing anything not listed.
+fn project_path(state: &TauriState<AppState>, dir: &str) -> Result<std::path::PathBuf, String> {
+    let root = projects_root(state)?;
+    if !launch::list_project_dirs(&root).iter().any(|d| d == dir) {
+        return Err("That folder is not in the projects directory.".into());
+    }
+    Ok(root.join(dir))
+}
+
+/// Past sessions of a project folder, newest first, with running ones marked.
+#[tauri::command(async)]
+fn list_resumable_sessions(state: TauriState<AppState>, dir: String) -> Result<Vec<resume::ResumableSession>, String> {
+    let path = project_path(&state, &dir)?;
+    let (claude_dir, running) = {
+        let store = state.store.lock().unwrap();
+        (store.claude_dir().to_path_buf(), store.live_session_ids())
+    };
+    Ok(resume::list_sessions(&claude_dir, &path.to_string_lossy(), &running))
+}
+
+/// Opens a Terminal in the folder running `claude --resume <id>`.
+#[tauri::command(async)]
+fn resume_session(state: TauriState<AppState>, dir: String, session_id: String) -> Result<(), String> {
+    let path = project_path(&state, &dir)?;
+    let (claude_dir, running) = {
+        let store = state.store.lock().unwrap();
+        (store.claude_dir().to_path_buf(), store.live_session_ids())
+    };
+    if running.contains(&session_id) {
+        return Err("That session is already running.".into());
+    }
+    if !resume::transcript_exists(&claude_dir, &path.to_string_lossy(), &session_id) {
+        return Err("No such session in that folder.".into());
+    }
+    launch::open_terminal_with(&resume::resume_command(&path, &session_id))
+}
+
 #[tauri::command(async)]
 fn list_project_dirs(state: TauriState<AppState>) -> Result<Vec<String>, String> {
     Ok(launch::list_project_dirs(&projects_root(&state)?))
@@ -349,6 +387,8 @@ pub fn run() {
             open_review_pr,
             review_pr,
             list_project_dirs,
+            list_resumable_sessions,
+            resume_session,
             start_session,
             hook_status,
             install_hook,
