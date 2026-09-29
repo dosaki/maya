@@ -75,8 +75,9 @@ function paint(): void {
   const delay = nextEnableDelay(cards, Date.now());
   if (enableTimer) clearTimeout(enableTimer);
   enableTimer = delay === null ? undefined : setTimeout(() => { enableTimer = undefined; paint(); }, delay + 50);
-  const meta = document.getElementById("meta");
-  if (meta) meta.textContent = `${cards.length} session${cards.length === 1 ? "" : "s"}`;
+  const counts = { idle: 0, working: 0, awaiting: 0, completed: 0 };
+  for (const c of cards) counts[c.state] += 1;
+  tabs?.setSessionCounts(counts);
 }
 
 async function focus(pid: number): Promise<void> {

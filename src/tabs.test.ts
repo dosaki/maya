@@ -3,7 +3,7 @@ import { makeTabs } from "./tabs";
 
 function dom() {
   document.body.innerHTML = `
-    <nav><button data-tab="sessions">Sessions</button><button data-tab="reviews">Pull Requests <span id="reviews-count"></span></button></nav>
+    <nav><button data-tab="sessions">Sessions <span class="tab__count tab__count--idle" data-count="idle"></span><span class="tab__count tab__count--working" data-count="working"></span><span class="tab__count tab__count--awaiting" data-count="awaiting"></span><span class="tab__count tab__count--completed" data-count="completed"></span></button><button data-tab="reviews">Pull Requests <span id="reviews-count"></span></button></nav>
     <div id="board"></div><div id="reviews" hidden></div>`;
 }
 
@@ -33,6 +33,18 @@ describe("makeTabs", () => {
     localStorage.setItem("maya.tab", "nonsense");
     dom();
     expect(makeTabs().current()).toBe("sessions");
+  });
+
+  it("shows one badge per column on the Sessions tab, zeros included, with tooltips", () => {
+    const tabs = makeTabs();
+    tabs.setSessionCounts({ idle: 12, working: 3, awaiting: 0, completed: 1 });
+    const badge = (state: string) => document.querySelector<HTMLElement>(`[data-count=${state}]`)!;
+    expect(badge("idle").textContent).toBe("12");
+    expect(badge("working").textContent).toBe("3");
+    expect(badge("awaiting").textContent).toBe("0");
+    expect(badge("completed").textContent).toBe("1");
+    expect(badge("awaiting").title).toBe("0 awaiting decision");
+    expect(badge("idle").title).toBe("12 idle");
   });
 
   it("shows the PR count on the tab, blank at zero", () => {

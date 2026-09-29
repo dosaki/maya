@@ -1,3 +1,5 @@
+import { STATE_LABEL, type CardState } from "./types";
+
 export type Tab = "sessions" | "reviews";
 
 const KEY = "maya.tab";
@@ -45,6 +47,15 @@ export function makeTabs() {
     setCount: (n: number) => {
       const el = document.getElementById("reviews-count");
       if (el) el.textContent = n > 0 ? String(n) : "";
+    },
+    /** One badge per column on the Sessions tab; zeros stay visible so the badges keep their places. */
+    setSessionCounts: (counts: Record<CardState, number>) => {
+      for (const [state, n] of Object.entries(counts) as [CardState, number][]) {
+        const el = document.querySelector<HTMLElement>(`[data-count=${state}]`);
+        if (!el) continue;
+        el.textContent = String(n);
+        el.title = `${n} ${STATE_LABEL[state].toLowerCase()}`;
+      }
     },
   };
 }
