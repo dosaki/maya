@@ -51,6 +51,9 @@ protocol Recogniser: AnyObject {
     /// Called once the audio engine runs; the recogniser emits `listening` when ready.
     func begin(format: AVAudioFormat)
     func accept(_ buffer: AVAudioPCMBuffer)
+    /// Called just before the process exits, as a courtesy: the exit itself
+    /// does not wait on this and does not run static destructors.
+    func shutdown()
 }
 
 /// Apple's on-device recogniser: today's behaviour, unchanged.
@@ -81,6 +84,8 @@ final class SystemRecogniser: Recogniser {
     func accept(_ buffer: AVAudioPCMBuffer) {
         request?.append(buffer)
     }
+
+    func shutdown() {}
 
     /// Emits a quiet partial as final and starts a new request; also performs
     /// a due rotation once nothing is being said.
@@ -204,6 +209,12 @@ final class WhisperRecogniser: Recogniser {
             Out.emit(["type": "note", "text": String(format: "model loaded in %.1f s", Date().timeIntervalSince(t0))])
             Out.emit(["type": "state", "state": "listening"])
         }
+    }
+
+    /// Frees the whisper.cpp context, as a courtesy before `_exit`; costs
+    /// nothing if it never loaded.
+    func shutdown() {
+        if let c = ctx { whisper_free(c) }
     }
 
     func accept(_ buffer: AVAudioPCMBuffer) {
@@ -378,15 +389,25 @@ default:
 let ear = Ear(recogniser: recogniser)
 ear.start()
 
+// _exit(0), not exit(0): whisper.cpp's Metal backend aborts inside its own
+// static destructors when exit() runs them, so quitting skips that path
+// entirely, after flushing the one thing this process buffers (stdout) and
+// giving the recogniser a chance to free what it can.
+func quit() -> Never {
+    recogniser.shutdown()
+    fflush(stdout)
+    _exit(0)
+}
+
 DispatchQueue.global().async {
     while let line = readLine() {
         switch line.trimmingCharacters(in: .whitespaces) {
         case "pause": DispatchQueue.main.async { ear.setPaused(true) }
         case "resume": DispatchQueue.main.async { ear.setPaused(false) }
-        case "quit": exit(0)
+        case "quit": quit()
         default: break
         }
     }
-    exit(0)
+    quit()
 }
 RunLoop.main.run()
