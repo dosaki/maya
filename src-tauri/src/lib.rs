@@ -136,6 +136,9 @@ fn refresh_and_emit(app: &AppHandle) {
         let mut n = state.notifier.lock().unwrap();
         (n.take_new(&cards), n.take_finished(&cards))
     };
+    // A Focus mode (Do Not Disturb and friends) keeps Maya quiet; banners are
+    // left to macOS, which filters them by the Focus's own rules.
+    let speak = speak && !((!fresh.is_empty() || !finished.is_empty()) && notify::focus_active());
     if wants_notify {
         for c in &fresh {
             // With a voice the banner stays silent; the sound is replaced, not doubled.

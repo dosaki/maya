@@ -1,7 +1,7 @@
 use crate::model::{AwaitKind, Card, State};
 use crate::state::truncate;
 use std::collections::HashSet;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{mpsc, Mutex, OnceLock};
 
 /// Remembers which asks have been announced so each one notifies once.
@@ -83,6 +83,26 @@ pub struct Utterance {
     pub text: String,
     /// ElevenLabs (maya dir, key, voice id) when configured; None for the built-in voice.
     pub eleven: Option<(std::path::PathBuf, String, String)>,
+}
+
+/// True when the Focus assertion store (`~/Library/DoNotDisturb/DB/Assertions.json`,
+/// as JSON) holds an active record: a Focus mode such as Do Not Disturb is on.
+pub fn focus_active_in(json: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v["data"][0]["storeAssertionRecords"].as_array().map(|a| !a.is_empty()))
+        .unwrap_or(false)
+}
+
+/// Whether a Focus mode is on right now. Unreadable state counts as off.
+pub fn focus_active() -> bool {
+    let Some(home) = dirs::home_dir() else { return false };
+    let path = home.join("Library/DoNotDisturb/DB/Assertions.json");
+    let out = Command::new("plutil").args(["-convert", "json", "-o", "-"]).arg(&path).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    match out {
+        Ok(o) if o.status.success() => focus_active_in(&String::from_utf8_lossy(&o.stdout)),
+        _ => std::fs::read_to_string(&path).map(|t| focus_active_in(&t)).unwrap_or(false),
+    }
 }
 
 static SPEECH: OnceLock<Mutex<mpsc::Sender<Utterance>>> = OnceLock::new();
@@ -225,6 +245,15 @@ mod tests {
         assert_eq!(pick_voice(list).as_deref(), Some("Samantha"));
         assert_eq!(pick_voice("Daniel en_GB # x\nTessa en_ZA # y\n").as_deref(), Some("Tessa"));
         assert_eq!(pick_voice("Daniel en_GB # x\n"), None);
+    }
+
+    #[test]
+    fn focus_is_active_when_the_assertion_store_has_records() {
+        let on = r#"{"data":[{"storeAssertionRecords":[{"assertionUUID":"x","assertionDetails":{"assertionDetailsModeIdentifier":"com.apple.donotdisturb.mode.default"}}]}]}"#;
+        assert!(focus_active_in(on));
+        assert!(!focus_active_in(r#"{"data":[{"storeAssertionRecords":[]}]}"#));
+        assert!(!focus_active_in(r#"{"data":[{}]}"#));
+        assert!(!focus_active_in("garbage"));
     }
 
     #[test]
