@@ -151,14 +151,14 @@ fn refresh_and_emit(app: &AppHandle) {
             notify::notify(c, !speak);
             if speak {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(notify::Utterance { text: line, eleven: eleven.clone() });
+                    notify::speak(notify::Utterance::new(line, eleven.clone()));
                 }
             }
         }
         if speak {
             for c in &finished {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(notify::Utterance { text: line, eleven: eleven.clone() });
+                    notify::speak(notify::Utterance::new(line, eleven.clone()));
                 }
             }
         }
@@ -457,14 +457,10 @@ fn try_voice(state: TauriState<AppState>) -> Result<(), String> {
         let store = state.store.lock().unwrap();
         eleven_settings(&store)
     };
+    // Through the one speech queue, so listening pauses and she does not
+    // wake herself on "Maya here".
     let line = "Maya here. hexgrid needs a decision".to_string();
-    match eleven {
-        Some((dir, key, voice_id)) => voice::speak(&dir, &key, &voice_id, &line),
-        None => {
-            notify::say_builtin(&line);
-            Ok(())
-        }
-    }
+    notify::speak_and_wait(notify::Utterance { fallback: false, ..notify::Utterance::new(line, eleven) })
 }
 
 #[tauri::command]
@@ -537,6 +533,7 @@ pub fn run() {
         ])
         .setup(move |app| {
             focus::install_app_handle(app.handle().clone());
+            listener::install_speech_hook(app.handle().clone());
             dock::set_dock_icon();
             let handle = app.handle().clone();
             let sessions_dir = dir.join("sessions");

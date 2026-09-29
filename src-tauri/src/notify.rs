@@ -83,6 +83,35 @@ pub struct Utterance {
     pub text: String,
     /// ElevenLabs (maya dir, key, voice id) when configured; None for the built-in voice.
     pub eleven: Option<(std::path::PathBuf, String, String)>,
+    /// When ElevenLabs fails, speak the line with the built-in voice instead.
+    /// Off for "Try the voice", which reports the failure.
+    pub fallback: bool,
+    /// Told once the line has been spoken, with the ElevenLabs error if any.
+    pub done: Option<mpsc::Sender<Result<(), String>>>,
+}
+
+impl Utterance {
+    pub fn new(text: String, eleven: Option<(std::path::PathBuf, String, String)>) -> Utterance {
+        Utterance { text, eleven, fallback: true, done: None }
+    }
+}
+
+/// Where an utterance is: the listener pauses its ear on `Starting` (and
+/// ignores the line if it hears it back) and resumes on `Finished`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpeechPhase {
+    Starting(String),
+    Finished,
+}
+
+type SpeechHook = Box<dyn Fn(SpeechPhase) + Send + Sync>;
+
+static SPEECH_HOOK: OnceLock<SpeechHook> = OnceLock::new();
+
+/// Installs the hook called around every utterance. Once per process; a
+/// second call is ignored.
+pub fn install_speech_hook(hook: impl Fn(SpeechPhase) + Send + Sync + 'static) {
+    let _ = SPEECH_HOOK.set(Box::new(hook));
 }
 
 /// True when the Focus assertion store (`~/Library/DoNotDisturb/DB/Assertions.json`,
@@ -108,7 +137,7 @@ pub fn focus_active() -> bool {
 static SPEECH: OnceLock<Mutex<mpsc::Sender<Utterance>>> = OnceLock::new();
 
 /// Speaks with the built-in female voice.
-pub fn say_builtin(line: &str) {
+fn say_builtin(line: &str) {
     let mut cmd = Command::new("say");
     if let Some(v) = voice() {
         cmd.args(["-v", &v]);
@@ -116,33 +145,47 @@ pub fn say_builtin(line: &str) {
     let _ = cmd.arg(line).status();
 }
 
-/// Speaks now and returns when done; replies to the user go this way so
-/// listening can pause around them. Not held back by a Focus mode.
-pub fn speak_now(text: &str, eleven: Option<(std::path::PathBuf, String, String)>) {
-    let spoken = match &eleven {
-        Some((dir, key, voice_id)) => crate::voice::speak(dir, key, voice_id, text).is_ok(),
-        None => false,
-    };
-    if !spoken {
-        say_builtin(text);
+/// Speaks one line with its chosen voice. An ElevenLabs failure falls back to
+/// the built-in voice unless the utterance says not to.
+fn speak_line(u: &Utterance) -> Result<(), String> {
+    if let Some((dir, key, voice_id)) = &u.eleven {
+        match crate::voice::speak(dir, key, voice_id, &u.text) {
+            Ok(()) => return Ok(()),
+            Err(e) if !u.fallback => return Err(e),
+            Err(_) => {}
+        }
+    }
+    say_builtin(&u.text);
+    Ok(())
+}
+
+/// Speaks `u` with `speak`, calling `hook` before and after, then tells
+/// whoever waits for it.
+fn deliver(u: Utterance, hook: Option<&dyn Fn(SpeechPhase)>, speak: &dyn Fn(&Utterance) -> Result<(), String>) {
+    if let Some(h) = hook {
+        h(SpeechPhase::Starting(u.text.clone()));
+    }
+    let result = speak(&u);
+    if let Some(h) = hook {
+        h(SpeechPhase::Finished);
+    }
+    if let Some(done) = u.done {
+        let _ = done.send(result);
     }
 }
 
-/// Queues an utterance. Lines are spoken one after another on a background
-/// thread, so the board never waits and voices never overlap. An ElevenLabs
-/// failure falls back to the built-in voice for that line.
+/// Queues an utterance. Every line Maya says (announcements, replies, the
+/// voice test) goes through this one queue and is spoken one after another
+/// on a background thread, so voices never overlap and the speech hook
+/// pauses listening around each one. The queue itself ignores Focus modes:
+/// unsolicited announcements are filtered before they are queued.
 pub fn speak(u: Utterance) {
     let tx = SPEECH.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Utterance>();
         std::thread::spawn(move || {
             for u in rx {
-                let spoken = match &u.eleven {
-                    Some((dir, key, voice_id)) => crate::voice::speak(dir, key, voice_id, &u.text).is_ok(),
-                    None => false,
-                };
-                if !spoken {
-                    say_builtin(&u.text);
-                }
+                let hook = SPEECH_HOOK.get().map(|h| h.as_ref() as &dyn Fn(SpeechPhase));
+                deliver(u, hook, &speak_line);
             }
         });
         Mutex::new(tx)
@@ -150,6 +193,16 @@ pub fn speak(u: Utterance) {
     if let Ok(tx) = tx.lock() {
         let _ = tx.send(u);
     }
+}
+
+/// Queues an utterance and waits until it has been spoken; the result is the
+/// ElevenLabs error when the line had no fallback. Never call it holding a
+/// lock the speech hook takes.
+pub fn speak_and_wait(mut u: Utterance) -> Result<(), String> {
+    let (tx, rx) = mpsc::channel();
+    u.done = Some(tx);
+    speak(u);
+    rx.recv().map_err(|_| "the speech queue stopped".to_string())?
 }
 
 fn applescript_string(text: &str) -> String {
@@ -266,6 +319,27 @@ mod tests {
         assert!(!focus_active_in(r#"{"data":[{"storeAssertionRecords":[]}]}"#));
         assert!(!focus_active_in(r#"{"data":[{}]}"#));
         assert!(!focus_active_in("garbage"));
+    }
+
+    #[test]
+    fn each_line_is_spoken_between_the_hook_calls_and_then_reported_done() {
+        let log = std::sync::Mutex::new(Vec::<String>::new());
+        let hook = |p: SpeechPhase| log.lock().unwrap().push(format!("{p:?}"));
+        let (tx, rx) = mpsc::channel();
+        let u = Utterance { done: Some(tx), ..Utterance::new("hexgrid needs a decision".into(), None) };
+        deliver(u, Some(&hook), &|u: &Utterance| {
+            log.lock().unwrap().push(format!("speak {}", u.text));
+            Err("no voice".into())
+        });
+        assert_eq!(*log.lock().unwrap(), vec!["Starting(\"hexgrid needs a decision\")", "speak hexgrid needs a decision", "Finished"]);
+        assert_eq!(rx.recv().unwrap(), Err("no voice".to_string()), "the speaker's result reaches the waiter");
+        // Without a hook (nothing listening) the line is still spoken.
+        let spoken = std::sync::Mutex::new(0);
+        deliver(Utterance::new("x".into(), None), None, &|_| {
+            *spoken.lock().unwrap() += 1;
+            Ok(())
+        });
+        assert_eq!(*spoken.lock().unwrap(), 1);
     }
 
     #[test]

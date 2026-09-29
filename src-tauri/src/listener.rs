@@ -79,9 +79,41 @@ fn remember(app: &AppHandle, who: &str, text: &str) {
     }
 }
 
-/// Speaks a reply to the user now (blocking), with listening paused around it.
-/// Blank text says nothing. False when run `generation` is no longer current,
-/// before or after speaking.
+/// What the speech hook does to the voice state: pause the ear and remember
+/// the line (so hearing it back does nothing) as an utterance starts, resume
+/// the ear when it ends.
+fn on_speech(v: &mut VoiceState, phase: &notify::SpeechPhase) {
+    match phase {
+        notify::SpeechPhase::Starting(text) => {
+            if let Some(e) = v.ear.as_mut() {
+                e.pause();
+            }
+            if let Some(f) = v.flow.as_mut() {
+                f.ignore_line(text);
+            }
+        }
+        notify::SpeechPhase::Finished => {
+            if let Some(e) = v.ear.as_mut() {
+                e.resume();
+            }
+        }
+    }
+}
+
+/// Installs the hook that pauses listening around every line Maya says:
+/// replies, queued announcements and the voice test all share one queue.
+pub(crate) fn install_speech_hook(app: AppHandle) {
+    notify::install_speech_hook(move |phase| {
+        let state = app.state::<AppState>();
+        let mut v = state.voice.lock().unwrap();
+        on_speech(&mut v, &phase);
+    });
+}
+
+/// Speaks a reply to the user (blocking until spoken) through the shared
+/// speech queue, which pauses listening around it and is not held back by a
+/// Focus mode. Blank text says nothing. False when run `generation` is no
+/// longer current, before or after speaking.
 fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
     if text.trim().is_empty() {
         return is_current(app, generation);
@@ -91,12 +123,6 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
         let mut v = state.voice.lock().unwrap();
         if v.generation != generation {
             return false;
-        }
-        if let Some(e) = v.ear.as_mut() {
-            e.pause();
-        }
-        if let Some(f) = v.flow.as_mut() {
-            f.ignore_line(text);
         }
         v.status.said = text.to_string();
     }
@@ -108,16 +134,9 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
         let store = state.store.lock().unwrap();
         eleven_settings(&store)
     };
-    notify::speak_now(text, eleven);
-    let state = app.state::<AppState>();
-    let mut v = state.voice.lock().unwrap();
-    if v.generation != generation {
-        return false;
-    }
-    if let Some(e) = v.ear.as_mut() {
-        e.resume();
-    }
-    true
+    // No lock is held here: the speech hook takes the voice lock.
+    let _ = notify::speak_and_wait(notify::Utterance::new(text.to_string(), eleven));
+    is_current(app, generation)
 }
 
 /// Runs a validated action through the same paths as the page's buttons;
@@ -631,5 +650,15 @@ mod tests {
         assert_eq!(user_turn(&[Effect::Execute(json!({"kind":"reply"}))]).as_deref(), Some("yes"));
         assert_eq!(user_turn(&[Effect::Cancelled]).as_deref(), Some("no"));
         assert_eq!(user_turn(&[]), None);
+    }
+
+    #[test]
+    fn a_line_she_starts_to_say_is_not_taken_as_a_command_when_heard_back() {
+        use crate::notify::SpeechPhase;
+        let mut v = VoiceState { flow: Some(wake::Flow::new()), ..Default::default() };
+        // The voice test and announcements go through the same hook as replies.
+        on_speech(&mut v, &SpeechPhase::Starting("Maya here. hexgrid needs a decision".into()));
+        on_speech(&mut v, &SpeechPhase::Finished);
+        assert_eq!(v.flow.as_mut().unwrap().on_segment("Maya here hexgrid needs a decision", 1000), vec![]);
     }
 }
