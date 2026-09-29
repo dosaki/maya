@@ -18,10 +18,12 @@ func inputDevices() -> [AVCaptureDevice] {
 }
 
 /// Built-in first, then any input that is not a virtual or remote device.
+/// The banned list is absolute: it is applied before honouring a preferred name,
+/// so a banned `--device` request falls through to the automatic choice.
 func pickDevice(_ names: [String], preferred: String?) -> String? {
-    if let p = preferred, names.contains(p) { return p }
     let banned = ["blackhole", "remote sound", "soundflower", "loopback"]
     let ok = names.filter { n in !banned.contains { n.lowercased().contains($0) } }
+    if let p = preferred, ok.contains(p) { return p }
     if let b = ok.first(where: { $0.lowercased().contains("macbook") || $0.lowercased().contains("built-in") }) { return b }
     return ok.first
 }
@@ -46,6 +48,7 @@ final class Ear {
     var paused = false
     var lastPartial = ""
     var restartTimer: Timer?
+    var lastLevelAt: TimeInterval = 0
 
     func start() {
         SFSpeechRecognizer.requestAuthorization { status in
@@ -69,7 +72,7 @@ final class Ear {
                 var devId = id
                 AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &devId, UInt32(MemoryLayout<AudioDeviceID>.size))
             }
-            Out.emit(["type": "state", "state": "device", "detail": name])
+            Out.emit(["type": "device", "name": name])
         }
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
@@ -81,7 +84,13 @@ final class Ear {
                 var sum: Float = 0
                 for i in 0..<n { sum += ch[i] * ch[i] }
                 let rms = n > 0 ? sqrt(sum / Float(n)) : 0
-                Out.emit(["type": "level", "value": min(1.0, Double(rms) * 8)])
+                let now = Date().timeIntervalSince1970
+                if now - self.lastLevelAt >= 0.2 {
+                    self.lastLevelAt = now
+                    // Typical speaking RMS is small (roughly 0.05-0.15), so scale it up by
+                    // 8x to fill a 0-1 range that's usable for a UI level meter.
+                    Out.emit(["type": "level", "value": min(1.0, Double(rms) * 8)])
+                }
             }
         }
         engine.prepare()
@@ -100,7 +109,11 @@ final class Ear {
         req.requiresOnDeviceRecognition = true
         request = req
         lastPartial = ""
-        task = recognizer.recognitionTask(with: req) { result, error in
+        // Captured by the completion handler below so it can tell whether it belongs to
+        // the still-current task; a handler whose task has since been superseded (by
+        // rotate(), which clears self.task before cancelling) must not restart anything.
+        var newTask: SFSpeechRecognitionTask?
+        newTask = recognizer.recognitionTask(with: req) { result, error in
             if let r = result {
                 let text = r.bestTranscription.formattedString
                 if r.isFinal {
@@ -111,19 +124,21 @@ final class Ear {
                     Out.emit(["type": "partial", "text": text])
                 }
             }
-            if error != nil && self.task != nil {
-                // The request ended (silence timeout or rotation): flush the partial as final and start again.
+            if error != nil && self.task === newTask {
+                // The request ended (silence timeout): flush the partial as final and start again.
                 if !self.lastPartial.isEmpty { Out.emit(["type": "final", "text": self.lastPartial]) }
                 DispatchQueue.main.async { self.beginRequest() }
             }
         }
+        task = newTask
     }
 
     func rotate() {
         if !lastPartial.isEmpty { Out.emit(["type": "final", "text": lastPartial]) }
         request?.endAudio()
-        task?.cancel()
+        let old = task
         task = nil
+        old?.cancel()
         beginRequest()
     }
 
