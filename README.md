@@ -7,6 +7,27 @@ Terminal tab, read the conversation and reply, or answer the question it is
 asking with one click. The Idle column's "+" starts a new session in one of
 your project folders, or lets Claude pick the folder from your prompt.
 
+## Install
+
+macOS only for now (Apple Silicon and Intel). One command:
+
+    curl -fsSL https://raw.githubusercontent.com/dosaki/maya/main/install.sh | sh
+
+It downloads the latest release, puts `Maya.app` in `/Applications` (or
+`~/Applications` when that is not writable), and clears the quarantine flag,
+since the builds are not signed or notarised. Then `open -a Maya`.
+
+Prefer a manual install? Grab the `.dmg` for your architecture from the
+[latest release](https://github.com/dosaki/maya/releases/latest), drag Maya
+to Applications, and the first time right-click it and choose Open.
+
+To update, run the same command again. Set `MAYA_INSTALL_DIR` to install
+somewhere else.
+
+Every push to `main` builds and publishes a release. Linux and Windows builds
+will follow once the terminal integration is portable; today the board is
+macOS only because it drives Terminal through AppleScript and AppKit.
+
 ## How it works
 
 - Reads the session registry Claude Code keeps at `~/.claude/sessions/`.

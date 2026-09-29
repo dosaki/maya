@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: Build and release (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: |
+          pnpm test
+          cd src-tauri && cargo test
+
+      - name: Read version
+        id: version
+        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Build (Apple Silicon)
+        run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
+
+      - name: Build (Intel)
+        run: pnpm tauri build --target x86_64-apple-darwin --bundles app,dmg
+
+      - name: Package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            arch="${target%%-*}"
+            bundle="src-tauri/target/$target/release/bundle"
+            tar -C "$bundle/macos" -czf "dist-release/Maya_${VERSION}_${arch}.app.tar.gz" Maya.app
+            cp "$bundle"/dmg/*.dmg "dist-release/Maya_${VERSION}_${arch}.dmg"
+          done
+          ls -la dist-release
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" dist-release/* \
+            --title "Maya ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
+            --notes "Built from ${GITHUB_SHA} on main. Unsigned macOS build: install with the one-line installer in the README, which clears the quarantine flag, or right-click the app and choose Open the first time."
