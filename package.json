@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "vitest run"
+    "test": "vitest run",
+    "ear:build": "sh scripts/build-ear.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
