@@ -2,6 +2,7 @@ use crate::model::{AwaitKind, Card, State};
 use crate::state::truncate;
 use std::collections::HashSet;
 use std::process::Command;
+use std::sync::{mpsc, Mutex, OnceLock};
 
 /// Remembers which asks have been announced so each one notifies once.
 /// The first refresh only primes it: asks already open when Maya starts
@@ -9,7 +10,9 @@ use std::process::Command;
 #[derive(Default)]
 pub struct Notifier {
     seen: HashSet<(String, u64)>,
+    finished: HashSet<(String, u64)>,
     primed: bool,
+    primed_finished: bool,
 }
 
 impl Notifier {
@@ -24,19 +27,67 @@ impl Notifier {
         self.primed = true;
         out
     }
+
+    /// The cards whose turn finished since the last call, once each.
+    pub fn take_finished(&mut self, cards: &[Card]) -> Vec<Card> {
+        let mut out = Vec::new();
+        for c in cards.iter().filter(|c| c.state == State::Completed) {
+            if self.finished.insert((c.session_id.clone(), c.state_since)) && self.primed_finished {
+                out.push(c.clone());
+            }
+        }
+        self.primed_finished = true;
+        out
+    }
+}
+
+/// The session name as speech: dashes and hashes become spaces.
+fn spoken_name(name: &str) -> String {
+    let spaced: String = name.chars().map(|c| if c == '-' || c == '_' || c == '#' { ' ' } else { c }).collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// What Maya says for a card, or nothing for states that are not announced.
+pub fn spoken_line(card: &Card) -> Option<String> {
+    let name = spoken_name(&card.name);
+    match card.state {
+        State::Awaiting => Some(format!("{name} needs a decision")),
+        State::Completed => Some(format!("{name} is finished")),
+        _ => None,
+    }
+}
+
+static SPEECH: OnceLock<Mutex<mpsc::Sender<String>>> = OnceLock::new();
+
+/// Queues `text` for the system voice. Lines are spoken one after another
+/// on a background thread, so the board never waits and voices never overlap.
+pub fn speak(text: String) {
+    let tx = SPEECH.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in rx {
+                let _ = Command::new("say").arg(&line).status();
+            }
+        });
+        Mutex::new(tx)
+    });
+    if let Ok(tx) = tx.lock() {
+        let _ = tx.send(text);
+    }
 }
 
 fn applescript_string(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// A Notification Center banner with a sound.
-pub fn applescript_notify(title: &str, subtitle: &str, body: &str) -> String {
+/// A Notification Center banner, with the default sound unless it is being spoken instead.
+pub fn applescript_notify(title: &str, subtitle: &str, body: &str, sound: bool) -> String {
     format!(
-        "display notification \"{}\" with title \"{}\" subtitle \"{}\" sound name \"default\"",
+        "display notification \"{}\" with title \"{}\" subtitle \"{}\"{}",
         applescript_string(body),
         applescript_string(title),
-        applescript_string(subtitle)
+        applescript_string(subtitle),
+        if sound { " sound name \"default\"" } else { "" }
     )
 }
 
@@ -55,9 +106,9 @@ pub fn body_for(card: &Card) -> String {
     .into()
 }
 
-pub fn notify(card: &Card) {
+pub fn notify(card: &Card, sound: bool) {
     let project = card.cwd.rsplit('/').find(|s| !s.is_empty()).unwrap_or(&card.cwd);
-    let _ = Command::new("osascript").arg("-e").arg(applescript_notify(&card.name, project, &body_for(card))).output();
+    let _ = Command::new("osascript").arg("-e").arg(applescript_notify(&card.name, project, &body_for(card), sound)).output();
 }
 
 #[cfg(test)]
@@ -102,8 +153,37 @@ mod tests {
     }
 
     #[test]
+    fn finished_turns_are_announced_once_like_asks() {
+        let mut n = Notifier::default();
+        let done = card("a", State::Completed, 100, "");
+        assert!(n.take_finished(&[done.clone()]).is_empty(), "already finished at startup: quiet");
+        let again = card("a", State::Completed, 200, "");
+        assert_eq!(n.take_finished(&[again.clone()]).len(), 1);
+        assert!(n.take_finished(&[again.clone()]).is_empty());
+        assert!(n.take_finished(&[card("a", State::Working, 300, "")]).is_empty());
+    }
+
+    #[test]
+    fn spoken_lines_are_short_and_say_the_name_without_dashes() {
+        let ask = card("hexgrid-d3", State::Awaiting, 1, "Approve this plan?");
+        assert_eq!(spoken_line(&ask).as_deref(), Some("hexgrid d3 name needs a decision"));
+        let done = card("coral", State::Completed, 1, "");
+        assert_eq!(spoken_line(&done).as_deref(), Some("coral name is finished"));
+        assert_eq!(spoken_line(&card("x", State::Working, 1, "")), None);
+        let mut named = card("x", State::Awaiting, 1, "q");
+        named.name = "review bedrock #451".into();
+        assert_eq!(spoken_line(&named).as_deref(), Some("review bedrock 451 needs a decision"));
+    }
+
+    #[test]
+    fn banner_script_can_be_silent() {
+        assert!(applescript_notify("t", "s", "b", true).contains("sound name"));
+        assert!(!applescript_notify("t", "s", "b", false).contains("sound name"));
+    }
+
+    #[test]
     fn script_escapes_text_and_names_the_session_project_and_ask() {
-        let s = applescript_notify("eye-1", "eye", "Bash: rm -rf \"x\" \\ y");
+        let s = applescript_notify("eye-1", "eye", "Bash: rm -rf \"x\" \\ y", true);
         assert!(s.starts_with("display notification \"Bash: rm -rf \\\"x\\\" \\\\ y\""), "{s}");
         assert!(s.contains("with title \"eye-1\""));
         assert!(s.contains("subtitle \"eye\""));

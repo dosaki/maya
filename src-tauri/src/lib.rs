@@ -111,16 +111,33 @@ fn claude_dir() -> std::path::PathBuf {
 }
 
 fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify) = {
+    let (cards, wants_notify, speak) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
-        (store.refresh(now_ms()), store.config.notify_on_awaiting)
+        (store.refresh(now_ms()), store.config.notify_on_awaiting, store.config.speak_notifications)
     };
-    // Track every refresh so a toggle-on later does not replay old asks.
-    let fresh = app.state::<AppState>().notifier.lock().unwrap().take_new(&cards);
+    // Track every refresh so a toggle-on later does not replay old events.
+    let (fresh, finished) = {
+        let state = app.state::<AppState>();
+        let mut n = state.notifier.lock().unwrap();
+        (n.take_new(&cards), n.take_finished(&cards))
+    };
     if wants_notify {
         for c in &fresh {
-            notify::notify(c);
+            // With a voice the banner stays silent; the sound is replaced, not doubled.
+            notify::notify(c, !speak);
+            if speak {
+                if let Some(line) = notify::spoken_line(c) {
+                    notify::speak(line);
+                }
+            }
+        }
+        if speak {
+            for c in &finished {
+                if let Some(line) = notify::spoken_line(c) {
+                    notify::speak(line);
+                }
+            }
         }
     }
     let _ = app.emit("sessions", &cards);

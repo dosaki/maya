@@ -11,6 +11,10 @@ pub struct Config {
     /// Post a system notification when a session starts waiting on the user.
     #[serde(default = "default_true")]
     pub notify_on_awaiting: bool,
+    /// Speak "<name> needs a decision" / "<name> is finished" with the system
+    /// voice instead of playing the notification sound.
+    #[serde(default = "default_true")]
+    pub speak_notifications: bool,
     /// Where PR review clones go when the project checkout is missing or busy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clones_dir: Option<String>,
@@ -24,7 +28,7 @@ fn default_true() -> bool {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { completed_timeout_minutes: 30, projects_dir: None, notify_on_awaiting: true, clones_dir: None }
+        Self { completed_timeout_minutes: 30, projects_dir: None, notify_on_awaiting: true, speak_notifications: true, clones_dir: None }
     }
 }
 
@@ -101,6 +105,16 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "notifyOnAwaiting": false}"#).unwrap();
         assert!(!c.notify_on_awaiting);
         assert!(serde_json::to_string(&c).unwrap().contains("\"notifyOnAwaiting\":false"));
+    }
+
+    #[test]
+    fn speaking_defaults_on_and_round_trips() {
+        assert!(Config::default().speak_notifications);
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5}"#).unwrap();
+        assert!(c.speak_notifications);
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "speakNotifications": false}"#).unwrap();
+        assert!(!c.speak_notifications);
+        assert!(serde_json::to_string(&c).unwrap().contains("\"speakNotifications\":false"));
     }
 
     #[test]

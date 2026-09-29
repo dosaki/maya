@@ -6,6 +6,7 @@ export interface SettingsModel {
   projectsDir: string;
   clonesDir: string;
   notifyOnAwaiting: boolean;
+  speakNotifications: boolean;
   error: string | null;
 }
 
@@ -16,6 +17,7 @@ export interface SettingsHandlers {
   onProjectsDir(path: string): void;
   onNotify(enabled: boolean): void;
   onClonesDir(path: string): void;
+  onSpeak(enabled: boolean): void;
 }
 
 interface ConfigJson {
@@ -23,6 +25,7 @@ interface ConfigJson {
   projectsDir?: string | null;
   clonesDir?: string | null;
   notifyOnAwaiting: boolean;
+  speakNotifications: boolean;
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLElement {
@@ -99,6 +102,16 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   notifyLabel.append(notifyBox, document.createTextNode(" Notify me when a session awaits a decision"));
   root.append(notifyLabel);
 
+  const speakLabel = document.createElement("label");
+  speakLabel.className = "settings__check";
+  const speakBox = document.createElement("input");
+  speakBox.type = "checkbox";
+  speakBox.name = "speak";
+  speakBox.checked = model.speakNotifications;
+  speakBox.addEventListener("change", () => h.onSpeak(speakBox.checked));
+  speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
+  root.append(speakLabel);
+
   if (model.error) {
     const err = document.createElement("div");
     err.className = "settings__error";
@@ -113,16 +126,17 @@ export async function initSettings(): Promise<void> {
   const toggle = document.getElementById("settings-toggle");
   if (!panel || !toggle) return;
 
-  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, error: null };
+  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, error: null };
 
   const saveConfig = async (patch: Partial<ConfigJson>) => {
     const c = await invoke<ConfigJson>("set_config", {
-      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, clonesDir: model.clonesDir || null, notifyOnAwaiting: model.notifyOnAwaiting, ...patch },
+      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, clonesDir: model.clonesDir || null, notifyOnAwaiting: model.notifyOnAwaiting, speakNotifications: model.speakNotifications, ...patch },
     });
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
     model.clonesDir = c.clonesDir ?? "";
     model.notifyOnAwaiting = c.notifyOnAwaiting;
+    model.speakNotifications = c.speakNotifications;
   };
 
   const paint = () => panel.replaceChildren(renderSettings(model, handlers));
@@ -144,6 +158,7 @@ export async function initSettings(): Promise<void> {
     onProjectsDir: (path) => void run(() => saveConfig({ projectsDir: path || null })),
     onNotify: (enabled) => void run(() => saveConfig({ notifyOnAwaiting: enabled })),
     onClonesDir: (path) => void run(() => saveConfig({ clonesDir: path || null })),
+    onSpeak: (enabled) => void run(() => saveConfig({ speakNotifications: enabled })),
   };
 
   toggle.addEventListener("click", () => {
@@ -157,5 +172,6 @@ export async function initSettings(): Promise<void> {
     model.projectsDir = config.projectsDir ?? "";
     model.clonesDir = config.clonesDir ?? "";
     model.notifyOnAwaiting = config.notifyOnAwaiting;
+    model.speakNotifications = config.speakNotifications;
   });
 }
