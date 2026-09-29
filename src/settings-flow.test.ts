@@ -38,6 +38,7 @@ describe("settings flow", () => {
         return Promise.resolve({ ...config });
       }
       if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
       return Promise.reject(new Error("unexpected " + cmd));
     });
 
@@ -63,6 +64,7 @@ describe("settings flow", () => {
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
       return Promise.reject(new Error("unexpected " + cmd));
     });
     await initSettings();
@@ -88,5 +90,22 @@ describe("settings flow", () => {
 
     onVoice({ payload: { listening: false } });
     expect(document.querySelector<HTMLInputElement>("input[name=listen]")!.checked).toBe(false);
+  });
+
+  it("applies voice-model progress events to the picker", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "builtin", whisperModel: "tiny.en" };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([{ id: "tiny.en", label: "Tiny", bytes: 100, downloaded: false }]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+    const onProgress = eventListen.mock.calls.find((c) => c[0] === "voice-model")![1] as (e: { payload: { id: string; received: number; total: number } }) => void;
+    onProgress({ payload: { id: "tiny.en", received: 25, total: 100 } });
+    expect(document.querySelector<HTMLProgressElement>("progress[name=modelDownload]")!.value).toBe(25);
   });
 });
