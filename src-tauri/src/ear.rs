@@ -36,7 +36,7 @@ const VIRTUAL: &[&str] = &["blackhole", "remote sound", "soundflower", "loopback
 /// the first input that is not a virtual or remote device.
 pub fn pick_microphone(names: &[String], preferred: Option<&str>) -> Option<String> {
     if let Some(p) = preferred {
-        if names.iter().any(|n| n == p) {
+        if names.iter().any(|n| n == p) && !VIRTUAL.iter().any(|v| p.to_lowercase().contains(v)) {
             return Some(p.to_string());
         }
     }
@@ -135,6 +135,8 @@ mod tests {
         assert_eq!(pick_microphone(&names, Some("Gone")).as_deref(), Some("MacBook Pro Microphone"));
         assert_eq!(pick_microphone(&["BlackHole 2ch".to_string()], None), None);
         assert_eq!(pick_microphone(&["USB Mic".to_string(), "BlackHole 2ch".to_string()], None).as_deref(), Some("USB Mic"));
+        assert_eq!(pick_microphone(&names, Some("BlackHole 2ch")).as_deref(), Some("MacBook Pro Microphone"), "a banned preferred device falls through");
+        assert_eq!(pick_microphone(&[], None), None);
     }
 
     #[test]
