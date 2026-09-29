@@ -40,7 +40,10 @@ describe("context meter", () => {
     expect(renderCard(card({ context: { used: 148_000, window: 200_000, percent: 74 } }), NOW).querySelector("button[data-action=compact]")).toBeNull();
     const el = renderCard(card({ context: { used: 150_000, window: 200_000, percent: 75 } }), NOW);
     const btn = el.querySelector<HTMLButtonElement>("button[data-action=compact]")!;
-    expect(btn.textContent).toBe("Compact");
+    expect(btn.querySelector("svg.icon-compact")).not.toBeNull();
+    expect(btn.textContent?.trim()).toBe("");
+    expect(btn.getAttribute("aria-label")).toBe("Compact context");
+    expect(btn.title).toContain("/compact");
     expect(el.querySelector<HTMLElement>(".card__meter")!.dataset.band).toBe("high");
   });
 });

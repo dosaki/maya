@@ -1,3 +1,5 @@
+import { iconButton } from "./icons";
+
 export type CardState = "awaiting" | "working" | "completed" | "idle";
 /** "text" is a question asked in prose at the end of a turn: no picker, reply through the inbox. */
 export type AwaitKind = "question" | "plan" | "permission" | "text";
@@ -58,12 +60,9 @@ export function contextMeter(ctx: ContextUsage): HTMLElement {
 }
 
 export function compactButton(className = "card__btn"): HTMLButtonElement {
-  const b = document.createElement("button");
-  b.type = "button";
-  b.className = className;
+  const b = iconButton("compact", "Compact context", className);
   b.dataset.action = "compact";
-  b.textContent = "Compact";
-  b.title = "Types /compact into the session's terminal";
+  b.title = "Compact context: types /compact into the session's terminal";
   return b;
 }
 
