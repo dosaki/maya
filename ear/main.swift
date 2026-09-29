@@ -152,7 +152,7 @@ final class Ear {
                     self.lastPartial = ""
                     // This request is finished: listen on with a new one.
                     self.task = nil
-                    DispatchQueue.main.async { self.beginRequest() }
+                    DispatchQueue.main.async { self.beginRequestIfIdle() }
                     return
                 } else if text != self.lastPartial {
                     self.lastPartial = text
@@ -165,10 +165,16 @@ final class Ear {
                 if !self.lastPartial.isEmpty { Out.emit(["type": "final", "text": self.lastPartial]) }
                 self.lastPartial = ""
                 self.task = nil
-                DispatchQueue.main.async { self.beginRequest() }
+                DispatchQueue.main.async { self.beginRequestIfIdle() }
             }
         }
         task = newTask
+    }
+
+    /// A deferred restart after a request ended on its own; skipped when
+    /// rotate() has already begun a new one in the meantime.
+    func beginRequestIfIdle() {
+        if task == nil { beginRequest() }
     }
 
     /// Ends the current request, emitting its partial as final, and begins a new one.
