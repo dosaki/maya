@@ -197,12 +197,14 @@ impl std::fmt::Display for RunError {
     }
 }
 
-/// The `claude -p` arguments. The run is sandboxed: no tools, no user or
-/// project settings (so no hooks), and Maya's system prompt in place of
-/// Claude Code's, since board text is written by other agents.
+/// The `claude -p` arguments. The run is sandboxed, since board text is
+/// written by other agents: no tools, and Maya's system prompt in place of
+/// Claude Code's. Only the user's own settings load (they may hold the auth
+/// or provider setup, such as an apiKeyHelper or a Bedrock env); project and
+/// local settings do not.
 pub fn claude_args(model: &str, system: &str, user: &str) -> Vec<String> {
     let flags = [
-        "-p", "--model", model, "--output-format", "json", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--max-turns", "1", "--tools", "", "--setting-sources", "", "--system-prompt", system,
+        "-p", "--model", model, "--output-format", "json", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--max-turns", "1", "--tools", "", "--setting-sources", "user", "--system-prompt", system,
     ];
     flags.iter().map(|s| s.to_string()).chain(std::iter::once(user.to_string())).collect()
 }
@@ -372,11 +374,11 @@ mod tests {
     }
 
     #[test]
-    fn the_run_has_no_tools_no_settings_and_only_its_own_system_prompt() {
+    fn the_run_has_no_tools_only_user_settings_and_only_its_own_system_prompt() {
         let a = claude_args("haiku", "SYSTEM", "USER");
         let pair = |flag: &str, value: &str| a.windows(2).any(|w| w[0] == flag && w[1] == value);
         assert!(pair("--tools", ""), "{a:?}");
-        assert!(pair("--setting-sources", ""), "{a:?}");
+        assert!(pair("--setting-sources", "user"), "the user's own settings (auth, provider env) load; project and local do not: {a:?}");
         assert!(pair("--system-prompt", "SYSTEM"), "{a:?}");
         assert!(pair("--model", "haiku"));
         assert!(!a.iter().any(|x| x == "--append-system-prompt"), "the Claude Code system prompt must not ride along");
