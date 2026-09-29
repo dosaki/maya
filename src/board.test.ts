@@ -111,6 +111,21 @@ describe("renderCard", () => {
   });
 });
 
+describe("card action icons", () => {
+  it("uses a console icon for Terminal and a speech bubble for Reply, with labels", () => {
+    const el = renderCard(card({}), NOW);
+    const term = el.querySelector<HTMLButtonElement>("button[data-action=terminal]")!;
+    const reply = el.querySelector<HTMLButtonElement>("button[data-action=reply]")!;
+    expect(term.querySelector("svg.icon-terminal")).not.toBeNull();
+    expect(reply.querySelector("svg.icon-reply")).not.toBeNull();
+    expect(term.textContent?.trim()).toBe("");
+    expect(term.getAttribute("aria-label")).toBe("Open terminal");
+    expect(term.title).toBe("Open terminal");
+    expect(reply.getAttribute("aria-label")).toBe("Reply");
+    expect(reply.title).toBe("Reply");
+  });
+});
+
 describe("column header buttons", () => {
   it("puts a resume button next to the new-session button on the Idle column only", () => {
     const board = renderBoard([], NOW);
@@ -189,7 +204,7 @@ describe("renderBoard", () => {
 describe("card actions", () => {
   it("renders Terminal and Reply buttons", () => {
     const el = renderCard(card({}), NOW);
-    expect(el.querySelector("button[data-action=terminal]")?.textContent).toBe("Terminal");
-    expect(el.querySelector("button[data-action=reply]")?.textContent).toBe("Reply");
+    expect(el.querySelector("button[data-action=terminal] svg.icon-terminal")).not.toBeNull();
+    expect(el.querySelector("button[data-action=reply] svg.icon-reply")).not.toBeNull();
   });
 });

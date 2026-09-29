@@ -1,4 +1,5 @@
 import { formatAge } from "./format";
+import { iconButton } from "./icons";
 import { STATE_LABEL, type Card, type ReviewPr, type ReviewState } from "./types";
 
 export type ReviewAction = { kind: "open-pr" | "review"; repo: string; number: number } | { kind: "terminal"; repo: string; number: number; pid: number };
@@ -50,11 +51,9 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
   root.append(el("div", "pr__meta", `${pr.author} · updated ${Number.isFinite(updated) ? formatAge(updated, nowMs) : "?"} ago · ${pr.repo}`));
   const actions = el("div", "card__actions");
   if (related) {
-    const term = el("button", "card__btn", "Terminal");
-    term.type = "button";
+    const term = iconButton("terminal", `Open terminal: ${related.name} · ${STATE_LABEL[related.state]}`);
     term.dataset.action = "terminal";
     term.dataset.pid = String(related.pid);
-    term.title = `${related.name} · ${STATE_LABEL[related.state]}`;
     actions.append(term);
   }
   const open = el("button", "card__btn", "Open");

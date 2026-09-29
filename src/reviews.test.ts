@@ -61,7 +61,8 @@ describe("renderReviews", () => {
     const live = [session({ sessionId: "a", pid: 42, name: "review bedrock #451", state: "awaiting" })];
     const el = renderReviews({ prs: [pr()], error: null, fetchedAt: NOW }, NOW, { cards: live, clonesDir: null });
     const btn = el.querySelector<HTMLButtonElement>("button[data-action=terminal]")!;
-    expect(btn.textContent).toBe("Terminal");
+    expect(btn.querySelector("svg.icon-terminal")).not.toBeNull();
+    expect(btn.getAttribute("aria-label")).toContain("review bedrock #451");
     expect(btn.title).toContain("review bedrock #451");
     expect(btn.title).toContain("Awaiting Decision");
     expect(reviewActionFor(btn)).toEqual({ kind: "terminal", repo: "Org/bedrock", number: 451, pid: 42 });

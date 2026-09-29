@@ -1,6 +1,7 @@
 import { formatAge, projectName } from "./format";
 import { OPEN_DELAY_MS, renderOptions } from "./options";
 import { harnessBadge } from "./harness";
+import { iconButton } from "./icons";
 import { COMPACT_AT, compactButton, contextMeter, prButton, type Card } from "./types";
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -34,11 +35,9 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   if (card.snippet) root.append(el("p", "card__snippet", card.snippet));
 
   const actions = el("div", "card__actions");
-  const terminal = el("button", "card__btn", "Terminal");
-  terminal.type = "button";
+  const terminal = iconButton("terminal", "Open terminal");
   terminal.dataset.action = "terminal";
-  const reply = el("button", "card__btn card__btn--primary", "Reply");
-  reply.type = "button";
+  const reply = iconButton("reply", "Reply", "card__btn card__btn--primary");
   reply.dataset.action = "reply";
   actions.append(terminal);
   if (card.pr) actions.append(prButton(card.pr));
