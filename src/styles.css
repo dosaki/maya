@@ -13,7 +13,8 @@ body { margin: 0; background: var(--bg); }
 #app { display: flex; flex-direction: column; height: 100vh; }
 [hidden] { display: none !important; }
 .topbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
-.topbar__title { margin: 0; font-size: 16px; font-weight: 600; }
+.topbar__title { margin: 0; font-size: 16px; font-weight: 600; display: inline-flex; align-items: center; gap: 8px; }
+.topbar__logo { width: 26px; height: 26px; object-fit: contain; }
 .topbar__settings, .settings button { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; color: var(--text); cursor: pointer; }
 #board { flex: 1; min-height: 0; display: flex; }
 .board { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; padding: 12px 16px; flex: 1; min-height: 0; overflow: hidden; }
