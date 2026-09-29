@@ -55,7 +55,7 @@ tar -xzf "$tmp/maya.tar.gz" -C "$tmp"
 [ -d "$tmp/Maya.app" ] || fail "the download did not contain Maya.app"
 
 if [ -d "$dest/Maya.app" ]; then
-  if pgrep -x Maya >/dev/null 2>&1; then
+  if pgrep -ix maya >/dev/null 2>&1; then
     printf 'Maya is running; quitting it before replacing the app.\n'
     osascript -e 'tell application "Maya" to quit' >/dev/null 2>&1 || true
     sleep 1
