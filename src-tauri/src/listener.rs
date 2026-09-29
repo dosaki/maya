@@ -214,7 +214,7 @@ fn reply_then_idle(app: &AppHandle, generation: u64, text: &str) {
 /// Sends a spoken command to the interpreter and acts on its reply. Every
 /// step after the interpreter returns checks that run `generation` is still
 /// current, so a stop while she thinks leaves nothing behind.
-fn interpret(app: &AppHandle, generation: u64, cmd: &str) {
+fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>) {
     let started = set_voice(app, generation, |st| {
         st.state = "thinking".into();
         st.pending = None;
@@ -281,6 +281,14 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str) {
             if !reply_aloud(app, generation, &say) {
                 return;
             }
+            // Anything heard before the read-back ended (an "okay" said to
+            // someone while she was thinking) sits queued and would confirm
+            // an action the user had not heard yet. Throw it away: a person
+            // who spoke before the read-back must say it again, which is
+            // safer than a stray word confirming.
+            if let Some(inbox) = inbox {
+                inbox.discard_heard();
+            }
             // The confirmation window starts when the read-back ends (the ear
             // was paused while she spoke), unless it was answered meanwhile.
             // A read-back longer than the window must still restart it.
@@ -305,7 +313,7 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str) {
 
 /// Handles one final segment heard during listener run `generation` (or a
 /// yes/no from the page). Nothing happens once that run is stopped or replaced.
-fn on_heard(app: &AppHandle, generation: u64, text: &str) {
+fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>) {
     let effects = {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
@@ -345,7 +353,7 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str) {
                 }
                 reply_aloud(app, generation, &s);
             }
-            wake::Effect::Interpret(cmd) => interpret(app, generation, &cmd),
+            wake::Effect::Interpret(cmd) => interpret(app, generation, &cmd, inbox),
             wake::Effect::Execute(action) => {
                 let go = set_voice(app, generation, |st| {
                     st.pending = None;
@@ -369,6 +377,36 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str) {
                     return;
                 }
                 reply_aloud(app, generation, "Cancelled.");
+            }
+        }
+    }
+}
+
+/// The listener thread's view of the ear's events, able to throw away what
+/// was heard so far without losing a state change such as the sidecar exiting.
+pub(crate) struct Inbox {
+    rx: std::sync::mpsc::Receiver<ear::EarEvent>,
+    kept: std::cell::RefCell<std::collections::VecDeque<ear::EarEvent>>,
+}
+
+impl Inbox {
+    pub(crate) fn new(rx: std::sync::mpsc::Receiver<ear::EarEvent>) -> Inbox {
+        Inbox { rx, kept: Default::default() }
+    }
+
+    /// The next event, blocking; None once the ear's reader has gone.
+    pub(crate) fn next(&self) -> Option<ear::EarEvent> {
+        let kept = self.kept.borrow_mut().pop_front();
+        kept.or_else(|| self.rx.recv().ok())
+    }
+
+    /// Discards every transcript and level event queued so far; state and
+    /// device events are kept for `next`.
+    pub(crate) fn discard_heard(&self) {
+        while let Ok(ev) = self.rx.try_recv() {
+            match ev {
+                ear::EarEvent::Partial(_) | ear::EarEvent::Final(_) | ear::EarEvent::Level(_) => {}
+                other => self.kept.borrow_mut().push_back(other),
             }
         }
     }
@@ -434,7 +472,8 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
     let handle = app.clone();
     std::thread::spawn(move || {
         let mut heard_any = false;
-        for ev in rx {
+        let inbox = Inbox::new(rx);
+        while let Some(ev) = inbox.next() {
             if !is_current(&handle, generation) {
                 break;
             }
@@ -457,7 +496,7 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
                             v.failures = 0;
                         }
                     }
-                    on_heard(&handle, generation, &t);
+                    on_heard(&handle, generation, &t, Some(&inbox));
                 }
                 ear::EarEvent::State { state, detail } if state == "error" || state == "exited" => {
                     let wants = handle.state::<AppState>().store.lock().unwrap().config.listen;
@@ -556,7 +595,7 @@ pub(crate) fn voice_confirm(app: AppHandle, yes: bool) {
         reply_aloud(&app, generation, "That expired. Ask me again.");
         return;
     }
-    on_heard(&app, generation, if yes { "yes" } else { "no" });
+    on_heard(&app, generation, if yes { "yes" } else { "no" }, None);
 }
 
 #[tauri::command]
@@ -650,6 +689,24 @@ mod tests {
         assert_eq!(user_turn(&[Effect::Execute(json!({"kind":"reply"}))]).as_deref(), Some("yes"));
         assert_eq!(user_turn(&[Effect::Cancelled]).as_deref(), Some("no"));
         assert_eq!(user_turn(&[]), None);
+    }
+
+    #[test]
+    fn speech_queued_before_the_read_back_is_discarded_but_state_changes_are_kept() {
+        use ear::EarEvent;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let inbox = Inbox::new(rx);
+        tx.send(EarEvent::Partial("ok".into())).unwrap();
+        tx.send(EarEvent::Final("okay".into())).unwrap();
+        tx.send(EarEvent::Level(0.3)).unwrap();
+        tx.send(EarEvent::State { state: "exited".into(), detail: String::new() }).unwrap();
+        tx.send(EarEvent::Final("sure".into())).unwrap();
+        inbox.discard_heard();
+        tx.send(EarEvent::Final("yes".into())).unwrap();
+        assert_eq!(inbox.next(), Some(EarEvent::State { state: "exited".into(), detail: String::new() }), "a sidecar exit is never lost");
+        assert_eq!(inbox.next(), Some(EarEvent::Final("yes".into())), "what comes after the drain is heard");
+        drop(tx);
+        assert_eq!(inbox.next(), None);
     }
 
     #[test]
