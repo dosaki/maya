@@ -9,6 +9,8 @@ export interface VoiceStatus {
   heard: string;
   said: string;
   pending: string | null;
+  /** Counts turns added to the history, so the page knows when to refetch it. */
+  turns: number;
 }
 
 export interface VoiceTurn {
@@ -105,7 +107,7 @@ export async function initVoice(): Promise<void> {
   const host = document.getElementById("voice-host");
   const panel = document.getElementById("voice-panel");
   if (!host || !panel) return;
-  let status: VoiceStatus = { listening: false, state: "off", detail: "", level: 0, heard: "", said: "", pending: null };
+  let status: VoiceStatus = { listening: false, state: "off", detail: "", level: 0, heard: "", said: "", pending: null, turns: 0 };
   let turns: VoiceTurn[] = [];
   const handlers: VoiceHandlers = {
     onConfirm: (yes) => void invoke("voice_confirm", { yes }),
@@ -121,9 +123,10 @@ export async function initVoice(): Promise<void> {
     paint();
   });
   await listen<VoiceStatus>("voice", (e) => {
-    const was = status.said;
+    const was = status;
     status = e.payload;
-    if (status.said !== was || status.heard) void invoke<VoiceTurn[]>("voice_history").then((t) => { turns = t; paint(); });
+    // Partials arrive several times a second: refetch only when a turn was added.
+    if (status.said !== was.said || status.turns !== was.turns) void invoke<VoiceTurn[]>("voice_history").then((t) => { turns = t; paint(); });
     paint();
   });
   await listen<number>("voice-level", (e) => {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderIndicator, renderVoicePanel, type VoiceStatus } from "./voice";
 
-const status = (over: Partial<VoiceStatus> = {}): VoiceStatus => ({ listening: true, state: "idle", detail: "", level: 0, heard: "", said: "", pending: null, ...over });
+const status = (over: Partial<VoiceStatus> = {}): VoiceStatus => ({ listening: true, state: "idle", detail: "", level: 0, heard: "", said: "", pending: null, turns: 0, ...over });
 
 describe("voice indicator", () => {
   it("reflects each state in a class and a label", () => {

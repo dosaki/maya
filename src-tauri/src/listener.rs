@@ -32,11 +32,13 @@ pub struct VoiceStatus {
     pub heard: String,
     pub said: String,
     pub pending: Option<String>,
+    /// Turns ever added to the history; the page refetches it when this changes.
+    pub turns: u64,
 }
 
 impl Default for VoiceStatus {
     fn default() -> Self {
-        Self { listening: false, state: "off".into(), detail: String::new(), level: 0.0, heard: String::new(), said: String::new(), pending: None }
+        Self { listening: false, state: "off".into(), detail: String::new(), level: 0.0, heard: String::new(), said: String::new(), pending: None, turns: 0 }
     }
 }
 
@@ -69,14 +71,21 @@ fn set_voice(app: &AppHandle, generation: u64, f: impl FnOnce(&mut VoiceStatus))
     true
 }
 
-fn remember(app: &AppHandle, who: &str, text: &str) {
-    let state = app.state::<AppState>();
-    let mut v = state.voice.lock().unwrap();
-    v.history.push(VoiceTurn { who: who.into(), text: text.into(), at: now_ms() });
+/// Adds a turn to the history (the last 40 are kept) and counts it.
+fn push_turn(v: &mut VoiceState, who: &str, text: &str, at: u64) {
+    v.history.push(VoiceTurn { who: who.into(), text: text.into(), at });
     if v.history.len() > 40 {
         let extra = v.history.len() - 40;
         v.history.drain(..extra);
     }
+    v.status.turns += 1;
+}
+
+/// Remembers a turn; the caller's next `voice` event tells the page.
+fn remember(app: &AppHandle, who: &str, text: &str) {
+    let state = app.state::<AppState>();
+    let mut v = state.voice.lock().unwrap();
+    push_turn(&mut v, who, text, now_ms());
 }
 
 /// What the speech hook does to the voice state: pause the ear and remember
@@ -550,7 +559,8 @@ fn stop_listening(app: &AppHandle) {
         let mut v = state.voice.lock().unwrap();
         v.generation += 1;
         v.flow = None;
-        v.status = VoiceStatus { state: "off".into(), ..Default::default() };
+        // The history outlives a run, and so does its counter.
+        v.status = VoiceStatus { state: "off".into(), turns: v.status.turns, ..Default::default() };
         v.failures = 0;
         v.ear.take()
     };
@@ -694,6 +704,17 @@ mod tests {
         assert_eq!(user_turn(&[Effect::Execute(json!({"kind":"reply"}))]).as_deref(), Some("yes"));
         assert_eq!(user_turn(&[Effect::Cancelled]).as_deref(), Some("no"));
         assert_eq!(user_turn(&[]), None);
+    }
+
+    #[test]
+    fn each_remembered_turn_bumps_the_counter_even_once_the_history_is_full() {
+        let mut v = VoiceState::default();
+        for i in 0..45 {
+            push_turn(&mut v, "user", &format!("turn {i}"), i);
+        }
+        assert_eq!(v.history.len(), 40, "the history keeps the last 40");
+        assert_eq!(v.history.last().unwrap().text, "turn 44");
+        assert_eq!(v.status.turns, 45, "the page refetches whenever this changes");
     }
 
     #[test]
