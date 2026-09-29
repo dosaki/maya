@@ -68,7 +68,7 @@ describe("settings flow", () => {
     await initSettings();
     await flush();
     document.getElementById("settings")!.hidden = false;
-    const onVoice = eventListen.mock.calls.find((c) => c[0] === "voice")![1] as (e: { payload: { listening: boolean } }) => void;
+    const onVoice = eventListen.mock.calls.find((c) => c[0] === "voice")![1] as (e: { payload: { listening: boolean; state?: string; detail?: string } }) => void;
 
     const typing = document.querySelector<HTMLInputElement>("input[name=projectsDir]")!;
     typing.value = "/Users/me/de";
@@ -77,6 +77,14 @@ describe("settings flow", () => {
     onVoice({ payload: { listening: true } });
     expect(document.querySelector("input[name=projectsDir]")).toBe(typing);
     expect(typing.value).toBe("/Users/me/de");
+
+    // The listener giving up is shown next to the toggle, not swallowed.
+    onVoice({ payload: { listening: false, state: "error", detail: "Dictation is off. Turn it on in System Settings." } });
+    expect(document.querySelector<HTMLInputElement>("input[name=listen]")!.checked).toBe(false);
+    expect(document.querySelector(".settings__error[data-for=listen]")?.textContent).toContain("Dictation is off");
+    // Listening again clears it.
+    onVoice({ payload: { listening: true, state: "idle", detail: "" } });
+    expect(document.querySelector(".settings__error[data-for=listen]")).toBeNull();
 
     onVoice({ payload: { listening: false } });
     expect(document.querySelector<HTMLInputElement>("input[name=listen]")!.checked).toBe(false);

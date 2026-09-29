@@ -18,6 +18,8 @@ export interface SettingsModel {
   microphone: string;
   microphones: string[];
   interpreterModel: string;
+  /** Why the listener stopped (Dictation off, no microphone…), shown under the toggle. */
+  listenError: string | null;
 }
 
 export type VoiceProvider = "builtin" | "elevenlabs";
@@ -56,9 +58,24 @@ interface ConfigJson {
   interpreterModel: string;
 }
 
+/** A titled card in the settings grid. */
+function section(title: string): HTMLElement {
+  const s = document.createElement("section");
+  s.className = "settings__section";
+  const heading = document.createElement("h2");
+  heading.className = "settings__heading";
+  heading.textContent = title;
+  s.append(heading);
+  return s;
+}
+
 export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLElement {
   const root = document.createElement("div");
   root.className = "settings__body";
+  const sessions = section("Sessions");
+  const notifications = section("Notifications");
+  const assistant = section("Voice assistant");
+  root.append(sessions, notifications, assistant);
 
   const status = document.createElement("div");
   status.className = "settings__status";
@@ -68,7 +85,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
       : model.hookInstalled
         ? "Claude Code hook is installed. Awaiting Decision and Completed are precise."
         : "Claude Code hook is not installed. Permission prompts will show as Working.";
-  root.append(status);
+  sessions.append(status);
 
   const btn = document.createElement("button");
   btn.type = "button";
@@ -82,7 +99,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
     btn.disabled = model.hookInstalled === null;
     btn.addEventListener("click", () => h.onInstall());
   }
-  root.append(btn);
+  sessions.append(btn);
 
   const label = document.createElement("label");
   label.textContent = "Completed decays to Idle after (minutes)";
@@ -96,7 +113,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
     if (Number.isFinite(n) && n >= 1) h.onTimeout(Math.floor(n));
   });
   label.append(input);
-  root.append(label);
+  sessions.append(label);
 
   const dirLabel = document.createElement("label");
   dirLabel.textContent = "Projects directory";
@@ -107,7 +124,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   dirInput.value = model.projectsDir;
   dirInput.addEventListener("change", () => h.onProjectsDir(dirInput.value.trim()));
   dirLabel.append(dirInput);
-  root.append(dirLabel);
+  sessions.append(dirLabel);
 
   const clonesLabel = document.createElement("label");
   clonesLabel.textContent = "Clones directory (for PR reviews)";
@@ -118,7 +135,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   clonesInput.value = model.clonesDir;
   clonesInput.addEventListener("change", () => h.onClonesDir(clonesInput.value.trim()));
   clonesLabel.append(clonesInput);
-  root.append(clonesLabel);
+  sessions.append(clonesLabel);
 
   const notifyLabel = document.createElement("label");
   notifyLabel.className = "settings__check";
@@ -128,7 +145,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   notifyBox.checked = model.notifyOnAwaiting;
   notifyBox.addEventListener("change", () => h.onNotify(notifyBox.checked));
   notifyLabel.append(notifyBox, document.createTextNode(" Notify me when a session awaits a decision"));
-  root.append(notifyLabel);
+  notifications.append(notifyLabel);
 
   const speakLabel = document.createElement("label");
   speakLabel.className = "settings__check";
@@ -138,7 +155,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   speakBox.checked = model.speakNotifications;
   speakBox.addEventListener("change", () => h.onSpeak(speakBox.checked));
   speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
-  root.append(speakLabel);
+  notifications.append(speakLabel);
 
   const listenLabel = document.createElement("label");
   listenLabel.className = "settings__check";
@@ -148,7 +165,16 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   listenBox.checked = model.listen;
   listenBox.addEventListener("change", () => h.onListen(listenBox.checked));
   listenLabel.append(listenBox, document.createTextNode(' Listen for "Maya" (on-device speech recognition)'));
-  root.append(listenLabel);
+  assistant.append(listenLabel);
+  if (model.listenError) {
+    // The listener stopped on its own (Dictation off, no microphone…): say
+    // why right under the toggle, or an unticked box looks like a glitch.
+    const err = document.createElement("div");
+    err.className = "settings__error";
+    err.dataset.for = "listen";
+    err.textContent = model.listenError;
+    assistant.append(err);
+  }
 
   const micLabel = document.createElement("label");
   micLabel.textContent = "Microphone";
@@ -167,7 +193,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   mic.value = model.microphones.includes(model.microphone) ? model.microphone : "";
   mic.addEventListener("change", () => h.onMicrophone(mic.value));
   micLabel.append(mic);
-  root.append(micLabel);
+  assistant.append(micLabel);
 
   const modelLabel = document.createElement("label");
   modelLabel.textContent = "Voice interpreter";
@@ -182,7 +208,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   modelSel.value = model.interpreterModel;
   modelSel.addEventListener("change", () => h.onInterpreter(modelSel.value));
   modelLabel.append(modelSel);
-  root.append(modelLabel);
+  assistant.append(modelLabel);
 
   const providerLabel = document.createElement("label");
   providerLabel.textContent = "Voice";
@@ -197,7 +223,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   provider.value = model.voiceProvider;
   provider.addEventListener("change", () => h.onVoiceProvider(provider.value === "elevenlabs" ? "elevenlabs" : "builtin"));
   providerLabel.append(provider);
-  root.append(providerLabel);
+  notifications.append(providerLabel);
 
   if (model.voiceProvider === "elevenlabs") {
     const keyLabel = document.createElement("label");
@@ -213,7 +239,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
       key.value = "";
     });
     keyLabel.append(key);
-    root.append(keyLabel);
+    notifications.append(keyLabel);
 
     const voiceLabel = document.createElement("label");
     voiceLabel.textContent = "ElevenLabs voice";
@@ -229,7 +255,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
     voice.disabled = model.elevenVoices.length === 0;
     voice.addEventListener("change", () => h.onElevenVoice(voice.value));
     voiceLabel.append(voice);
-    root.append(voiceLabel);
+    notifications.append(voiceLabel);
   }
 
   const tryBtn = document.createElement("button");
@@ -237,7 +263,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   tryBtn.dataset.action = "try-voice";
   tryBtn.textContent = "Try the voice";
   tryBtn.addEventListener("click", () => h.onTryVoice());
-  root.append(tryBtn);
+  notifications.append(tryBtn);
 
   if (model.error) {
     const err = document.createElement("div");
@@ -252,7 +278,7 @@ export async function initSettings(): Promise<void> {
   const panel = document.getElementById("settings");
   if (!panel) return;
 
-  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku" };
+  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku", listenError: null };
 
   const loadVoices = async () => {
     if (model.voiceProvider !== "elevenlabs") return;
@@ -315,8 +341,10 @@ export async function initSettings(): Promise<void> {
   // Every partial transcript emits `voice`: repaint only when listening
   // actually changed, or a repaint would wipe a field being typed in.
   await listen<VoiceStatus>("voice", (e) => {
-    if (model.listen === e.payload.listening) return;
+    const listenError = e.payload.state === "error" && e.payload.detail ? e.payload.detail : null;
+    if (model.listen === e.payload.listening && model.listenError === listenError) return;
     model.listen = e.payload.listening;
+    model.listenError = listenError;
     if (!panel.hidden) paint();
   });
 

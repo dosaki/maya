@@ -39,9 +39,13 @@ body { margin: 0; background: var(--bg); }
 .card__awaiting[data-kind="plan"] { background: color-mix(in srgb, var(--completed) 12%, transparent); border-left-color: var(--completed); font-family: inherit; }
 .card__snippet { margin: 8px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .settings { display: flex; flex-direction: column; gap: 10px; }
+.settings.pane .settings__body { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; align-items: start; }
+.settings__section { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.settings__heading { margin: 0 0 4px; font-size: 13px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); }
+.settings.pane input[type=text], .settings.pane input[type=password], .settings.pane select { width: 240px; max-width: 60%; }
 .popover { position: absolute; top: 48px; right: 16px; width: 320px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; box-shadow: 0 8px 30px rgba(0,0,0,.18); z-index: 10; }
 .pane { flex: 1; min-height: 0; padding: 16px; overflow: auto; box-sizing: border-box; }
-.settings.pane { max-width: 520px; }
+.settings.pane { max-width: 1400px; }
 .settings[hidden], .pane[hidden], .toast[hidden] { display: none; }
 .settings__body { display: flex; flex-direction: column; gap: 10px; }
 .settings label { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
