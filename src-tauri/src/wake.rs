@@ -179,6 +179,15 @@ impl Flow {
         }
     }
 
+    /// Drops a pending action whose window has run out; true when one was dropped.
+    pub fn drop_expired(&mut self, now_ms: u64) -> bool {
+        let expired = self.has_pending() && self.state(now_ms) == "idle";
+        if expired {
+            self.state = State::Idle;
+        }
+        expired
+    }
+
     fn expire(&mut self, now_ms: u64) {
         if self.state(now_ms) == "idle" {
             self.state = State::Idle;
@@ -335,6 +344,17 @@ mod tests {
         assert_eq!(f.on_segment("no Maya", 5500), vec![Effect::Cancelled]);
         f.set_pending(pending(), 6000);
         assert_eq!(f.on_segment("stop", 6500), vec![Effect::Cancelled], "without the wake word a no-word still cancels");
+    }
+
+    #[test]
+    fn an_expired_pending_action_can_be_dropped_once() {
+        let mut f = Flow::new();
+        f.set_pending(pending(), 1000);
+        assert!(!f.drop_expired(1000 + CONFIRM_WAIT_MS), "still inside its window");
+        assert!(f.has_pending());
+        assert!(f.drop_expired(1000 + CONFIRM_WAIT_MS + 1));
+        assert!(!f.has_pending());
+        assert!(!f.drop_expired(1000 + CONFIRM_WAIT_MS + 2), "nothing left to drop");
     }
 
     #[test]

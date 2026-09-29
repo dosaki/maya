@@ -514,17 +514,29 @@ pub(crate) fn voice_listen(app: AppHandle, state: TauriState<AppState>, on: bool
     }
 }
 
-/// The page's yes/no buttons; ignored unless a confirmation is waiting.
+/// The page's yes/no buttons; ignored unless a confirmation is waiting. A
+/// tap after the window ran out drops the action and says so.
 #[tauri::command(async)]
 pub(crate) fn voice_confirm(app: AppHandle, yes: bool) {
-    let generation = {
+    let (generation, expired) = {
         let state = app.state::<AppState>();
-        let v = state.voice.lock().unwrap();
-        match v.flow.as_ref() {
-            Some(f) if f.has_pending() => v.generation,
+        let mut v = state.voice.lock().unwrap();
+        let generation = v.generation;
+        let expired = match v.flow.as_mut() {
+            Some(f) if f.has_pending() => f.drop_expired(now_ms()),
             _ => return,
+        };
+        if expired {
+            v.status.pending = None;
+            v.status.state = "idle".into();
         }
+        (generation, expired)
     };
+    if expired {
+        emit_voice(&app);
+        reply_aloud(&app, generation, "That expired. Ask me again.");
+        return;
+    }
     on_heard(&app, generation, if yes { "yes" } else { "no" });
 }
 
