@@ -24,6 +24,15 @@ pub struct Config {
     /// Where PR review clones go when the project checkout is missing or busy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clones_dir: Option<String>,
+    /// Listen for the "Maya" wake word while the app runs.
+    #[serde(default)]
+    pub listen: bool,
+    /// Microphone name for the listener; None picks the built-in one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub microphone: Option<String>,
+    /// Model alias for the voice interpreter.
+    #[serde(default = "default_interpreter_model")]
+    pub interpreter_model: String,
 }
 
 pub const DEFAULT_CLONES_DIR: &str = "~/dev/reviews";
@@ -32,9 +41,13 @@ fn default_true() -> bool {
     true
 }
 
+fn default_interpreter_model() -> String {
+    "haiku".into()
+}
+
 impl Default for Config {
     fn default() -> Self {
-        Self { completed_timeout_minutes: 30, projects_dir: None, notify_on_awaiting: true, speak_notifications: true, voice_provider: Default::default(), elevenlabs_voice_id: None, clones_dir: None }
+        Self { completed_timeout_minutes: 30, projects_dir: None, notify_on_awaiting: true, speak_notifications: true, voice_provider: Default::default(), elevenlabs_voice_id: None, clones_dir: None, listen: false, microphone: None, interpreter_model: "haiku".into() }
     }
 }
 
@@ -144,6 +157,18 @@ mod tests {
         let blank = Config { clones_dir: Some("  ".into()), ..Default::default() };
         assert_eq!(blank.clones_dir_path(), home.join("dev/reviews"));
         assert!(serde_json::to_string(&c).unwrap().contains("\"clonesDir\":\"~/tmp/clones\""));
+    }
+
+    #[test]
+    fn voice_settings_default_off_with_haiku() {
+        let c = Config::default();
+        assert!(!c.listen);
+        assert!(c.microphone.is_none());
+        assert_eq!(c.interpreter_model, "haiku");
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "listen": true, "microphone": "USB Mic", "interpreterModel": "sonnet"}"#).unwrap();
+        assert!(c.listen);
+        assert_eq!(c.microphone.as_deref(), Some("USB Mic"));
+        assert_eq!(c.interpreter_model, "sonnet");
     }
 
     #[test]

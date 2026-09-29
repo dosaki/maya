@@ -61,6 +61,11 @@ pub fn sidecar_path() -> Option<PathBuf> {
     sidecar_path_in(&exe_dir, &triple, Path::new(env!("CARGO_MANIFEST_DIR")))
 }
 
+/// Delay before restarting a listener that exited, by consecutive failure count.
+pub fn restart_delay_ms(failures: u32) -> Option<u64> {
+    (failures < 5).then(|| 1_000u64 << failures)
+}
+
 pub struct Ear {
     child: Child,
     stdin: ChildStdin,
@@ -137,6 +142,15 @@ mod tests {
         assert_eq!(pick_microphone(&["USB Mic".to_string(), "BlackHole 2ch".to_string()], None).as_deref(), Some("USB Mic"));
         assert_eq!(pick_microphone(&names, Some("BlackHole 2ch")).as_deref(), Some("MacBook Pro Microphone"), "a banned preferred device falls through");
         assert_eq!(pick_microphone(&[], None), None);
+    }
+
+    #[test]
+    fn restart_backoff_grows_and_gives_up() {
+        assert_eq!(restart_delay_ms(0), Some(1_000));
+        assert_eq!(restart_delay_ms(1), Some(2_000));
+        assert_eq!(restart_delay_ms(2), Some(4_000));
+        assert_eq!(restart_delay_ms(4), Some(16_000));
+        assert_eq!(restart_delay_ms(5), None, "after five crashes the indicator shows error and stays off");
     }
 
     #[test]

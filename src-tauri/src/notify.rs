@@ -116,6 +116,18 @@ pub fn say_builtin(line: &str) {
     let _ = cmd.arg(line).status();
 }
 
+/// Speaks now and returns when done; replies to the user go this way so
+/// listening can pause around them. Not held back by a Focus mode.
+pub fn speak_now(text: &str, eleven: Option<(std::path::PathBuf, String, String)>) {
+    let spoken = match &eleven {
+        Some((dir, key, voice_id)) => crate::voice::speak(dir, key, voice_id, text).is_ok(),
+        None => false,
+    };
+    if !spoken {
+        say_builtin(text);
+    }
+}
+
 /// Queues an utterance. Lines are spoken one after another on a background
 /// thread, so the board never waits and voices never overlap. An ElevenLabs
 /// failure falls back to the built-in voice for that line.
