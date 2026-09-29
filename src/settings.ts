@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { VoiceStatus } from "./voice";
 
 export interface SettingsModel {
   hookInstalled: boolean | null;
@@ -261,8 +263,12 @@ export async function initSettings(): Promise<void> {
   };
 
   const saveConfig = async (patch: Partial<ConfigJson>) => {
+    // The local model can be stale for fields it doesn't own (e.g. `listen`,
+    // which the voice panel can flip independently), so fetch the freshest
+    // config and merge the patch onto that rather than onto `model`.
+    const fresh = await invoke<ConfigJson>("get_config");
     const c = await invoke<ConfigJson>("set_config", {
-      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, clonesDir: model.clonesDir || null, notifyOnAwaiting: model.notifyOnAwaiting, speakNotifications: model.speakNotifications, voiceProvider: model.voiceProvider, elevenlabsVoiceId: model.elevenVoiceId || null, listen: model.listen, microphone: model.microphone || null, interpreterModel: model.interpreterModel, ...patch },
+      config: { ...fresh, ...patch },
     });
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
@@ -307,6 +313,13 @@ export async function initSettings(): Promise<void> {
 
   toggle.addEventListener("click", () => {
     panel.hidden = !panel.hidden;
+  });
+
+  // The voice panel can turn listening on or off on its own; mirror that
+  // into the model so the Settings checkbox doesn't show a stale state.
+  await listen<VoiceStatus>("voice", (e) => {
+    model.listen = e.payload.listening;
+    if (!panel.hidden) paint();
   });
 
   await run(async () => {
