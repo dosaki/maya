@@ -53,9 +53,10 @@ protocol Recogniser: AnyObject {
     func accept(_ buffer: AVAudioPCMBuffer)
     /// True once `begin` has finished getting ready to transcribe.
     var ready: Bool { get }
-    /// Called on pause: clears anything buffered so a stale VAD state (an
-    /// utterance half-heard before the gap) doesn't carry into what's said after.
-    func reset()
+    /// Called on every tap callback while paused — the same thread as
+    /// `accept`, so a recogniser that buffers state across calls can defer
+    /// clearing it to the next `accept` without any cross-thread mutation.
+    func paused()
 }
 
 /// Apple's on-device recogniser: today's behaviour, unchanged.
@@ -98,7 +99,7 @@ final class SystemRecogniser: Recogniser {
         request?.append(buffer)
     }
 
-    func reset() {}
+    func paused() {}
 
     /// Emits a quiet partial as final and starts a new request; also performs
     /// a due rotation once nothing is being said.
@@ -202,6 +203,10 @@ final class WhisperRecogniser: Recogniser {
     var utterance: [Float] = []
     let work = DispatchQueue(label: "maya.whisper")
     var busy = false
+    /// Set by `paused()` on the tap thread; consumed by `accept`, also on the
+    /// tap thread, so `pending`/`preRoll`/`utterance`/`vad` are only ever
+    /// touched from that one thread and never race a pause against a buffer.
+    private var needsReset = false
 
     init(modelPath: String) { self.modelPath = modelPath }
 
@@ -223,17 +228,23 @@ final class WhisperRecogniser: Recogniser {
         }
     }
 
-    /// Clears anything buffered on pause: the VAD's notion of speaking, its
-    /// pre-roll, and any partial utterance, so nothing said during the gap
-    /// bleeds into what's transcribed after resuming.
-    func reset() {
-        pending = []
-        preRoll = []
-        utterance = []
-        vad = Vad()
+    /// Called on the tap thread for every buffer while paused; only records
+    /// that a reset is due — see `needsReset`.
+    func paused() {
+        needsReset = true
     }
 
     func accept(_ buffer: AVAudioPCMBuffer) {
+        // Deferred from `paused()`: cleared here, on the same (tap) thread,
+        // so nothing said during the gap bleeds into what's transcribed
+        // after resuming, without mutating these buffers from two threads.
+        if needsReset {
+            needsReset = false
+            pending = []
+            preRoll = []
+            utterance = []
+            vad = Vad()
+        }
         guard let converter = converter else { return }
         let ratio = target.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
@@ -365,7 +376,12 @@ final class Ear {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
-            guard !self.paused else { return }
+            guard !self.paused else {
+                // Still called on every buffer while paused so a recogniser
+                // can notice the pause on this same thread (see `paused()`).
+                self.recogniser.paused()
+                return
+            }
             self.recogniser.accept(buffer)
             if let ch = buffer.floatChannelData?[0] {
                 let n = Int(buffer.frameLength)
@@ -391,7 +407,6 @@ final class Ear {
     func setPaused(_ p: Bool) {
         paused = p
         if p {
-            recogniser.reset()
             Out.emit(["type": "state", "state": "paused"])
         } else {
             Out.emit(["type": "state", "state": recogniser.ready ? "listening" : "loading"])
