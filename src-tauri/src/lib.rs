@@ -23,6 +23,7 @@ pub mod state;
 pub mod store;
 pub mod transcript;
 pub mod voice;
+pub mod wake;
 pub mod watcher;
 
 use config::Config;
