@@ -601,6 +601,9 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
                 ear::EarEvent::State { state, detail } => {
                     log::line("ear", if detail.is_empty() { state } else { format!("{state}: {detail}") });
                 }
+                ear::EarEvent::Note(text) => {
+                    log::line("ear", text);
+                }
                 _ => {}
             }
         }

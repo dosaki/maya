@@ -14,6 +14,7 @@ pub enum EarEvent {
     Level(f64),
     Devices(Vec<String>),
     Device(String),
+    Note(String),
     Other,
 }
 
@@ -26,6 +27,7 @@ pub fn parse_line(line: &str) -> Option<EarEvent> {
         "state" => EarEvent::State { state: v["state"].as_str().unwrap_or("").to_string(), detail: v["detail"].as_str().unwrap_or("").to_string() },
         "devices" => EarEvent::Devices(v["names"].as_array().map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect()).unwrap_or_default()),
         "device" => EarEvent::Device(v["name"].as_str()?.to_string()),
+        "note" => EarEvent::Note(v["text"].as_str()?.to_string()),
         _ => EarEvent::Other,
     })
 }
@@ -173,6 +175,7 @@ mod tests {
         assert!(matches!(parse_line(r#"{"type":"state","state":"error","detail":"nope"}"#), Some(EarEvent::State { state, detail }) if state == "error" && detail == "nope"));
         assert!(matches!(parse_line(r#"{"type":"devices","names":["A","B"]}"#), Some(EarEvent::Devices(n)) if n == vec!["A".to_string(), "B".to_string()]));
         assert!(matches!(parse_line(r#"{"type":"device","name":"MacBook Pro Microphone"}"#), Some(EarEvent::Device(n)) if n == "MacBook Pro Microphone"));
+        assert!(matches!(parse_line(r#"{"type":"note","text":"model loaded in 1.2 s"}"#), Some(EarEvent::Note(t)) if t == "model loaded in 1.2 s"));
         assert!(matches!(parse_line(r#"{"type":"selftest"}"#), Some(EarEvent::Other)));
         assert!(parse_line("not json").is_none());
         assert!(parse_line("").is_none());

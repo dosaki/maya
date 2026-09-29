@@ -39,92 +39,47 @@ if args.contains("--selftest") {
 }
 var preferred: String? = nil
 if let i = args.firstIndex(of: "--device"), i + 1 < args.count { preferred = args[i + 1] }
+var engineName = "system"
+if let i = args.firstIndex(of: "--engine"), i + 1 < args.count { engineName = args[i + 1] }
+var modelPath: String? = nil
+if let i = args.firstIndex(of: "--model"), i + 1 < args.count { modelPath = args[i + 1] }
 Out.emit(["type": "devices", "names": names])
 
-final class Ear {
-    let engine = AVAudioEngine()
+/// One of the two ways audio becomes text. Both receive every tap buffer
+/// while not paused and emit `partial` and `final` lines themselves.
+protocol Recogniser: AnyObject {
+    /// Called once the audio engine runs; the recogniser emits `listening` when ready.
+    func begin(format: AVAudioFormat)
+    func accept(_ buffer: AVAudioPCMBuffer)
+}
+
+/// Apple's on-device recogniser: today's behaviour, unchanged.
+final class SystemRecogniser: Recogniser {
     let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-GB"))!
     var request: SFSpeechAudioBufferRecognitionRequest?
     var task: SFSpeechRecognitionTask?
-    var paused = false
     var lastPartial = ""
-    /// When `lastPartial` last changed; a transcript quiet for `endpointAfter` is an utterance.
     var lastChangeAt = Date()
-    /// Set by the 50 s timer; the rotation waits for a quiet moment.
     var rotateDue = false
     var restartTimer: Timer?
-    /// When the current request began, and how many requests in a row died
-    /// within two seconds: recognition that fails instantly (Dictation off,
-    /// a missing on-device model) is reported, then given up on.
+    var endpointTimer: Timer?
     var requestBegan = Date()
     var instantFailures = 0
     var lastErrorMessage = ""
-    var endpointTimer: Timer?
-    var lastLevelAt: TimeInterval = 0
     let endpointAfter: TimeInterval = 1.2
 
-    func start() {
-        SFSpeechRecognizer.requestAuthorization { status in
-            guard status == .authorized else {
-                Out.emit(["type": "state", "state": "error", "detail": "speech recognition not authorised (\(status.rawValue))"]); exit(2)
-            }
-            DispatchQueue.main.async { self.startAudio() }
-        }
-    }
-
-    func startAudio() {
-        // Never fall back to the system default input: it may be a virtual device.
-        guard let name = pickDevice(names, preferred: preferred) else {
-            Out.emit(["type": "state", "state": "error", "detail": "no non-virtual microphone"]); exit(4)
-        }
-        if let dev = inputDevices().first(where: { $0.localizedName == name }) {
-            var id = AudioDeviceID(0)
-            var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslateUIDToDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-            var uidRef: CFString = dev.uniqueID as CFString
-            var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-            _ = withUnsafeMutablePointer(to: &uidRef) { p in
-                AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, UInt32(MemoryLayout<CFString>.size), p, &size, &id)
-            }
-            if id != 0, let unit = engine.inputNode.audioUnit {
-                var devId = id
-                AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &devId, UInt32(MemoryLayout<AudioDeviceID>.size))
-            }
-            Out.emit(["type": "device", "name": name])
-        }
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
-            guard !self.paused else { return }
-            self.request?.append(buffer)
-            if let ch = buffer.floatChannelData?[0] {
-                let n = Int(buffer.frameLength)
-                var sum: Float = 0
-                for i in 0..<n { sum += ch[i] * ch[i] }
-                let rms = n > 0 ? sqrt(sum / Float(n)) : 0
-                let now = Date().timeIntervalSince1970
-                if now - self.lastLevelAt >= 0.2 {
-                    self.lastLevelAt = now
-                    // Typical speaking RMS is small (roughly 0.05-0.15), so scale it up by
-                    // 8x to fill a 0-1 range that's usable for a UI level meter.
-                    Out.emit(["type": "level", "value": min(1.0, Double(rms) * 8)])
-                }
-            }
-        }
-        engine.prepare()
-        do { try engine.start() } catch {
-            Out.emit(["type": "state", "state": "error", "detail": "audio engine: \(error.localizedDescription)"]); exit(3)
-        }
+    func begin(format: AVAudioFormat) {
         beginRequest()
-        // On-device requests are capped around a minute: rotate before the cap,
-        // but only at a quiet moment so a sentence is never split.
         restartTimer = Timer.scheduledTimer(withTimeInterval: 50, repeats: true) { _ in
             self.rotateDue = true
             self.tick()
         }
-        // The recogniser keeps one growing transcript across pauses, so Maya
-        // end-points utterances herself: a partial unchanged for 1.2 s is final.
         endpointTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in self.tick() }
         Out.emit(["type": "state", "state": "listening"])
+    }
+
+    func accept(_ buffer: AVAudioPCMBuffer) {
+        request?.append(buffer)
     }
 
     /// Emits a quiet partial as final and starts a new request; also performs
@@ -213,6 +168,196 @@ final class Ear {
         old?.cancel()
         beginRequest()
     }
+}
+
+/// whisper.cpp on this Mac. The tap's audio is converted to 16 kHz mono,
+/// cut into utterances by the VAD, and transcribed on one background queue.
+final class WhisperRecogniser: Recogniser {
+    let modelPath: String
+    var ctx: OpaquePointer?
+    var converter: AVAudioConverter?
+    let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+    var vad = Vad()
+    /// Samples not yet framed, then the last `preRollFrames` frames, then the open utterance.
+    var pending: [Float] = []
+    var preRoll: [Float] = []
+    var utterance: [Float] = []
+    let work = DispatchQueue(label: "maya.whisper")
+    var busy = false
+
+    init(modelPath: String) { self.modelPath = modelPath }
+
+    func begin(format: AVAudioFormat) {
+        converter = AVAudioConverter(from: format, to: target)
+        guard FileManager.default.fileExists(atPath: modelPath) else {
+            Out.emit(["type": "state", "state": "error", "detail": "model file not found: \(modelPath)"]); exit(7)
+        }
+        Out.emit(["type": "state", "state": "loading"])
+        work.async {
+            var cparams = whisper_context_default_params()
+            cparams.use_gpu = true
+            let t0 = Date()
+            guard let c = whisper_init_from_file_with_params(self.modelPath, cparams) else {
+                Out.emit(["type": "state", "state": "error", "detail": "could not load model: \(self.modelPath)"]); exit(8)
+            }
+            self.ctx = c
+            Out.emit(["type": "note", "text": String(format: "model loaded in %.1f s", Date().timeIntervalSince(t0))])
+            Out.emit(["type": "state", "state": "listening"])
+        }
+    }
+
+    func accept(_ buffer: AVAudioPCMBuffer) {
+        guard let converter = converter else { return }
+        let ratio = target.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 32
+        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
+        var consumed = false
+        var error: NSError?
+        converter.convert(to: out, error: &error) { _, status in
+            if consumed { status.pointee = .noDataNow; return nil }
+            consumed = true
+            status.pointee = .haveData
+            return buffer
+        }
+        guard error == nil, let ch = out.floatChannelData?[0] else { return }
+        pending.append(contentsOf: UnsafeBufferPointer(start: ch, count: Int(out.frameLength)))
+        while pending.count >= Vad.frameSamples {
+            let frame = Array(pending[0..<Vad.frameSamples])
+            pending.removeFirst(Vad.frameSamples)
+            step(frame)
+        }
+    }
+
+    private func step(_ frame: [Float]) {
+        var sum: Float = 0
+        for s in frame { sum += s * s }
+        let rms = sqrt(sum / Float(frame.count))
+        switch vad.push(rms: rms) {
+        case .none:
+            if vad.speaking {
+                utterance.append(contentsOf: frame)
+            } else {
+                preRoll.append(contentsOf: frame)
+                let keep = Vad.preRollFrames * Vad.frameSamples
+                if preRoll.count > keep { preRoll.removeFirst(preRoll.count - keep) }
+            }
+        case .started:
+            utterance = preRoll + frame
+            preRoll = []
+        case .partialDue:
+            utterance.append(contentsOf: frame)
+            transcribe(Array(utterance), final: false)
+        case .ended(let reason):
+            utterance.append(contentsOf: frame)
+            let audio = utterance
+            utterance = []
+            Out.emit(["type": "note", "text": String(format: "utterance %.1f s (%@)", Double(audio.count) / 16000, reason)])
+            transcribe(audio, final: true)
+        }
+    }
+
+    /// A partial is skipped while the previous transcription still runs; a
+    /// final always runs, queued behind it.
+    private func transcribe(_ audio: [Float], final: Bool) {
+        if !final && busy { return }
+        busy = true
+        work.async {
+            defer { self.busy = false }
+            guard let ctx = self.ctx else { return }
+            var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
+            params.print_progress = false
+            params.print_realtime = false
+            params.print_timestamps = false
+            params.no_timestamps = true
+            params.single_segment = true
+            params.suppress_blank = true
+            params.n_threads = 4
+            params.language = UnsafePointer(strdup("en"))
+            let t0 = Date()
+            let rc = audio.withUnsafeBufferPointer { whisper_full(ctx, params, $0.baseAddress, Int32(audio.count)) }
+            guard rc == 0 else {
+                Out.emit(["type": "state", "state": "warning", "detail": "whisper_full failed: \(rc)"]); return
+            }
+            var text = ""
+            for i in 0..<whisper_full_n_segments(ctx) { text += String(cString: whisper_full_get_segment_text(ctx, i)) }
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if final {
+                Out.emit(["type": "note", "text": String(format: "transcribed %.1f s in %.2f s", Double(audio.count) / 16000, Date().timeIntervalSince(t0))])
+            }
+            if isFiller(text) {
+                if final && !text.isEmpty { Out.emit(["type": "note", "text": "dropped filler: \(text)"]) }
+                return
+            }
+            Out.emit(["type": final ? "final" : "partial", "text": text])
+        }
+    }
+}
+
+final class Ear {
+    let engine = AVAudioEngine()
+    let recogniser: Recogniser
+    var paused = false
+    var lastLevelAt: TimeInterval = 0
+
+    init(recogniser: Recogniser) { self.recogniser = recogniser }
+
+    func start() {
+        if recogniser is SystemRecogniser {
+            SFSpeechRecognizer.requestAuthorization { status in
+                guard status == .authorized else {
+                    Out.emit(["type": "state", "state": "error", "detail": "speech recognition not authorised (\(status.rawValue))"]); exit(2)
+                }
+                DispatchQueue.main.async { self.startAudio() }
+            }
+        } else {
+            startAudio()
+        }
+    }
+
+    func startAudio() {
+        // Never fall back to the system default input: it may be a virtual device.
+        guard let name = pickDevice(names, preferred: preferred) else {
+            Out.emit(["type": "state", "state": "error", "detail": "no non-virtual microphone"]); exit(4)
+        }
+        if let dev = inputDevices().first(where: { $0.localizedName == name }) {
+            var id = AudioDeviceID(0)
+            var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslateUIDToDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            var uidRef: CFString = dev.uniqueID as CFString
+            var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            _ = withUnsafeMutablePointer(to: &uidRef) { p in
+                AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, UInt32(MemoryLayout<CFString>.size), p, &size, &id)
+            }
+            if id != 0, let unit = engine.inputNode.audioUnit {
+                var devId = id
+                AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &devId, UInt32(MemoryLayout<AudioDeviceID>.size))
+            }
+            Out.emit(["type": "device", "name": name])
+        }
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
+            guard !self.paused else { return }
+            self.recogniser.accept(buffer)
+            if let ch = buffer.floatChannelData?[0] {
+                let n = Int(buffer.frameLength)
+                var sum: Float = 0
+                for i in 0..<n { sum += ch[i] * ch[i] }
+                let rms = n > 0 ? sqrt(sum / Float(n)) : 0
+                let now = Date().timeIntervalSince1970
+                if now - self.lastLevelAt >= 0.2 {
+                    self.lastLevelAt = now
+                    // Typical speaking RMS is small (roughly 0.05-0.15), so scale it up by
+                    // 8x to fill a 0-1 range that's usable for a UI level meter.
+                    Out.emit(["type": "level", "value": min(1.0, Double(rms) * 8)])
+                }
+            }
+        }
+        engine.prepare()
+        do { try engine.start() } catch {
+            Out.emit(["type": "state", "state": "error", "detail": "audio engine: \(error.localizedDescription)"]); exit(3)
+        }
+        recogniser.begin(format: format)
+    }
 
     func setPaused(_ p: Bool) {
         paused = p
@@ -220,7 +365,17 @@ final class Ear {
     }
 }
 
-let ear = Ear()
+let recogniser: Recogniser
+switch engineName {
+case "whisper":
+    guard let m = modelPath else {
+        Out.emit(["type": "state", "state": "error", "detail": "--engine whisper needs --model <path>"]); exit(7)
+    }
+    recogniser = WhisperRecogniser(modelPath: m)
+default:
+    recogniser = SystemRecogniser()
+}
+let ear = Ear(recogniser: recogniser)
 ear.start()
 
 DispatchQueue.global().async {
