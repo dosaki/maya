@@ -38,6 +38,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build the listener (both architectures)
+        run: |
+          sh scripts/build-ear.sh aarch64-apple-darwin
+          sh scripts/build-ear.sh x86_64-apple-darwin
+
       - name: Test
         run: |
           pnpm test
