@@ -17,6 +17,7 @@ pub mod launch;
 pub mod listener;
 pub mod log;
 pub mod model;
+pub mod models;
 pub mod notify;
 pub mod pr;
 pub mod registry;
@@ -32,6 +33,7 @@ pub mod watcher;
 use config::Config;
 use listener::VoiceState;
 use model::Card;
+use serde::Serialize;
 use std::sync::Mutex;
 use std::time::Duration;
 use store::{now_ms, Store};
@@ -90,6 +92,49 @@ fn log_clear() {
 #[tauri::command]
 fn log_path(state: TauriState<AppState>) -> String {
     state.store.lock().unwrap().claude_dir().join("maya").join("maya.log").display().to_string()
+}
+
+#[tauri::command]
+fn list_whisper_models(state: TauriState<AppState>) -> Vec<models::ModelInfo> {
+    let claude = state.store.lock().unwrap().claude_dir().to_path_buf();
+    models::list(&claude)
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ModelProgress {
+    id: String,
+    received: u64,
+    total: u64,
+}
+
+/// Downloads one model, reporting progress as `voice-model` events.
+#[tauri::command(async)]
+fn download_whisper_model(app: AppHandle, state: TauriState<AppState>, id: String) -> Result<(), String> {
+    let claude = state.store.lock().unwrap().claude_dir().to_path_buf();
+    log::line("app", format!("downloading whisper model {id}"));
+    let handle = app.clone();
+    let name = id.clone();
+    models::download(&claude, &id, &move |received, total| {
+        let _ = handle.emit("voice-model", ModelProgress { id: name.clone(), received, total });
+    })
+    .map(|_| log::line("app", format!("whisper model {id} ready")))
+    .map_err(|e| {
+        log::line("app", format!("whisper model {id}: {e}"));
+        e
+    })
+}
+
+#[tauri::command]
+fn remove_whisper_model(state: TauriState<AppState>, id: String) -> Result<(), String> {
+    let (claude, in_use) = {
+        let store = state.store.lock().unwrap();
+        (store.claude_dir().to_path_buf(), store.config.recognizer == config::Recognizer::Builtin && store.config.whisper_model == id)
+    };
+    if in_use {
+        return Err("That model is in use; pick another first.".into());
+    }
+    models::remove(&claude, &id)
 }
 
 /// The clones directory with `~` expanded, so the page can recognise review clones.
@@ -558,7 +603,10 @@ pub fn run() {
             listener::voice_selftest,
             log_lines,
             log_clear,
-            log_path
+            log_path,
+            list_whisper_models,
+            download_whisper_model,
+            remove_whisper_model
         ])
         .setup(move |app| {
             let log_path = dir.join("maya").join("maya.log");

@@ -33,6 +33,21 @@ pub struct Config {
     /// Model alias for the voice interpreter.
     #[serde(default = "default_interpreter_model")]
     pub interpreter_model: String,
+    /// System (Apple) or Built-in (whisper.cpp) recognition.
+    #[serde(default)]
+    pub recognizer: Recognizer,
+    /// Whisper model id for the built-in recogniser.
+    #[serde(default = "default_whisper_model")]
+    pub whisper_model: String,
+}
+
+/// Which speech recogniser the listener uses.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Recognizer {
+    #[default]
+    System,
+    Builtin,
 }
 
 pub const DEFAULT_CLONES_DIR: &str = "~/dev/reviews";
@@ -45,9 +60,26 @@ fn default_interpreter_model() -> String {
     "haiku".into()
 }
 
+fn default_whisper_model() -> String {
+    crate::models::DEFAULT_MODEL.into()
+}
+
 impl Default for Config {
     fn default() -> Self {
-        Self { completed_timeout_minutes: 30, projects_dir: None, notify_on_awaiting: true, speak_notifications: true, voice_provider: Default::default(), elevenlabs_voice_id: None, clones_dir: None, listen: false, microphone: None, interpreter_model: "haiku".into() }
+        Self {
+            completed_timeout_minutes: 30,
+            projects_dir: None,
+            notify_on_awaiting: true,
+            speak_notifications: true,
+            voice_provider: Default::default(),
+            elevenlabs_voice_id: None,
+            clones_dir: None,
+            listen: false,
+            microphone: None,
+            interpreter_model: "haiku".into(),
+            recognizer: Recognizer::System,
+            whisper_model: crate::models::DEFAULT_MODEL.into(),
+        }
     }
 }
 
@@ -169,6 +201,17 @@ mod tests {
         assert!(c.listen);
         assert_eq!(c.microphone.as_deref(), Some("USB Mic"));
         assert_eq!(c.interpreter_model, "sonnet");
+    }
+
+    #[test]
+    fn recogniser_defaults_to_system_and_round_trips() {
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5}"#).unwrap();
+        assert_eq!(c.recognizer, Recognizer::System);
+        assert_eq!(c.whisper_model, "base.en-q5_1");
+        let c = Config { recognizer: Recognizer::Builtin, whisper_model: "tiny.en".into(), ..Default::default() };
+        let text = serde_json::to_string(&c).unwrap();
+        assert!(text.contains("\"recognizer\":\"builtin\""));
+        assert!(text.contains("\"whisperModel\":\"tiny.en\""));
     }
 
     #[test]
