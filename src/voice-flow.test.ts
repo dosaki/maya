@@ -42,4 +42,12 @@ describe("voice flow", () => {
     await flush();
     expect(fetches()).toBe(2);
   });
+
+  it("says that a click opens the panel when listening is off", async () => {
+    invoke.mockImplementation((cmd: string) => (cmd === "voice_status" ? Promise.resolve(status({ listening: false, state: "off" })) : Promise.resolve([])));
+    await initVoice();
+    const button = document.querySelector<HTMLButtonElement>("#voice-host button")!;
+    expect(button.title).toContain("Click to open");
+    expect(button.title).not.toContain("Click to listen");
+  });
 });

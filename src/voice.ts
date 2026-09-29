@@ -25,7 +25,7 @@ export interface VoiceHandlers {
 }
 
 const LABEL: Record<VoiceStatus["state"], string> = {
-  off: "Not listening. Click to listen for \"Maya\".",
+  off: "Not listening. Click to open.",
   idle: "Listening for \"Maya\".",
   "awaiting-command": "Yes? Say your command.",
   "awaiting-confirm": "Waiting for yes or no.",

@@ -188,7 +188,7 @@ body { margin: 0; background: var(--bg); }
 
 .voice { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); cursor: pointer; position: relative; margin-left: 8px; }
 .voice::after { content: ""; position: absolute; inset: -3px; border-radius: 999px; border: 2px solid currentColor; opacity: calc(var(--level, 0) * 0.9); pointer-events: none; }
-.voice--idle { color: var(--completed); }
+.voice--idle { color: var(--idle); }
 .voice--awaiting { color: var(--awaiting); }
 .voice--thinking { color: var(--working); }
 .voice--error { color: #e5484d; }
