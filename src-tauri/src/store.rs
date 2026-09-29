@@ -14,6 +14,7 @@ pub struct Store {
     claude_dir: PathBuf,
     codex_dir: PathBuf,
     agy_dir: PathBuf,
+    grok_dir: PathBuf,
     /// Sessions of other harnesses, keyed by pid, kept between refreshes so
     /// `lsof` runs once per process rather than every five seconds.
     foreign: std::collections::HashMap<i32, ForeignSession>,
@@ -39,6 +40,7 @@ impl Store {
             claude_dir,
             codex_dir: home.join(".codex"),
             agy_dir: home.join(".gemini/antigravity-cli"),
+            grok_dir: home.join(".grok"),
             foreign: std::collections::HashMap::new(),
             processes: Box::new(foreign::list_tui_processes),
             config,
@@ -52,15 +54,17 @@ impl Store {
     #[cfg(test)]
     pub fn with_alive(mut self, alive: impl Fn(i32) -> bool + Send + 'static) -> Self {
         self.alive = Box::new(alive);
-        // Tests never see the machine's real codex/agy processes.
+        // Tests never see the machine's real codex/agy/grok sessions.
         self.processes = Box::new(Vec::new);
+        self.grok_dir = PathBuf::from("/nonexistent/grok");
         self
     }
 
     #[cfg(test)]
     pub fn with_foreign(mut self, codex_dir: PathBuf, agy_dir: PathBuf, sessions: Vec<ForeignSession>) -> Self {
         self.codex_dir = codex_dir;
-        self.agy_dir = agy_dir;
+        self.agy_dir = agy_dir.clone();
+        self.grok_dir = agy_dir.join("no-grok");
         let pids: Vec<(i32, String, Harness)> = sessions.iter().map(|s| (s.pid, s.tty.clone().unwrap_or_default(), s.harness)).collect();
         self.foreign = sessions.into_iter().map(|s| (s.pid, s)).collect();
         self.processes = Box::new(move || pids.clone());
@@ -77,6 +81,13 @@ impl Store {
             for s in foreign::discover(&fresh, foreign::proc_info, &self.codex_dir, &self.agy_dir) {
                 self.foreign.insert(s.pid, s);
             }
+        }
+        // Grok keeps a registry of its own: cheap to read every refresh.
+        let grok = foreign::grok_sessions(&self.grok_dir, &*self.alive, &|pid| crate::focus::tty_for_pid(pid).ok());
+        let grok_pids: std::collections::HashSet<i32> = grok.iter().map(|s| s.pid).collect();
+        self.foreign.retain(|pid, s| s.harness != Harness::Grok || grok_pids.contains(pid));
+        for s in grok {
+            self.foreign.entry(s.pid).or_insert(s);
         }
     }
 
@@ -178,8 +189,7 @@ impl Store {
         self.tails.retain(&paths);
         let timeout = self.config.completed_timeout_ms();
         for s in self.foreign.values() {
-            let text = crate::transcript::tail_text(&s.transcript_path, crate::transcript::TAIL_BYTES).unwrap_or_default();
-            let tail = foreign::tail_for(s.harness, &text);
+            let tail = foreign::tail_for(s);
             let mut card = foreign::derive(s, &tail, now_ms, timeout);
             card.pr = self.prs.get(&s.cwd);
             cards.push(card);
@@ -299,6 +309,25 @@ mod tests {
     }
 
     #[test]
+    fn grok_sessions_come_from_its_registry_when_the_pid_is_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let grok = dir.path().join("grok");
+        let sdir = crate::grok::session_dir(&grok, "/Users/x", "g1");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(grok.join("active_sessions.json"), r#"[{"session_id":"g1","pid":11,"cwd":"/Users/x"},{"session_id":"g2","pid":12,"cwd":"/Users/x"}]"#).unwrap();
+        std::fs::write(sdir.join("summary.json"), r#"{"generated_title":"Testing Grok Build"}"#).unwrap();
+        std::fs::write(sdir.join("events.jsonl"), "{\"ts\":\"2026-09-29T14:02:15.012Z\",\"type\":\"turn_started\"}\n").unwrap();
+        std::fs::write(sdir.join("chat_history.jsonl"), "{\"type\":\"assistant\",\"content\":\"Hi\"}\n").unwrap();
+        let found = foreign::grok_sessions(&grok, &|pid| pid == 11, &|_| Some("/dev/ttys008".into()));
+        assert_eq!(found.len(), 1);
+        assert_eq!((found[0].harness, found[0].pid, found[0].name.as_str(), found[0].session_id.as_str()), (Harness::Grok, 11, "Testing Grok Build", "g1"));
+        let tail = foreign::tail_for(&found[0]);
+        assert!(tail.working);
+        assert_eq!(tail.last_agent_text.as_deref(), Some("Hi"));
+        assert_eq!(foreign::turns_for(&found[0], 10).len(), 1);
+    }
+
+    #[test]
     fn card_for_returns_the_derived_card_or_none() {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().to_path_buf();
@@ -342,5 +371,6 @@ mod tests {
         assert!(!log.contains("gone"));
     }
 }
+
 
 

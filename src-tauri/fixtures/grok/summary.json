@@ -1,0 +1,26 @@
+{
+  "info": {
+    "id": "01a0ed78-fb28-7750-aebc-21d4e4daa45b",
+    "cwd": "/Users/tiagocorreia"
+  },
+  "agent_id": "ag1.f292c895a11a4d1088df07f3032385e7",
+  "attempt_id": "at1.92c3c819b6a54e8d9c2ee15fd8d94bd6",
+  "session_summary": "Simple Greeting Request from User",
+  "created_at": "2026-09-29T14:02:04.053214Z",
+  "updated_at": "2026-09-29T14:02:27.850508Z",
+  "num_messages": 7,
+  "num_chat_messages": 8,
+  "current_model_id": "grok-4.7",
+  "next_trace_turn": 1,
+  "chat_format_version": 1,
+  "request_id": "a319e617-1fda-4f7d-b9eb-4e7bade21333",
+  "grok_home": "/Users/tiagocorreia/.grok",
+  "last_active_at": "2026-09-29T14:02:19.511215Z",
+  "generated_title": "Testing Grok Build",
+  "title_is_manual": true,
+  "agent_name": "grok-build-plan",
+  "sandbox_profile": "off",
+  "reasoning_effort": "high",
+  "last_turn_summary": "Hi — short reply, nothing further added",
+  "last_turn_summary_prompt_id": "a319e617-1fda-4f7d-b9eb-4e7bade21333"
+}

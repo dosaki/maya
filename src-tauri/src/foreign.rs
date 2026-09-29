@@ -153,28 +153,50 @@ pub fn discover(procs: &[(i32, String, Harness)], info: impl Fn(i32) -> ProcInfo
                 let path = crate::antigravity::transcript_path(agy_dir, &id);
                 out.push(ForeignSession { harness: *harness, pid: *pid, tty: Some(tty.clone()), session_id: id, cwd, name, transcript_path: path });
             }
-            Harness::ClaudeCode => {}
+            Harness::ClaudeCode | Harness::Grok => {}
         }
     }
     out
 }
 
-/// The card state for a foreign session's transcript, by harness.
-pub fn tail_for(harness: Harness, text: &str) -> ForeignTail {
-    match harness {
-        Harness::Codex => crate::codex::parse_tail(text),
-        Harness::Antigravity => crate::antigravity::parse_tail(text),
+fn tail_of(path: &std::path::Path, bytes: u64) -> String {
+    crate::transcript::tail_text(path, bytes).unwrap_or_default()
+}
+
+/// The card state for a foreign session, read from its files by harness.
+pub fn tail_for(s: &ForeignSession) -> ForeignTail {
+    match s.harness {
+        Harness::Codex => crate::codex::parse_tail(&tail_of(&s.transcript_path, crate::transcript::TAIL_BYTES)),
+        Harness::Antigravity => crate::antigravity::parse_tail(&tail_of(&s.transcript_path, crate::transcript::TAIL_BYTES)),
+        Harness::Grok => crate::grok::tail_for_dir(s.transcript_path.parent().unwrap_or(&s.transcript_path)),
         Harness::ClaudeCode => ForeignTail::default(),
     }
 }
 
-/// Conversation turns for a foreign session's transcript, by harness.
-pub fn turns_for(harness: Harness, text: &str, max_turns: usize) -> Vec<crate::transcript::Turn> {
-    match harness {
-        Harness::Codex => crate::codex::parse_turns(text, max_turns),
-        Harness::Antigravity => crate::antigravity::parse_turns(text, max_turns),
+/// Conversation turns for a foreign session, read from its files by harness.
+pub fn turns_for(s: &ForeignSession, max_turns: usize) -> Vec<crate::transcript::Turn> {
+    let big = crate::transcript::TURNS_TAIL_BYTES;
+    match s.harness {
+        Harness::Codex => crate::codex::parse_turns(&tail_of(&s.transcript_path, big), max_turns),
+        Harness::Antigravity => crate::antigravity::parse_turns(&tail_of(&s.transcript_path, big), max_turns),
+        Harness::Grok => crate::grok::parse_turns(&tail_of(&s.transcript_path.with_file_name("chat_history.jsonl"), big), max_turns),
         Harness::ClaudeCode => vec![],
     }
+}
+
+/// Live Grok Build sessions from its registry, for pids that are running.
+pub fn grok_sessions(grok_dir: &std::path::Path, alive: &dyn Fn(i32) -> bool, tty_of: &dyn Fn(i32) -> Option<String>) -> Vec<ForeignSession> {
+    let text = std::fs::read_to_string(grok_dir.join("active_sessions.json")).unwrap_or_default();
+    crate::grok::registry(&text)
+        .into_iter()
+        .filter(|(_, pid, _)| alive(*pid))
+        .map(|(id, pid, cwd)| {
+            let dir = crate::grok::session_dir(grok_dir, &cwd, &id);
+            let summary = std::fs::read_to_string(dir.join("summary.json")).unwrap_or_default();
+            let name = crate::grok::title(&summary).unwrap_or_else(|| format!("grok-{pid}"));
+            ForeignSession { harness: Harness::Grok, pid, tty: tty_of(pid), session_id: id, cwd, name, transcript_path: dir.join("events.jsonl") }
+        })
+        .collect()
 }
 
 pub fn proc_info(pid: i32) -> ProcInfo {

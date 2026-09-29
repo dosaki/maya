@@ -124,6 +124,8 @@ describe("other harnesses", () => {
     expect(el.querySelector("button[data-action=reply]")).not.toBeNull();
     const agy = renderCard(card({ harness: "antigravity", hasInbox: false }), NOW);
     expect(agy.querySelector<HTMLImageElement>("img.card__harness")!.alt).toBe("Antigravity");
+    const grok = renderCard(card({ harness: "grok", hasInbox: false }), NOW);
+    expect(grok.querySelector<HTMLImageElement>("img.card__harness")!.alt).toBe("Grok Build");
   });
 });
 

@@ -5,6 +5,7 @@ pub mod codex;
 pub mod config;
 pub mod dock;
 pub mod foreign;
+pub mod grok;
 pub mod context;
 pub mod events;
 pub mod focus;
@@ -140,17 +141,14 @@ fn session_history(state: TauriState<AppState>, session_id: String) -> Result<Ve
     let (path, foreign) = {
         let store = state.store.lock().unwrap();
         if let Some(f) = store.foreign(&session_id) {
-            (f.transcript_path.clone(), Some(f.harness))
+            (f.transcript_path.clone(), Some(f))
         } else {
             let s = store.session(&session_id).ok_or("Session is no longer running.")?;
             (store.transcript_path_for(&s), None)
         }
     };
     match foreign {
-        Some(h) => {
-            let text = transcript::tail_text(&path, transcript::TURNS_TAIL_BYTES).unwrap_or_default();
-            Ok(foreign::turns_for(h, &text, 30))
-        }
+        Some(f) => Ok(foreign::turns_for(&f, 30)),
         None => Ok(transcript::read_turns(&path, 30)),
     }
 }

@@ -17,7 +17,7 @@ export interface Question {
 }
 
 /** The agent runner behind a session. Only Claude Code has a source today. */
-export type Harness = "claude-code" | "codex" | "antigravity";
+export type Harness = "claude-code" | "codex" | "antigravity" | "grok";
 
 export interface PullRequest {
   number: number;

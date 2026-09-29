@@ -1,0 +1,6 @@
+{"ts":"2026-09-29T14:02:16.936Z","type":"phase_changed","phase":"streaming_reasoning"}
+{"ts":"2026-09-29T14:02:16.936Z","type":"phase_changed","phase":"streaming_reasoning"}
+{"ts":"2026-09-29T14:02:16.936Z","type":"phase_changed","phase":"streaming_reasoning"}
+{"ts":"2026-09-29T14:02:16.971Z","type":"phase_changed","phase":"streaming_reasoning"}
+{"ts":"2026-09-29T14:02:18.930Z","type":"phase_changed","phase":"streaming_text"}
+{"ts":"2026-09-29T14:02:19.434Z","type":"turn_ended","outcome":"completed"}

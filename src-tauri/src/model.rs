@@ -58,6 +58,7 @@ pub enum Harness {
     ClaudeCode,
     Codex,
     Antigravity,
+    Grok,
 }
 
 /// The pull request for a session directory's current branch.
