@@ -10,10 +10,15 @@
     <div id="app">
       <header class="topbar">
         <h1 class="topbar__title" title="Manage All Your Agents">Maya</h1>
+        <nav class="tabs" role="tablist">
+          <button class="tab" type="button" role="tab" data-tab="sessions">Sessions</button>
+          <button class="tab" type="button" role="tab" data-tab="reviews">Pull Requests <span class="tab__count" id="reviews-count"></span></button>
+        </nav>
         <span class="topbar__meta" id="meta"></span>
         <button class="topbar__settings" id="settings-toggle" type="button">Settings</button>
       </header>
       <div id="board"></div>
+      <div id="reviews" hidden></div>
       <aside id="settings" class="settings" hidden></aside>
       <div id="modal-host"></div>
       <div id="toast" class="toast" hidden></div>

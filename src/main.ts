@@ -8,9 +8,11 @@ import { openModal, refreshModal, setProgress } from "./modal";
 import { closeNewSession, openNewSession } from "./newsession";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
+import { renderReviews, reviewActionFor } from "./reviews";
+import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
-import type { Card } from "./types";
+import type { Card, ReviewState } from "./types";
 
 let cards: Card[] = [];
 const guard = makeClickGuard();
@@ -20,6 +22,30 @@ let retry: ReturnType<typeof setTimeout> | undefined;
 let enableTimer: ReturnType<typeof setTimeout> | undefined;
 let known = new Set<string>();
 let pointer: { x: number; y: number } | null = null;
+let reviews: ReviewState = { prs: [], error: null, fetchedAt: null };
+let tabs: ReturnType<typeof makeTabs> | null = null;
+
+function paintReviews(): void {
+  const host = document.getElementById("reviews");
+  if (!host) return;
+  host.replaceChildren(renderReviews(reviews, Date.now()));
+  tabs?.setCount(reviews.prs.length);
+}
+
+async function reviewAction(target: Element): Promise<void> {
+  const action = reviewActionFor(target);
+  if (!action) return;
+  try {
+    if (action.kind === "open-pr") {
+      await invoke("open_review_pr", { repo: action.repo, number: action.number });
+    } else {
+      const dir = await invoke<string>("review_pr", { repo: action.repo, number: action.number });
+      showToast(`Reviewing #${action.number} in ${dir.split("/").filter(Boolean).pop() ?? dir}`);
+    }
+  } catch (e) {
+    showToast(String(e));
+  }
+}
 
 /** Which card and button sit under the pointer, as a comparable key. */
 function targetUnderPointer(): string {
@@ -103,6 +129,17 @@ async function answer(card: Card, questionIndex: number, optionIndex: number, bu
 
 async function start(): Promise<void> {
   void initSettings();
+  tabs = makeTabs();
+  document.getElementById("reviews")?.addEventListener("click", (ev) => void reviewAction(ev.target as Element));
+  await listen<ReviewState>("reviews", (e) => {
+    reviews = e.payload;
+    paintReviews();
+  });
+  paintReviews();
+  void invoke<ReviewState>("list_review_prs").then((r) => {
+    reviews = r;
+    paintReviews();
+  });
   const board = document.getElementById("board");
   board?.addEventListener("pointerdown", () => guard.setPointerDown(true));
   window.addEventListener("pointerup", () => guard.setPointerDown(false));
@@ -141,7 +178,7 @@ async function start(): Promise<void> {
   });
   cards = await invoke<Card[]>("list_sessions");
   paint();
-  setInterval(paint, 10_000); // refresh the age labels
+  setInterval(() => { paint(); paintReviews(); }, 10_000); // refresh the age labels
 }
 
 void start();

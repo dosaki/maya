@@ -10,6 +10,7 @@ pub mod model;
 pub mod notify;
 pub mod pr;
 pub mod registry;
+pub mod reviews;
 pub mod state;
 pub mod store;
 pub mod transcript;
@@ -25,6 +26,71 @@ use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 pub struct AppState {
     pub store: Mutex<Store>,
     pub notifier: Mutex<notify::Notifier>,
+    pub reviews: Mutex<ReviewState>,
+}
+
+/// The last PR list fetched, and the error from the last attempt if it failed.
+#[derive(Default, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewState {
+    pub prs: Vec<reviews::ReviewPr>,
+    pub error: Option<String>,
+    pub fetched_at: Option<u64>,
+}
+
+fn poll_reviews(app: &AppHandle) {
+    let result = reviews::fetch();
+    let state = app.state::<AppState>();
+    let snapshot = {
+        let mut r = state.reviews.lock().unwrap();
+        match result {
+            Ok(prs) => {
+                r.prs = prs;
+                r.error = None;
+                r.fetched_at = Some(now_ms());
+            }
+            Err(e) => r.error = Some(e),
+        }
+        r.clone()
+    };
+    let _ = app.emit("reviews", &snapshot);
+}
+
+#[tauri::command(async)]
+fn list_review_prs(state: TauriState<AppState>) -> ReviewState {
+    state.reviews.lock().unwrap().clone()
+}
+
+fn review_pr_for(state: &TauriState<AppState>, repo: &str, number: u64) -> Result<reviews::ReviewPr, String> {
+    state.reviews.lock().unwrap().prs.iter().find(|p| p.repo == repo && p.number == number).cloned().ok_or("That pull request is no longer on the list.".into())
+}
+
+/// Opens a listed PR in the browser; the URL comes from the fetched list.
+#[tauri::command(async)]
+fn open_review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<(), String> {
+    let pr = review_pr_for(&state, &repo, number)?;
+    let ok = std::process::Command::new("open").arg(&pr.url).status().map_err(|e| format!("could not open the browser: {e}"))?;
+    if ok.success() {
+        Ok(())
+    } else {
+        Err("The browser refused to open the pull request.".into())
+    }
+}
+
+/// Opens a Terminal that reviews a listed PR with /should-i-approve, in the
+/// project checkout when it is free, else in a clone under the clones dir.
+#[tauri::command(async)]
+fn review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<String, String> {
+    let pr = review_pr_for(&state, &repo, number)?;
+    let (projects, clones, live) = {
+        let store = state.store.lock().unwrap();
+        let live: Vec<String> = store.live_cwds();
+        (store.config.projects_dir_path(), store.config.clones_dir_path(), live)
+    };
+    let projects = projects.ok_or("Set a projects directory in Settings first.")?;
+    let target = reviews::resolve_target(&projects, &clones, &pr.repo, pr.number, &live);
+    launch::open_terminal_with(&reviews::shell_command(&target, &pr.repo, pr.number))?;
+    Ok(target.dir.to_string_lossy().into_owned())
 }
 
 fn claude_dir() -> std::path::PathBuf {
@@ -260,7 +326,7 @@ pub fn run() {
     store.compact_events();
 
     tauri::Builder::default()
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()) })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             focus_session,
@@ -272,6 +338,9 @@ pub fn run() {
             rename_session,
             compact_session,
             open_pr,
+            list_review_prs,
+            open_review_pr,
+            review_pr,
             list_project_dirs,
             start_session,
             hook_status,
@@ -291,6 +360,11 @@ pub fn run() {
             std::thread::spawn(move || loop {
                 poll_pull_requests(&pr_handle);
                 std::thread::sleep(Duration::from_secs(10));
+            });
+            let review_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                poll_reviews(&review_handle);
+                std::thread::sleep(Duration::from_secs(120));
             });
             Ok(())
         })

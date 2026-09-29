@@ -188,26 +188,35 @@ fn applescript_string(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Opens a new Terminal window running the session and brings Terminal forward.
-/// The shell reads the prompt file into a variable, deletes the file, and
-/// passes the prompt after `--` so a prompt starting with `-` is not an option.
-pub fn applescript_launch(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> String {
-    let file = shell_single_quote(&prompt_file.to_string_lossy());
-    let cmd = format!(
-        "cd {} && p=\"$(cat {file})\" && rm -f {file} && claude{} -- \"$p\"",
-        shell_single_quote(&target.to_string_lossy()),
-        opts.flags()
-    );
+/// Opens a new Terminal window running `cmd` and brings Terminal forward.
+pub fn applescript_run(cmd: &str) -> String {
     format!(
         "tell application \"Terminal\"\n  do script \"{}\"\n  activate\nend tell",
-        applescript_string(&cmd)
+        applescript_string(cmd)
     )
 }
 
-pub fn open_terminal(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> Result<(), String> {
+/// The shell line that starts a session: it reads the prompt file into a
+/// variable, deletes the file, and passes the prompt after `--` so a prompt
+/// starting with `-` is not an option.
+pub fn session_command(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> String {
+    let file = shell_single_quote(&prompt_file.to_string_lossy());
+    format!(
+        "cd {} && p=\"$(cat {file})\" && rm -f {file} && claude{} -- \"$p\"",
+        shell_single_quote(&target.to_string_lossy()),
+        opts.flags()
+    )
+}
+
+pub fn applescript_launch(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> String {
+    applescript_run(&session_command(target, prompt_file, opts))
+}
+
+/// Runs `cmd` in a new Terminal window.
+pub fn open_terminal_with(cmd: &str) -> Result<(), String> {
     let out = Command::new("osascript")
         .arg("-e")
-        .arg(applescript_launch(target, prompt_file, opts))
+        .arg(applescript_run(cmd))
         .output()
         .map_err(|e| format!("could not run osascript: {e}"))?;
     if out.status.success() {
@@ -215,6 +224,10 @@ pub fn open_terminal(target: &Path, prompt_file: &Path, opts: &LaunchOptions) ->
     } else {
         Err(format!("osascript failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
     }
+}
+
+pub fn open_terminal(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> Result<(), String> {
+    open_terminal_with(&session_command(target, prompt_file, opts))
 }
 
 /// Where the session starts and why: the user's choice, the classifier's pick,
@@ -318,6 +331,12 @@ mod tests {
         assert_eq!(all.flags(), " --model sonnet --effort low --permission-mode plan");
         let one = LaunchOptions { effort: Some("max".into()), ..Default::default() };
         assert_eq!(one.flags(), " --effort max");
+    }
+
+    #[test]
+    fn any_shell_command_can_be_opened_in_a_terminal_window() {
+        let s = applescript_run("cd '/r' && echo \"hi\"");
+        assert_eq!(s, "tell application \"Terminal\"\n  do script \"cd '/r' && echo \\\"hi\\\"\"\n  activate\nend tell");
     }
 
     #[test]

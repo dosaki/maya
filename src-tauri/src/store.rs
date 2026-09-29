@@ -53,6 +53,11 @@ impl Store {
         registry::list(&self.claude_dir.join("sessions"), &*self.alive)
     }
 
+    /// Working directories of every live session.
+    pub fn live_cwds(&self) -> Vec<String> {
+        self.registry().into_iter().map(|s| s.cwd).collect()
+    }
+
     /// The live registry entry for a session id, if it is still running.
     pub fn session(&self, session_id: &str) -> Option<RegistrySession> {
         self.registry().into_iter().find(|s| s.session_id == session_id)

@@ -11,7 +11,12 @@ pub struct Config {
     /// Post a system notification when a session starts waiting on the user.
     #[serde(default = "default_true")]
     pub notify_on_awaiting: bool,
+    /// Where PR review clones go when the project checkout is missing or busy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clones_dir: Option<String>,
 }
+
+pub const DEFAULT_CLONES_DIR: &str = "~/dev/reviews";
 
 fn default_true() -> bool {
     true
@@ -19,7 +24,7 @@ fn default_true() -> bool {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { completed_timeout_minutes: 30, projects_dir: None, notify_on_awaiting: true }
+        Self { completed_timeout_minutes: 30, projects_dir: None, notify_on_awaiting: true, clones_dir: None }
     }
 }
 
@@ -31,6 +36,11 @@ impl Config {
     /// The projects directory with `~` expanded, if configured.
     pub fn projects_dir_path(&self) -> Option<PathBuf> {
         self.projects_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(expand_home)
+    }
+
+    /// The clones directory with `~` expanded; `DEFAULT_CLONES_DIR` when unset or blank.
+    pub fn clones_dir_path(&self) -> PathBuf {
+        expand_home(self.clones_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_CLONES_DIR))
     }
 }
 
@@ -91,6 +101,17 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "notifyOnAwaiting": false}"#).unwrap();
         assert!(!c.notify_on_awaiting);
         assert!(serde_json::to_string(&c).unwrap().contains("\"notifyOnAwaiting\":false"));
+    }
+
+    #[test]
+    fn clones_dir_defaults_under_home_and_expands() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(Config::default().clones_dir_path(), home.join("dev/reviews"));
+        let c = Config { clones_dir: Some("~/tmp/clones".into()), ..Default::default() };
+        assert_eq!(c.clones_dir_path(), home.join("tmp/clones"));
+        let blank = Config { clones_dir: Some("  ".into()), ..Default::default() };
+        assert_eq!(blank.clones_dir_path(), home.join("dev/reviews"));
+        assert!(serde_json::to_string(&c).unwrap().contains("\"clonesDir\":\"~/tmp/clones\""));
     }
 
     #[test]

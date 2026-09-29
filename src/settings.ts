@@ -4,6 +4,7 @@ export interface SettingsModel {
   hookInstalled: boolean | null;
   completedTimeoutMinutes: number;
   projectsDir: string;
+  clonesDir: string;
   notifyOnAwaiting: boolean;
   error: string | null;
 }
@@ -14,11 +15,13 @@ export interface SettingsHandlers {
   onTimeout(minutes: number): void;
   onProjectsDir(path: string): void;
   onNotify(enabled: boolean): void;
+  onClonesDir(path: string): void;
 }
 
 interface ConfigJson {
   completedTimeoutMinutes: number;
   projectsDir?: string | null;
+  clonesDir?: string | null;
   notifyOnAwaiting: boolean;
 }
 
@@ -75,6 +78,17 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   dirLabel.append(dirInput);
   root.append(dirLabel);
 
+  const clonesLabel = document.createElement("label");
+  clonesLabel.textContent = "Clones directory (for PR reviews)";
+  const clonesInput = document.createElement("input");
+  clonesInput.type = "text";
+  clonesInput.name = "clonesDir";
+  clonesInput.placeholder = "~/dev/reviews";
+  clonesInput.value = model.clonesDir;
+  clonesInput.addEventListener("change", () => h.onClonesDir(clonesInput.value.trim()));
+  clonesLabel.append(clonesInput);
+  root.append(clonesLabel);
+
   const notifyLabel = document.createElement("label");
   notifyLabel.className = "settings__check";
   const notifyBox = document.createElement("input");
@@ -99,14 +113,15 @@ export async function initSettings(): Promise<void> {
   const toggle = document.getElementById("settings-toggle");
   if (!panel || !toggle) return;
 
-  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", notifyOnAwaiting: true, error: null };
+  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, error: null };
 
   const saveConfig = async (patch: Partial<ConfigJson>) => {
     const c = await invoke<ConfigJson>("set_config", {
-      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, notifyOnAwaiting: model.notifyOnAwaiting, ...patch },
+      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, clonesDir: model.clonesDir || null, notifyOnAwaiting: model.notifyOnAwaiting, ...patch },
     });
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
+    model.clonesDir = c.clonesDir ?? "";
     model.notifyOnAwaiting = c.notifyOnAwaiting;
   };
 
@@ -128,6 +143,7 @@ export async function initSettings(): Promise<void> {
     onTimeout: (minutes) => void run(() => saveConfig({ completedTimeoutMinutes: minutes })),
     onProjectsDir: (path) => void run(() => saveConfig({ projectsDir: path || null })),
     onNotify: (enabled) => void run(() => saveConfig({ notifyOnAwaiting: enabled })),
+    onClonesDir: (path) => void run(() => saveConfig({ clonesDir: path || null })),
   };
 
   toggle.addEventListener("click", () => {
@@ -139,6 +155,7 @@ export async function initSettings(): Promise<void> {
     model.hookInstalled = installed;
     model.completedTimeoutMinutes = config.completedTimeoutMinutes;
     model.projectsDir = config.projectsDir ?? "";
+    model.clonesDir = config.clonesDir ?? "";
     model.notifyOnAwaiting = config.notifyOnAwaiting;
   });
 }

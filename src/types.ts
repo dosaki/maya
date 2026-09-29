@@ -67,6 +67,25 @@ export function compactButton(className = "card__btn"): HTMLButtonElement {
   return b;
 }
 
+/** A pull request waiting on the user, from the Pull Requests tab. */
+export interface ReviewPr {
+  number: number;
+  /** owner/name */
+  repo: string;
+  title: string;
+  author: string;
+  url: string;
+  isDraft: boolean;
+  updatedAt: string;
+  reasons: ("review" | "assigned")[];
+}
+
+export interface ReviewState {
+  prs: ReviewPr[];
+  error: string | null;
+  fetchedAt: number | null;
+}
+
 export interface Card {
   sessionId: string;
   pid: number;
