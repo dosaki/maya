@@ -1,4 +1,6 @@
+import antigravityIcon from "./assets/icons/antigravity.svg";
 import claudeCodeIcon from "./assets/claude-code.png";
+import codexIcon from "./assets/icons/codex.svg";
 import type { Harness } from "./types";
 
 export const HARNESS_LABEL: Record<Harness, string> = {
@@ -10,6 +12,8 @@ export const HARNESS_LABEL: Record<Harness, string> = {
 /** Icons by harness; a harness without one falls back to its label as text. */
 export const HARNESS_ICON: Partial<Record<Harness, string>> = {
   "claude-code": claudeCodeIcon,
+  codex: codexIcon,
+  antigravity: antigravityIcon,
 };
 
 export function harnessLabel(h: Harness): string {

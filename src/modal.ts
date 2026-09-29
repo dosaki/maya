@@ -49,8 +49,12 @@ export interface ModalHandlers {
  * commits a changed, non-blank name; Escape, or leaving the field, cancels.
  * Escape is stopped here so the modal's own Escape handler does not close it.
  */
-function renderTitle(name: string, h: ModalHandlers): HTMLElement {
+function renderTitle(name: string, h: ModalHandlers, renamable: boolean): HTMLElement {
   const title = el("h2", "modal__title", name);
+  if (!renamable) {
+    title.classList.add("modal__title--fixed");
+    return title;
+  }
   title.title = "Click to rename this session";
   title.tabIndex = 0;
   const edit = () => {
@@ -144,7 +148,8 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
 
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");
-  titles.append(renderTitle(m.card.name, h), el("span", "modal__project", projectName(m.card.cwd)));
+  const claude = m.card.harness === "claude-code";
+  titles.append(renderTitle(m.card.name, h, claude), el("span", "modal__project", projectName(m.card.cwd)));
   titles.append(harnessBadge(m.card.harness, "modal__harness"));
   if (m.card.pr) {
     const pr = prButton(m.card.pr);
@@ -155,7 +160,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const ctx = el("span", "modal__context", `ctx ${m.card.context.percent}%`);
     ctx.title = `Context ${m.card.context.percent}% · ${formatTokens(m.card.context.used)} of ${formatTokens(m.card.context.window)}`;
     titles.append(ctx);
-    if (m.card.context.percent >= COMPACT_AT) {
+    if (claude && m.card.context.percent >= COMPACT_AT) {
       const compact = compactButton();
       compact.addEventListener("click", () => h.onCompact());
       titles.append(compact);
@@ -213,14 +218,17 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     h.onOpenLink(a.getAttribute("href") ?? "");
   });
   panel.append(history);
-  panel.append(renderTweaks(h));
+  if (claude) panel.append(renderTweaks(h));
 
-  if (m.card.hasInbox) {
+  // Other harnesses have no inbox; a reply is typed into their terminal instead.
+  if (m.card.hasInbox || !claude) {
     const attachments = m.attachments ?? [];
     panel.append(renderChips(attachments, (path) => h.onRemoveAttachment?.(path)));
     const form = el("div", "modal__composer");
     const ta = el("textarea", "modal__input");
-    ta.placeholder = "Message this session… (⌘↵ to send, paste or drop files to attach)";
+    ta.placeholder = claude
+      ? "Message this session… (⌘↵ to send, paste or drop files to attach)"
+      : "Message this session… (⌘↵ to send; typed into its terminal as one line)";
     ta.value = m.draft;
     ta.rows = 3;
     const trySend = () => {
@@ -391,7 +399,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   if (enableTimer) clearTimeout(enableTimer);
   enableTimer = delay === null ? undefined : setTimeout(() => { enableTimer = undefined; paint(); }, delay + 50);
   const existing = host.querySelector<HTMLElement>(".modal");
-  const composerUnchanged = !!existing && !!existing.querySelector("textarea") === m.card.hasInbox;
+  const composerUnchanged = !!existing && !!existing.querySelector("textarea") === (m.card.hasInbox || m.card.harness !== "claude-code");
   if (existing && composerUnchanged) patchModal(existing, fresh);
   else host.replaceChildren(fresh);
   const hist = host.querySelector(".modal__history");

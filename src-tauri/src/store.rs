@@ -1,5 +1,7 @@
 use crate::config::{self, Config};
 use crate::events::EventLog;
+use crate::foreign::{self, ForeignSession};
+use crate::model::Harness;
 use crate::model::{Card, PullRequest};
 use crate::pr::PrCache;
 use crate::registry::{self, RegistrySession};
@@ -10,6 +12,13 @@ use std::path::{Path, PathBuf};
 
 pub struct Store {
     claude_dir: PathBuf,
+    codex_dir: PathBuf,
+    agy_dir: PathBuf,
+    /// Sessions of other harnesses, keyed by pid, kept between refreshes so
+    /// `lsof` runs once per process rather than every five seconds.
+    foreign: std::collections::HashMap<i32, ForeignSession>,
+    /// The process lister, replaceable in tests.
+    processes: Box<dyn Fn() -> Vec<(i32, String, Harness)> + Send>,
     events: EventLog,
     pub config: Config,
     alive: Box<dyn Fn(i32) -> bool + Send>,
@@ -24,9 +33,14 @@ pub const DEFAULT_COMPACT_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
 impl Store {
     pub fn new(claude_dir: PathBuf) -> Self {
         let config = config::load(&claude_dir.join("maya/config.json"));
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         Self {
             events: EventLog::new(claude_dir.join("maya/events.jsonl")),
             claude_dir,
+            codex_dir: home.join(".codex"),
+            agy_dir: home.join(".gemini/antigravity-cli"),
+            foreign: std::collections::HashMap::new(),
+            processes: Box::new(foreign::list_tui_processes),
             config,
             alive: Box::new(registry::pid_alive),
             tails: TailCache::default(),
@@ -38,7 +52,37 @@ impl Store {
     #[cfg(test)]
     pub fn with_alive(mut self, alive: impl Fn(i32) -> bool + Send + 'static) -> Self {
         self.alive = Box::new(alive);
+        // Tests never see the machine's real codex/agy processes.
+        self.processes = Box::new(Vec::new);
         self
+    }
+
+    #[cfg(test)]
+    pub fn with_foreign(mut self, codex_dir: PathBuf, agy_dir: PathBuf, sessions: Vec<ForeignSession>) -> Self {
+        self.codex_dir = codex_dir;
+        self.agy_dir = agy_dir;
+        let pids: Vec<(i32, String, Harness)> = sessions.iter().map(|s| (s.pid, s.tty.clone().unwrap_or_default(), s.harness)).collect();
+        self.foreign = sessions.into_iter().map(|s| (s.pid, s)).collect();
+        self.processes = Box::new(move || pids.clone());
+        self
+    }
+
+    /// Re-discovers foreign sessions: new pids are looked up, gone pids dropped.
+    fn refresh_foreign(&mut self) {
+        let procs = (self.processes)();
+        let live: std::collections::HashSet<i32> = procs.iter().map(|p| p.0).collect();
+        self.foreign.retain(|pid, _| live.contains(pid));
+        let fresh: Vec<_> = procs.into_iter().filter(|p| !self.foreign.contains_key(&p.0)).collect();
+        if !fresh.is_empty() {
+            for s in foreign::discover(&fresh, foreign::proc_info, &self.codex_dir, &self.agy_dir) {
+                self.foreign.insert(s.pid, s);
+            }
+        }
+    }
+
+    /// The foreign session with this id, if it is still running.
+    pub fn foreign(&self, session_id: &str) -> Option<ForeignSession> {
+        self.foreign.values().find(|s| s.session_id == session_id).cloned()
     }
 
     pub fn config_path(&self) -> PathBuf {
@@ -53,14 +97,14 @@ impl Store {
         registry::list(&self.claude_dir.join("sessions"), &*self.alive)
     }
 
-    /// Ids of every live session.
+    /// Ids of every live session, any harness.
     pub fn live_session_ids(&self) -> Vec<String> {
-        self.registry().into_iter().map(|s| s.session_id).collect()
+        self.registry().into_iter().map(|s| s.session_id).chain(self.foreign.values().map(|s| s.session_id.clone())).collect()
     }
 
-    /// Working directories of every live session.
+    /// Working directories of every live session, any harness.
     pub fn live_cwds(&self) -> Vec<String> {
-        self.registry().into_iter().map(|s| s.cwd).collect()
+        self.registry().into_iter().map(|s| s.cwd).chain(self.foreign.values().map(|s| s.cwd.clone())).collect()
     }
 
     /// The live registry entry for a session id, if it is still running.
@@ -90,7 +134,7 @@ impl Store {
     /// Directories of live sessions whose PR lookup is missing or stale.
     /// Dead sessions' directories are forgotten at the same time.
     pub fn pr_dirs_due(&mut self, now_ms: u64) -> Vec<String> {
-        let mut dirs: Vec<String> = self.registry().into_iter().map(|s| s.cwd).collect();
+        let mut dirs: Vec<String> = self.live_cwds();
         dirs.sort();
         dirs.dedup();
         self.prs.retain(&dirs);
@@ -112,8 +156,9 @@ impl Store {
         }
         let default_1m = self.default_window_is_1m();
         let _ = self.events.read_new();
+        self.refresh_foreign();
         let sessions = self.registry();
-        let mut cards = Vec::with_capacity(sessions.len());
+        let mut cards = Vec::with_capacity(sessions.len() + self.foreign.len());
         let mut paths = Vec::with_capacity(sessions.len());
         for s in &sessions {
             let path = self.transcript_path_for(s);
@@ -131,6 +176,14 @@ impl Store {
             cards.push(card);
         }
         self.tails.retain(&paths);
+        let timeout = self.config.completed_timeout_ms();
+        for s in self.foreign.values() {
+            let text = crate::transcript::tail_text(&s.transcript_path, crate::transcript::TAIL_BYTES).unwrap_or_default();
+            let tail = foreign::tail_for(s.harness, &text);
+            let mut card = foreign::derive(s, &tail, now_ms, timeout);
+            card.pr = self.prs.get(&s.cwd);
+            cards.push(card);
+        }
         cards
     }
 }
@@ -225,6 +278,27 @@ mod tests {
     }
 
     #[test]
+    fn refresh_includes_foreign_sessions_with_their_own_state() {
+        use crate::foreign::ForeignSession;
+        use crate::model::{Harness, State};
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        let codex = dir.path().join("codex");
+        let agy = dir.path().join("agy");
+        let rollout = dir.path().join("rollout.jsonl");
+        std::fs::write(&rollout, "{\"timestamp\":\"2026-09-29T08:47:58.953Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"t1\"}}\n").unwrap();
+        let s = ForeignSession { harness: Harness::Codex, pid: 77, tty: Some("/dev/ttys009".into()), session_id: "aaa".into(), cwd: "/Users/x/dev/one".into(), name: "Fix CI".into(), transcript_path: rollout };
+        let mut store = Store::new(claude).with_alive(|_| true).with_foreign(codex, agy, vec![s]);
+        let cards = store.refresh(1_790_671_680_000);
+        assert_eq!(cards.len(), 1);
+        assert_eq!((cards[0].harness, cards[0].state, cards[0].name.as_str(), cards[0].pid), (Harness::Codex, State::Working, "Fix CI", 77));
+        assert!(store.foreign("aaa").is_some());
+        assert_eq!(store.live_session_ids(), vec!["aaa".to_string()]);
+        assert_eq!(store.card_for("aaa", 1_790_671_680_000).unwrap().session_id, "aaa");
+    }
+
+    #[test]
     fn card_for_returns_the_derived_card_or_none() {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().to_path_buf();
@@ -268,3 +342,5 @@ mod tests {
         assert!(!log.contains("gone"));
     }
 }
+
+

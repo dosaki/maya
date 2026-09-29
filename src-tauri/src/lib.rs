@@ -1,6 +1,9 @@
 pub mod answer;
+pub mod antigravity;
 pub mod attachments;
+pub mod codex;
 pub mod config;
+pub mod foreign;
 pub mod context;
 pub mod events;
 pub mod focus;
@@ -133,16 +136,41 @@ fn focus_session(pid: i32) -> Result<(), String> {
 
 #[tauri::command(async)]
 fn session_history(state: TauriState<AppState>, session_id: String) -> Result<Vec<transcript::Turn>, String> {
-    let path = {
+    let (path, foreign) = {
         let store = state.store.lock().unwrap();
-        let s = store.session(&session_id).ok_or("Session is no longer running.")?;
-        store.transcript_path_for(&s)
+        if let Some(f) = store.foreign(&session_id) {
+            (f.transcript_path.clone(), Some(f.harness))
+        } else {
+            let s = store.session(&session_id).ok_or("Session is no longer running.")?;
+            (store.transcript_path_for(&s), None)
+        }
     };
-    Ok(transcript::read_turns(&path, 30))
+    match foreign {
+        Some(h) => {
+            let text = transcript::tail_text(&path, transcript::TURNS_TAIL_BYTES).unwrap_or_default();
+            Ok(foreign::turns_for(h, &text, 30))
+        }
+        None => Ok(transcript::read_turns(&path, 30)),
+    }
 }
 
 #[tauri::command(async)]
 fn send_reply(state: TauriState<AppState>, session_id: String, text: String) -> Result<(), String> {
+    // Other harnesses have no inbox: the reply is typed into their tty as one line.
+    let foreign = state.store.lock().unwrap().foreign(&session_id);
+    if let Some(f) = foreign {
+        let card = state.store.lock().unwrap().card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?;
+        answer::check_free(&card)?;
+        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            return Err("Message is empty.".into());
+        }
+        let tty = match f.tty {
+            Some(t) => t,
+            None => focus::tty_for_pid(f.pid)?,
+        };
+        return answer::type_into_tty(&tty, &line);
+    }
     let (socket, pid) = {
         let store = state.store.lock().unwrap();
         let s = store.session(&session_id).ok_or("Session is no longer running.")?;
@@ -259,6 +287,9 @@ fn type_into_session(state: &TauriState<AppState>, session_id: &str, text: &str)
         let mut store = state.store.lock().unwrap();
         store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?
     };
+    if card.harness != model::Harness::ClaudeCode {
+        return Err("That command is only available for Claude Code sessions.".into());
+    }
     answer::check_free(&card)?;
     let tty = focus::tty_for_pid(card.pid)?;
     answer::type_into_tty(&tty, text)

@@ -20,6 +20,23 @@ describe("renderModal", () => {
     expect(el.querySelector(".modal__banner")).toBeNull();
   });
 
+  it("keeps Claude-only controls off a Codex session but still lets you type a reply", () => {
+    const h = handlers();
+    const codex = { ...base, harness: "codex" as const, hasInbox: false, context: { used: 160_000, window: 200_000, percent: 80 } };
+    const el = renderModal({ card: codex, turns: [], status: null, draft: "" }, h);
+    expect(el.querySelector(".modal__tweaks")).toBeNull();
+    expect(el.querySelector("button[data-action=compact]")).toBeNull();
+    expect(el.querySelector(".modal__context")?.textContent).toBe("ctx 80%");
+    el.querySelector<HTMLElement>(".modal__title")!.click();
+    expect(el.querySelector("input.modal__title-input")).toBeNull();
+    const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(ta.placeholder).toContain("typed into its terminal");
+    expect(el.querySelector(".modal__noinbox")).toBeNull();
+    ta.value = "carry on";
+    el.querySelector<HTMLButtonElement>("button[data-action=send]")!.click();
+    expect(h.onSend).toHaveBeenCalledWith("carry on");
+  });
+
   it("renames on Enter from the clicked title, and only when the name changed", () => {
     const h = handlers();
     const el = renderModal({ card: base, turns: [], status: null, draft: "" }, h);

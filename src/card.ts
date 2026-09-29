@@ -41,7 +41,7 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   reply.dataset.action = "reply";
   actions.append(terminal);
   if (card.pr) actions.append(prButton(card.pr));
-  if (card.context && card.context.percent >= COMPACT_AT) actions.append(compactButton());
+  if (card.harness === "claude-code" && card.context && card.context.percent >= COMPACT_AT) actions.append(compactButton());
   actions.append(reply);
   root.append(actions);
   return root;

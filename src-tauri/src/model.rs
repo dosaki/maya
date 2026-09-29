@@ -56,6 +56,8 @@ pub fn parse_questions(input: &serde_json::Value) -> Vec<Question> {
 #[serde(rename_all = "kebab-case")]
 pub enum Harness {
     ClaudeCode,
+    Codex,
+    Antigravity,
 }
 
 /// The pull request for a session directory's current branch.
