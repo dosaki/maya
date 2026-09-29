@@ -57,8 +57,9 @@ a session.
 - The wake word is "Maya". Say it with the command, or say it alone and she
   answers "Yes?" and waits for the command.
 - Audio never leaves the Mac: speech recognition runs on the device. Only
-  the command text and a summary of the board go to Claude (`claude -p`,
-  Haiku by default, with no tools).
+  the command text, the last few voice exchanges and a summary of the board
+  go to Claude (`claude -p`, Haiku by default, with no tools and only your
+  user-level Claude settings).
 - Sending text, answering a question, starting or resuming a session is read
   back first and needs a "yes" (or the Yes button in the panel).
 - Listening pauses while Maya speaks, so she does not hear herself.
