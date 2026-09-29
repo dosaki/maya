@@ -5,7 +5,7 @@ const ICONS = {
   reply:
     '<svg class="icon icon-reply" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 2.5 C4.4 2.5 1.8 4.7 1.8 7.4 c0 1.5 0.8 2.8 2.1 3.7 L3.2 13.8 L6.4 12.1 c0.5 0.1 1 0.2 1.6 0.2 c3.6 0 6.2-2.2 6.2-4.9 S11.6 2.5 8 2.5 Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>',
   compact:
-    '<svg class="icon icon-compact" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="6" y="5.5" width="4" height="5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M0.8 8 H4.2 M2.6 6.4 L4.2 8 L2.6 9.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M15.2 8 H11.8 M13.4 6.4 L11.8 8 L13.4 9.6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    '<svg class="icon icon-compact" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="5.5" y="4.5" width="5" height="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M1 4.5 L4 8 L1 11.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M15 4.5 L12 8 L15 11.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 } as const;
 
 export type IconName = keyof typeof ICONS;
