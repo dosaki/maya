@@ -397,6 +397,7 @@ pub fn run() {
             set_config
         ])
         .setup(move |app| {
+            focus::install_app_handle(app.handle().clone());
             let handle = app.handle().clone();
             let sessions_dir = dir.join("sessions");
             let maya_dir = dir.join("maya");

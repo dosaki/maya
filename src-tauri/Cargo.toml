@@ -24,6 +24,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 notify = "8"
 libc = "0.2"
 dirs = "6"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSApplication", "NSResponder"] }
 
 [dev-dependencies]
 tempfile = "3"

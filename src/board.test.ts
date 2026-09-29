@@ -116,7 +116,8 @@ describe("column header buttons", () => {
     const board = renderBoard([], NOW);
     const idle = board.querySelector(".column--idle")!;
     const resume = idle.querySelector<HTMLButtonElement>("button[data-action=resume-session]")!;
-    expect(resume.textContent).toBe("▶");
+    expect(resume.querySelector("svg.icon-resume")).not.toBeNull();
+    expect(resume.getAttribute("aria-label")).toContain("Resume");
     expect(resume.title).toContain("Resume");
     expect(idle.querySelector("button[data-action=new-session]")).not.toBeNull();
     expect(board.querySelector(".column--working button[data-action=resume-session]")).toBeNull();

@@ -1,4 +1,39 @@
 use std::process::Command;
+use std::sync::OnceLock;
+
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// Remembers the app handle so activation can run on Maya's main thread.
+pub fn install_app_handle(app: tauri::AppHandle) {
+    let _ = APP.set(app);
+}
+
+/// Activates Terminal from inside Maya's own process, on the main thread:
+/// Maya is the active app when the user clicks, so it may yield activation
+/// to Terminal (macOS 14 cooperative activation). Requests from a helper
+/// process such as `osascript` can be silently deferred. Returns false when
+/// Terminal is not running or the request was not accepted.
+pub fn activate_terminal_in_process() -> bool {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSRunningApplication};
+    use objc2_foundation::ns_string;
+    let Some(mtm) = MainThreadMarker::new() else { return false };
+    let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(ns_string!("com.apple.Terminal"));
+    let Some(terminal) = apps.iter().next() else { return false };
+    NSApplication::sharedApplication(mtm).yieldActivationToApplication(&terminal);
+    terminal.activateWithOptions(NSApplicationActivationOptions::empty())
+}
+
+/// Runs the in-process activation on the main thread and waits for its answer.
+fn activate_from_main_thread() -> Option<bool> {
+    let app = APP.get()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(activate_terminal_in_process());
+    })
+    .ok()?;
+    rx.recv_timeout(std::time::Duration::from_secs(2)).ok()
+}
 
 /// Turns `ps -o tty= -p <pid>` output into `/dev/ttysNNN`.
 pub fn tty_from_ps(output: &str) -> Option<String> {
@@ -39,8 +74,16 @@ pub fn activate_script() -> String {
         .to_string()
 }
 
-/// Brings Terminal forward with only its front window.
+/// Brings Terminal forward with only its front window: from Maya's own
+/// process when possible, else through a JavaScript for Automation helper.
 pub fn activate_terminal() -> Result<(), String> {
+    if activate_from_main_thread() == Some(true) {
+        return Ok(());
+    }
+    activate_terminal_via_osascript()
+}
+
+pub fn activate_terminal_via_osascript() -> Result<(), String> {
     let out = Command::new("osascript")
         .args(["-l", "JavaScript", "-e", &activate_script()])
         .output()
