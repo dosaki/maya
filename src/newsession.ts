@@ -133,6 +133,8 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   }
 
   const remoteMachine = m.machine !== "";
+  // Claude cannot choose on a remote machine: a folder is always picked there.
+  if (remoteMachine && !m.dir && m.dirs.length > 0) m.dir = m.dirs[0];
   const dirLabel = el("label", "newsession__field");
   dirLabel.append(el("span", "newsession__label", "Directory"));
   const select = el("select", "newsession__select");
@@ -178,7 +180,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   start.type = "button";
   start.dataset.action = "start";
   const sync = () => {
-    start.disabled = m.busy || ta.value.trim() === "";
+    start.disabled = m.busy || ta.value.trim() === "" || (remoteMachine && select.value === "");
   };
   const tryStart = () => {
     if (start.disabled) return;
@@ -187,6 +189,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
     h.onStart(m.machine, select.value || null, prompt, readOptions());
   };
   ta.addEventListener("input", sync);
+  select.addEventListener("change", sync);
   ta.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
       ev.preventDefault();

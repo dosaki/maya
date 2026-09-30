@@ -108,7 +108,21 @@ describe("renderNewSession", () => {
     ta.value = "go";
     ta.dispatchEvent(new Event("input"));
     el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(h.onStart).toHaveBeenCalledWith("laptop", null, "go", defaults);
+    expect(h.onStart).toHaveBeenCalledWith("laptop", "a", "go", defaults);
+  });
+
+  it("on a remote machine picks the first folder, and Start stays disabled without one", () => {
+    const h = handlers();
+    const el = renderNewSession({ ...base, machines: twoMachines, machine: "laptop", prompt: "go" }, h);
+    expect(el.querySelector<HTMLSelectElement>("select[name=dir]")!.value).toBe("a");
+    expect(el.querySelector<HTMLButtonElement>("button[data-action=start]")!.disabled).toBe(false);
+    // Its folders have not arrived yet: nothing to pick, nothing to start.
+    const empty = renderNewSession({ ...base, dirs: [], machines: twoMachines, machine: "laptop", prompt: "go" }, h);
+    expect(empty.querySelector<HTMLSelectElement>("select[name=dir]")!.value).toBe("");
+    const start = empty.querySelector<HTMLButtonElement>("button[data-action=start]")!;
+    expect(start.disabled).toBe(true);
+    start.click();
+    expect(h.onStart).not.toHaveBeenCalled();
   });
 
   it("disables Let Claude choose with a hint when a remote machine is selected", () => {
