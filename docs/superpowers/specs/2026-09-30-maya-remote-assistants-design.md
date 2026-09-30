@@ -141,7 +141,9 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
   label as its subtitle, "Runs on <label>, <address>" as the glyph's
   tooltip (the card's and the modal header's; just "Runs on <label>" when
   the label already carries the address), and no Terminal button. Everything else on the card and in its modal works: the
-  conversation (fetched with `history`), reply with attachments, answer
+  conversation (fetched with `history` when the card's state, state time
+  or snippet moves, and at most every 3 s while it is working, since tool
+  calls change none of those), reply with attachments, answer
   buttons, compact, rename, model, effort and mode.
 - Every session command in the app (`send_reply`, `answer_question`,
   `compact_session`, `rename_session`, `set_session_option`,

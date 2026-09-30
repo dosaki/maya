@@ -331,7 +331,8 @@ export function makeSendGuard(send: (text: string) => Promise<void>): (text: str
   };
 }
 
-let current: { model: ModalModel; keyHandler: (e: KeyboardEvent) => void } | null = null;
+/** `lastRemoteFetchAt`: when a remote card's history was last requested (ms). */
+let current: { model: ModalModel; keyHandler: (e: KeyboardEvent) => void; lastRemoteFetchAt: number } | null = null;
 let progress: Progress | null = null;
 const attachments = makeAttachments();
 let unlistenDrop: (() => void) | null = null;
@@ -498,6 +499,7 @@ const guardedSend = makeSendGuard(async (text: string) => {
 async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): Promise<void> {
   if (!current) return;
   const { card } = current.model;
+  if (card.machine) current.lastRemoteFetchAt = Date.now();
   let turns: Turn[];
   try {
     turns = await invoke<Turn[]>("session_history", { sessionId: card.sessionId });
@@ -517,7 +519,7 @@ export async function openModal(card: Card): Promise<void> {
   const keyHandler = (e: KeyboardEvent) => {
     if (e.key === "Escape") closeModal();
   };
-  current = { model: { card, turns: [], status: null, draft: "" }, keyHandler };
+  current = { model: { card, turns: [], status: null, draft: "" }, keyHandler, lastRemoteFetchAt: 0 };
   attachments.clear();
   document.addEventListener("keydown", keyHandler);
   void watchDrops();
@@ -535,15 +537,21 @@ export function closeModal(): void {
   document.getElementById("modal-host")?.replaceChildren();
 }
 
+/** How often a working remote card's history is refetched when nothing on the card moved. */
+export const REMOTE_WORKING_REFETCH_MS = 3_000;
+
 /**
  * Whether a board refresh should refetch the open card's history. A local
  * card's is a cheap file read, so always; a remote card's is a round trip
  * to its assistant (pushed about once a second while it works), so only
- * when its state, state time or snippet moved.
+ * when its state, state time or snippet moved, or while it works (tool
+ * calls change none of those) once `REMOTE_WORKING_REFETCH_MS` passed since
+ * `lastRemoteFetchAt`.
  */
-export function historyRefetchDue(before: Card, fresh: Card): boolean {
+export function historyRefetchDue(before: Card, fresh: Card, lastRemoteFetchAt: number, now: number): boolean {
   if (!fresh.machine) return true;
-  return fresh.state !== before.state || fresh.stateSince !== before.stateSince || fresh.snippet !== before.snippet;
+  if (fresh.state !== before.state || fresh.stateSince !== before.stateSince || fresh.snippet !== before.snippet) return true;
+  return fresh.state === "working" && now - lastRemoteFetchAt >= REMOTE_WORKING_REFETCH_MS;
 }
 
 /** Called on every board refresh: keeps the open modal's card and history current. */
@@ -557,7 +565,7 @@ export function refreshModal(cards: Card[]): void {
   }
   const stateChanged =
     fresh.state !== current.model.card.state || fresh.stateSince !== current.model.card.stateSince || fresh.hasInbox !== current.model.card.hasInbox;
-  const refetch = historyRefetchDue(current.model.card, fresh);
+  const refetch = historyRefetchDue(current.model.card, fresh, current.lastRemoteFetchAt, Date.now());
   current.model.card = fresh;
   if (refetch) void loadTurns({ force: stateChanged });
   else if (stateChanged) paint();

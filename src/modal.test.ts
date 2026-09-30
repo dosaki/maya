@@ -8,13 +8,23 @@ const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn()
 
 describe("historyRefetchDue", () => {
   it("always refetches a local card, and a remote one only when its state, state time or snippet moved", () => {
-    expect(historyRefetchDue(base, { ...base })).toBe(true);
+    const due = (before: Card, fresh: Card) => historyRefetchDue(before, fresh, 0, 1_000);
+    expect(due(base, { ...base })).toBe(true);
     const remote = { ...base, machine: "laptop" };
-    expect(historyRefetchDue(remote, { ...remote })).toBe(false);
-    expect(historyRefetchDue(remote, { ...remote, stale: true, context: { used: 1, window: 2, percent: 50 } })).toBe(false);
-    expect(historyRefetchDue(remote, { ...remote, state: "working" })).toBe(true);
-    expect(historyRefetchDue(remote, { ...remote, stateSince: 5 })).toBe(true);
-    expect(historyRefetchDue(remote, { ...remote, snippet: "done" })).toBe(true);
+    expect(due(remote, { ...remote })).toBe(false);
+    expect(due(remote, { ...remote, stale: true, context: { used: 1, window: 2, percent: 50 } })).toBe(false);
+    expect(due(remote, { ...remote, state: "working" })).toBe(true);
+    expect(due(remote, { ...remote, stateSince: 5 })).toBe(true);
+    expect(due(remote, { ...remote, snippet: "done" })).toBe(true);
+  });
+
+  it("refetches a working remote card every 3 s even when nothing on it moved", () => {
+    const working = { ...base, machine: "laptop", state: "working" as const };
+    expect(historyRefetchDue(working, { ...working }, 10_000, 12_999)).toBe(false);
+    expect(historyRefetchDue(working, { ...working }, 10_000, 13_000)).toBe(true);
+    const idle = { ...base, machine: "laptop" };
+    expect(historyRefetchDue(idle, { ...idle }, 10_000, 60_000)).toBe(false);
+    expect(historyRefetchDue(base, { ...base }, 10_000, 10_001)).toBe(true);
   });
 });
 
