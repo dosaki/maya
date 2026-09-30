@@ -47,8 +47,9 @@ asks you something back, just answer. See [Voice](#voice).
 **Several Macs.** Run Maya on your laptop, desktop and Mac mini. One is the
 main, the others are assistants. The main shows every session from every
 machine on one board, tells you what needs you, and drives them all by
-voice. Assistants stay quiet: they listen and run commands, but do not
-notify or speak. Set it up in Settings › Network.
+voice. Assistants stay quiet: they show their own sessions and run what
+the main asks, but do not notify, speak or listen for "Maya". Set it up
+in Settings › Network.
 
 ## Install
 
@@ -125,18 +126,20 @@ quiet.
   five minutes. To add an assistant, give it the code; Maya shows each
   paired assistant and lets you remove them.
 - **Assistant.** Turn on "Assistant to a main Maya" and enter the main's
-  host, port and the pairing code. Pair once; Maya keeps a token and
-  reconnects on its own. A status line shows "Connected to [main name]",
-  "Reconnecting…" or the error.
+  host, port, a name for this machine (its hostname when blank) and the
+  pairing code. Pair once; Maya keeps a token and reconnects on its own. A
+  status line shows "Connected to <main>", "Reconnecting…" or the error.
 - **What travels.** Session ids, conversation text, option numbers, folder
   names and attachments (up to 20 MB). Commands run on the assistant; the
   main never touches the assistant's files.
 - **Plain text on the LAN.** Traffic is not encrypted in this version; all
   data is plain text.
-- **Remote cards.** On the main, remote sessions appear on their own machine's
-  board. Each card shows a remote glyph, the machine's name and platform. A
-  card greys out thirty seconds after the assistant goes quiet and disappears
-  after five minutes; it comes back when the assistant reconnects.
+- **Remote cards.** On the main, an assistant's sessions sit in the same
+  columns as local ones, with a remote glyph and the machine's name under
+  the session name and no Terminal button; the "+" and resume dialogs get
+  a Machine picker, and announcements say "hexgrid on laptop". A card greys
+  out thirty seconds after its assistant goes quiet and disappears after
+  five minutes; it comes back when the assistant reconnects.
 
 ## How it works
 
