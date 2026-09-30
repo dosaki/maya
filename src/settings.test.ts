@@ -49,6 +49,7 @@ const handlers = () => ({
   onDownloadModel: vi.fn(),
   onRemoveModel: vi.fn(),
   onRole: vi.fn(),
+  onPairAgain: vi.fn(),
   onPort: vi.fn(),
   onMainHost: vi.fn(),
   onMainPort: vi.fn(),
@@ -389,6 +390,25 @@ describe("Network settings", () => {
     el.querySelector<HTMLButtonElement>("button[data-action=pair]")!.click();
     expect(h.onPair).toHaveBeenCalled();
     expect(el.querySelector("select[name=networkRole]")).not.toBeNull();
+  });
+
+  it("an assistant with stored credentials shows no code input, only a Pair again link that reveals it", () => {
+    const h = handlers();
+    const model: SettingsModel = { ...voiceBase, networkRole: "assistant", networkPaired: true, networkMainHost: "desk.local" };
+    const el = renderSettings(model, h);
+    expect(el.querySelector("input[name=networkCode]")).toBeNull();
+    expect(el.querySelector("button[data-action=pair]")).toBeNull();
+    expect(el.querySelector<HTMLInputElement>("input[name=networkHost]")!.value).toBe("desk.local");
+    el.querySelector<HTMLButtonElement>("button[data-action=pair-again]")!.click();
+    expect(h.onPairAgain).toHaveBeenCalled();
+    const again = renderSettings({ ...model, networkRepair: true }, h);
+    expect(again.querySelector("input[name=networkCode]")).not.toBeNull();
+    expect(again.querySelector("button[data-action=pair]")).not.toBeNull();
+    expect(again.querySelector("button[data-action=pair-again]")).toBeNull();
+    // Never paired: the pairing form as before, no link.
+    const fresh = renderSettings({ ...voiceBase, networkRole: "assistant" }, h);
+    expect(fresh.querySelector("input[name=networkCode]")).not.toBeNull();
+    expect(fresh.querySelector("button[data-action=pair-again]")).toBeNull();
   });
 
   it("shows Reconnecting… when paired but not connected, and the removal error otherwise", () => {

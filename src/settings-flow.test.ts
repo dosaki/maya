@@ -204,6 +204,48 @@ describe("settings flow", () => {
     expect(document.querySelector<HTMLInputElement>("input[name=networkCode]")!.value).toBe("48392");
   });
 
+  it("Off → Assistant with stored credentials saves the role at once instead of asking to pair", async () => {
+    let config: Record<string, unknown> = {
+      completedTimeoutMinutes: 30,
+      projectsDir: null,
+      clonesDir: null,
+      notifyOnAwaiting: true,
+      speakNotifications: true,
+      voiceProvider: "builtin",
+      elevenlabsVoiceId: null,
+      listen: false,
+      microphone: null,
+      interpreterModel: "haiku",
+      network: { role: "off", port: 0, mainHost: "desk.local", mainPort: 4127, name: "laptop", assistantId: "id1", token: "t", assistants: [] },
+    };
+    invoke.mockImplementation((cmd: string, args?: { config?: Record<string, unknown> }) => {
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "set_config") {
+        config = { ...args!.config };
+        return Promise.resolve({ ...config });
+      }
+      if (cmd === "network_status") return Promise.resolve({ role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+
+    const roleSel = document.querySelector<HTMLSelectElement>("select[name=networkRole]")!;
+    roleSel.value = "assistant";
+    roleSel.dispatchEvent(new Event("change"));
+    await flush();
+    await flush();
+    const saved = invoke.mock.calls.find((c) => c[0] === "set_config");
+    expect(saved, "the role is saved").toBeDefined();
+    expect((saved![1] as { config: { network: { role: string; assistantId: string } } }).config.network).toMatchObject({ role: "assistant", assistantId: "id1" });
+    expect(document.querySelector("input[name=networkCode]")).toBeNull();
+    expect(document.querySelector("button[data-action=pair-again]")).not.toBeNull();
+  });
+
   it("shows a failed Pair's message in the status line", async () => {
     const config = {
       completedTimeoutMinutes: 30,

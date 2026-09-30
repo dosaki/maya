@@ -78,6 +78,10 @@ export interface SettingsModel {
   networkCode?: string;
   /** The message from a failed Pair attempt, shown in the status line; cleared by the next attempt or a success. */
   networkError?: string | null;
+  /** The config holds an assistant id and token: choosing Assistant reconnects without pairing. */
+  networkPaired?: boolean;
+  /** "Pair again" was clicked: the pairing form shows even though credentials are stored. */
+  networkRepair?: boolean;
 }
 
 export type VoiceProvider = "builtin" | "elevenlabs";
@@ -113,8 +117,10 @@ export interface SettingsHandlers {
   onWhisperModel(id: string): void;
   onDownloadModel(id: string): void;
   onRemoveModel(id: string): void;
-  /** Off or Main save immediately; Assistant only previews the pairing form (see `onPair`). */
+  /** Off or Main save immediately, and so does Assistant when credentials are stored; otherwise Assistant only previews the pairing form (see `onPair`). */
   onRole(role: NetworkRole): void;
+  /** Reveals the pairing form on an already-paired assistant. */
+  onPairAgain(): void;
   onPort(port: number): void;
   onMainHost(host: string): void;
   onMainPort(port: number): void;
@@ -604,6 +610,17 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     nameLabel.append(nameInput);
     network.append(nameLabel);
 
+    if (model.networkPaired && !model.networkRepair) {
+      const again = document.createElement("button");
+      again.type = "button";
+      again.className = "settings__link";
+      again.dataset.action = "pair-again";
+      again.textContent = "Pair again";
+      again.addEventListener("click", () => h.onPairAgain());
+      network.append(again);
+    }
+  }
+  if (netRole === "assistant" && (!model.networkPaired || model.networkRepair)) {
     const codeLabel = document.createElement("label");
     codeLabel.textContent = "Pairing code";
     const codeInput = document.createElement("input");
@@ -689,6 +706,7 @@ export async function initSettings(): Promise<void> {
   };
 
   const applyNetworkConfig = (c: ConfigJson) => {
+    model.networkPaired = !!(c.network?.assistantId && c.network?.token);
     model.networkPort = c.network?.port ?? 0;
     model.networkMainHost = c.network?.mainHost ?? "";
     model.networkMainPort = c.network?.mainPort ?? 0;
@@ -784,9 +802,10 @@ export async function initSettings(): Promise<void> {
     },
     onRemoveModel: (id) => void run(async () => { await invoke("remove_whisper_model", { id }); await loadModels(); }),
     onRole: (role) => {
-      if (role === "assistant") {
+      if (role === "assistant" && !model.networkPaired) {
         // Previewing the pairing form does not save anything; only a
-        // successful Pair (see `onPair`) commits the assistant role.
+        // successful Pair (see `onPair`) commits the assistant role. With
+        // credentials stored, Assistant saves at once and reconnects.
         model.networkRole = "assistant";
         paint();
         return;
@@ -798,6 +817,10 @@ export async function initSettings(): Promise<void> {
     onMainHost: (host) => void saveNetwork({ mainHost: host }),
     onMainPort: (port) => void saveNetwork({ mainPort: port }),
     onName: (name) => void saveNetwork({ name }),
+    onPairAgain: () => {
+      model.networkRepair = true;
+      paint();
+    },
     onRegenerate: () => void run(async () => { model.network = await invoke<NetworkStatus>("network_pairing_code"); }),
     onRemoveAssistant: (id) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_assistant", { id }); }),
     onPair: (host, port, name, code) => {
@@ -814,6 +837,9 @@ export async function initSettings(): Promise<void> {
           model.networkMainPort = port;
           model.networkName = name;
           model.networkCode = "";
+          // The new pairing's id and token replaced the stored ones.
+          model.networkPaired = true;
+          model.networkRepair = false;
         } catch (e) {
           model.networkError = String(e);
         }
