@@ -4,7 +4,8 @@
      in light and dark system modes. */
   --bg: #0c0b09; --panel: #16140f; --text: #f1e9d8; --muted: #a39a86; --border: #2c2719;
   --gold: #d9ab3c; --gold-bright: #f0c85a; --gold-deep: #8f6a1c;
-  --awaiting: #e08a3a; --working: #d9ab3c; --completed: #a7b95a; --idle: #6e6858;
+  /* Column and state colours stay as they were: grey, blue, yellow, green. */
+  --awaiting: #d97706; --working: #2563eb; --completed: #16a34a; --idle: #9ca3af;
   --on-gold: #1a1408;
   --shadow: 0 1px 2px rgba(0,0,0,.5);
   font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
@@ -92,9 +93,8 @@ body { margin: 0; background: var(--bg); }
 .turn__who { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
 .card { position: relative; }
 .card__meter { position: absolute; left: 0; top: 8px; bottom: 8px; width: 4px; border-radius: 2px; background: color-mix(in srgb, var(--border) 60%, transparent); overflow: hidden; }
-.card__meter-fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; background: var(--completed); }
-.card__meter[data-band="mid"] .card__meter-fill { background: var(--awaiting); }
-.card__meter[data-band="high"] .card__meter-fill { background: #e5484d; }
+/* The context meter is gold in every band; the Compact button appears at 75%. */
+.card__meter-fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; background: linear-gradient(180deg, var(--gold-bright), var(--gold)); }
 .modal__context { font-size: 12px; color: var(--muted); }
 .card__meta { display: flex; align-items: center; gap: 6px; }
 .card__harness, .modal__harness { width: 14px; height: 14px; border-radius: 3px; flex: none; }
@@ -159,12 +159,12 @@ body { margin: 0; background: var(--bg); }
 .tab { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 5px 10px; color: var(--muted); cursor: pointer; font: inherit; }
 .tab:hover { color: var(--text); }
 .tab--active { background: var(--panel); border-color: var(--gold-deep); color: var(--gold-bright); }
-.tab__count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 999px; background: var(--working); color: var(--on-gold); font-size: 11px; text-align: center; }
+.tab__count { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 999px; background: var(--working); color: #fff; font-size: 11px; text-align: center; }
 .tab__count:empty { display: none; }
-.tab__count--idle { background: var(--idle); color: var(--text); }
-.tab__count--working { background: var(--working); color: var(--on-gold); }
-.tab__count--awaiting { background: var(--awaiting); color: var(--on-gold); }
-.tab__count--completed { background: var(--completed); color: var(--on-gold); }
+.tab__count--idle { background: var(--idle); color: #1a1a1a; }
+.tab__count--working { background: var(--working); color: #fff; }
+.tab__count--awaiting { background: var(--awaiting); color: #1a1a1a; }
+.tab__count--completed { background: var(--completed); color: #1a1a1a; }
 .tabs { flex: 1; align-items: center; }
 .tabs__spacer { flex: 1; }
 .debug { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
