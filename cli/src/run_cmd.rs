@@ -22,7 +22,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Refuses to start unless this machine is a paired assistant and no other
 /// `maya run` holds the lock at `lock_path`; the lock, held for the run's
@@ -47,10 +47,14 @@ pub fn pid_suffix(existing: Option<&RunStatus>) -> String {
     existing.map(|s| format!(" (pid {})", s.pid)).unwrap_or_default()
 }
 
-/// How `run` exits once the client stopped: 0 for a signal, 2 when the
-/// config is no longer an assistant's, 1 otherwise (removed, or unpaired).
-pub fn exit_code_for(stopped_by_signal: bool, config: &Config) -> i32 {
-    if stopped_by_signal {
+/// How `run` exits once the client stopped: 2 when the watcher saw the
+/// config stop being an assistant's (`config_changed`, although that also
+/// set `stop`), 0 for a signal, 2 when the config is no longer an
+/// assistant's, 1 otherwise (removed, or unpaired).
+pub fn exit_code_for(stopped_by_signal: bool, config_changed: bool, config: &Config) -> i32 {
+    if config_changed {
+        2
+    } else if stopped_by_signal {
         0
     } else if config.network.role != NetworkRole::Assistant {
         2
@@ -124,6 +128,29 @@ fn reload_network(store: &Mutex<Store>, path: &Path) -> NetworkConfig {
     n
 }
 
+/// What changes when `config.json` is written, replaced or removed (`None`).
+type ConfigStamp = Option<(u64, Option<SystemTime>, u64)>;
+
+fn config_stamp(path: &Path) -> ConfigStamp {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.ino(), m.modified().ok(), m.len()))
+}
+
+/// The watcher's look at the config: reloads it into the store (through
+/// `reload_network`) when it changed since `seen`, and says whether the
+/// role is still Assistant. The watcher fires on every write under
+/// `~/.claude/maya`, this run's own log and status file included, so an
+/// unchanged file is not read again (an unreadable one would log, and so
+/// fire the watcher, forever).
+fn config_still_assistant(store: &Mutex<Store>, path: &Path, seen: &mut ConfigStamp) -> bool {
+    let now = config_stamp(path);
+    if *seen != now {
+        *seen = now;
+        reload_network(store, path);
+    }
+    store.lock().unwrap().config.network.role == NetworkRole::Assistant
+}
+
 pub fn run(claude_dir: &Path) -> i32 {
     let stop = Arc::new(AtomicBool::new(false));
     install_signal_handlers(stop.clone());
@@ -161,13 +188,22 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
     // Claims the status file at once, so a second run started before this
     // one connects sees it.
     notify.write(false, None, Some("connecting"));
+    // Set by the watcher when the config on disk stops being an assistant's.
+    let config_changed = Arc::new(AtomicBool::new(false));
     {
         let (s, due) = (store.clone(), exec.board_due.clone());
         let (sessions_dir, md) = (claude_dir.join("sessions"), maya_dir.clone());
+        let (path, changed, stop) = (config_path.clone(), config_changed.clone(), stop.clone());
+        // The config as loaded at start counts as seen.
+        let mut seen = config_stamp(&path);
         std::thread::spawn(move || {
             watcher::run(&sessions_dir, &md, Duration::from_secs(5), || {
                 s.lock().unwrap().refresh(now_ms());
                 due.store(true, Ordering::SeqCst);
+                if !config_still_assistant(&s, &path, &mut seen) && !changed.swap(true, Ordering::SeqCst) {
+                    log::line("cli", "the config is no longer an assistant's; stopping");
+                    stop.store(true, Ordering::SeqCst);
+                }
             })
         });
     }
@@ -178,11 +214,13 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
     client::reconnect(&config_of, exec, notify.clone() as Arc<dyn ClientNotify>, &stop);
 
     let by_signal = stop.load(Ordering::SeqCst) && !notify.removed.load(Ordering::SeqCst);
-    let code = exit_code_for(by_signal, &store.lock().unwrap().config);
+    let changed = config_changed.load(Ordering::SeqCst);
+    let code = exit_code_for(by_signal, changed, &store.lock().unwrap().config);
     if by_signal {
         status_file::remove(&maya_dir);
     }
-    if code == 2 {
+    // The watcher logged it already when it was the one that saw it.
+    if code == 2 && !changed {
         log::line("cli", "the config is no longer an assistant's; stopping");
     }
     log::line("cli", "stopped");
@@ -241,6 +279,7 @@ mod tests {
         std::fs::write(&path, r#"{"completedTimeoutMinutes":10,"network":{"role":"off","token":"t","assistantId":"a"}}"#).unwrap();
         let n = reload_network(&store, &path);
         assert_eq!((n.token.as_str(), n.assistant_id.as_str()), ("", ""));
+        assert_eq!(store.lock().unwrap().config.network.role, NetworkRole::Off);
         drop(dir);
     }
 
@@ -273,12 +312,43 @@ mod tests {
     fn exit_code_is_zero_for_a_signal_two_for_a_config_no_longer_an_assistants_else_one() {
         let mut c = Config::default();
         c.network.role = NetworkRole::Assistant;
-        assert_eq!(exit_code_for(true, &c), 0);
-        assert_eq!(exit_code_for(false, &c), 1);
+        assert_eq!(exit_code_for(true, false, &c), 0);
+        assert_eq!(exit_code_for(false, false, &c), 1);
         c.network.role = NetworkRole::Off;
-        assert_eq!(exit_code_for(true, &c), 0);
-        assert_eq!(exit_code_for(false, &c), 2);
+        assert_eq!(exit_code_for(true, false, &c), 0);
+        assert_eq!(exit_code_for(false, false, &c), 2);
         c.network.role = NetworkRole::Main;
-        assert_eq!(exit_code_for(false, &c), 2);
+        assert_eq!(exit_code_for(false, false, &c), 2);
+        // The watcher saw the role change and set `stop` itself: 2, not 0.
+        assert_eq!(exit_code_for(true, true, &c), 2);
+        c.network.role = NetworkRole::Assistant;
+        assert_eq!(exit_code_for(true, true, &c), 2);
+    }
+
+    #[test]
+    fn the_watcher_reloads_a_changed_config_and_sees_a_role_that_is_no_longer_an_assistants() {
+        let (dir, store) = maya_core::actions::test_support::store_with_session("s1", 4242);
+        let path = store.lock().unwrap().config_path();
+        let assistant = r#"{"completedTimeoutMinutes":10,"network":{"role":"assistant","token":"t","assistantId":"a"}}"#;
+        std::fs::write(&path, assistant).unwrap();
+        let mut seen = None;
+        assert!(config_still_assistant(&store, &path, &mut seen));
+        assert_eq!(store.lock().unwrap().config.network.role, NetworkRole::Assistant);
+        // Unchanged since the last look: not read again, so an in-memory
+        // change stands.
+        store.lock().unwrap().config.network.role = NetworkRole::Main;
+        assert!(!config_still_assistant(&store, &path, &mut seen));
+        store.lock().unwrap().config.network.role = NetworkRole::Assistant;
+        // Edited to role off: reloaded, and no longer an assistant's.
+        std::fs::write(&path, r#"{"completedTimeoutMinutes":10,"network":{"role":"off"}}"#).unwrap();
+        assert!(!config_still_assistant(&store, &path, &mut seen));
+        assert_eq!(store.lock().unwrap().config.network.role, NetworkRole::Off);
+        // Removed: treated as unpaired.
+        std::fs::write(&path, assistant).unwrap();
+        assert!(config_still_assistant(&store, &path, &mut seen));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!config_still_assistant(&store, &path, &mut seen));
+        assert_eq!(store.lock().unwrap().config.network.role, NetworkRole::Off);
+        drop(dir);
     }
 }

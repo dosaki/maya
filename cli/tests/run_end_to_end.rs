@@ -125,3 +125,31 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     wait_until("disconnected", || handle.status().assistants.iter().all(|a| !a.connected));
     handle.stop();
 }
+
+#[test]
+fn run_stops_with_two_when_the_config_on_disk_stops_being_an_assistants() {
+    let handle = start_with(Arc::new(Recorder::default()), Arc::new(Mutex::new(NetworkConfig { name: "Yhi".into(), ..Default::default() })), 0).unwrap();
+    let (dir, store) = maya_core::actions::test_support::store_with_session("s1", std::process::id() as i32);
+    drop(store);
+    let claude_dir = dir.path().to_path_buf();
+    let (code, _) = handle.open_pairing(maya_core::now_ms());
+    commands::pair(&claude_dir, "127.0.0.1", handle.port(), Some("box"), &code).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let runner = {
+        let claude_dir = claude_dir.clone();
+        std::thread::spawn(move || run_cmd::run_with(&claude_dir, Arc::new(FakeTerminal::default()), stop))
+    };
+    wait_until("connected", || handle.status().assistants.iter().any(|a| a.name == "box" && a.connected));
+
+    // Edited to role off while connected: the watcher sees it and the run
+    // closes the link and exits 2, without waiting for a reconnect.
+    let config_path = claude_dir.join("maya/config.json");
+    let mut c = maya_core::config::load(&config_path);
+    c.network.role = maya_core::config::NetworkRole::Off;
+    maya_core::config::save(&config_path, &c).unwrap();
+    wait_until("stopped", || runner.is_finished());
+    assert_eq!(runner.join().unwrap(), 2);
+    wait_until("disconnected", || handle.status().assistants.iter().all(|a| !a.connected));
+    handle.stop();
+}

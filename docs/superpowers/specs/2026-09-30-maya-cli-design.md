@@ -245,8 +245,11 @@ watcher change updates the store and marks the board due, as the app's
   (`unexpected argument: <token>`), exit 2.
 - `run`: errors from the main's commands go back as the command's error;
   link errors are logged and retried with the client's backoff; a config
-  that stops being an assistant (the file edited while running) ends `run`
-  with exit 2 and a message.
+  that stops being an assistant (the file edited to another role, or
+  removed, while running) ends `run` with exit 2 and a message: the
+  watcher, which fires on changes under `~/.claude/maya`, reloads
+  `config.json` when it changed and sets the stop flag within seconds,
+  even while connected; a reconnect reloads it too.
 - tmux failures carry tmux's stderr in the message.
 
 ## Testing

@@ -208,6 +208,9 @@ too, with no desktop and no app: the `maya` command line tool.
     main, and an `Environment=PATH=…` that includes `claude`, `tmux` and
     `jq`. A launchd agent likewise needs that PATH in its
     `EnvironmentVariables`.
+
+  Editing `~/.claude/maya/config.json` to another role, or deleting it,
+  stops a running `maya run` within seconds (exit 2).
 - **What works.** Every action the main can send an assistant: reply,
   answer, compact, rename, change model, effort or mode, start and resume.
   Start and resume land in a tmux session named `maya-<8 hex>`, shown in the
