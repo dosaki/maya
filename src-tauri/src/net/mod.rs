@@ -38,6 +38,9 @@ pub struct AssistantStatus {
     pub platform: String,
     pub connected: bool,
     pub last_seen: Option<u64>,
+    /// Something the user should know: a different Maya version, or a board
+    /// this Maya could not read.
+    pub note: Option<String>,
 }
 
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
@@ -95,7 +98,7 @@ pub fn paired_offline(paired: &[PairedAssistant]) -> Vec<AssistantStatus> {
     paired
         .iter()
         .zip(merge::display_names(&entries))
-        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), connected: false, last_seen: None })
+        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), connected: false, last_seen: None, note: None })
         .collect()
 }
 

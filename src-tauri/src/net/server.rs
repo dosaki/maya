@@ -64,7 +64,35 @@ struct Peer {
     name: String,
     hostname: String,
     platform: String,
+    /// The Maya version it runs.
+    app: String,
     last_seen: u64,
+    /// Its last board failed to decode; the one before it is kept.
+    unreadable_board: bool,
+}
+
+pub(crate) const UNREADABLE_BOARD: &str = "sent a board this version cannot read; update Maya on both machines";
+
+impl Peer {
+    /// What the assistants list says beside its name, if anything.
+    fn note(&self) -> Option<String> {
+        let ours = env!("CARGO_PKG_VERSION");
+        let mut parts = vec![];
+        if !self.app.is_empty() && self.app != ours {
+            parts.push(format!("runs Maya {}; this Mac runs {ours}", self.app));
+        }
+        if self.unreadable_board {
+            parts.push(UNREADABLE_BOARD.to_string());
+        }
+        Some(parts.join("; ")).filter(|n| !n.is_empty())
+    }
+}
+
+/// Why a frame that did not decode matters: a board this version cannot
+/// read (a newer Maya's session state…) is worth telling the user about;
+/// any other bad frame is only logged.
+fn unreadable_board(text: &str) -> bool {
+    serde_json::from_str::<Value>(text).is_ok_and(|v| v.get("type").and_then(Value::as_str) == Some("board"))
 }
 
 pub struct Server {
@@ -165,7 +193,8 @@ impl Server {
             .zip(labels)
             .map(|(p, (_, name))| {
                 let (hostname, platform) = self.host_of(&p.id);
-                AssistantStatus { id: p.id.clone(), name, hostname, platform, connected: self.conns.contains_key(&p.id), last_seen: self.peers.get(&p.id).map(|x| x.last_seen) }
+                let peer = self.peers.get(&p.id);
+                AssistantStatus { id: p.id.clone(), name, hostname, platform, connected: self.conns.contains_key(&p.id), last_seen: peer.map(|x| x.last_seen), note: peer.and_then(Peer::note) }
             })
             .collect();
         NetworkStatus { role: NetworkRole::Main, code, assistants, ..Default::default() }
@@ -437,7 +466,7 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr) -> Option<Link> {
             return None;
         }
     };
-    let Up::Hello { protocol, name, hostname, platform, id, .. } = hello else {
+    let Up::Hello { protocol, app, name, hostname, platform, id } = hello else {
         log::line("network", format!("{ip}: first message was not a hello"));
         bye(ws, "protocol");
         return None;
@@ -447,7 +476,10 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr) -> Option<Link> {
         bye(ws, "protocol");
         return None;
     }
-    let (hostname, platform) = (clean(&hostname), clean(&platform));
+    let (hostname, platform, app) = (clean(&hostname), clean(&platform), clean(&app));
+    if app != env!("CARGO_PKG_VERSION") {
+        log::line("network", format!("{ip}: runs Maya {app}; this Mac runs {}", env!("CARGO_PKG_VERSION")));
+    }
     let name = Some(clean(&name)).filter(|n| !n.is_empty()).or_else(|| Some(hostname.clone()).filter(|h| !h.is_empty())).unwrap_or_else(|| "assistant".into());
     // `proof` answers the assistant's own nonce; a fresh pairing has none to answer.
     let (id, proof) = match id {
@@ -462,7 +494,7 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr) -> Option<Link> {
         let mut s = lock(&ctx.shared);
         if s.is_paired(&id) {
             let serial = s.next();
-            s.peers.insert(id.clone(), Peer { name, hostname, platform, last_seen: now_ms() });
+            s.peers.insert(id.clone(), Peer { name, hostname, platform, app, last_seen: now_ms(), unreadable_board: false });
             // A newer connection replaces an older one; dropping its sender ends it.
             s.conns.insert(id.clone(), Conn { tx, serial });
             if let Some(b) = s.by_id.get_mut(&id) {
@@ -596,6 +628,11 @@ fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
                             return e;
                         }
                     }
+                    Err(e) if unreadable_board(&t) => {
+                        // Keep the last good board; say why it no longer updates.
+                        log::line("network", format!("{}: could not read its board: {e}", link.label));
+                        mark_board(ctx, link, true);
+                    }
                     Err(e) => log::line("network", format!("{}: ignored a message: {e}", link.label)),
                 }
             }
@@ -632,6 +669,7 @@ fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
             if !current {
                 return Err("replaced by a newer connection".into());
             }
+            mark_board(ctx, link, false);
             ctx.notify.board_changed();
         }
         Up::Result { id, ok, error, data } => {
@@ -657,6 +695,25 @@ fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
         Up::Hello { .. } | Up::Pair { .. } | Up::Auth { .. } => log::line("network", format!("{}: ignored a handshake message after welcome", link.label)),
     }
     Ok(())
+}
+
+/// Records whether the assistant's last board was unreadable; the status
+/// goes out only when that changed.
+fn mark_board(ctx: &Ctx, link: &Link, unreadable: bool) {
+    let changed = {
+        let mut s = lock(&ctx.shared);
+        let current = s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial);
+        match s.peers.get_mut(&link.id) {
+            Some(p) if current && p.unreadable_board != unreadable => {
+                p.unreadable_board = unreadable;
+                true
+            }
+            _ => false,
+        }
+    };
+    if changed {
+        ctx.announce();
+    }
 }
 
 /// Forgets a closed connection: its board greys, its commands fail.
@@ -991,6 +1048,44 @@ mod tests {
             assert!(t.join().unwrap().is_ok());
         }
         handle.stop();
+    }
+
+    #[test]
+    fn a_version_mismatch_and_an_unreadable_board_are_noted_and_the_last_good_board_kept() {
+        let (handle, port) = test_server();
+        // The test clients say they run Maya "t".
+        let (mut ws, id, _) = pair_client(&handle, port, "desk");
+        let note = |handle: &ServerHandle| handle.status().assistants.iter().find(|a| a.id == id).unwrap().note.clone();
+        let ours = env!("CARGO_PKG_VERSION");
+        assert_eq!(note(&handle), Some(format!("runs Maya t; this Mac runs {ours}")));
+        send(&mut ws, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![] });
+        wait_until(|| handle.boards().iter().any(|b| b.cards.len() == 1));
+        // A newer Maya's board: a harness this version does not know.
+        let mut future = serde_json::to_value(Up::Board { cards: vec![card("r2", "y")], dirs: vec![] }).unwrap();
+        future["cards"][0]["harness"] = "future-harness".into();
+        ws.send(Message::text(future.to_string())).unwrap();
+        wait_until(|| note(&handle).is_some_and(|n| n.ends_with(UNREADABLE_BOARD)));
+        assert_eq!(note(&handle).unwrap(), format!("runs Maya t; this Mac runs {ours}; {UNREADABLE_BOARD}"));
+        assert_eq!(handle.boards()[0].cards[0].session_id, "r1", "the last good board stays");
+        // A readable board clears the note.
+        send(&mut ws, &Up::Board { cards: vec![card("r3", "z")], dirs: vec![] });
+        wait_until(|| note(&handle).is_some_and(|n| !n.contains(UNREADABLE_BOARD)));
+        // The same version says nothing.
+        let (code, _) = handle.open_pairing(now_ms());
+        let mut same = connect(port);
+        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), id: None });
+        send(&mut same, &Up::Pair { code });
+        let Down::Paired { id: twin, .. } = recv(&mut same) else { panic!("expected paired") };
+        assert!(matches!(recv(&mut same), Down::Welcome { .. }));
+        assert_eq!(handle.status().assistants.iter().find(|a| a.id == twin).unwrap().note, None);
+        handle.stop();
+    }
+
+    #[test]
+    fn only_an_unreadable_board_is_worth_a_note() {
+        assert!(unreadable_board(r#"{"type":"board","cards":[{"harness":"future"}],"dirs":[]}"#));
+        assert!(!unreadable_board(r#"{"type":"dance"}"#));
+        assert!(!unreadable_board("not json"));
     }
 
     #[test]

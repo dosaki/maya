@@ -344,6 +344,27 @@ describe("Network settings", () => {
     expect(renderSettings({ ...voiceBase, networkRole: "main" }, handlers()).querySelector(".settings__error[data-for=network]")).toBeNull();
   });
 
+  it("shows an assistant's note (a different version, an unreadable board) in the list", () => {
+    const el = renderSettings(
+      {
+        ...voiceBase,
+        networkRole: "main",
+        network: {
+          role: "main",
+          code: null,
+          assistants: [
+            { id: "a1", name: "laptop", hostname: "h", platform: "macos", connected: true, lastSeen: null, note: "runs Maya 0.3.0; this Mac runs 0.2.0" },
+            { id: "b2", name: "desk", hostname: "h2", platform: "macos", connected: true, lastSeen: null, note: null },
+          ],
+          assistant: { connected: false, mainName: null, error: null },
+        },
+      },
+      handlers(),
+    );
+    const notes = [...el.querySelectorAll("[data-for=assistant-note]")].map((n) => n.textContent);
+    expect(notes).toEqual(["runs Maya 0.3.0; this Mac runs 0.2.0"]);
+  });
+
   it("role assistant shows host, port, name, code, Pair and the status line", () => {
     const h = handlers();
     const el = renderSettings(

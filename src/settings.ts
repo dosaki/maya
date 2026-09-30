@@ -18,6 +18,8 @@ export interface AssistantStatus {
   platform: string;
   connected: boolean;
   lastSeen: number | null;
+  /** A different Maya version, or a board this Maya could not read. */
+  note?: string | null;
 }
 
 export interface AssistantLink {
@@ -541,6 +543,13 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       row.className = "settings__assistant";
       const info = document.createElement("span");
       info.textContent = `${a.name} (${a.platform}) — ${a.connected ? "Connected" : a.lastSeen !== null ? `Last seen ${formatAge(a.lastSeen, nowMs)} ago` : "Never connected"}`;
+      if (a.note) {
+        const note = document.createElement("div");
+        note.className = "settings__hint";
+        note.dataset.for = "assistant-note";
+        note.textContent = a.note;
+        info.append(note);
+      }
       const rm = document.createElement("button");
       rm.type = "button";
       rm.dataset.action = "remove-assistant";
