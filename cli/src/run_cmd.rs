@@ -70,13 +70,23 @@ fn install_signal_handlers(stop: Arc<AtomicBool>) {
 
 /// The network config for the next connect attempt, read afresh from
 /// `path` into the store: a config edited to another role stops the client
-/// with NOT_PAIRED. A file that does not parse (half-written, or broken by
-/// hand) keeps the last good config.
+/// with NOT_PAIRED. A missing `config.json` is an unpair signal: the role
+/// goes `Off` and the credentials are cleared, so the client fails with
+/// NOT_PAIRED. A file that exists but does not parse, or any other read
+/// error (half-written, or broken by hand), keeps the last good config.
 fn reload_network(store: &Mutex<Store>, path: &Path) -> NetworkConfig {
     let mut s = store.lock().unwrap();
-    let read = std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<Config>(&t).map_err(|e| e.to_string()));
-    match read {
-        Ok(c) => s.config = c,
+    match std::fs::read_to_string(path) {
+        Ok(t) => match serde_json::from_str::<Config>(&t) {
+            Ok(c) => s.config = c,
+            Err(e) => log::line("cli", format!("config.json unreadable, keeping the last good one: {e}")),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log::line("cli", "config.json is gone; treating this as unpaired");
+            s.config.network.role = NetworkRole::Off;
+            s.config.network.token.clear();
+            s.config.network.assistant_id.clear();
+        }
         Err(e) => log::line("cli", format!("config.json unreadable, keeping the last good one: {e}")),
     }
     let mut n = s.config.network.clone();
@@ -184,6 +194,22 @@ mod tests {
         std::fs::write(&path, r#"{"completedTimeoutMinutes":10,"network":{"role":"off","token":"t","assistantId":"a"}}"#).unwrap();
         let n = reload_network(&store, &path);
         assert_eq!((n.token.as_str(), n.assistant_id.as_str()), ("", ""));
+        drop(dir);
+    }
+
+    #[test]
+    fn a_missing_config_clears_the_credentials_and_sets_the_role_off() {
+        let (dir, store) = maya_core::actions::test_support::store_with_session("s1", 4242);
+        let path = {
+            let mut s = store.lock().unwrap();
+            s.config.network.role = NetworkRole::Assistant;
+            s.config.network.token = "t".into();
+            s.config.network.assistant_id = "a".into();
+            s.config_path()
+        };
+        std::fs::remove_file(&path).unwrap();
+        let n = reload_network(&store, &path);
+        assert_eq!((n.role, n.token.as_str(), n.assistant_id.as_str()), (NetworkRole::Off, "", ""));
         drop(dir);
     }
 
