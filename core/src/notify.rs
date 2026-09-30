@@ -302,6 +302,7 @@ mod tests {
             context: None,
             machine: None,
             machine_address: None, machine_platform: None,
+            terminal: None,
             stale: false,
         }
     }
@@ -367,6 +368,7 @@ mod tests {
             context: None,
             machine: None,
             machine_address: None, machine_platform: None,
+            terminal: None,
             stale: false,
         }
     }

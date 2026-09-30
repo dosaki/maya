@@ -110,6 +110,9 @@ pub struct Card {
     /// `windows`); None for a local session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_platform: Option<String>,
+    /// The assistant's terminal name for this session (a tmux session), if it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
     /// True when the machine has not reported for a while or is disconnected.
     #[serde(default)]
     pub stale: bool,
@@ -156,6 +159,7 @@ mod tests {
             context: Some(crate::context::ContextUsage { used: 124_000, window: 200_000, percent: 62 }),
             machine: None,
             machine_address: None, machine_platform: None,
+            terminal: None,
             stale: false,
         };
         let json = serde_json::to_value(&card).unwrap();

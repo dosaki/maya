@@ -69,6 +69,7 @@ pub fn derive(s: &ForeignSession, t: &ForeignTail, now_ms: u64, completed_timeou
         context,
         machine: None,
         machine_address: None, machine_platform: None,
+        terminal: None,
         stale: false,
     }
 }

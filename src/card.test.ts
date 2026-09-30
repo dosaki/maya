@@ -43,6 +43,11 @@ describe("renderCard: remote cards", () => {
     expect(other.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on box (freebsd), 10.0.0.2");
   });
 
+  it("names the tmux session in the remote tooltip", () => {
+    const el = renderCard({ ...base, machine: "laptop", machineAddress: "10.0.0.9", machinePlatform: "macos", stale: false, terminal: "maya-1a2b3c4d" }, 0);
+    expect(el.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on laptop (macOS), 10.0.0.9; attach: tmux attach -t maya-1a2b3c4d");
+  });
+
   it("shows no remote glyph or machine subtitle for a local card", () => {
     const el = renderCard(base, 0);
     expect(el.querySelector(".card__remote")).toBeNull();
