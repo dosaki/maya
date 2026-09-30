@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderCard } from "./card";
-import type { Card } from "./types";
+import { remoteTerminalToast, type Card } from "./types";
 
 const base: Card = {
   sessionId: "s",
@@ -16,6 +16,14 @@ const base: Card = {
   pr: null,
   context: null,
 };
+
+describe("remoteTerminalToast", () => {
+  it("says where a remote session runs, and how to attach when it is in tmux", () => {
+    expect(remoteTerminalToast({ ...base, machine: "laptop" })).toBe("That session runs on laptop");
+    expect(remoteTerminalToast({ ...base, machine: "box", terminal: "maya-1a2b3c4d" })).toBe("That session runs on box; attach: tmux attach -t maya-1a2b3c4d");
+    expect(remoteTerminalToast({ ...base, machine: "box", terminal: null })).toBe("That session runs on box");
+  });
+});
 
 describe("renderCard: remote cards", () => {
   it("marks a remote card with the machine and drops the Terminal button", () => {
