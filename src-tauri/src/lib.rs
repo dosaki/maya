@@ -51,7 +51,7 @@ const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 /// A remote session's machine, when this Maya is the main and the session
 /// belongs to one of its connected assistants; else `None` for a local one.
 fn remote_machine_of(state: &AppState, session_id: &str) -> Option<String> {
-    merge::machine_of(&remote_boards(state), session_id)
+    merge::machine_of(&remote_boards(state), session_id, now_ms())
 }
 
 /// Sends `kind` to `machine` and discards its (empty) result.

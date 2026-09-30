@@ -29,12 +29,11 @@ pub struct RemoteBoard {
 /// snapshot lingers), and otherwise the first board listing it wins.
 pub fn merged(local: Vec<Card>, remotes: &[RemoteBoard], now_ms: u64) -> Vec<Card> {
     let mut out = local;
-    let live = |b: &RemoteBoard| now_ms.saturating_sub(b.received_at) <= EXPIRE_MS;
-    let connected: HashSet<&str> = remotes.iter().filter(|b| b.connected && live(b)).flat_map(|b| b.cards.iter().map(|c| c.session_id.as_str())).collect();
+    let connected: HashSet<&str> = remotes.iter().filter(|b| b.connected && live(b, now_ms)).flat_map(|b| b.cards.iter().map(|c| c.session_id.as_str())).collect();
     let mut seen: HashSet<String> = HashSet::new();
     for b in remotes {
         let age = now_ms.saturating_sub(b.received_at);
-        if !live(b) {
+        if !live(b, now_ms) {
             continue;
         }
         let stale = !b.connected || age > STALE_MS;
@@ -51,6 +50,11 @@ pub fn merged(local: Vec<Card>, remotes: &[RemoteBoard], now_ms: u64) -> Vec<Car
         }
     }
     out
+}
+
+/// A board heard from within `EXPIRE_MS`; older ones are left out everywhere.
+fn live(b: &RemoteBoard, now_ms: u64) -> bool {
+    now_ms.saturating_sub(b.received_at) <= EXPIRE_MS
 }
 
 /// Labels as shown on cards and said by Maya, from `(name, address)`: the
@@ -72,9 +76,10 @@ pub fn display_names(entries: &[(String, String)]) -> Vec<String> {
 }
 
 /// The machine a session id runs on; a connected board wins over a
-/// disconnected one listing the same id.
-pub fn machine_of(remotes: &[RemoteBoard], session_id: &str) -> Option<String> {
-    let listing = || remotes.iter().filter(|b| b.cards.iter().any(|c| c.session_id == session_id));
+/// disconnected one listing the same id, and an expired board (one `merged`
+/// leaves out) lists nothing.
+pub fn machine_of(remotes: &[RemoteBoard], session_id: &str, now_ms: u64) -> Option<String> {
+    let listing = || remotes.iter().filter(|b| live(b, now_ms) && b.cards.iter().any(|c| c.session_id == session_id));
     listing().find(|b| b.connected).or_else(|| listing().next()).map(|b| b.machine.clone())
 }
 
@@ -132,9 +137,15 @@ mod tests {
     #[test]
     fn routing_prefers_the_connected_board() {
         let boards = [board("laptop (h, abcd)", "h", &["r1"], 0, false), board("laptop (h, wxyz)", "h", &["r1"], 0, true)];
-        assert_eq!(machine_of(&boards, "r1").as_deref(), Some("laptop (h, wxyz)"));
+        assert_eq!(machine_of(&boards, "r1", 0).as_deref(), Some("laptop (h, wxyz)"));
         let none_connected = [board("a", "h", &["r1"], 0, false), board("b", "h", &["r1"], 0, false)];
-        assert_eq!(machine_of(&none_connected, "r1").as_deref(), Some("a"));
+        assert_eq!(machine_of(&none_connected, "r1", 0).as_deref(), Some("a"));
+        // An expired board is off the board, so its sessions route nowhere.
+        let expired = [board("a", "h", &["r1"], 1_000, false), board("b", "h", &["r2"], 1_000 + EXPIRE_MS, true)];
+        let now = 1_000 + EXPIRE_MS + 1;
+        assert_eq!(machine_of(&expired, "r1", now), None);
+        assert_eq!(machine_of(&expired, "r2", now).as_deref(), Some("b"));
+        assert!(merged(vec![], &expired, now).iter().all(|c| c.session_id != "r1"), "the same rule as merged");
     }
 
     #[test]
@@ -149,8 +160,8 @@ mod tests {
     #[test]
     fn routes_a_session_id_to_its_machine() {
         let boards = [board("a", "h1", &["r1"], 0, true), board("b", "h2", &["r2"], 0, true)];
-        assert_eq!(machine_of(&boards, "r2").as_deref(), Some("b"));
-        assert_eq!(machine_of(&boards, "l1"), None);
+        assert_eq!(machine_of(&boards, "r2", 0).as_deref(), Some("b"));
+        assert_eq!(machine_of(&boards, "l1", 0), None);
         assert_eq!(dirs_of(&boards, "a"), vec!["proj".to_string()]);
         assert!(dirs_of(&boards, "zzz").is_empty());
     }
