@@ -565,9 +565,7 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         let mut s = lock(&ctx.shared);
         if s.is_paired(&id) {
             let serial = s.next();
-            for old in s.replace_older(&id, &name, &hostname) {
-                log::line("network", format!("{}: replaced by a newer pairing of the same machine", s.label(&old)));
-            }
+            let replaced: Vec<String> = s.replace_older(&id, &name, &hostname).iter().map(|old| s.label(old)).collect();
             s.peers.insert(id.clone(), Peer { name, hostname, platform, app, last_seen: now_ms(), unreadable_board: false });
             // A newer connection replaces an older one; dropping its sender ends it.
             s.conns.insert(id.clone(), Conn { tx, serial });
@@ -575,15 +573,18 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
                 b.connected = true;
             }
             s.sync_boards();
-            Some((serial, s.label(&id)))
+            Some((serial, s.label(&id), replaced))
         } else {
             None
         }
     };
-    let Some((serial, label)) = registered else {
+    let Some((serial, label, replaced)) = registered else {
         bye(ws, "removed");
         return None;
     };
+    for old in replaced {
+        log::line("network", format!("{old}: replaced by a newer pairing of the same machine"));
+    }
     let link = Link { id, serial, label, rx };
     // Authenticated: boards and results may now be large.
     ws.set_config(|c| {
