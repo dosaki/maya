@@ -55,9 +55,9 @@ const DISCONNECTED: &str = "assistant disconnected";
 /// What the server tells the app; the Tauri adapter lives in `lib.rs`.
 pub trait Notify: Send + Sync {
     fn board_changed(&self);
-    /// An assistant's first board since it connected, before it joins the
-    /// boards: what it shows happened while it was away, so nothing on it
-    /// is announced. Later changes are.
+    /// An assistant's first board when this run of the main holds none for
+    /// it (it just paired, or the main just started), before it joins the
+    /// boards: nothing on it is announced. Later changes are.
     fn board_seeded(&self, cards: &[crate::model::Card]);
     fn status_changed(&self, status: NetworkStatus);
     fn paired(&self, assistant: &PairedAssistant);
@@ -819,8 +819,15 @@ fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
 fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
     match up {
         Up::Board { cards, dirs } => {
-            // Seeded before the board is visible, so no refresh in between announces it.
-            if link.first_board.replace(false) {
+            // The first board of a connection is seeded, not announced, only
+            // when this run of the main holds no board for the assistant: it
+            // just paired, or the main just started. A reconnect's first board
+            // is compared with the held one, so what began while it was away
+            // is announced. Decided under the lock, seeded outside it (no
+            // `Notify` call with `shared` held) and before the board is
+            // visible, so no refresh in between announces it. Only this
+            // connection's thread inserts this id's board.
+            if link.first_board.replace(false) && !lock(&ctx.shared).by_id.contains_key(&link.id) {
                 ctx.notify.board_seeded(&cards);
             }
             let current = {
@@ -1310,31 +1317,55 @@ mod tests {
     }
 
     #[test]
-    fn nothing_on_an_assistants_first_board_is_announced_but_later_changes_are() {
+    fn a_first_board_is_quiet_but_a_reconnect_announces_what_began_while_away() {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
         let state = |id: &str, state: State, since: u64| Card { state, state_since: since, ..card(id, "x") };
         let (mut ws, id, token) = pair_client(&handle, port, "desk");
-        // Open when it connected: an ask and a finished turn.
+        // Open when it paired: an ask and a finished turn. Nothing is announced.
         send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 100), state("r2", State::Completed, 100)], dirs: vec![] });
         wait_until(|| handle.boards().iter().any(|b| b.cards.len() == 2));
         // A new ask after that is announced, and only it.
         send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 100), state("r2", State::Completed, 100), state("r3", State::Awaiting, 200)], dirs: vec![] });
         wait_until(|| !counter.announced.lock().unwrap().is_empty());
         assert_eq!(*counter.announced.lock().unwrap(), ["r3"]);
-        // It reconnects: what happened while it was away is not replayed.
+        // It drops; while it is away r1 asks something new and r2 finishes again.
         drop(ws);
         wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
         let mut ws = connect(port);
         hello(&mut ws, "desk", Some(&id));
         let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
         answer(&mut ws, &token, &nonce);
-        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 300), state("r2", State::Completed, 300)], dirs: vec![] });
-        wait_until(|| handle.boards().iter().any(|b| b.connected && b.cards[0].state_since == 300));
-        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 300), state("r2", State::Completed, 400)], dirs: vec![] });
-        wait_until(|| counter.announced.lock().unwrap().len() == 2);
-        assert_eq!(*counter.announced.lock().unwrap(), ["r3", "r2"]);
+        // The main still holds its board, so the reconnect's first board is news.
+        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 300), state("r2", State::Completed, 300), state("r3", State::Awaiting, 200)], dirs: vec![] });
+        wait_until(|| counter.announced.lock().unwrap().len() == 3);
+        assert_eq!(*counter.announced.lock().unwrap(), ["r3", "r1", "r2"], "what began while away is announced; r3 is not repeated");
         handle.stop();
+    }
+
+    #[test]
+    fn a_main_started_afresh_is_quiet_about_a_known_assistants_first_board() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (ws, id, token) = pair_client(&handle, port, "desk");
+        drop(ws);
+        wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
+        handle.stop();
+        // A new run of the main: the assistant is paired but no board is held yet.
+        let saved = handle.shared.lock().unwrap().paired.clone();
+        let counter = Arc::new(Counter::default());
+        let restarted = start_with(counter.clone(), Arc::new(Mutex::new(NetworkConfig { assistants: saved, ..Default::default() })), 0).unwrap();
+        let _ = counter.server.set(restarted.shared.clone());
+        let mut ws = connect(restarted.port());
+        hello(&mut ws, "desk", Some(&id));
+        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
+        answer(&mut ws, &token, &nonce);
+        send(&mut ws, &Up::Board { cards: vec![Card { state: State::Awaiting, state_since: 100, ..card("r1", "x") }], dirs: vec![] });
+        wait_until(|| restarted.boards().iter().any(|b| b.cards.len() == 1));
+        send(&mut ws, &Up::Board { cards: vec![Card { state: State::Awaiting, state_since: 100, ..card("r1", "x") }, Card { state: State::Awaiting, state_since: 200, ..card("r2", "x") }], dirs: vec![] });
+        wait_until(|| !counter.announced.lock().unwrap().is_empty());
+        assert_eq!(*counter.announced.lock().unwrap(), ["r2"]);
+        restarted.stop();
     }
 
     /// Closes `ws` with a reset rather than a FIN, so the main's next write fails.

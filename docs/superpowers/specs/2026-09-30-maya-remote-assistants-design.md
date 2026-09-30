@@ -153,10 +153,15 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
   hexgrid on this Mac?". Read-backs say the machine for remote sessions.
   Folders for start and resume are listed as `project (on machine)` for
   remote machines. Voice and notifications use the label.
-- Nothing on an assistant's first board after it connects (pairing or
-  reconnecting) is announced: the server hands that board to
-  `Notify::board_seeded` before it joins the boards, and the app seeds its
-  notifier with it (`Notifier::seed`). Later changes are announced.
+- Nothing on an assistant's first board is announced when this run of the
+  main holds no board for it: right after pairing, and on its first
+  connection after the main starts. The server decides that under its lock
+  (no board held for the id) and hands the board to
+  `Notify::board_seeded` before it joins the boards; the app seeds its
+  notifier with it (`Notifier::seed`). Later changes are announced. A
+  reconnect within the same run is not seeded: its first board is compared
+  with the one the main holds, so an ask or a finished turn that began
+  while the assistant was away is announced when it comes back.
 
 ### The assistant
 
@@ -230,7 +235,8 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
   assistant refuses a main that cannot prove the code or the token, the
   same address pairing again keeps its entry, a third handshake from one
   address is refused, a client gone right after `pair` leaves no entry,
-  and nothing on a first board is announced.
+  nothing on the first board after pairing is announced, and what began
+  while an assistant was away is announced when it reconnects.
 - End to end on two Macs: pair, see the remote cards, reply and answer from
   the main, start a session on the assistant from the main, hear the main
   announce a remote decision, and confirm the assistant stays silent.

@@ -160,8 +160,10 @@ quiet.
   a Machine picker, and announcements say "hexgrid on laptop". A card greys
   out thirty seconds after its assistant goes quiet and disappears after
   five minutes; it comes back when the assistant reconnects. Whatever was
-  already waiting when an assistant connects is shown but not announced;
-  only what changes after that is.
+  already waiting when an assistant pairs, or when it first connects after
+  the main starts, is shown but not announced; only what changes after
+  that is. When an assistant reconnects, what began while it was away is
+  announced.
 
 ## How it works
 

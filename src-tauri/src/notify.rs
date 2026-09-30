@@ -41,8 +41,8 @@ impl Notifier {
     }
 
     /// Marks the asks and finished turns on `cards` as already announced,
-    /// without announcing them: an assistant's first board after it
-    /// connects says what happened while it was away, not what is new.
+    /// without announcing them: a board the main has never held (an
+    /// assistant just paired, or the main just started) is not news.
     pub fn seed(&mut self, cards: &[Card]) {
         for c in cards {
             match c.state {
