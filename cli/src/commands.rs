@@ -39,11 +39,16 @@ fn live_run(claude_dir: &Path) -> Option<u32> {
     status_file::read(&claude_dir.join("maya")).map(|s| s.pid).filter(|pid| pid_alive(*pid as i32))
 }
 
+/// What `maya pair` prints once paired.
+pub fn paired_message(main: &str, label: &str) -> String {
+    format!("Paired with {main} as {label}")
+}
+
 /// Pairs with a main Maya at `host:port` using its six-digit `code`, stores
 /// the assistant id and token and the link in the config, and returns the
-/// main's name. Errors carry the exit code: 2 while a `maya run` is live
+/// main's name and the label this machine paired under. Errors carry the exit code: 2 while a `maya run` is live
 /// (pairing would swap the credentials under it), else 1.
-pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: &str) -> Result<String, (i32, String)> {
+pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: &str) -> Result<(String, String), (i32, String)> {
     if let Some(pid) = live_run(claude_dir) {
         return Err((2, format!("stop `maya run` first (pid {pid})")));
     }
@@ -55,12 +60,12 @@ pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: 
     s.config.network.role = NetworkRole::Assistant;
     s.config.network.main_host = host.trim().into();
     s.config.network.main_port = port;
-    s.config.network.name = name;
+    s.config.network.name = name.clone();
     s.config.network.assistant_id = id;
     s.config.network.token = token;
     s.config.listen = false;
     config::save(&s.config_path(), &s.config).map_err(|e| (1, e))?;
-    Ok(main)
+    Ok((main, name))
 }
 
 /// The printed report for `maya status`.
@@ -159,6 +164,11 @@ mod tests {
         c.network.role = role;
         config::save(&dir.path().join("maya/config.json"), &c).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_pairing_reports_the_main_and_this_machines_label() {
+        assert_eq!(paired_message("Yhi", "box"), "Paired with Yhi as box");
     }
 
     #[test]

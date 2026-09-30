@@ -68,7 +68,7 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
 
     // 1. Pair.
     let (code, _) = handle.open_pairing(maya_core::now_ms());
-    assert_eq!(commands::pair(&claude_dir, "127.0.0.1", port, Some("box"), &code), Ok("Yhi".to_string()));
+    assert_eq!(commands::pair(&claude_dir, "127.0.0.1", port, Some("box"), &code), Ok(("Yhi".to_string(), "box".to_string())));
     assert_eq!(recorder.paired.load(Ordering::SeqCst), 1);
     let saved = maya_core::config::load(&maya_dir.join("config.json"));
     assert!(!saved.network.token.is_empty(), "the config on disk holds the token");
