@@ -25,8 +25,7 @@ pub fn run(args: Vec<String>) -> i32 {
         Ok(args::Cmd::Status) => report(commands::status(&claude_dir)),
         Ok(args::Cmd::Hooks(op)) => report(commands::hooks(&claude_dir, op)),
         Ok(args::Cmd::Run) => run_cmd::run(&claude_dir),
-        // Task 8.
-        Ok(args::Cmd::Start { .. }) => report(Err("not implemented yet".into())),
+        Ok(args::Cmd::Start { dir, prompt, options }) => report(commands::start(&claude_dir, dir, prompt, options)),
     }
 }
 

@@ -227,14 +227,17 @@ pub fn tmux_label() -> String {
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
+    use crate::config;
     use crate::store::Store;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    /// A temp dir holding `claude/` (with `sessions/` and `maya/`) and `projects/`.
+    /// A temp dir that *is* `~/.claude` (with `sessions/` and `maya/`) plus
+    /// `projects/`: its own path is the claude dir, so callers can hand
+    /// `.path()` straight to anything that takes a claude dir.
     fn temp_claude() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let claude = dir.path().join("claude");
+        let claude = dir.path().to_path_buf();
         std::fs::create_dir_all(claude.join("sessions")).unwrap();
         std::fs::create_dir_all(claude.join("maya")).unwrap();
         (dir, claude)
@@ -255,9 +258,13 @@ pub mod test_support {
         projects
     }
 
+    /// Builds the store and also persists the config to disk, so a second
+    /// `Store::new` over the same claude dir (as the CLI commands do) sees
+    /// the same projects directory.
     fn store(claude: PathBuf, projects: Option<&Path>) -> Mutex<Store> {
         let mut store = Store::new(claude).with_alive(|_| true);
         store.config.projects_dir = projects.map(|p| p.to_string_lossy().into_owned());
+        config::save(&store.config_path(), &store.config).unwrap();
         Mutex::new(store)
     }
 

@@ -51,7 +51,7 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     // A registry session owned by this (live) process, on /dev/pts/3.
     let (dir, store) = maya_core::actions::test_support::store_with_session("s1", std::process::id() as i32);
     drop(store);
-    let claude_dir = dir.path().join("claude");
+    let claude_dir = dir.path().to_path_buf();
     let maya_dir = claude_dir.join("maya");
 
     // 1. Pair.

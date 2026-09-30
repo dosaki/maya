@@ -4,11 +4,14 @@ use crate::args::HooksOp;
 use crate::executor::CliExecutor;
 use crate::status_file;
 use crate::tmux::Tmux;
+use maya_core::actions;
 use maya_core::config::{self, NetworkRole};
 use maya_core::hook_install;
+use maya_core::launch::LaunchOptions;
 use maya_core::net::client::{self, Executor};
 use maya_core::registry::pid_alive;
 use maya_core::store::Store;
+use maya_core::terminal::Terminal;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -74,11 +77,26 @@ pub fn hooks(claude_dir: &Path, op: HooksOp) -> Result<String, String> {
     }
 }
 
+/// Opens a session in a project folder through tmux: `maya start [dir] [prompt]`.
+pub fn start(claude_dir: &Path, dir: Option<String>, prompt: Option<String>, options: LaunchOptions) -> Result<String, String> {
+    start_with(claude_dir, dir, prompt, options, Arc::new(Tmux::default()))
+}
+
+pub fn start_with(claude_dir: &Path, dir: Option<String>, prompt: Option<String>, options: LaunchOptions, terminal: Arc<dyn Terminal>) -> Result<String, String> {
+    let store = Mutex::new(Store::new(claude_dir.to_path_buf()));
+    let l = actions::Local { store: &store, terminal: &*terminal };
+    let r = actions::start_session(&l, dir, prompt.unwrap_or_default(), options)?;
+    let name = Path::new(&r.dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(r.dir.clone());
+    Ok(match r.terminal { Some(t) => format!("started in {name}: tmux attach -t {t}"), None => format!("started in {name}") })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::status_file::RunStatus;
+    use maya_core::actions::test_support::store_with_projects;
     use maya_core::config::Config;
+    use maya_core::terminal::FakeTerminal;
 
     fn claude_dir_with(role: NetworkRole) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -111,5 +129,14 @@ mod tests {
         assert_eq!(hooks(dir.path(), HooksOp::Status).unwrap(), "hooks: not installed");
         hooks(dir.path(), HooksOp::Install).unwrap();
         assert_eq!(hooks(dir.path(), HooksOp::Status).unwrap(), "hooks: installed");
+    }
+
+    #[test]
+    fn start_prints_the_tmux_session_and_needs_a_prompt() {
+        let (dir, _store) = store_with_projects(&["proj"]);
+        let fake = Arc::new(FakeTerminal::default());
+        let out = start_with(dir.path(), Some("proj".into()), Some("hello".into()), LaunchOptions::default(), fake.clone()).unwrap();
+        assert!(out.starts_with("started in proj: tmux attach -t maya-"), "{out}");
+        assert_eq!(start_with(dir.path(), Some("proj".into()), None, LaunchOptions::default(), fake).unwrap_err(), "Type a prompt first.");
     }
 }
