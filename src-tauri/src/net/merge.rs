@@ -125,10 +125,10 @@ mod tests {
     #[test]
     fn a_session_id_shows_once_and_a_connected_board_wins() {
         // The old pairing's snapshot sorts first but is disconnected.
-        let boards = [board("laptop (h, abcd)", "h", &["r1", "old"], 1_000, false), board("laptop (h, wxyz)", "h", &["r1", "r2"], 1_000, true)];
+        let boards = [board("laptop (10.0.0.5)", "h", &["r1", "old"], 1_000, false), board("laptop (10.0.0.6)", "h", &["r1", "r2"], 1_000, true)];
         let m = merged(vec![], &boards, 1_500);
         let ids: Vec<(&str, &str)> = m.iter().map(|c| (c.session_id.as_str(), c.machine.as_deref().unwrap())).collect();
-        assert_eq!(ids, [("old", "laptop (h, abcd)"), ("r1", "laptop (h, wxyz)"), ("r2", "laptop (h, wxyz)")]);
+        assert_eq!(ids, [("old", "laptop (10.0.0.5)"), ("r1", "laptop (10.0.0.6)"), ("r2", "laptop (10.0.0.6)")]);
         // Two connected boards listing the same id: the first wins.
         let both = [board("a", "h1", &["r1"], 1_000, true), board("b", "h2", &["r1"], 1_000, true)];
         assert_eq!(merged(vec![], &both, 1_500).iter().map(|c| c.machine.clone().unwrap()).collect::<Vec<_>>(), ["a"]);
@@ -136,8 +136,8 @@ mod tests {
 
     #[test]
     fn routing_prefers_the_connected_board() {
-        let boards = [board("laptop (h, abcd)", "h", &["r1"], 0, false), board("laptop (h, wxyz)", "h", &["r1"], 0, true)];
-        assert_eq!(machine_of(&boards, "r1", 0).as_deref(), Some("laptop (h, wxyz)"));
+        let boards = [board("laptop (10.0.0.5)", "h", &["r1"], 0, false), board("laptop (10.0.0.6)", "h", &["r1"], 0, true)];
+        assert_eq!(machine_of(&boards, "r1", 0).as_deref(), Some("laptop (10.0.0.6)"));
         let none_connected = [board("a", "h", &["r1"], 0, false), board("b", "h", &["r1"], 0, false)];
         assert_eq!(machine_of(&none_connected, "r1", 0).as_deref(), Some("a"));
         // An expired board is off the board, so its sessions route nowhere.
