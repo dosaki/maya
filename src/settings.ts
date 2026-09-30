@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
+import { builtinVoiceName, isWindows, recognizerOptions, secretStore } from "./platform";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -390,7 +391,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   recLabel.textContent = "Speech recognition";
   const rec = document.createElement("select");
   rec.name = "recognizer";
-  for (const [v, text] of [["system", "System (Apple)"], ["builtin", "Built-in (Whisper, runs on this Mac)"]] as const) {
+  for (const [v, text] of recognizerOptions()) {
     const o = document.createElement("option");
     o.value = v;
     o.textContent = text;
@@ -438,7 +439,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       if (!model.downloading) {
         const hint = document.createElement("div");
         hint.className = "settings__hint";
-        hint.textContent = "Download the model once; it stays on this Mac.";
+        hint.textContent = `Download the model once; it stays on ${isWindows() ? "this PC" : "this Mac"}.`;
         row.append(hint);
       }
     }
@@ -514,7 +515,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   providerLabel.textContent = "Voice";
   const provider = document.createElement("select");
   provider.name = "voiceProvider";
-  for (const [v, text] of [["builtin", "Samantha (built in)"], ["elevenlabs", "ElevenLabs"]] as const) {
+  for (const [v, text] of [["builtin", `${builtinVoiceName()} (built in)`], ["elevenlabs", "ElevenLabs"]] as const) {
     const o = document.createElement("option");
     o.value = v;
     o.textContent = text;
@@ -531,7 +532,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const key = document.createElement("input");
     key.type = "password";
     key.name = "elevenKey";
-    key.placeholder = model.elevenKeySet ? "saved in Keychain; paste to replace" : "paste your key";
+    key.placeholder = model.elevenKeySet ? `saved in ${secretStore()}; paste to replace` : "paste your key";
     key.autocomplete = "off";
     key.addEventListener("change", () => {
       const k = key.value.trim();
