@@ -105,3 +105,18 @@ exists, because Tauri bundles it as a sidecar.
 The app bundle lands in `src-tauri/target/release/bundle/`. The build fails
 without the sidecar binary, so run `pnpm ear:build` first (it needs the
 Xcode Command Line Tools).
+
+### Signing
+
+Without a signing identity the bundle is ad-hoc signed, and macOS treats
+every rebuild as a new app: the microphone and speech-recognition prompts
+come back each time. Sign with a stable identity to keep the grants:
+
+    APPLE_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID)" pnpm tauri build --bundles app
+
+An Apple Development certificate is free: in Xcode, Settings › Accounts,
+add your Apple ID, then Manage Certificates › + › Apple Development.
+`security find-identity -v -p codesigning` prints the exact name to use.
+Tauri signs the app, the listener sidecar and the whisper framework with
+it. Release builds from CI stay ad-hoc unless Developer ID secrets are
+configured.
