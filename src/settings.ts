@@ -896,6 +896,8 @@ export async function initSettings(): Promise<void> {
     },
     onRemoveModel: (id) => void run(async () => { await invoke("remove_whisper_model", { id }); await loadModels(); }),
     onRole: (role) => {
+      // A failed Pair's message belongs to the pairing form; leaving it drops the message.
+      if (role !== "assistant") model.networkError = null;
       if (role === "assistant" && !model.networkPaired) {
         // Previewing the pairing form does not save anything; only a
         // successful Pair (see `onPair`) commits the assistant role. With

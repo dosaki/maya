@@ -260,13 +260,14 @@ describe("settings flow", () => {
       interpreterModel: "haiku",
       network: { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [] },
     };
-    invoke.mockImplementation((cmd: string) => {
+    invoke.mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "network_status") return Promise.resolve({ role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
       if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
       if (cmd === "list_whisper_models") return Promise.resolve([]);
       if (cmd === "network_pair") return Promise.reject("Wrong or expired pairing code.");
+      if (cmd === "set_config") return Promise.resolve({ ...(args as { config: object }).config });
       return Promise.reject(new Error("unexpected " + cmd));
     });
     await initSettings();
@@ -289,6 +290,16 @@ describe("settings flow", () => {
     document.querySelector<HTMLButtonElement>("button[data-action=pair]")!.click();
     await flush();
     expect(document.querySelector(".settings__status--network")?.textContent).toBe("Wrong or expired pairing code.");
+
+    // Leaving Assistant drops the failed attempt's message; coming back starts clean.
+    const role = () => document.querySelector<HTMLSelectElement>("select[name=networkRole]")!;
+    role().value = "off";
+    role().dispatchEvent(new Event("change"));
+    await flush();
+    await flush();
+    role().value = "assistant";
+    role().dispatchEvent(new Event("change"));
+    expect(document.querySelector(".settings__status--network")).toBeNull();
   });
 
   it("repaints a hidden Settings tab when it is shown after a network event", async () => {
