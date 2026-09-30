@@ -18,6 +18,7 @@ pub mod listener;
 pub mod log;
 pub mod model;
 pub mod models;
+pub mod net;
 pub mod notify;
 pub mod pr;
 pub mod registry;

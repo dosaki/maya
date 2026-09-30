@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
     Awaiting,
@@ -9,7 +9,7 @@ pub enum State {
     Idle,
 }
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AwaitKind {
     Question,
@@ -52,7 +52,7 @@ pub fn parse_questions(input: &serde_json::Value) -> Vec<Question> {
 
 /// The agent runner a session belongs to. Only Claude Code has a session
 /// source today; a new harness adds a variant here and its own reader.
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Harness {
     ClaudeCode,
@@ -62,7 +62,7 @@ pub enum Harness {
 }
 
 /// The pull request for a session directory's current branch.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PullRequest {
     pub number: u64,
@@ -71,7 +71,7 @@ pub struct PullRequest {
     pub state: String,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Awaiting {
     pub kind: AwaitKind,
     pub detail: String,
@@ -80,7 +80,7 @@ pub struct Awaiting {
     pub questions: Vec<Question>,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Card {
     pub session_id: String,
@@ -100,6 +100,12 @@ pub struct Card {
     pub pr: Option<PullRequest>,
     /// Context window usage after the last assistant turn.
     pub context: Option<crate::context::ContextUsage>,
+    /// The assistant machine this card came from; None for a local session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// True when the machine has not reported for a while or is disconnected.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 #[cfg(test)]
@@ -141,6 +147,8 @@ mod tests {
             harness: Harness::ClaudeCode,
             pr: Some(PullRequest { number: 781, url: "https://github.com/o/r/pull/781".into(), state: "merged".into() }),
             context: Some(crate::context::ContextUsage { used: 124_000, window: 200_000, percent: 62 }),
+            machine: None,
+            stale: false,
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["context"]["percent"], 62);

@@ -344,7 +344,7 @@ mod tests {
         Card {
             session_id: id.into(), pid: 1, name: name.into(), cwd: format!("/Users/x/dev/proj-{id}"), state, state_since: 0, snippet: "".into(),
             awaiting: ask.map(|a| Awaiting { kind: AwaitKind::Text, detail: a.into(), questions: vec![] }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None,
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, stale: false,
         }
     }
 

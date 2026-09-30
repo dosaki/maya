@@ -263,6 +263,8 @@ mod tests {
             harness: Harness::ClaudeCode,
             pr: None,
             context: None,
+            machine: None,
+            stale: false,
         }
     }
 
