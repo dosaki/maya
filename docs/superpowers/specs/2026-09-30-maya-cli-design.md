@@ -93,6 +93,10 @@ maya --version
   `SO_PEERCRED` (`LOCAL_PEERPID` on macOS).
 - `config.json` (it holds the token) and `cli-status.json` are written
   with mode 0600.
+- `claude` is looked up on the PATH first, then in `~/.local/bin`,
+  `/opt/homebrew/bin` and `/usr/local/bin`, then through the login shell
+  (`zsh -lc` on macOS, `sh -lc` elsewhere, since a Linux box may have no
+  zsh).
 - **Start and resume** create `tmux new-session -d -s maya-<8 hex chars>
   -c <project dir> 'sh -c "<the same claude command line the app builds>;
   exec ${SHELL:-sh}"'`, creating the tmux server if needed; the shell that
