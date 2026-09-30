@@ -20,6 +20,9 @@ jobs:
     if: >-
       !startsWith(github.event.head_commit.message, 'docs:') &&
       !startsWith(github.event.head_commit.message, 'docs(')
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -130,6 +133,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist-release
+          cargo build -p maya-cli --release --target aarch64-apple-darwin
+          cargo build -p maya-cli --release --target x86_64-apple-darwin
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/aarch64-apple-darwin/release/maya-cli
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/x86_64-apple-darwin/release/maya-cli
+          fi
+          cp target/aarch64-apple-darwin/release/maya-cli dist-release/maya-macos-arm64
+          cp target/x86_64-apple-darwin/release/maya-cli dist-release/maya-macos-x86_64
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             arch="${target%%-*}"
             bundle="target/$target/release/bundle"
@@ -149,3 +160,34 @@ jobs:
             --title "Maya v${VERSION}" \
             --generate-notes \
             --notes "Built from ${GITHUB_SHA} on main. macOS builds are not notarised: install with the one-line installer in the README, which clears the quarantine flag, or right-click the app and choose Open the first time."
+
+  linux:
+    name: Test core and CLI, build Linux binaries
+    runs-on: ubuntu-latest
+    if: >-
+      !startsWith(github.event.head_commit.message, 'docs:') &&
+      !startsWith(github.event.head_commit.message, 'docs(')
+    needs: macos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: Install tmux for the integration test
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Test core and the CLI on Linux
+        run: cargo test -p maya-core -p maya-cli
+      - name: Build Linux binaries
+        if: needs.macos.outputs.release == 'true'
+        run: |
+          cargo install cross --locked
+          cross build -p maya-cli --release --target x86_64-unknown-linux-musl
+          cross build -p maya-cli --release --target aarch64-unknown-linux-musl
+          mkdir -p dist-linux
+          cp target/x86_64-unknown-linux-musl/release/maya-cli dist-linux/maya-linux-x86_64
+          cp target/aarch64-unknown-linux-musl/release/maya-cli dist-linux/maya-linux-aarch64
+      - name: Attach to the release
+        if: needs.macos.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.macos.outputs.version }}
+        run: gh release upload "v${VERSION}" dist-linux/* --clobber
