@@ -182,4 +182,37 @@ describe("resume flow", () => {
     expect(setup.querySelector("button[data-action=open-settings]")).toBeNull();
     expect(document.querySelector("select[name=machine]")).not.toBeNull();
   });
+
+  it("ignores a local session list that arrives after another machine was chosen", async () => {
+    let answerLocal: (v: unknown) => void = () => {};
+    invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["maya"]);
+      if (cmd === "list_resumable_sessions") {
+        if (args.machine) return Promise.resolve([{ id: "remote-1", title: "On laptop", lastActiveMs: 1, running: false }]);
+        return new Promise((r) => (answerLocal = r));
+      }
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openResume();
+    await flush();
+    const pick = (dir: string) => {
+      const select = document.querySelector<HTMLSelectElement>("select[name=dir]")!;
+      select.value = dir;
+      select.dispatchEvent(new Event("change"));
+    };
+    pick("maya");
+    await flush();
+    const machineSel = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    machineSel.value = "laptop";
+    machineSel.dispatchEvent(new Event("change"));
+    await flush();
+    pick("maya");
+    await flush();
+    expect([...document.querySelectorAll<HTMLButtonElement>("button[data-action=resume]")].map((b) => b.dataset.id)).toEqual(["remote-1"]);
+    // This Mac's answer for the same folder name comes in late.
+    answerLocal([{ id: "local-1", title: "Here", lastActiveMs: 1, running: false }]);
+    await flush();
+    expect([...document.querySelectorAll<HTMLButtonElement>("button[data-action=resume]")].map((b) => b.dataset.id)).toEqual(["remote-1"]);
+  });
 });

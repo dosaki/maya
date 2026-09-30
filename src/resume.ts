@@ -244,10 +244,11 @@ async function loadSessions(dir: string): Promise<void> {
   paint();
   try {
     const sessions = await invoke<ResumableSession[]>("list_resumable_sessions", { dir, machine });
-    if (current !== me || me.model.dir !== dir) return;
+    // A late answer for another folder or machine (the same folder name can exist on both) is dropped.
+    if (current !== me || me.model.dir !== dir || me.model.machine !== machine) return;
     me.model.sessions = sessions;
   } catch (e) {
-    if (current !== me) return;
+    if (current !== me || me.model.dir !== dir || me.model.machine !== machine) return;
     me.model.sessions = [];
     me.model.status = { ok: false, text: String(e) };
   }
