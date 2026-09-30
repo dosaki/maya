@@ -70,6 +70,10 @@ export interface SettingsModel {
   networkMainPort?: number;
   /** The assistant's display name; blank means the hostname. */
   networkName?: string;
+  /** The pairing code as typed, held here (not persisted) so a repaint never wipes it mid-entry. */
+  networkCode?: string;
+  /** The message from a failed Pair attempt, shown in the status line; cleared by the next attempt or a success. */
+  networkError?: string | null;
 }
 
 export type VoiceProvider = "builtin" | "elevenlabs";
@@ -179,6 +183,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   const netMainHost = model.networkMainHost ?? "";
   const netMainPort = model.networkMainPort ?? 0;
   const netName = model.networkName ?? "";
+  const netCode = model.networkCode ?? "";
 
   const status = document.createElement("div");
   status.className = "settings__status";
@@ -492,10 +497,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     portInput.name = "networkPort";
     portInput.placeholder = "4127";
     portInput.value = netPort ? String(netPort) : "";
-    portInput.addEventListener("change", () => {
+    const readPort = () => {
       const n = Number(portInput.value);
-      h.onPort(Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
-    });
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    };
+    portInput.addEventListener("input", () => { model.networkPort = readPort(); });
+    portInput.addEventListener("change", () => h.onPort(readPort()));
     portLabel.append(portInput);
     network.append(portLabel);
 
@@ -535,6 +542,9 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     }
     network.append(list);
   } else if (netRole === "assistant") {
+    // Values live on the model, updated on every keystroke (not just on
+    // `change`), so an unrelated repaint (a `voice` or `network` event) never
+    // wipes a half-typed field; `change` still drives when each is saved.
     const hostLabel = document.createElement("label");
     hostLabel.textContent = "Main's host or address";
     const hostInput = document.createElement("input");
@@ -542,6 +552,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     hostInput.name = "networkHost";
     hostInput.placeholder = "e.g. 192.168.1.42 or maya-mini.local";
     hostInput.value = netMainHost;
+    hostInput.addEventListener("input", () => { model.networkMainHost = hostInput.value; });
     hostInput.addEventListener("change", () => h.onMainHost(hostInput.value.trim()));
     hostLabel.append(hostInput);
     network.append(hostLabel);
@@ -553,10 +564,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     mainPortInput.name = "networkMainPort";
     mainPortInput.placeholder = "4127";
     mainPortInput.value = netMainPort ? String(netMainPort) : "";
-    mainPortInput.addEventListener("change", () => {
+    const readMainPort = () => {
       const n = Number(mainPortInput.value);
-      h.onMainPort(Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
-    });
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    };
+    mainPortInput.addEventListener("input", () => { model.networkMainPort = readMainPort(); });
+    mainPortInput.addEventListener("change", () => h.onMainPort(readMainPort()));
     mainPortLabel.append(mainPortInput);
     network.append(mainPortLabel);
 
@@ -567,6 +580,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     nameInput.name = "networkName";
     nameInput.placeholder = "blank uses this computer's hostname";
     nameInput.value = netName;
+    nameInput.addEventListener("input", () => { model.networkName = nameInput.value; });
     nameInput.addEventListener("change", () => h.onName(nameInput.value.trim()));
     nameLabel.append(nameInput);
     network.append(nameLabel);
@@ -577,6 +591,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     codeInput.type = "text";
     codeInput.name = "networkCode";
     codeInput.placeholder = "483921";
+    codeInput.value = netCode;
+    codeInput.addEventListener("input", () => { model.networkCode = codeInput.value; });
     codeLabel.append(codeInput);
     network.append(codeLabel);
 
@@ -584,15 +600,26 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     pairBtn.type = "button";
     pairBtn.dataset.action = "pair";
     pairBtn.textContent = "Pair";
-    pairBtn.addEventListener("click", () => h.onPair(hostInput.value.trim(), Number(mainPortInput.value) || 0, nameInput.value.trim(), codeInput.value.trim()));
+    pairBtn.addEventListener("click", () =>
+      h.onPair((model.networkMainHost ?? "").trim(), model.networkMainPort ?? 0, (model.networkName ?? "").trim(), (model.networkCode ?? "").trim()),
+    );
     network.append(pairBtn);
+  }
 
-    if (net.role === "assistant") {
-      const statusText = net.assistant.connected
-        ? `Connected to ${net.assistant.mainName ?? ""}`
-        : net.assistant.error
-          ? net.assistant.error
-          : "Reconnecting…";
+  // Shown whenever the select shows Assistant, saved or still being
+  // previewed, so a failed Pair on a never-paired machine has somewhere to
+  // put its message instead of only the page-level error banner.
+  if (netRole === "assistant") {
+    const statusText = model.networkError
+      ? model.networkError
+      : net.role === "assistant"
+        ? net.assistant.connected
+          ? `Connected to ${net.assistant.mainName ?? ""}`
+          : net.assistant.error
+            ? net.assistant.error
+            : "Reconnecting…"
+        : null;
+    if (statusText !== null) {
       const statusEl = document.createElement("div");
       statusEl.className = "settings__status settings__status--network";
       statusEl.textContent = statusText;
@@ -754,14 +781,26 @@ export async function initSettings(): Promise<void> {
     onName: (name) => void saveNetwork({ name }),
     onRegenerate: () => void run(async () => { model.network = await invoke<NetworkStatus>("network_pairing_code"); }),
     onRemoveAssistant: (id) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_assistant", { id }); }),
-    onPair: (host, port, name, code) =>
-      void run(async () => {
-        model.network = await invoke<NetworkStatus>("network_pair", { host, port, name, code });
-        model.networkRole = model.network.role;
-        model.networkMainHost = host;
-        model.networkMainPort = port;
-        model.networkName = name;
-      }),
+    onPair: (host, port, name, code) => {
+      // Shown next to the pairing form itself (`.settings__status--network`),
+      // not just the page-level banner: cleared by this attempt starting, and
+      // by either a success or a fresh attempt afterwards.
+      model.error = null;
+      model.networkError = null;
+      void (async () => {
+        try {
+          model.network = await invoke<NetworkStatus>("network_pair", { host, port, name, code });
+          model.networkRole = model.network.role;
+          model.networkMainHost = host;
+          model.networkMainPort = port;
+          model.networkName = name;
+          model.networkCode = "";
+        } catch (e) {
+          model.networkError = String(e);
+        }
+        paint();
+      })();
+    },
   };
 
   // The voice panel can turn listening on or off on its own; mirror that

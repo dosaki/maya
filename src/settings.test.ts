@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderSettings } from "./settings";
+import { renderSettings, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -363,6 +363,42 @@ describe("Network settings", () => {
       handlers(),
     );
     expect(removed.querySelector(".settings__status--network")?.textContent).toBe("Removed by the main Maya; pair again.");
+  });
+
+  it("shows a failed Pair's message in the status line even on a never-paired machine", () => {
+    const neverPaired = renderSettings({ ...voiceBase, networkRole: "assistant", networkError: "Wrong or expired pairing code." }, handlers());
+    expect(neverPaired.querySelector(".settings__status--network")?.textContent).toBe("Wrong or expired pairing code.");
+    // Previewing Assistant with no error yet and never paired: nothing to show.
+    const previewing = renderSettings({ ...voiceBase, networkRole: "assistant" }, handlers());
+    expect(previewing.querySelector(".settings__status--network")).toBeNull();
+  });
+
+  it("holds the pairing form's typed values on the model so a repaint never wipes them", () => {
+    // renderSettings mutates the model object it was given, live, on every
+    // keystroke, so a caller that re-renders from the same model (as
+    // initSettings' `paint` does) never loses a half-typed field.
+    const h = handlers();
+    const model: SettingsModel = { ...voiceBase, networkRole: "assistant" };
+    const el = renderSettings(model, h);
+    const code = el.querySelector<HTMLInputElement>("input[name=networkCode]")!;
+    code.value = "48392";
+    code.dispatchEvent(new Event("input"));
+    expect(model.networkCode).toBe("48392");
+    const host = el.querySelector<HTMLInputElement>("input[name=networkHost]")!;
+    host.value = "office.local";
+    host.dispatchEvent(new Event("input"));
+    expect(model.networkMainHost).toBe("office.local");
+    const port = el.querySelector<HTMLInputElement>("input[name=networkMainPort]")!;
+    port.value = "5000";
+    port.dispatchEvent(new Event("input"));
+    expect(model.networkMainPort).toBe(5000);
+    const name = el.querySelector<HTMLInputElement>("input[name=networkName]")!;
+    name.value = "laptop";
+    name.dispatchEvent(new Event("input"));
+    expect(model.networkName).toBe("laptop");
+    // Pair reads the model, not stale closures over the DOM elements.
+    el.querySelector<HTMLButtonElement>("button[data-action=pair]")!.click();
+    expect(h.onPair).toHaveBeenCalledWith("office.local", 5000, "laptop", "48392");
   });
 
   it("disables the listen toggle with a note when the role is assistant", () => {

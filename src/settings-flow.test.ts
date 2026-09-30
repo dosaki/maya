@@ -162,6 +162,93 @@ describe("settings flow", () => {
     expect(document.querySelector(".settings__status--network")?.textContent).toBe("Connected to desk");
   });
 
+  it("keeps a half-typed pairing code across an unrelated repaint (a voice event)", async () => {
+    const config = {
+      completedTimeoutMinutes: 30,
+      projectsDir: null,
+      clonesDir: null,
+      notifyOnAwaiting: true,
+      speakNotifications: true,
+      voiceProvider: "builtin",
+      elevenlabsVoiceId: null,
+      listen: true,
+      microphone: null,
+      interpreterModel: "haiku",
+      network: { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [] },
+    };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "network_status") return Promise.resolve({ role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+
+    // Preview "Assistant" (unsaved) to reveal the pairing form.
+    const roleSel = document.querySelector<HTMLSelectElement>("select[name=networkRole]")!;
+    roleSel.value = "assistant";
+    roleSel.dispatchEvent(new Event("change"));
+
+    const code = document.querySelector<HTMLInputElement>("input[name=networkCode]")!;
+    code.value = "48392";
+    code.dispatchEvent(new Event("input"));
+
+    // A `voice` event with `listening` changed repaints the whole panel.
+    const onVoice = eventListen.mock.calls.find((c) => c[0] === "voice")![1] as (e: { payload: { listening: boolean } }) => void;
+    onVoice({ payload: { listening: false } });
+
+    expect(document.querySelector<HTMLInputElement>("input[name=networkCode]")!.value).toBe("48392");
+  });
+
+  it("shows a failed Pair's message in the status line", async () => {
+    const config = {
+      completedTimeoutMinutes: 30,
+      projectsDir: null,
+      clonesDir: null,
+      notifyOnAwaiting: true,
+      speakNotifications: true,
+      voiceProvider: "builtin",
+      elevenlabsVoiceId: null,
+      listen: false,
+      microphone: null,
+      interpreterModel: "haiku",
+      network: { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [] },
+    };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "network_status") return Promise.resolve({ role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "network_pair") return Promise.reject("Wrong or expired pairing code.");
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+
+    const roleSel = document.querySelector<HTMLSelectElement>("select[name=networkRole]")!;
+    roleSel.value = "assistant";
+    roleSel.dispatchEvent(new Event("change"));
+    // A never-paired machine has no status line until an attempt fails.
+    expect(document.querySelector(".settings__status--network")).toBeNull();
+
+    const host = document.querySelector<HTMLInputElement>("input[name=networkHost]")!;
+    host.value = "desk.local";
+    host.dispatchEvent(new Event("input"));
+    const code = document.querySelector<HTMLInputElement>("input[name=networkCode]")!;
+    code.value = "000000";
+    code.dispatchEvent(new Event("input"));
+
+    document.querySelector<HTMLButtonElement>("button[data-action=pair]")!.click();
+    await flush();
+    expect(document.querySelector(".settings__status--network")?.textContent).toBe("Wrong or expired pairing code.");
+  });
+
   it("ignores a voice-model event for another id when nothing is downloading", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "builtin", whisperModel: "tiny.en" };
     invoke.mockImplementation((cmd: string) => {

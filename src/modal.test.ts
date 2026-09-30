@@ -232,6 +232,33 @@ describe("renderModal", () => {
     expect(local.querySelector(".card__remote")).toBeNull();
   });
 
+  it("never suggests the terminal in the awaiting banner for a remote card, naming the machine instead", () => {
+    const h = handlers();
+    const permission = renderModal(
+      { card: { ...base, machine: "laptop", state: "awaiting" as const, awaiting: { kind: "permission" as const, detail: "Bash: rm", questions: [] } }, turns: [], status: null, draft: "" },
+      h,
+    );
+    expect(permission.querySelector(".modal__banner")?.textContent).not.toContain("terminal");
+    expect(permission.querySelector(".modal__banner")?.textContent).toContain("waiting for a decision on laptop");
+
+    const prose = renderModal(
+      {
+        card: { ...base, machine: "laptop", state: "awaiting" as const, awaiting: { kind: "text" as const, detail: "Create it as drafted?", questions: [] } },
+        turns: [],
+        status: null,
+        draft: "",
+      },
+      h,
+    );
+    expect(prose.querySelector(".modal__banner")?.textContent).not.toContain("terminal");
+    expect(prose.querySelector(".modal__banner")?.textContent).toContain("Reply below.");
+
+    const asking = { ...base, machine: "laptop", state: "awaiting" as const, stateSince: 5000, awaiting: { kind: "question" as const, detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "" }] }] } };
+    const question = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000);
+    expect(question.querySelector(".modal__banner")?.textContent).not.toContain("terminal");
+    expect(question.querySelector(".modal__banner")?.textContent).toContain("Pick an answer here.");
+  });
+
   it("closes on backdrop click and on the close button", () => {
     const h = handlers();
     const el = renderModal({ card: base, turns: [], status: null, draft: "" }, h);
