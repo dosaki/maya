@@ -1064,22 +1064,24 @@ mod tests {
     #[test]
     fn changing_the_recogniser_restarts_a_running_listener() {
         use crate::config::{Config, Recognizer};
-        let off = Config::default();
-        let on = Config { listen: true, ..Default::default() };
-        let on_builtin = Config { listen: true, recognizer: Recognizer::Builtin, ..Default::default() };
-        let on_tiny = Config { listen: true, recognizer: Recognizer::Builtin, whisper_model: "tiny.en".into(), ..Default::default() };
-        let on_mic = Config { listen: true, microphone: Some("USB".into()), ..Default::default() };
+        // Starts from System, which Windows does not have, to cover both.
+        let base = Config { recognizer: Recognizer::System, ..Default::default() };
+        let off = base.clone();
+        let on = Config { listen: true, ..base.clone() };
+        let on_builtin = Config { listen: true, recognizer: Recognizer::Builtin, ..base.clone() };
+        let on_tiny = Config { listen: true, recognizer: Recognizer::Builtin, whisper_model: "tiny.en".into(), ..base.clone() };
+        let on_mic = Config { listen: true, microphone: Some("USB".into()), ..base.clone() };
         assert_eq!(listening_change(&off, &on), ListenChange::Start);
         assert_eq!(listening_change(&on, &off), ListenChange::Stop);
         assert_eq!(listening_change(&on, &on_builtin), ListenChange::Restart);
         assert_eq!(listening_change(&on_builtin, &on_tiny), ListenChange::Restart);
         assert_eq!(listening_change(&on, &on_mic), ListenChange::Restart);
-        assert_eq!(listening_change(&off, &Config { recognizer: Recognizer::Builtin, ..Default::default() }), ListenChange::None, "no run to restart while off");
-        assert_eq!(listening_change(&on, &Config { listen: true, completed_timeout_minutes: 5, ..Default::default() }), ListenChange::None);
+        assert_eq!(listening_change(&off, &Config { recognizer: Recognizer::Builtin, ..base.clone() }), ListenChange::None, "no run to restart while off");
+        assert_eq!(listening_change(&on, &Config { listen: true, completed_timeout_minutes: 5, ..base.clone() }), ListenChange::None);
         // The model picker is hidden under System: a stale whisperModel
         // value changing must not restart a System listener.
         assert_eq!(
-            listening_change(&on, &Config { listen: true, whisper_model: "tiny.en".into(), ..Default::default() }),
+            listening_change(&on, &Config { listen: true, whisper_model: "tiny.en".into(), ..base.clone() }),
             ListenChange::None,
             "a model change under System is not a restart"
         );

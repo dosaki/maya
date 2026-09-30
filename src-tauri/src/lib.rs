@@ -856,7 +856,7 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
             return Err(format!("Projects directory does not exist: {}.", dir.display()));
         }
     }
-    let mut config = config;
+    let mut config = config.for_this_platform();
     // The main notifies and listens for an assistant.
     if config.network.role == config::NetworkRole::Assistant {
         config.listen = false;

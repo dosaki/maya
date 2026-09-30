@@ -76,19 +76,21 @@ pub fn pick_microphone(names: &[String], preferred: Option<&str>) -> Option<Stri
 }
 
 /// The sidecar next to the running executable (a bundled app), else the dev
-/// build under `<manifest>/binaries/` when a manifest dir is given.
-pub fn sidecar_path_in(exe_dir: &Path, triple: &str, manifest_dir: Option<&Path>) -> Option<PathBuf> {
-    let bundled = exe_dir.join("maya-ear");
+/// build under `<manifest>/binaries/` when a manifest dir is given. `exe` is
+/// the platform's executable suffix (`.exe` on Windows).
+pub fn sidecar_path_in(exe_dir: &Path, triple: &str, exe: &str, manifest_dir: Option<&Path>) -> Option<PathBuf> {
+    let bundled = exe_dir.join(format!("maya-ear{exe}"));
     if bundled.is_file() {
         return Some(bundled);
     }
-    let dev = manifest_dir?.join("binaries").join(format!("maya-ear-{triple}"));
+    let dev = manifest_dir?.join("binaries").join(format!("maya-ear-{triple}{exe}"));
     dev.is_file().then_some(dev)
 }
 
 pub fn sidecar_path() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let triple = format!("{}-apple-darwin", std::env::consts::ARCH);
+    // The triple this app was built for, as Tauri names sidecars.
+    let triple = env!("MAYA_TARGET_TRIPLE");
     // Only a debug build looks in the source tree; a release build would
     // otherwise carry the build machine's path (cfg, not cfg!, so the
     // string is not compiled in at all).
@@ -96,7 +98,7 @@ pub fn sidecar_path() -> Option<PathBuf> {
     let manifest = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
     #[cfg(not(debug_assertions))]
     let manifest = None;
-    sidecar_path_in(&exe_dir, &triple, manifest)
+    sidecar_path_in(&exe_dir, triple, std::env::consts::EXE_SUFFIX, manifest)
 }
 
 /// Delay before restarting a listener that exited, by consecutive failure count.
@@ -224,14 +226,28 @@ mod tests {
         let exe_dir = t.path().join("Contents/MacOS");
         std::fs::create_dir_all(&exe_dir).unwrap();
         std::fs::write(exe_dir.join("maya-ear"), "").unwrap();
-        assert_eq!(sidecar_path_in(&exe_dir, "aarch64-apple-darwin", Some(t.path())), Some(exe_dir.join("maya-ear")));
+        assert_eq!(sidecar_path_in(&exe_dir, "aarch64-apple-darwin", "", Some(t.path())), Some(exe_dir.join("maya-ear")));
         std::fs::remove_file(exe_dir.join("maya-ear")).unwrap();
         let dev = t.path().join("binaries");
         std::fs::create_dir_all(&dev).unwrap();
         std::fs::write(dev.join("maya-ear-aarch64-apple-darwin"), "").unwrap();
-        assert_eq!(sidecar_path_in(&exe_dir, "aarch64-apple-darwin", Some(t.path())), Some(dev.join("maya-ear-aarch64-apple-darwin")));
-        assert_eq!(sidecar_path_in(&exe_dir, "aarch64-apple-darwin", None), None, "a release build never looks in the build machine's tree");
+        assert_eq!(sidecar_path_in(&exe_dir, "aarch64-apple-darwin", "", Some(t.path())), Some(dev.join("maya-ear-aarch64-apple-darwin")));
+        assert_eq!(sidecar_path_in(&exe_dir, "aarch64-apple-darwin", "", None), None, "a release build never looks in the build machine's tree");
         std::fs::remove_file(dev.join("maya-ear-aarch64-apple-darwin")).unwrap();
-        assert_eq!(sidecar_path_in(&exe_dir, "aarch64-apple-darwin", Some(t.path())), None);
+        assert_eq!(sidecar_path_in(&exe_dir, "aarch64-apple-darwin", "", Some(t.path())), None);
+    }
+
+    #[test]
+    fn windows_sidecars_carry_the_exe_suffix() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join("maya-ear"), "").unwrap();
+        assert_eq!(sidecar_path_in(t.path(), "x86_64-pc-windows-msvc", ".exe", None), None, "no suffix is not the Windows sidecar");
+        std::fs::write(t.path().join("maya-ear.exe"), "").unwrap();
+        assert_eq!(sidecar_path_in(t.path(), "x86_64-pc-windows-msvc", ".exe", None), Some(t.path().join("maya-ear.exe")));
+        let dev = t.path().join("binaries");
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::remove_file(t.path().join("maya-ear.exe")).unwrap();
+        std::fs::write(dev.join("maya-ear-x86_64-pc-windows-msvc.exe"), "").unwrap();
+        assert_eq!(sidecar_path_in(t.path(), "x86_64-pc-windows-msvc", ".exe", Some(t.path())), Some(dev.join("maya-ear-x86_64-pc-windows-msvc.exe")));
     }
 }

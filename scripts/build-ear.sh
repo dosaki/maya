@@ -6,6 +6,16 @@ target="${1:-$(rustc -vV | sed -n 's/^host: //p')}"
 case "$target" in
   aarch64-apple-darwin) arch=arm64 ;;
   x86_64-apple-darwin) arch=x86_64 ;;
+  *-pc-windows-msvc)
+    # Windows: the Rust ear (whisper.cpp built in) and the hook, named the
+    # way Tauri looks for sidecars.
+    mkdir -p src-tauri/binaries
+    cargo build --release --target "$target" -p maya-ear -p maya-hook
+    for bin in maya-ear maya-hook; do
+      cp "target/$target/release/$bin.exe" "src-tauri/binaries/$bin-$target.exe"
+      echo "built src-tauri/binaries/$bin-$target.exe"
+    done
+    exit 0 ;;
   *) echo "unsupported target $target" >&2; exit 1 ;;
 esac
 sh scripts/fetch-whisper.sh
