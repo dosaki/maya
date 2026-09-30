@@ -5,8 +5,8 @@
 //! while the interpreter runs; take what is needed, release, then act.
 
 use crate::store::now_ms;
-use crate::{answer, config, ear, eleven_settings, focus, interpreter, launch, log, notify, wake};
-use crate::{answer_question, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, type_into_session, AppState};
+use crate::{config, ear, eleven_settings, focus, interpreter, launch, log, notify, wake};
+use crate::{answer_question, compact_session, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, AppState};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 
@@ -179,7 +179,9 @@ fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String,
             Ok("Done.".into())
         }
         "compact" => {
-            type_into_session(&state, &session, answer::COMPACT)?;
+            // Routed like reply/answer: a remote card's compact must run on
+            // its own machine, never typed into a local (nonexistent) tty.
+            compact_session(app.clone(), state.clone(), session)?;
             Ok("Compacting.".into())
         }
         "reply" => {
