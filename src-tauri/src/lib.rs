@@ -617,16 +617,30 @@ fn answer_question(app: AppHandle, state: TauriState<AppState>, session_id: Stri
     Ok(())
 }
 
-/// Opens the session's pull request in the browser. The URL comes from the
-/// PR cache, never from the page.
+/// The pull request link to open for `card`: only a web address, since a
+/// remote card's link comes from its assistant and `open` also takes file
+/// paths and app schemes.
+fn pr_link(card: &Card) -> Result<String, String> {
+    let pr = card.pr.as_ref().ok_or("No pull request is known for this session yet.")?;
+    if !attachments::is_web_url(&pr.url) {
+        return Err("That pull request's link is not a web address.".into());
+    }
+    Ok(pr.url.trim().to_string())
+}
+
+/// Opens the session's pull request in the browser, on this Mac. The URL
+/// comes from the PR cache (or, for a remote card, the assistant's card),
+/// never from the page.
 #[tauri::command(async)]
 fn open_pr(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
-    let card = {
+    let card = if remote_machine_of(&state, &session_id).is_some() {
+        merged_cards(&state).into_iter().find(|c| c.session_id == session_id && c.machine.is_some()).ok_or("Session is no longer running.")?
+    } else {
         let mut store = state.store.lock().unwrap();
         store.card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?
     };
-    let pr = card.pr.ok_or("No pull request is known for this session yet.")?;
-    let ok = std::process::Command::new("open").arg(&pr.url).status().map_err(|e| format!("could not open the browser: {e}"))?;
+    let url = pr_link(&card)?;
+    let ok = std::process::Command::new("open").arg(&url).status().map_err(|e| format!("could not open the browser: {e}"))?;
     if ok.success() {
         Ok(())
     } else {
@@ -1124,6 +1138,30 @@ mod route_tests {
         assert_eq!(err, "The file is too large (over 20 MB).");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_pull_request_link_opens_only_when_it_is_a_web_address() {
+        let card = |url: &str| Card {
+            session_id: "r1".into(),
+            pid: 1,
+            name: "x".into(),
+            cwd: "/x".into(),
+            state: model::State::Idle,
+            state_since: 0,
+            snippet: "".into(),
+            awaiting: None,
+            has_inbox: true,
+            harness: model::Harness::ClaudeCode,
+            pr: Some(model::PullRequest { number: 7, url: url.into(), state: "open".into() }),
+            context: None,
+            machine: Some("laptop".into()),
+            stale: false,
+        };
+        assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));
+        assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
+        assert_eq!(pr_link(&card("/Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
+        assert_eq!(pr_link(&Card { pr: None, ..card("") }).unwrap_err(), "No pull request is known for this session yet.");
     }
 
     #[test]
