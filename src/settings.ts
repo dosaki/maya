@@ -802,6 +802,7 @@ export async function initSettings(): Promise<void> {
       applyNetworkConfig(c);
     });
 
+  let stale = false;
   const paint = () => panel.replaceChildren(renderSettings(model, handlers));
 
   const run = async (action: () => Promise<void>) => {
@@ -913,7 +914,17 @@ export async function initSettings(): Promise<void> {
     model.network = e.payload;
     if (!previewingAssistant) model.networkRole = e.payload.role;
     if (!panel.hidden) paint();
+    else stale = true;
   });
+
+  // Events that arrive while the tab is hidden update the model only; a
+  // repaint when the tab is shown brings the pane up to date.
+  new MutationObserver(() => {
+    if (!panel.hidden && stale) {
+      stale = false;
+      paint();
+    }
+  }).observe(panel, { attributes: true, attributeFilter: ["hidden"] });
 
   // The pairing code's countdown, and its end. Updated in place: a full
   // repaint here would wipe unsaved text in the other sections every 30 s.

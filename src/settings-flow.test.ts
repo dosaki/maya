@@ -291,6 +291,30 @@ describe("settings flow", () => {
     expect(document.querySelector(".settings__status--network")?.textContent).toBe("Wrong or expired pairing code.");
   });
 
+  it("repaints a hidden Settings tab when it is shown after a network event", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "system", whisperModel: "base.en-q5_1", network: { role: "main", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", token: "t" }] } };
+    const before = { role: "main", code: null, assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", connected: false, lastSeen: null, note: null }], assistant: { connected: false, mainName: null, error: null }, mainError: null };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "network_status") return Promise.resolve(before);
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    const panel = document.getElementById("settings")!;
+    expect(panel.hidden).toBe(true);
+    // The assistant connects while the Sessions tab is showing.
+    const onNetwork = eventListen.mock.calls.find((c) => c[0] === "network")![1] as (e: { payload: unknown }) => void;
+    onNetwork({ payload: { ...before, assistants: [{ ...before.assistants[0], connected: true, lastSeen: 1 }] } });
+    panel.hidden = false;
+    await flush();
+    expect(panel.textContent).toContain("Gnowee (macos) — Connected");
+    expect(panel.textContent).not.toContain("Never connected");
+  });
+
   it("ignores a voice-model event for another id when nothing is downloading", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "builtin", whisperModel: "tiny.en" };
     invoke.mockImplementation((cmd: string) => {
