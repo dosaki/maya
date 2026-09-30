@@ -137,3 +137,9 @@ export const STATE_LABEL: Record<CardState, string> = {
   completed: "Completed",
   idle: "Idle",
 };
+
+/** The remote glyph's tooltip: the machine's label, and its address unless the label already carries it. */
+export function remoteTitle(machine: string, address?: string | null): string {
+  if (!address || machine.includes(`(${address})`)) return `Runs on ${machine}`;
+  return `Runs on ${machine}, ${address}`;
+}

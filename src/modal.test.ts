@@ -244,6 +244,14 @@ describe("renderModal", () => {
     expect(local.querySelector(".card__remote")).toBeNull();
   });
 
+  it("names the machine's address in the header glyph's tooltip, once", () => {
+    const h = handlers();
+    const plain = renderModal({ card: { ...base, machine: "Gnowee", machineAddress: "192.168.55.70" }, turns: [], status: null, draft: "" }, h);
+    expect(plain.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee, 192.168.55.70");
+    const twin = renderModal({ card: { ...base, machine: "Gnowee (192.168.55.70)", machineAddress: "192.168.55.70" }, turns: [], status: null, draft: "" }, h);
+    expect(twin.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (192.168.55.70)");
+  });
+
   it("never suggests the terminal in the awaiting banner for a remote card, naming the machine instead", () => {
     const h = handlers();
     const permission = renderModal(

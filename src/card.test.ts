@@ -30,7 +30,8 @@ describe("renderCard: remote cards", () => {
 
   it("names the machine's address in the glyph's tooltip", () => {
     const el = renderCard({ ...base, machine: "Gnowee (192.168.55.70)", machineAddress: "192.168.55.70", stale: false }, 0);
-    expect(el.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (192.168.55.70), 192.168.55.70");
+    // A label that already carries the address does not repeat it.
+    expect(el.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (192.168.55.70)");
     const plain = renderCard({ ...base, machine: "Gnowee", machineAddress: "192.168.55.70", stale: false }, 0);
     expect(plain.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee, 192.168.55.70");
   });

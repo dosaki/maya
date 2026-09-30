@@ -9,7 +9,7 @@ import { EFFORT_CHOICES, MODEL_CHOICES, renderChoice } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
 import { harnessBadge } from "./harness";
-import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, type Card, type Turn } from "./types";
+import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, remoteTitle, type Card, type Turn } from "./types";
 
 export interface ModalModel {
   card: Card;
@@ -153,7 +153,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   titles.append(renderTitle(m.card.name, h, claude));
   if (m.card.machine) {
     const remote = el("span", "card__remote");
-    remote.title = `Runs on ${m.card.machine}`;
+    remote.title = remoteTitle(m.card.machine, m.card.machineAddress);
     remote.append(iconElement("remote", 12));
     titles.append(remote);
   }

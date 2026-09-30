@@ -121,7 +121,8 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
   connected assistant's cards, in the same columns and order rules.
 - A remote card shows a small remote glyph after its name, the machine's
   label as its subtitle, "Runs on <label>, <address>" as the glyph's
-  tooltip, and no Terminal button. Everything else on the card and in its modal works: the
+  tooltip (the card's and the modal header's; just "Runs on <label>" when
+  the label already carries the address), and no Terminal button. Everything else on the card and in its modal works: the
   conversation (fetched with `history`), reply with attachments, answer
   buttons, compact, rename, model, effort and mode.
 - Every session command in the app (`send_reply`, `answer_question`,

@@ -2,7 +2,7 @@ import { formatAge, projectName } from "./format";
 import { OPEN_DELAY_MS, renderOptions } from "./options";
 import { harnessBadge } from "./harness";
 import { iconButton, iconElement } from "./icons";
-import { COMPACT_AT, compactButton, contextMeter, prButton, type Card } from "./types";
+import { COMPACT_AT, compactButton, contextMeter, prButton, remoteTitle, type Card } from "./types";
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -23,7 +23,7 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   head.append(el("span", "card__name", card.name));
   if (card.machine) {
     const remote = el("span", "card__remote");
-    remote.title = card.machineAddress ? `Runs on ${card.machine}, ${card.machineAddress}` : `Runs on ${card.machine}`;
+    remote.title = remoteTitle(card.machine, card.machineAddress);
     remote.append(iconElement("remote", 12));
     head.append(remote);
   }
