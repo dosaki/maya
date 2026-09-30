@@ -46,6 +46,7 @@ const MAX_CONNECTIONS: usize = 32;
 const MAX_PRE_AUTH: usize = 8;
 /// A connection must get through `welcome` within this, from accept.
 const PRE_AUTH_DEADLINE: Duration = Duration::from_secs(10);
+/// What `fail_pending` answers; `send_command_with` names the machine.
 const DISCONNECTED: &str = "assistant disconnected";
 
 /// What the server tells the app; the Tauri adapter lives in `lib.rs`.
@@ -846,12 +847,13 @@ pub fn send_command_with(shared: &Arc<Mutex<Server>>, machine: &str, kind: Comma
     };
     log::line("network", format!("{machine}: command {id} {name}"));
     let out = match rx.recv_timeout(timeout) {
+        Ok(Err(e)) if e == DISCONNECTED => Err(format!("{machine} disconnected before answering.")),
         Ok(r) => r,
         Err(RecvTimeoutError::Timeout) => {
             lock(shared).pending.remove(&id);
             Err(format!("{machine} did not answer in time"))
         }
-        Err(RecvTimeoutError::Disconnected) => Err(DISCONNECTED.into()),
+        Err(RecvTimeoutError::Disconnected) => Err(format!("{machine} disconnected before answering.")),
     };
     if let Err(e) = &out {
         log::line("network", format!("{machine}: command {id} {name} failed: {e}"));
@@ -1038,7 +1040,7 @@ mod tests {
         assert!(matches!(recv(&mut ws), Down::Command { .. }));
         drop(ws);
         let err = t.join().unwrap().unwrap_err();
-        assert!(err.contains("disconnected"), "{err}");
+        assert_eq!(err, "desk disconnected before answering.");
         wait_until(|| handle.boards().iter().any(|b| b.machine == "desk" && !b.connected));
         assert!(!handle.status().assistants[0].connected);
         // A wrong MAC is refused.
