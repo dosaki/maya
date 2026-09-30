@@ -23,6 +23,10 @@ pub struct PairedAssistant {
     /// authentication; what tells two machines apart (names are labels).
     #[serde(default)]
     pub address: String,
+    /// When it last connected or disconnected (epoch millis), so a main
+    /// restarted since still says when it last saw it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
@@ -294,10 +298,10 @@ mod tests {
         c.network.role = NetworkRole::Assistant;
         c.network.main_host = "10.0.0.2".into();
         c.network.token = "abc".into();
-        c.network.assistants.push(PairedAssistant { id: "x".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "192.168.55.70".into() });
+        c.network.assistants.push(PairedAssistant { id: "x".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "192.168.55.70".into(), last_seen: Some(1_700_000_000_000) });
         let text = serde_json::to_string(&c).unwrap();
         assert!(text.contains("\"role\":\"assistant\"") && text.contains("\"mainHost\":\"10.0.0.2\"") && text.contains("\"assistants\":[{"), "{text}");
-        assert!(text.contains("\"address\":\"192.168.55.70\""), "{text}");
+        assert!(text.contains("\"address\":\"192.168.55.70\"") && text.contains("\"lastSeen\":1700000000000"), "{text}");
         assert_eq!(serde_json::from_str::<Config>(&text).unwrap(), c);
     }
 
@@ -305,5 +309,6 @@ mod tests {
     fn a_paired_assistant_saved_before_addresses_loads_without_one() {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "network": {"assistants": [{"id": "x", "name": "laptop", "hostname": "h", "platform": "macos", "token": "t"}]}}"#).unwrap();
         assert_eq!(c.network.assistants[0].address, "");
+        assert_eq!(c.network.assistants[0].last_seen, None);
     }
 }

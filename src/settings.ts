@@ -143,7 +143,7 @@ interface NetworkConfigJson {
   name: string;
   assistantId: string;
   token: string;
-  assistants: { id: string; name: string; hostname: string; platform: string; token: string; address?: string }[];
+  assistants: { id: string; name: string; hostname: string; platform: string; token: string; address?: string; lastSeen?: number | null }[];
 }
 
 interface ConfigJson {

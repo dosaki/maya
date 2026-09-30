@@ -151,7 +151,7 @@ impl Server {
     fn record_pairing(&mut self, address: &str, name: &str, hostname: &str, platform: &str) -> (PairedAssistant, Option<PairedAssistant>) {
         let again = self.paired.iter().position(|p| p.address == address && !self.conns.contains_key(&p.id));
         let Some(i) = again else {
-            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token(), address: address.into() };
+            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token(), address: address.into(), last_seen: None };
             self.paired.push(a.clone());
             return (a, None);
         };
@@ -186,19 +186,16 @@ impl Server {
         self.sync_boards();
     }
 
-    /// Brings a paired entry up to date with what its machine just said and
-    /// the address it connected from; true when anything changed.
-    fn refresh_entry(&mut self, id: &str, address: &str, name: &str, hostname: &str, platform: &str) -> bool {
-        let Some(p) = self.paired.iter_mut().find(|p| p.id == id) else { return false };
-        let fresh = (address, name, hostname, platform);
-        if (p.address.as_str(), p.name.as_str(), p.hostname.as_str(), p.platform.as_str()) == fresh {
-            return false;
+    /// Brings a paired entry up to date as its machine connects: the address
+    /// it connected from, the names it just gave, and when that was.
+    fn refresh_entry(&mut self, id: &str, address: &str, name: &str, hostname: &str, platform: &str, now_ms: u64) {
+        if let Some(p) = self.paired.iter_mut().find(|p| p.id == id) {
+            p.address = address.into();
+            p.name = name.into();
+            p.hostname = hostname.into();
+            p.platform = platform.into();
+            p.last_seen = Some(now_ms);
         }
-        p.address = address.into();
-        p.name = name.into();
-        p.hostname = hostname.into();
-        p.platform = platform.into();
-        true
     }
 
     fn label(&self, id: &str) -> String {
@@ -253,7 +250,7 @@ impl Server {
             .zip(labels)
             .map(|(p, (_, name))| {
                 let peer = self.peers.get(&p.id);
-                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: self.conns.contains_key(&p.id), last_seen: peer.map(|x| x.last_seen), note: peer.and_then(Peer::note) }
+                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: self.conns.contains_key(&p.id), last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note) }
             })
             .collect();
         NetworkStatus { role: NetworkRole::Main, code, assistants, ..Default::default() }
@@ -620,15 +617,17 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         if s.is_paired(&id) {
             let serial = s.next();
             // The entry follows the machine: its address, and the names it just gave.
-            let changed = s.refresh_entry(&id, &ip, &name, &hostname, &platform);
-            s.peers.insert(id.clone(), Peer { app, last_seen: now_ms(), unreadable_board: false });
+            let now = now_ms();
+            s.refresh_entry(&id, &ip, &name, &hostname, &platform, now);
+            s.peers.insert(id.clone(), Peer { app, last_seen: now, unreadable_board: false });
             // A newer connection replaces an older one; dropping its sender ends it.
             s.conns.insert(id.clone(), Conn { tx, serial });
             if let Some(b) = s.by_id.get_mut(&id) {
                 b.connected = true;
             }
             s.sync_boards();
-            Some((serial, s.label(&id), changed.then(|| s.paired.clone())))
+            // A fresh pairing is saved after `welcome`, below.
+            Some((serial, s.label(&id), pairing.is_none().then(|| s.paired.clone())))
         } else {
             None
         }
@@ -647,14 +646,18 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         c.max_frame_size = Some(MAX_FRAME);
     });
     if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone(), mac: proof }) {
-        leave(ctx, &link, &e);
+        // Undone first, so `leave` never saves the pairing it takes back.
         if let Some(p) = pairing {
             p.undo(ctx, &e);
         }
+        leave(ctx, &link, &e);
         return None;
     }
-    if let Some(p) = &pairing {
-        ctx.notify.paired(&p.entry);
+    if pairing.is_some() {
+        let entry = lock(&ctx.shared).paired.iter().find(|p| p.id == link.id).cloned();
+        if let Some(entry) = entry {
+            ctx.notify.paired(&entry);
+        }
     }
     log::line("network", format!("{}: connected from {ip}", link.label));
     ctx.announce();
@@ -899,9 +902,10 @@ fn mark_board(ctx: &Ctx, link: &Link, unreadable: bool) {
     }
 }
 
-/// Forgets a closed connection: its board greys, its commands fail.
+/// Forgets a closed connection: its board greys, its commands fail, and
+/// when it was last seen is saved.
 fn leave(ctx: &Ctx, link: &Link, reason: &str) {
-    let current = {
+    let (current, list) = {
         let mut s = lock(&ctx.shared);
         let current = s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial);
         if current {
@@ -910,12 +914,18 @@ fn leave(ctx: &Ctx, link: &Link, reason: &str) {
                 b.connected = false;
             }
             s.sync_boards();
+            let seen = s.peers.get(&link.id).map_or_else(now_ms, |p| p.last_seen);
+            if let Some(p) = s.paired.iter_mut().find(|p| p.id == link.id) {
+                p.last_seen = Some(seen);
+            }
         }
         s.fail_pending(link.serial);
-        current
+        (current, s.paired.clone())
     };
     log::line("network", format!("{}: disconnected ({reason})", link.label));
+    // A stopped server's list is no longer the truth: a new one may be running.
     if current && !ctx.stopped() {
+        ctx.notify.paired_list_changed(&list);
         ctx.announce();
         ctx.notify.board_changed();
     }
@@ -1001,9 +1011,10 @@ mod tests {
         pub boards: AtomicUsize,
         pub statuses: AtomicUsize,
         pub paired: AtomicUsize,
-        pub lists: AtomicUsize,
         /// Session ids announced (asks and finished turns), in order.
         pub announced: Mutex<Vec<String>>,
+        /// The paired list as last saved.
+        pub saved: Mutex<Vec<crate::config::PairedAssistant>>,
         notifier: Mutex<crate::notify::Notifier>,
         server: std::sync::OnceLock<Arc<Mutex<Server>>>,
     }
@@ -1027,8 +1038,8 @@ mod tests {
         fn paired(&self, _: &crate::config::PairedAssistant) {
             self.paired.fetch_add(1, Ordering::SeqCst);
         }
-        fn paired_list_changed(&self, _: &[crate::config::PairedAssistant]) {
-            self.lists.fetch_add(1, Ordering::SeqCst);
+        fn paired_list_changed(&self, list: &[crate::config::PairedAssistant]) {
+            *self.saved.lock().unwrap() = list.to_vec();
         }
     }
 
@@ -1197,7 +1208,7 @@ mod tests {
         assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == "removed"));
         assert!(handle.boards().is_empty());
         assert!(handle.status().assistants.is_empty());
-        assert_eq!(counter.lists.load(Ordering::SeqCst), 1);
+        assert!(counter.saved.lock().unwrap().is_empty(), "the removal is saved");
         let mut again = connect(port);
         hello(&mut again, "desk", Some(&id));
         assert!(matches!(recv(&mut again), Down::Bye { reason } if reason == "removed"));
@@ -1284,9 +1295,8 @@ mod tests {
         assert_eq!(s.paired.len(), 3);
         assert_ne!(third.id, other.id);
         // Authentication brings the entry up to date: a new address, a new name.
-        assert!(s.refresh_entry(&first.id, "192.168.55.80", "Gnowee", "TKC-0176", "macos"));
-        assert!(!s.refresh_entry(&first.id, "192.168.55.80", "Gnowee", "TKC-0176", "macos"), "nothing new: nothing to save");
-        assert_eq!(s.paired[0].address, "192.168.55.80");
+        s.refresh_entry(&first.id, "192.168.55.80", "Gnowee", "TKC-0176", "macos", 7);
+        assert_eq!((s.paired[0].address.as_str(), s.paired[0].last_seen), ("192.168.55.80", Some(7)));
         // A pairing the assistant never completed is taken back.
         s.undo_pairing(&third.id, None);
         assert_eq!(s.paired.len(), 2);
@@ -1351,6 +1361,23 @@ mod tests {
         assert_eq!(counter.paired.load(Ordering::SeqCst), 0, "nothing was saved");
         assert!(handle.status().code.is_none(), "the main read the code and paired, then took the pairing back");
         handle.stop();
+    }
+
+    #[test]
+    fn when_an_assistant_was_last_seen_is_saved_and_shown_after_a_restart() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (ws, id, _) = pair_client(&handle, port, "desk");
+        drop(ws);
+        wait_until(|| !handle.status().assistants[0].connected && counter.saved.lock().unwrap().iter().any(|p| p.id == id && p.last_seen.is_some()));
+        let saved = counter.saved.lock().unwrap().clone();
+        assert_eq!(handle.status().assistants[0].last_seen, saved[0].last_seen);
+        handle.stop();
+        let restarted = start_with(Arc::new(Counter::default()), Arc::new(Mutex::new(NetworkConfig { assistants: saved.clone(), ..Default::default() })), 0).unwrap();
+        let status = restarted.status();
+        assert!(!status.assistants[0].connected);
+        assert_eq!(status.assistants[0].last_seen, saved[0].last_seen, "a restarted main still says when it last saw it");
+        restarted.stop();
     }
 
     #[test]
