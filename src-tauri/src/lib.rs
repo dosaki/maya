@@ -1,35 +1,14 @@
-pub mod answer;
-pub mod antigravity;
-pub mod attachments;
-pub mod codex;
-pub mod config;
+pub use maya_core::{answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, launch, log, model, net, notify, pr, registry, resume, reviews, state, store, transcript, tty, watcher};
+
 pub mod dock;
 pub mod ear;
-pub mod foreign;
-pub mod grok;
-pub mod context;
-pub mod events;
 pub mod focus;
-pub mod hook_install;
-pub mod inbox;
-pub mod interpreter;
-pub mod launch;
 pub mod listener;
-pub mod log;
-pub mod model;
 pub mod models;
-pub mod net;
-pub mod notify;
-pub mod pr;
-pub mod registry;
-pub mod resume;
-pub mod reviews;
-pub mod state;
-pub mod store;
-pub mod transcript;
+pub mod net_app;
+pub mod terminal_app;
 pub mod voice;
 pub mod wake;
-pub mod watcher;
 
 use base64::Engine;
 use config::Config;
@@ -58,12 +37,12 @@ fn remote_machine_of(state: &AppState, session_id: &str) -> Option<String> {
 
 /// Sends `kind` to `machine` and discards its (empty) result.
 fn route_done(app: &AppHandle, machine: &str, kind: CommandKind) -> Result<(), String> {
-    net::server::send_command(app, machine, kind, ROUTE_TIMEOUT).map(|_| ())
+    net_app::send_command(app, machine, kind, ROUTE_TIMEOUT).map(|_| ())
 }
 
 /// Sends `kind` to `machine` and deserialises its result into `T`.
 fn route_data<T: for<'de> serde::Deserialize<'de>>(app: &AppHandle, machine: &str, kind: CommandKind) -> Result<T, String> {
-    let value = net::server::send_command(app, machine, kind, ROUTE_TIMEOUT)?;
+    let value = net_app::send_command(app, machine, kind, ROUTE_TIMEOUT)?;
     let value = value.ok_or("The assistant sent no result.")?;
     serde_json::from_value(value).map_err(|e| e.to_string())
 }
@@ -327,7 +306,7 @@ fn review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<S
     };
     let projects = projects.ok_or("Set a projects directory in Settings first.")?;
     let target = reviews::resolve_target(&projects, &clones, &pr.repo, pr.number, &live);
-    launch::open_terminal_with(&reviews::shell_command(&target, &pr.repo, pr.number))?;
+    terminal_app::open_terminal_with(&reviews::shell_command(&target, &pr.repo, pr.number))?;
     Ok(target.dir.to_string_lossy().into_owned())
 }
 
@@ -391,7 +370,7 @@ fn refresh_and_emit(app: &AppHandle) {
     }
     let _ = app.emit("sessions", &cards);
     if assistant {
-        net::client::push_board(app);
+        net_app::push_board(app);
     }
 }
 
@@ -478,13 +457,13 @@ fn start_main(app: &AppHandle, show_code: bool) {
     stop_main(app);
     let port = app.state::<AppState>().store.lock().unwrap().config.listen_port();
     // A server just stopped lets go of the port within a tick; retry briefly.
-    let mut started = net::server::start(app.clone(), port);
+    let mut started = net_app::start_server(app.clone(), port);
     for _ in 0..5 {
         if started.is_ok() {
             break;
         }
         std::thread::sleep(Duration::from_millis(150));
-        started = net::server::start(app.clone(), port);
+        started = net_app::start_server(app.clone(), port);
     }
     match started {
         Ok(handle) => {
@@ -531,7 +510,7 @@ fn stop_main(app: &AppHandle) {
 
 /// Starts the assistant's client with the stored link, replacing any running one.
 fn start_assistant(app: &AppHandle) {
-    let handle = net::client::start(app.clone());
+    let handle = net_app::start(app.clone());
     let displaced = {
         let state = app.state::<AppState>();
         let mut n = state.network.lock().unwrap();
@@ -579,7 +558,7 @@ fn network_pair(app: AppHandle, state: TauriState<AppState>, host: String, port:
     // it winds down (its notifier takes `network`).
     let running = state.network.lock().unwrap().client.take();
     let had_client = running.is_some();
-    if let Err(e) = net::client::pair_after_stopping(running, || net::client::pair(&app, host, port, &name, &code)) {
+    if let Err(e) = net::client::pair_after_stopping(running, || net_app::pair(&app, host, port, &name, &code)) {
         // The old pairing still stands: its client comes back.
         let assistant = state.store.lock().unwrap().config.network.role == config::NetworkRole::Assistant;
         if had_client && assistant {
@@ -850,7 +829,7 @@ fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, sess
     if !resume::transcript_exists(&claude_dir, &path.to_string_lossy(), &session_id) {
         return Err("No such session in that folder.".into());
     }
-    launch::open_terminal_with(&resume::resume_command(&path, &session_id))
+    terminal_app::open_terminal_with(&resume::resume_command(&path, &session_id))
 }
 
 #[tauri::command(async)]
@@ -884,7 +863,7 @@ fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String
     };
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
     let file = launch::write_prompt_file(&maya_dir, &prompt)?;
-    launch::open_terminal(&target, &file, &options)?;
+    terminal_app::open_terminal(&target, &file, &options)?;
     Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string() })
 }
 
@@ -1098,6 +1077,7 @@ pub fn run() {
             });
             log::line("app", format!("Maya {} started; log at {}", env!("CARGO_PKG_VERSION"), log_path.display()));
             focus::install_app_handle(app.handle().clone());
+            notify::set_eleven_speaker(voice::speak);
             listener::install_speech_hook(app.handle().clone());
             dock::set_dock_icon();
             let handle = app.handle().clone();

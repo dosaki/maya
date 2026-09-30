@@ -63,7 +63,7 @@ pub struct Config {
     pub speak_notifications: bool,
     /// Which voice speaks: the built-in one or ElevenLabs.
     #[serde(default)]
-    pub voice_provider: crate::voice::VoiceProvider,
+    pub voice_provider: VoiceProvider,
     /// The ElevenLabs voice to use; the key itself lives in the Keychain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elevenlabs_voice_id: Option<String>,
@@ -100,6 +100,18 @@ pub enum Recognizer {
 
 pub const DEFAULT_CLONES_DIR: &str = "~/dev/reviews";
 
+/// Which voice speaks Maya's lines: the built-in `say`, or ElevenLabs.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceProvider {
+    #[default]
+    Builtin,
+    Elevenlabs,
+}
+
+/// The whisper model used until the user picks another.
+pub const DEFAULT_MODEL: &str = "base.en-q5_1";
+
 fn default_true() -> bool {
     true
 }
@@ -109,7 +121,7 @@ fn default_interpreter_model() -> String {
 }
 
 fn default_whisper_model() -> String {
-    crate::models::DEFAULT_MODEL.into()
+    DEFAULT_MODEL.into()
 }
 
 impl Default for Config {
@@ -126,7 +138,7 @@ impl Default for Config {
             microphone: None,
             interpreter_model: "haiku".into(),
             recognizer: Recognizer::System,
-            whisper_model: crate::models::DEFAULT_MODEL.into(),
+            whisper_model: DEFAULT_MODEL.into(),
             network: NetworkConfig::default(),
         }
     }
@@ -235,10 +247,10 @@ mod tests {
 
     #[test]
     fn voice_provider_defaults_to_builtin_and_round_trips() {
-        assert_eq!(Config::default().voice_provider, crate::voice::VoiceProvider::Builtin);
+        assert_eq!(Config::default().voice_provider, VoiceProvider::Builtin);
         assert!(Config::default().elevenlabs_voice_id.is_none());
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "voiceProvider": "elevenlabs", "elevenlabsVoiceId": "abc"}"#).unwrap();
-        assert_eq!(c.voice_provider, crate::voice::VoiceProvider::Elevenlabs);
+        assert_eq!(c.voice_provider, VoiceProvider::Elevenlabs);
         assert_eq!(c.elevenlabs_voice_id.as_deref(), Some("abc"));
         let text = serde_json::to_string(&c).unwrap();
         assert!(text.contains("\"voiceProvider\":\"elevenlabs\""));

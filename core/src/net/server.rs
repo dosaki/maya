@@ -19,7 +19,7 @@
 //! are made with it held, so they land in the order the list changed and an
 //! older snapshot can never overwrite a newer one. Their adapter takes only
 //! `store`, which comes after the server's mutex in that order (`AppState`
-//! in lib.rs), and nothing takes the server's mutex while holding `store`.
+//! in the app's lib.rs), and nothing takes the server's mutex while holding `store`.
 
 use super::merge::{display_names, RemoteBoard};
 use super::protocol::{decode_up, encode, mac, mac_matches, new_id, new_nonce, new_token, Attempts, CommandKind, Down, NonceLog, PairingWindow, Up, MAX_FRAME, PROTOCOL};
@@ -34,7 +34,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
 use tungstenite::handshake::HandshakeError;
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Message, WebSocket};
@@ -60,7 +59,7 @@ const DISCONNECTED: &str = "assistant disconnected";
 /// keeps nothing and says "The main could not save the pairing."
 pub(crate) const PAIRING_NOT_SAVED: &str = "could not save the pairing";
 
-/// What the server tells the app; the Tauri adapter lives in `lib.rs`.
+/// What the server tells the app; the Tauri adapter lives in the app's `lib.rs`.
 /// `paired` and `paired_list_changed` are called with the server's mutex
 /// held (see the module docs) and must not take it; the others never are.
 /// Both saves say whether they reached the disk: a pairing or a removal
@@ -397,12 +396,6 @@ impl ServerHandle {
             log::line("network", "server stopped");
         }
     }
-}
-
-/// Starts the server with the Tauri adapter and the store's paired list.
-pub fn start(app: AppHandle, port: u16) -> Result<ServerHandle, String> {
-    let view = app.state::<crate::AppState>().store.lock().unwrap().config.network.clone();
-    start_with(Arc::new(crate::TauriNetNotify { app }), Arc::new(Mutex::new(view)), port)
 }
 
 /// Binds `port` on every interface (0 picks a free one) and starts accepting.
@@ -1027,13 +1020,6 @@ pub fn send_command_with(shared: &Arc<Mutex<Server>>, machine: &str, kind: Comma
         log::line("network", format!("{machine}: command {id} {name} failed: {e}"));
     }
     out
-}
-
-/// `send_command_with` against the running server; an error when this Maya is not the main.
-pub fn send_command(app: &AppHandle, machine: &str, kind: CommandKind, timeout: Duration) -> Result<Option<Value>, String> {
-    let shared = app.state::<crate::AppState>().network.lock().unwrap().server.as_ref().map(|s| s.shared.clone());
-    let shared = shared.ok_or_else(|| format!("{machine} is not connected"))?;
-    send_command_with(&shared, machine, kind, timeout)
 }
 
 #[cfg(test)]

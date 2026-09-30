@@ -1,7 +1,8 @@
 # Developing Maya
 
-Maya is a Tauri 2 app: a Rust backend in `src-tauri/`, a vanilla TypeScript
-frontend in `src/` (vitest), and a Swift listener sidecar in `ear/`.
+Maya is a Tauri 2 app: a Rust backend in a Cargo workspace (`core/` and
+`src-tauri/`), a vanilla TypeScript frontend in `src/` (vitest), and a Swift
+listener sidecar in `ear/`.
 
 ## Requirements
 
@@ -16,7 +17,7 @@ frontend in `src/` (vitest), and a Swift listener sidecar in `ear/`.
     pnpm tauri dev      # run
     pnpm test           # frontend tests
     pnpm ear:test       # sidecar tests
-    cd src-tauri && cargo test   # Rust tests
+    cargo test --workspace   # Rust tests, from the repo root
 
 `pnpm ear:build` fetches whisper.cpp's prebuilt framework (53 MB, once, into
 `vendor/`, checked against a pinned sha256) and compiles `ear/main.swift`
@@ -26,24 +27,32 @@ exists, because Tauri bundles it as a sidecar.
 
     pnpm tauri build --bundles app
 
-puts `Maya.app` in `src-tauri/target/release/bundle/macos/`. The voice
+puts `Maya.app` in `target/release/bundle/macos/` (with `--target <triple>`,
+`target/<triple>/release/bundle/macos/Maya.app`). The voice
 features only work from a bundle: the sidecar, the whisper framework and
 the microphone and speech permissions are all tied to it.
 
 ## Layout
 
-- `src-tauri/src/` — `store.rs` (session cache), `state.rs` (card states),
+- `Cargo.toml` — the workspace: shared version, dependencies and release profile.
+- `core/` — `maya_core`, the platform-neutral core: no Tauri, no AppKit.
+- `src-tauri/` — `maya`, the app: Tauri commands, voice, focus and dock; depends on `maya_core`.
+- `core/src/` — `store.rs` (session cache), `state.rs` (card states),
   `watcher.rs`, `answer.rs` and `launch.rs` (Terminal automation),
   `inbox.rs` (Claude Code's session socket), `foreign.rs` with `codex.rs`,
   `antigravity.rs`, `grok.rs` (other agents), `reviews.rs` and `pr.rs`
-  (GitHub), `notify.rs` and `voice.rs` (speech output, ElevenLabs),
-  `ear.rs`, `wake.rs`, `interpreter.rs`, `listener.rs`, `models.rs` (the
-  voice assistant), `log.rs` (the Debug tab and `maya.log`), and `net/`
+  (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
+  `interpreter.rs`, `log.rs` (the Debug tab and `maya.log`), and `net/`
   with `protocol.rs` (message types, encode/decode, pairing and HMAC),
   `server.rs` (the main: listener, threads per assistant, pairing,
   command dispatch), `client.rs` (the assistant: connection, backoff,
-  board sending, command execution), and `merge.rs` (merging local and
-  remote cards, stale and expiry rules, routing).
+  board sending), and `merge.rs` (merging local and remote cards, stale
+  and expiry rules, routing).
+- `src-tauri/src/` — `lib.rs` (Tauri commands), `net_app.rs` (the network's
+  Tauri side: starting server and client, command execution),
+  `terminal_app.rs` (opening Terminal windows), `focus.rs` and `dock.rs`
+  (AppKit), `voice.rs` (ElevenLabs), and `ear.rs`, `wake.rs`,
+  `listener.rs`, `models.rs` (the voice assistant).
 - `src/` — `main.ts`, `board.ts`, `card.ts`, `modal.ts`, `reviews.ts`,
   `settings.ts`, `voice.ts`, `debug.ts`, `tabs.ts`.
 - `ear/` — `main.swift` (audio capture, the System and Whisper engines),

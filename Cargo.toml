@@ -1,0 +1,28 @@
+[workspace]
+members = ["core", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Tiago Correia"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+notify = "8"
+libc = "0.2"
+dirs = "6"
+tungstenite = "0.30"
+hmac = "0.13"
+sha2 = "0.11"
+rand = "0.10"
+base64 = "0.23"
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

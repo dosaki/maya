@@ -22,7 +22,7 @@ pub const MODELS: &[WhisperModel] = &[
     WhisperModel { id: "small.en-q5_1", file: "ggml-small.en-q5_1.bin", bytes: 190_098_681, sha256: "bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30", label: "Small, quantised (190 MB, most accurate)" },
 ];
 
-pub const DEFAULT_MODEL: &str = "base.en-q5_1";
+pub use maya_core::config::DEFAULT_MODEL;
 const BASE_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
 pub fn model(id: &str) -> Option<&'static WhisperModel> {

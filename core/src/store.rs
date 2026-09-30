@@ -83,7 +83,7 @@ impl Store {
             }
         }
         // Grok keeps a registry of its own: cheap to read every refresh.
-        let grok = foreign::grok_sessions(&self.grok_dir, &*self.alive, &|pid| crate::focus::tty_for_pid(pid).ok());
+        let grok = foreign::grok_sessions(&self.grok_dir, &*self.alive, &|pid| crate::tty::tty_for_pid(pid).ok());
         let grok_pids: std::collections::HashSet<i32> = grok.iter().map(|s| s.pid).collect();
         self.foreign.retain(|pid, s| s.harness != Harness::Grok || grok_pids.contains(pid));
         for s in grok {

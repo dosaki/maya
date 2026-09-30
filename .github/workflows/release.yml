@@ -38,7 +38,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -52,7 +52,7 @@ jobs:
         run: |
           pnpm test
           sh scripts/test-ear.sh
-          cd src-tauri && cargo test
+          cargo test --workspace
 
       # The version in src-tauri/tauri.conf.json is the release version
       # (`sh scripts/set-version.sh 0.2.0` sets it everywhere). A push whose
@@ -65,7 +65,7 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           pkg="$(node -p "require('./package.json').version")"
-          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
           if [ "$version" != "$pkg" ] || [ "$version" != "$cargo_version" ]; then
             echo "version mismatch: tauri.conf.json=$version package.json=$pkg Cargo.toml=$cargo_version" >&2
             echo "run: sh scripts/set-version.sh $version" >&2
@@ -132,7 +132,7 @@ jobs:
           mkdir -p dist-release
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             arch="${target%%-*}"
-            bundle="src-tauri/target/$target/release/bundle"
+            bundle="target/$target/release/bundle"
             tar -C "$bundle/macos" -czf "dist-release/Maya_${VERSION}_${arch}.app.tar.gz" Maya.app
             cp "$bundle"/dmg/*.dmg "dist-release/Maya_${VERSION}_${arch}.dmg"
           done

@@ -1,6 +1,8 @@
 use std::process::Command;
 use std::sync::OnceLock;
 
+pub use maya_core::tty::{tty_for_pid, tty_from_ps};
+
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 
 /// Remembers the app handle so activation can run on Maya's main thread.
@@ -33,15 +35,6 @@ fn activate_from_main_thread() -> Option<bool> {
     })
     .ok()?;
     rx.recv_timeout(std::time::Duration::from_secs(2)).ok()
-}
-
-/// Turns `ps -o tty= -p <pid>` output into `/dev/ttysNNN`.
-pub fn tty_from_ps(output: &str) -> Option<String> {
-    let t = output.trim();
-    if t.is_empty() || t == "??" || t == "-" {
-        return None;
-    }
-    Some(format!("/dev/{t}"))
 }
 
 /// Selects the tab on `tty` and puts its window first in Terminal's stack,
@@ -95,16 +88,6 @@ pub fn activate_terminal_via_osascript() -> Result<(), String> {
     }
 }
 
-/// `/dev/ttysNNN` of the terminal hosting `pid`.
-pub fn tty_for_pid(pid: i32) -> Result<String, String> {
-    let ps = Command::new("ps")
-        .args(["-o", "tty=", "-p", &pid.to_string()])
-        .output()
-        .map_err(|e| format!("could not run ps: {e}"))?;
-    let stdout = String::from_utf8_lossy(&ps.stdout);
-    tty_from_ps(&stdout).ok_or_else(|| format!("no tty for process {pid}"))
-}
-
 /// Brings the Terminal tab hosting `pid` to the front.
 pub fn focus_pid(pid: i32) -> Result<(), String> {
     let tty = tty_for_pid(pid)?;
@@ -130,14 +113,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_tty_from_ps_output() {
-        assert_eq!(tty_from_ps("ttys021 \n"), Some("/dev/ttys021".to_string()));
-        assert_eq!(tty_from_ps("  ttys007\n"), Some("/dev/ttys007".to_string()));
-        assert_eq!(tty_from_ps("??\n"), None);
-        assert_eq!(tty_from_ps(""), None);
-    }
-
-    #[test]
     fn applescript_targets_the_tty_without_activating() {
         let s = applescript_for("/dev/ttys021");
         assert!(s.contains("tell application \"Terminal\""));
@@ -156,11 +131,6 @@ mod tests {
         assert!(s.contains("com.apple.Terminal"));
         assert!(s.contains("NSApplicationActivateIgnoringOtherApps"));
         assert!(!s.contains("NSApplicationActivateAllWindows"));
-    }
-
-    #[test]
-    fn tty_for_pid_of_dead_process_is_an_error() {
-        assert!(tty_for_pid(2_000_000_000).is_err());
     }
 
     #[test]
