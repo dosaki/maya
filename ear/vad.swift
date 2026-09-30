@@ -11,8 +11,10 @@ enum VadEvent {
 /// Frames of 20 ms. Speech starts after `startLoudFrames` frames above the
 /// threshold and ends after `endQuietFrames` below it, or at `maxFrames`.
 /// The threshold follows the room: `floor` is the running minimum of frame
-/// RMS, nudged upward each frame so a change of room is forgotten in a
-/// minute or two; speech is `floor + margin`.
+/// RMS, nudged upward by `floorDecay` (0.0005) every 20 ms frame — 0.025
+/// RMS/s — so a quieter room is followed within a second or two, and a
+/// louder one immediately (`floor` is clamped down to `rms`, not decayed
+/// up to it); speech is `floor + margin`.
 struct Vad {
     static let frameSamples = 320
     static let preRollFrames = 15
