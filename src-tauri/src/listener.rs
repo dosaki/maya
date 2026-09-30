@@ -152,15 +152,28 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
     is_current(app, generation)
 }
 
+/// Why "focus" refuses a card that runs on another machine: its pid means
+/// nothing here, so the user is sent to open it there instead. None locally.
+fn remote_focus_refusal(machine: Option<&str>) -> Option<String> {
+    machine.map(|m| format!("That session runs on {m}; open it there."))
+}
+
 /// Runs a validated action through the same paths as the page's buttons;
 /// the Ok text is what Maya says after a confirmed action.
 fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String, String> {
     let state = app.state::<AppState>();
     let kind = action["kind"].as_str().unwrap_or("");
     let session = action["session"].as_str().unwrap_or("").to_string();
+    // The machine the validated action runs on; None (or blank) means local.
+    let machine = action["machine"].as_str().filter(|m| !m.is_empty()).map(str::to_string);
     match kind {
         "report" => Ok(String::new()),
         "focus" => {
+            // A remote card's pid is meaningless here: there is nothing local to
+            // bring forward, so send the user to the machine that has it.
+            if let Some(msg) = remote_focus_refusal(machine.as_deref()) {
+                return Err(msg);
+            }
             let pid = state.store.lock().unwrap().card_for(&session, now_ms()).map(|c| c.pid).ok_or("Session is no longer running.")?;
             focus::focus_pid(pid)?;
             Ok("Done.".into())
@@ -183,15 +196,15 @@ fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String,
         }
         "resume" => {
             let dir = action["dir"].as_str().unwrap_or("").to_string();
-            let sessions = list_resumable_sessions(app.clone(), state.clone(), dir.clone(), None)?;
+            let sessions = list_resumable_sessions(app.clone(), state.clone(), dir.clone(), machine.clone())?;
             let latest = sessions.into_iter().find(|s| !s.running).ok_or("Nothing to resume there.")?;
-            resume_session(app.clone(), state.clone(), dir, latest.id, None)?;
+            resume_session(app.clone(), state.clone(), dir, latest.id, machine)?;
             Ok("Resuming.".into())
         }
         "start" => {
             let dir = action["dir"].as_str().unwrap_or("").to_string();
             let prompt = action["prompt"].as_str().unwrap_or("").to_string();
-            start_session(app.clone(), state.clone(), Some(dir), prompt, launch::LaunchOptions::default(), None)?;
+            start_session(app.clone(), state.clone(), Some(dir), prompt, launch::LaunchOptions::default(), machine)?;
             Ok("Started.".into())
         }
         "review" => {
@@ -283,13 +296,22 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     if !started {
         return;
     }
-    let (cards, dirs, model, maya_dir) = {
+    let (dirs_local, model, maya_dir) = {
         let state = app.state::<AppState>();
-        let mut store = state.store.lock().unwrap();
-        let cards = store.refresh(now_ms());
-        let dirs = store.config.projects_dir_path().map(|r| launch::list_project_dirs(&r)).unwrap_or_default();
-        (cards, dirs, store.config.interpreter_model.clone(), store.claude_dir().join("maya"))
+        let store = state.store.lock().unwrap();
+        let dirs_local = store.config.projects_dir_path().map(|r| launch::list_project_dirs(&r)).unwrap_or_default();
+        (dirs_local, store.config.interpreter_model.clone(), store.claude_dir().join("maya"))
     };
+    // Cards and remote dirs come from the same merged board `list_sessions`
+    // shows, taken after `store` is released (lock order: `store` then `network`).
+    let state = app.state::<AppState>();
+    let cards = crate::merged_cards(&state);
+    let mut dirs = dirs_local;
+    for board in crate::remote_boards(&state).into_iter().filter(|b| b.connected) {
+        for d in &board.dirs {
+            dirs.push(format!("{d} (on {})", board.machine));
+        }
+    }
     let prs = app.state::<AppState>().reviews.lock().unwrap().prs.clone();
     let history = recent_exchanges(app);
     let Some(binary) = launch::claude_binary() else {
@@ -912,14 +934,17 @@ fn repo_name(repo: &str) -> &str {
 
 pub(crate) fn spoken_for(action: &serde_json::Value) -> Option<String> {
     let s = |k: &str| action[k].as_str().unwrap_or("").trim().to_string();
+    // " on <machine>" after the name (or the dir, for start/resume) when the
+    // action runs on a remote machine; nothing for a local one.
+    let on_machine = action["machine"].as_str().filter(|m| !m.is_empty()).map(|m| format!(" on {m}")).unwrap_or_default();
     Some(match action["kind"].as_str()? {
-        "reply" => format!("Telling {}: {} Yes?", s("name"), sentence(&s("text"))),
-        "answer" => format!("Answering {} with \"{}\". Yes?", s("name"), s("label")),
-        "start" => format!("Starting a session in {}: {} Yes?", s("dir"), sentence(&s("prompt"))),
+        "reply" => format!("Telling {}{on_machine}: {} Yes?", s("name"), sentence(&s("text"))),
+        "answer" => format!("Answering {}{on_machine} with \"{}\". Yes?", s("name"), s("label")),
+        "start" => format!("Starting a session in {}{on_machine}: {} Yes?", s("dir"), sentence(&s("prompt"))),
         // Resume always picks the newest session that is not running.
-        "resume" => format!("Resuming the latest {} session. Yes?", s("dir")),
-        "focus" => format!("Focusing {}.", s("name")),
-        "compact" => format!("Compacting {}.", s("name")),
+        "resume" => format!("Resuming the latest {}{on_machine} session. Yes?", s("dir")),
+        "focus" => format!("Focusing {}{on_machine}.", s("name")),
+        "compact" => format!("Compacting {}{on_machine}.", s("name")),
         "review" => format!("Reviewing {} #{}, {}. Yes?", repo_name(&s("repo")), action["number"].as_u64().unwrap_or(0), s("title")),
         "open" => format!("Opening {} #{}.", repo_name(&s("repo")), action["number"].as_u64().unwrap_or(0)),
         _ => return None,
@@ -948,6 +973,18 @@ mod tests {
         assert_eq!(spoken_for(&json!({"kind":"review","repo":"dosaki/collector","number":14,"title":"Add ERD overlay"})).unwrap(), "Reviewing collector #14, Add ERD overlay. Yes?");
         assert_eq!(spoken_for(&json!({"kind":"open","repo":"dosaki/collector","number":14,"title":"Add ERD overlay"})).unwrap(), "Opening collector #14.");
         assert_eq!(spoken_for(&json!({"kind":"report"})), None, "a report speaks the model's own answer");
+    }
+
+    #[test]
+    fn read_backs_name_the_machine() {
+        assert_eq!(spoken_for(&json!({"kind":"reply","session":"id","name":"hexgrid","machine":"laptop","text":"go"})).unwrap(), "Telling hexgrid on laptop: go. Yes?");
+        assert_eq!(spoken_for(&json!({"kind":"start","dir":"maya","machine":"laptop","prompt":"fix it"})).unwrap(), "Starting a session in maya on laptop: fix it. Yes?");
+    }
+
+    #[test]
+    fn a_remote_session_cannot_be_focused_here() {
+        assert_eq!(remote_focus_refusal(Some("laptop")).as_deref(), Some("That session runs on laptop; open it there."));
+        assert_eq!(remote_focus_refusal(None), None);
     }
 
     #[test]

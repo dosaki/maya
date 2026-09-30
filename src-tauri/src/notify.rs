@@ -50,6 +50,10 @@ fn spoken_name(name: &str) -> String {
 /// What Maya says for a card, or nothing for states that are not announced.
 pub fn spoken_line(card: &Card) -> Option<String> {
     let name = spoken_name(&card.name);
+    let name = match &card.machine {
+        Some(m) => format!("{name} on {m}"),
+        None => name,
+    };
     match card.state {
         State::Awaiting => Some(format!("{name} needs a decision")),
         State::Completed => Some(format!("{name} is finished")),
@@ -239,9 +243,18 @@ pub fn body_for(card: &Card) -> String {
     .into()
 }
 
-pub fn notify(card: &Card, sound: bool) {
+/// The banner's subtitle: the project, with the machine appended for a
+/// remote card so a decision on another Mac is never mistaken for a local one.
+pub fn subtitle_for(card: &Card) -> String {
     let project = card.cwd.rsplit('/').find(|s| !s.is_empty()).unwrap_or(&card.cwd);
-    let _ = Command::new("osascript").arg("-e").arg(applescript_notify(&card.name, project, &body_for(card), sound)).output();
+    match &card.machine {
+        Some(m) => format!("{project} on {m}"),
+        None => project.to_string(),
+    }
+}
+
+pub fn notify(card: &Card, sound: bool) {
+    let _ = Command::new("osascript").arg("-e").arg(applescript_notify(&card.name, &subtitle_for(card), &body_for(card), sound)).output();
 }
 
 #[cfg(test)]
@@ -296,6 +309,41 @@ mod tests {
         assert_eq!(n.take_finished(&[again.clone()]).len(), 1);
         assert!(n.take_finished(&[again.clone()]).is_empty());
         assert!(n.take_finished(&[card("a", State::Working, 300, "")]).is_empty());
+    }
+
+    fn card_awaiting(name: &str) -> Card {
+        Card {
+            session_id: "x".into(),
+            pid: 1,
+            name: name.into(),
+            cwd: "/Users/x/dev/x".into(),
+            state: State::Awaiting,
+            state_since: 1,
+            snippet: "".into(),
+            awaiting: Some(Awaiting { kind: AwaitKind::Text, detail: "".into(), questions: vec![] }),
+            has_inbox: true,
+            harness: Harness::ClaudeCode,
+            pr: None,
+            context: None,
+            machine: None,
+            stale: false,
+        }
+    }
+
+    #[test]
+    fn remote_sessions_are_announced_with_their_machine() {
+        let mut c = card_awaiting("hexgrid");
+        c.machine = Some("laptop".into());
+        assert_eq!(spoken_line(&c).unwrap(), "hexgrid on laptop needs a decision");
+    }
+
+    #[test]
+    fn the_banner_subtitle_names_the_machine_for_a_remote_card() {
+        let local = card("a", State::Awaiting, 1, "");
+        assert_eq!(subtitle_for(&local), "a");
+        let mut remote = card("b", State::Awaiting, 1, "");
+        remote.machine = Some("laptop".into());
+        assert_eq!(subtitle_for(&remote), "b on laptop");
     }
 
     #[test]

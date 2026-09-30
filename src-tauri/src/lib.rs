@@ -369,10 +369,18 @@ fn refresh_and_emit(app: &AppHandle) {
     }
 }
 
+/// Local and remote cards merged: what the board shows and what the voice
+/// interpreter reasons about. Locks `store` only long enough to refresh it,
+/// releasing it before `remote_boards` takes `network` (lock order: never
+/// hold `store` while taking `network`).
+pub(crate) fn merged_cards(state: &AppState) -> Vec<Card> {
+    let cards = state.store.lock().unwrap().refresh(now_ms());
+    merge::merged(cards, &remote_boards(state), now_ms())
+}
+
 #[tauri::command(async)]
 fn list_sessions(state: TauriState<AppState>) -> Vec<Card> {
-    let cards = state.store.lock().unwrap().refresh(now_ms());
-    merge::merged(cards, &remote_boards(&state), now_ms())
+    merged_cards(&state)
 }
 
 /// What the Network section of Settings shows.
