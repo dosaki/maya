@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src/assets/maya.png" width="200" alt="Maya">
+</p>
+
 # Maya
 
 **Manage All Your Agents.** Maya is a macOS app that puts every coding-agent
