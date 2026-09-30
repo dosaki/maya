@@ -16,12 +16,13 @@ pub fn path(maya_dir: &Path) -> PathBuf {
     maya_dir.join("cli-status.json")
 }
 
-/// Writes via a temp file and rename, so a half-written file is never read.
+/// Writes via a temp file and rename, so a half-written file is never read;
+/// readable by its owner only, like `config.json`.
 pub fn write(maya_dir: &Path, s: &RunStatus) -> Result<(), String> {
     std::fs::create_dir_all(maya_dir).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
     let tmp = maya_dir.join("cli-status.json.tmp");
-    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
+    maya_core::config::write_private(&tmp, text.as_bytes()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path(maya_dir)).map_err(|e| e.to_string())
 }
 
@@ -45,6 +46,8 @@ mod tests {
         let s = RunStatus { pid: 7, connected: true, main_name: Some("Yhi".into()), error: None, updated_ms: 5 };
         write(d.path(), &s).unwrap();
         assert_eq!(read(d.path()), Some(s));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(path(d.path())).unwrap().permissions().mode() & 0o777, 0o600);
         remove(d.path());
         assert_eq!(read(d.path()), None);
     }
