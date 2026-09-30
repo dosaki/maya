@@ -215,6 +215,7 @@ mod tests {
             status_updated_at,
             entrypoint: "cli".into(),
             messaging_socket_path: None,
+            tty: None,
         }
     }
 

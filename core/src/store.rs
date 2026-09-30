@@ -51,7 +51,7 @@ impl Store {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_alive(mut self, alive: impl Fn(i32) -> bool + Send + 'static) -> Self {
         self.alive = Box::new(alive);
         // Tests never see the machine's real codex/agy/grok sessions.
@@ -60,7 +60,7 @@ impl Store {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_foreign(mut self, codex_dir: PathBuf, agy_dir: PathBuf, sessions: Vec<ForeignSession>) -> Self {
         self.codex_dir = codex_dir;
         self.agy_dir = agy_dir.clone();

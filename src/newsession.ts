@@ -72,6 +72,8 @@ export interface NewSessionHandlers {
 interface StartResult {
   dir: string;
   how: "chosen" | "classifier" | "fallback";
+  /** The terminal's name for the new session, where it has names (tmux). */
+  terminal?: string;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {

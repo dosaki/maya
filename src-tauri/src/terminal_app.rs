@@ -1,7 +1,7 @@
 //! Opening Terminal.app windows: the AppleScript comes from the core, the
 //! activation afterwards needs AppKit, so these live in the app.
 
-use maya_core::launch::{applescript_run, session_command, LaunchOptions};
+use maya_core::launch::applescript_run;
 use maya_core::terminal::Terminal;
 use std::path::Path;
 use std::process::Command;
@@ -17,10 +17,6 @@ pub fn open_terminal_with(cmd: &str) -> Result<(), String> {
         return Err(format!("osascript failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     crate::focus::activate_terminal()
-}
-
-pub fn open_terminal(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> Result<(), String> {
-    open_terminal_with(&session_command(target, prompt_file, opts))
 }
 
 fn applescript_string(text: &str) -> String {
@@ -63,6 +59,9 @@ pub fn type_into_tty(tty: &str, text: &str) -> Result<(), String> {
 
 /// Terminal.app: new windows through AppleScript, keys through `do script … in tab`.
 pub struct TerminalApp;
+
+/// The app's one terminal, borrowed by every local action.
+pub static TERMINAL: TerminalApp = TerminalApp;
 
 impl Terminal for TerminalApp {
     fn open(&self, command: &str, _cwd: &Path, _label: &str) -> Result<Option<String>, String> {

@@ -5,6 +5,7 @@
 //! Locks: the adapters take `network` or `store` one at a time, never one
 //! while holding the other.
 
+use crate::actions;
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
 use crate::net::protocol::CommandKind;
 use crate::net::server::{send_command_with, start_with, ServerHandle};
@@ -151,28 +152,29 @@ fn to_data<T: serde::Serialize>(v: T) -> Result<Option<Value>, String> {
     serde_json::to_value(v).map(Some).map_err(|e| e.to_string())
 }
 
-/// Runs one command from the main with this Maya's local session functions.
+/// Runs one command from the main with this Maya's local session actions:
+/// no routing check, since the main already chose this machine.
 pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, String> {
-    let state = || app.state::<AppState>();
+    let state = app.state::<AppState>();
+    let l = crate::local(&state);
     let done = |r: Result<(), String>| r.map(|_| None);
     match kind {
         CommandKind::Reply { session, text, attachments } => {
             let (maya_dir, exists) = {
-                let state = state();
                 let mut store = state.store.lock().unwrap();
                 (store.claude_dir().join("maya"), store.card_for(&session, now_ms()).is_some())
             };
             // The files are local once saved; nothing further to attach.
-            done(reply_with_attachments(&maya_dir, exists, &text, attachments, now_ms(), |text| crate::send_reply(app.clone(), state(), session, text, vec![])))
+            done(reply_with_attachments(&maya_dir, exists, &text, attachments, now_ms(), |text| actions::send_reply(&l, &session, &text)))
         }
-        CommandKind::Answer { session, ask_id, question, option } => done(crate::answer_question(app.clone(), state(), session, ask_id, question, option)),
-        CommandKind::Compact { session } => done(crate::compact_session(app.clone(), state(), session)),
-        CommandKind::Rename { session, name } => done(crate::rename_session(app.clone(), state(), session, name)),
-        CommandKind::SetOption { session, setting, value } => done(crate::set_session_option(app.clone(), state(), session, setting, value)),
-        CommandKind::CycleMode { session } => done(crate::cycle_session_mode(app.clone(), state(), session)),
-        CommandKind::Start { dir, prompt, options } => to_data(crate::start_session(app.clone(), state(), dir, prompt, options, None)?),
-        CommandKind::Resume { dir, session } => done(crate::resume_session(app.clone(), state(), dir, session, None)),
-        CommandKind::ListResumable { dir } => to_data(crate::list_resumable_sessions(app.clone(), state(), dir, None)?),
-        CommandKind::History { session } => to_data(crate::session_history(app.clone(), state(), session)?),
+        CommandKind::Answer { session, ask_id, question, option } => done(actions::answer_question(&l, &session, ask_id, question, option)),
+        CommandKind::Compact { session } => done(actions::compact_session(&l, &session)),
+        CommandKind::Rename { session, name } => done(actions::rename_session(&l, &session, &name)),
+        CommandKind::SetOption { session, setting, value } => done(actions::set_session_option(&l, &session, &setting, &value)),
+        CommandKind::CycleMode { session } => done(actions::cycle_session_mode(&l, &session)),
+        CommandKind::Start { dir, prompt, options } => to_data(actions::start_session(&l, dir, prompt, options)?),
+        CommandKind::Resume { dir, session } => done(actions::resume_session(&l, &dir, &session)),
+        CommandKind::ListResumable { dir } => to_data(actions::list_resumable_sessions(&l, &dir)?),
+        CommandKind::History { session } => to_data(actions::session_history(&l, &session)?),
     }
 }
