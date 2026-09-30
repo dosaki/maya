@@ -68,7 +68,9 @@ maya --version
 - **hooks** installs, removes or reports the Claude Code hooks, writing the
   same `~/.claude/maya/hook.sh` and `settings.json` entries the app does.
   `run` warns on start when the hooks are not installed (sessions would not
-  be seen) and keeps going.
+  be seen) and keeps going. `hooks install`, `hooks status` and `run` warn
+  when `jq` is not on the PATH (`jq is not installed: Claude Code's hooks
+  need it, so sessions will not be seen`); `hooks install` still installs.
 - **start** is a local shortcut with the same behaviour as a `start`
   command from the main: it resolves the project directory (the classifier
   when `--dir` is omitted and a prompt is given), writes the prompt file and

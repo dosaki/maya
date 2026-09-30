@@ -7,6 +7,7 @@
 //! the main role, another run alive) or the config on disk stopped being
 //! an assistant's while it ran.
 
+use crate::commands::{jq_found, NO_JQ};
 use crate::executor::CliExecutor;
 use crate::notify::CliNotify;
 use crate::status_file::{self, RunStatus};
@@ -56,10 +57,13 @@ pub const NO_PROJECTS_DIR: &str = "no projects directory: start and resume from 
 
 /// What `run` logs at start about a setup that will not fully work; it
 /// keeps going regardless.
-pub fn startup_warnings(config: &Config, hooks_installed: bool) -> Vec<&'static str> {
+pub fn startup_warnings(config: &Config, hooks_installed: bool, jq_found: bool) -> Vec<&'static str> {
     let mut out = Vec::new();
     if !hooks_installed {
         out.push(NO_HOOKS);
+    }
+    if !jq_found {
+        out.push(NO_JQ);
     }
     if config.projects_dir_path().is_none() {
         out.push(NO_PROJECTS_DIR);
@@ -136,7 +140,7 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
         let _ = writeln!(std::io::stdout().lock(), "{}", log::file_line(l));
     });
     log::line("cli", format!("maya {} run started", env!("CARGO_PKG_VERSION")));
-    for w in startup_warnings(&store.config, matches!(hook_install::status(claude_dir), Ok(true))) {
+    for w in startup_warnings(&store.config, matches!(hook_install::status(claude_dir), Ok(true)), jq_found()) {
         log::line("cli", w);
     }
 
@@ -229,11 +233,11 @@ mod tests {
     }
 
     #[test]
-    fn run_warns_at_start_about_missing_hooks_and_a_missing_projects_directory() {
+    fn run_warns_at_start_about_missing_hooks_jq_and_projects_directory() {
         let mut c = Config::default();
-        assert_eq!(startup_warnings(&c, false), vec![NO_HOOKS, NO_PROJECTS_DIR]);
+        assert_eq!(startup_warnings(&c, false, false), vec![NO_HOOKS, NO_JQ, NO_PROJECTS_DIR]);
         c.projects_dir = Some("/p".into());
-        assert_eq!(startup_warnings(&c, true), Vec::<&str>::new());
+        assert_eq!(startup_warnings(&c, true, true), Vec::<&str>::new());
         assert_eq!(NO_PROJECTS_DIR, "no projects directory: start and resume from the main will fail until you run `maya config projects-dir <path>`");
     }
 

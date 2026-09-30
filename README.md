@@ -177,6 +177,10 @@ quiet.
 A Linux box, a container, or a Mac reached only over SSH can be an assistant
 too, with no desktop and no app: the `maya` command line tool.
 
+- **Requirements.** `claude`, `tmux` and `jq` on the PATH (the hook needs
+  `jq`; `maya run` and `maya hooks` warn when it is missing), plus `lsof`
+  and `ps` to find Codex and Antigravity sessions.
+
 - **Download.** Get the binary for the machine from the
   [latest release](https://github.com/dosaki/maya/releases/latest) and save
   it as `maya` (swap in `maya-linux-aarch64`, `maya-macos-arm64` or

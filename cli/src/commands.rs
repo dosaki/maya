@@ -12,8 +12,26 @@ use maya_core::net::client::{self, Executor};
 use maya_core::registry::pid_alive;
 use maya_core::store::Store;
 use maya_core::terminal::Terminal;
+use std::ffi::OsStr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+/// The hook script pipes every event through `jq`; without it no session is seen.
+pub const NO_JQ: &str = "jq is not installed: Claude Code's hooks need it, so sessions will not be seen";
+
+/// True when `name` is an executable file in one of `path`'s folders.
+pub fn on_path(name: &str, path: Option<&OsStr>) -> bool {
+    let Some(path) = path else { return false };
+    std::env::split_paths(path).any(|dir| {
+        std::fs::metadata(dir.join(name)).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    })
+}
+
+/// True when `jq` is on this process's PATH.
+pub fn jq_found() -> bool {
+    on_path("jq", std::env::var_os("PATH").as_deref())
+}
 
 /// Pairs with a main Maya at `host:port` using its six-digit `code`, stores
 /// the assistant id and token and the link in the config, and returns the
@@ -180,6 +198,22 @@ mod tests {
         let missing = dir.path().join("nope");
         assert_eq!(set_projects_dir(dir.path(), &missing.to_string_lossy()), Err(format!("Projects directory does not exist: {}.", missing.display())));
         assert_eq!(config::load(&dir.path().join("maya/config.json")).projects_dir.as_deref(), Some("~"), "a refused path is not saved");
+    }
+
+    #[test]
+    fn on_path_finds_an_executable_file_in_any_path_entry() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let jq = b.path().join("jq");
+        std::fs::write(&jq, "#!/bin/sh\n").unwrap();
+        let path = std::env::join_paths([a.path(), b.path()]).unwrap();
+        assert!(!on_path("jq", Some(&path)), "not executable yet");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&jq, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(on_path("jq", Some(&path)));
+        assert!(!on_path("jq", Some(a.path().as_os_str())));
+        assert!(!on_path("jq", None));
+        assert_eq!(NO_JQ, "jq is not installed: Claude Code's hooks need it, so sessions will not be seen");
     }
 
     #[test]
