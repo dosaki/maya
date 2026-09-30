@@ -58,7 +58,7 @@ fn take_value(rest: &[String], i: &mut usize, flag: &str) -> Result<String, Stri
 fn split_host_port(s: &str) -> Result<(String, u16), String> {
     match s.rsplit_once(':') {
         Some((host, port)) => {
-            let port: u16 = port.parse().map_err(|_| format!("{USAGE}\nbad port: {port}"))?;
+            let port: u16 = port.parse().ok().filter(|p| *p != 0).ok_or_else(|| format!("{USAGE}\nbad port: {port}"))?;
             Ok((host.to_string(), port))
         }
         None => Ok((s.to_string(), DEFAULT_PORT)),
@@ -136,6 +136,7 @@ mod tests {
         assert_eq!(parse(&a("pair desk.local:5000 --code 111222 --name box")).unwrap(), Cmd::Pair { host: "desk.local".into(), port: 5000, code: "111222".into(), name: Some("box".into()) });
         assert!(parse(&a("pair 10.0.0.5")).unwrap_err().contains("--code"));
         assert!(parse(&a("pair --code 1")).unwrap_err().contains("host"));
+        assert!(parse(&a("pair desk.local:0 --code 111222")).unwrap_err().contains("bad port: 0"));
     }
 
     #[test]

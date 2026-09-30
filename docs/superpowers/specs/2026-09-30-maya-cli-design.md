@@ -45,6 +45,9 @@ maya --version
   exits 0; on failure it prints the same message the app would show
   ("Wrong or expired pairing code.", "The main Maya failed to prove it
   received the pairing code.", "Could not reach <host>:<port>: …") and exits 1.
+  A code that is not exactly six digits gets "Wrong or expired pairing
+  code." without contacting the main; the name is trimmed (blank means the
+  hostname); port 0 is a usage error (exit 2).
   Pairing again replaces the stored credentials. It refuses while a
   `maya run` is live (`stop \`maya run\` first (pid N)`, exit 2), since
   that run holds the old credentials.

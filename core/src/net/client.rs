@@ -48,6 +48,8 @@ const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 const STEADY: Duration = Duration::from_secs(60);
 
 pub const REMOVED: &str = "Removed by the main Maya; pair again.";
+/// What the user reads when the main refuses a pairing code.
+pub const WRONG_CODE: &str = "Wrong or expired pairing code.";
 pub const NOT_PAIRED: &str = "Not paired with a main Maya yet; pair in Settings.";
 pub const MAIN_UNPROVEN: &str = "The main Maya failed to prove it holds the pairing token.";
 pub const PAIRING_UNPROVEN: &str = "The main Maya failed to prove it knows the pairing code.";
@@ -144,7 +146,7 @@ fn clean(s: &str) -> String {
 fn bye_message(reason: &str) -> String {
     match reason {
         "removed" => REMOVED.into(),
-        "wrong or expired pairing code" => "Wrong or expired pairing code.".into(),
+        "wrong or expired pairing code" => WRONG_CODE.into(),
         "too many attempts" => "Too many wrong codes; wait five minutes and try again.".into(),
         "authentication failed" => "The main Maya did not accept this assistant's key; pair again.".into(),
         "protocol" => "The main Maya runs a different version of Maya.".into(),

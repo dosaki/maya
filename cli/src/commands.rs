@@ -8,7 +8,7 @@ use maya_core::actions;
 use maya_core::config::{self, NetworkRole};
 use maya_core::hook_install;
 use maya_core::launch::LaunchOptions;
-use maya_core::net::client::{self, Executor};
+use maya_core::net::client::{self, Executor, WRONG_CODE};
 use maya_core::registry::pid_alive;
 use maya_core::store::Store;
 use maya_core::terminal::Terminal;
@@ -52,7 +52,13 @@ pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: 
     if let Some(pid) = live_run(claude_dir) {
         return Err((2, format!("stop `maya run` first (pid {pid})")));
     }
-    let name = name.map(str::to_string).unwrap_or_else(maya_core::net::local_hostname);
+    // The main only ever issues six ASCII digits: anything else is refused
+    // here, with the main's own message, without contacting it.
+    let code = code.trim();
+    if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return Err((1, WRONG_CODE.into()));
+    }
+    let name = name.map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(maya_core::net::local_hostname);
     let store = Arc::new(Mutex::new(Store::new(claude_dir.to_path_buf())));
     let exec: Arc<dyn Executor> = Arc::new(CliExecutor::new(store.clone(), Arc::new(Tmux::default())));
     let (main, id, token) = client::pair_with(exec, host, port, &name, code).map_err(|e| (1, e))?;
@@ -169,6 +175,15 @@ mod tests {
     #[test]
     fn a_pairing_reports_the_main_and_this_machines_label() {
         assert_eq!(paired_message("Yhi", "box"), "Paired with Yhi as box");
+    }
+
+    #[test]
+    fn a_code_that_is_not_six_digits_is_refused_without_contacting_the_main() {
+        let dir = claude_dir_with(NetworkRole::Off);
+        // Port 1 has no main: reaching the network would say "Could not reach".
+        for code in ["12345", "1234567", "12a456", "", "１２３４５６"] {
+            assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), code), Err((1, WRONG_CODE.to_string())), "{code:?}");
+        }
     }
 
     #[test]
