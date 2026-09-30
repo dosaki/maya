@@ -111,6 +111,9 @@ struct ModelProgress {
 /// Downloads one model, reporting progress as `voice-model` events.
 #[tauri::command(async)]
 fn download_whisper_model(app: AppHandle, state: TauriState<AppState>, id: String) -> Result<(), String> {
+    if models::is_in_flight(&id) {
+        return Err("That model is already downloading.".into());
+    }
     let claude = state.store.lock().unwrap().claude_dir().to_path_buf();
     log::line("app", format!("downloading whisper model {id}"));
     let handle = app.clone();
@@ -677,6 +680,14 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            // A stalled model download otherwise keeps its curl child alive
+            // under launchd after Maya quits, writing a 60-190 MB `.part`
+            // file to nowhere.
+            if let tauri::RunEvent::Exit = event {
+                models::abort_all();
+            }
+        });
 }

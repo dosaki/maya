@@ -2,8 +2,10 @@
 //! and downloading them once, verified, into `<claude_dir>/maya/models/`.
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
 
 pub struct WhisperModel {
     pub id: &'static str,
@@ -52,6 +54,45 @@ fn sha256_of(path: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or("").to_string())
 }
 
+/// Model ids currently downloading, mapped to the curl child's pid. Guards
+/// `download_whisper_model` against a second concurrent download of the same
+/// model, and lets `abort_all` kill every curl child still running when Maya
+/// exits, so a stalled download does not keep writing its `.part` file
+/// after the app is gone.
+static IN_FLIGHT: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Whether `id` already has a download running.
+pub fn is_in_flight(id: &str) -> bool {
+    IN_FLIGHT.lock().unwrap().contains_key(id)
+}
+
+/// Kills every curl child still downloading, for a clean app exit.
+pub fn abort_all() {
+    for pid in IN_FLIGHT.lock().unwrap().values() {
+        unsafe { libc::kill(*pid as i32, libc::SIGTERM) };
+    }
+}
+
+/// The curl arguments to fetch `url` into `part`, quietly (`-fsSL`) and with
+/// timeouts: `--connect-timeout 30` gives up on a connection that never
+/// opens, and `--speed-limit 1024 --speed-time 60` gives up once the
+/// transfer stays under 1 KB/s for 60 s (a stalled Wi-Fi link, a captive
+/// portal, a CDN hiccup) instead of hanging forever.
+fn curl_args(part: &Path, url: &str) -> Vec<String> {
+    vec![
+        "-fsSL".to_string(),
+        "--connect-timeout".to_string(),
+        "30".to_string(),
+        "--speed-limit".to_string(),
+        "1024".to_string(),
+        "--speed-time".to_string(),
+        "60".to_string(),
+        "-o".to_string(),
+        part.display().to_string(),
+        url.to_string(),
+    ]
+}
+
 pub fn verify(path: &Path, m: &WhisperModel) -> Result<(), String> {
     let len = std::fs::metadata(path).map_err(|e| format!("could not read {}: {e}", path.display()))?.len();
     if len != m.bytes {
@@ -74,13 +115,12 @@ pub fn fetch_to(dir: &Path, m: &WhisperModel, url: &str, progress: &dyn Fn(u64, 
     let _ = std::fs::remove_file(&part);
     let result = (|| {
         let mut child = Command::new("curl")
-            .args(["-fsSL", "-o"])
-            .arg(&part)
-            .arg(url)
+            .args(curl_args(&part, url))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| format!("could not run curl: {e}"))?;
+        IN_FLIGHT.lock().unwrap().insert(m.id.to_string(), child.id());
         loop {
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 if !status.success() {
@@ -102,6 +142,7 @@ pub fn fetch_to(dir: &Path, m: &WhisperModel, url: &str, progress: &dyn Fn(u64, 
         progress(m.bytes, m.bytes);
         Ok(target.clone())
     })();
+    IN_FLIGHT.lock().unwrap().remove(m.id);
     if result.is_err() {
         let _ = std::fs::remove_file(&part);
     }
@@ -190,6 +231,29 @@ mod tests {
         assert!(!err.is_empty());
         assert!(!models_dir(claude).join("never.bin.part").exists());
         assert!(!models_dir(claude).join("never.bin").exists());
+        assert!(!is_in_flight("t"), "a failed download clears the in-flight marker");
+    }
+
+    #[test]
+    fn curl_args_give_up_on_a_stalled_transfer() {
+        let part = Path::new("/tmp/whatever.part");
+        let args = curl_args(part, "https://example.com/x.bin");
+        assert!(args.contains(&"--connect-timeout".to_string()));
+        assert!(args.contains(&"30".to_string()));
+        assert!(args.contains(&"--speed-limit".to_string()));
+        assert!(args.contains(&"1024".to_string()));
+        assert!(args.contains(&"--speed-time".to_string()));
+        assert!(args.contains(&"60".to_string()));
+        assert!(args.contains(&"-fsSL".to_string()));
+    }
+
+    #[test]
+    fn the_in_flight_set_tracks_by_model_id() {
+        assert!(!is_in_flight("ghost-model"));
+        IN_FLIGHT.lock().unwrap().insert("ghost-model".to_string(), 424_242);
+        assert!(is_in_flight("ghost-model"));
+        IN_FLIGHT.lock().unwrap().remove("ghost-model");
+        assert!(!is_in_flight("ghost-model"));
     }
 
     #[test]
