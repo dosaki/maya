@@ -636,7 +636,6 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
                 b.connected = true;
             }
             s.sync_boards();
-            // A fresh pairing is saved after `welcome`, below.
             // Saved here, under the lock; a fresh pairing is saved after
             // `welcome`, below. A stopped server's list is no longer the truth.
             if pairing.is_none() && !ctx.stopped() {
