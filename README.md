@@ -203,7 +203,11 @@ too, with no desktop and no app: the `maya` command line tool.
   - in `tmux`: `tmux new -d -s maya './maya run'`
   - with `nohup`: `nohup ./maya run >/dev/null 2>&1 &`
   - as a service: a systemd unit (Linux) or launchd agent (macOS) that runs
-    `maya run`
+    `maya run`. A systemd unit needs `KillMode=process`, or stopping the
+    unit also kills the tmux server and every session started from the
+    main, and an `Environment=PATH=…` that includes `claude`, `tmux` and
+    `jq`. A launchd agent likewise needs that PATH in its
+    `EnvironmentVariables`.
 - **What works.** Every action the main can send an assistant: reply,
   answer, compact, rename, change model, effort or mode, start and resume.
   Start and resume land in a tmux session named `maya-<8 hex>`, shown in the
@@ -212,6 +216,10 @@ too, with no desktop and no app: the `maya` command line tool.
   started in a plain SSH shell is shown on the board but can only be
   replied to through its inbox. The CLI never notifies, speaks or listens;
   those stay app-only.
+- **What does not.** The CLI does not check pull requests, so cards from a
+  headless machine carry no PR badge. Do not run the app and `maya run` on
+  the same Mac: they share one pairing in `~/.claude/maya/config.json`, so
+  on the main each connection replaces the other.
 - **Status.** `./maya status` shows whether it is paired, connected and
   running, and the projects directory; `./maya hooks status` checks the
   hook.
