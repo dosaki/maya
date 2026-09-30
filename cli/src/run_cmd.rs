@@ -51,6 +51,22 @@ pub fn exit_code_for(stopped_by_signal: bool, config: &Config) -> i32 {
     }
 }
 
+pub const NO_HOOKS: &str = "hooks are not installed: sessions will not be seen (run `maya hooks install`)";
+pub const NO_PROJECTS_DIR: &str = "no projects directory: start and resume from the main will fail until you run `maya config projects-dir <path>`";
+
+/// What `run` logs at start about a setup that will not fully work; it
+/// keeps going regardless.
+pub fn startup_warnings(config: &Config, hooks_installed: bool) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if !hooks_installed {
+        out.push(NO_HOOKS);
+    }
+    if config.projects_dir_path().is_none() {
+        out.push(NO_PROJECTS_DIR);
+    }
+    out
+}
+
 static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 extern "C" fn on_signal(_: libc::c_int) {
@@ -120,9 +136,8 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
         let _ = writeln!(std::io::stdout().lock(), "{}", log::file_line(l));
     });
     log::line("cli", format!("maya {} run started", env!("CARGO_PKG_VERSION")));
-    match hook_install::status(claude_dir) {
-        Ok(true) => {}
-        _ => log::line("cli", "hooks are not installed: sessions will not be seen (run `maya hooks install`)"),
+    for w in startup_warnings(&store.config, matches!(hook_install::status(claude_dir), Ok(true))) {
+        log::line("cli", w);
     }
 
     let store = Arc::new(Mutex::new(store));
@@ -211,6 +226,15 @@ mod tests {
         let n = reload_network(&store, &path);
         assert_eq!((n.role, n.token.as_str(), n.assistant_id.as_str()), (NetworkRole::Off, "", ""));
         drop(dir);
+    }
+
+    #[test]
+    fn run_warns_at_start_about_missing_hooks_and_a_missing_projects_directory() {
+        let mut c = Config::default();
+        assert_eq!(startup_warnings(&c, false), vec![NO_HOOKS, NO_PROJECTS_DIR]);
+        c.projects_dir = Some("/p".into());
+        assert_eq!(startup_warnings(&c, true), Vec::<&str>::new());
+        assert_eq!(NO_PROJECTS_DIR, "no projects directory: start and resume from the main will fail until you run `maya config projects-dir <path>`");
     }
 
     #[test]

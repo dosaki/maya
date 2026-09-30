@@ -1,4 +1,4 @@
-//! The `pair`, `status` and `hooks` subcommands.
+//! The `pair`, `status`, `hooks`, `config` and `start` subcommands.
 
 use crate::args::HooksOp;
 use crate::executor::CliExecutor;
@@ -50,6 +50,11 @@ pub fn status(claude_dir: &Path) -> Result<String, String> {
         }
     }
 
+    match store.config.projects_dir_path() {
+        Some(p) => out.push_str(&format!("projects: {}\n", p.display())),
+        None => out.push_str("projects: unset\n"),
+    }
+
     let run_status = status_file::read(&claude_dir.join("maya"));
     let run_line = match (role, run_status) {
         (NetworkRole::Assistant, Some(s)) if pid_alive(s.pid as i32) && s.connected => {
@@ -75,6 +80,28 @@ pub fn hooks(claude_dir: &Path, op: HooksOp) -> Result<String, String> {
         HooksOp::Remove => hook_install::remove_from(claude_dir).map(|_| "hooks removed".to_string()),
         HooksOp::Status => hook_install::status(claude_dir).map(|installed| if installed { "hooks: installed".to_string() } else { "hooks: not installed".to_string() }),
     }
+}
+
+/// `maya config projects-dir <path>`: saves the folder start and resume
+/// pick projects from. A `~` is kept and expanded when read, as the app
+/// does; any other relative path is made absolute against the current
+/// folder. Refused, and not saved, when the folder does not exist.
+pub fn set_projects_dir(claude_dir: &Path, dir: &str) -> Result<String, String> {
+    let dir = dir.trim();
+    let stored = if dir.starts_with('~') || Path::new(dir).is_absolute() {
+        dir.to_string()
+    } else {
+        std::env::current_dir().map_err(|e| e.to_string())?.join(dir).to_string_lossy().into_owned()
+    };
+    let path = claude_dir.join("maya/config.json");
+    let mut c = config::load(&path);
+    c.projects_dir = Some(stored);
+    let resolved = c.projects_dir_path().ok_or("A projects directory needs a path.")?;
+    if !resolved.is_dir() {
+        return Err(format!("Projects directory does not exist: {}.", resolved.display()));
+    }
+    config::save(&path, &c)?;
+    Ok(format!("projects: {}", resolved.display()))
 }
 
 /// Opens a session in a project folder through tmux: `maya start [dir] [prompt]`.
@@ -120,6 +147,39 @@ mod tests {
         status_file::write(&dir.path().join("maya"), &RunStatus { pid: 1, connected: true, main_name: Some("Yhi".into()), error: None, updated_ms: 1 }).unwrap();
         let report = status(dir.path()).unwrap();
         assert!(report.contains("run: connected to Yhi (pid 1)"), "{report}");
+    }
+
+    #[test]
+    fn status_reports_the_projects_directory_or_unset() {
+        let dir = claude_dir_with(NetworkRole::Assistant);
+        assert!(status(dir.path()).unwrap().contains("\nprojects: unset\n"));
+        let projects = dir.path().join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        set_projects_dir(dir.path(), &projects.to_string_lossy()).unwrap();
+        let report = status(dir.path()).unwrap();
+        assert!(report.contains(&format!("\nprojects: {}\n", projects.display())), "{report}");
+    }
+
+    #[test]
+    fn config_projects_dir_saves_the_path_and_keeps_the_rest_of_the_config() {
+        let dir = claude_dir_with(NetworkRole::Assistant);
+        let projects = dir.path().join("projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        assert_eq!(set_projects_dir(dir.path(), &projects.to_string_lossy()), Ok(format!("projects: {}", projects.display())));
+        let saved = config::load(&dir.path().join("maya/config.json"));
+        assert_eq!(saved.projects_dir_path(), Some(projects.clone()));
+        assert_eq!(saved.network.role, NetworkRole::Assistant);
+    }
+
+    #[test]
+    fn config_projects_dir_keeps_a_tilde_for_later_expansion_and_refuses_a_missing_folder() {
+        let dir = claude_dir_with(NetworkRole::Off);
+        // `~` alone is the home folder, which exists.
+        assert!(set_projects_dir(dir.path(), "~").is_ok());
+        assert_eq!(config::load(&dir.path().join("maya/config.json")).projects_dir.as_deref(), Some("~"));
+        let missing = dir.path().join("nope");
+        assert_eq!(set_projects_dir(dir.path(), &missing.to_string_lossy()), Err(format!("Projects directory does not exist: {}.", missing.display())));
+        assert_eq!(config::load(&dir.path().join("maya/config.json")).projects_dir.as_deref(), Some("~"), "a refused path is not saved");
     }
 
     #[test]

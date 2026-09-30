@@ -32,6 +32,7 @@ maya pair <host>[:port] --code <6 digits> [--name <label>]
 maya run
 maya status
 maya hooks install | remove | status
+maya config projects-dir <path>
 maya start [--dir <project>] [--prompt "<text>"] [--model ..] [--effort ..] [--mode ..]
 maya --version
 ```
@@ -57,7 +58,13 @@ maya --version
 - **status** prints the role, the main's host and port, the stored name,
   whether a `maya run` is connected (read from a small status file
   `~/.claude/maya/cli-status.json` that `run` rewrites on every status
-  change and removes on exit), and the number of live local sessions.
+  change and removes on exit), the projects directory (`projects: <dir>`
+  or `projects: unset`), and the number of live local sessions.
+- **config projects-dir** saves the folder whose subfolders start and
+  resume pick from into `config.json`'s `projectsDir` (a `~` is kept and
+  expanded when read, as in the app; another relative path is made
+  absolute). A folder that does not exist is refused. `run` warns on start
+  when none is set: start and resume from the main fail until it is.
 - **hooks** installs, removes or reports the Claude Code hooks, writing the
   same `~/.claude/maya/hook.sh` and `settings.json` entries the app does.
   `run` warns on start when the hooks are not installed (sessions would not

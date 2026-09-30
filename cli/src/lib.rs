@@ -24,6 +24,7 @@ pub fn run(args: Vec<String>) -> i32 {
         Ok(args::Cmd::Pair { host, port, code, name }) => report(commands::pair(&claude_dir, &host, port, name.as_deref(), &code).map(|m| format!("Paired with {m}"))),
         Ok(args::Cmd::Status) => report(commands::status(&claude_dir)),
         Ok(args::Cmd::Hooks(op)) => report(commands::hooks(&claude_dir, op)),
+        Ok(args::Cmd::Config(args::ConfigOp::ProjectsDir(dir))) => report(commands::set_projects_dir(&claude_dir, &dir)),
         Ok(args::Cmd::Run) => run_cmd::run(&claude_dir),
         Ok(args::Cmd::Start { dir, prompt, options }) => report(commands::start(&claude_dir, dir, prompt, options)),
     }

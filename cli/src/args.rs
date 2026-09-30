@@ -8,6 +8,7 @@ pub enum Cmd {
     Run,
     Status,
     Hooks(HooksOp),
+    Config(ConfigOp),
     Start { dir: Option<String>, prompt: Option<String>, options: LaunchOptions },
     Version,
     Help,
@@ -20,7 +21,13 @@ pub enum HooksOp {
     Status,
 }
 
-pub const USAGE: &str = "usage: maya <pair|run|status|hooks|start|--version> …";
+#[derive(Debug, PartialEq)]
+pub enum ConfigOp {
+    /// `maya config projects-dir <path>`: the folder start and resume pick projects from.
+    ProjectsDir(String),
+}
+
+pub const USAGE: &str = "usage: maya <pair|run|status|hooks|config|start|--version> …";
 
 /// The main Maya's default port when none is given after the host.
 const DEFAULT_PORT: u16 = 4127;
@@ -33,6 +40,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         "run" => Ok(Cmd::Run),
         "status" => Ok(Cmd::Status),
         "hooks" => parse_hooks(&args[1..]),
+        "config" => parse_config(&args[1..]),
         "start" => parse_start(&args[1..]),
         other => Err(format!("{USAGE}\nunknown command: {other}")),
     }
@@ -89,6 +97,14 @@ fn parse_hooks(rest: &[String]) -> Result<Cmd, String> {
     }
 }
 
+fn parse_config(rest: &[String]) -> Result<Cmd, String> {
+    match rest {
+        [op, path] if op == "projects-dir" => Ok(Cmd::Config(ConfigOp::ProjectsDir(path.clone()))),
+        [op, _, extra, ..] if op == "projects-dir" => Err(format!("{USAGE}\nunexpected argument: {extra}")),
+        _ => Err(format!("{USAGE}\nconfig needs: projects-dir <path>")),
+    }
+}
+
 fn parse_start(rest: &[String]) -> Result<Cmd, String> {
     let mut dir: Option<String> = None;
     let mut prompt: Option<String> = None;
@@ -132,6 +148,15 @@ mod tests {
         assert_eq!(parse(&a("")).unwrap(), Cmd::Help);
         assert!(parse(&a("dance")).unwrap_err().starts_with("usage:"));
         assert!(parse(&a("hooks")).unwrap_err().contains("install|remove|status"));
+    }
+
+    #[test]
+    fn config_projects_dir_takes_one_path() {
+        assert_eq!(parse(&["config", "projects-dir", "~/dev projects"].map(String::from)).unwrap(), Cmd::Config(ConfigOp::ProjectsDir("~/dev projects".into())));
+        assert!(parse(&a("config projects-dir")).unwrap_err().contains("projects-dir <path>"));
+        assert!(parse(&a("config")).unwrap_err().contains("projects-dir <path>"));
+        assert!(parse(&a("config colour red")).unwrap_err().contains("projects-dir <path>"));
+        assert!(parse(&a("config projects-dir a b")).unwrap_err().contains("unexpected argument: b"));
     }
 
     #[test]

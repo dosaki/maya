@@ -189,6 +189,10 @@ too, with no desktop and no app: the `maya` command line tool.
 - **Pair.** `./maya pair <main host> --code <code> --name <label>`, with the
   code from the main's Settings › Network (`--name` is optional; the
   machine's hostname is used when it is left out).
+- **Projects.** `./maya config projects-dir <path>` sets the folder whose
+  subfolders the main offers for start and resume (`~` works). Until it is
+  set, `maya run` warns at start and starting or resuming from the main
+  fails.
 - **Run.** `./maya run` runs in the foreground, logging to stdout and to
   `~/.claude/maya/maya-cli.log`. Keep it running with whichever fits the
   machine:
@@ -205,7 +209,8 @@ too, with no desktop and no app: the `maya` command line tool.
   replied to through its inbox. The CLI never notifies, speaks or listens;
   those stay app-only.
 - **Status.** `./maya status` shows whether it is paired, connected and
-  running; `./maya hooks status` checks the hook.
+  running, and the projects directory; `./maya hooks status` checks the
+  hook.
 
 ## How it works
 
