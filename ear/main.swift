@@ -265,7 +265,10 @@ final class WhisperRecogniser: Recogniser {
             preRoll = []
             utterance = []
             vad = Vad()
-            lastPartialText = ""
+            // `lastPartialText` belongs to the work queue (it is read and
+            // written by transcription jobs), so it is reset there, in order
+            // behind any job still running.
+            work.async { self.lastPartialText = "" }
         }
         guard let converter = converter else { return }
         let ratio = target.sampleRate / buffer.format.sampleRate
