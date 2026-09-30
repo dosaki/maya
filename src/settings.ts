@@ -86,6 +86,8 @@ export interface SettingsModel {
   networkPaired?: boolean;
   /** "Pair again" was clicked: the pairing form shows even though credentials are stored. */
   networkRepair?: boolean;
+  /** A Pair is in flight: the button is disabled and further clicks are ignored. */
+  networkPairing?: boolean;
 }
 
 export type VoiceProvider = "builtin" | "elevenlabs";
@@ -720,10 +722,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const pairBtn = document.createElement("button");
     pairBtn.type = "button";
     pairBtn.dataset.action = "pair";
-    pairBtn.textContent = "Pair";
-    pairBtn.addEventListener("click", () =>
-      h.onPair((model.networkMainHost ?? "").trim(), model.networkMainPort ?? 0, (model.networkName ?? "").trim(), (model.networkCode ?? "").trim()),
-    );
+    pairBtn.textContent = model.networkPairing ? "Pairing…" : "Pair";
+    pairBtn.disabled = !!model.networkPairing;
+    pairBtn.addEventListener("click", () => {
+      if (model.networkPairing) return;
+      h.onPair((model.networkMainHost ?? "").trim(), model.networkMainPort ?? 0, (model.networkName ?? "").trim(), (model.networkCode ?? "").trim());
+    });
     network.append(pairBtn);
   }
 
@@ -927,11 +931,15 @@ export async function initSettings(): Promise<void> {
     onRegenerate: () => void run(async () => { model.network = await invoke<NetworkStatus>("network_pairing_code"); }),
     onRemoveAssistant: (id) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_assistant", { id }); }),
     onPair: (host, port, name, code) => {
+      // One Pair at a time: a second would pair twice with one code.
+      if (model.networkPairing) return;
+      model.networkPairing = true;
       // Shown next to the pairing form itself (`.settings__status--network`),
       // not just the page-level banner: cleared by this attempt starting, and
       // by either a success or a fresh attempt afterwards.
       model.error = null;
       model.networkError = null;
+      paint();
       void (async () => {
         try {
           model.network = await invoke<NetworkStatus>("network_pair", { host, port, name, code });
@@ -943,8 +951,10 @@ export async function initSettings(): Promise<void> {
           // The new pairing's id and token replaced the stored ones.
           model.networkPaired = true;
           model.networkRepair = false;
+          model.networkPairing = false;
         } catch (e) {
           model.networkError = String(e);
+          model.networkPairing = false;
         }
         paint();
       })();

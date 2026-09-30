@@ -341,6 +341,59 @@ describe("settings flow", () => {
     expect(invoke.mock.calls.some((c) => c[0] === "set_config")).toBe(false);
   });
 
+  it("sends one Pair while one is in flight, with the button disabled until it ends", async () => {
+    const config = {
+      completedTimeoutMinutes: 30,
+      projectsDir: null,
+      clonesDir: null,
+      notifyOnAwaiting: true,
+      speakNotifications: true,
+      voiceProvider: "builtin",
+      elevenlabsVoiceId: null,
+      listen: false,
+      microphone: null,
+      interpreterModel: "haiku",
+      network: { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [] },
+    };
+    let finishPair: (v: unknown) => void = () => {};
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "network_status") return Promise.resolve({ role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "network_pair") return new Promise((_, reject) => (finishPair = reject));
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+    const roleSel = document.querySelector<HTMLSelectElement>("select[name=networkRole]")!;
+    roleSel.value = "assistant";
+    roleSel.dispatchEvent(new Event("change"));
+    const code = document.querySelector<HTMLInputElement>("input[name=networkCode]")!;
+    code.value = "483921";
+    code.dispatchEvent(new Event("input"));
+
+    const pair = () => document.querySelector<HTMLButtonElement>("button[data-action=pair]")!;
+    const first = pair();
+    first.click();
+    // The same element clicked again (a double click before the repaint), then the repainted one.
+    first.click();
+    await flush();
+    expect(pair().disabled).toBe(true);
+    pair().click();
+    await flush();
+    expect(invoke.mock.calls.filter((c) => c[0] === "network_pair")).toHaveLength(1);
+
+    finishPair("Wrong or expired pairing code.");
+    await flush();
+    expect(pair().disabled).toBe(false);
+    pair().click();
+    await flush();
+    expect(invoke.mock.calls.filter((c) => c[0] === "network_pair")).toHaveLength(2);
+  });
+
   it("repaints a hidden Settings tab when it is shown after a network event", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "system", whisperModel: "base.en-q5_1", network: { role: "main", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", token: "t" }] } };
     const before = { role: "main", code: null, assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", connected: false, lastSeen: null, note: null }], assistant: { connected: false, mainName: null, error: null }, mainError: null };
