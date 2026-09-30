@@ -44,6 +44,12 @@ summary, "Maya, tell hexgrid to go ahead" sends the reply after a read-back
 and your "yes", and "Maya, review collector 14" starts a review. When she
 asks you something back, just answer. See [Voice](#voice).
 
+**Several Macs.** Run Maya on your laptop, desktop and Mac mini. One is the
+main, the others are assistants. The main shows every session from every
+machine on one board, tells you what needs you, and drives them all by
+voice. Assistants stay quiet: they listen and run commands, but do not
+notify or speak. Set it up in Settings › Network.
+
 ## Install
 
 macOS only, Apple Silicon and Intel. One command:
@@ -107,6 +113,30 @@ The Debug tab shows what she heard, what she made of it, what she asked
 Claude, what came back, what ran and what she said. The same lines go to
 `~/.claude/maya/maya.log`, which starts afresh on every launch. Paste them
 into an issue if something goes wrong.
+
+## Network
+
+Run Maya on multiple machines with one as the **main** and the others as
+**assistants**. The main shows all sessions on one board; assistants go
+quiet.
+
+- **Main.** Open Settings › Network and turn on "Act as main Maya". Choose
+  a port (default 4127) and Maya shows a six-digit pairing code, valid for
+  five minutes. To add an assistant, give it the code; Maya shows each
+  paired assistant and lets you remove them.
+- **Assistant.** Turn on "Assistant to a main Maya" and enter the main's
+  host, port and the pairing code. Pair once; Maya keeps a token and
+  reconnects on its own. A status line shows "Connected to [main name]",
+  "Reconnecting…" or the error.
+- **What travels.** Session ids, conversation text, option numbers, folder
+  names and attachments (up to 20 MB). Commands run on the assistant; the
+  main never touches the assistant's files.
+- **Plain text on the LAN.** Traffic is not encrypted in this version; all
+  data is plain text.
+- **Remote cards.** On the main, remote sessions appear on their own machine's
+  board. Each card shows a remote glyph, the machine's name and platform. A
+  card greys out thirty seconds after the assistant goes quiet and disappears
+  after five minutes; it comes back when the assistant reconnects.
 
 ## How it works
 
