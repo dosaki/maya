@@ -33,14 +33,24 @@ pub fn jq_found() -> bool {
     on_path("jq", std::env::var_os("PATH").as_deref())
 }
 
+/// The pid of a live `maya run`, from its status file; a file left by a
+/// dead run does not count.
+fn live_run(claude_dir: &Path) -> Option<u32> {
+    status_file::read(&claude_dir.join("maya")).map(|s| s.pid).filter(|pid| pid_alive(*pid as i32))
+}
+
 /// Pairs with a main Maya at `host:port` using its six-digit `code`, stores
 /// the assistant id and token and the link in the config, and returns the
-/// main's name.
-pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: &str) -> Result<String, String> {
+/// main's name. Errors carry the exit code: 2 while a `maya run` is live
+/// (pairing would swap the credentials under it), else 1.
+pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: &str) -> Result<String, (i32, String)> {
+    if let Some(pid) = live_run(claude_dir) {
+        return Err((2, format!("stop `maya run` first (pid {pid})")));
+    }
     let name = name.map(str::to_string).unwrap_or_else(maya_core::net::local_hostname);
     let store = Arc::new(Mutex::new(Store::new(claude_dir.to_path_buf())));
     let exec: Arc<dyn Executor> = Arc::new(CliExecutor::new(store.clone(), Arc::new(Tmux::default())));
-    let (main, id, token) = client::pair_with(exec, host, port, &name, code)?;
+    let (main, id, token) = client::pair_with(exec, host, port, &name, code).map_err(|e| (1, e))?;
     let mut s = store.lock().unwrap();
     s.config.network.role = NetworkRole::Assistant;
     s.config.network.main_host = host.trim().into();
@@ -49,7 +59,7 @@ pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: 
     s.config.network.assistant_id = id;
     s.config.network.token = token;
     s.config.listen = false;
-    config::save(&s.config_path(), &s.config)?;
+    config::save(&s.config_path(), &s.config).map_err(|e| (1, e))?;
     Ok(main)
 }
 
@@ -149,6 +159,25 @@ mod tests {
         c.network.role = role;
         config::save(&dir.path().join("maya/config.json"), &c).unwrap();
         dir
+    }
+
+    #[test]
+    fn pair_refuses_while_maya_run_is_live_and_leaves_the_config_alone() {
+        let dir = claude_dir_with(NetworkRole::Off);
+        let me = std::process::id();
+        status_file::write(&dir.path().join("maya"), &RunStatus { pid: me, connected: true, ..Default::default() }).unwrap();
+        assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456"), Err((2, format!("stop `maya run` first (pid {me})"))));
+        assert_eq!(config::load(&dir.path().join("maya/config.json")).network.role, NetworkRole::Off);
+    }
+
+    #[test]
+    fn a_status_file_left_by_a_dead_run_does_not_block_pairing() {
+        let dir = claude_dir_with(NetworkRole::Off);
+        status_file::write(&dir.path().join("maya"), &RunStatus { pid: 2_000_000_000, ..Default::default() }).unwrap();
+        // Past the check: it tries the main, which is not there.
+        let (code, err) = pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456").unwrap_err();
+        assert_eq!(code, 1);
+        assert!(err.starts_with("Could not reach"), "{err}");
     }
 
     #[test]

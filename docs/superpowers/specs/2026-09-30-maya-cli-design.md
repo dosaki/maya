@@ -45,7 +45,9 @@ maya --version
   exits 0; on failure it prints the same message the app would show
   ("Wrong or expired pairing code.", "The main Maya failed to prove it
   received the pairing code.", "Could not reach <host>:<port>: …") and exits 1.
-  Pairing again replaces the stored credentials.
+  Pairing again replaces the stored credentials. It refuses while a
+  `maya run` is live (`stop \`maya run\` first (pid N)`, exit 2), since
+  that run holds the old credentials.
 - **run** is the assistant, in the foreground. It refuses to start without
   assistant credentials (`run \`maya pair\` first`, exit 2) or when the
   config's role is `main` (`the CLI is assistant-only`, exit 2). It watches
