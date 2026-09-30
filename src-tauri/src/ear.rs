@@ -3,7 +3,7 @@
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,7 +54,7 @@ pub fn managed_dictation_off(defaults_output: &str) -> bool {
 
 /// Asks macOS whether a management profile forbids Dictation.
 pub fn dictation_managed_off() -> bool {
-    Command::new("defaults")
+    maya_core::command("defaults")
         .args(["read", "/Library/Managed Preferences/com.apple.applicationaccess", "allowDictation"])
         .output()
         .map(|o| o.status.success() && managed_dictation_off(&String::from_utf8_lossy(&o.stdout)))
@@ -119,7 +119,7 @@ impl Ear {
     /// Starts the sidecar; events arrive on the returned channel until it exits.
     pub fn spawn(device: Option<&str>, engine: EngineArgs) -> Result<(Ear, mpsc::Receiver<EarEvent>), String> {
         let path = sidecar_path().ok_or("The listener (maya-ear) is not built. Run `pnpm ear:build`.")?;
-        let mut cmd = Command::new(path);
+        let mut cmd = maya_core::command(path);
         if let Some(d) = device {
             cmd.args(["--device", d]);
         }

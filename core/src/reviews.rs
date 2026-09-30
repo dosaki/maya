@@ -1,7 +1,7 @@
 use crate::launch::shell_single_quote;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Why a PR is on the list.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,7 +70,7 @@ pub fn merge(a: Vec<ReviewPr>, b: Vec<ReviewPr>) -> Vec<ReviewPr> {
 }
 
 fn search(flag: &str, reason: Reason) -> Result<Vec<ReviewPr>, String> {
-    let out = Command::new("gh")
+    let out = crate::command("gh")
         .args(["search", "prs", flag, "--state=open", "--limit", "50", "--json", SEARCH_FIELDS])
         .stdin(Stdio::null())
         .output()
@@ -103,7 +103,7 @@ pub fn remote_matches(remote: &str, name_with_owner: &str) -> bool {
 }
 
 fn origin_of(dir: &Path) -> Option<String> {
-    let out = Command::new("git").args(["-C", dir.to_str()?, "config", "--get", "remote.origin.url"]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let out = crate::command("git").args(["-C", dir.to_str()?, "config", "--get", "remote.origin.url"]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     if out.status.success() {
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {

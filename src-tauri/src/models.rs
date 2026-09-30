@@ -4,7 +4,6 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{LazyLock, Mutex};
 
 pub struct WhisperModel {
@@ -144,7 +143,7 @@ pub fn fetch_to(dir: &Path, m: &WhisperModel, url: &str, progress: &dyn Fn(u64, 
     let target = dir.join(m.file);
     let _ = std::fs::remove_file(&part);
     let result = (|| {
-        let mut child = Command::new("curl")
+        let mut child = maya_core::command("curl")
             .args(curl_args(&part, url))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())

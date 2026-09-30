@@ -1,10 +1,11 @@
-//! ElevenLabs as an optional voice. The key lives in the macOS Keychain,
-//! synthesised lines are cached under `<maya_dir>/voice/`, and playback uses
-//! the built-in `afplay`. Anything that fails falls back to the built-in voice.
+//! ElevenLabs as an optional voice. The key lives in the macOS Keychain (the
+//! Windows Credential Manager on Windows), synthesised lines are cached under
+//! `<maya_dir>/voice/`, and playback uses the built-in `afplay` (MCI on
+//! Windows). Anything that fails falls back to the built-in voice.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub use maya_core::config::VoiceProvider;
 
@@ -19,13 +20,74 @@ const KEYCHAIN_SERVICE: &str = "maya-elevenlabs";
 const KEYCHAIN_ACCOUNT: &str = "api-key";
 pub const MODEL_ID: &str = "eleven_multilingual_v2";
 
+/// Stores the API key in Credential Manager (replacing any previous one).
+#[cfg(windows)]
+pub fn store_key(key: &str) -> Result<(), String> {
+    store_credential(KEYCHAIN_SERVICE, key)
+}
+
+/// The stored API key, if any.
+#[cfg(windows)]
+pub fn load_key() -> Option<String> {
+    load_credential(KEYCHAIN_SERVICE)
+}
+
+#[cfg(windows)]
+fn store_credential(service: &str, key: &str) -> Result<(), String> {
+    use windows_sys::Win32::Security::Credentials::{CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC};
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("The key is empty.".into());
+    }
+    let mut target = wide(service);
+    let mut user = wide(KEYCHAIN_ACCOUNT);
+    let mut blob = key.as_bytes().to_vec();
+    let mut cred: CREDENTIALW = unsafe { std::mem::zeroed() };
+    cred.Type = CRED_TYPE_GENERIC;
+    cred.TargetName = target.as_mut_ptr();
+    cred.UserName = user.as_mut_ptr();
+    cred.CredentialBlobSize = blob.len() as u32;
+    cred.CredentialBlob = blob.as_mut_ptr();
+    cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
+    // SAFETY: the credential's strings and blob outlive the call.
+    if unsafe { CredWriteW(&cred, 0) } != 0 {
+        Ok(())
+    } else {
+        Err(format!("Credential Manager refused the key: {}", std::io::Error::last_os_error()))
+    }
+}
+
+#[cfg(windows)]
+fn load_credential(service: &str) -> Option<String> {
+    use windows_sys::Win32::Security::Credentials::{CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC};
+    let target = wide(service);
+    let mut cred: *mut CREDENTIALW = std::ptr::null_mut();
+    // SAFETY: CredReadW allocates the credential, which is read then freed.
+    unsafe {
+        if CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut cred) == 0 || cred.is_null() {
+            return None;
+        }
+        let c = &*cred;
+        let bytes = std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize).to_vec();
+        CredFree(cred as *const _);
+        let key = String::from_utf8(bytes).ok()?.trim().to_string();
+        (!key.is_empty()).then_some(key)
+    }
+}
+
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain([0]).collect()
+}
+
 /// Stores the API key in the login Keychain (replacing any previous one).
+#[cfg(target_os = "macos")]
 pub fn store_key(key: &str) -> Result<(), String> {
     let key = key.trim();
     if key.is_empty() {
         return Err("The key is empty.".into());
     }
-    let out = Command::new("security")
+    let out = maya_core::command("security")
         .args(["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w", key])
         .stdin(Stdio::null())
         .output()
@@ -38,8 +100,9 @@ pub fn store_key(key: &str) -> Result<(), String> {
 }
 
 /// The stored API key, if any.
+#[cfg(target_os = "macos")]
 pub fn load_key() -> Option<String> {
-    let out = Command::new("security")
+    let out = maya_core::command("security")
         .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -70,7 +133,7 @@ pub fn parse_voices(json: &str) -> Result<Vec<Voice>, String> {
 
 /// The account's voices.
 pub fn list_voices(key: &str) -> Result<Vec<Voice>, String> {
-    let out = Command::new("curl")
+    let out = maya_core::command("curl")
         .args(["-fsS", "--max-time", "15", "-H", &format!("xi-api-key: {key}"), "https://api.elevenlabs.io/v1/voices"])
         .stdin(Stdio::null())
         .output()
@@ -108,7 +171,7 @@ pub fn synthesize(key: &str, voice_id: &str, text: &str, path: &Path) -> Result<
     }
     let tmp = path.with_extension("part");
     let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128");
-    let out = Command::new("curl")
+    let out = maya_core::command("curl")
         .args(["-fsS", "--max-time", "20", "-X", "POST", "-H", &format!("xi-api-key: {key}"), "-H", "Content-Type: application/json", "-d", &request_body(text), "-o"])
         .arg(&tmp)
         .arg(&url)
@@ -122,9 +185,28 @@ pub fn synthesize(key: &str, voice_id: &str, text: &str, path: &Path) -> Result<
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
-/// Plays an audio file with the system player, waiting for it to finish.
+/// Plays an audio file through MCI, waiting for it to finish.
+#[cfg(windows)]
 pub fn play(path: &Path) -> Result<(), String> {
-    let ok = Command::new("afplay").arg(path).stdin(Stdio::null()).status().map_err(|e| format!("could not run afplay: {e}"))?;
+    use windows_sys::Win32::Media::Multimedia::mciSendStringW;
+    let send = |cmd: String| -> Result<(), String> {
+        let w = wide(&cmd);
+        // SAFETY: a NUL-terminated command; no return buffer or window.
+        match unsafe { mciSendStringW(w.as_ptr(), std::ptr::null_mut(), 0, std::ptr::null_mut()) } {
+            0 => Ok(()),
+            code => Err(format!("could not play the voice (MCI error {code})")),
+        }
+    };
+    send(format!("open \"{}\" type mpegvideo alias maya_voice", path.display()))?;
+    let played = send("play maya_voice wait".into());
+    let _ = send("close maya_voice".into());
+    played
+}
+
+/// Plays an audio file with the system player, waiting for it to finish.
+#[cfg(target_os = "macos")]
+pub fn play(path: &Path) -> Result<(), String> {
+    let ok = maya_core::command("afplay").arg(path).stdin(Stdio::null()).status().map_err(|e| format!("could not run afplay: {e}"))?;
     if ok.success() {
         Ok(())
     } else {
@@ -144,6 +226,22 @@ pub fn speak(maya_dir: &Path, key: &str, voice_id: &str, text: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn credential_manager_round_trips_and_replaces_the_key() {
+        use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
+        let service = format!("maya-test-{}", std::process::id());
+        assert_eq!(load_credential(&service), None);
+        store_credential(&service, "  first-key
+").unwrap();
+        assert_eq!(load_credential(&service).as_deref(), Some("first-key"));
+        store_credential(&service, "second").unwrap();
+        assert_eq!(load_credential(&service).as_deref(), Some("second"));
+        assert!(store_credential(&service, "  ").unwrap_err().contains("empty"));
+        unsafe { CredDeleteW(wide(&service).as_ptr(), CRED_TYPE_GENERIC, 0) };
+        assert_eq!(load_credential(&service), None);
+    }
     use std::path::Path;
 
     #[test]

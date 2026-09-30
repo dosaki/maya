@@ -1,7 +1,7 @@
 use crate::model::PullRequest;
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// How long a lookup result (a PR or none) is trusted before `gh` is asked again.
 pub const TTL_MS: u64 = 60_000;
@@ -18,7 +18,7 @@ pub fn parse(stdout: &str) -> Option<PullRequest> {
 /// Asks `gh` for the PR of `dir`'s current branch. None when there is no
 /// repo, remote, PR, or `gh` itself.
 pub fn lookup(dir: &Path) -> Option<PullRequest> {
-    let out = Command::new("gh")
+    let out = crate::command("gh")
         .args(["pr", "view", "--json", "number,url,state,isDraft"])
         .current_dir(dir)
         .stdin(Stdio::null())

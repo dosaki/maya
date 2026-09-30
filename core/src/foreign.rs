@@ -6,7 +6,7 @@ use crate::context;
 use crate::model::{AwaitKind, Awaiting, Card, Harness, State};
 use crate::state::{asking_line, truncate, SNIPPET_CHARS};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// A live session of another harness.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +100,7 @@ pub fn tui_processes(ps: &str) -> Vec<(i32, String, Harness)> {
 }
 
 pub fn list_tui_processes() -> Vec<(i32, String, Harness)> {
-    Command::new("ps")
+    crate::command("ps")
         .args(["-axo", "pid=,tty=,command="])
         .stdin(Stdio::null())
         .output()
@@ -204,7 +204,7 @@ pub fn grok_sessions(grok_dir: &std::path::Path, alive: &dyn Fn(i32) -> bool, tt
 }
 
 pub fn proc_info(pid: i32) -> ProcInfo {
-    Command::new("lsof")
+    crate::command("lsof")
         .args(["-p", &pid.to_string(), "-Fn", "-w"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())

@@ -1,6 +1,7 @@
 use crate::model::{AwaitKind, Card, State};
 use crate::state::truncate;
 use std::collections::HashSet;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Mutex, OnceLock};
 
@@ -84,8 +85,10 @@ pub fn pick_voice(installed: &str) -> Option<String> {
     VOICES.iter().find(|v| names.contains(v)).map(|v| v.to_string())
 }
 
+#[cfg(unix)]
 static VOICE: OnceLock<Option<String>> = OnceLock::new();
 
+#[cfg(unix)]
 fn voice() -> Option<String> {
     VOICE
         .get_or_init(|| {
@@ -140,7 +143,15 @@ pub fn focus_active_in(json: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether Windows is keeping quiet: Do not disturb, quiet time, a
+/// presentation or a full-screen app. Unreadable state counts as off.
+#[cfg(windows)]
+pub fn focus_active() -> bool {
+    crate::notify_win::quiet_now()
+}
+
 /// Whether a Focus mode is on right now. Unreadable state counts as off.
+#[cfg(unix)]
 pub fn focus_active() -> bool {
     let Some(home) = dirs::home_dir() else { return false };
     let path = home.join("Library/DoNotDisturb/DB/Assertions.json");
@@ -165,6 +176,13 @@ pub fn set_eleven_speaker(speak: ElevenSpeaker) {
 }
 
 /// Speaks with the built-in female voice.
+#[cfg(windows)]
+fn say_builtin(line: &str) {
+    crate::notify_win::say(line)
+}
+
+/// Speaks with the built-in female voice.
+#[cfg(unix)]
 fn say_builtin(line: &str) {
     let mut cmd = Command::new("say");
     if let Some(v) = voice() {
@@ -277,6 +295,12 @@ pub fn subtitle_for(card: &Card) -> String {
     }
 }
 
+#[cfg(windows)]
+pub fn notify(card: &Card, sound: bool) {
+    crate::notify_win::show_toast(&card.name, &subtitle_for(card), &body_for(card), sound);
+}
+
+#[cfg(unix)]
 pub fn notify(card: &Card, sound: bool) {
     let _ = Command::new("osascript").arg("-e").arg(applescript_notify(&card.name, &subtitle_for(card), &body_for(card), sound)).output();
 }

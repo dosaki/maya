@@ -883,7 +883,7 @@ pub(crate) fn voice_history(state: TauriState<AppState>) -> Vec<VoiceTurn> {
 #[tauri::command(async)]
 pub(crate) fn voice_selftest() -> Result<String, String> {
     let path = ear::sidecar_path().ok_or("The listener (maya-ear) is not built. Run `pnpm ear:build`.")?;
-    let out = std::process::Command::new(path).arg("--selftest").output().map_err(|e| e.to_string())?;
+    let out = maya_core::command(path).arg("--selftest").output().map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 

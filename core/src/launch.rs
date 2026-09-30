@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub const CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(90);
@@ -174,7 +174,7 @@ pub fn claude_binary() -> Option<PathBuf> {
     if let Some(p) = candidates.iter().find(|p| p.is_file()) {
         return Some(p.clone());
     }
-    let out = Command::new(LOGIN_SHELL).args(["-lc", "command -v claude"]).output().ok()?;
+    let out = crate::command(LOGIN_SHELL).args(["-lc", "command -v claude"]).output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if out.status.success() && !s.is_empty() {
         Some(PathBuf::from(s))
@@ -185,7 +185,7 @@ pub fn claude_binary() -> Option<PathBuf> {
 
 /// Runs the headless picker; None on NONE, no match, timeout or any error.
 pub fn classify(binary: &Path, root: &Path, user_prompt: &str, dirs: &[String], timeout: Duration) -> Option<String> {
-    let mut child = Command::new(binary)
+    let mut child = crate::command(binary)
         .args(["-p", "--strict-mcp-config", "--disable-slash-commands", "--model", "haiku", "--output-format", "text", "--no-session-persistence", "--max-turns", "1"])
         .arg(classifier_prompt(user_prompt, dirs))
         .current_dir(root)
