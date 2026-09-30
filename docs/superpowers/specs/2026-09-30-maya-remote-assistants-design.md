@@ -144,7 +144,9 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
   `cycle_session_mode`, `session_history`) looks the session id up first: a
   local id runs as today, a remote id becomes a `command` to its assistant,
   and the command's `result` is the Tauri command's result. The page does
-  not change for that.
+  not change for that. A live local session wins over a remote card with
+  the same id: the board shows the local card only, and commands for that
+  id run locally.
 - The "+" and resume dialogs gain a Machine picker, "This Mac" first, then
   each connected assistant. A remote machine's folders come from its last
   `board`; start and resume forward to it.
@@ -167,7 +169,9 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
   `name`, and an ambiguous name asks "Which one: hexgrid on maya-mini or
   hexgrid on this Mac?". Read-backs say the machine for remote sessions.
   Folders for start and resume are listed as `project (on machine)` for
-  remote machines. Voice and notifications use the label.
+  remote machines; a chosen folder is split into project and machine only
+  when `machine` is the label of a connected assistant, so a local folder
+  that happens to be named like that stays local. Voice and notifications use the label.
 - Nothing on an assistant's first board is announced when this run of the
   main holds no board for it: right after pairing, and on its first
   connection after the main starts. The server decides that under its lock

@@ -24,13 +24,14 @@ pub struct RemoteBoard {
 /// `stale` when the snapshot is old or the link is down; machines quiet for
 /// `EXPIRE_MS` are left out.
 ///
-/// A session id shows once: a disconnected board's card gives way to a
+/// A session id shows once: a local session wins over any remote card with
+/// its id (what `route` does too), a disconnected board's card gives way to a
 /// connected board listing the same id (a machine paired again, whose old
 /// snapshot lingers), and otherwise the first board listing it wins.
 pub fn merged(local: Vec<Card>, remotes: &[RemoteBoard], now_ms: u64) -> Vec<Card> {
-    let mut out = local;
     let connected: HashSet<&str> = remotes.iter().filter(|b| b.connected && live(b, now_ms)).flat_map(|b| b.cards.iter().map(|c| c.session_id.as_str())).collect();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = local.iter().map(|c| c.session_id.clone()).collect();
+    let mut out = local;
     for b in remotes {
         let age = now_ms.saturating_sub(b.received_at);
         if !live(b, now_ms) {
@@ -81,6 +82,16 @@ pub fn display_names(entries: &[(String, String)]) -> Vec<String> {
 pub fn machine_of(remotes: &[RemoteBoard], session_id: &str, now_ms: u64) -> Option<String> {
     let listing = || remotes.iter().filter(|b| live(b, now_ms) && b.cards.iter().any(|c| c.session_id == session_id));
     listing().find(|b| b.connected).or_else(|| listing().next()).map(|b| b.machine.clone())
+}
+
+/// Where a command for `session_id` goes: `None` (this Mac) when it is one
+/// of `local_ids`, the live local sessions, else the machine listing it.
+/// The same precedence as `merged`, so a command reaches the card shown.
+pub fn route(local_ids: &[String], remotes: &[RemoteBoard], session_id: &str, now_ms: u64) -> Option<String> {
+    if local_ids.iter().any(|id| id == session_id) {
+        return None;
+    }
+    machine_of(remotes, session_id, now_ms)
 }
 
 pub fn dirs_of(remotes: &[RemoteBoard], machine: &str) -> Vec<String> {
@@ -155,6 +166,22 @@ mod tests {
         assert_eq!(names, ["Gnowee (192.168.55.70)", "Gnowee (192.168.55.71)", "desk"]);
         assert_eq!(display_names(&[e("laptop", "10.0.0.5")]), ["laptop"], "a unique name stays plain");
         assert_eq!(display_names(&[e("laptop", ""), e("laptop", "10.0.0.5")]), ["laptop (address unknown)", "laptop (10.0.0.5)"], "an entry saved before addresses were kept");
+    }
+
+    #[test]
+    fn a_local_session_wins_over_a_remote_card_with_its_id() {
+        let mut local = card("same", "mine");
+        local.cwd = "/here".into();
+        let m = merged(vec![local, card("l2", "l2")], &[board("laptop", "h", &["same", "r1"], 1_000, true)], 1_500);
+        let ids: Vec<(&str, Option<&str>)> = m.iter().map(|c| (c.session_id.as_str(), c.machine.as_deref())).collect();
+        assert_eq!(ids, [("same", None), ("l2", None), ("r1", Some("laptop"))], "one card for the id, the local one");
+        assert_eq!(m[0].cwd, "/here");
+        // Routing follows the board: the live local session is not routed away.
+        let boards = [board("laptop", "h", &["same", "r1"], 0, true)];
+        let local_ids = vec!["same".to_string(), "l2".to_string()];
+        assert_eq!(route(&local_ids, &boards, "same", 0), None);
+        assert_eq!(route(&local_ids, &boards, "r1", 0).as_deref(), Some("laptop"));
+        assert_eq!(route(&[], &boards, "same", 0).as_deref(), Some("laptop"), "once the local session ends, the remote one routes");
     }
 
     #[test]

@@ -309,10 +309,12 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     let state = app.state::<AppState>();
     let cards = crate::merged_cards(&state);
     let mut dirs = dirs_local;
+    let mut machines = vec![];
     for board in crate::remote_boards(&state).into_iter().filter(|b| b.connected) {
         for d in &board.dirs {
             dirs.push(format!("{d} (on {})", board.machine));
         }
+        machines.push(board.machine);
     }
     let prs = app.state::<AppState>().reviews.lock().unwrap().prs.clone();
     let history = recent_exchanges(app);
@@ -341,7 +343,7 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
         reply_then_idle(app, generation, &reply.say, inbox);
         return;
     };
-    match interpreter::validate(proposed, &cards, &dirs, &prs) {
+    match interpreter::validate(proposed, &cards, &dirs, &machines, &prs) {
         Err(why) => {
             log::line("action", format!("rejected: {why}"));
             reply_then_idle(app, generation, &why, inbox)

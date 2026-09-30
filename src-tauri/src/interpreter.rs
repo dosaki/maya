@@ -126,17 +126,21 @@ fn loose(s: &str) -> String {
 }
 
 /// Splits a voice dir list entry spelled `"<dir> (on <machine>)"` into the
-/// bare dir and the machine; a plain (local) entry gets no machine back.
-fn split_machine_suffix(s: &str) -> (String, Option<String>) {
-    if let Some(idx) = s.rfind(" (on ") {
-        if s.ends_with(')') {
-            let machine = &s[idx + " (on ".len()..s.len() - 1];
-            if !machine.is_empty() {
-                return (s[..idx].to_string(), Some(machine.to_string()));
-            }
-        }
+/// bare dir and the machine, only when `<machine>` is one of `machines` (the
+/// labels of the connected assistants); anything else, a local dir that
+/// happens to be named like that included, stays whole with no machine.
+/// The longest matching label wins, so `proj (on a (b))` finds `a (b)`.
+fn split_machine_suffix(s: &str, machines: &[String]) -> (String, Option<String>) {
+    let found = machines
+        .iter()
+        .filter(|m| !m.is_empty())
+        .filter_map(|m| s.strip_suffix(&format!(" (on {m})")).map(|base| (base, m)))
+        .filter(|(base, _)| !base.is_empty())
+        .max_by_key(|(_, m)| m.len());
+    match found {
+        Some((base, m)) => (base.to_string(), Some(m.clone())),
+        None => (s.to_string(), None),
     }
-    (s.to_string(), None)
 }
 
 /// Shorter than this, a name (or the request) is too generic to match inside
@@ -275,8 +279,9 @@ fn find_pr<'a>(prs: &'a [ReviewPr], wanted: &str) -> Result<&'a ReviewPr, String
 
 /// The action with its session resolved to an id, or why it cannot run.
 /// It also carries what the spoken read-back needs: the resolved card's
-/// `name`, and for an answer the chosen option's `label`.
-pub fn validate(action: &Value, cards: &[Card], dirs: &[String], prs: &[ReviewPr]) -> Result<Value, String> {
+/// `name`, and for an answer the chosen option's `label`. `machines` are
+/// the labels of the connected assistants whose dirs are in `dirs`.
+pub fn validate(action: &Value, cards: &[Card], dirs: &[String], machines: &[String], prs: &[ReviewPr]) -> Result<Value, String> {
     let mut a = action.clone();
     let kind = a["kind"].as_str().unwrap_or("").to_string();
     match kind.as_str() {
@@ -318,7 +323,7 @@ pub fn validate(action: &Value, cards: &[Card], dirs: &[String], prs: &[ReviewPr
         "resume" | "start" => {
             let dir = a["dir"].as_str().unwrap_or("").to_string();
             let found = dirs.iter().find(|d| loose(d) == loose(&dir)).ok_or_else(|| format!("I couldn't find a project called {dir}"))?.clone();
-            let (base, machine) = split_machine_suffix(&found);
+            let (base, machine) = split_machine_suffix(&found, machines);
             a["dir"] = Value::String(base);
             if let Some(m) = machine {
                 a["machine"] = Value::String(m);
@@ -453,7 +458,7 @@ mod tests {
         let cards = [card("a", "Collector 2", State::Awaiting, Some("Approve, or amend?"))];
         let s = board_summary(&cards);
         assert!(s.contains("asks: Approve, or amend? (free text: use reply)"), "{s}");
-        let err = validate(&json!({"kind":"answer","session":"Collector 2","option":1}), &cards, &[], &[]).unwrap_err();
+        let err = validate(&json!({"kind":"answer","session":"Collector 2","option":1}), &cards, &[], &[], &[]).unwrap_err();
         assert!(err.contains("What should I tell"), "{err}");
         assert!(err.ends_with('?'), "the failure asks a question so the follow-up window opens: {err}");
         assert!(system_prompt().contains("numbered options"));
@@ -462,15 +467,15 @@ mod tests {
     #[test]
     fn review_and_open_resolve_a_pull_request_loosely() {
         let prs = [pr("dosaki/collector", 14, "Add ERD overlay", "alex", false), pr("dosaki/maya", 3, "Voice assistant", "tiago", true)];
-        let by_number = validate(&json!({"kind":"review","pr":"#14"}), &[], &[], &prs).unwrap();
+        let by_number = validate(&json!({"kind":"review","pr":"#14"}), &[], &[], &[], &prs).unwrap();
         assert_eq!(by_number["repo"], "dosaki/collector");
         assert_eq!(by_number["number"], 14);
         assert_eq!(by_number["title"], "Add ERD overlay");
-        let by_repo = validate(&json!({"kind":"open","pr":"collector 14"}), &[], &[], &prs).unwrap();
+        let by_repo = validate(&json!({"kind":"open","pr":"collector 14"}), &[], &[], &[], &prs).unwrap();
         assert_eq!(by_repo["number"], 14);
-        let by_title = validate(&json!({"kind":"review","pr":"voice assistant"}), &[], &[], &prs).unwrap();
+        let by_title = validate(&json!({"kind":"review","pr":"voice assistant"}), &[], &[], &[], &prs).unwrap();
         assert_eq!(by_title["number"], 3);
-        let err = validate(&json!({"kind":"review","pr":"#99"}), &[], &[], &prs).unwrap_err();
+        let err = validate(&json!({"kind":"review","pr":"#99"}), &[], &[], &[], &prs).unwrap_err();
         assert!(err.contains("pull request"), "{err}");
         assert!(needs_confirm(&json!({"kind":"review"})));
         assert!(!needs_confirm(&json!({"kind":"open"})));
@@ -525,20 +530,20 @@ mod tests {
     fn validation_matches_sessions_loosely_and_rejects_the_unknown() {
         let cards = vec![card("a", "hexgrid-d3", State::Awaiting, Some("Push now?")), card("b", "Coral4 Loop", State::Working, None)];
         let dirs = vec!["maya".to_string()];
-        let ok = validate(&serde_json::json!({"kind":"reply","session":"hexgrid","text":"go"}), &cards, &dirs, &[]).unwrap();
+        let ok = validate(&serde_json::json!({"kind":"reply","session":"hexgrid","text":"go"}), &cards, &dirs, &[], &[]).unwrap();
         assert_eq!(ok["session"], "a");
-        let ok = validate(&serde_json::json!({"kind":"focus","session":"coral 4 loop"}), &cards, &dirs, &[]).unwrap();
+        let ok = validate(&serde_json::json!({"kind":"focus","session":"coral 4 loop"}), &cards, &dirs, &[], &[]).unwrap();
         assert_eq!(ok["session"], "b");
-        assert!(validate(&serde_json::json!({"kind":"focus","session":"nautilus"}), &cards, &dirs, &[]).unwrap_err().contains("nautilus"));
-        assert!(validate(&serde_json::json!({"kind":"start","dir":"nowhere","prompt":"x"}), &cards, &dirs, &[]).unwrap_err().contains("nowhere"));
-        assert!(validate(&serde_json::json!({"kind":"start","dir":"maya","prompt":"x"}), &cards, &dirs, &[]).is_ok());
-        assert!(validate(&serde_json::json!({"kind":"answer","session":"a","option":3}), &cards, &dirs, &[]).unwrap_err().contains("free-text"), "a prose ask cannot be answered by number");
-        assert!(validate(&serde_json::json!({"kind":"dance"}), &cards, &dirs, &[]).unwrap_err().contains("dance"));
-        assert!(validate(&serde_json::json!({"kind":"report"}), &cards, &dirs, &[]).is_ok());
+        assert!(validate(&serde_json::json!({"kind":"focus","session":"nautilus"}), &cards, &dirs, &[], &[]).unwrap_err().contains("nautilus"));
+        assert!(validate(&serde_json::json!({"kind":"start","dir":"nowhere","prompt":"x"}), &cards, &dirs, &[], &[]).unwrap_err().contains("nowhere"));
+        assert!(validate(&serde_json::json!({"kind":"start","dir":"maya","prompt":"x"}), &cards, &dirs, &[], &[]).is_ok());
+        assert!(validate(&serde_json::json!({"kind":"answer","session":"a","option":3}), &cards, &dirs, &[], &[]).unwrap_err().contains("free-text"), "a prose ask cannot be answered by number");
+        assert!(validate(&serde_json::json!({"kind":"dance"}), &cards, &dirs, &[], &[]).unwrap_err().contains("dance"));
+        assert!(validate(&serde_json::json!({"kind":"report"}), &cards, &dirs, &[], &[]).is_ok());
 
         let two = vec![card("a", "Coral4 Loop", State::Working, None), card("b", "coral-boards2", State::Working, None)];
-        assert!(validate(&serde_json::json!({"kind":"focus","session":"coral"}), &two, &dirs, &[]).unwrap_err().starts_with("Which one:"));
-        assert_eq!(validate(&serde_json::json!({"kind":"focus","session":"Coral4 Loop"}), &two, &dirs, &[]).unwrap()["session"], "a", "an exact name is never ambiguous");
+        assert!(validate(&serde_json::json!({"kind":"focus","session":"coral"}), &two, &dirs, &[], &[]).unwrap_err().starts_with("Which one:"));
+        assert_eq!(validate(&serde_json::json!({"kind":"focus","session":"Coral4 Loop"}), &two, &dirs, &[], &[]).unwrap()["session"], "a", "an exact name is never ambiguous");
     }
 
     #[test]
@@ -549,9 +554,9 @@ mod tests {
         c.awaiting.as_mut().unwrap().questions = vec![Question { question: "Which?".into(), header: "H".into(), multi_select: false, options: vec![Choice { label: "A".into(), description: "".into() }, Choice { label: "B".into(), description: "".into() }] }];
         c.state_since = 1234;
         let cards = vec![c];
-        assert_eq!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &[], &[]).unwrap()["option"], 2);
-        assert_eq!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &[], &[]).unwrap()["askId"], 1234, "the ask id is captured when the action is validated");
-        assert!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":3}), &cards, &[], &[]).unwrap_err().contains("option"));
+        assert_eq!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &[], &[], &[]).unwrap()["option"], 2);
+        assert_eq!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &[], &[], &[]).unwrap()["askId"], 1234, "the ask id is captured when the action is validated");
+        assert!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":3}), &cards, &[], &[], &[]).unwrap_err().contains("option"));
     }
 
     fn asking(id: &str, name: &str, labels: &[&str]) -> Card {
@@ -576,40 +581,56 @@ mod tests {
         let dirs: Vec<String> = vec![];
         let cards = vec![card("a", "api", State::Working, None), card("b", "rapid fix", State::Working, None)];
         // "api" is inside "rapid fix", but three letters are too few to count.
-        assert_eq!(validate(&serde_json::json!({"kind":"focus","session":"rapid fix"}), &cards, &dirs, &[]).unwrap()["session"], "b");
-        assert!(validate(&serde_json::json!({"kind":"focus","session":"rapid"}), &cards, &dirs, &[]).is_ok_and(|a| a["session"] == "b"));
-        assert!(validate(&serde_json::json!({"kind":"focus","session":"ap"}), &cards, &dirs, &[]).is_err());
+        assert_eq!(validate(&serde_json::json!({"kind":"focus","session":"rapid fix"}), &cards, &dirs, &[], &[]).unwrap()["session"], "b");
+        assert!(validate(&serde_json::json!({"kind":"focus","session":"rapid"}), &cards, &dirs, &[], &[]).is_ok_and(|a| a["session"] == "b"));
+        assert!(validate(&serde_json::json!({"kind":"focus","session":"ap"}), &cards, &dirs, &[], &[]).is_err());
         // A card with no usable name matches nothing.
         let blank = vec![card("c", "--", State::Working, None)];
-        assert!(validate(&serde_json::json!({"kind":"focus","session":"anything at all"}), &blank, &dirs, &[]).is_err());
+        assert!(validate(&serde_json::json!({"kind":"focus","session":"anything at all"}), &blank, &dirs, &[], &[]).is_err());
         // Ambiguity still asks.
         let two = vec![card("a", "hexgrid-one", State::Working, None), card("b", "hexgrid-two", State::Working, None)];
-        assert_eq!(validate(&serde_json::json!({"kind":"focus","session":"hexgrid"}), &two, &dirs, &[]).unwrap_err(), "Which one: hexgrid-one or hexgrid-two?");
+        assert_eq!(validate(&serde_json::json!({"kind":"focus","session":"hexgrid"}), &two, &dirs, &[], &[]).unwrap_err(), "Which one: hexgrid-one or hexgrid-two?");
     }
 
     #[test]
     fn the_validated_action_carries_what_the_read_back_needs() {
         let cards = vec![asking("a", "hexgrid-d3", &["Postgres", "SQLite"]), card("b", "Coral4 Loop", State::Working, None)];
         let dirs = vec!["maya".to_string()];
-        let r = validate(&serde_json::json!({"kind":"reply","session":"coral","text":"go ahead"}), &cards, &dirs, &[]).unwrap();
+        let r = validate(&serde_json::json!({"kind":"reply","session":"coral","text":"go ahead"}), &cards, &dirs, &[], &[]).unwrap();
         assert_eq!((r["name"].as_str(), r["text"].as_str()), (Some("Coral4 Loop"), Some("go ahead")));
-        let a = validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &dirs, &[]).unwrap();
+        let a = validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &dirs, &[], &[]).unwrap();
         assert_eq!((a["name"].as_str(), a["label"].as_str()), (Some("hexgrid-d3"), Some("SQLite")));
-        let f = validate(&serde_json::json!({"kind":"focus","session":"a"}), &cards, &dirs, &[]).unwrap();
+        let f = validate(&serde_json::json!({"kind":"focus","session":"a"}), &cards, &dirs, &[], &[]).unwrap();
         assert_eq!(f["name"], "hexgrid-d3");
-        let st = validate(&serde_json::json!({"kind":"start","dir":"MAYA","prompt":"fix the build"}), &cards, &dirs, &[]).unwrap();
+        let st = validate(&serde_json::json!({"kind":"start","dir":"MAYA","prompt":"fix the build"}), &cards, &dirs, &[], &[]).unwrap();
         assert_eq!((st["dir"].as_str(), st["prompt"].as_str()), (Some("maya"), Some("fix the build")));
     }
 
     #[test]
     fn a_dir_spelled_with_its_machine_maps_to_dir_and_machine() {
         let dirs = vec!["maya".to_string(), "maya (on laptop)".to_string()];
-        let local = validate(&serde_json::json!({"kind":"start","dir":"maya","prompt":"go"}), &[], &dirs, &[]).unwrap();
+        let machines = vec!["laptop".to_string()];
+        let local = validate(&serde_json::json!({"kind":"start","dir":"maya","prompt":"go"}), &[], &dirs, &machines, &[]).unwrap();
         assert_eq!((local["dir"].as_str(), local["machine"].as_str()), (Some("maya"), None), "a local dir carries no machine");
-        let remote = validate(&serde_json::json!({"kind":"start","dir":"maya (on laptop)","prompt":"go"}), &[], &dirs, &[]).unwrap();
+        let remote = validate(&serde_json::json!({"kind":"start","dir":"maya (on laptop)","prompt":"go"}), &[], &dirs, &machines, &[]).unwrap();
         assert_eq!((remote["dir"].as_str(), remote["machine"].as_str()), (Some("maya"), Some("laptop")));
-        let resumed = validate(&serde_json::json!({"kind":"resume","dir":"maya (on laptop)"}), &[], &dirs, &[]).unwrap();
+        let resumed = validate(&serde_json::json!({"kind":"resume","dir":"maya (on laptop)"}), &[], &dirs, &machines, &[]).unwrap();
         assert_eq!((resumed["dir"].as_str(), resumed["machine"].as_str()), (Some("maya"), Some("laptop")));
+        // A label with its address in it still splits at the right place.
+        let twins = vec!["proj (on Gnowee (10.0.0.5))".to_string()];
+        let t = validate(&serde_json::json!({"kind":"resume","dir":"proj (on Gnowee (10.0.0.5))"}), &[], &twins, &["Gnowee (10.0.0.5)".to_string()], &[]).unwrap();
+        assert_eq!((t["dir"].as_str(), t["machine"].as_str()), (Some("proj"), Some("Gnowee (10.0.0.5)")));
+    }
+
+    #[test]
+    fn a_local_dir_that_looks_like_a_machine_suffix_stays_local_unless_the_machine_exists() {
+        let dirs = vec!["foo (on laptop)".to_string()];
+        let alone = validate(&serde_json::json!({"kind":"start","dir":"foo (on laptop)","prompt":"go"}), &[], &dirs, &[], &[]).unwrap();
+        assert_eq!((alone["dir"].as_str(), alone["machine"].as_str()), (Some("foo (on laptop)"), None), "no machine called laptop: a local dir");
+        let other = validate(&serde_json::json!({"kind":"start","dir":"foo (on laptop)","prompt":"go"}), &[], &dirs, &["desk".to_string()], &[]).unwrap();
+        assert_eq!((other["dir"].as_str(), other["machine"].as_str()), (Some("foo (on laptop)"), None));
+        let routed = validate(&serde_json::json!({"kind":"start","dir":"foo (on laptop)","prompt":"go"}), &[], &dirs, &["laptop".to_string()], &[]).unwrap();
+        assert_eq!((routed["dir"].as_str(), routed["machine"].as_str()), (Some("foo"), Some("laptop")), "with a machine called laptop it routes there");
     }
 
     #[test]
@@ -617,7 +638,7 @@ mod tests {
         let mut remote = card("b", "hexgrid", State::Working, None);
         remote.machine = Some("laptop".into());
         let cards = vec![remote];
-        let f = validate(&serde_json::json!({"kind":"focus","session":"hexgrid"}), &cards, &[], &[]).unwrap();
+        let f = validate(&serde_json::json!({"kind":"focus","session":"hexgrid"}), &cards, &[], &[], &[]).unwrap();
         assert_eq!(f["machine"].as_str(), Some("laptop"));
     }
 
