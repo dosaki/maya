@@ -386,11 +386,28 @@ final class Ear {
 
     func start() {
         if recogniser is SystemRecogniser {
-            SFSpeechRecognizer.requestAuthorization { status in
-                guard status == .authorized else {
-                    Out.emit(["type": "state", "state": "error", "detail": "speech recognition not authorised (\(status.rawValue))"]); exit(2)
+            // A status that is already decided needs no request, and the
+            // request itself has been seen to never answer (its daemon
+            // wedged): give it 20 s, then report instead of listening forever.
+            let known = SFSpeechRecognizer.authorizationStatus()
+            if known == .authorized {
+                startAudio()
+                return
+            }
+            var answered = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+                if !answered {
+                    Out.emit(["type": "state", "state": "error", "detail": "speech recognition did not answer the permission request; try again, or switch Speech recognition to Built-in in Settings"]); exit(9)
                 }
-                DispatchQueue.main.async { self.startAudio() }
+            }
+            SFSpeechRecognizer.requestAuthorization { status in
+                DispatchQueue.main.async {
+                    answered = true
+                    guard status == .authorized else {
+                        Out.emit(["type": "state", "state": "error", "detail": "speech recognition not authorised (\(status.rawValue))"]); exit(2)
+                    }
+                    self.startAudio()
+                }
             }
         } else {
             startAudio()
