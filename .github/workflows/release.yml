@@ -15,6 +15,11 @@ jobs:
   macos:
     name: Build and release (macOS)
     runs-on: macos-latest
+    # A docs commit (conventional type `docs`, with or without a scope)
+    # changes nothing that needs building or releasing.
+    if: >-
+      !startsWith(github.event.head_commit.message, 'docs:') &&
+      !startsWith(github.event.head_commit.message, 'docs(')
     steps:
       - uses: actions/checkout@v4
 
