@@ -1909,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "maya"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "dirs 6.0.0",
@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "maya-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "maya-core",
@@ -1943,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "maya-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "dirs 6.0.0",
