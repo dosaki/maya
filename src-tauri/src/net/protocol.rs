@@ -120,7 +120,9 @@ pub fn mac_matches(token: &str, nonce: &str, given: &str) -> bool {
     m.verify_slice(&given).is_ok()
 }
 
-/// Nonces the main has issued; each answers once.
+/// Nonces the main has issued; each answers once. The real replay guard is
+/// that every challenge carries a fresh random nonce; this log is belt and
+/// braces against a nonce ever being accepted twice.
 #[derive(Default)]
 pub struct NonceLog {
     used: HashMap<String, u64>,
@@ -158,9 +160,12 @@ pub struct Attempts {
 
 impl Attempts {
     pub fn failed(&mut self, addr: &str, now_ms: u64) {
-        let v = self.failures.entry(addr.to_string()).or_default();
-        v.retain(|t| now_ms.saturating_sub(*t) < LOCKOUT_MS);
-        v.push(now_ms);
+        // Old failures age out, and an address with none left is forgotten.
+        self.failures.retain(|_, v| {
+            v.retain(|t| now_ms.saturating_sub(*t) < LOCKOUT_MS);
+            !v.is_empty()
+        });
+        self.failures.entry(addr.to_string()).or_default().push(now_ms);
     }
 
     pub fn locked(&self, addr: &str, now_ms: u64) -> bool {
@@ -231,6 +236,8 @@ mod tests {
         assert!(a.locked("10.0.0.5", 1_000));
         assert!(!a.locked("10.0.0.6", 1_000));
         assert!(!a.locked("10.0.0.5", 1_000 + LOCKOUT_MS + 1));
+        a.failed("10.0.0.7", 1_000 + LOCKOUT_MS + 1);
+        assert_eq!(a.failures.len(), 1, "addresses whose failures aged out are pruned");
     }
 
     #[test]

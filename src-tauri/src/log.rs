@@ -121,7 +121,8 @@ mod tests {
         clear();
         line("ear", "heard: Maya what's waiting");
         line("interpreter", "reply: {\"say\":\"Nothing.\"}\nsecond line");
-        let kept = lines();
+        // Other tests' threads may log meanwhile; look at this test's lines only.
+        let kept: Vec<Line> = lines().into_iter().filter(|l| l.source == "ear" || l.source == "interpreter").collect();
         let tail = &kept[kept.len() - 2..];
         assert_eq!(tail[0].source, "ear");
         assert_eq!(tail[1].text, "reply: {\"say\":\"Nothing.\"}\nsecond line");
@@ -150,12 +151,16 @@ mod tests {
         let _s = SERIAL.lock().unwrap();
         clear();
         for i in 0..(CAPACITY + 3) {
-            line("app", format!("n{i}"));
+            line("ring-test", format!("n{i}"));
         }
         let kept = lines();
         assert_eq!(kept.len(), CAPACITY);
-        assert_eq!(kept[0].text, "n3");
-        assert_eq!(kept[CAPACITY - 1].text, format!("n{}", CAPACITY + 2));
+        // Other tests' threads may log meanwhile, pushing out a few more of ours.
+        let ours: Vec<&str> = kept.iter().filter(|l| l.source == "ring-test").map(|l| l.text.as_str()).collect();
+        let last = format!("n{}", CAPACITY + 2);
+        assert_eq!(ours.last().copied(), Some(last.as_str()));
+        assert!(!ours.iter().any(|t| ["n0", "n1", "n2"].contains(t)), "the oldest are dropped");
+        assert!(ours.len() > CAPACITY - 50, "only stray lines displace ours: {}", ours.len());
     }
 
     #[test]

@@ -35,6 +35,8 @@ use tungstenite::{Message, WebSocket};
 const TICK: Duration = Duration::from_millis(100);
 /// A peer silent this long is dropped (assistants ping every 10 s).
 const SILENCE: Duration = Duration::from_secs(15);
+/// Frames before `welcome` are small; a stranger cannot make the main buffer more.
+const PRE_AUTH_FRAME: usize = 64 * 1024;
 /// Connections beyond this are closed at once.
 const MAX_CONNECTIONS: usize = 32;
 const DISCONNECTED: &str = "assistant disconnected";
@@ -93,18 +95,27 @@ impl Server {
         self.paired.iter().any(|p| p.id == id)
     }
 
-    /// Each paired assistant's id and display name, `name (hostname)` when two share a name.
+    /// Each paired assistant's id and display name, unique across the list.
     fn labels(&self) -> Vec<(String, String)> {
-        let pairs: Vec<(String, String)> = self.paired.iter().map(|p| self.peers.get(&p.id).map_or((p.name.clone(), p.hostname.clone()), |x| (x.name.clone(), x.hostname.clone()))).collect();
-        self.paired.iter().map(|p| p.id.clone()).zip(display_names(&pairs)).collect()
+        let entries: Vec<(String, String, String)> = self
+            .paired
+            .iter()
+            .map(|p| {
+                let (name, host) = self.peers.get(&p.id).map_or((p.name.clone(), p.hostname.clone()), |x| (x.name.clone(), x.hostname.clone()));
+                (name, host, p.id.clone())
+            })
+            .collect();
+        self.paired.iter().map(|p| p.id.clone()).zip(display_names(&entries)).collect()
     }
 
     fn label(&self, id: &str) -> String {
         self.labels().into_iter().find(|(i, _)| i == id).map(|(_, l)| l).unwrap_or_else(|| id.to_string())
     }
 
+    /// The assistant shown as `machine`; a connected one wins should labels ever tie.
     fn id_for(&self, machine: &str) -> Option<String> {
-        self.labels().into_iter().find(|(_, l)| l == machine).map(|(i, _)| i)
+        let ids: Vec<String> = self.labels().into_iter().filter(|(_, l)| l == machine).map(|(i, _)| i).collect();
+        ids.iter().find(|i| self.conns.contains_key(*i)).or(ids.first()).cloned()
     }
 
     fn host_of(&self, id: &str) -> (String, String) {
@@ -169,7 +180,6 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 struct Ctx {
     shared: Arc<Mutex<Server>>,
     notify: Arc<dyn Notify>,
-    config_view: Arc<Mutex<NetworkConfig>>,
     stop: Arc<AtomicBool>,
     main_name: String,
     live: AtomicUsize,
@@ -227,7 +237,6 @@ impl ServerHandle {
             s.sync_boards();
             (s.paired.clone(), label, s.status(now_ms()))
         };
-        lock(&self.ctx.config_view).assistants.retain(|p| p.id != id);
         log::line("network", format!("{label}: removed"));
         self.ctx.notify.paired_list_changed(&list);
         self.ctx.notify.status_changed(status);
@@ -261,6 +270,8 @@ pub fn start(app: AppHandle, port: u16) -> Result<ServerHandle, String> {
 }
 
 /// Binds `port` on every interface (0 picks a free one) and starts accepting.
+/// `config_view` supplies the paired assistants at start; from then on the
+/// server's own list is the truth and `Notify` reports changes to it.
 pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>>, port: u16) -> Result<ServerHandle, String> {
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("Could not listen on port {port}: {e}"))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -268,7 +279,7 @@ pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>
     let paired = lock(&config_view).assistants.clone();
     let shared = Arc::new(Mutex::new(Server::new(paired)));
     let stop = Arc::new(AtomicBool::new(false));
-    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, config_view, stop: stop.clone(), main_name: super::local_hostname(), live: AtomicUsize::new(0) });
+    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name: super::local_hostname(), live: AtomicUsize::new(0) });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
     log::line("network", format!("listening on port {port}"));
@@ -336,7 +347,7 @@ fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
 }
 
 fn upgrade(ctx: &Ctx, stream: TcpStream) -> Result<Ws, String> {
-    let config = WebSocketConfig::default().max_message_size(Some(MAX_FRAME)).max_frame_size(Some(MAX_FRAME));
+    let config = WebSocketConfig::default().max_message_size(Some(PRE_AUTH_FRAME)).max_frame_size(Some(PRE_AUTH_FRAME));
     let deadline = Instant::now() + SILENCE;
     let mut attempt = tungstenite::accept_with_config(stream, Some(config));
     loop {
@@ -359,6 +370,15 @@ fn is_timeout(e: &tungstenite::Error) -> bool {
 
 fn send_down(ws: &mut Ws, down: &Down) -> Result<(), String> {
     ws.send(Message::text(encode(down))).map_err(|e| format!("write failed: {e}"))
+}
+
+/// Logs a frame that is neither text nor a control frame, and skips it.
+fn skip_frame(who: &str, m: &Message) {
+    match m {
+        Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Close(_) => {}
+        Message::Binary(b) => log::line("network", format!("{who}: ignored a binary frame ({} bytes)", b.len())),
+        Message::Frame(_) => log::line("network", format!("{who}: ignored a raw frame")),
+    }
 }
 
 fn bye(ws: &mut Ws, reason: &str) {
@@ -392,7 +412,7 @@ fn read_up(ctx: &Ctx, ws: &mut Ws, who: &str) -> Result<Up, String> {
                 Err(e) => log::line("network", format!("{who}: ignored a message: {e}")),
             },
             Ok(Message::Close(_)) => return Err("closed".into()),
-            Ok(_) => {}
+            Ok(other) => skip_frame(who, &other),
             Err(e) if is_timeout(&e) => {
                 if Instant::now() > deadline {
                     return Err("silent for 15 s".into());
@@ -458,6 +478,11 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr) -> Option<Link> {
         return None;
     };
     let link = Link { id, serial, label, rx };
+    // Authenticated: boards and results may now be large.
+    ws.set_config(|c| {
+        c.max_message_size = Some(MAX_FRAME);
+        c.max_frame_size = Some(MAX_FRAME);
+    });
     if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone() }) {
         leave(ctx, &link, &e);
         return None;
@@ -529,7 +554,6 @@ fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: 
             None
         }
         Ok(a) => {
-            lock(&ctx.config_view).assistants.push(a.clone());
             ctx.notify.paired(&a);
             log::line("network", format!("{name}: paired from {ip}"));
             send_down(ws, &Down::Paired { id: a.id.clone(), token: a.token.clone() }).ok()?;
@@ -573,7 +597,10 @@ fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
                 }
             }
             Ok(Message::Close(_)) => return "closed by the assistant".into(),
-            Ok(_) => deadline = Instant::now() + SILENCE,
+            Ok(other) => {
+                deadline = Instant::now() + SILENCE;
+                skip_frame(&link.label, &other);
+            }
             Err(e) if is_timeout(&e) => {
                 if Instant::now() > deadline {
                     return "silent for 15 s".into();
@@ -923,5 +950,58 @@ mod tests {
         assert!(closed, "the connection closes when the server stops");
         handle.stop();
         wait_until(|| TcpStream::connect(("127.0.0.1", port)).is_err());
+    }
+
+    #[test]
+    fn the_same_machine_paired_twice_gets_distinct_labels_and_commands_reach_the_right_one() {
+        let (handle, port) = test_server();
+        let (old, old_id, old_token) = pair_client(&handle, port, "laptop");
+        drop(old);
+        wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
+        // Its config was reset: it pairs again with the same name and hostname.
+        let (mut new, new_id, _) = pair_client(&handle, port, "laptop");
+        let label = |id: &str| handle.status().assistants.iter().find(|a| a.id == id).unwrap().name.clone();
+        let (old_label, new_label) = (label(&old_id), label(&new_id));
+        assert_ne!(old_label, new_label);
+        assert!(new_label.starts_with("laptop (h, "), "{new_label}");
+        send(&mut new, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![] });
+        wait_until(|| handle.boards().iter().any(|b| b.machine == new_label));
+        // The old one comes back too; each label reaches its own socket.
+        let mut old = connect(port);
+        hello(&mut old, "laptop", Some(&old_id));
+        let Down::Challenge { nonce } = recv(&mut old) else { panic!("expected challenge") };
+        send(&mut old, &Up::Auth { mac: mac(&old_token, &nonce) });
+        assert!(matches!(recv(&mut old), Down::Welcome { .. }));
+        for (target, ws) in [(new_label.clone(), &mut new), (old_label.clone(), &mut old)] {
+            let shared = handle.shared.clone();
+            let t = std::thread::spawn(move || send_command_with(&shared, &target, CommandKind::Compact { session: "r1".into() }, Duration::from_secs(5)));
+            let Down::Command { id, .. } = recv(ws) else { panic!("expected command") };
+            send(ws, &Up::Result { id, ok: true, error: None, data: None });
+            assert!(t.join().unwrap().is_ok());
+        }
+        handle.stop();
+    }
+
+    #[test]
+    fn frames_are_small_until_welcome_and_large_after() {
+        let (handle, port) = test_server();
+        let mut ws = connect(port);
+        ws.send(Message::text("x".repeat(PRE_AUTH_FRAME + 1))).unwrap();
+        let refused = loop {
+            match ws.read() {
+                Ok(Message::Text(_)) => break false,
+                Ok(Message::Close(_)) => break true,
+                Ok(_) => continue,
+                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break false,
+                Err(_) => break true,
+            }
+        };
+        assert!(refused, "an oversized frame before hello closes the connection");
+        let (mut ws, _, _) = pair_client(&handle, port, "desk");
+        let mut big = card("r1", "x");
+        big.snippet = "y".repeat(4 * PRE_AUTH_FRAME);
+        send(&mut ws, &Up::Board { cards: vec![big], dirs: vec![] });
+        wait_until(|| handle.boards().iter().any(|b| b.cards.len() == 1));
+        handle.stop();
     }
 }

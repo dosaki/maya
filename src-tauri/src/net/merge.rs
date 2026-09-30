@@ -38,13 +38,20 @@ pub fn merged(local: Vec<Card>, remotes: &[RemoteBoard], now_ms: u64) -> Vec<Car
     out
 }
 
-/// Names as shown on cards: a name shared by two machines gets its hostname.
-pub fn display_names(pairs: &[(String, String)]) -> Vec<String> {
-    pairs
+/// Names as shown on cards, from `(name, hostname, id)`: a name shared by two
+/// machines gets its hostname, and one still shared (the same machine paired
+/// twice) also gets the first four characters of its id.
+pub fn display_names(entries: &[(String, String, String)]) -> Vec<String> {
+    entries
         .iter()
-        .map(|(name, host)| {
-            let dup = pairs.iter().filter(|(n, _)| n == name).count() > 1;
-            if dup { format!("{name} ({host})") } else { name.clone() }
+        .map(|(name, host, id)| {
+            let same_name = entries.iter().filter(|(n, _, _)| n == name).count() > 1;
+            let same_host = entries.iter().filter(|(n, h, _)| n == name && h == host).count() > 1;
+            match (same_name, same_host) {
+                (false, _) => name.clone(),
+                (true, false) => format!("{name} ({host})"),
+                (true, true) => format!("{name} ({host}, {})", id.chars().take(4).collect::<String>()),
+            }
         })
         .collect()
 }
@@ -92,8 +99,11 @@ mod tests {
 
     #[test]
     fn duplicate_names_get_the_hostname() {
-        let names = display_names(&[("laptop".into(), "h1".into()), ("laptop".into(), "h2".into()), ("desk".into(), "h3".into())]);
+        let e = |n: &str, h: &str, id: &str| (n.to_string(), h.to_string(), id.to_string());
+        let names = display_names(&[e("laptop", "h1", "a1"), e("laptop", "h2", "b2"), e("desk", "h3", "c3")]);
         assert_eq!(names, ["laptop (h1)", "laptop (h2)", "desk"]);
+        let twice = display_names(&[e("laptop", "h1", "abcdef"), e("laptop", "h1", "wxyz12"), e("laptop", "h2", "q")]);
+        assert_eq!(twice, ["laptop (h1, abcd)", "laptop (h1, wxyz)", "laptop (h2)"], "the same machine paired twice stays distinct");
     }
 
     #[test]

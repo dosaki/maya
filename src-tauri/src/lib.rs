@@ -366,7 +366,13 @@ fn start_main(app: &AppHandle) {
         started = net::server::start(app.clone(), port);
     }
     match started {
-        Ok(handle) => app.state::<AppState>().network.lock().unwrap().server = Some(handle),
+        Ok(handle) => {
+            // Another start may have finished meanwhile; the displaced server stops.
+            let displaced = app.state::<AppState>().network.lock().unwrap().server.replace(handle);
+            if let Some(old) = displaced {
+                old.stop();
+            }
+        }
         Err(e) => log::line("network", e),
     }
     let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
