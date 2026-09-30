@@ -468,7 +468,11 @@ pub(crate) fn listening_change(before: &config::Config, after: &config::Config) 
         (true, false) => ListenChange::Stop,
         (false, false) => ListenChange::None,
         (true, true) => {
-            if before.recognizer != after.recognizer || before.whisper_model != after.whisper_model || before.microphone != after.microphone {
+            // A whisper_model change only matters once Builtin is the active
+            // recogniser; the picker is hidden under System, but a stale
+            // config value must not force a needless restart.
+            let model_changed = before.whisper_model != after.whisper_model && after.recognizer == config::Recognizer::Builtin;
+            if before.recognizer != after.recognizer || model_changed || before.microphone != after.microphone {
                 ListenChange::Restart
             } else {
                 ListenChange::None
@@ -948,6 +952,13 @@ mod tests {
         assert_eq!(listening_change(&on, &on_mic), ListenChange::Restart);
         assert_eq!(listening_change(&off, &Config { recognizer: Recognizer::Builtin, ..Default::default() }), ListenChange::None, "no run to restart while off");
         assert_eq!(listening_change(&on, &Config { listen: true, completed_timeout_minutes: 5, ..Default::default() }), ListenChange::None);
+        // The model picker is hidden under System: a stale whisperModel
+        // value changing must not restart a System listener.
+        assert_eq!(
+            listening_change(&on, &Config { listen: true, whisper_model: "tiny.en".into(), ..Default::default() }),
+            ListenChange::None,
+            "a model change under System is not a restart"
+        );
     }
 
     #[test]
