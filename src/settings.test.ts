@@ -543,7 +543,8 @@ describe("Network settings", () => {
   });
 
   it("disables the listen toggle with a note when the role is assistant", () => {
-    const el = renderSettings({ ...voiceBase, listen: true, networkRole: "assistant" }, handlers());
+    const live = { role: "assistant" as const, code: null, assistants: [], assistant: { connected: true, mainName: "desk", error: null } };
+    const el = renderSettings({ ...voiceBase, listen: true, networkRole: "assistant", network: live }, handlers());
     const listen = el.querySelector<HTMLInputElement>("input[name=listen]")!;
     expect(listen.disabled).toBe(true);
     expect(listen.checked).toBe(false);
@@ -551,5 +552,10 @@ describe("Network settings", () => {
     const off = renderSettings({ ...voiceBase, listen: true, networkRole: "off" }, handlers());
     expect(off.querySelector<HTMLInputElement>("input[name=listen]")!.disabled).toBe(false);
     expect(off.textContent).not.toContain("The main Maya notifies and listens for this machine.");
+    // Previewing Assistant before pairing changes nothing yet: the live role is still off.
+    const preview = renderSettings({ ...voiceBase, listen: true, networkRole: "assistant", network: { ...live, role: "off" } }, handlers());
+    expect(preview.querySelector<HTMLInputElement>("input[name=listen]")!.disabled).toBe(false);
+    expect(preview.querySelector<HTMLInputElement>("input[name=listen]")!.checked).toBe(true);
+    expect(preview.textContent).not.toContain("The main Maya notifies and listens for this machine.");
   });
 });

@@ -352,7 +352,9 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
   notifications.append(speakLabel);
 
-  const isAssistant = netRole === "assistant";
+  // The live role, not the select: previewing Assistant before a Pair
+  // succeeds must not untick listening on a machine that is not one yet.
+  const isAssistant = model.network?.role === "assistant";
   const listenLabel = document.createElement("label");
   listenLabel.className = "settings__check";
   const listenBox = document.createElement("input");

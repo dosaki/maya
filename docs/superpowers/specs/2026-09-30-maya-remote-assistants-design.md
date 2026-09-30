@@ -37,7 +37,9 @@ numbers, folder names.
 - One Maya is one role at a time; ticking one box clears the other.
 - While assistant mode is on, notifications and speech are suppressed and
   "Listen for 'Maya'" is off and disabled, with a note: "The main Maya
-  notifies and listens for this machine."
+  notifies and listens for this machine." That follows the saved role:
+  choosing Assistant only previews the pairing form until a Pair
+  succeeds, and leaves the toggle as it was.
 
 ### Pairing and trust
 

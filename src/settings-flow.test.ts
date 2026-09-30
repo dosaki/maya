@@ -302,6 +302,45 @@ describe("settings flow", () => {
     expect(document.querySelector(".settings__status--network")).toBeNull();
   });
 
+  it("leaves the listen box alone while Assistant is only previewed before pairing", async () => {
+    const config = {
+      completedTimeoutMinutes: 30,
+      projectsDir: null,
+      clonesDir: null,
+      notifyOnAwaiting: true,
+      speakNotifications: true,
+      voiceProvider: "builtin",
+      elevenlabsVoiceId: null,
+      listen: true,
+      microphone: null,
+      interpreterModel: "haiku",
+      network: { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [] },
+    };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "network_status") return Promise.resolve({ role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+    expect(document.querySelector<HTMLInputElement>("input[name=listen]")!.checked).toBe(true);
+
+    const roleSel = document.querySelector<HTMLSelectElement>("select[name=networkRole]")!;
+    roleSel.value = "assistant";
+    roleSel.dispatchEvent(new Event("change"));
+    await flush();
+    expect(document.querySelector("input[name=networkCode]"), "the pairing form is previewed").not.toBeNull();
+    const listen = document.querySelector<HTMLInputElement>("input[name=listen]")!;
+    expect(listen.checked).toBe(true);
+    expect(listen.disabled).toBe(false);
+    expect(document.querySelector(".settings__hint[data-for=listen]")).toBeNull();
+    expect(invoke.mock.calls.some((c) => c[0] === "set_config")).toBe(false);
+  });
+
   it("repaints a hidden Settings tab when it is shown after a network event", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "system", whisperModel: "base.en-q5_1", network: { role: "main", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", token: "t" }] } };
     const before = { role: "main", code: null, assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", connected: false, lastSeen: null, note: null }], assistant: { connected: false, mainName: null, error: null }, mainError: null };
