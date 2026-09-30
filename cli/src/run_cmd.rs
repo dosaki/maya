@@ -11,11 +11,12 @@ use crate::executor::CliExecutor;
 use crate::notify::CliNotify;
 use crate::status_file::{self, RunStatus};
 use crate::tmux::Tmux;
-use maya_core::config::{self, Config, NetworkRole};
+use maya_core::config::{Config, NetworkConfig, NetworkRole};
 use maya_core::net::client::{self, ClientNotify};
 use maya_core::store::Store;
 use maya_core::terminal::Terminal;
 use maya_core::{hook_install, log, now_ms, watcher};
+use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -67,6 +68,25 @@ fn install_signal_handlers(stop: Arc<AtomicBool>) {
     }
 }
 
+/// The network config for the next connect attempt, read afresh from
+/// `path` into the store: a config edited to another role stops the client
+/// with NOT_PAIRED. A file that does not parse (half-written, or broken by
+/// hand) keeps the last good config.
+fn reload_network(store: &Mutex<Store>, path: &Path) -> NetworkConfig {
+    let mut s = store.lock().unwrap();
+    let read = std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<Config>(&t).map_err(|e| e.to_string()));
+    match read {
+        Ok(c) => s.config = c,
+        Err(e) => log::line("cli", format!("config.json unreadable, keeping the last good one: {e}")),
+    }
+    let mut n = s.config.network.clone();
+    if n.role != NetworkRole::Assistant {
+        n.token.clear();
+        n.assistant_id.clear();
+    }
+    n
+}
+
 pub fn run(claude_dir: &Path) -> i32 {
     let stop = Arc::new(AtomicBool::new(false));
     install_signal_handlers(stop.clone());
@@ -77,14 +97,18 @@ pub fn run(claude_dir: &Path) -> i32 {
 pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<AtomicBool>) -> i32 {
     let maya_dir = claude_dir.join("maya");
     let mut store = Store::new(claude_dir.to_path_buf());
-    store.compact_events();
     if let Err((code, msg)) = preflight(&store.config, status_file::read(&maya_dir).as_ref(), &|pid| maya_core::registry::pid_alive(pid as i32)) {
         eprintln!("{msg}");
         return code;
     }
+    // Only once no other run is alive: it would be rewriting events.jsonl under that run.
+    store.compact_events();
     let config_path = store.config_path();
     let _ = log::init(&maya_dir.join("maya-cli.log"));
-    log::install_emitter(|l| println!("{}", log::file_line(l)));
+    // A stdout gone (an SSH logout) must not panic the thread that logged.
+    log::install_emitter(|l| {
+        let _ = writeln!(std::io::stdout().lock(), "{}", log::file_line(l));
+    });
     log::line("cli", format!("maya {} run started", env!("CARGO_PKG_VERSION")));
     match hook_install::status(claude_dir) {
         Ok(true) => {}
@@ -107,25 +131,14 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
             })
         });
     }
-    // Read afresh each attempt: a config edited to another role stops the
-    // client with NOT_PAIRED.
     let config_of = {
         let (s, path) = (store.clone(), config_path.clone());
-        move || {
-            let mut s = s.lock().unwrap();
-            s.config = config::load(&path);
-            let mut n = s.config.network.clone();
-            if n.role != NetworkRole::Assistant {
-                n.token.clear();
-                n.assistant_id.clear();
-            }
-            n
-        }
+        move || reload_network(&s, &path)
     };
     client::reconnect(&config_of, exec, notify.clone() as Arc<dyn ClientNotify>, &stop);
 
     let by_signal = stop.load(Ordering::SeqCst) && !notify.removed.load(Ordering::SeqCst);
-    let code = exit_code_for(by_signal, &config::load(&config_path));
+    let code = exit_code_for(by_signal, &store.lock().unwrap().config);
     if by_signal {
         status_file::remove(&maya_dir);
     }
@@ -152,6 +165,26 @@ mod tests {
         let twin = RunStatus { pid: 99, ..Default::default() };
         assert_eq!(preflight(&c, Some(&twin), &|pid| pid == 99), Err((2, "maya run is already running (pid 99)".into())));
         assert_eq!(preflight(&c, Some(&twin), &|_| false), Ok(())); // a stale file from a dead run is ignored
+    }
+
+    #[test]
+    fn an_unreadable_config_keeps_the_last_good_credentials() {
+        let (dir, store) = maya_core::actions::test_support::store_with_session("s1", 4242);
+        let path = {
+            let mut s = store.lock().unwrap();
+            s.config.network.role = NetworkRole::Assistant;
+            s.config.network.token = "t".into();
+            s.config.network.assistant_id = "a".into();
+            s.config_path()
+        };
+        std::fs::write(&path, "{").unwrap();
+        let n = reload_network(&store, &path);
+        assert_eq!((n.role, n.token.as_str(), n.assistant_id.as_str()), (NetworkRole::Assistant, "t", "a"));
+        // A config that parses and is no longer an assistant's clears them.
+        std::fs::write(&path, r#"{"completedTimeoutMinutes":10,"network":{"role":"off","token":"t","assistantId":"a"}}"#).unwrap();
+        let n = reload_network(&store, &path);
+        assert_eq!((n.token.as_str(), n.assistant_id.as_str()), ("", ""));
+        drop(dir);
     }
 
     #[test]

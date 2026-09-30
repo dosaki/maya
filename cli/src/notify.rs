@@ -1,5 +1,5 @@
-//! What the client tells `maya run`: each change is logged and written to
-//! the status file `maya status` reads.
+//! What the client tells `maya run`: each change is written to the status
+//! file `maya status` reads. The core client logs them already.
 
 use crate::status_file::{self, RunStatus};
 use maya_core::log;
@@ -34,17 +34,14 @@ impl ClientNotify for CliNotify {
     fn paired(&self, _id: &str, _token: &str) {}
 
     fn connected(&self, main_name: &str) {
-        log::line("cli", format!("connected to {main_name}"));
         self.write(true, Some(main_name), None);
     }
 
     fn disconnected(&self, error: &str) {
-        log::line("cli", format!("disconnected: {error}"));
         self.write(false, None, Some(error));
     }
 
     fn removed(&self) {
-        log::line("cli", "removed by the main Maya");
         self.write(false, None, Some(REMOVED));
         self.removed.store(true, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
