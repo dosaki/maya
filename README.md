@@ -55,7 +55,9 @@ a session.
   then appears in the top bar, and clicking it opens the voice panel. macOS
   asks for microphone and speech recognition access the first time.
 - The wake word is "Maya". Say it with the command, or say it alone and she
-  answers "Yes?" and waits for the command.
+  answers "Yes?" and waits for the command. When she asks you something
+  back, just answer: she listens for eight seconds without the wake word,
+  and remembers the last few exchanges so you can clarify.
 - Audio never leaves the Mac: speech recognition runs on the device. Only
   the command text, the last few voice exchanges and a summary of the board
   go to Claude (`claude -p`, Haiku by default, with no tools and only your

@@ -214,10 +214,39 @@ fn recent_exchanges(app: &AppHandle) -> Vec<(String, String)> {
 }
 
 /// Says `text`, then shows idle; both only while run `generation` is current.
-fn reply_then_idle(app: &AppHandle, generation: u64, text: &str) {
-    if reply_aloud(app, generation, text) {
-        set_voice(app, generation, |st| st.state = "idle".into());
+fn reply_then_idle(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>) {
+    if !reply_aloud(app, generation, text) {
+        return;
     }
+    if !asks_question(text) {
+        set_voice(app, generation, |st| st.state = "idle".into());
+        return;
+    }
+    // She asked something: listen for the answer without a wake word.
+    // Whatever was heard while she thought and spoke is not the answer.
+    if let Some(inbox) = inbox {
+        let n = inbox.discard_heard();
+        if n > 0 {
+            log::line("listener", format!("discarded {n} segment(s) heard before the question ended"));
+        }
+    }
+    let state = app.state::<AppState>();
+    let mut v = state.voice.lock().unwrap();
+    if v.generation != generation {
+        return;
+    }
+    if let Some(f) = v.flow.as_mut() {
+        f.await_reply(now_ms());
+        v.status.state = "awaiting-command".into();
+        log::line("wake", "waiting for the answer to her question");
+    }
+    drop(v);
+    emit_voice(app);
+}
+
+/// A spoken line that ends in a question mark expects an answer.
+pub(crate) fn asks_question(text: &str) -> bool {
+    text.trim_end().ends_with('?')
 }
 
 /// Sends a spoken command to the interpreter and acts on its reply. Every
@@ -240,17 +269,17 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     };
     let history = recent_exchanges(app);
     let Some(binary) = launch::claude_binary() else {
-        reply_then_idle(app, generation, "I can't find the claude command.");
+        reply_then_idle(app, generation, "I can't find the claude command.", inbox);
         return;
     };
     let reply = match interpreter::run(&binary, &model, cmd, &cards, &history, &maya_dir, interpreter::TIMEOUT) {
         Ok(r) => r,
         Err(interpreter::RunError::TimedOut) => {
-            reply_then_idle(app, generation, "Sorry, that took too long.");
+            reply_then_idle(app, generation, "Sorry, that took too long.", inbox);
             return;
         }
         Err(_) => {
-            reply_then_idle(app, generation, "Sorry, I didn't catch that.");
+            reply_then_idle(app, generation, "Sorry, I didn't catch that.", inbox);
             return;
         }
     };
@@ -261,13 +290,13 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     // No action, or only a report: the spoken reply is the whole answer.
     let Some(proposed) = reply.action.as_ref().filter(|a| a["kind"] != "report") else {
         log::line("action", "report only; nothing to run");
-        reply_then_idle(app, generation, &reply.say);
+        reply_then_idle(app, generation, &reply.say, inbox);
         return;
     };
     match interpreter::validate(proposed, &cards, &dirs) {
         Err(why) => {
             log::line("action", format!("rejected: {why}"));
-            reply_then_idle(app, generation, &why)
+            reply_then_idle(app, generation, &why, inbox)
         }
         Ok(action) if interpreter::needs_confirm(&action) => {
             // The read-back is what will run, never the model's `say`, so a
@@ -331,7 +360,7 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
                     e
                 }
             };
-            reply_then_idle(app, generation, &said);
+            reply_then_idle(app, generation, &said, inbox);
         }
     }
 }
@@ -397,7 +426,7 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>)
                         e
                     }
                 };
-                reply_then_idle(app, generation, &said);
+                reply_then_idle(app, generation, &said, inbox);
             }
             wake::Effect::Cancelled => {
                 let shown = set_voice(app, generation, |st| {
@@ -935,6 +964,16 @@ mod tests {
         on_speech(&mut v, &SpeechPhase::Starting("Maya here. hexgrid needs a decision".into()));
         on_speech(&mut v, &SpeechPhase::Finished);
         assert_eq!(v.flow.as_mut().unwrap().on_segment("Maya here hexgrid needs a decision", 1000), vec![]);
+    }
+
+    #[test]
+    fn a_reply_that_ends_in_a_question_mark_asks_for_a_follow_up() {
+        assert!(asks_question("Which one: Hexgrid 1 or Hexgrid 2?"));
+        assert!(asks_question("I couldn't find voice test. Did you mean voice-test? "));
+        assert!(!asks_question("Nothing is waiting on you."));
+        // A read-back is a question too; the confirm window handles it before this check runs.
+        assert!(asks_question("Telling hexgrid: ready? Yes?"));
+        assert!(!asks_question(""));
     }
 
     #[test]

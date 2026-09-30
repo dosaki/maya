@@ -51,6 +51,12 @@ except the listener, which is plain speech recognition.
 - If the wake word ends the segment ("Maya." then a pause), she says "Yes?"
   and takes the next `final` segment as the command, giving up after eight
   seconds of silence with no reply.
+- The same window opens whenever one of her spoken replies ends in a
+  question mark ("Which one: Hexgrid 1 or Hexgrid 2?"): the next segment
+  within eight seconds is the answer, no wake word needed. The last six
+  exchanges go to the interpreter with every command, and it is told to
+  read a follow-up as the answer to her last question, so "the second one"
+  works.
 - The indicator in the top bar appears only while listening is on (the
   switch lives in Settings). It shows grey while idle, amber while she is
   waiting for a command or a confirmation, and blue while she thinks.

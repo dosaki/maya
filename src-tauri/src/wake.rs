@@ -160,6 +160,12 @@ impl Flow {
         }
     }
 
+    /// Maya just asked the user something: the next segment within
+    /// `COMMAND_WAIT_MS` is taken as the answer, no wake word needed.
+    pub fn await_reply(&mut self, now_ms: u64) {
+        self.state = State::AwaitingCommand { until: now_ms + COMMAND_WAIT_MS };
+    }
+
     pub fn set_pending(&mut self, p: Pending, now_ms: u64) {
         self.state = State::AwaitingConfirm { pending: p, until: now_ms + CONFIRM_WAIT_MS };
     }
@@ -302,6 +308,21 @@ mod tests {
         f.on_segment("Maya.", 5000);
         assert_eq!(f.state(5000 + COMMAND_WAIT_MS + 1), "idle");
         assert_eq!(f.on_segment("late words", 5000 + COMMAND_WAIT_MS + 1), vec![]);
+    }
+
+    #[test]
+    fn after_she_asks_a_question_the_next_segment_is_the_answer_without_a_wake_word() {
+        let mut f = Flow::new();
+        f.await_reply(1_000);
+        assert_eq!(f.state(1_000), "awaiting-command");
+        assert_eq!(f.on_segment("the second one", 3_000), vec![Effect::Interpret("the second one".into())]);
+        assert_eq!(f.state(3_000), "idle");
+        // The window closes after COMMAND_WAIT_MS: chatter is ignored again.
+        f.await_reply(10_000);
+        assert_eq!(f.on_segment("the second one", 10_000 + COMMAND_WAIT_MS + 1), vec![]);
+        // A wake word inside the window still works as usual.
+        f.await_reply(30_000);
+        assert_eq!(f.on_segment("Maya what's waiting", 31_000), vec![Effect::Interpret("what's waiting".into())]);
     }
 
     #[test]
