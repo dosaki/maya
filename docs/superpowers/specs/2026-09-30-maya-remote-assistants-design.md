@@ -70,6 +70,11 @@ numbers, folder names.
   that is not connected is the same machine pairing again (its config was
   reset, say): the entry keeps its id, gets a new token and the new names,
   and its old board is dropped. Any other `pair` is a new entry.
+- "Pair again" on an assistant stops its running client and waits for its
+  thread to end (its connection closed) before sending `pair`, and the main
+  forgets a closed connection before it answers the close, so the main
+  counts the machine as disconnected and reuses its entry. If pairing
+  fails, the old client starts again.
 - Every later connection is challenge-response: the main sends a random
   nonce, the assistant answers with HMAC-SHA256(token, nonce). A wrong
   answer, an unknown assistant or a removed one is closed with a reason.
