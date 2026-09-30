@@ -207,6 +207,17 @@ final class WhisperRecogniser: Recogniser {
     /// tap thread, so `pending`/`preRoll`/`utterance`/`vad` are only ever
     /// touched from that one thread and never race a pause against a buffer.
     private var needsReset = false
+    /// The last emitted partial's text, so an unchanged partial is not
+    /// re-emitted (and re-logged) every 1.5 s in a noisy room.
+    private var lastPartialText = ""
+    /// Bumped once per pause, under `epochLock`. A transcription already
+    /// queued on `work` when the pause lands can still finish after it — the
+    /// Rust side may have already drained "heard" for the read-back by
+    /// then — so the safety rule "nothing before the read-back confirms an
+    /// action" needs every result to know whether a pause happened while it
+    /// was in flight.
+    private let epochLock = NSLock()
+    private var epoch = 0
 
     init(modelPath: String) { self.modelPath = modelPath }
 
@@ -233,8 +244,14 @@ final class WhisperRecogniser: Recogniser {
     }
 
     /// Called on the tap thread for every buffer while paused; only records
-    /// that a reset is due — see `needsReset`.
+    /// that a reset is due — see `needsReset`. Bumps the pause epoch once
+    /// per pause (not on every buffer while it stays paused), so any
+    /// transcription already queued for this utterance is dropped instead
+    /// of possibly landing after the read-back.
     func paused() {
+        if !needsReset {
+            epochLock.lock(); epoch += 1; epochLock.unlock()
+        }
         needsReset = true
     }
 
@@ -248,6 +265,7 @@ final class WhisperRecogniser: Recogniser {
             preRoll = []
             utterance = []
             vad = Vad()
+            lastPartialText = ""
         }
         guard let converter = converter else { return }
         let ratio = target.sampleRate / buffer.format.sampleRate
@@ -303,6 +321,10 @@ final class WhisperRecogniser: Recogniser {
     private func transcribe(_ audio: [Float], final: Bool) {
         if !final && busy { return }
         busy = true
+        // Captured now, on the tap thread, at the moment this transcription
+        // is queued — not when it finishes — so a pause landing while it
+        // runs on `work` is detected below.
+        epochLock.lock(); let capturedEpoch = epoch; epochLock.unlock()
         work.async {
             defer { self.busy = false }
             guard let ctx = self.ctx else { return }
@@ -313,6 +335,7 @@ final class WhisperRecogniser: Recogniser {
             params.no_timestamps = true
             params.single_segment = true
             params.suppress_blank = true
+            params.suppress_nst = true
             params.n_threads = 4
             let t0 = Date()
             let rc: Int32 = "en".withCString { lang in
@@ -328,9 +351,22 @@ final class WhisperRecogniser: Recogniser {
             if final {
                 Out.emit(["type": "note", "text": String(format: "transcribed %.1f s in %.2f s", Double(audio.count) / 16000, Date().timeIntervalSince(t0))])
             }
+            // Just before emitting: if a pause happened while this ran, the
+            // Rust side may already have drained "heard" for a read-back, so
+            // this result — final or partial — must never surface and risk
+            // confirming a pending action with a stray word from before it.
+            self.epochLock.lock(); let epochChanged = self.epoch != capturedEpoch; self.epochLock.unlock()
+            if epochChanged {
+                Out.emit(["type": "note", "text": "dropped a result from before a pause"])
+                return
+            }
             if isFiller(text) {
                 if final && !text.isEmpty { Out.emit(["type": "note", "text": "dropped filler: \(text)"]) }
                 return
+            }
+            if !final {
+                if text == self.lastPartialText { return }
+                self.lastPartialText = text
             }
             Out.emit(["type": final ? "final" : "partial", "text": text])
         }
