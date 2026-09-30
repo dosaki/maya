@@ -38,7 +38,12 @@ the microphone and speech permissions are all tied to it.
   `antigravity.rs`, `grok.rs` (other agents), `reviews.rs` and `pr.rs`
   (GitHub), `notify.rs` and `voice.rs` (speech output, ElevenLabs),
   `ear.rs`, `wake.rs`, `interpreter.rs`, `listener.rs`, `models.rs` (the
-  voice assistant), `log.rs` (the Debug tab and `maya.log`).
+  voice assistant), `log.rs` (the Debug tab and `maya.log`), and `net/`
+  with `protocol.rs` (message types, encode/decode, pairing and HMAC),
+  `server.rs` (the main: listener, threads per assistant, pairing,
+  command dispatch), `client.rs` (the assistant: connection, backoff,
+  board sending, command execution), and `merge.rs` (merging local and
+  remote cards, stale and expiry rules, routing).
 - `src/` — `main.ts`, `board.ts`, `card.ts`, `modal.ts`, `reviews.ts`,
   `settings.ts`, `voice.ts`, `debug.ts`, `tabs.ts`.
 - `ear/` — `main.swift` (audio capture, the System and Whisper engines),

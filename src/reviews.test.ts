@@ -69,6 +69,13 @@ describe("renderReviews", () => {
     expect(renderReviews({ prs: [pr()], error: null, fetchedAt: NOW }, NOW).querySelector("button[data-action=terminal]")).toBeNull();
   });
 
+  it("names the machine instead of a Terminal button when the related session is remote", () => {
+    const remote = [session({ sessionId: "r", pid: 42, name: "review bedrock #451", state: "working", machine: "laptop" })];
+    const el = renderReviews({ prs: [pr()], error: null, fetchedAt: NOW }, NOW, { cards: remote, clonesDir: null });
+    expect(el.querySelector("button[data-action=terminal]")).toBeNull();
+    expect(el.querySelector(".pr__machine")?.textContent).toBe("on laptop");
+  });
+
   it("shows an empty state, and the error when the last fetch failed", () => {
     const empty = renderReviews({ prs: [], error: null, fetchedAt: NOW }, NOW);
     expect(empty.querySelector(".reviews__empty")?.textContent).toContain("Nothing waiting");

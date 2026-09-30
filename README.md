@@ -44,6 +44,13 @@ summary, "Maya, tell hexgrid to go ahead" sends the reply after a read-back
 and your "yes", and "Maya, review collector 14" starts a review. When she
 asks you something back, just answer. See [Voice](#voice).
 
+**Several Macs.** Run Maya on your laptop, desktop and Mac mini. One is the
+main, the others are assistants. The main shows every session from every
+machine on one board, tells you what needs you, and drives them all by
+voice. Assistants stay quiet: they show their own sessions and run what
+the main asks, but do not notify, speak or listen for "Maya". Set it up
+in Settings › Network.
+
 ## Install
 
 macOS only, Apple Silicon and Intel. One command:
@@ -107,6 +114,63 @@ The Debug tab shows what she heard, what she made of it, what she asked
 Claude, what came back, what ran and what she said. The same lines go to
 `~/.claude/maya/maya.log`, which starts afresh on every launch. Paste them
 into an issue if something goes wrong.
+
+## Network
+
+Run Maya on multiple machines with one as the **main** and the others as
+**assistants**. The main shows all sessions on one board; assistants go
+quiet.
+
+- **Main.** Open Settings › Network and choose "Act as main Maya" in the
+  Network menu. Choose a port (default 4127) and a name for this Mac (its hostname when blank); Maya shows a six-digit
+  pairing code at once, valid for five minutes ("Show pairing code" makes
+  a new one). The main accepts incoming connections, so macOS asks once
+  whether Maya may do so: allow it. To add an assistant, give it the
+  code; Maya lists each paired assistant with its platform and IP address
+  (and when it was last seen) and lets you remove them. If the port is
+  taken, Settings says so under the menu.
+- **Assistant.** Choose "Assistant to a main Maya" in the Network menu and
+  enter the main's host, port, a name for this machine (its hostname when
+  blank) and the pairing code. Pair once; Maya keeps a token and
+  reconnects on its own, also after you switch the role Off and back on.
+  "Pair again" pairs with a fresh code. A status line shows "Connected to
+  <main>", "Reconnecting…" (with the last error under it) or the error.
+  On macOS 15 and later, macOS asks once whether Maya may reach devices on
+  the local network: allow it.
+- **Trust.** Pairing sends the code, in plain text, to the host you typed.
+  Whatever answers there must send back proof that it received that code;
+  a host that is not a Maya main fails the handshake and the assistant
+  keeps nothing. That proof does not show the answer came from your main:
+  on a network you do not trust, an impostor that controls the typed host
+  could read the code and pair in its place, so pair on a network you
+  trust. (A password-authenticated key exchange would close this gap; this
+  version does not have one.) After pairing, each side proves it holds the
+  token on every connection; an assistant never obeys a main that cannot.
+- **Names and addresses.** The main tells machines apart by their IP
+  address; names are only labels, on cards and in what Maya says. Two
+  assistants with the same name show as "laptop (192.168.1.20)". A machine
+  that pairs again from the same address (after a reset, say) keeps its
+  place in the list with a new token. So does another machine that later
+  gets a disconnected assistant's address (from the router, say) and
+  pairs: it takes over that entry.
+- **Versions.** Run the same Maya on every machine. The main notes an
+  assistant that runs another version, or one whose board it cannot read.
+- **What travels.** Session ids, conversation text, option numbers, folder
+  names and attachments (up to 20 MB). Commands run on the assistant; the
+  main never touches the assistant's files.
+- **Plain text on the LAN.** Traffic is not encrypted in this version; all
+  data is plain text.
+- **Remote cards.** On the main, an assistant's sessions sit in the same
+  columns as local ones, with a remote glyph (its tooltip names the
+  machine and its address) and the machine's name under the session name
+  and no Terminal button; the "+" and resume dialogs get
+  a Machine picker, and announcements say "hexgrid on laptop". A card greys
+  out thirty seconds after its assistant goes quiet and disappears after
+  five minutes; it comes back when the assistant reconnects. Whatever was
+  already waiting when an assistant pairs, or when it first connects after
+  the main starts, is shown but not announced; only what changes after
+  that is. When an assistant reconnects, what began while it was away is
+  announced.
 
 ## How it works
 

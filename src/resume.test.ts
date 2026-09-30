@@ -6,8 +6,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(
 import { closeResume, openResume, renderResume } from "./resume";
 
 const NOW = Date.parse("2026-09-29T11:00:00Z");
-const handlers = () => ({ onDir: vi.fn(), onResume: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn() });
-const base = { dirs: ["eye", "maya"], dir: null, sessions: [], loading: false, status: null, needsSetup: false };
+const handlers = () => ({ onDir: vi.fn(), onResume: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn(), onMachine: vi.fn() });
+const base = { dirs: ["eye", "maya"], dir: null, sessions: [], loading: false, status: null, needsSetup: false, machines: [{ name: "This Mac", value: "" }], machine: "" };
+const twoMachines = [{ name: "This Mac", value: "" }, { name: "laptop", value: "laptop" }];
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("renderResume", () => {
@@ -51,6 +52,30 @@ describe("renderResume", () => {
     setup.querySelector<HTMLButtonElement>("button[data-action=open-settings]")!.click();
     expect(h.onOpenSettings).toHaveBeenCalled();
   });
+
+  it("renders no Machine picker with a single machine", () => {
+    const el = renderResume(base, handlers(), NOW);
+    expect(el.querySelector("select[name=machine]")).toBeNull();
+  });
+
+  it("offers a Machine picker before the folder select when more than one machine is known", () => {
+    const h = handlers();
+    const el = renderResume({ ...base, machines: twoMachines, machine: "" }, h, NOW);
+    const sel = el.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    expect([...sel.options].map((o) => [o.value, o.textContent])).toEqual([["", "This Mac"], ["laptop", "laptop"]]);
+    expect(sel.value).toBe("");
+    sel.value = "laptop";
+    sel.dispatchEvent(new Event("change"));
+    expect(h.onMachine).toHaveBeenCalledWith("laptop");
+  });
+
+  it("passes the selected machine to onResume", () => {
+    const h = handlers();
+    const sessions = [{ id: "a1", title: "T", lastActiveMs: NOW - 1000, running: false }];
+    const el = renderResume({ ...base, machines: twoMachines, machine: "laptop", dir: "maya", sessions }, h, NOW);
+    el.querySelector<HTMLButtonElement>("button[data-action=resume]")!.click();
+    expect(h.onResume).toHaveBeenCalledWith("maya", "a1");
+  });
 });
 
 describe("resume flow", () => {
@@ -62,7 +87,8 @@ describe("resume flow", () => {
   afterEach(() => closeResume());
 
   it("loads directories, then sessions for the chosen one, resumes on click and remembers the directory", async () => {
-    invoke.mockImplementation((cmd: string, args: { dir?: string }) => {
+    invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["eye", "maya"]);
       if (cmd === "list_resumable_sessions") return Promise.resolve(args.dir === "maya" ? [{ id: "a1", title: "T", lastActiveMs: 1, running: false }] : []);
       if (cmd === "resume_session") return Promise.resolve();
@@ -70,27 +96,123 @@ describe("resume flow", () => {
     });
     await openResume();
     await flush();
-    expect(invoke).toHaveBeenCalledWith("list_project_dirs");
+    expect(invoke).toHaveBeenCalledWith("list_project_dirs", { machine: "" });
     const select = document.querySelector<HTMLSelectElement>("select[name=dir]")!;
     select.value = "maya";
     select.dispatchEvent(new Event("change"));
     await flush();
-    expect(invoke).toHaveBeenCalledWith("list_resumable_sessions", { dir: "maya" });
+    expect(invoke).toHaveBeenCalledWith("list_resumable_sessions", { dir: "maya", machine: "" });
     const row = document.querySelector<HTMLButtonElement>("button[data-action=resume]")!;
     row.click();
     await flush();
-    expect(invoke).toHaveBeenCalledWith("resume_session", { dir: "maya", sessionId: "a1" });
+    expect(invoke).toHaveBeenCalledWith("resume_session", { dir: "maya", sessionId: "a1", machine: "" });
     expect(document.querySelector(".modal")).toBeNull();
     await openResume();
     await flush();
     expect(document.querySelector<HTMLSelectElement>("select[name=dir]")!.value).toBe("maya");
-    expect(invoke).toHaveBeenLastCalledWith("list_resumable_sessions", { dir: "maya" });
+    expect(invoke).toHaveBeenLastCalledWith("list_resumable_sessions", { dir: "maya", machine: "" });
   });
 
   it("shows the setup hint when no projects directory is set", async () => {
-    invoke.mockImplementation((cmd: string) => (cmd === "list_project_dirs" ? Promise.reject("Set a projects directory in Settings first.") : Promise.reject("x")));
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      return cmd === "list_project_dirs" ? Promise.reject("Set a projects directory in Settings first.") : Promise.reject("x");
+    });
     await openResume();
     await flush();
     expect(document.querySelector(".modal__setup")).not.toBeNull();
+  });
+
+  it("offers a Machine picker once list_machines reports a connected assistant, and reloads dirs for it", async () => {
+    invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "list_project_dirs") return Promise.resolve(args.machine ? ["remote-proj"] : ["eye", "maya"]);
+      if (cmd === "list_resumable_sessions") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openResume();
+    await flush();
+    const machineSel = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    expect([...machineSel.options].map((o) => o.textContent)).toEqual(["This Mac", "laptop"]);
+    machineSel.value = "laptop";
+    machineSel.dispatchEvent(new Event("change"));
+    await flush();
+    expect(invoke).toHaveBeenLastCalledWith("list_project_dirs", { machine: "laptop" });
+    expect([...document.querySelectorAll<HTMLOptionElement>("select[name=dir] option")].map((o) => o.textContent)).toEqual(["Choose a directory…", "remote-proj"]);
+  });
+
+  it("keeps the Machine picker when this Mac has no projects directory, and lists a chosen assistant's folders", async () => {
+    invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "list_project_dirs") return args.machine ? Promise.resolve(["remote-proj"]) : Promise.reject("Set a projects directory in Settings first.");
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openResume();
+    await flush();
+    expect(document.querySelector(".modal__setup")).not.toBeNull();
+    const machineSel = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    expect([...machineSel.options].map((o) => o.textContent)).toEqual(["This Mac", "laptop"]);
+    machineSel.value = "laptop";
+    machineSel.dispatchEvent(new Event("change"));
+    await flush();
+    expect(document.querySelector(".modal__setup")).toBeNull();
+    expect([...document.querySelectorAll<HTMLOptionElement>("select[name=dir] option")].map((o) => o.textContent)).toEqual(["Choose a directory…", "remote-proj"]);
+    // Back on this Mac, the setup hint returns.
+    const again = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    again.value = "";
+    again.dispatchEvent(new Event("change"));
+    await flush();
+    expect(document.querySelector(".modal__setup")?.textContent).toContain("Set a projects directory in Settings first.");
+  });
+
+  it("says to set the projects directory on the assistant when a remote machine lists no folders", async () => {
+    invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "list_project_dirs") return Promise.resolve(args.machine ? [] : ["eye"]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openResume();
+    await flush();
+    const machineSel = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    machineSel.value = "laptop";
+    machineSel.dispatchEvent(new Event("change"));
+    await flush();
+    const setup = document.querySelector(".modal__setup")!;
+    expect(setup.textContent).toContain("Set a projects directory in Settings on laptop");
+    expect(setup.querySelector("button[data-action=open-settings]")).toBeNull();
+    expect(document.querySelector("select[name=machine]")).not.toBeNull();
+  });
+
+  it("ignores a local session list that arrives after another machine was chosen", async () => {
+    let answerLocal: (v: unknown) => void = () => {};
+    invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["maya"]);
+      if (cmd === "list_resumable_sessions") {
+        if (args.machine) return Promise.resolve([{ id: "remote-1", title: "On laptop", lastActiveMs: 1, running: false }]);
+        return new Promise((r) => (answerLocal = r));
+      }
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openResume();
+    await flush();
+    const pick = (dir: string) => {
+      const select = document.querySelector<HTMLSelectElement>("select[name=dir]")!;
+      select.value = dir;
+      select.dispatchEvent(new Event("change"));
+    };
+    pick("maya");
+    await flush();
+    const machineSel = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    machineSel.value = "laptop";
+    machineSel.dispatchEvent(new Event("change"));
+    await flush();
+    pick("maya");
+    await flush();
+    expect([...document.querySelectorAll<HTMLButtonElement>("button[data-action=resume]")].map((b) => b.dataset.id)).toEqual(["remote-1"]);
+    // This Mac's answer for the same folder name comes in late.
+    answerLocal([{ id: "local-1", title: "Here", lastActiveMs: 1, running: false }]);
+    await flush();
+    expect([...document.querySelectorAll<HTMLButtonElement>("button[data-action=resume]")].map((b) => b.dataset.id)).toEqual(["remote-1"]);
   });
 });

@@ -18,6 +18,7 @@ pub mod listener;
 pub mod log;
 pub mod model;
 pub mod models;
+pub mod net;
 pub mod notify;
 pub mod pr;
 pub mod registry;
@@ -30,20 +31,156 @@ pub mod voice;
 pub mod wake;
 pub mod watcher;
 
+use base64::Engine;
 use config::Config;
 use listener::VoiceState;
 use model::Card;
+use net::merge;
+use net::protocol::{Attachment, CommandKind};
+use net::server::Notify;
+use net::{NetChange, NetworkStatus};
 use serde::Serialize;
 use std::sync::Mutex;
 use std::time::Duration;
 use store::{now_ms, Store};
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 
+/// How long the main waits for a command's result from an assistant.
+const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A remote session's machine, when this Maya is the main and the session
+/// belongs to one of its connected assistants; else `None` for a local one.
+/// A live local session with the id wins, as it does on the board.
+fn remote_machine_of(state: &AppState, session_id: &str) -> Option<String> {
+    let local_ids = state.store.lock().unwrap().live_session_ids();
+    merge::route(&local_ids, &remote_boards(state), session_id, now_ms())
+}
+
+/// Sends `kind` to `machine` and discards its (empty) result.
+fn route_done(app: &AppHandle, machine: &str, kind: CommandKind) -> Result<(), String> {
+    net::server::send_command(app, machine, kind, ROUTE_TIMEOUT).map(|_| ())
+}
+
+/// Sends `kind` to `machine` and deserialises its result into `T`.
+fn route_data<T: for<'de> serde::Deserialize<'de>>(app: &AppHandle, machine: &str, kind: CommandKind) -> Result<T, String> {
+    let value = net::server::send_command(app, machine, kind, ROUTE_TIMEOUT)?;
+    let value = value.ok_or("The assistant sent no result.")?;
+    serde_json::from_value(value).map_err(|e| e.to_string())
+}
+
+/// Reads and base64-encodes local files for a remote reply's attachments;
+/// refuses a missing file, one over 20 MB, or files over 20 MB together
+/// (the command must fit in one frame). `name` on each `Attachment` is the
+/// path exactly as given, since the assistant matches on it.
+fn remote_attachments(paths: &[String]) -> Result<Vec<Attachment>, String> {
+    const MAX_BYTES: u64 = 20 * 1024 * 1024;
+    let mut total = 0u64;
+    for p in paths {
+        let meta = std::fs::metadata(p).map_err(|_| format!("Attachment not found: {p}"))?;
+        if meta.len() > MAX_BYTES {
+            return Err("The file is too large (over 20 MB).".into());
+        }
+        total += meta.len();
+    }
+    if total > MAX_BYTES {
+        return Err("Attachments total more than 20 MB.".into());
+    }
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let bytes = std::fs::read(p).map_err(|_| format!("Attachment not found: {p}"))?;
+        out.push(Attachment { name: p.clone(), bytes: base64::engine::general_purpose::STANDARD.encode(bytes) });
+    }
+    Ok(out)
+}
+
+/// Builds the `Start` command a "+" dialog on a remote machine sends.
+fn start_kind_for(dir: Option<String>, prompt: String, options: launch::LaunchOptions) -> CommandKind {
+    CommandKind::Start { dir, prompt, options }
+}
+
+/// What Settings' Machine pickers show: each connected assistant's display
+/// name, host and platform.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineInfo {
+    pub name: String,
+    pub hostname: String,
+    pub platform: String,
+    pub connected: bool,
+}
+
+#[tauri::command]
+fn list_machines(state: TauriState<AppState>) -> Vec<MachineInfo> {
+    network_status_of(&state).assistants.into_iter().map(|a| MachineInfo { name: a.name, hostname: a.hostname, platform: a.platform, connected: a.connected }).collect()
+}
+
 pub struct AppState {
     pub store: Mutex<Store>,
     pub notifier: Mutex<notify::Notifier>,
     pub reviews: Mutex<ReviewState>,
     pub voice: Mutex<VoiceState>,
+    /// Lock order: `network`, then the server's own mutex, then `store`.
+    pub network: Mutex<net::NetworkState>,
+}
+
+/// The server's line to the app: repaints the board, tells the page about
+/// pairing and connections, and keeps the paired list in the config file.
+pub(crate) struct TauriNetNotify {
+    pub app: AppHandle,
+}
+
+impl TauriNetNotify {
+    fn save_assistants(&self, f: impl FnOnce(&mut Vec<config::PairedAssistant>)) -> Result<(), String> {
+        let state = self.app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        let path = store.config_path();
+        save_paired(&path, &mut store.config, f)
+    }
+}
+
+/// Changes the paired list with `f` and saves the config to `path`; the
+/// config in memory changes only once the save succeeded.
+fn save_paired(path: &std::path::Path, config: &mut Config, f: impl FnOnce(&mut Vec<config::PairedAssistant>)) -> Result<(), String> {
+    let mut next = config.clone();
+    f(&mut next.network.assistants);
+    if let Err(e) = config::save(path, &next) {
+        log::line("network", format!("could not save the paired assistants: {e}"));
+        return Err(format!("Could not save the paired assistants: {e}"));
+    }
+    *config = next;
+    Ok(())
+}
+
+impl Notify for TauriNetNotify {
+    fn board_changed(&self) {
+        refresh_and_emit(&self.app);
+    }
+
+    fn board_seeded(&self, cards: &[Card]) {
+        self.app.state::<AppState>().notifier.lock().unwrap().seed(cards);
+    }
+
+    fn status_changed(&self, status: NetworkStatus) {
+        let _ = self.app.emit("network", &status);
+    }
+
+    fn paired(&self, assistant: &config::PairedAssistant) -> Result<(), String> {
+        // A machine pairing again keeps its entry, and its place in the list.
+        self.save_assistants(|list| match list.iter_mut().find(|a| a.id == assistant.id) {
+            Some(a) => *a = assistant.clone(),
+            None => list.push(assistant.clone()),
+        })
+    }
+
+    fn paired_list_changed(&self, assistants: &[config::PairedAssistant]) -> Result<(), String> {
+        self.save_assistants(|list| *list = assistants.to_vec())
+    }
+}
+
+/// The assistants' last snapshots when this Maya is the main; else none.
+fn remote_boards(state: &AppState) -> Vec<merge::RemoteBoard> {
+    let server = state.network.lock().unwrap().server.clone();
+    server.map(|s| s.boards()).unwrap_or_default()
 }
 
 /// The last PR list fetched, and the error from the last attempt if it failed.
@@ -210,13 +347,16 @@ fn eleven_settings(store: &Store) -> Option<(std::path::PathBuf, String, String)
 }
 
 fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify, speak, eleven) = {
+    let (cards, wants_notify, speak, eleven, assistant) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
         let cards = store.refresh(now_ms());
         let eleven = if store.config.speak_notifications { eleven_settings(&store) } else { None };
-        (cards, store.config.notify_on_awaiting, store.config.speak_notifications, eleven)
+        (cards, store.config.notify_on_awaiting, store.config.speak_notifications, eleven, store.config.network.role == config::NetworkRole::Assistant)
     };
+    // Remote cards join after the store lock is released (lock order), so
+    // the notifier below announces remote decisions too.
+    let cards = merge::merged(cards, &remote_boards(&app.state::<AppState>()), now_ms());
     // Track every refresh so a toggle-on later does not replay old events.
     let (fresh, finished) = {
         let state = app.state::<AppState>();
@@ -225,12 +365,13 @@ fn refresh_and_emit(app: &AppHandle) {
     };
     // A Focus mode (Do Not Disturb and friends) keeps Maya quiet; banners are
     // left to macOS, which filters them by the Focus's own rules.
-    let focus = (!fresh.is_empty() || !finished.is_empty()) && notify::focus_active();
+    // An assistant stays quiet: its main notifies and speaks for it.
+    let focus = !assistant && (!fresh.is_empty() || !finished.is_empty()) && notify::focus_active();
     if focus {
         log::line("app", "focus mode is on: announcements stay silent");
     }
     let speak = speak && !focus;
-    if wants_notify {
+    if wants_notify && !assistant {
         for c in &fresh {
             // With a voice the banner stays silent; the sound is replaced, not doubled.
             notify::notify(c, !speak);
@@ -249,11 +390,204 @@ fn refresh_and_emit(app: &AppHandle) {
         }
     }
     let _ = app.emit("sessions", &cards);
+    if assistant {
+        net::client::push_board(app);
+    }
+}
+
+/// Local and remote cards merged: what the board shows and what the voice
+/// interpreter reasons about. Locks `store` only long enough to refresh it,
+/// releasing it before `remote_boards` takes `network` (lock order: never
+/// hold `store` while taking `network`).
+pub(crate) fn merged_cards(state: &AppState) -> Vec<Card> {
+    let cards = state.store.lock().unwrap().refresh(now_ms());
+    merge::merged(cards, &remote_boards(state), now_ms())
 }
 
 #[tauri::command(async)]
 fn list_sessions(state: TauriState<AppState>) -> Vec<Card> {
-    state.store.lock().unwrap().refresh(now_ms())
+    merged_cards(&state)
+}
+
+/// What the Network section of Settings shows.
+fn network_status_of(state: &AppState) -> NetworkStatus {
+    let (server, stored) = {
+        let n = state.network.lock().unwrap();
+        (n.server.clone(), n.status.clone())
+    };
+    match server {
+        Some(s) => s.status(),
+        None => {
+            let (role, paired) = {
+                let store = state.store.lock().unwrap();
+                (store.config.network.role, store.config.network.assistants.clone())
+            };
+            let main = role == config::NetworkRole::Main;
+            // A main whose server is down still lists its assistants, disconnected.
+            let assistants = if main { net::paired_offline(&paired) } else { vec![] };
+            let main_error = if main { stored.main_error.clone() } else { None };
+            NetworkStatus { role, code: None, assistants, main_error, ..stored }
+        }
+    }
+}
+
+#[tauri::command]
+fn network_status(state: TauriState<AppState>) -> NetworkStatus {
+    network_status_of(&state)
+}
+
+/// Opens pairing, or regenerates the code when it is already open.
+#[tauri::command]
+fn network_pairing_code(state: TauriState<AppState>) -> Result<NetworkStatus, String> {
+    let (server, main_error) = {
+        let n = state.network.lock().unwrap();
+        (n.server.clone(), n.status.main_error.clone())
+    };
+    let Some(server) = server else {
+        let main = state.store.lock().unwrap().config.network.role == config::NetworkRole::Main;
+        return Err(match main_error {
+            Some(e) if main => e,
+            _ => "Turn on \"Act as main Maya\" first.".into(),
+        });
+    };
+    server.open_pairing(now_ms());
+    Ok(server.status())
+}
+
+/// Forgets a paired assistant; a connected one is told and closed. The
+/// shorter list is saved first: if that fails, nothing changes and the
+/// page gets the error.
+#[tauri::command]
+fn network_remove_assistant(app: AppHandle, state: TauriState<AppState>, id: String) -> Result<NetworkStatus, String> {
+    // The handle is cloned out so the network lock is not held while the
+    // server notifies (its adapter takes `network` again to repaint).
+    let server = state.network.lock().unwrap().server.clone();
+    match server {
+        Some(s) => s.remove_assistant(&id)?,
+        None => {
+            TauriNetNotify { app: app.clone() }.save_assistants(|list| list.retain(|a| a.id != id))?;
+            log::line("network", format!("{id}: removed"));
+        }
+    }
+    Ok(network_status_of(&state))
+}
+
+/// Starts the main's server on the configured port, replacing any running
+/// one; with `show_code` (the role just turned on) it opens pairing at once.
+fn start_main(app: &AppHandle, show_code: bool) {
+    stop_main(app);
+    let port = app.state::<AppState>().store.lock().unwrap().config.listen_port();
+    // A server just stopped lets go of the port within a tick; retry briefly.
+    let mut started = net::server::start(app.clone(), port);
+    for _ in 0..5 {
+        if started.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        started = net::server::start(app.clone(), port);
+    }
+    match started {
+        Ok(handle) => {
+            // Another start may have finished meanwhile; the displaced server stops.
+            let displaced = {
+                let state = app.state::<AppState>();
+                let mut n = state.network.lock().unwrap();
+                n.status.main_error = None;
+                n.server.replace(handle)
+            };
+            if let Some(old) = displaced {
+                old.stop();
+            }
+            if show_code {
+                let server = app.state::<AppState>().network.lock().unwrap().server.clone();
+                if let Some(server) = server {
+                    server.open_pairing(now_ms());
+                }
+            }
+        }
+        Err(e) => {
+            log::line("network", &e);
+            // Shown under the role in Settings until a start succeeds.
+            app.state::<AppState>().network.lock().unwrap().status.main_error = Some(e);
+        }
+    }
+    let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
+}
+
+/// Stops the main's server, if running, and drops the remote cards.
+fn stop_main(app: &AppHandle) {
+    let (server, had_error) = {
+        let state = app.state::<AppState>();
+        let mut n = state.network.lock().unwrap();
+        (n.server.take(), n.status.main_error.take().is_some())
+    };
+    if let Some(s) = &server {
+        s.stop();
+    }
+    if server.is_some() || had_error {
+        let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
+    }
+}
+
+/// Starts the assistant's client with the stored link, replacing any running one.
+fn start_assistant(app: &AppHandle) {
+    let handle = net::client::start(app.clone());
+    let displaced = {
+        let state = app.state::<AppState>();
+        let mut n = state.network.lock().unwrap();
+        n.status.assistant = Default::default();
+        n.client.replace(handle)
+    };
+    if let Some(old) = displaced {
+        old.stop();
+    }
+    let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
+}
+
+/// Stops the assistant's client, if running.
+fn stop_assistant(app: &AppHandle) {
+    let client = {
+        let state = app.state::<AppState>();
+        let mut n = state.network.lock().unwrap();
+        let client = n.client.take();
+        if client.is_some() {
+            n.status.assistant = Default::default();
+        }
+        client
+    };
+    if let Some(c) = client {
+        c.stop();
+        let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
+    }
+}
+
+/// Pairs this Maya with a main as its assistant and starts the client.
+#[tauri::command(async)]
+fn network_pair(app: AppHandle, state: TauriState<AppState>, host: String, port: u16, name: String, code: String) -> Result<NetworkStatus, String> {
+    let host = host.trim();
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c == '/') {
+        return Err("Type the main Maya's host name or address.".into());
+    }
+    let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+        return Err("The pairing code has six digits.".into());
+    }
+    let port = if port == 0 { net::protocol::DEFAULT_PORT } else { port };
+    // "Pair again" while connected: the running client goes first, and its
+    // connection with it, so the main reuses this machine's entry instead of
+    // pairing a second machine at the same address. No lock is held while
+    // it winds down (its notifier takes `network`).
+    let running = state.network.lock().unwrap().client.take();
+    let had_client = running.is_some();
+    if let Err(e) = net::client::pair_after_stopping(running, || net::client::pair(&app, host, port, &name, &code)) {
+        // The old pairing still stands: its client comes back.
+        let assistant = state.store.lock().unwrap().config.network.role == config::NetworkRole::Assistant;
+        if had_client && assistant {
+            start_assistant(&app);
+        }
+        return Err(e);
+    }
+    Ok(network_status_of(&state))
 }
 
 #[tauri::command(async)]
@@ -262,7 +596,10 @@ fn focus_session(pid: i32) -> Result<(), String> {
 }
 
 #[tauri::command(async)]
-fn session_history(state: TauriState<AppState>, session_id: String) -> Result<Vec<transcript::Turn>, String> {
+fn session_history(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<Vec<transcript::Turn>, String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_data(&app, &machine, CommandKind::History { session: session_id });
+    }
     let (path, foreign) = {
         let store = state.store.lock().unwrap();
         if let Some(f) = store.foreign(&session_id) {
@@ -279,7 +616,11 @@ fn session_history(state: TauriState<AppState>, session_id: String) -> Result<Ve
 }
 
 #[tauri::command(async)]
-fn send_reply(state: TauriState<AppState>, session_id: String, text: String) -> Result<(), String> {
+fn send_reply(app: AppHandle, state: TauriState<AppState>, session_id: String, text: String, attachments: Vec<String>) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        let attachments = remote_attachments(&attachments)?;
+        return route_done(&app, &machine, CommandKind::Reply { session: session_id, text, attachments });
+    }
     // Other harnesses have no inbox: the reply is typed into their tty as one line.
     let foreign = state.store.lock().unwrap().foreign(&session_id);
     if let Some(f) = foreign {
@@ -305,7 +646,10 @@ fn send_reply(state: TauriState<AppState>, session_id: String, text: String) -> 
 }
 
 #[tauri::command(async)]
-fn answer_question(state: TauriState<AppState>, session_id: String, ask_id: u64, question_index: usize, option_index: usize) -> Result<(), String> {
+fn answer_question(app: AppHandle, state: TauriState<AppState>, session_id: String, ask_id: u64, question_index: usize, option_index: usize) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Answer { session: session_id, ask_id, question: question_index, option: option_index });
+    }
     let card = {
         let mut store = state.store.lock().unwrap();
         store.card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?
@@ -321,16 +665,30 @@ fn answer_question(state: TauriState<AppState>, session_id: String, ask_id: u64,
     Ok(())
 }
 
-/// Opens the session's pull request in the browser. The URL comes from the
-/// PR cache, never from the page.
+/// The pull request link to open for `card`: only a web address, since a
+/// remote card's link comes from its assistant and `open` also takes file
+/// paths and app schemes.
+fn pr_link(card: &Card) -> Result<String, String> {
+    let pr = card.pr.as_ref().ok_or("No pull request is known for this session yet.")?;
+    if !attachments::is_web_url(&pr.url) {
+        return Err("That pull request's link is not a web address.".into());
+    }
+    Ok(pr.url.trim().to_string())
+}
+
+/// Opens the session's pull request in the browser, on this Mac. The URL
+/// comes from the PR cache (or, for a remote card, the assistant's card),
+/// never from the page.
 #[tauri::command(async)]
 fn open_pr(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
-    let card = {
+    let card = if remote_machine_of(&state, &session_id).is_some() {
+        merged_cards(&state).into_iter().find(|c| c.session_id == session_id && c.machine.is_some()).ok_or("Session is no longer running.")?
+    } else {
         let mut store = state.store.lock().unwrap();
         store.card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?
     };
-    let pr = card.pr.ok_or("No pull request is known for this session yet.")?;
-    let ok = std::process::Command::new("open").arg(&pr.url).status().map_err(|e| format!("could not open the browser: {e}"))?;
+    let url = pr_link(&card)?;
+    let ok = std::process::Command::new("open").arg(&url).status().map_err(|e| format!("could not open the browser: {e}"))?;
     if ok.success() {
         Ok(())
     } else {
@@ -381,7 +739,10 @@ fn open_url(url: String) -> Result<(), String> {
 
 /// Types `/model x` or `/effort y` into the session's Terminal tab.
 #[tauri::command(async)]
-fn set_session_option(state: TauriState<AppState>, session_id: String, setting: String, value: String) -> Result<(), String> {
+fn set_session_option(app: AppHandle, state: TauriState<AppState>, session_id: String, setting: String, value: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::SetOption { session: session_id, setting, value });
+    }
     let text = answer::slash_command(&setting, &value)?;
     type_into_session(&state, &session_id, &text)
 }
@@ -389,20 +750,29 @@ fn set_session_option(state: TauriState<AppState>, session_id: String, setting: 
 /// Types `/rename <name>` into the session's Terminal tab. The new name comes
 /// back through the session registry on the next refresh.
 #[tauri::command(async)]
-fn rename_session(state: TauriState<AppState>, session_id: String, name: String) -> Result<(), String> {
+fn rename_session(app: AppHandle, state: TauriState<AppState>, session_id: String, name: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Rename { session: session_id, name });
+    }
     let text = answer::rename_command(&name)?;
     type_into_session(&state, &session_id, &text)
 }
 
 /// Types `/compact` into the session's Terminal tab.
 #[tauri::command(async)]
-fn compact_session(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+fn compact_session(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Compact { session: session_id });
+    }
     type_into_session(&state, &session_id, answer::COMPACT)
 }
 
 /// Sends Shift+Tab to the session's Terminal tab, cycling its permission mode.
 #[tauri::command(async)]
-fn cycle_session_mode(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+fn cycle_session_mode(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::CycleMode { session: session_id });
+    }
     type_into_session(&state, &session_id, answer::SHIFT_TAB)
 }
 
@@ -419,10 +789,10 @@ fn type_into_session(state: &TauriState<AppState>, session_id: &str, text: &str)
     answer::type_into_tty(&tty, text)
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StartResult {
     pub dir: String,
-    pub how: &'static str,
+    pub how: String,
 }
 
 fn projects_root(state: &TauriState<AppState>) -> Result<std::path::PathBuf, String> {
@@ -442,9 +812,18 @@ fn project_path(state: &TauriState<AppState>, dir: &str) -> Result<std::path::Pa
     Ok(root.join(dir))
 }
 
+/// `None` or `""` means the machine argument was not given: this Mac.
+fn is_local(machine: &Option<String>) -> bool {
+    machine.as_deref().map_or(true, str::is_empty)
+}
+
 /// Past sessions of a project folder, newest first, with running ones marked.
 #[tauri::command(async)]
-fn list_resumable_sessions(state: TauriState<AppState>, dir: String) -> Result<Vec<resume::ResumableSession>, String> {
+fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: String, machine: Option<String>) -> Result<Vec<resume::ResumableSession>, String> {
+    if !is_local(&machine) {
+        let machine = machine.unwrap();
+        return route_data(&app, &machine, CommandKind::ListResumable { dir });
+    }
     let path = project_path(&state, &dir)?;
     let (claude_dir, running) = {
         let store = state.store.lock().unwrap();
@@ -455,7 +834,11 @@ fn list_resumable_sessions(state: TauriState<AppState>, dir: String) -> Result<V
 
 /// Opens a Terminal in the folder running `claude --resume <id>`.
 #[tauri::command(async)]
-fn resume_session(state: TauriState<AppState>, dir: String, session_id: String) -> Result<(), String> {
+fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>) -> Result<(), String> {
+    if !is_local(&machine) {
+        let machine = machine.unwrap();
+        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id });
+    }
     let path = project_path(&state, &dir)?;
     let (claude_dir, running) = {
         let store = state.store.lock().unwrap();
@@ -471,16 +854,24 @@ fn resume_session(state: TauriState<AppState>, dir: String, session_id: String) 
 }
 
 #[tauri::command(async)]
-fn list_project_dirs(state: TauriState<AppState>) -> Result<Vec<String>, String> {
+fn list_project_dirs(state: TauriState<AppState>, machine: Option<String>) -> Result<Vec<String>, String> {
+    if !is_local(&machine) {
+        let machine = machine.unwrap();
+        return Ok(merge::dirs_of(&remote_boards(&state), &machine));
+    }
     Ok(launch::list_project_dirs(&projects_root(&state)?))
 }
 
 #[tauri::command(async)]
-fn start_session(state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions) -> Result<StartResult, String> {
+fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions, machine: Option<String>) -> Result<StartResult, String> {
     if prompt.trim().is_empty() {
         return Err("Type a prompt first.".into());
     }
     options.validate()?;
+    if !is_local(&machine) {
+        let machine = machine.unwrap();
+        return route_data(&app, &machine, start_kind_for(dir, prompt, options));
+    }
     let root = projects_root(&state)?;
     let maya_dir = state.store.lock().unwrap().claude_dir().join("maya");
     let dirs = launch::list_project_dirs(&root);
@@ -494,7 +885,7 @@ fn start_session(state: TauriState<AppState>, dir: Option<String>, prompt: Strin
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
     let file = launch::write_prompt_file(&maya_dir, &prompt)?;
     launch::open_terminal(&target, &file, &options)?;
-    Ok(StartResult { dir: target.to_string_lossy().into_owned(), how })
+    Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string() })
 }
 
 #[tauri::command(async)]
@@ -563,14 +954,49 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
             return Err(format!("Projects directory does not exist: {}.", dir.display()));
         }
     }
+    let mut config = config;
+    // The main notifies and listens for an assistant.
+    if config.network.role == config::NetworkRole::Assistant {
+        config.listen = false;
+    }
     let before = {
         let mut store = state.store.lock().unwrap();
         let before = store.config.clone();
+        // The paired list belongs to the server and the assistant's id and
+        // token to pairing; a page holding an older config must not undo them.
+        config.network.assistants = before.network.assistants.clone();
+        config.network.assistant_id = before.network.assistant_id.clone();
+        config.network.token = before.network.token.clone();
         config::save(&store.config_path(), &config)?;
         store.config = config.clone();
         before
     };
-    match listener::listening_change(&before, &config) {
+    apply_config_change(&app, &before, &config);
+    refresh_and_emit(&app);
+    Ok(config)
+}
+
+/// Changes the stored config with `f`, saves it, and starts or stops what the change asks for.
+pub(crate) fn update_config(app: &AppHandle, f: impl FnOnce(&mut Config)) -> Result<Config, String> {
+    let (before, after) = {
+        let state = app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        let before = store.config.clone();
+        let mut after = before.clone();
+        f(&mut after);
+        config::save(&store.config_path(), &after)?;
+        store.config = after.clone();
+        (before, after)
+    };
+    apply_config_change(app, &before, &after);
+    refresh_and_emit(app);
+    Ok(after)
+}
+
+/// Starts, stops or restarts the listener, the server and the client after a config change.
+fn apply_config_change(app: &AppHandle, before: &Config, config: &Config) {
+    let state = app.state::<AppState>();
+    match listener::listening_change(before, config) {
         listener::ListenChange::Restart => {
             log::line("listener", "settings changed; restarting");
             state.voice.lock().unwrap().failures = 0;
@@ -586,11 +1012,24 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
                 let _ = listener::start_listening(&handle);
             });
         }
-        listener::ListenChange::Stop => listener::stop_listening(&app),
+        listener::ListenChange::Stop => listener::stop_listening(app),
         listener::ListenChange::None => {}
     }
-    refresh_and_emit(&app);
-    Ok(config)
+    for change in net::network_change(before, config) {
+        match change {
+            NetChange::StartMain | NetChange::RestartMain => {
+                log::line("network", "settings changed; starting the main's server");
+                // Turning the role on shows a pairing code without a click.
+                start_main(app, change == NetChange::StartMain);
+            }
+            NetChange::StopMain => stop_main(app),
+            NetChange::StartAssistant | NetChange::RestartAssistant => {
+                log::line("network", "settings changed; starting the assistant's client");
+                start_assistant(app);
+            }
+            NetChange::StopAssistant => stop_assistant(app),
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -600,7 +1039,7 @@ pub fn run() {
     store.compact_events();
 
     tauri::Builder::default()
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), voice: Mutex::new(VoiceState::default()) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()) })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             focus_session,
@@ -641,7 +1080,12 @@ pub fn run() {
             log_path,
             list_whisper_models,
             download_whisper_model,
-            remove_whisper_model
+            remove_whisper_model,
+            network_status,
+            network_pairing_code,
+            network_remove_assistant,
+            network_pair,
+            list_machines
         ])
         .setup(move |app| {
             let log_path = dir.join("maya").join("maya.log");
@@ -672,7 +1116,17 @@ pub fn run() {
                 poll_reviews(&review_handle);
                 std::thread::sleep(Duration::from_secs(120));
             });
-            if app.state::<AppState>().store.lock().unwrap().config.listen {
+            let role = app.state::<AppState>().store.lock().unwrap().config.network.role;
+            match role {
+                config::NetworkRole::Main => {
+                    let net_handle = app.handle().clone();
+                    std::thread::spawn(move || start_main(&net_handle, false));
+                }
+                config::NetworkRole::Assistant => start_assistant(app.handle()),
+                config::NetworkRole::Off => {}
+            }
+            // The main listens for an assistant.
+            if app.state::<AppState>().store.lock().unwrap().config.listen && role != config::NetworkRole::Assistant {
                 let voice_handle = app.handle().clone();
                 std::thread::spawn(move || {
                     let _ = listener::start_listening(&voice_handle);
@@ -690,4 +1144,123 @@ pub fn run() {
                 models::abort_all();
             }
         });
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn remote_attachments_encodes_a_small_file() {
+        let dir = std::env::temp_dir().join(format!("maya-route-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.txt");
+        std::fs::write(&path, b"hello there").unwrap();
+        let path_str = path.to_string_lossy().into_owned();
+
+        let out = remote_attachments(&[path_str.clone()]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, path_str, "the name carries the main's full local path exactly");
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&out[0].bytes).unwrap();
+        assert_eq!(decoded, b"hello there");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remote_attachments_refuses_a_missing_file() {
+        let err = remote_attachments(&["/no/such/file-for-maya-tests.txt".to_string()]).unwrap_err();
+        assert!(err.contains("Attachment not found"), "{err}");
+    }
+
+    #[test]
+    fn remote_attachments_refuses_a_file_over_20_mb() {
+        let dir = std::env::temp_dir().join(format!("maya-route-test-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.bin");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(20 * 1024 * 1024 + 1).unwrap();
+        drop(file);
+        let path_str = path.to_string_lossy().into_owned();
+
+        let err = remote_attachments(&[path_str]).unwrap_err();
+        assert_eq!(err, "The file is too large (over 20 MB).");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remote_attachments_refuses_files_over_20_mb_together() {
+        let dir = std::env::temp_dir().join(format!("maya-route-test-total-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<String> = (0..2)
+            .map(|i| {
+                let path = dir.join(format!("part{i}.bin"));
+                std::fs::File::create(&path).unwrap().set_len(11 * 1024 * 1024).unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+        assert!(remote_attachments(&paths[..1]).is_ok(), "one alone fits");
+        assert_eq!(remote_attachments(&paths).unwrap_err(), "Attachments total more than 20 MB.");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_pull_request_link_opens_only_when_it_is_a_web_address() {
+        let card = |url: &str| Card {
+            session_id: "r1".into(),
+            pid: 1,
+            name: "x".into(),
+            cwd: "/x".into(),
+            state: model::State::Idle,
+            state_since: 0,
+            snippet: "".into(),
+            awaiting: None,
+            has_inbox: true,
+            harness: model::Harness::ClaudeCode,
+            pr: Some(model::PullRequest { number: 7, url: url.into(), state: "open".into() }),
+            context: None,
+            machine: Some("laptop".into()),
+            machine_address: None, machine_platform: None,
+            stale: false,
+        };
+        assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));
+        assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
+        assert_eq!(pr_link(&card("/Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
+        assert_eq!(pr_link(&Card { pr: None, ..card("") }).unwrap_err(), "No pull request is known for this session yet.");
+    }
+
+    #[test]
+    fn a_paired_list_that_cannot_be_saved_is_not_changed() {
+        let dir = std::env::temp_dir().join(format!("maya-save-paired-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = |id: &str| config::PairedAssistant { id: id.into(), name: id.into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "10.0.0.5".into(), last_seen: None };
+        let mut config = Config::default();
+        config.network.assistants = vec![p("a1"), p("b2")];
+        // A file where the config's directory should be: the save fails.
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let err = save_paired(&blocker.join("maya/config.json"), &mut config, |l| l.retain(|a| a.id != "a1")).unwrap_err();
+        assert!(err.starts_with("Could not save the paired assistants: "), "{err}");
+        assert_eq!(config.network.assistants.len(), 2, "the removal is not made");
+        let path = dir.join("maya/config.json");
+        assert_eq!(save_paired(&path, &mut config, |l| l.retain(|a| a.id != "a1")), Ok(()));
+        assert_eq!(config.network.assistants.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["b2"]);
+        assert_eq!(config::load(&path).network.assistants.len(), 1, "and it is on disk");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn start_kind_for_builds_a_start_command() {
+        let options = launch::LaunchOptions::default();
+        let kind = start_kind_for(Some("proj".into()), "do the thing".into(), options.clone());
+        match kind {
+            CommandKind::Start { dir, prompt, options: got } => {
+                assert_eq!(dir.as_deref(), Some("proj"));
+                assert_eq!(prompt, "do the thing");
+                assert_eq!(got, options);
+            }
+            other => panic!("expected a Start command, got {other:?}"),
+        }
+    }
 }

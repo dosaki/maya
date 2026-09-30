@@ -9,6 +9,12 @@ export interface ResumableSession {
   running: boolean;
 }
 
+/** A machine choice for the picker: "This Mac" first, then each connected assistant. */
+export interface MachineChoice {
+  name: string;
+  value: string;
+}
+
 export interface ResumeModel {
   dirs: string[];
   dir: string | null;
@@ -16,6 +22,10 @@ export interface ResumeModel {
   loading: boolean;
   status: { ok: boolean; text: string } | null;
   needsSetup: boolean;
+  /** "This Mac" first, then each connected assistant. */
+  machines: MachineChoice[];
+  /** The chosen machine's value; "" is this Mac. */
+  machine: string;
 }
 
 export interface ResumeHandlers {
@@ -23,6 +33,7 @@ export interface ResumeHandlers {
   onResume(dir: string, sessionId: string): void;
   onClose(): void;
   onOpenSettings(): void;
+  onMachine(machine: string): void;
 }
 
 const DIR_KEY = "maya.resume.dir";
@@ -32,6 +43,26 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   n.className = className;
   if (text !== undefined) n.textContent = text;
   return n;
+}
+
+/**
+ * What to do when the chosen machine has no folders to offer: on this Mac,
+ * set the projects directory here; on an assistant, set it over there.
+ */
+function renderSetup(m: { machine: string; machines: MachineChoice[] }, h: { onOpenSettings(): void }): HTMLElement {
+  const setup = el("div", "modal__setup");
+  if (m.machine !== "") {
+    const name = m.machines.find((mm) => mm.value === m.machine)?.name ?? m.machine;
+    setup.append(el("p", "", `Set a projects directory in Settings on ${name}. Its subfolders become the choices here.`));
+    return setup;
+  }
+  setup.append(el("p", "", "Set a projects directory in Settings first. Its subfolders become the choices here."));
+  const open = el("button", "card__btn card__btn--primary", "Open Settings");
+  open.type = "button";
+  open.dataset.action = "open-settings";
+  open.addEventListener("click", () => h.onOpenSettings());
+  setup.append(open);
+  return setup;
 }
 
 /** Step one: pick a directory. Step two: pick one of its sessions. */
@@ -54,20 +85,33 @@ export function renderResume(m: ResumeModel, h: ResumeHandlers, nowMs: number = 
   head.append(titles, close);
   panel.append(head);
 
+  const form = el("div", "newsession");
+
+  // The picker comes first, so a machine without folders can still be left for another.
+  if (m.machines.length > 1) {
+    const machineLabel = el("label", "newsession__field");
+    machineLabel.append(el("span", "newsession__label", "Machine"));
+    const machineSelect = el("select", "newsession__select");
+    machineSelect.name = "machine";
+    for (const mm of m.machines) {
+      const o = document.createElement("option");
+      o.value = mm.value;
+      o.textContent = mm.name;
+      machineSelect.append(o);
+    }
+    machineSelect.value = m.machine;
+    machineSelect.addEventListener("change", () => h.onMachine(machineSelect.value));
+    machineLabel.append(machineSelect);
+    form.append(machineLabel);
+  }
+
   if (m.needsSetup) {
-    const setup = el("div", "modal__setup");
-    setup.append(el("p", "", "Set a projects directory in Settings first. Its subfolders become the choices here."));
-    const open = el("button", "card__btn card__btn--primary", "Open Settings");
-    open.type = "button";
-    open.dataset.action = "open-settings";
-    open.addEventListener("click", () => h.onOpenSettings());
-    setup.append(open);
-    panel.append(setup);
+    if (form.childElementCount > 0) panel.append(form);
+    panel.append(renderSetup(m, h));
     root.append(backdrop, panel);
     return root;
   }
 
-  const form = el("div", "newsession");
   const dirLabel = el("label", "newsession__field");
   dirLabel.append(el("span", "newsession__label", "Directory"));
   const select = el("select", "newsession__select");
@@ -143,28 +187,68 @@ function paint(): void {
         closeResume();
         document.querySelector<HTMLElement>("[data-tab=settings]")?.click();
       },
+      onMachine: (machine) => void chooseMachine(machine),
     }),
   );
+}
+
+async function loadDirs(machine: string): Promise<void> {
+  if (!current) return;
+  const me = current;
+  try {
+    const dirs = await invoke<string[]>("list_project_dirs", { machine });
+    if (current !== me || me.model.machine !== machine) return;
+    me.model.dirs = dirs;
+    // An assistant with no folders has no projects directory set over there.
+    me.model.needsSetup = machine !== "" && dirs.length === 0;
+    const last = rememberedDir();
+    if (machine === "" && last && dirs.includes(last)) {
+      await loadSessions(last);
+      return;
+    }
+  } catch (e) {
+    if (current !== me || me.model.machine !== machine) return;
+    const msg = String(e);
+    if (machine === "" && msg.includes("projects directory")) me.model.needsSetup = true;
+    else me.model.status = { ok: false, text: msg };
+  }
+  paint();
+}
+
+async function chooseMachine(machine: string): Promise<void> {
+  if (!current) return;
+  current.model.machine = machine;
+  current.model.dir = null;
+  current.model.dirs = [];
+  // Setup belongs to the machine that needed it; `loadDirs` decides again for this one.
+  current.model.needsSetup = false;
+  current.model.sessions = [];
+  paint();
+  await loadDirs(machine);
 }
 
 async function loadSessions(dir: string): Promise<void> {
   if (!current) return;
   const me = current;
+  const machine = me.model.machine;
   me.model.dir = dir;
   me.model.loading = true;
   me.model.status = null;
-  try {
-    localStorage.setItem(DIR_KEY, dir);
-  } catch {
-    /* nothing to remember */
+  if (machine === "") {
+    try {
+      localStorage.setItem(DIR_KEY, dir);
+    } catch {
+      /* nothing to remember */
+    }
   }
   paint();
   try {
-    const sessions = await invoke<ResumableSession[]>("list_resumable_sessions", { dir });
-    if (current !== me || me.model.dir !== dir) return;
+    const sessions = await invoke<ResumableSession[]>("list_resumable_sessions", { dir, machine });
+    // A late answer for another folder or machine (the same folder name can exist on both) is dropped.
+    if (current !== me || me.model.dir !== dir || me.model.machine !== machine) return;
     me.model.sessions = sessions;
   } catch (e) {
-    if (current !== me) return;
+    if (current !== me || me.model.dir !== dir || me.model.machine !== machine) return;
     me.model.sessions = [];
     me.model.status = { ok: false, text: String(e) };
   }
@@ -175,8 +259,9 @@ async function loadSessions(dir: string): Promise<void> {
 async function resume(dir: string, sessionId: string): Promise<void> {
   if (!current) return;
   const me = current;
+  const machine = me.model.machine;
   try {
-    await invoke("resume_session", { dir, sessionId });
+    await invoke("resume_session", { dir, sessionId, machine });
     if (current === me) closeResume();
     showToast(`Resuming in ${dir}`);
   } catch (e) {
@@ -194,25 +279,20 @@ export async function openResume(): Promise<void> {
   const keyHandler = (e: KeyboardEvent) => {
     if (e.key === "Escape") closeResume();
   };
-  current = { model: { dirs: [], dir: null, sessions: [], loading: false, status: null, needsSetup: false }, keyHandler };
+  current = {
+    model: { dirs: [], dir: null, sessions: [], loading: false, status: null, needsSetup: false, machines: [{ name: "This Mac", value: "" }], machine: "" },
+    keyHandler,
+  };
   document.addEventListener("keydown", keyHandler);
   paint();
-  try {
-    const dirs = await invoke<string[]>("list_project_dirs");
-    if (!current) return;
-    current.model.dirs = dirs;
-    const last = rememberedDir();
-    if (last && dirs.includes(last)) {
-      await loadSessions(last);
-      return;
-    }
-  } catch (e) {
-    if (!current) return;
-    const msg = String(e);
-    if (msg.includes("projects directory")) current.model.needsSetup = true;
-    else current.model.status = { ok: false, text: msg };
-  }
-  paint();
+  void invoke<{ name: string; hostname: string; platform: string; connected: boolean }[]>("list_machines")
+    .then((machines) => {
+      if (!current) return;
+      current.model.machines = [{ name: "This Mac", value: "" }, ...machines.filter((m) => m.connected).map((m) => ({ name: m.name, value: m.name }))];
+      paint();
+    })
+    .catch(() => undefined);
+  await loadDirs("");
 }
 
 export function closeResume(): void {

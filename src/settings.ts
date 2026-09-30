@@ -1,6 +1,48 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
+
+/** Which network role this Maya plays, and what Settings › Network shows. */
+export type NetworkRole = "off" | "main" | "assistant";
+
+export interface PairingCode {
+  code: string;
+  expiresAt: number;
+}
+
+export interface AssistantStatus {
+  id: string;
+  name: string;
+  hostname: string;
+  platform: string;
+  /** Its IP address as the main last saw it; empty when never recorded. */
+  address?: string;
+  connected: boolean;
+  lastSeen: number | null;
+  /** A different Maya version, or a board this Maya could not read. */
+  note?: string | null;
+}
+
+export interface AssistantLink {
+  connected: boolean;
+  mainName: string | null;
+  error: string | null;
+  /** The client waits to try again; `error` is then the last failure. */
+  retrying?: boolean;
+}
+
+/** The live `network_status`/`network` event payload. */
+export interface NetworkStatus {
+  role: NetworkRole;
+  code: PairingCode | null;
+  assistants: AssistantStatus[];
+  assistant: AssistantLink;
+  /** Why the main's server is not running (the port is taken…). */
+  mainError?: string | null;
+}
+
+const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } };
 
 export interface SettingsModel {
   hookInstalled: boolean | null;
@@ -24,6 +66,28 @@ export interface SettingsModel {
   whisperModel: string;
   models: ModelInfo[];
   downloading: { id: string; received: number; total: number } | null;
+  /** The live status from `network_status`/the `network` event. */
+  network?: NetworkStatus;
+  /** The Network select's current value; can diverge from `network.role` while previewing "Assistant" before Pair succeeds. */
+  networkRole?: NetworkRole;
+  /** This Maya's listening port as a main. */
+  networkPort?: number;
+  /** The assistant's target: the main's host/address. */
+  networkMainHost?: string;
+  /** The assistant's target: the main's port. */
+  networkMainPort?: number;
+  /** The assistant's display name; blank means the hostname. */
+  networkName?: string;
+  /** The pairing code as typed, held here (not persisted) so a repaint never wipes it mid-entry. */
+  networkCode?: string;
+  /** The message from a failed Pair attempt, shown in the status line; cleared by the next attempt or a success. */
+  networkError?: string | null;
+  /** The config holds an assistant id and token: choosing Assistant reconnects without pairing. */
+  networkPaired?: boolean;
+  /** "Pair again" was clicked: the pairing form shows even though credentials are stored. */
+  networkRepair?: boolean;
+  /** A Pair is in flight: the button is disabled and further clicks are ignored. */
+  networkPairing?: boolean;
 }
 
 export type VoiceProvider = "builtin" | "elevenlabs";
@@ -59,6 +123,29 @@ export interface SettingsHandlers {
   onWhisperModel(id: string): void;
   onDownloadModel(id: string): void;
   onRemoveModel(id: string): void;
+  /** Off or Main save immediately, and so does Assistant when credentials are stored; otherwise Assistant only previews the pairing form (see `onPair`). */
+  onRole(role: NetworkRole): void;
+  /** Reveals the pairing form on an already-paired assistant. */
+  onPairAgain(): void;
+  onPort(port: number): void;
+  onMainHost(host: string): void;
+  onMainPort(port: number): void;
+  onName(name: string): void;
+  /** Opens pairing (mints a code) or, if one is already open, regenerates it. */
+  onRegenerate(): void;
+  onRemoveAssistant(id: string): void;
+  onPair(host: string, port: number, name: string, code: string): void;
+}
+
+interface NetworkConfigJson {
+  role: NetworkRole;
+  port: number;
+  mainHost: string;
+  mainPort: number;
+  name: string;
+  assistantId: string;
+  token: string;
+  assistants: { id: string; name: string; hostname: string; platform: string; token: string; address?: string; lastSeen?: number | null }[];
 }
 
 interface ConfigJson {
@@ -74,6 +161,7 @@ interface ConfigJson {
   interpreterModel: string;
   recognizer: Recognizer;
   whisperModel: string;
+  network?: NetworkConfigJson;
 }
 
 /** A titled card in the settings grid. */
@@ -87,13 +175,104 @@ function section(title: string): HTMLElement {
   return s;
 }
 
-export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLElement {
+/** "483 921" from "483921": a space after the first three digits. */
+function formatPairingCode(code: string): string {
+  return code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
+}
+
+function expiresInMinutes(expiresAt: number, nowMs: number): number {
+  return Math.max(0, Math.ceil((expiresAt - nowMs) / 60_000));
+}
+
+type Field = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+
+/** The named field in `root` that has focus, and its selection when it has one. */
+interface FocusedField {
+  name: string;
+  start: number | null;
+  end: number | null;
+  direction: "forward" | "backward" | "none" | null;
+}
+
+function isField(el: Element | null): el is Field {
+  return el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement;
+}
+
+function focusedField(root: HTMLElement): FocusedField | null {
+  const el = document.activeElement;
+  if (!isField(el) || !el.name || !root.contains(el)) return null;
+  const focused: FocusedField = { name: el.name, start: null, end: null, direction: null };
+  if (el instanceof HTMLSelectElement) return focused;
+  try {
+    // Null (or a throw, in some engines) for inputs with no caret, such as checkboxes.
+    focused.start = el.selectionStart;
+    focused.end = el.selectionEnd;
+    focused.direction = el.selectionDirection;
+  } catch {
+    // no selection to keep
+  }
+  return focused;
+}
+
+function restoreFocus(root: HTMLElement, f: FocusedField): void {
+  const el = [...root.querySelectorAll("input, select, textarea")].find((e): e is Field => isField(e) && e.name === f.name);
+  if (!el) return;
+  el.focus();
+  if (el instanceof HTMLSelectElement || f.start === null || f.end === null) return;
+  try {
+    el.setSelectionRange(f.start, f.end, f.direction ?? undefined);
+  } catch {
+    // the field changed kind; focus alone will do
+  }
+}
+
+/** How often the pairing code's "expires in N min" line is repainted. */
+export const PAIRING_TICK_MS = 30_000;
+
+/**
+ * Refreshes the code's expiry line in place, or once it expired removes the
+ * code and sets the button back to "Show pairing code".
+ */
+export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: number): void {
+  const code = model.network?.code;
+  const box = panel.querySelector<HTMLElement>(".settings__code");
+  const expiry = panel.querySelector<HTMLElement>(".settings__code-expiry");
+  if (!code || !box) return;
+  if (nowMs > code.expiresAt) {
+    box.remove();
+    expiry?.remove();
+    const regen = panel.querySelector<HTMLButtonElement>("button[data-action=regenerate-code]");
+    if (regen) regen.textContent = "Show pairing code";
+  } else if (expiry) {
+    expiry.textContent = `expires in ${expiresInMinutes(code.expiresAt, nowMs)} min`;
+  }
+}
+
+/**
+ * True while a pairing code is on screen or has just expired: the timer
+ * ticks then, so the countdown moves and the code goes when it expires.
+ */
+export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean {
+  const code = model.network?.code;
+  return (model.networkRole ?? model.network?.role) === "main" && !!code && nowMs <= code.expiresAt + PAIRING_TICK_MS;
+}
+
+export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = document.createElement("div");
   root.className = "settings__body";
   const sessions = section("Sessions");
   const notifications = section("Notifications");
   const assistant = section("Voice assistant");
-  root.append(sessions, notifications, assistant);
+  const network = section("Network");
+  root.append(sessions, notifications, assistant, network);
+
+  const net = model.network ?? DEFAULT_NETWORK_STATUS;
+  const netRole = model.networkRole ?? net.role;
+  const netPort = model.networkPort ?? 0;
+  const netMainHost = model.networkMainHost ?? "";
+  const netMainPort = model.networkMainPort ?? 0;
+  const netName = model.networkName ?? "";
+  const netCode = model.networkCode ?? "";
 
   const status = document.createElement("div");
   status.className = "settings__status";
@@ -175,16 +354,29 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
   notifications.append(speakLabel);
 
+  // The live role, not the select: previewing Assistant before a Pair
+  // succeeds must not untick listening on a machine that is not one yet.
+  const isAssistant = model.network?.role === "assistant";
   const listenLabel = document.createElement("label");
   listenLabel.className = "settings__check";
   const listenBox = document.createElement("input");
   listenBox.type = "checkbox";
   listenBox.name = "listen";
-  listenBox.checked = model.listen;
+  listenBox.checked = isAssistant ? false : model.listen;
+  listenBox.disabled = isAssistant;
   listenBox.addEventListener("change", () => h.onListen(listenBox.checked));
   listenLabel.append(listenBox, document.createTextNode(' Listen for "Maya" (on-device speech recognition)'));
   assistant.append(listenLabel);
-  if (model.listenError) {
+  if (isAssistant) {
+    // The main Maya owns notifications and listening while this machine is
+    // an assistant: say so right under the toggle rather than leave it
+    // looking merely unticked.
+    const note = document.createElement("div");
+    note.className = "settings__hint";
+    note.dataset.for = "listen";
+    note.textContent = "The main Maya notifies and listens for this machine.";
+    assistant.append(note);
+  } else if (model.listenError) {
     // The listener stopped on its own (Dictation off, no microphone…): say
     // why right under the toggle, or an unticked box looks like a glitch.
     const err = document.createElement("div");
@@ -373,6 +565,202 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   tryBtn.addEventListener("click", () => h.onTryVoice());
   notifications.append(tryBtn);
 
+  const roleLabel = document.createElement("label");
+  roleLabel.textContent = "Network";
+  const roleSel = document.createElement("select");
+  roleSel.name = "networkRole";
+  for (const [v, text] of [["off", "Off"], ["main", "Act as main Maya"], ["assistant", "Assistant to a main Maya"]] as const) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = text;
+    roleSel.append(o);
+  }
+  roleSel.value = netRole;
+  roleSel.addEventListener("change", () => h.onRole(roleSel.value === "main" || roleSel.value === "assistant" ? roleSel.value : "off"));
+  roleLabel.append(roleSel);
+  network.append(roleLabel);
+
+  // Both roles carry a name: assistants show the main's in "Connected to …",
+  // and the main shows an assistant's on its cards.
+  const nameField = () => {
+    const nameLabel = document.createElement("label");
+    nameLabel.textContent = "This machine's name";
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.name = "networkName";
+    nameInput.placeholder = "blank uses this computer's hostname";
+    nameInput.value = netName;
+    nameInput.addEventListener("input", () => { model.networkName = nameInput.value; });
+    nameInput.addEventListener("change", () => h.onName(nameInput.value.trim()));
+    nameLabel.append(nameInput);
+    return nameLabel;
+  };
+  if (netRole === "main" && net.mainError) {
+    const err = document.createElement("div");
+    err.className = "settings__error";
+    err.dataset.for = "network";
+    err.textContent = net.mainError;
+    network.append(err);
+  }
+
+  if (netRole === "main") {
+    const portLabel = document.createElement("label");
+    portLabel.textContent = "Port";
+    const portInput = document.createElement("input");
+    portInput.type = "number";
+    portInput.name = "networkPort";
+    portInput.placeholder = "4127";
+    portInput.value = netPort ? String(netPort) : "";
+    const readPort = () => {
+      const n = Number(portInput.value);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    };
+    portInput.addEventListener("input", () => { model.networkPort = readPort(); });
+    portInput.addEventListener("change", () => h.onPort(readPort()));
+    portLabel.append(portInput);
+    network.append(portLabel);
+    network.append(nameField());
+
+    if (net.code && nowMs <= net.code.expiresAt) {
+      const codeBox = document.createElement("div");
+      codeBox.className = "settings__code";
+      codeBox.textContent = formatPairingCode(net.code.code);
+      network.append(codeBox);
+      const expiry = document.createElement("div");
+      expiry.className = "settings__hint settings__code-expiry";
+      expiry.textContent = `expires in ${expiresInMinutes(net.code.expiresAt, nowMs)} min`;
+      network.append(expiry);
+    }
+
+    const regen = document.createElement("button");
+    regen.type = "button";
+    regen.dataset.action = "regenerate-code";
+    regen.textContent = net.code && nowMs <= net.code.expiresAt ? "Regenerate" : "Show pairing code";
+    regen.addEventListener("click", () => h.onRegenerate());
+    network.append(regen);
+
+    const list = document.createElement("div");
+    list.className = "settings__assistants";
+    for (const a of net.assistants) {
+      const row = document.createElement("div");
+      row.className = "settings__assistant";
+      const info = document.createElement("span");
+      info.textContent = `${a.name} (${[a.platform, a.address].filter(Boolean).join(", ")}) — ${a.connected ? "Connected" : a.lastSeen !== null ? `Last seen ${formatAge(a.lastSeen, nowMs)} ago` : "Never connected"}`;
+      if (a.note) {
+        const note = document.createElement("div");
+        note.className = "settings__hint";
+        note.dataset.for = "assistant-note";
+        note.textContent = a.note;
+        info.append(note);
+      }
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.dataset.action = "remove-assistant";
+      rm.dataset.id = a.id;
+      rm.textContent = "Remove";
+      rm.addEventListener("click", () => h.onRemoveAssistant(a.id));
+      row.append(info, rm);
+      list.append(row);
+    }
+    network.append(list);
+  } else if (netRole === "assistant") {
+    // Values live on the model, updated on every keystroke (not just on
+    // `change`), so an unrelated repaint (a `voice` or `network` event) never
+    // wipes a half-typed field; `change` still drives when each is saved.
+    const hostLabel = document.createElement("label");
+    hostLabel.textContent = "Main's host or address";
+    const hostInput = document.createElement("input");
+    hostInput.type = "text";
+    hostInput.name = "networkHost";
+    hostInput.placeholder = "e.g. 192.168.1.42 or maya-mini.local";
+    hostInput.value = netMainHost;
+    hostInput.addEventListener("input", () => { model.networkMainHost = hostInput.value; });
+    hostInput.addEventListener("change", () => h.onMainHost(hostInput.value.trim()));
+    hostLabel.append(hostInput);
+    network.append(hostLabel);
+
+    const mainPortLabel = document.createElement("label");
+    mainPortLabel.textContent = "Port";
+    const mainPortInput = document.createElement("input");
+    mainPortInput.type = "number";
+    mainPortInput.name = "networkMainPort";
+    mainPortInput.placeholder = "4127";
+    mainPortInput.value = netMainPort ? String(netMainPort) : "";
+    const readMainPort = () => {
+      const n = Number(mainPortInput.value);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    };
+    mainPortInput.addEventListener("input", () => { model.networkMainPort = readMainPort(); });
+    mainPortInput.addEventListener("change", () => h.onMainPort(readMainPort()));
+    mainPortLabel.append(mainPortInput);
+    network.append(mainPortLabel);
+
+    network.append(nameField());
+
+    if (model.networkPaired && !model.networkRepair) {
+      const again = document.createElement("button");
+      again.type = "button";
+      again.className = "settings__link";
+      again.dataset.action = "pair-again";
+      again.textContent = "Pair again";
+      again.addEventListener("click", () => h.onPairAgain());
+      network.append(again);
+    }
+  }
+  if (netRole === "assistant" && (!model.networkPaired || model.networkRepair)) {
+    const codeLabel = document.createElement("label");
+    codeLabel.textContent = "Pairing code";
+    const codeInput = document.createElement("input");
+    codeInput.type = "text";
+    codeInput.name = "networkCode";
+    codeInput.placeholder = "483921";
+    codeInput.value = netCode;
+    codeInput.addEventListener("input", () => { model.networkCode = codeInput.value; });
+    codeLabel.append(codeInput);
+    network.append(codeLabel);
+
+    const pairBtn = document.createElement("button");
+    pairBtn.type = "button";
+    pairBtn.dataset.action = "pair";
+    pairBtn.textContent = model.networkPairing ? "Pairing…" : "Pair";
+    pairBtn.disabled = !!model.networkPairing;
+    pairBtn.addEventListener("click", () => {
+      if (model.networkPairing) return;
+      h.onPair((model.networkMainHost ?? "").trim(), model.networkMainPort ?? 0, (model.networkName ?? "").trim(), (model.networkCode ?? "").trim());
+    });
+    network.append(pairBtn);
+  }
+
+  // Shown whenever the select shows Assistant, saved or still being
+  // previewed, so a failed Pair on a never-paired machine has somewhere to
+  // put its message instead of only the page-level error banner.
+  if (netRole === "assistant") {
+    const statusText = model.networkError
+      ? model.networkError
+      : net.role === "assistant"
+        ? net.assistant.connected
+          ? `Connected to ${net.assistant.mainName ?? ""}`
+          : net.assistant.error && !net.assistant.retrying
+            ? net.assistant.error
+            : "Reconnecting…"
+        : null;
+    if (statusText !== null) {
+      const statusEl = document.createElement("div");
+      statusEl.className = "settings__status settings__status--network";
+      statusEl.textContent = statusText;
+      network.append(statusEl);
+      // While it retries, the last failure sits under "Reconnecting…".
+      if (!model.networkError && net.role === "assistant" && !net.assistant.connected && net.assistant.retrying && net.assistant.error) {
+        statusEl.title = net.assistant.error;
+        const last = document.createElement("div");
+        last.className = "settings__hint";
+        last.dataset.for = "network-last-error";
+        last.textContent = `Last error: ${net.assistant.error}`;
+        network.append(last);
+      }
+    }
+  }
+
   if (model.error) {
     const err = document.createElement("div");
     err.className = "settings__error";
@@ -386,7 +774,42 @@ export async function initSettings(): Promise<void> {
   const panel = document.getElementById("settings");
   if (!panel) return;
 
-  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku", listenError: null, recognizer: "system", whisperModel: "base.en-q5_1", models: [], downloading: null };
+  const model: SettingsModel = {
+    hookInstalled: null,
+    completedTimeoutMinutes: 30,
+    projectsDir: "",
+    clonesDir: "",
+    notifyOnAwaiting: true,
+    speakNotifications: true,
+    voiceProvider: "builtin",
+    elevenKeySet: false,
+    elevenVoices: [],
+    elevenVoiceId: "",
+    error: null,
+    listen: false,
+    microphone: "",
+    microphones: [],
+    interpreterModel: "haiku",
+    listenError: null,
+    recognizer: "system",
+    whisperModel: "base.en-q5_1",
+    models: [],
+    downloading: null,
+    network: DEFAULT_NETWORK_STATUS,
+    networkRole: "off",
+    networkPort: 0,
+    networkMainHost: "",
+    networkMainPort: 0,
+    networkName: "",
+  };
+
+  const applyNetworkConfig = (c: ConfigJson) => {
+    model.networkPaired = !!(c.network?.assistantId && c.network?.token);
+    model.networkPort = c.network?.port ?? 0;
+    model.networkMainHost = c.network?.mainHost ?? "";
+    model.networkMainPort = c.network?.mainPort ?? 0;
+    model.networkName = c.network?.name ?? "";
+  };
 
   const loadVoices = async () => {
     if (model.voiceProvider !== "elevenlabs") return;
@@ -423,9 +846,25 @@ export async function initSettings(): Promise<void> {
     model.interpreterModel = c.interpreterModel;
     model.recognizer = c.recognizer;
     model.whisperModel = c.whisperModel;
+    applyNetworkConfig(c);
   };
 
-  const paint = () => panel.replaceChildren(renderSettings(model, handlers));
+  const saveNetwork = (patch: Partial<NetworkConfigJson>) =>
+    run(async () => {
+      const fresh = await invoke<ConfigJson>("get_config");
+      const net: NetworkConfigJson = { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [], ...fresh.network, ...patch };
+      const c = await invoke<ConfigJson>("set_config", { config: { ...fresh, network: net } });
+      applyNetworkConfig(c);
+    });
+
+  let stale = false;
+  // A repaint replaces every field: the one being used gets its focus and
+  // caret back, so a status push never pulls the cursor out from under you.
+  const paint = () => {
+    const focused = focusedField(panel);
+    panel.replaceChildren(renderSettings(model, handlers));
+    if (focused) restoreFocus(panel, focused);
+  };
 
   const run = async (action: () => Promise<void>) => {
     model.error = null;
@@ -467,6 +906,59 @@ export async function initSettings(): Promise<void> {
       });
     },
     onRemoveModel: (id) => void run(async () => { await invoke("remove_whisper_model", { id }); await loadModels(); }),
+    onRole: (role) => {
+      // A failed Pair's message belongs to the pairing form; leaving it drops the message.
+      if (role !== "assistant") model.networkError = null;
+      if (role === "assistant" && !model.networkPaired) {
+        // Previewing the pairing form does not save anything; only a
+        // successful Pair (see `onPair`) commits the assistant role. With
+        // credentials stored, Assistant saves at once and reconnects.
+        model.networkRole = "assistant";
+        paint();
+        return;
+      }
+      model.networkRole = role;
+      void saveNetwork({ role });
+    },
+    onPort: (port) => void saveNetwork({ port }),
+    onMainHost: (host) => void saveNetwork({ mainHost: host }),
+    onMainPort: (port) => void saveNetwork({ mainPort: port }),
+    onName: (name) => void saveNetwork({ name }),
+    onPairAgain: () => {
+      model.networkRepair = true;
+      paint();
+    },
+    onRegenerate: () => void run(async () => { model.network = await invoke<NetworkStatus>("network_pairing_code"); }),
+    onRemoveAssistant: (id) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_assistant", { id }); }),
+    onPair: (host, port, name, code) => {
+      // One Pair at a time: a second would pair twice with one code.
+      if (model.networkPairing) return;
+      model.networkPairing = true;
+      // Shown next to the pairing form itself (`.settings__status--network`),
+      // not just the page-level banner: cleared by this attempt starting, and
+      // by either a success or a fresh attempt afterwards.
+      model.error = null;
+      model.networkError = null;
+      paint();
+      void (async () => {
+        try {
+          model.network = await invoke<NetworkStatus>("network_pair", { host, port, name, code });
+          model.networkRole = model.network.role;
+          model.networkMainHost = host;
+          model.networkMainPort = port;
+          model.networkName = name;
+          model.networkCode = "";
+          // The new pairing's id and token replaced the stored ones.
+          model.networkPaired = true;
+          model.networkRepair = false;
+          model.networkPairing = false;
+        } catch (e) {
+          model.networkError = String(e);
+          model.networkPairing = false;
+        }
+        paint();
+      })();
+    },
   };
 
   // The voice panel can turn listening on or off on its own; mirror that
@@ -480,6 +972,36 @@ export async function initSettings(): Promise<void> {
     model.listenError = listenError;
     if (!panel.hidden) paint();
   });
+
+  // Sent on every change; repaint only when the status actually changed, or
+  // an unrelated push (e.g. a ping-driven refresh) would repaint for nothing.
+  await listen<NetworkStatus>("network", (e) => {
+    if (JSON.stringify(model.network) === JSON.stringify(e.payload)) return;
+    // Previewing "Assistant" before Pair succeeds is local only; an
+    // unrelated event must not snap the form back to the saved role.
+    const previewingAssistant = model.networkRole === "assistant" && e.payload.role !== "assistant";
+    model.network = e.payload;
+    if (!previewingAssistant) model.networkRole = e.payload.role;
+    if (!panel.hidden) paint();
+    else stale = true;
+  });
+
+  // Events that arrive while the tab is hidden update the model only; a
+  // repaint when the tab is shown brings the pane up to date.
+  new MutationObserver(() => {
+    if (!panel.hidden && stale) {
+      stale = false;
+      paint();
+    }
+  }).observe(panel, { attributes: true, attributeFilter: ["hidden"] });
+
+  // The pairing code's countdown, and its end. Updated in place: a full
+  // repaint here would wipe unsaved text in the other sections every 30 s.
+  setInterval(() => {
+    const now = Date.now();
+    if (panel.hidden || !pairingRepaintDue(model, now)) return;
+    tickPairingCode(panel, model, now);
+  }, PAIRING_TICK_MS);
 
   await listen<{ id: string; received: number; total: number }>("voice-model", (e) => {
     // Only one model downloads at a time; ignore stray events for any other
@@ -504,6 +1026,7 @@ export async function initSettings(): Promise<void> {
     model.interpreterModel = config.interpreterModel;
     model.recognizer = config.recognizer;
     model.whisperModel = config.whisperModel;
+    applyNetworkConfig(config);
     await loadVoices();
     await loadModels();
     try {
@@ -512,6 +1035,12 @@ export async function initSettings(): Promise<void> {
       model.microphones = parsed.devices ?? [];
     } catch {
       // ignore: the microphone list is a nicety, not required to use settings
+    }
+    try {
+      model.network = await invoke<NetworkStatus>("network_status");
+      model.networkRole = model.network.role;
+    } catch {
+      // ignore: an older backend or a stray failure just leaves Network off
     }
   });
 }

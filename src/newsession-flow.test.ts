@@ -16,6 +16,7 @@ describe("new-session options", () => {
 
   it("sends the chosen options and remembers them for the next open", async () => {
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
       if (cmd === "start_session") return Promise.resolve({ dir: "/x/dev/a", how: "chosen" });
       return Promise.reject(new Error("unexpected " + cmd));
@@ -34,7 +35,7 @@ describe("new-session options", () => {
     ta.value = "fix ci";
     ta.dispatchEvent(new Event("input"));
     document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(invoke).toHaveBeenCalledWith("start_session", { dir: "a", prompt: "fix ci", options: { model: "opus", effort: "", mode: "plan" } });
+    expect(invoke).toHaveBeenCalledWith("start_session", { dir: "a", prompt: "fix ci", options: { model: "opus", effort: "", mode: "plan" }, machine: "" });
     await flush();
     await flush();
     closeNewSession();
@@ -61,6 +62,7 @@ describe("new-session flow", () => {
   it("clears the prompt after a successful start, keeps Start disabled, ignores a second click and closes", async () => {
     let resolveStart: (v: unknown) => void = () => {};
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
       if (cmd === "start_session") return new Promise((r) => { resolveStart = r; });
       return Promise.reject(new Error("unexpected " + cmd));
@@ -71,7 +73,7 @@ describe("new-session flow", () => {
     ta.value = "fix ci";
     ta.dispatchEvent(new Event("input"));
     document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(invoke).toHaveBeenCalledWith("start_session", { dir: null, prompt: "fix ci", options: { model: "", effort: "", mode: "" } });
+    expect(invoke).toHaveBeenCalledWith("start_session", { dir: null, prompt: "fix ci", options: { model: "", effort: "", mode: "" }, machine: "" });
     resolveStart({ dir: "/x/dev/a", how: "classifier" });
     await flush();
     await flush();
@@ -91,6 +93,7 @@ describe("new-session flow", () => {
   it("keeps the draft and reports the outcome when the modal is closed mid-start", async () => {
     let rejectStart: (e: unknown) => void = () => {};
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
       if (cmd === "start_session") return new Promise((_, rej) => { rejectStart = rej; });
       return Promise.reject(new Error("unexpected " + cmd));
@@ -110,5 +113,57 @@ describe("new-session flow", () => {
     await openNewSession();
     await flush();
     expect(document.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")!.value).toBe("deploy it");
+  });
+});
+
+describe("new-session machine picker", () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="modal-host"></div><div id="toast" class="toast" hidden></div>';
+    invoke.mockReset();
+  });
+  afterEach(() => closeNewSession());
+
+  it("keeps the Machine picker when this Mac has no projects directory, and lists a chosen assistant's folders", async () => {
+    invoke.mockImplementation((cmd: string, args: { machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "list_project_dirs") return args.machine ? Promise.resolve(["remote-proj"]) : Promise.reject("Set a projects directory in Settings first.");
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    expect(document.querySelector(".modal__setup")).not.toBeNull();
+    expect(document.querySelector("textarea[name=prompt]")).toBeNull();
+    const machineSel = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    expect([...machineSel.options].map((o) => o.textContent)).toEqual(["This Mac", "laptop"]);
+    machineSel.value = "laptop";
+    machineSel.dispatchEvent(new Event("change"));
+    await flush();
+    expect(document.querySelector(".modal__setup")).toBeNull();
+    expect([...document.querySelectorAll<HTMLOptionElement>("select[name=dir] option")].map((o) => o.value)).toEqual(["", "remote-proj"]);
+    expect(document.querySelector<HTMLSelectElement>("select[name=dir]")!.value).toBe("remote-proj");
+    // Back on this Mac, the setup hint returns.
+    const again = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    again.value = "";
+    again.dispatchEvent(new Event("change"));
+    await flush();
+    expect(document.querySelector(".modal__setup")?.textContent).toContain("Set a projects directory in Settings first.");
+  });
+
+  it("says to set the projects directory on the assistant when a remote machine lists no folders", async () => {
+    invoke.mockImplementation((cmd: string, args: { machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "list_project_dirs") return Promise.resolve(args.machine ? [] : ["a"]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    const machineSel = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    machineSel.value = "laptop";
+    machineSel.dispatchEvent(new Event("change"));
+    await flush();
+    const setup = document.querySelector(".modal__setup")!;
+    expect(setup.textContent).toContain("Set a projects directory in Settings on laptop");
+    expect(setup.querySelector("button[data-action=open-settings]")).toBeNull();
+    expect(document.querySelector("select[name=machine]")).not.toBeNull();
   });
 });

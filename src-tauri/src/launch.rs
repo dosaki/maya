@@ -11,7 +11,7 @@ pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 pub const MODES: &[&str] = &["manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
 
 /// Per-session choices for `claude`. None or "" means "use the defaults".
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct LaunchOptions {
     pub model: Option<String>,

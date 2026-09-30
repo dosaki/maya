@@ -187,6 +187,9 @@ pub fn derive(i: &DeriveInput) -> Card {
         harness: Harness::ClaudeCode,
         pr: None,
         context: None,
+        machine: None,
+        machine_address: None, machine_platform: None,
+        stale: false,
     }
 }
 

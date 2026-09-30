@@ -100,6 +100,14 @@ export interface Card {
   pr: PullRequest | null;
   /** Context window usage after the last assistant turn. */
   context: ContextUsage | null;
+  /** The assistant machine this card came from; absent or null for a local session. */
+  machine?: string | null;
+  /** That machine's IP address as the main sees it; absent for a local session. */
+  machineAddress?: string | null;
+  /** That machine's platform as it reported it (`macos`, `linux`, `windows`); absent for a local session. */
+  machinePlatform?: string | null;
+  /** True when the machine has not reported for a while or is disconnected. */
+  stale?: boolean;
 }
 
 /** The PR button: "PR #12", with the state and URL in its tooltip. */
@@ -131,3 +139,16 @@ export const STATE_LABEL: Record<CardState, string> = {
   completed: "Completed",
   idle: "Idle",
 };
+
+const PLATFORM_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
+
+/**
+ * The remote glyph's tooltip: "Runs on <label> (<platform>), <address>".
+ * The platform is left out when unknown, and the address when the label
+ * already carries it.
+ */
+export function remoteTitle(machine: string, address?: string | null, platform?: string | null): string {
+  const shown = platform ? ` (${PLATFORM_NAMES[platform] ?? platform})` : "";
+  if (!address || machine.includes(`(${address})`)) return `Runs on ${machine}${shown}`;
+  return `Runs on ${machine}${shown}, ${address}`;
+}

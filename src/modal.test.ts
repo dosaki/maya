@@ -1,10 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderModal } from "./modal";
+import { historyRefetchDue, renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
 const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
 const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn() });
+
+describe("historyRefetchDue", () => {
+  it("always refetches a local card, and a remote one only when its state, state time or snippet moved", () => {
+    const due = (before: Card, fresh: Card) => historyRefetchDue(before, fresh, 0, 1_000);
+    expect(due(base, { ...base })).toBe(true);
+    const remote = { ...base, machine: "laptop" };
+    expect(due(remote, { ...remote })).toBe(false);
+    expect(due(remote, { ...remote, stale: true, context: { used: 1, window: 2, percent: 50 } })).toBe(false);
+    expect(due(remote, { ...remote, state: "working" })).toBe(true);
+    expect(due(remote, { ...remote, stateSince: 5 })).toBe(true);
+    expect(due(remote, { ...remote, snippet: "done" })).toBe(true);
+  });
+
+  it("refetches a working remote card every 3 s even when nothing on it moved", () => {
+    const working = { ...base, machine: "laptop", state: "working" as const };
+    expect(historyRefetchDue(working, { ...working }, 10_000, 12_999)).toBe(false);
+    expect(historyRefetchDue(working, { ...working }, 10_000, 13_000)).toBe(true);
+    const idle = { ...base, machine: "laptop" };
+    expect(historyRefetchDue(idle, { ...idle }, 10_000, 60_000)).toBe(false);
+    expect(historyRefetchDue(base, { ...base }, 10_000, 10_001)).toBe(true);
+  });
+});
 
 describe("renderModal", () => {
   it("shows header, turns with kind classes and a composer", () => {
@@ -220,6 +242,53 @@ describe("renderModal", () => {
     const el = renderModal({ card: { ...base, hasInbox: false }, turns: [], status: null, draft: "" }, handlers());
     expect(el.querySelector("textarea")).toBeNull();
     expect(el.querySelector(".modal__noinbox")?.textContent).toContain("no inbox");
+  });
+
+  it("shows the machine in the header and drops the terminal button from the awaiting banner for a remote card", () => {
+    const h = handlers();
+    const remote = { ...base, machine: "laptop", state: "awaiting" as const, awaiting: { kind: "permission" as const, detail: "Bash: rm", questions: [] } };
+    const el = renderModal({ card: remote, turns: [], status: null, draft: "" }, h);
+    expect(el.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on laptop");
+    expect(el.querySelector(".modal__banner button")).toBeNull();
+    const local = renderModal({ card: base, turns: [], status: null, draft: "" }, h);
+    expect(local.querySelector(".card__remote")).toBeNull();
+  });
+
+  it("names the machine's address in the header glyph's tooltip, once", () => {
+    const h = handlers();
+    const plain = renderModal({ card: { ...base, machine: "Gnowee", machineAddress: "192.168.55.70" }, turns: [], status: null, draft: "" }, h);
+    expect(plain.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee, 192.168.55.70");
+    const twin = renderModal({ card: { ...base, machine: "Gnowee (192.168.55.70)", machineAddress: "192.168.55.70" }, turns: [], status: null, draft: "" }, h);
+    expect(twin.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (192.168.55.70)");
+    const win = renderModal({ card: { ...base, machine: "Gnowee", machineAddress: "192.168.55.70", machinePlatform: "windows" }, turns: [], status: null, draft: "" }, h);
+    expect(win.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (Windows), 192.168.55.70");
+  });
+
+  it("never suggests the terminal in the awaiting banner for a remote card, naming the machine instead", () => {
+    const h = handlers();
+    const permission = renderModal(
+      { card: { ...base, machine: "laptop", state: "awaiting" as const, awaiting: { kind: "permission" as const, detail: "Bash: rm", questions: [] } }, turns: [], status: null, draft: "" },
+      h,
+    );
+    expect(permission.querySelector(".modal__banner")?.textContent).not.toContain("terminal");
+    expect(permission.querySelector(".modal__banner")?.textContent).toContain("waiting for a decision on laptop");
+
+    const prose = renderModal(
+      {
+        card: { ...base, machine: "laptop", state: "awaiting" as const, awaiting: { kind: "text" as const, detail: "Create it as drafted?", questions: [] } },
+        turns: [],
+        status: null,
+        draft: "",
+      },
+      h,
+    );
+    expect(prose.querySelector(".modal__banner")?.textContent).not.toContain("terminal");
+    expect(prose.querySelector(".modal__banner")?.textContent).toContain("Reply below.");
+
+    const asking = { ...base, machine: "laptop", state: "awaiting" as const, stateSince: 5000, awaiting: { kind: "question" as const, detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "" }] }] } };
+    const question = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000);
+    expect(question.querySelector(".modal__banner")?.textContent).not.toContain("terminal");
+    expect(question.querySelector(".modal__banner")?.textContent).toContain("Pick an answer here.");
   });
 
   it("closes on backdrop click and on the close button", () => {

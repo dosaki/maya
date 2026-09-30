@@ -4,11 +4,12 @@ import { answerGuard } from "./answer";
 import { composeMessage, makeAttachments, pastedFiles, renderChips, type Attachment } from "./attachments";
 import { renderMarkdown } from "./markdown";
 import { projectName } from "./format";
+import { iconElement } from "./icons";
 import { EFFORT_CHOICES, MODEL_CHOICES, renderChoice } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
 import { harnessBadge } from "./harness";
-import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, type Card, type Turn } from "./types";
+import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, remoteTitle, type Card, type Turn } from "./types";
 
 export interface ModalModel {
   card: Card;
@@ -149,7 +150,14 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");
   const claude = m.card.harness === "claude-code";
-  titles.append(renderTitle(m.card.name, h, claude), el("span", "modal__project", projectName(m.card.cwd)));
+  titles.append(renderTitle(m.card.name, h, claude));
+  if (m.card.machine) {
+    const remote = el("span", "card__remote");
+    remote.title = remoteTitle(m.card.machine, m.card.machineAddress, m.card.machinePlatform);
+    remote.append(iconElement("remote", 12));
+    titles.append(remote);
+  }
+  titles.append(el("span", "modal__project", projectName(m.card.cwd)));
   titles.append(harnessBadge(m.card.harness, "modal__harness"));
   if (m.card.pr) {
     const pr = prButton(m.card.pr);
@@ -179,16 +187,25 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const banner = el("div", "modal__banner");
     const options = renderOptions(m.card, m.next ?? 0, { descriptions: true, enabled: nowMs - m.card.stateSince >= OPEN_DELAY_MS });
     const prose = m.card.awaiting?.kind === "text";
+    const remote = !!m.card.machine;
     const text = options
-      ? "This session is asking a question. Pick an answer here or in its terminal."
+      ? remote
+        ? "This session is asking a question. Pick an answer here."
+        : "This session is asking a question. Pick an answer here or in its terminal."
       : prose
-        ? `This session asked you something. Reply below or in its terminal. "${m.card.awaiting?.detail ?? ""}"`
-        : "This session is waiting for a decision in its terminal. A reply will queue behind it.";
+        ? remote
+          ? `This session asked you something. Reply below. "${m.card.awaiting?.detail ?? ""}"`
+          : `This session asked you something. Reply below or in its terminal. "${m.card.awaiting?.detail ?? ""}"`
+        : remote
+          ? `This session is waiting for a decision on ${m.card.machine}. A reply will queue behind it.`
+          : "This session is waiting for a decision in its terminal. A reply will queue behind it.";
     banner.append(el("span", "", text));
-    const open = el("button", "card__btn", "Open terminal");
-    open.type = "button";
-    open.addEventListener("click", () => h.onTerminal());
-    banner.append(open);
+    if (!m.card.machine) {
+      const open = el("button", "card__btn", "Open terminal");
+      open.type = "button";
+      open.addEventListener("click", () => h.onTerminal());
+      banner.append(open);
+    }
     if (options) {
       options.addEventListener("click", (ev) => {
         const btn = (ev.target as HTMLElement).closest<HTMLElement>("button[data-action=answer]");
@@ -314,7 +331,8 @@ export function makeSendGuard(send: (text: string) => Promise<void>): (text: str
   };
 }
 
-let current: { model: ModalModel; keyHandler: (e: KeyboardEvent) => void } | null = null;
+/** `lastRemoteFetchAt`: when a remote card's history was last requested (ms). */
+let current: { model: ModalModel; keyHandler: (e: KeyboardEvent) => void; lastRemoteFetchAt: number } | null = null;
 let progress: Progress | null = null;
 const attachments = makeAttachments();
 let unlistenDrop: (() => void) | null = null;
@@ -465,7 +483,7 @@ const guardedSend = makeSendGuard(async (text: string) => {
   if (!current) return;
   const { card } = current.model;
   try {
-    await invoke("send_reply", { sessionId: card.sessionId, text });
+    await invoke("send_reply", { sessionId: card.sessionId, text, attachments: current.model.attachments?.map((a) => a.path) ?? [] });
     const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea");
     if (ta) ta.value = "";
     current.model.draft = "";
@@ -481,6 +499,7 @@ const guardedSend = makeSendGuard(async (text: string) => {
 async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): Promise<void> {
   if (!current) return;
   const { card } = current.model;
+  if (card.machine) current.lastRemoteFetchAt = Date.now();
   let turns: Turn[];
   try {
     turns = await invoke<Turn[]>("session_history", { sessionId: card.sessionId });
@@ -500,7 +519,7 @@ export async function openModal(card: Card): Promise<void> {
   const keyHandler = (e: KeyboardEvent) => {
     if (e.key === "Escape") closeModal();
   };
-  current = { model: { card, turns: [], status: null, draft: "" }, keyHandler };
+  current = { model: { card, turns: [], status: null, draft: "" }, keyHandler, lastRemoteFetchAt: 0 };
   attachments.clear();
   document.addEventListener("keydown", keyHandler);
   void watchDrops();
@@ -518,6 +537,23 @@ export function closeModal(): void {
   document.getElementById("modal-host")?.replaceChildren();
 }
 
+/** How often a working remote card's history is refetched when nothing on the card moved. */
+export const REMOTE_WORKING_REFETCH_MS = 3_000;
+
+/**
+ * Whether a board refresh should refetch the open card's history. A local
+ * card's is a cheap file read, so always; a remote card's is a round trip
+ * to its assistant (pushed about once a second while it works), so only
+ * when its state, state time or snippet moved, or while it works (tool
+ * calls change none of those) once `REMOTE_WORKING_REFETCH_MS` passed since
+ * `lastRemoteFetchAt`.
+ */
+export function historyRefetchDue(before: Card, fresh: Card, lastRemoteFetchAt: number, now: number): boolean {
+  if (!fresh.machine) return true;
+  if (fresh.state !== before.state || fresh.stateSince !== before.stateSince || fresh.snippet !== before.snippet) return true;
+  return fresh.state === "working" && now - lastRemoteFetchAt >= REMOTE_WORKING_REFETCH_MS;
+}
+
 /** Called on every board refresh: keeps the open modal's card and history current. */
 export function refreshModal(cards: Card[]): void {
   if (!current) return;
@@ -529,6 +565,8 @@ export function refreshModal(cards: Card[]): void {
   }
   const stateChanged =
     fresh.state !== current.model.card.state || fresh.stateSince !== current.model.card.stateSince || fresh.hasInbox !== current.model.card.hasInbox;
+  const refetch = historyRefetchDue(current.model.card, fresh, current.lastRemoteFetchAt, Date.now());
   current.model.card = fresh;
-  void loadTurns({ force: stateChanged });
+  if (refetch) void loadTurns({ force: stateChanged });
+  else if (stateChanged) paint();
 }

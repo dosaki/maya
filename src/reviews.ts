@@ -50,7 +50,12 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
   const updated = Date.parse(pr.updatedAt);
   root.append(el("div", "pr__meta", `${pr.author} · updated ${Number.isFinite(updated) ? formatAge(updated, nowMs) : "?"} ago · ${pr.repo}`));
   const actions = el("div", "card__actions");
-  if (related) {
+  if (related?.machine) {
+    // Its terminal is on another Mac: name the machine instead of a button.
+    const where = el("span", "pr__machine", `on ${related.machine}`);
+    where.title = `${related.name} · ${STATE_LABEL[related.state]} · runs on ${related.machine}`;
+    actions.append(where);
+  } else if (related) {
     const term = iconButton("terminal", `Open terminal: ${related.name} · ${STATE_LABEL[related.state]}`);
     term.dataset.action = "terminal";
     term.dataset.pid = String(related.pid);

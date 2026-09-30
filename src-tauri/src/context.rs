@@ -1,10 +1,10 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const WINDOW_200K: u64 = 200_000;
 pub const WINDOW_1M: u64 = 1_000_000;
 
 /// How full a session's context window is.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContextUsage {
     pub used: u64,
     pub window: u64,

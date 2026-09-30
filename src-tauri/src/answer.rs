@@ -156,6 +156,9 @@ mod tests {
             harness: crate::model::Harness::ClaudeCode,
             pr: None,
             context: None,
+            machine: None,
+            machine_address: None, machine_platform: None,
+            stale: false,
         }
     }
 
