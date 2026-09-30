@@ -113,8 +113,10 @@ function act(target: Element): void {
   if (!action) return;
   const card = cards.find((c) => c.sessionId === action.sessionId);
   if (!card) return;
-  if (action.kind === "terminal") void focus(card.pid);
-  else if (action.kind === "pr") void openPr(card.sessionId);
+  if (action.kind === "terminal") {
+    if (card.machine) showToast(`That session runs on ${card.machine}`);
+    else void focus(card.pid);
+  } else if (action.kind === "pr") void openPr(card.sessionId);
   else if (action.kind === "compact") void compact(card.sessionId);
   else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex, target);
   else {

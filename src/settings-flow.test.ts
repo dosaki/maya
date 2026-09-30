@@ -123,6 +123,45 @@ describe("settings flow", () => {
     expect(document.querySelector("progress[name=modelDownload]")).toBeNull();
   });
 
+  it("repaints the Network section on a network event only when the status changed", async () => {
+    const config = {
+      completedTimeoutMinutes: 30,
+      projectsDir: null,
+      clonesDir: null,
+      notifyOnAwaiting: true,
+      speakNotifications: true,
+      voiceProvider: "builtin",
+      elevenlabsVoiceId: null,
+      listen: false,
+      microphone: null,
+      interpreterModel: "haiku",
+      network: { role: "assistant", port: 0, mainHost: "desk.local", mainPort: 4127, name: "laptop", assistantId: "id1", token: "t", assistants: [] },
+    };
+    const networkStatus = { role: "assistant", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "network_status") return Promise.resolve({ ...networkStatus });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+    expect(document.querySelector(".settings__status--network")?.textContent).toBe("Reconnecting…");
+
+    const onNetwork = eventListen.mock.calls.find((c) => c[0] === "network")![1] as (e: {
+      payload: { role: string; code: null; assistants: unknown[]; assistant: { connected: boolean; mainName: string | null; error: string | null } };
+    }) => void;
+    // The same status arrives again (e.g. an unrelated repaint upstream): no visible change.
+    onNetwork({ payload: { ...networkStatus } });
+    expect(document.querySelector(".settings__status--network")?.textContent).toBe("Reconnecting…");
+
+    onNetwork({ payload: { role: "assistant", code: null, assistants: [], assistant: { connected: true, mainName: "desk", error: null } } });
+    expect(document.querySelector(".settings__status--network")?.textContent).toBe("Connected to desk");
+  });
+
   it("ignores a voice-model event for another id when nothing is downloading", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "builtin", whisperModel: "tiny.en" };
     invoke.mockImplementation((cmd: string) => {

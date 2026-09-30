@@ -1,8 +1,62 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderSettings } from "./settings";
 
-const voiceBase = { hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null };
-const handlers = () => ({ onInstall: vi.fn(), onRemove: vi.fn(), onTimeout: vi.fn(), onProjectsDir: vi.fn(), onNotify: vi.fn(), onClonesDir: vi.fn(), onSpeak: vi.fn(), onVoiceProvider: vi.fn(), onElevenKey: vi.fn(), onElevenVoice: vi.fn(), onTryVoice: vi.fn(), onListen: vi.fn(), onMicrophone: vi.fn(), onInterpreter: vi.fn(), onRecognizer: vi.fn(), onWhisperModel: vi.fn(), onDownloadModel: vi.fn(), onRemoveModel: vi.fn() });
+const voiceBase = {
+  hookInstalled: true,
+  completedTimeoutMinutes: 30,
+  projectsDir: "",
+  clonesDir: "",
+  notifyOnAwaiting: true,
+  speakNotifications: true,
+  voiceProvider: "builtin" as const,
+  elevenKeySet: false,
+  elevenVoices: [],
+  elevenVoiceId: "",
+  error: null,
+  listen: false,
+  microphone: "",
+  microphones: [],
+  interpreterModel: "haiku",
+  listenError: null,
+  recognizer: "system" as const,
+  whisperModel: "base.en-q5_1",
+  models: [],
+  downloading: null,
+  network: { role: "off" as const, code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } },
+  networkRole: "off" as const,
+  networkPort: 0,
+  networkMainHost: "",
+  networkMainPort: 0,
+  networkName: "",
+};
+const handlers = () => ({
+  onInstall: vi.fn(),
+  onRemove: vi.fn(),
+  onTimeout: vi.fn(),
+  onProjectsDir: vi.fn(),
+  onNotify: vi.fn(),
+  onClonesDir: vi.fn(),
+  onSpeak: vi.fn(),
+  onVoiceProvider: vi.fn(),
+  onElevenKey: vi.fn(),
+  onElevenVoice: vi.fn(),
+  onTryVoice: vi.fn(),
+  onListen: vi.fn(),
+  onMicrophone: vi.fn(),
+  onInterpreter: vi.fn(),
+  onRecognizer: vi.fn(),
+  onWhisperModel: vi.fn(),
+  onDownloadModel: vi.fn(),
+  onRemoveModel: vi.fn(),
+  onRole: vi.fn(),
+  onPort: vi.fn(),
+  onMainHost: vi.fn(),
+  onMainPort: vi.fn(),
+  onName: vi.fn(),
+  onRegenerate: vi.fn(),
+  onRemoveAssistant: vi.fn(),
+  onPair: vi.fn(),
+});
 
 describe("renderSettings", () => {
   it("offers install when the hook is missing", () => {
@@ -117,7 +171,7 @@ describe("renderSettings", () => {
 
   it("groups the fields into titled sections", () => {
     const el = renderSettings(voiceBase, handlers());
-    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["Sessions", "Notifications", "Voice assistant"]);
+    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["Sessions", "Notifications", "Voice assistant", "Network"]);
     expect(el.querySelector(".settings__section input[name=listen]")).not.toBeNull();
   });
 
@@ -218,5 +272,107 @@ describe("renderSettings", () => {
     expect(other[0].dataset.model).toBe("tiny.en");
     other[0].click();
     expect(h.onRemoveModel).toHaveBeenCalledWith("tiny.en");
+  });
+});
+
+describe("Network settings", () => {
+  it("offers Off, Main and Assistant, off by default, and reports Off/Main changes", () => {
+    const h = handlers();
+    const el = renderSettings(voiceBase, h);
+    const sel = el.querySelector<HTMLSelectElement>("select[name=networkRole]")!;
+    expect([...sel.options].map((o) => o.value)).toEqual(["off", "main", "assistant"]);
+    expect(sel.value).toBe("off");
+    sel.value = "main";
+    sel.dispatchEvent(new Event("change"));
+    expect(h.onRole).toHaveBeenCalledWith("main");
+  });
+
+  it("role main shows the port, the pairing code, Regenerate and the assistants list", () => {
+    const h = handlers();
+    const el = renderSettings(
+      {
+        ...voiceBase,
+        networkRole: "main",
+        networkPort: 4127,
+        network: {
+          role: "main",
+          code: { code: "483921", expiresAt: 180_000 },
+          assistants: [{ id: "a1", name: "laptop", hostname: "laptop.local", platform: "macos", connected: true, lastSeen: null }],
+          assistant: { connected: false, mainName: null, error: null },
+        },
+      },
+      h,
+      0,
+    );
+    expect(el.querySelector<HTMLSelectElement>("select[name=networkRole]")!.value).toBe("main");
+    const port = el.querySelector<HTMLInputElement>("input[name=networkPort]")!;
+    expect(port.value).toBe("4127");
+    port.value = "5000";
+    port.dispatchEvent(new Event("change"));
+    expect(h.onPort).toHaveBeenCalledWith(5000);
+    expect(el.querySelector(".settings__code")?.textContent).toBe("483 921");
+    expect(el.querySelector(".settings__hint")?.textContent).toContain("3 min");
+    const regen = el.querySelector<HTMLButtonElement>("button[data-action=regenerate-code]")!;
+    regen.click();
+    expect(h.onRegenerate).toHaveBeenCalled();
+    const remove = el.querySelector<HTMLButtonElement>("button[data-action=remove-assistant]")!;
+    expect(remove.dataset.id).toBe("a1");
+    remove.click();
+    expect(h.onRemoveAssistant).toHaveBeenCalledWith("a1");
+    expect(el.querySelector("input[name=networkHost]")).toBeNull();
+  });
+
+  it("role assistant shows host, port, name, code, Pair and the status line", () => {
+    const h = handlers();
+    const el = renderSettings(
+      {
+        ...voiceBase,
+        networkRole: "assistant",
+        networkMainHost: "maya-mini.local",
+        networkMainPort: 4127,
+        networkName: "laptop",
+        network: { role: "assistant", code: null, assistants: [], assistant: { connected: true, mainName: "desk", error: null } },
+      },
+      h,
+    );
+    expect(el.querySelector<HTMLInputElement>("input[name=networkHost]")!.value).toBe("maya-mini.local");
+    expect(el.querySelector<HTMLInputElement>("input[name=networkMainPort]")!.value).toBe("4127");
+    expect(el.querySelector<HTMLInputElement>("input[name=networkName]")!.value).toBe("laptop");
+    expect(el.querySelector("input[name=networkCode]")).not.toBeNull();
+    expect(el.querySelector(".settings__status--network")?.textContent).toBe("Connected to desk");
+    el.querySelector<HTMLInputElement>("input[name=networkHost]")!.value = "office.local";
+    el.querySelector<HTMLInputElement>("input[name=networkHost]")!.dispatchEvent(new Event("change"));
+    expect(h.onMainHost).toHaveBeenCalledWith("office.local");
+    el.querySelector<HTMLButtonElement>("button[data-action=pair]")!.click();
+    expect(h.onPair).toHaveBeenCalled();
+    expect(el.querySelector("select[name=networkRole]")).not.toBeNull();
+  });
+
+  it("shows Reconnecting… when paired but not connected, and the removal error otherwise", () => {
+    const reconnecting = renderSettings(
+      { ...voiceBase, networkRole: "assistant", network: { role: "assistant", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } } },
+      handlers(),
+    );
+    expect(reconnecting.querySelector(".settings__status--network")?.textContent).toBe("Reconnecting…");
+    const removed = renderSettings(
+      {
+        ...voiceBase,
+        networkRole: "assistant",
+        network: { role: "assistant", code: null, assistants: [], assistant: { connected: false, mainName: null, error: "Removed by the main Maya; pair again." } },
+      },
+      handlers(),
+    );
+    expect(removed.querySelector(".settings__status--network")?.textContent).toBe("Removed by the main Maya; pair again.");
+  });
+
+  it("disables the listen toggle with a note when the role is assistant", () => {
+    const el = renderSettings({ ...voiceBase, listen: true, networkRole: "assistant" }, handlers());
+    const listen = el.querySelector<HTMLInputElement>("input[name=listen]")!;
+    expect(listen.disabled).toBe(true);
+    expect(listen.checked).toBe(false);
+    expect(el.textContent).toContain("The main Maya notifies and listens for this machine.");
+    const off = renderSettings({ ...voiceBase, listen: true, networkRole: "off" }, handlers());
+    expect(off.querySelector<HTMLInputElement>("input[name=listen]")!.disabled).toBe(false);
+    expect(off.textContent).not.toContain("The main Maya notifies and listens for this machine.");
   });
 });

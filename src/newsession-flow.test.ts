@@ -16,6 +16,7 @@ describe("new-session options", () => {
 
   it("sends the chosen options and remembers them for the next open", async () => {
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
       if (cmd === "start_session") return Promise.resolve({ dir: "/x/dev/a", how: "chosen" });
       return Promise.reject(new Error("unexpected " + cmd));
@@ -34,7 +35,7 @@ describe("new-session options", () => {
     ta.value = "fix ci";
     ta.dispatchEvent(new Event("input"));
     document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(invoke).toHaveBeenCalledWith("start_session", { dir: "a", prompt: "fix ci", options: { model: "opus", effort: "", mode: "plan" } });
+    expect(invoke).toHaveBeenCalledWith("start_session", { dir: "a", prompt: "fix ci", options: { model: "opus", effort: "", mode: "plan" }, machine: "" });
     await flush();
     await flush();
     closeNewSession();
@@ -61,6 +62,7 @@ describe("new-session flow", () => {
   it("clears the prompt after a successful start, keeps Start disabled, ignores a second click and closes", async () => {
     let resolveStart: (v: unknown) => void = () => {};
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
       if (cmd === "start_session") return new Promise((r) => { resolveStart = r; });
       return Promise.reject(new Error("unexpected " + cmd));
@@ -71,7 +73,7 @@ describe("new-session flow", () => {
     ta.value = "fix ci";
     ta.dispatchEvent(new Event("input"));
     document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(invoke).toHaveBeenCalledWith("start_session", { dir: null, prompt: "fix ci", options: { model: "", effort: "", mode: "" } });
+    expect(invoke).toHaveBeenCalledWith("start_session", { dir: null, prompt: "fix ci", options: { model: "", effort: "", mode: "" }, machine: "" });
     resolveStart({ dir: "/x/dev/a", how: "classifier" });
     await flush();
     await flush();
@@ -91,6 +93,7 @@ describe("new-session flow", () => {
   it("keeps the draft and reports the outcome when the modal is closed mid-start", async () => {
     let rejectStart: (e: unknown) => void = () => {};
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
       if (cmd === "start_session") return new Promise((_, rej) => { rejectStart = rej; });
       return Promise.reject(new Error("unexpected " + cmd));

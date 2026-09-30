@@ -1,6 +1,40 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
+
+/** Which network role this Maya plays, and what Settings › Network shows. */
+export type NetworkRole = "off" | "main" | "assistant";
+
+export interface PairingCode {
+  code: string;
+  expiresAt: number;
+}
+
+export interface AssistantStatus {
+  id: string;
+  name: string;
+  hostname: string;
+  platform: string;
+  connected: boolean;
+  lastSeen: number | null;
+}
+
+export interface AssistantLink {
+  connected: boolean;
+  mainName: string | null;
+  error: string | null;
+}
+
+/** The live `network_status`/`network` event payload. */
+export interface NetworkStatus {
+  role: NetworkRole;
+  code: PairingCode | null;
+  assistants: AssistantStatus[];
+  assistant: AssistantLink;
+}
+
+const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } };
 
 export interface SettingsModel {
   hookInstalled: boolean | null;
@@ -24,6 +58,18 @@ export interface SettingsModel {
   whisperModel: string;
   models: ModelInfo[];
   downloading: { id: string; received: number; total: number } | null;
+  /** The live status from `network_status`/the `network` event. */
+  network?: NetworkStatus;
+  /** The Network select's current value; can diverge from `network.role` while previewing "Assistant" before Pair succeeds. */
+  networkRole?: NetworkRole;
+  /** This Maya's listening port as a main. */
+  networkPort?: number;
+  /** The assistant's target: the main's host/address. */
+  networkMainHost?: string;
+  /** The assistant's target: the main's port. */
+  networkMainPort?: number;
+  /** The assistant's display name; blank means the hostname. */
+  networkName?: string;
 }
 
 export type VoiceProvider = "builtin" | "elevenlabs";
@@ -59,6 +105,27 @@ export interface SettingsHandlers {
   onWhisperModel(id: string): void;
   onDownloadModel(id: string): void;
   onRemoveModel(id: string): void;
+  /** Off or Main save immediately; Assistant only previews the pairing form (see `onPair`). */
+  onRole(role: NetworkRole): void;
+  onPort(port: number): void;
+  onMainHost(host: string): void;
+  onMainPort(port: number): void;
+  onName(name: string): void;
+  /** Opens pairing (mints a code) or, if one is already open, regenerates it. */
+  onRegenerate(): void;
+  onRemoveAssistant(id: string): void;
+  onPair(host: string, port: number, name: string, code: string): void;
+}
+
+interface NetworkConfigJson {
+  role: NetworkRole;
+  port: number;
+  mainHost: string;
+  mainPort: number;
+  name: string;
+  assistantId: string;
+  token: string;
+  assistants: { id: string; name: string; hostname: string; platform: string; token: string }[];
 }
 
 interface ConfigJson {
@@ -74,6 +141,7 @@ interface ConfigJson {
   interpreterModel: string;
   recognizer: Recognizer;
   whisperModel: string;
+  network?: NetworkConfigJson;
 }
 
 /** A titled card in the settings grid. */
@@ -87,13 +155,30 @@ function section(title: string): HTMLElement {
   return s;
 }
 
-export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLElement {
+/** "483 921" from "483921": a space after the first three digits. */
+function formatPairingCode(code: string): string {
+  return code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
+}
+
+function expiresInMinutes(expiresAt: number, nowMs: number): number {
+  return Math.max(0, Math.ceil((expiresAt - nowMs) / 60_000));
+}
+
+export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = document.createElement("div");
   root.className = "settings__body";
   const sessions = section("Sessions");
   const notifications = section("Notifications");
   const assistant = section("Voice assistant");
-  root.append(sessions, notifications, assistant);
+  const network = section("Network");
+  root.append(sessions, notifications, assistant, network);
+
+  const net = model.network ?? DEFAULT_NETWORK_STATUS;
+  const netRole = model.networkRole ?? net.role;
+  const netPort = model.networkPort ?? 0;
+  const netMainHost = model.networkMainHost ?? "";
+  const netMainPort = model.networkMainPort ?? 0;
+  const netName = model.networkName ?? "";
 
   const status = document.createElement("div");
   status.className = "settings__status";
@@ -175,16 +260,27 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
   notifications.append(speakLabel);
 
+  const isAssistant = netRole === "assistant";
   const listenLabel = document.createElement("label");
   listenLabel.className = "settings__check";
   const listenBox = document.createElement("input");
   listenBox.type = "checkbox";
   listenBox.name = "listen";
-  listenBox.checked = model.listen;
+  listenBox.checked = isAssistant ? false : model.listen;
+  listenBox.disabled = isAssistant;
   listenBox.addEventListener("change", () => h.onListen(listenBox.checked));
   listenLabel.append(listenBox, document.createTextNode(' Listen for "Maya" (on-device speech recognition)'));
   assistant.append(listenLabel);
-  if (model.listenError) {
+  if (isAssistant) {
+    // The main Maya owns notifications and listening while this machine is
+    // an assistant: say so right under the toggle rather than leave it
+    // looking merely unticked.
+    const note = document.createElement("div");
+    note.className = "settings__hint";
+    note.dataset.for = "listen";
+    note.textContent = "The main Maya notifies and listens for this machine.";
+    assistant.append(note);
+  } else if (model.listenError) {
     // The listener stopped on its own (Dictation off, no microphone…): say
     // why right under the toggle, or an unticked box looks like a glitch.
     const err = document.createElement("div");
@@ -373,6 +469,137 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   tryBtn.addEventListener("click", () => h.onTryVoice());
   notifications.append(tryBtn);
 
+  const roleLabel = document.createElement("label");
+  roleLabel.textContent = "Network";
+  const roleSel = document.createElement("select");
+  roleSel.name = "networkRole";
+  for (const [v, text] of [["off", "Off"], ["main", "Act as main Maya"], ["assistant", "Assistant to a main Maya"]] as const) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = text;
+    roleSel.append(o);
+  }
+  roleSel.value = netRole;
+  roleSel.addEventListener("change", () => h.onRole(roleSel.value === "main" || roleSel.value === "assistant" ? roleSel.value : "off"));
+  roleLabel.append(roleSel);
+  network.append(roleLabel);
+
+  if (netRole === "main") {
+    const portLabel = document.createElement("label");
+    portLabel.textContent = "Port";
+    const portInput = document.createElement("input");
+    portInput.type = "number";
+    portInput.name = "networkPort";
+    portInput.placeholder = "4127";
+    portInput.value = netPort ? String(netPort) : "";
+    portInput.addEventListener("change", () => {
+      const n = Number(portInput.value);
+      h.onPort(Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
+    });
+    portLabel.append(portInput);
+    network.append(portLabel);
+
+    if (net.code) {
+      const codeBox = document.createElement("div");
+      codeBox.className = "settings__code";
+      codeBox.textContent = formatPairingCode(net.code.code);
+      network.append(codeBox);
+      const expiry = document.createElement("div");
+      expiry.className = "settings__hint";
+      expiry.textContent = `expires in ${expiresInMinutes(net.code.expiresAt, nowMs)} min`;
+      network.append(expiry);
+    }
+
+    const regen = document.createElement("button");
+    regen.type = "button";
+    regen.dataset.action = "regenerate-code";
+    regen.textContent = "Regenerate";
+    regen.addEventListener("click", () => h.onRegenerate());
+    network.append(regen);
+
+    const list = document.createElement("div");
+    list.className = "settings__assistants";
+    for (const a of net.assistants) {
+      const row = document.createElement("div");
+      row.className = "settings__assistant";
+      const info = document.createElement("span");
+      info.textContent = `${a.name} (${a.platform}) — ${a.connected ? "Connected" : a.lastSeen !== null ? `Last seen ${formatAge(a.lastSeen, nowMs)} ago` : "Never connected"}`;
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.dataset.action = "remove-assistant";
+      rm.dataset.id = a.id;
+      rm.textContent = "Remove";
+      rm.addEventListener("click", () => h.onRemoveAssistant(a.id));
+      row.append(info, rm);
+      list.append(row);
+    }
+    network.append(list);
+  } else if (netRole === "assistant") {
+    const hostLabel = document.createElement("label");
+    hostLabel.textContent = "Main's host or address";
+    const hostInput = document.createElement("input");
+    hostInput.type = "text";
+    hostInput.name = "networkHost";
+    hostInput.placeholder = "e.g. 192.168.1.42 or maya-mini.local";
+    hostInput.value = netMainHost;
+    hostInput.addEventListener("change", () => h.onMainHost(hostInput.value.trim()));
+    hostLabel.append(hostInput);
+    network.append(hostLabel);
+
+    const mainPortLabel = document.createElement("label");
+    mainPortLabel.textContent = "Port";
+    const mainPortInput = document.createElement("input");
+    mainPortInput.type = "number";
+    mainPortInput.name = "networkMainPort";
+    mainPortInput.placeholder = "4127";
+    mainPortInput.value = netMainPort ? String(netMainPort) : "";
+    mainPortInput.addEventListener("change", () => {
+      const n = Number(mainPortInput.value);
+      h.onMainPort(Number.isFinite(n) && n > 0 ? Math.floor(n) : 0);
+    });
+    mainPortLabel.append(mainPortInput);
+    network.append(mainPortLabel);
+
+    const nameLabel = document.createElement("label");
+    nameLabel.textContent = "This machine's name";
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.name = "networkName";
+    nameInput.placeholder = "blank uses this computer's hostname";
+    nameInput.value = netName;
+    nameInput.addEventListener("change", () => h.onName(nameInput.value.trim()));
+    nameLabel.append(nameInput);
+    network.append(nameLabel);
+
+    const codeLabel = document.createElement("label");
+    codeLabel.textContent = "Pairing code";
+    const codeInput = document.createElement("input");
+    codeInput.type = "text";
+    codeInput.name = "networkCode";
+    codeInput.placeholder = "483921";
+    codeLabel.append(codeInput);
+    network.append(codeLabel);
+
+    const pairBtn = document.createElement("button");
+    pairBtn.type = "button";
+    pairBtn.dataset.action = "pair";
+    pairBtn.textContent = "Pair";
+    pairBtn.addEventListener("click", () => h.onPair(hostInput.value.trim(), Number(mainPortInput.value) || 0, nameInput.value.trim(), codeInput.value.trim()));
+    network.append(pairBtn);
+
+    if (net.role === "assistant") {
+      const statusText = net.assistant.connected
+        ? `Connected to ${net.assistant.mainName ?? ""}`
+        : net.assistant.error
+          ? net.assistant.error
+          : "Reconnecting…";
+      const statusEl = document.createElement("div");
+      statusEl.className = "settings__status settings__status--network";
+      statusEl.textContent = statusText;
+      network.append(statusEl);
+    }
+  }
+
   if (model.error) {
     const err = document.createElement("div");
     err.className = "settings__error";
@@ -386,7 +613,41 @@ export async function initSettings(): Promise<void> {
   const panel = document.getElementById("settings");
   if (!panel) return;
 
-  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku", listenError: null, recognizer: "system", whisperModel: "base.en-q5_1", models: [], downloading: null };
+  const model: SettingsModel = {
+    hookInstalled: null,
+    completedTimeoutMinutes: 30,
+    projectsDir: "",
+    clonesDir: "",
+    notifyOnAwaiting: true,
+    speakNotifications: true,
+    voiceProvider: "builtin",
+    elevenKeySet: false,
+    elevenVoices: [],
+    elevenVoiceId: "",
+    error: null,
+    listen: false,
+    microphone: "",
+    microphones: [],
+    interpreterModel: "haiku",
+    listenError: null,
+    recognizer: "system",
+    whisperModel: "base.en-q5_1",
+    models: [],
+    downloading: null,
+    network: DEFAULT_NETWORK_STATUS,
+    networkRole: "off",
+    networkPort: 0,
+    networkMainHost: "",
+    networkMainPort: 0,
+    networkName: "",
+  };
+
+  const applyNetworkConfig = (c: ConfigJson) => {
+    model.networkPort = c.network?.port ?? 0;
+    model.networkMainHost = c.network?.mainHost ?? "";
+    model.networkMainPort = c.network?.mainPort ?? 0;
+    model.networkName = c.network?.name ?? "";
+  };
 
   const loadVoices = async () => {
     if (model.voiceProvider !== "elevenlabs") return;
@@ -423,7 +684,16 @@ export async function initSettings(): Promise<void> {
     model.interpreterModel = c.interpreterModel;
     model.recognizer = c.recognizer;
     model.whisperModel = c.whisperModel;
+    applyNetworkConfig(c);
   };
+
+  const saveNetwork = (patch: Partial<NetworkConfigJson>) =>
+    run(async () => {
+      const fresh = await invoke<ConfigJson>("get_config");
+      const net: NetworkConfigJson = { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [], ...fresh.network, ...patch };
+      const c = await invoke<ConfigJson>("set_config", { config: { ...fresh, network: net } });
+      applyNetworkConfig(c);
+    });
 
   const paint = () => panel.replaceChildren(renderSettings(model, handlers));
 
@@ -467,6 +737,31 @@ export async function initSettings(): Promise<void> {
       });
     },
     onRemoveModel: (id) => void run(async () => { await invoke("remove_whisper_model", { id }); await loadModels(); }),
+    onRole: (role) => {
+      if (role === "assistant") {
+        // Previewing the pairing form does not save anything; only a
+        // successful Pair (see `onPair`) commits the assistant role.
+        model.networkRole = "assistant";
+        paint();
+        return;
+      }
+      model.networkRole = role;
+      void saveNetwork({ role });
+    },
+    onPort: (port) => void saveNetwork({ port }),
+    onMainHost: (host) => void saveNetwork({ mainHost: host }),
+    onMainPort: (port) => void saveNetwork({ mainPort: port }),
+    onName: (name) => void saveNetwork({ name }),
+    onRegenerate: () => void run(async () => { model.network = await invoke<NetworkStatus>("network_pairing_code"); }),
+    onRemoveAssistant: (id) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_assistant", { id }); }),
+    onPair: (host, port, name, code) =>
+      void run(async () => {
+        model.network = await invoke<NetworkStatus>("network_pair", { host, port, name, code });
+        model.networkRole = model.network.role;
+        model.networkMainHost = host;
+        model.networkMainPort = port;
+        model.networkName = name;
+      }),
   };
 
   // The voice panel can turn listening on or off on its own; mirror that
@@ -478,6 +773,18 @@ export async function initSettings(): Promise<void> {
     if (model.listen === e.payload.listening && model.listenError === listenError) return;
     model.listen = e.payload.listening;
     model.listenError = listenError;
+    if (!panel.hidden) paint();
+  });
+
+  // Sent on every change; repaint only when the status actually changed, or
+  // an unrelated push (e.g. a ping-driven refresh) would repaint for nothing.
+  await listen<NetworkStatus>("network", (e) => {
+    if (JSON.stringify(model.network) === JSON.stringify(e.payload)) return;
+    // Previewing "Assistant" before Pair succeeds is local only; an
+    // unrelated event must not snap the form back to the saved role.
+    const previewingAssistant = model.networkRole === "assistant" && e.payload.role !== "assistant";
+    model.network = e.payload;
+    if (!previewingAssistant) model.networkRole = e.payload.role;
     if (!panel.hidden) paint();
   });
 
@@ -504,6 +811,7 @@ export async function initSettings(): Promise<void> {
     model.interpreterModel = config.interpreterModel;
     model.recognizer = config.recognizer;
     model.whisperModel = config.whisperModel;
+    applyNetworkConfig(config);
     await loadVoices();
     await loadModels();
     try {
@@ -512,6 +820,12 @@ export async function initSettings(): Promise<void> {
       model.microphones = parsed.devices ?? [];
     } catch {
       // ignore: the microphone list is a nicety, not required to use settings
+    }
+    try {
+      model.network = await invoke<NetworkStatus>("network_status");
+      model.networkRole = model.network.role;
+    } catch {
+      // ignore: an older backend or a stray failure just leaves Network off
     }
   });
 }

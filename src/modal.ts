@@ -4,6 +4,7 @@ import { answerGuard } from "./answer";
 import { composeMessage, makeAttachments, pastedFiles, renderChips, type Attachment } from "./attachments";
 import { renderMarkdown } from "./markdown";
 import { projectName } from "./format";
+import { iconElement } from "./icons";
 import { EFFORT_CHOICES, MODEL_CHOICES, renderChoice } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
@@ -149,7 +150,14 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");
   const claude = m.card.harness === "claude-code";
-  titles.append(renderTitle(m.card.name, h, claude), el("span", "modal__project", projectName(m.card.cwd)));
+  titles.append(renderTitle(m.card.name, h, claude));
+  if (m.card.machine) {
+    const remote = el("span", "card__remote");
+    remote.title = `Runs on ${m.card.machine}`;
+    remote.append(iconElement("remote", 12));
+    titles.append(remote);
+  }
+  titles.append(el("span", "modal__project", projectName(m.card.cwd)));
   titles.append(harnessBadge(m.card.harness, "modal__harness"));
   if (m.card.pr) {
     const pr = prButton(m.card.pr);
@@ -185,10 +193,12 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
         ? `This session asked you something. Reply below or in its terminal. "${m.card.awaiting?.detail ?? ""}"`
         : "This session is waiting for a decision in its terminal. A reply will queue behind it.";
     banner.append(el("span", "", text));
-    const open = el("button", "card__btn", "Open terminal");
-    open.type = "button";
-    open.addEventListener("click", () => h.onTerminal());
-    banner.append(open);
+    if (!m.card.machine) {
+      const open = el("button", "card__btn", "Open terminal");
+      open.type = "button";
+      open.addEventListener("click", () => h.onTerminal());
+      banner.append(open);
+    }
     if (options) {
       options.addEventListener("click", (ev) => {
         const btn = (ev.target as HTMLElement).closest<HTMLElement>("button[data-action=answer]");

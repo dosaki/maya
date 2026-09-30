@@ -33,10 +33,12 @@ body { margin: 0; background: var(--bg); }
 .column__empty { color: var(--muted); font-style: italic; padding: 12px; text-align: center; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; box-shadow: var(--shadow); cursor: pointer; }
 .card:hover, .card:focus-visible { border-color: var(--gold); outline: none; box-shadow: 0 0 0 1px var(--gold-deep), 0 6px 18px rgba(217,171,60,.10); }
-.card__head { display: flex; justify-content: space-between; gap: 8px; }
+.card__head { display: flex; align-items: center; gap: 8px; }
 .card__name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card__age { color: var(--muted); font-variant-numeric: tabular-nums; }
+.card__remote { color: var(--gold); margin-left: 6px; display: inline-flex; align-items: center; }
+.card__age { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; }
 .card__project { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.card--stale { opacity: .55; }
 .card__awaiting { margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--awaiting) 14%, transparent); border-left: 3px solid var(--awaiting); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
 .card__awaiting[data-kind="question"] { background: color-mix(in srgb, var(--working) 12%, transparent); border-left-color: var(--working); font-family: inherit; }
 .card__awaiting[data-kind="text"] { font-family: inherit; }
@@ -58,6 +60,8 @@ body { margin: 0; background: var(--bg); }
 .settings__error { color: #dc2626; font-size: 12.5px; }
 .settings__row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .settings__hint, .settings__progress { color: var(--muted); font-size: 12.5px; }
+.settings__code { font: 600 22px ui-monospace, monospace; letter-spacing: .15em; color: var(--gold-bright); }
+.settings__assistant { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
 .settings progress { width: 100%; }
 .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 20; }
 

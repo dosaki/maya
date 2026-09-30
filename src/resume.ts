@@ -9,6 +9,12 @@ export interface ResumableSession {
   running: boolean;
 }
 
+/** A machine choice for the picker: "This Mac" first, then each connected assistant. */
+export interface MachineChoice {
+  name: string;
+  value: string;
+}
+
 export interface ResumeModel {
   dirs: string[];
   dir: string | null;
@@ -16,6 +22,10 @@ export interface ResumeModel {
   loading: boolean;
   status: { ok: boolean; text: string } | null;
   needsSetup: boolean;
+  /** "This Mac" first, then each connected assistant. */
+  machines: MachineChoice[];
+  /** The chosen machine's value; "" is this Mac. */
+  machine: string;
 }
 
 export interface ResumeHandlers {
@@ -23,6 +33,7 @@ export interface ResumeHandlers {
   onResume(dir: string, sessionId: string): void;
   onClose(): void;
   onOpenSettings(): void;
+  onMachine(machine: string): void;
 }
 
 const DIR_KEY = "maya.resume.dir";
@@ -68,6 +79,24 @@ export function renderResume(m: ResumeModel, h: ResumeHandlers, nowMs: number = 
   }
 
   const form = el("div", "newsession");
+
+  if (m.machines.length > 1) {
+    const machineLabel = el("label", "newsession__field");
+    machineLabel.append(el("span", "newsession__label", "Machine"));
+    const machineSelect = el("select", "newsession__select");
+    machineSelect.name = "machine";
+    for (const mm of m.machines) {
+      const o = document.createElement("option");
+      o.value = mm.value;
+      o.textContent = mm.name;
+      machineSelect.append(o);
+    }
+    machineSelect.value = m.machine;
+    machineSelect.addEventListener("change", () => h.onMachine(machineSelect.value));
+    machineLabel.append(machineSelect);
+    form.append(machineLabel);
+  }
+
   const dirLabel = el("label", "newsession__field");
   dirLabel.append(el("span", "newsession__label", "Directory"));
   const select = el("select", "newsession__select");
@@ -143,24 +172,59 @@ function paint(): void {
         closeResume();
         document.querySelector<HTMLElement>("[data-tab=settings]")?.click();
       },
+      onMachine: (machine) => void chooseMachine(machine),
     }),
   );
+}
+
+async function loadDirs(machine: string): Promise<void> {
+  if (!current) return;
+  const me = current;
+  try {
+    const dirs = await invoke<string[]>("list_project_dirs", { machine });
+    if (current !== me || me.model.machine !== machine) return;
+    me.model.dirs = dirs;
+    const last = rememberedDir();
+    if (machine === "" && last && dirs.includes(last)) {
+      await loadSessions(last);
+      return;
+    }
+  } catch (e) {
+    if (current !== me || me.model.machine !== machine) return;
+    const msg = String(e);
+    if (msg.includes("projects directory")) me.model.needsSetup = true;
+    else me.model.status = { ok: false, text: msg };
+  }
+  paint();
+}
+
+async function chooseMachine(machine: string): Promise<void> {
+  if (!current) return;
+  current.model.machine = machine;
+  current.model.dir = null;
+  current.model.dirs = [];
+  current.model.sessions = [];
+  paint();
+  await loadDirs(machine);
 }
 
 async function loadSessions(dir: string): Promise<void> {
   if (!current) return;
   const me = current;
+  const machine = me.model.machine;
   me.model.dir = dir;
   me.model.loading = true;
   me.model.status = null;
-  try {
-    localStorage.setItem(DIR_KEY, dir);
-  } catch {
-    /* nothing to remember */
+  if (machine === "") {
+    try {
+      localStorage.setItem(DIR_KEY, dir);
+    } catch {
+      /* nothing to remember */
+    }
   }
   paint();
   try {
-    const sessions = await invoke<ResumableSession[]>("list_resumable_sessions", { dir });
+    const sessions = await invoke<ResumableSession[]>("list_resumable_sessions", { dir, machine });
     if (current !== me || me.model.dir !== dir) return;
     me.model.sessions = sessions;
   } catch (e) {
@@ -175,8 +239,9 @@ async function loadSessions(dir: string): Promise<void> {
 async function resume(dir: string, sessionId: string): Promise<void> {
   if (!current) return;
   const me = current;
+  const machine = me.model.machine;
   try {
-    await invoke("resume_session", { dir, sessionId });
+    await invoke("resume_session", { dir, sessionId, machine });
     if (current === me) closeResume();
     showToast(`Resuming in ${dir}`);
   } catch (e) {
@@ -194,25 +259,20 @@ export async function openResume(): Promise<void> {
   const keyHandler = (e: KeyboardEvent) => {
     if (e.key === "Escape") closeResume();
   };
-  current = { model: { dirs: [], dir: null, sessions: [], loading: false, status: null, needsSetup: false }, keyHandler };
+  current = {
+    model: { dirs: [], dir: null, sessions: [], loading: false, status: null, needsSetup: false, machines: [{ name: "This Mac", value: "" }], machine: "" },
+    keyHandler,
+  };
   document.addEventListener("keydown", keyHandler);
   paint();
-  try {
-    const dirs = await invoke<string[]>("list_project_dirs");
-    if (!current) return;
-    current.model.dirs = dirs;
-    const last = rememberedDir();
-    if (last && dirs.includes(last)) {
-      await loadSessions(last);
-      return;
-    }
-  } catch (e) {
-    if (!current) return;
-    const msg = String(e);
-    if (msg.includes("projects directory")) current.model.needsSetup = true;
-    else current.model.status = { ok: false, text: msg };
-  }
-  paint();
+  void invoke<{ name: string; hostname: string; platform: string; connected: boolean }[]>("list_machines")
+    .then((machines) => {
+      if (!current) return;
+      current.model.machines = [{ name: "This Mac", value: "" }, ...machines.filter((m) => m.connected).map((m) => ({ name: m.name, value: m.name }))];
+      paint();
+    })
+    .catch(() => undefined);
+  await loadDirs("");
 }
 
 export function closeResume(): void {

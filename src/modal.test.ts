@@ -222,6 +222,16 @@ describe("renderModal", () => {
     expect(el.querySelector(".modal__noinbox")?.textContent).toContain("no inbox");
   });
 
+  it("shows the machine in the header and drops the terminal button from the awaiting banner for a remote card", () => {
+    const h = handlers();
+    const remote = { ...base, machine: "laptop", state: "awaiting" as const, awaiting: { kind: "permission" as const, detail: "Bash: rm", questions: [] } };
+    const el = renderModal({ card: remote, turns: [], status: null, draft: "" }, h);
+    expect(el.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on laptop");
+    expect(el.querySelector(".modal__banner button")).toBeNull();
+    const local = renderModal({ card: base, turns: [], status: null, draft: "" }, h);
+    expect(local.querySelector(".card__remote")).toBeNull();
+  });
+
   it("closes on backdrop click and on the close button", () => {
     const h = handlers();
     const el = renderModal({ card: base, turns: [], status: null, draft: "" }, h);

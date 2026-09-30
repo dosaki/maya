@@ -40,6 +40,12 @@ export function renderChoice(name: string, label: string, choices: [string, stri
   return field;
 }
 
+/** A machine choice for the picker: "This Mac" first, then each connected assistant. */
+export interface MachineChoice {
+  name: string;
+  value: string;
+}
+
 export interface NewSessionModel {
   dirs: string[];
   dir: string | null;
@@ -50,12 +56,17 @@ export interface NewSessionModel {
   needsSetup: boolean;
   /** Set once a start succeeded: the prompt is spent and must not come back as a draft. */
   done?: boolean;
+  /** "This Mac" first, then each connected assistant. */
+  machines: MachineChoice[];
+  /** The chosen machine's value; "" is this Mac. */
+  machine: string;
 }
 
 export interface NewSessionHandlers {
-  onStart(dir: string | null, prompt: string, options: SessionOptions): void;
+  onStart(machine: string, dir: string | null, prompt: string, options: SessionOptions): void;
   onClose(): void;
   onOpenSettings(): void;
+  onMachine(machine: string): void;
 }
 
 interface StartResult {
@@ -103,6 +114,25 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   }
 
   const form = el("div", "newsession");
+
+  if (m.machines.length > 1) {
+    const machineLabel = el("label", "newsession__field");
+    machineLabel.append(el("span", "newsession__label", "Machine"));
+    const machineSelect = el("select", "newsession__select");
+    machineSelect.name = "machine";
+    for (const mm of m.machines) {
+      const o = document.createElement("option");
+      o.value = mm.value;
+      o.textContent = mm.name;
+      machineSelect.append(o);
+    }
+    machineSelect.value = m.machine;
+    machineSelect.addEventListener("change", () => h.onMachine(machineSelect.value));
+    machineLabel.append(machineSelect);
+    form.append(machineLabel);
+  }
+
+  const remoteMachine = m.machine !== "";
   const dirLabel = el("label", "newsession__field");
   dirLabel.append(el("span", "newsession__label", "Directory"));
   const select = el("select", "newsession__select");
@@ -110,6 +140,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   const auto = document.createElement("option");
   auto.value = "";
   auto.textContent = "Let Claude choose";
+  auto.disabled = remoteMachine;
   select.append(auto);
   for (const d of m.dirs) {
     const o = document.createElement("option");
@@ -119,6 +150,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   }
   select.value = m.dir ?? "";
   dirLabel.append(select);
+  if (remoteMachine) dirLabel.append(el("p", "newsession__hint", "Claude can't choose for you on a remote machine; pick a folder."));
 
   const promptLabel = el("label", "newsession__field");
   promptLabel.append(el("span", "newsession__label", "Prompt"));
@@ -152,7 +184,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
     if (start.disabled) return;
     const prompt = ta.value.trim();
     if (!prompt) return;
-    h.onStart(select.value || null, prompt, readOptions());
+    h.onStart(m.machine, select.value || null, prompt, readOptions());
   };
   ta.addEventListener("input", sync);
   ta.addEventListener("keydown", (ev) => {
@@ -207,18 +239,44 @@ function paint(): void {
   if (opts) m.options = lastOptions = opts;
   host.replaceChildren(
     renderNewSession(m, {
-      onStart: (dir, prompt, options) => void start(dir, prompt, options),
+      onStart: (machine, dir, prompt, options) => void start(machine, dir, prompt, options),
       onClose: closeNewSession,
       onOpenSettings: () => {
         closeNewSession();
         document.querySelector<HTMLElement>("[data-tab=settings]")?.click();
       },
+      onMachine: (machine) => void chooseMachine(machine),
     }),
   );
   host.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")?.focus();
 }
 
-async function start(dir: string | null, prompt: string, options: SessionOptions): Promise<void> {
+async function loadDirs(machine: string): Promise<void> {
+  if (!current) return;
+  const me = current;
+  try {
+    const dirs = await invoke<string[]>("list_project_dirs", { machine });
+    if (current !== me || me.model.machine !== machine) return;
+    me.model.dirs = dirs;
+  } catch (e) {
+    if (current !== me || me.model.machine !== machine) return;
+    const msg = String(e);
+    if (msg.includes("projects directory")) me.model.needsSetup = true;
+    else me.model.status = { ok: false, text: msg };
+  }
+  paint();
+}
+
+async function chooseMachine(machine: string): Promise<void> {
+  if (!current) return;
+  current.model.machine = machine;
+  current.model.dir = null;
+  current.model.dirs = [];
+  paint();
+  await loadDirs(machine);
+}
+
+async function start(machine: string, dir: string | null, prompt: string, options: SessionOptions): Promise<void> {
   if (!current || current.model.busy) return;
   const me = current;
   me.model.busy = true;
@@ -228,7 +286,7 @@ async function start(dir: string | null, prompt: string, options: SessionOptions
   me.model.status = { ok: true, text: dir ? "Starting…" : "Choosing a repository…" };
   paint();
   try {
-    const r = await invoke<StartResult>("start_session", { dir, prompt, options });
+    const r = await invoke<StartResult>("start_session", { dir, prompt, options, machine });
     draft = "";
     if (current !== me) {
       showToast(startedText(r));
@@ -259,20 +317,20 @@ export async function openNewSession(): Promise<void> {
   const keyHandler = (e: KeyboardEvent) => {
     if (e.key === "Escape") closeNewSession();
   };
-  current = { model: { dirs: [], dir: null, prompt: draft, options: { ...lastOptions }, status: null, busy: false, needsSetup: false }, keyHandler };
+  current = {
+    model: { dirs: [], dir: null, prompt: draft, options: { ...lastOptions }, status: null, busy: false, needsSetup: false, machines: [{ name: "This Mac", value: "" }], machine: "" },
+    keyHandler,
+  };
   document.addEventListener("keydown", keyHandler);
   paint();
-  try {
-    const dirs = await invoke<string[]>("list_project_dirs");
-    if (!current) return;
-    current.model.dirs = dirs;
-  } catch (e) {
-    if (!current) return;
-    const msg = String(e);
-    if (msg.includes("projects directory")) current.model.needsSetup = true;
-    else current.model.status = { ok: false, text: msg };
-  }
-  paint();
+  void invoke<{ name: string; hostname: string; platform: string; connected: boolean }[]>("list_machines")
+    .then((machines) => {
+      if (!current) return;
+      current.model.machines = [{ name: "This Mac", value: "" }, ...machines.filter((m) => m.connected).map((m) => ({ name: m.name, value: m.name }))];
+      paint();
+    })
+    .catch(() => undefined);
+  await loadDirs("");
 }
 
 export function closeNewSession(): void {

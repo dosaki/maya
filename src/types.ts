@@ -100,6 +100,10 @@ export interface Card {
   pr: PullRequest | null;
   /** Context window usage after the last assistant turn. */
   context: ContextUsage | null;
+  /** The assistant machine this card came from; absent or null for a local session. */
+  machine?: string | null;
+  /** True when the machine has not reported for a while or is disconnected. */
+  stale?: boolean;
 }
 
 /** The PR button: "PR #12", with the state and URL in its tooltip. */
