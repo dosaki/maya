@@ -457,31 +457,68 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, tx: &Sender<Up>) -> Result<(), S
     Ok(())
 }
 
-/// The running client; `stop` ends its thread within a tick.
+/// The running client; `stop` ends its thread within a tick (within the
+/// connect or lookup timeout while one is in flight).
 #[derive(Clone)]
 pub struct ClientHandle {
     stop: Arc<AtomicBool>,
     board_due: Arc<AtomicBool>,
+    thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 impl ClientHandle {
+    /// Runs `body` on the client thread; it should return once its stop flag is set.
+    pub fn spawn(body: impl FnOnce(Arc<AtomicBool>) + Send + 'static) -> ClientHandle {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = match std::thread::Builder::new().name("net-client".into()).spawn(move || body(flag)) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                log::line("network", format!("no thread for the client: {e}"));
+                None
+            }
+        };
+        ClientHandle { stop, board_due: Arc::new(AtomicBool::new(false)), thread: Arc::new(Mutex::new(thread)) }
+    }
+
     pub fn stop(&self) {
         if !self.stop.swap(true, Ordering::SeqCst) {
             log::line("network", "client stopped");
         }
     }
+
+    /// Stops the client and waits for its thread to end: by then its
+    /// connection is closed, so the main has seen it go.
+    pub fn stop_and_join(&self) {
+        self.stop();
+        let thread = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(t) = thread {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Pairs (`pair`) only once the running client, if any, has stopped and its
+/// connection has closed. Otherwise the main would still count this machine
+/// as connected and take the new pairing for a second machine at the same
+/// address.
+pub fn pair_after_stopping<T>(running: Option<ClientHandle>, pair: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    if let Some(c) = running {
+        c.stop_and_join();
+    }
+    pair()
 }
 
 /// Starts the client with the stored config, reconnecting until stopped.
 pub fn start(app: AppHandle) -> ClientHandle {
-    let handle = ClientHandle { stop: Arc::new(AtomicBool::new(false)), board_due: Arc::new(AtomicBool::new(false)) };
-    let exec: Arc<dyn Executor> = Arc::new(TauriExecutor { app: app.clone(), board_due: handle.board_due.clone() });
-    let notify: Arc<dyn ClientNotify> = Arc::new(TauriClientNotify { app: app.clone(), stop: handle.stop.clone() });
-    let stop = handle.stop.clone();
-    let spawned = std::thread::Builder::new().name("net-client".into()).spawn(move || reconnect(&app, exec, notify, &stop));
-    if let Err(e) = spawned {
-        log::line("network", format!("no thread for the client: {e}"));
-    }
+    let board_due = Arc::new(AtomicBool::new(false));
+    let exec: Arc<dyn Executor> = Arc::new(TauriExecutor { app: app.clone(), board_due: board_due.clone() });
+    let notify_app = app.clone();
+    let mut handle = ClientHandle::spawn(move |stop| {
+        let notify: Arc<dyn ClientNotify> = Arc::new(TauriClientNotify { app: notify_app, stop: stop.clone() });
+        reconnect(&app, exec, notify, &stop)
+    });
+    handle.board_due = board_due;
     handle
 }
 
@@ -717,6 +754,27 @@ mod tests {
         assert_eq!(out, Ok(()));
         assert_eq!(files(), 1);
         assert_eq!(sent, format!("look\nAttached file: {}", dir.path().join("attachments/4-a.png").display()));
+    }
+
+    #[test]
+    fn pairing_waits_for_the_running_client_to_end() {
+        let log = Arc::new(Mutex::new(Vec::<&str>::new()));
+        let l = log.clone();
+        let running = ClientHandle::spawn(move |stop| {
+            while !stopped(&stop) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            // As `finish` does: the socket closes a moment after the stop.
+            std::thread::sleep(Duration::from_millis(50));
+            l.lock().unwrap().push("client ended");
+        });
+        let out = pair_after_stopping(Some(running), || {
+            log.lock().unwrap().push("paired");
+            Ok::<_, String>(7)
+        });
+        assert_eq!(out, Ok(7));
+        assert_eq!(*log.lock().unwrap(), ["client ended", "paired"]);
+        assert_eq!(pair_after_stopping(None, || Ok::<_, String>(1)), Ok(1), "no client running: it just pairs");
     }
 
     #[test]

@@ -490,8 +490,11 @@ fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
         return;
     };
     let reason = pump(ctx, &mut ws, &link);
-    finish(&mut ws);
+    // Forgotten before the close completes: an assistant that waits for its
+    // close to be answered (a client stopped for "Pair again") finds the
+    // main already counting it as gone.
     leave(ctx, &link, &reason);
+    finish(&mut ws);
 }
 
 fn upgrade(ctx: &Ctx, stream: TcpStream, deadline: Instant) -> Result<Ws, String> {
@@ -1627,6 +1630,40 @@ mod tests {
             assert!(notify.main.lock().unwrap().is_none(), "never reported as connected");
             assert_eq!(*notify.errors.lock().unwrap(), [client::MAIN_UNPROVEN]);
         }
+    }
+
+    #[test]
+    fn pair_again_stops_the_running_client_first_and_keeps_the_entry() {
+        let (handle, port) = test_server();
+        let exec = Arc::new(FakeExec::default());
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "Gnowee".into(), ..Default::default() };
+        // Pairing on its own connection, ended once the credentials are kept.
+        let pair = |notify: Arc<FakeClientNotify>| {
+            let (code, _) = handle.open_pairing(now_ms());
+            let stop = Arc::new(AtomicBool::new(false));
+            let (c, e, n, s) = (config.clone(), exec.clone(), notify.clone(), stop.clone());
+            let t = std::thread::spawn(move || client::run_once(&c, e, n, &s, Some(&code)));
+            wait_until(|| notify.creds.lock().unwrap().is_some());
+            stop.store(true, Ordering::SeqCst);
+            assert_eq!(t.join().unwrap(), Ok(()));
+            notify.creds.lock().unwrap().clone().unwrap()
+        };
+        let (id, token) = pair(Arc::new(FakeClientNotify::default()));
+        // The client runs with those credentials and is connected as that entry.
+        let linked = NetworkConfig { assistant_id: id.clone(), token: token.clone(), ..config.clone() };
+        let (e, n) = (exec.clone(), Arc::new(FakeClientNotify::default()));
+        let running = client::ClientHandle::spawn(move |stop| {
+            let _ = client::run_once(&linked, e, n, &stop, None);
+        });
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        // "Pair again": the running client is stopped and gone before the pair is sent.
+        let (again, new_token) = client::pair_after_stopping(Some(running), || Ok::<_, String>(pair(Arc::new(FakeClientNotify::default())))).unwrap();
+        assert_eq!(again, id, "the same machine keeps its entry");
+        assert_ne!(new_token, token);
+        let status = handle.status();
+        assert_eq!(status.assistants.len(), 1, "no twin");
+        assert_eq!(status.assistants[0].name, "Gnowee");
+        handle.stop();
     }
 
     #[test]

@@ -558,7 +558,20 @@ fn network_pair(app: AppHandle, state: TauriState<AppState>, host: String, port:
         return Err("The pairing code has six digits.".into());
     }
     let port = if port == 0 { net::protocol::DEFAULT_PORT } else { port };
-    net::client::pair(&app, host, port, &name, &code)?;
+    // "Pair again" while connected: the running client goes first, and its
+    // connection with it, so the main reuses this machine's entry instead of
+    // pairing a second machine at the same address. No lock is held while
+    // it winds down (its notifier takes `network`).
+    let running = state.network.lock().unwrap().client.take();
+    let had_client = running.is_some();
+    if let Err(e) = net::client::pair_after_stopping(running, || net::client::pair(&app, host, port, &name, &code)) {
+        // The old pairing still stands: its client comes back.
+        let assistant = state.store.lock().unwrap().config.network.role == config::NetworkRole::Assistant;
+        if had_client && assistant {
+            start_assistant(&app);
+        }
+        return Err(e);
+    }
     Ok(network_status_of(&state))
 }
 
