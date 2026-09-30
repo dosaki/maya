@@ -228,10 +228,9 @@ function restoreFocus(root: HTMLElement, f: FocusedField): void {
 export const PAIRING_TICK_MS = 30_000;
 
 /**
- * True while a pairing code is on screen or has just expired: the timer
- * repaints then, so the countdown moves and the code goes when it expires.
+ * Refreshes the code's expiry line in place, or once it expired removes the
+ * code and sets the button back to "Show pairing code".
  */
-/** Refreshes the code's expiry line in place, or removes the code once it expired. */
 export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: number): void {
   const code = model.network?.code;
   const box = panel.querySelector<HTMLElement>(".settings__code");
@@ -240,11 +239,17 @@ export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: 
   if (nowMs > code.expiresAt) {
     box.remove();
     expiry?.remove();
+    const regen = panel.querySelector<HTMLButtonElement>("button[data-action=regenerate-code]");
+    if (regen) regen.textContent = "Show pairing code";
   } else if (expiry) {
     expiry.textContent = `expires in ${expiresInMinutes(code.expiresAt, nowMs)} min`;
   }
 }
 
+/**
+ * True while a pairing code is on screen or has just expired: the timer
+ * ticks then, so the countdown moves and the code goes when it expires.
+ */
 export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean {
   const code = model.network?.code;
   return (model.networkRole ?? model.network?.role) === "main" && !!code && nowMs <= code.expiresAt + PAIRING_TICK_MS;

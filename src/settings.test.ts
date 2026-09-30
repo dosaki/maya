@@ -345,9 +345,12 @@ describe("Network settings", () => {
     tickPairingCode(host, withCode, 250_000);
     expect(host.querySelector(".settings__code-expiry")?.textContent).toBe("expires in 1 min");
     expect(host.querySelector(".settings__code")).not.toBeNull();
+    expect(host.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Regenerate");
     tickPairingCode(host, withCode, 320_000);
     expect(host.querySelector(".settings__code")).toBeNull();
     expect(host.querySelector(".settings__code-expiry")).toBeNull();
+    // The button no longer offers to regenerate a code that is gone.
+    expect(host.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Show pairing code");
     expect(marker.value).toBe("typing");
     expect(pairingRepaintDue(withCode, 100_000)).toBe(true);
     expect(pairingRepaintDue(withCode, 320_000)).toBe(true);
