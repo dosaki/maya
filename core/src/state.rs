@@ -189,6 +189,7 @@ pub fn derive(i: &DeriveInput) -> Card {
         context: None,
         machine: None,
         machine_address: None, machine_platform: None,
+        terminal: None,
         stale: false,
     }
 }
@@ -215,6 +216,7 @@ mod tests {
             status_updated_at,
             entrypoint: "cli".into(),
             messaging_socket_path: None,
+            tty: None,
         }
     }
 

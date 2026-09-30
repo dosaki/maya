@@ -153,7 +153,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   titles.append(renderTitle(m.card.name, h, claude));
   if (m.card.machine) {
     const remote = el("span", "card__remote");
-    remote.title = remoteTitle(m.card.machine, m.card.machineAddress, m.card.machinePlatform);
+    remote.title = remoteTitle(m.card.machine, m.card.machineAddress, m.card.machinePlatform, m.card.terminal);
     remote.append(iconElement("remote", 12));
     titles.append(remote);
   }

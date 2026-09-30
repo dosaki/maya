@@ -1,6 +1,5 @@
 use crate::launch::{check_choice, EFFORTS, MODELS};
 use crate::model::{AwaitKind, Card, State};
-use std::process::Command;
 
 /// The slash command that compacts a running session's context.
 pub const COMPACT: &str = "/compact";
@@ -65,28 +64,6 @@ pub fn needs_submit(question_index: usize, question_count: usize) -> bool {
     question_count > 1 && question_index + 1 == question_count
 }
 
-fn applescript_string(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// Types `text` (plus Enter) into the Terminal tab on `tty` without activating Terminal.
-pub fn applescript_type(tty: &str, text: &str) -> String {
-    format!(
-        r#"tell application "Terminal"
-  repeat with w in windows
-    repeat with t in tabs of w
-      if tty of t is "{tty}" then
-        do script "{}" in t
-        return "ok"
-      end if
-    end repeat
-  end repeat
-end tell
-return "not found""#,
-        applescript_string(text)
-    )
-}
-
 /// Refuses unless the card is still waiting on the ask the buttons were
 /// rendered for (`ask_id` is that ask's awaiting timestamp), the option
 /// exists, the question is single-select and the picker has had time to appear.
@@ -111,22 +88,6 @@ pub fn check(card: &Card, ask_id: u64, question_index: usize, option_index: usiz
         return Err("Give the terminal a second to show the question.".into());
     }
     Ok(())
-}
-
-pub fn type_into_tty(tty: &str, text: &str) -> Result<(), String> {
-    let out = Command::new("osascript")
-        .arg("-e")
-        .arg(applescript_type(tty, text))
-        .output()
-        .map_err(|e| format!("could not run osascript: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("osascript failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    if String::from_utf8_lossy(&out.stdout).trim() == "ok" {
-        Ok(())
-    } else {
-        Err(format!("No Terminal tab found for {tty}."))
-    }
 }
 
 #[cfg(test)]
@@ -158,6 +119,7 @@ mod tests {
             context: None,
             machine: None,
             machine_address: None, machine_platform: None,
+            terminal: None,
             stale: false,
         }
     }
@@ -217,15 +179,6 @@ mod tests {
         assert!(!needs_submit(0, 1));
         assert!(!needs_submit(0, 2));
         assert!(needs_submit(1, 2));
-    }
-
-    #[test]
-    fn applescript_types_without_activating_and_escapes_text() {
-        let s = applescript_type("/dev/ttys021", "a\"b\\c");
-        assert!(s.contains("if tty of t is \"/dev/ttys021\""));
-        assert!(s.contains("do script \"a\\\"b\\\\c\" in t"), "{s}");
-        assert!(!s.contains("activate"));
-        assert!(s.contains("return \"not found\""));
     }
 
     #[test]

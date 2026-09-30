@@ -63,7 +63,7 @@ pub struct Config {
     pub speak_notifications: bool,
     /// Which voice speaks: the built-in one or ElevenLabs.
     #[serde(default)]
-    pub voice_provider: crate::voice::VoiceProvider,
+    pub voice_provider: VoiceProvider,
     /// The ElevenLabs voice to use; the key itself lives in the Keychain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elevenlabs_voice_id: Option<String>,
@@ -100,6 +100,18 @@ pub enum Recognizer {
 
 pub const DEFAULT_CLONES_DIR: &str = "~/dev/reviews";
 
+/// Which voice speaks Maya's lines: the built-in `say`, or ElevenLabs.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceProvider {
+    #[default]
+    Builtin,
+    Elevenlabs,
+}
+
+/// The whisper model used until the user picks another.
+pub const DEFAULT_MODEL: &str = "base.en-q5_1";
+
 fn default_true() -> bool {
     true
 }
@@ -109,7 +121,7 @@ fn default_interpreter_model() -> String {
 }
 
 fn default_whisper_model() -> String {
-    crate::models::DEFAULT_MODEL.into()
+    DEFAULT_MODEL.into()
 }
 
 impl Default for Config {
@@ -126,7 +138,7 @@ impl Default for Config {
             microphone: None,
             interpreter_model: "haiku".into(),
             recognizer: Recognizer::System,
-            whisper_model: crate::models::DEFAULT_MODEL.into(),
+            whisper_model: DEFAULT_MODEL.into(),
             network: NetworkConfig::default(),
         }
     }
@@ -181,17 +193,42 @@ pub fn load(path: &Path) -> Config {
     std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
+/// Writes the config readable by its owner only: it holds the network token.
 pub fn save(path: &Path, config: &Config) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let text = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    write_private(path, text.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// Writes `bytes` to `path` with mode 0600: created that way, and an
+/// existing file's mode is tightened before it is written.
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    f.write_all(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_leaves_the_config_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("maya/config.json");
+        save(&p, &Config::default()).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        // A config an older version left world-readable is tightened too.
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        save(&p, &Config::default()).unwrap();
+        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(load(&p), Config::default());
+    }
 
     #[test]
     fn defaults_to_thirty_minutes_when_missing() {
@@ -235,10 +272,10 @@ mod tests {
 
     #[test]
     fn voice_provider_defaults_to_builtin_and_round_trips() {
-        assert_eq!(Config::default().voice_provider, crate::voice::VoiceProvider::Builtin);
+        assert_eq!(Config::default().voice_provider, VoiceProvider::Builtin);
         assert!(Config::default().elevenlabs_voice_id.is_none());
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "voiceProvider": "elevenlabs", "elevenlabsVoiceId": "abc"}"#).unwrap();
-        assert_eq!(c.voice_provider, crate::voice::VoiceProvider::Elevenlabs);
+        assert_eq!(c.voice_provider, VoiceProvider::Elevenlabs);
         assert_eq!(c.elevenlabs_voice_id.as_deref(), Some("abc"));
         let text = serde_json::to_string(&c).unwrap();
         assert!(text.contains("\"voiceProvider\":\"elevenlabs\""));

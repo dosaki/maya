@@ -13,7 +13,7 @@ import { renderReviews, reviewActionFor } from "./reviews";
 import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
-import type { Card, ReviewState } from "./types";
+import { remoteTerminalToast, type Card, type ReviewState } from "./types";
 import { initVoice } from "./voice";
 import { initDebug } from "./debug";
 
@@ -114,7 +114,7 @@ function act(target: Element): void {
   const card = cards.find((c) => c.sessionId === action.sessionId);
   if (!card) return;
   if (action.kind === "terminal") {
-    if (card.machine) showToast(`That session runs on ${card.machine}`);
+    if (card.machine) showToast(remoteTerminalToast(card));
     else void focus(card.pid);
   } else if (action.kind === "pr") void openPr(card.sessionId);
   else if (action.kind === "compact") void compact(card.sessionId);

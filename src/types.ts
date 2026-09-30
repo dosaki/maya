@@ -106,6 +106,8 @@ export interface Card {
   machineAddress?: string | null;
   /** That machine's platform as it reported it (`macos`, `linux`, `windows`); absent for a local session. */
   machinePlatform?: string | null;
+  /** The assistant's tmux session name for this card, if it has one. */
+  terminal?: string | null;
   /** True when the machine has not reported for a while or is disconnected. */
   stale?: boolean;
 }
@@ -145,10 +147,21 @@ const PLATFORM_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux",
 /**
  * The remote glyph's tooltip: "Runs on <label> (<platform>), <address>".
  * The platform is left out when unknown, and the address when the label
- * already carries it.
+ * already carries it. When the card has a tmux session name, it appends
+ * "; attach: tmux attach -t <terminal>" so the main can say how to reach it.
  */
-export function remoteTitle(machine: string, address?: string | null, platform?: string | null): string {
+/**
+ * The toast for a remote card's Terminal action: the main cannot focus
+ * another machine's terminal, so it says where the session runs and, when
+ * the card has a tmux session name, how to attach to it.
+ */
+export function remoteTerminalToast(card: Pick<Card, "machine" | "terminal">): string {
+  const base = `That session runs on ${card.machine ?? "another machine"}`;
+  return card.terminal ? `${base}; attach: tmux attach -t ${card.terminal}` : base;
+}
+
+export function remoteTitle(machine: string, address?: string | null, platform?: string | null, terminal?: string | null): string {
   const shown = platform ? ` (${PLATFORM_NAMES[platform] ?? platform})` : "";
-  if (!address || machine.includes(`(${address})`)) return `Runs on ${machine}${shown}`;
-  return `Runs on ${machine}${shown}, ${address}`;
+  const base = !address || machine.includes(`(${address})`) ? `Runs on ${machine}${shown}` : `Runs on ${machine}${shown}, ${address}`;
+  return terminal ? `${base}; attach: tmux attach -t ${terminal}` : base;
 }

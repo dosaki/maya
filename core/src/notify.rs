@@ -153,6 +153,17 @@ pub fn focus_active() -> bool {
 
 static SPEECH: OnceLock<Mutex<mpsc::Sender<Utterance>>> = OnceLock::new();
 
+/// Speaks `text` with ElevenLabs: `(maya_dir, key, voice_id, text)`.
+pub type ElevenSpeaker = fn(&std::path::Path, &str, &str, &str) -> Result<(), String>;
+
+static ELEVEN_SPEAKER: OnceLock<ElevenSpeaker> = OnceLock::new();
+
+/// Installs the ElevenLabs speaker. Once per process; a second call is
+/// ignored. Without one, every line is spoken with the built-in voice.
+pub fn set_eleven_speaker(speak: ElevenSpeaker) {
+    let _ = ELEVEN_SPEAKER.set(speak);
+}
+
 /// Speaks with the built-in female voice.
 fn say_builtin(line: &str) {
     let mut cmd = Command::new("say");
@@ -165,8 +176,8 @@ fn say_builtin(line: &str) {
 /// Speaks one line with its chosen voice. An ElevenLabs failure falls back to
 /// the built-in voice unless the utterance says not to.
 fn speak_line(u: &Utterance) -> Result<(), String> {
-    if let Some((dir, key, voice_id)) = &u.eleven {
-        match crate::voice::speak(dir, key, voice_id, &u.text) {
+    if let (Some((dir, key, voice_id)), Some(speak)) = (&u.eleven, ELEVEN_SPEAKER.get()) {
+        match speak(dir, key, voice_id, &u.text) {
             Ok(()) => return Ok(()),
             Err(e) if !u.fallback => return Err(e),
             Err(_) => {}
@@ -291,6 +302,7 @@ mod tests {
             context: None,
             machine: None,
             machine_address: None, machine_platform: None,
+            terminal: None,
             stale: false,
         }
     }
@@ -356,6 +368,7 @@ mod tests {
             context: None,
             machine: None,
             machine_address: None, machine_platform: None,
+            terminal: None,
             stale: false,
         }
     }

@@ -264,6 +264,15 @@ describe("renderModal", () => {
     expect(win.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (Windows), 192.168.55.70");
   });
 
+  it("names the tmux session in the header glyph's tooltip", () => {
+    const h = handlers();
+    const el = renderModal(
+      { card: { ...base, machine: "laptop", machineAddress: "10.0.0.9", machinePlatform: "macos", terminal: "maya-1a2b3c4d" }, turns: [], status: null, draft: "" },
+      h,
+    );
+    expect(el.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on laptop (macOS), 10.0.0.9; attach: tmux attach -t maya-1a2b3c4d");
+  });
+
   it("never suggests the terminal in the awaiting banner for a remote card, naming the machine instead", () => {
     const h = handlers();
     const permission = renderModal(

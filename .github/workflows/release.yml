@@ -3,21 +3,71 @@ name: Release
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
 
+# Pushes to main run one at a time, so two releases never race; each pull
+# request has its own group, and a newer push to it cancels the older run.
 concurrency:
-  group: release
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'push' && 'release' || format('pr-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  macos:
-    name: Build and release (macOS)
-    runs-on: macos-latest
+  # Runs first, on pushes and pull requests alike: the tests that keep
+  # maya_core and the CLI portable. On a release push it also builds the
+  # Linux binaries and hands them to the macOS job, which publishes the
+  # release only once they exist, so no release ever lacks them.
+  linux:
+    name: Test core and CLI, build Linux binaries
+    runs-on: ubuntu-latest
     # A docs commit (conventional type `docs`, with or without a scope)
     # changes nothing that needs building or releasing.
     if: >-
+      !startsWith(github.event.head_commit.message, 'docs:') &&
+      !startsWith(github.event.head_commit.message, 'docs(')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: Install tmux for the integration test
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Test core and the CLI on Linux
+        run: cargo test -p maya-core -p maya-cli
+      - name: Read version
+        id: version
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/release-version.sh >> "$GITHUB_OUTPUT"
+      - name: Build Linux binaries
+        if: steps.version.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          cargo install cross --version 0.2.5 --locked
+          cross build -p maya-cli --release --target x86_64-unknown-linux-musl
+          cross build -p maya-cli --release --target aarch64-unknown-linux-musl
+          mkdir -p dist-linux
+          cp target/x86_64-unknown-linux-musl/release/maya-cli dist-linux/maya-linux-x86_64
+          cp target/aarch64-unknown-linux-musl/release/maya-cli dist-linux/maya-linux-aarch64
+      - name: Hand the binaries to the macOS job
+        if: steps.version.outputs.release == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: dist-linux/*
+          if-no-files-found: error
+
+  macos:
+    name: Build and release (macOS)
+    runs-on: macos-latest
+    needs: linux
+    # Pushes to main only; pull requests stop at the linux job. The docs
+    # skip is the linux job's.
+    if: >-
+      github.event_name == 'push' &&
       !startsWith(github.event.head_commit.message, 'docs:') &&
       !startsWith(github.event.head_commit.message, 'docs(')
     steps:
@@ -38,7 +88,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -52,7 +102,7 @@ jobs:
         run: |
           pnpm test
           sh scripts/test-ear.sh
-          cd src-tauri && cargo test
+          cargo test --workspace
 
       # The version in src-tauri/tauri.conf.json is the release version
       # (`sh scripts/set-version.sh 0.2.0` sets it everywhere). A push whose
@@ -61,23 +111,7 @@ jobs:
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          pkg="$(node -p "require('./package.json').version")"
-          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)"
-          if [ "$version" != "$pkg" ] || [ "$version" != "$cargo_version" ]; then
-            echo "version mismatch: tauri.conf.json=$version package.json=$pkg Cargo.toml=$cargo_version" >&2
-            echo "run: sh scripts/set-version.sh $version" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          if gh release view "v$version" >/dev/null 2>&1; then
-            echo "v$version is already released; bump the version to publish another"
-            echo "release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "release=true" >> "$GITHUB_OUTPUT"
-          fi
+        run: sh scripts/release-version.sh >> "$GITHUB_OUTPUT"
 
       # With the three APPLE_* secrets set, the certificate goes into a
       # keychain of its own and is marked trusted for code signing (a
@@ -130,13 +164,28 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist-release
+          cargo build -p maya-cli --release --target aarch64-apple-darwin
+          cargo build -p maya-cli --release --target x86_64-apple-darwin
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/aarch64-apple-darwin/release/maya-cli
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/x86_64-apple-darwin/release/maya-cli
+          fi
+          cp target/aarch64-apple-darwin/release/maya-cli dist-release/maya-macos-arm64
+          cp target/x86_64-apple-darwin/release/maya-cli dist-release/maya-macos-x86_64
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             arch="${target%%-*}"
-            bundle="src-tauri/target/$target/release/bundle"
+            bundle="target/$target/release/bundle"
             tar -C "$bundle/macos" -czf "dist-release/Maya_${VERSION}_${arch}.app.tar.gz" Maya.app
             cp "$bundle"/dmg/*.dmg "dist-release/Maya_${VERSION}_${arch}.dmg"
           done
           ls -la dist-release
+
+      - name: Add the Linux binaries
+        if: steps.version.outputs.release == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-binaries
+          path: dist-release
 
       - name: Release
         if: steps.version.outputs.release == 'true'

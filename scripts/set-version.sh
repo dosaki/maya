@@ -9,10 +9,11 @@ case "$v" in
   *) echo "usage: sh scripts/set-version.sh <major.minor.patch>" >&2; exit 1 ;;
 esac
 sed -i '' -E "s/^(  \"version\": \")[^\"]+(\",)$/\1$v\2/" package.json src-tauri/tauri.conf.json
-sed -i '' -E "s/^(version = \")[^\"]+(\")$/\1$v\2/" src-tauri/Cargo.toml
-# Cargo.lock records the crate's own version too.
-if [ -f src-tauri/Cargo.lock ]; then
-  (cd src-tauri && cargo update -p maya --offline >/dev/null 2>&1 || cargo generate-lockfile --offline >/dev/null 2>&1 || true)
+# The workspace root carries the version; every crate inherits it.
+sed -i '' -E "s/^(version = \")[^\"]+(\")$/\1$v\2/" Cargo.toml
+# Cargo.lock records the crates' own versions too.
+if [ -f Cargo.lock ]; then
+  cargo update -p maya -p maya-core --offline >/dev/null 2>&1 || cargo generate-lockfile --offline >/dev/null 2>&1 || true
 fi
 grep -H '"version"' package.json src-tauri/tauri.conf.json
-grep -H '^version' src-tauri/Cargo.toml
+grep -H '^version' Cargo.toml

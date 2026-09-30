@@ -1,7 +1,8 @@
 # Developing Maya
 
-Maya is a Tauri 2 app: a Rust backend in `src-tauri/`, a vanilla TypeScript
-frontend in `src/` (vitest), and a Swift listener sidecar in `ear/`.
+Maya is a Tauri 2 app: a Rust backend in a Cargo workspace (`core/`,
+`src-tauri/` and `cli/`), a vanilla TypeScript frontend in `src/` (vitest),
+and a Swift listener sidecar in `ear/`.
 
 ## Requirements
 
@@ -16,7 +17,7 @@ frontend in `src/` (vitest), and a Swift listener sidecar in `ear/`.
     pnpm tauri dev      # run
     pnpm test           # frontend tests
     pnpm ear:test       # sidecar tests
-    cd src-tauri && cargo test   # Rust tests
+    cargo test --workspace   # Rust tests, from the repo root
 
 `pnpm ear:build` fetches whisper.cpp's prebuilt framework (53 MB, once, into
 `vendor/`, checked against a pinned sha256) and compiles `ear/main.swift`
@@ -26,24 +27,63 @@ exists, because Tauri bundles it as a sidecar.
 
     pnpm tauri build --bundles app
 
-puts `Maya.app` in `src-tauri/target/release/bundle/macos/`. The voice
+puts `Maya.app` in `target/release/bundle/macos/` (with `--target <triple>`,
+`target/<triple>/release/bundle/macos/Maya.app`). The voice
 features only work from a bundle: the sidecar, the whisper framework and
 the microphone and speech permissions are all tied to it.
 
+## The CLI
+
+`cli/` builds on its own, with no Node toolchain and no `pnpm ear:build`:
+
+    cargo build -p maya-cli --release        # target/release/maya-cli
+    cargo test -p maya-core -p maya-cli
+
+`maya-cli` depends only on `maya_core`, so unlike the rest of the workspace
+it also builds and tests on Linux. The release workflow's `linux` job runs
+first, on every pull request to `main` and every push to it: it runs
+`cargo test -p maya-core -p maya-cli` on Ubuntu (with tmux installed) —
+the guard that keeps `maya_core` free of macOS-only code. On a release
+push it also cross-compiles `maya-cli` for `x86_64-unknown-linux-musl`
+and `aarch64-unknown-linux-musl` with `cross` 0.2.5 (needs Docker) and
+hands both binaries to the `macos` job as the `linux-binaries` artifact.
+The `macos` job runs on pushes only and after `linux` succeeds; it tests
+the whole workspace, builds the app and the macOS binaries, and creates
+the release with every asset at once, so a failed Linux build publishes
+nothing. Both jobs decide whether to release with
+`scripts/release-version.sh`.
+
 ## Layout
 
-- `src-tauri/src/` — `store.rs` (session cache), `state.rs` (card states),
+- `Cargo.toml` — the workspace: shared version, dependencies and release profile.
+- `core/` — `maya_core`, the platform-neutral core: no Tauri, no AppKit.
+- `src-tauri/` — `maya`, the app: Tauri commands, voice, focus and dock; depends on `maya_core`.
+- `cli/` — `maya_cli`, binary `maya-cli`: the headless assistant for
+  SSH boxes and containers (`pair`, `run`, `status`, `hooks`, `config`, `start`);
+  depends on `maya_core`, no Tauri.
+- `core/src/` — `store.rs` (session cache), `state.rs` (card states),
   `watcher.rs`, `answer.rs` and `launch.rs` (Terminal automation),
   `inbox.rs` (Claude Code's session socket), `foreign.rs` with `codex.rs`,
   `antigravity.rs`, `grok.rs` (other agents), `reviews.rs` and `pr.rs`
-  (GitHub), `notify.rs` and `voice.rs` (speech output, ElevenLabs),
-  `ear.rs`, `wake.rs`, `interpreter.rs`, `listener.rs`, `models.rs` (the
-  voice assistant), `log.rs` (the Debug tab and `maya.log`), and `net/`
+  (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
+  `interpreter.rs`, `log.rs` (the Debug tab and `maya.log`), and `net/`
   with `protocol.rs` (message types, encode/decode, pairing and HMAC),
   `server.rs` (the main: listener, threads per assistant, pairing,
   command dispatch), `client.rs` (the assistant: connection, backoff,
-  board sending, command execution), and `merge.rs` (merging local and
-  remote cards, stale and expiry rules, routing).
+  board sending), and `merge.rs` (merging local and remote cards, stale
+  and expiry rules, routing).
+- `src-tauri/src/` — `lib.rs` (Tauri commands), `net_app.rs` (the network's
+  Tauri side: starting server and client, command execution),
+  `terminal_app.rs` (opening Terminal windows), `focus.rs` and `dock.rs`
+  (AppKit), `voice.rs` (ElevenLabs), and `ear.rs`, `wake.rs`,
+  `listener.rs`, `models.rs` (the voice assistant).
+- `cli/src/` — `main.rs` and `args.rs` (subcommand parsing), `commands.rs`
+  (`pair`, `status`, `hooks`, `config`, `start`), `run_cmd.rs` (`run`, the headless
+  loop), `executor.rs` (running the main's commands), `tmux.rs` (named
+  sessions for start and resume), `notify.rs` (writes the CLI's own status
+  file on connect, disconnect and removal — the CLI never notifies, speaks
+  or listens like the app), and `status_file.rs`
+  (`~/.claude/maya/cli-status.json`, read by `maya status`).
 - `src/` — `main.ts`, `board.ts`, `card.ts`, `modal.ts`, `reviews.ts`,
   `settings.ts`, `voice.ts`, `debug.ts`, `tabs.ts`.
 - `ear/` — `main.swift` (audio capture, the System and Whisper engines),
@@ -62,7 +102,8 @@ release version; bump it everywhere, commit and push to `main`:
 The workflow publishes `v0.2.0` for both architectures, with notes generated
 from the merged pull requests and commits. A push whose version already has
 a release only runs the tests; a mismatch between `tauri.conf.json`,
-`package.json` and `Cargo.toml` fails the run.
+`package.json` and `Cargo.toml` fails the run. A pull request runs only
+the Linux tests.
 
 ## Signing
 

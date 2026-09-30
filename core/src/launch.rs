@@ -100,14 +100,34 @@ pub fn clean_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, S
     vars.filter(|(k, _)| k != "ANTHROPIC_API_KEY" && k != "CLAUDECODE" && !k.starts_with("CLAUDE_CODE_")).collect()
 }
 
-/// The `claude` binary, from the usual install locations or the login shell.
+/// The login shell `claude_binary` asks last: zsh is macOS's default, and a
+/// Linux box or container may not have it, so `sh` there.
+#[cfg(target_os = "macos")]
+pub const LOGIN_SHELL: &str = "zsh";
+#[cfg(not(target_os = "macos"))]
+pub const LOGIN_SHELL: &str = "sh";
+
+/// The first executable file named `name` in one of `path`'s folders.
+pub fn find_on_path(path: &str, name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|p| std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false))
+}
+
+/// The `claude` binary: from this process's PATH, then the usual install
+/// locations, then the login shell's PATH.
 pub fn claude_binary() -> Option<PathBuf> {
+    if let Some(p) = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, "claude")) {
+        return Some(p);
+    }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     let candidates = [home.join(".local/bin/claude"), PathBuf::from("/opt/homebrew/bin/claude"), PathBuf::from("/usr/local/bin/claude")];
     if let Some(p) = candidates.iter().find(|p| p.is_file()) {
         return Some(p.clone());
     }
-    let out = Command::new("zsh").args(["-lc", "command -v claude"]).output().ok()?;
+    let out = Command::new(LOGIN_SHELL).args(["-lc", "command -v claude"]).output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if out.status.success() && !s.is_empty() {
         Some(PathBuf::from(s))
@@ -213,23 +233,6 @@ pub fn applescript_launch(target: &Path, prompt_file: &Path, opts: &LaunchOption
     applescript_run(&session_command(target, prompt_file, opts))
 }
 
-/// Runs `cmd` in a new Terminal window.
-pub fn open_terminal_with(cmd: &str) -> Result<(), String> {
-    let out = Command::new("osascript")
-        .arg("-e")
-        .arg(applescript_run(cmd))
-        .output()
-        .map_err(|e| format!("could not run osascript: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("osascript failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    crate::focus::activate_terminal()
-}
-
-pub fn open_terminal(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> Result<(), String> {
-    open_terminal_with(&session_command(target, prompt_file, opts))
-}
-
 /// Where the session starts and why: the user's choice, the classifier's pick,
 /// or the projects directory itself.
 pub fn resolve_target(root: &Path, dirs: &[String], dir: Option<&str>, picked: Option<&str>) -> Result<(PathBuf, &'static str), String> {
@@ -261,6 +264,25 @@ mod tests {
         std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
+    }
+
+    #[test]
+    fn find_on_path_takes_the_first_executable_file_in_the_path() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        std::fs::write(a.path().join("claude"), "not executable").unwrap();
+        let expected = fake_binary(b.path(), "exit 0");
+        let path = std::env::join_paths([a.path(), b.path()]).unwrap().into_string().unwrap();
+        assert_eq!(find_on_path(&path, "claude"), Some(expected));
+        assert_eq!(find_on_path(&a.path().to_string_lossy(), "claude"), None, "a file that is not executable");
+        assert_eq!(find_on_path("", "claude"), None);
+        std::fs::create_dir(a.path().join("dir")).unwrap();
+        assert_eq!(find_on_path(&a.path().to_string_lossy(), "dir"), None, "a folder");
+    }
+
+    #[test]
+    fn the_login_shell_fallback_is_zsh_on_macos_and_sh_elsewhere() {
+        assert_eq!(LOGIN_SHELL, if cfg!(target_os = "macos") { "zsh" } else { "sh" });
     }
 
     #[test]

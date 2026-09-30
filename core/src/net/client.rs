@@ -1,8 +1,8 @@
 //! The assistant Maya's client: one WebSocket to the main, opened by this
 //! side, reconnecting with backoff.
 //!
-//! Threads: `start` spawns one connection thread that loops `run_once`,
-//! waiting `backoff_ms` between failures. `run_once` owns the socket, and
+//! Threads: the app's `start` spawns one connection thread that loops
+//! `run_once` through `reconnect`, waiting `backoff_ms` between failures. `run_once` owns the socket, and
 //! its read timeout (`TICK`) is the loop's tick: each turn sends the results
 //! finished commands queued, a board when one is due, a ping every ten
 //! seconds, then tries one read. Each command runs on its own short-lived
@@ -11,16 +11,13 @@
 //! connection thread within a tick (within the connect timeout while a TCP
 //! connect is in flight).
 //!
-//! Locks: none of its own. The Tauri adapters take `network` or `store` one
-//! at a time, never one while holding the other.
+//! Locks: none of its own. The app's adapters (`net_app`) take `network` or
+//! `store` one at a time, never one while holding the other.
 
 use super::protocol::{decode_down, encode, mac, mac_matches, new_nonce, Attachment, CommandKind, Down, Up, DEFAULT_PORT, MAX_FRAME, PROTOCOL};
-use super::AssistantLink;
 use crate::config::{NetworkConfig, NetworkRole};
 use crate::log;
 use crate::model::Card;
-use crate::store::now_ms;
-use crate::AppState;
 use base64::Engine;
 use serde_json::Value;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -29,7 +26,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
 use tungstenite::handshake::HandshakeError;
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Message, WebSocket};
@@ -52,6 +48,8 @@ const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 const STEADY: Duration = Duration::from_secs(60);
 
 pub const REMOVED: &str = "Removed by the main Maya; pair again.";
+/// What the user reads when the main refuses a pairing code.
+pub const WRONG_CODE: &str = "Wrong or expired pairing code.";
 pub const NOT_PAIRED: &str = "Not paired with a main Maya yet; pair in Settings.";
 pub const MAIN_UNPROVEN: &str = "The main Maya failed to prove it holds the pairing token.";
 pub const PAIRING_UNPROVEN: &str = "The main Maya failed to prove it knows the pairing code.";
@@ -148,7 +146,7 @@ fn clean(s: &str) -> String {
 fn bye_message(reason: &str) -> String {
     match reason {
         "removed" => REMOVED.into(),
-        "wrong or expired pairing code" => "Wrong or expired pairing code.".into(),
+        "wrong or expired pairing code" => WRONG_CODE.into(),
         "too many attempts" => "Too many wrong codes; wait five minutes and try again.".into(),
         "authentication failed" => "The main Maya did not accept this assistant's key; pair again.".into(),
         "protocol" => "The main Maya runs a different version of Maya.".into(),
@@ -463,7 +461,8 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, tx: &Sender<Up>) -> Result<(), S
 #[derive(Clone)]
 pub struct ClientHandle {
     stop: Arc<AtomicBool>,
-    board_due: Arc<AtomicBool>,
+    /// Set to ask the connection for a board (throttled there to one a second).
+    pub board_due: Arc<AtomicBool>,
     thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
@@ -510,23 +509,11 @@ pub fn pair_after_stopping<T>(running: Option<ClientHandle>, pair: impl FnOnce()
     pair()
 }
 
-/// Starts the client with the stored config, reconnecting until stopped.
-pub fn start(app: AppHandle) -> ClientHandle {
-    let board_due = Arc::new(AtomicBool::new(false));
-    let exec: Arc<dyn Executor> = Arc::new(TauriExecutor { app: app.clone(), board_due: board_due.clone() });
-    let notify_app = app.clone();
-    let mut handle = ClientHandle::spawn(move |stop| {
-        let notify: Arc<dyn ClientNotify> = Arc::new(TauriClientNotify { app: notify_app, stop: stop.clone() });
-        reconnect(&app, exec, notify, &stop)
-    });
-    handle.board_due = board_due;
-    handle
-}
-
-fn reconnect(app: &AppHandle, exec: Arc<dyn Executor>, notify: Arc<dyn ClientNotify>, stop: &AtomicBool) {
+/// Reconnects until `stop`, reading the config afresh each attempt.
+pub fn reconnect(config_of: &dyn Fn() -> NetworkConfig, exec: Arc<dyn Executor>, notify: Arc<dyn ClientNotify>, stop: &AtomicBool) {
     let mut attempt = 0u32;
     while !stopped(stop) {
-        let config = app.state::<AppState>().store.lock().unwrap().config.network.clone();
+        let config = config_of();
         log::line("network", format!("connecting to {}:{}", config.main_host.trim(), port_of(&config)));
         let began = Instant::now();
         match run_once(&config, exec.clone(), notify.clone(), stop, None) {
@@ -553,23 +540,13 @@ fn reconnect(app: &AppHandle, exec: Arc<dyn Executor>, notify: Arc<dyn ClientNot
     }
 }
 
-/// Asks the running client, if any, to send the board (throttled there to one a second).
-pub fn push_board(app: &AppHandle) {
-    if let Some(c) = app.state::<AppState>().network.lock().unwrap().client.as_ref() {
-        c.board_due.store(true, Ordering::SeqCst);
-    }
-}
-
-/// Pairs with the main at `host:port` using its six-digit code, stores the
-/// id and token and the link in the config (which starts the client), and
-/// returns the main's name. One blocking connection, at most `SILENCE` long
-/// once connected.
-pub fn pair(app: &AppHandle, host: &str, port: u16, name: &str, code: &str) -> Result<String, String> {
+/// The pairing handshake once. Ok((main_name, id, token)). One blocking
+/// connection, at most `SILENCE` long once connected; it ends at `welcome`,
+/// so no command reaches `exec`.
+pub fn pair_with(exec: Arc<dyn Executor>, host: &str, port: u16, name: &str, code: &str) -> Result<(String, String, String), String> {
     let config = NetworkConfig { role: NetworkRole::Assistant, main_host: host.trim().into(), main_port: port, name: name.trim().into(), ..Default::default() };
     let stop = Arc::new(AtomicBool::new(false));
     let notify = Arc::new(PairNotify { stop: stop.clone(), creds: Mutex::new(None), main: Mutex::new(None) });
-    // The connection ends at `welcome`, so no command reaches this executor.
-    let exec: Arc<dyn Executor> = Arc::new(TauriExecutor { app: app.clone(), board_due: Arc::new(AtomicBool::new(false)) });
     log::line("network", format!("pairing with {}:{}", config.main_host, port_of(&config)));
     run_once(&config, exec, notify.clone(), &stop, Some(code)).map_err(|e| {
         log::line("network", format!("pairing failed: {e}"));
@@ -577,17 +554,7 @@ pub fn pair(app: &AppHandle, host: &str, port: u16, name: &str, code: &str) -> R
     })?;
     let (id, token) = notify.creds.lock().unwrap().take().ok_or("The main Maya did not pair this assistant.")?;
     let main = notify.main.lock().unwrap().take().unwrap_or_default();
-    crate::update_config(app, |c| {
-        c.network.role = NetworkRole::Assistant;
-        c.network.main_host = config.main_host.clone();
-        c.network.main_port = config.main_port;
-        c.network.name = config.name.clone();
-        c.network.assistant_id = id;
-        c.network.token = token;
-        c.listen = false;
-    })?;
-    log::line("network", format!("paired with {main}"));
-    Ok(main)
+    Ok((main, id, token))
 }
 
 /// Pairing's notifier: keeps the credentials and ends the connection at `welcome`.
@@ -607,109 +574,6 @@ impl ClientNotify for PairNotify {
     }
     fn disconnected(&self, _: &str) {}
     fn removed(&self) {}
-}
-
-/// Keeps `NetworkState.status.assistant` and tells the page (`network`).
-struct TauriClientNotify {
-    app: AppHandle,
-    /// Its client's stop flag: a stopped client no longer reports.
-    stop: Arc<AtomicBool>,
-}
-
-impl TauriClientNotify {
-    fn set(&self, f: impl FnOnce(&mut AssistantLink)) {
-        if stopped(&self.stop) {
-            return;
-        }
-        {
-            let state = self.app.state::<AppState>();
-            let mut n = state.network.lock().unwrap();
-            f(&mut n.status.assistant);
-        }
-        let _ = self.app.emit("network", crate::network_status_of(&self.app.state::<AppState>()));
-    }
-}
-
-impl ClientNotify for TauriClientNotify {
-    fn paired(&self, _: &str, _: &str) {}
-    fn connected(&self, main_name: &str) {
-        let name = main_name.to_string();
-        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false });
-    }
-    fn disconnected(&self, error: &str) {
-        log::line("network", format!("disconnected: {error}"));
-        // `reconnect` tries again after every failure but these two.
-        let retrying = error != NOT_PAIRED && error != REMOVED;
-        self.set(|l| {
-            l.connected = false;
-            l.error = Some(error.to_string());
-            l.retrying = retrying;
-        });
-    }
-    fn removed(&self) {
-        log::line("network", "removed by the main Maya");
-        self.set(|l| {
-            l.connected = false;
-            l.error = Some(REMOVED.into());
-            l.retrying = false;
-        });
-    }
-}
-
-/// Runs the main's commands through the same functions this Maya's own buttons use.
-struct TauriExecutor {
-    app: AppHandle,
-    board_due: Arc<AtomicBool>,
-}
-
-impl Executor for TauriExecutor {
-    fn execute(&self, kind: CommandKind) -> Result<Option<Value>, String> {
-        execute(&self.app, kind)
-    }
-
-    fn board(&self) -> (Vec<Card>, Vec<String>) {
-        let (cards, root) = {
-            let state = self.app.state::<AppState>();
-            let mut store = state.store.lock().unwrap();
-            (store.refresh(now_ms()), store.config.projects_dir_path())
-        };
-        let dirs = root.filter(|r| r.is_dir()).map(|r| crate::launch::list_project_dirs(&r)).unwrap_or_default();
-        (cards, dirs)
-    }
-
-    fn board_requested(&self) -> bool {
-        self.board_due.swap(false, Ordering::SeqCst)
-    }
-}
-
-fn to_data<T: serde::Serialize>(v: T) -> Result<Option<Value>, String> {
-    serde_json::to_value(v).map(Some).map_err(|e| e.to_string())
-}
-
-/// Runs one command from the main with this Maya's local session functions.
-pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, String> {
-    let state = || app.state::<AppState>();
-    let done = |r: Result<(), String>| r.map(|_| None);
-    match kind {
-        CommandKind::Reply { session, text, attachments } => {
-            let (maya_dir, exists) = {
-                let state = state();
-                let mut store = state.store.lock().unwrap();
-                (store.claude_dir().join("maya"), store.card_for(&session, now_ms()).is_some())
-            };
-            // The files are local once saved; nothing further to attach.
-            done(reply_with_attachments(&maya_dir, exists, &text, attachments, now_ms(), |text| crate::send_reply(app.clone(), state(), session, text, vec![])))
-        }
-        CommandKind::Answer { session, ask_id, question, option } => done(crate::answer_question(app.clone(), state(), session, ask_id, question, option)),
-        CommandKind::Compact { session } => done(crate::compact_session(app.clone(), state(), session)),
-        CommandKind::Rename { session, name } => done(crate::rename_session(app.clone(), state(), session, name)),
-        CommandKind::SetOption { session, setting, value } => done(crate::set_session_option(app.clone(), state(), session, setting, value)),
-        CommandKind::CycleMode { session } => done(crate::cycle_session_mode(app.clone(), state(), session)),
-        CommandKind::Start { dir, prompt, options } => to_data(crate::start_session(app.clone(), state(), dir, prompt, options, None)?),
-        CommandKind::Resume { dir, session } => done(crate::resume_session(app.clone(), state(), dir, session, None)),
-        CommandKind::ListResumable { dir } => to_data(crate::list_resumable_sessions(app.clone(), state(), dir, None)?),
-        CommandKind::History { session } => to_data(crate::session_history(app.clone(), state(), session)?),
-    }
 }
 
 #[cfg(test)]

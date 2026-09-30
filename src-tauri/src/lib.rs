@@ -1,35 +1,14 @@
-pub mod answer;
-pub mod antigravity;
-pub mod attachments;
-pub mod codex;
-pub mod config;
+pub use maya_core::{actions, answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, launch, log, model, net, notify, pr, registry, resume, reviews, state, store, terminal, transcript, tty, watcher};
+
 pub mod dock;
 pub mod ear;
-pub mod foreign;
-pub mod grok;
-pub mod context;
-pub mod events;
 pub mod focus;
-pub mod hook_install;
-pub mod inbox;
-pub mod interpreter;
-pub mod launch;
 pub mod listener;
-pub mod log;
-pub mod model;
 pub mod models;
-pub mod net;
-pub mod notify;
-pub mod pr;
-pub mod registry;
-pub mod resume;
-pub mod reviews;
-pub mod state;
-pub mod store;
-pub mod transcript;
+pub mod net_app;
+pub mod terminal_app;
 pub mod voice;
 pub mod wake;
-pub mod watcher;
 
 use base64::Engine;
 use config::Config;
@@ -58,12 +37,12 @@ fn remote_machine_of(state: &AppState, session_id: &str) -> Option<String> {
 
 /// Sends `kind` to `machine` and discards its (empty) result.
 fn route_done(app: &AppHandle, machine: &str, kind: CommandKind) -> Result<(), String> {
-    net::server::send_command(app, machine, kind, ROUTE_TIMEOUT).map(|_| ())
+    net_app::send_command(app, machine, kind, ROUTE_TIMEOUT).map(|_| ())
 }
 
 /// Sends `kind` to `machine` and deserialises its result into `T`.
 fn route_data<T: for<'de> serde::Deserialize<'de>>(app: &AppHandle, machine: &str, kind: CommandKind) -> Result<T, String> {
-    let value = net::server::send_command(app, machine, kind, ROUTE_TIMEOUT)?;
+    let value = net_app::send_command(app, machine, kind, ROUTE_TIMEOUT)?;
     let value = value.ok_or("The assistant sent no result.")?;
     serde_json::from_value(value).map_err(|e| e.to_string())
 }
@@ -327,7 +306,7 @@ fn review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<S
     };
     let projects = projects.ok_or("Set a projects directory in Settings first.")?;
     let target = reviews::resolve_target(&projects, &clones, &pr.repo, pr.number, &live);
-    launch::open_terminal_with(&reviews::shell_command(&target, &pr.repo, pr.number))?;
+    terminal_app::open_terminal_with(&reviews::shell_command(&target, &pr.repo, pr.number))?;
     Ok(target.dir.to_string_lossy().into_owned())
 }
 
@@ -391,7 +370,7 @@ fn refresh_and_emit(app: &AppHandle) {
     }
     let _ = app.emit("sessions", &cards);
     if assistant {
-        net::client::push_board(app);
+        net_app::push_board(app);
     }
 }
 
@@ -478,13 +457,13 @@ fn start_main(app: &AppHandle, show_code: bool) {
     stop_main(app);
     let port = app.state::<AppState>().store.lock().unwrap().config.listen_port();
     // A server just stopped lets go of the port within a tick; retry briefly.
-    let mut started = net::server::start(app.clone(), port);
+    let mut started = net_app::start_server(app.clone(), port);
     for _ in 0..5 {
         if started.is_ok() {
             break;
         }
         std::thread::sleep(Duration::from_millis(150));
-        started = net::server::start(app.clone(), port);
+        started = net_app::start_server(app.clone(), port);
     }
     match started {
         Ok(handle) => {
@@ -531,7 +510,7 @@ fn stop_main(app: &AppHandle) {
 
 /// Starts the assistant's client with the stored link, replacing any running one.
 fn start_assistant(app: &AppHandle) {
-    let handle = net::client::start(app.clone());
+    let handle = net_app::start(app.clone());
     let displaced = {
         let state = app.state::<AppState>();
         let mut n = state.network.lock().unwrap();
@@ -579,7 +558,7 @@ fn network_pair(app: AppHandle, state: TauriState<AppState>, host: String, port:
     // it winds down (its notifier takes `network`).
     let running = state.network.lock().unwrap().client.take();
     let had_client = running.is_some();
-    if let Err(e) = net::client::pair_after_stopping(running, || net::client::pair(&app, host, port, &name, &code)) {
+    if let Err(e) = net::client::pair_after_stopping(running, || net_app::pair(&app, host, port, &name, &code)) {
         // The old pairing still stands: its client comes back.
         let assistant = state.store.lock().unwrap().config.network.role == config::NetworkRole::Assistant;
         if had_client && assistant {
@@ -590,9 +569,19 @@ fn network_pair(app: AppHandle, state: TauriState<AppState>, host: String, port:
     Ok(network_status_of(&state))
 }
 
+/// This Maya's sessions over Terminal.app, for the core's local actions.
+pub(crate) fn local(state: &AppState) -> actions::Local<'_> {
+    actions::Local { store: &state.store, terminal: &terminal_app::TERMINAL }
+}
+
+/// Brings forward the terminal of the local session running as `pid`.
 #[tauri::command(async)]
-fn focus_session(pid: i32) -> Result<(), String> {
-    focus::focus_pid(pid)
+fn focus_session(state: TauriState<AppState>, pid: i32) -> Result<(), String> {
+    let session_id = state.store.lock().unwrap().refresh(now_ms()).into_iter().find(|c| c.pid == pid && c.machine.is_none()).map(|c| c.session_id);
+    match session_id {
+        Some(id) => actions::focus_session(&local(&state), &id),
+        None => focus::focus_pid(pid),
+    }
 }
 
 #[tauri::command(async)]
@@ -600,19 +589,7 @@ fn session_history(app: AppHandle, state: TauriState<AppState>, session_id: Stri
     if let Some(machine) = remote_machine_of(&state, &session_id) {
         return route_data(&app, &machine, CommandKind::History { session: session_id });
     }
-    let (path, foreign) = {
-        let store = state.store.lock().unwrap();
-        if let Some(f) = store.foreign(&session_id) {
-            (f.transcript_path.clone(), Some(f))
-        } else {
-            let s = store.session(&session_id).ok_or("Session is no longer running.")?;
-            (store.transcript_path_for(&s), None)
-        }
-    };
-    match foreign {
-        Some(f) => Ok(foreign::turns_for(&f, 30)),
-        None => Ok(transcript::read_turns(&path, 30)),
-    }
+    actions::session_history(&local(&state), &session_id)
 }
 
 #[tauri::command(async)]
@@ -621,28 +598,7 @@ fn send_reply(app: AppHandle, state: TauriState<AppState>, session_id: String, t
         let attachments = remote_attachments(&attachments)?;
         return route_done(&app, &machine, CommandKind::Reply { session: session_id, text, attachments });
     }
-    // Other harnesses have no inbox: the reply is typed into their tty as one line.
-    let foreign = state.store.lock().unwrap().foreign(&session_id);
-    if let Some(f) = foreign {
-        let card = state.store.lock().unwrap().card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?;
-        answer::check_free(&card)?;
-        let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if line.is_empty() {
-            return Err("Message is empty.".into());
-        }
-        let tty = match f.tty {
-            Some(t) => t,
-            None => focus::tty_for_pid(f.pid)?,
-        };
-        return answer::type_into_tty(&tty, &line);
-    }
-    let (socket, pid) = {
-        let store = state.store.lock().unwrap();
-        let s = store.session(&session_id).ok_or("Session is no longer running.")?;
-        let socket = s.messaging_socket_path.clone().ok_or("This session has no inbox. Use the terminal.")?;
-        (socket, s.pid)
-    };
-    inbox::send(std::path::Path::new(&socket), pid, &text)
+    actions::send_reply(&local(&state), &session_id, &text)
 }
 
 #[tauri::command(async)]
@@ -650,19 +606,7 @@ fn answer_question(app: AppHandle, state: TauriState<AppState>, session_id: Stri
     if let Some(machine) = remote_machine_of(&state, &session_id) {
         return route_done(&app, &machine, CommandKind::Answer { session: session_id, ask_id, question: question_index, option: option_index });
     }
-    let card = {
-        let mut store = state.store.lock().unwrap();
-        store.card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?
-    };
-    answer::check(&card, ask_id, question_index, option_index, now_ms())?;
-    let count = card.awaiting.as_ref().map(|a| a.questions.len()).unwrap_or(0);
-    let tty = focus::tty_for_pid(card.pid)?;
-    answer::type_into_tty(&tty, &answer::keys_for_option(option_index))?;
-    if answer::needs_submit(question_index, count) {
-        std::thread::sleep(Duration::from_millis(answer::SUBMIT_DELAY_MS));
-        answer::type_into_tty(&tty, "")?;
-    }
-    Ok(())
+    actions::answer_question(&local(&state), &session_id, ask_id, question_index, option_index)
 }
 
 /// The pull request link to open for `card`: only a web address, since a
@@ -743,8 +687,7 @@ fn set_session_option(app: AppHandle, state: TauriState<AppState>, session_id: S
     if let Some(machine) = remote_machine_of(&state, &session_id) {
         return route_done(&app, &machine, CommandKind::SetOption { session: session_id, setting, value });
     }
-    let text = answer::slash_command(&setting, &value)?;
-    type_into_session(&state, &session_id, &text)
+    actions::set_session_option(&local(&state), &session_id, &setting, &value)
 }
 
 /// Types `/rename <name>` into the session's Terminal tab. The new name comes
@@ -754,8 +697,7 @@ fn rename_session(app: AppHandle, state: TauriState<AppState>, session_id: Strin
     if let Some(machine) = remote_machine_of(&state, &session_id) {
         return route_done(&app, &machine, CommandKind::Rename { session: session_id, name });
     }
-    let text = answer::rename_command(&name)?;
-    type_into_session(&state, &session_id, &text)
+    actions::rename_session(&local(&state), &session_id, &name)
 }
 
 /// Types `/compact` into the session's Terminal tab.
@@ -764,7 +706,7 @@ fn compact_session(app: AppHandle, state: TauriState<AppState>, session_id: Stri
     if let Some(machine) = remote_machine_of(&state, &session_id) {
         return route_done(&app, &machine, CommandKind::Compact { session: session_id });
     }
-    type_into_session(&state, &session_id, answer::COMPACT)
+    actions::compact_session(&local(&state), &session_id)
 }
 
 /// Sends Shift+Tab to the session's Terminal tab, cycling its permission mode.
@@ -773,43 +715,7 @@ fn cycle_session_mode(app: AppHandle, state: TauriState<AppState>, session_id: S
     if let Some(machine) = remote_machine_of(&state, &session_id) {
         return route_done(&app, &machine, CommandKind::CycleMode { session: session_id });
     }
-    type_into_session(&state, &session_id, answer::SHIFT_TAB)
-}
-
-fn type_into_session(state: &TauriState<AppState>, session_id: &str, text: &str) -> Result<(), String> {
-    let card = {
-        let mut store = state.store.lock().unwrap();
-        store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?
-    };
-    if card.harness != model::Harness::ClaudeCode {
-        return Err("That command is only available for Claude Code sessions.".into());
-    }
-    answer::check_free(&card)?;
-    let tty = focus::tty_for_pid(card.pid)?;
-    answer::type_into_tty(&tty, text)
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct StartResult {
-    pub dir: String,
-    pub how: String,
-}
-
-fn projects_root(state: &TauriState<AppState>) -> Result<std::path::PathBuf, String> {
-    let root = state.store.lock().unwrap().config.projects_dir_path().ok_or("Set a projects directory in Settings first.")?;
-    if !root.is_dir() {
-        return Err(format!("Projects directory does not exist: {}.", root.display()));
-    }
-    Ok(root)
-}
-
-/// The project folder `dir` as an absolute path, refusing anything not listed.
-fn project_path(state: &TauriState<AppState>, dir: &str) -> Result<std::path::PathBuf, String> {
-    let root = projects_root(state)?;
-    if !launch::list_project_dirs(&root).iter().any(|d| d == dir) {
-        return Err("That folder is not in the projects directory.".into());
-    }
-    Ok(root.join(dir))
+    actions::cycle_session_mode(&local(&state), &session_id)
 }
 
 /// `None` or `""` means the machine argument was not given: this Mac.
@@ -824,12 +730,7 @@ fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: Str
         let machine = machine.unwrap();
         return route_data(&app, &machine, CommandKind::ListResumable { dir });
     }
-    let path = project_path(&state, &dir)?;
-    let (claude_dir, running) = {
-        let store = state.store.lock().unwrap();
-        (store.claude_dir().to_path_buf(), store.live_session_ids())
-    };
-    Ok(resume::list_sessions(&claude_dir, &path.to_string_lossy(), &running))
+    actions::list_resumable_sessions(&local(&state), &dir)
 }
 
 /// Opens a Terminal in the folder running `claude --resume <id>`.
@@ -839,18 +740,7 @@ fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, sess
         let machine = machine.unwrap();
         return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id });
     }
-    let path = project_path(&state, &dir)?;
-    let (claude_dir, running) = {
-        let store = state.store.lock().unwrap();
-        (store.claude_dir().to_path_buf(), store.live_session_ids())
-    };
-    if running.contains(&session_id) {
-        return Err("That session is already running.".into());
-    }
-    if !resume::transcript_exists(&claude_dir, &path.to_string_lossy(), &session_id) {
-        return Err("No such session in that folder.".into());
-    }
-    launch::open_terminal_with(&resume::resume_command(&path, &session_id))
+    actions::resume_session(&local(&state), &dir, &session_id)
 }
 
 #[tauri::command(async)]
@@ -859,33 +749,20 @@ fn list_project_dirs(state: TauriState<AppState>, machine: Option<String>) -> Re
         let machine = machine.unwrap();
         return Ok(merge::dirs_of(&remote_boards(&state), &machine));
     }
-    Ok(launch::list_project_dirs(&projects_root(&state)?))
+    actions::list_project_dirs(&local(&state))
 }
 
 #[tauri::command(async)]
-fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions, machine: Option<String>) -> Result<StartResult, String> {
-    if prompt.trim().is_empty() {
-        return Err("Type a prompt first.".into());
-    }
-    options.validate()?;
+fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions, machine: Option<String>) -> Result<actions::StartResult, String> {
     if !is_local(&machine) {
+        if prompt.trim().is_empty() {
+            return Err("Type a prompt first.".into());
+        }
+        options.validate()?;
         let machine = machine.unwrap();
         return route_data(&app, &machine, start_kind_for(dir, prompt, options));
     }
-    let root = projects_root(&state)?;
-    let maya_dir = state.store.lock().unwrap().claude_dir().join("maya");
-    let dirs = launch::list_project_dirs(&root);
-    let picked = match dir {
-        Some(_) => None,
-        None => {
-            let binary = launch::claude_binary().ok_or("Could not find the claude command.")?;
-            launch::classify(&binary, &root, &prompt, &dirs, launch::CLASSIFIER_TIMEOUT)
-        }
-    };
-    let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
-    let file = launch::write_prompt_file(&maya_dir, &prompt)?;
-    launch::open_terminal(&target, &file, &options)?;
-    Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string() })
+    actions::start_session(&local(&state), dir, prompt, options)
 }
 
 #[tauri::command(async)]
@@ -1098,6 +975,7 @@ pub fn run() {
             });
             log::line("app", format!("Maya {} started; log at {}", env!("CARGO_PKG_VERSION"), log_path.display()));
             focus::install_app_handle(app.handle().clone());
+            notify::set_eleven_speaker(voice::speak);
             listener::install_speech_hook(app.handle().clone());
             dock::set_dock_icon();
             let handle = app.handle().clone();
@@ -1222,6 +1100,7 @@ mod route_tests {
             context: None,
             machine: Some("laptop".into()),
             machine_address: None, machine_platform: None,
+            terminal: None,
             stale: false,
         };
         assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));

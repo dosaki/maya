@@ -1,0 +1,24 @@
+[package]
+name = "maya-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Maya's headless assistant for SSH boxes and containers"
+
+[[bin]]
+name = "maya-cli"
+path = "src/main.rs"
+
+[lib]
+name = "maya_cli"
+path = "src/lib.rs"
+
+[dependencies]
+maya-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+maya-core = { path = "../core", features = ["test-support"] }
+tempfile.workspace = true

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderCard } from "./card";
-import type { Card } from "./types";
+import { remoteTerminalToast, type Card } from "./types";
 
 const base: Card = {
   sessionId: "s",
@@ -16,6 +16,14 @@ const base: Card = {
   pr: null,
   context: null,
 };
+
+describe("remoteTerminalToast", () => {
+  it("says where a remote session runs, and how to attach when it is in tmux", () => {
+    expect(remoteTerminalToast({ ...base, machine: "laptop" })).toBe("That session runs on laptop");
+    expect(remoteTerminalToast({ ...base, machine: "box", terminal: "maya-1a2b3c4d" })).toBe("That session runs on box; attach: tmux attach -t maya-1a2b3c4d");
+    expect(remoteTerminalToast({ ...base, machine: "box", terminal: null })).toBe("That session runs on box");
+  });
+});
 
 describe("renderCard: remote cards", () => {
   it("marks a remote card with the machine and drops the Terminal button", () => {
@@ -41,6 +49,11 @@ describe("renderCard: remote cards", () => {
     expect(twin.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (192.168.55.70) (Linux)");
     const other = renderCard({ ...base, machine: "box", machineAddress: "10.0.0.2", machinePlatform: "freebsd", stale: false }, 0);
     expect(other.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on box (freebsd), 10.0.0.2");
+  });
+
+  it("names the tmux session in the remote tooltip", () => {
+    const el = renderCard({ ...base, machine: "laptop", machineAddress: "10.0.0.9", machinePlatform: "macos", stale: false, terminal: "maya-1a2b3c4d" }, 0);
+    expect(el.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on laptop (macOS), 10.0.0.9; attach: tmux attach -t maya-1a2b3c4d");
   });
 
   it("shows no remote glyph or machine subtitle for a local card", () => {

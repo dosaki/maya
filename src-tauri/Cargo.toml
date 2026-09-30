@@ -1,9 +1,9 @@
 [package]
 name = "maya"
-version = "0.1.0"
+version.workspace = true
 description = "Maya: Manage All Your Agents. A kanban board for local Claude Code sessions"
-authors = ["Tiago Correia"]
-edition = "2021"
+authors.workspace = true
+edition.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -18,29 +18,21 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+maya-core = { path = "../core" }
 tauri = { version = "2", features = [] }
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
-notify = "8"
-libc = "0.2"
-dirs = "6"
+serde = { workspace = true }
+serde_json = { workspace = true }
+notify = { workspace = true }
+libc = { workspace = true }
+dirs = { workspace = true }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = ["NSRunningApplication", "NSApplication", "NSResponder", "NSImage", "NSImageRep"] }
-tungstenite = "0.30"
-hmac = "0.13"
-sha2 = "0.11"
-rand = "0.10"
-base64 = "0.23"
+tungstenite = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
-
-
-# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = 3
-panic = "abort"
-strip = true
+tempfile = { workspace = true }

@@ -22,6 +22,10 @@ pub struct RegistrySession {
     /// Unix socket where other processes can post messages to this session.
     #[serde(rename = "messagingSocketPath", default)]
     pub messaging_socket_path: Option<String>,
+    /// The session's terminal device. Claude Code does not write it; when
+    /// present it is used instead of asking `ps`.
+    #[serde(default)]
+    pub tty: Option<String>,
 }
 
 fn default_entrypoint() -> String {

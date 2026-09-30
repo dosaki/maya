@@ -105,7 +105,7 @@ mod tests {
     use crate::model::{Card, Harness, State};
 
     fn card(id: &str, name: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, stale: false }
+        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false }
     }
 
     fn board(machine: &str, hostname: &str, ids: &[&str], received_at: u64, connected: bool) -> RemoteBoard {
@@ -126,6 +126,14 @@ mod tests {
         assert_eq!(json["machinePlatform"], "macos");
         assert!(serde_json::to_value(&m[0]).unwrap().get("machinePlatform").is_none(), "a local card carries none");
         assert!(!m[1].stale);
+    }
+
+    #[test]
+    fn a_remote_cards_terminal_name_survives_the_merge() {
+        let mut b = board("laptop", "h", &["r1"], 1_000, true);
+        b.cards[0].terminal = Some("maya-1a2b3c4d".into());
+        let out = merged(vec![], &[b], 1_000);
+        assert_eq!(out[0].terminal.as_deref(), Some("maya-1a2b3c4d"));
     }
 
     #[test]
