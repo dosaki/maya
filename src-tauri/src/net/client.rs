@@ -23,7 +23,7 @@ use crate::store::now_ms;
 use crate::AppState;
 use base64::Engine;
 use serde_json::Value;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
@@ -46,6 +46,8 @@ const BOARD_GAP: Duration = Duration::from_secs(1);
 /// 30 s) stays fresh.
 const BOARD_REFRESH: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long looking up the main's name may take.
+const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 /// A connection that lasted this long starts the backoff over.
 const STEADY: Duration = Duration::from_secs(60);
 
@@ -145,6 +147,31 @@ fn port_of(config: &NetworkConfig) -> u16 {
     }
 }
 
+/// Looks `host` up, giving up after `DNS_TIMEOUT`.
+fn resolve(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    let name = host.to_string();
+    resolve_with(host, DNS_TIMEOUT, move || (name.as_str(), port).to_socket_addrs().map(|a| a.collect()))
+}
+
+/// Runs `lookup` on a helper thread and waits at most `timeout` for it: the
+/// system resolver has no deadline of its own, and a stuck lookup would
+/// otherwise hold the connection thread, and a stop, as long as it likes.
+/// A lookup that times out finishes on its own and is ignored.
+fn resolve_with(host: &str, timeout: Duration, lookup: impl FnOnce() -> std::io::Result<Vec<SocketAddr>> + Send + 'static) -> Result<Vec<SocketAddr>, String> {
+    let (tx, rx) = channel();
+    std::thread::Builder::new()
+        .name("net-dns".into())
+        .spawn(move || {
+            let _ = tx.send(lookup());
+        })
+        .map_err(|e| format!("Could not find {host}: {e}"))?;
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(addrs)) => Ok(addrs),
+        Ok(Err(e)) => Err(format!("Could not find {host}: {e}")),
+        Err(_) => Err(format!("Could not find {host}: the lookup took more than {} s.", timeout.as_secs())),
+    }
+}
+
 /// Opens the TCP connection and the WebSocket handshake, by `deadline`.
 fn connect(config: &NetworkConfig, stop: &AtomicBool, deadline: Instant) -> Result<Ws, String> {
     let host = config.main_host.trim();
@@ -152,7 +179,7 @@ fn connect(config: &NetworkConfig, stop: &AtomicBool, deadline: Instant) -> Resu
         return Err("Type the main Maya's host first.".into());
     }
     let port = port_of(config);
-    let addrs = (host, port).to_socket_addrs().map_err(|e| format!("Could not find {host}: {e}"))?;
+    let addrs = resolve(host, port)?;
     let mut stream = None;
     let mut last = String::from("no address");
     for a in addrs {
@@ -636,6 +663,21 @@ mod tests {
         let text = "look at this\nAttached file: /Users/main/.claude/maya/attachments/a.png";
         let out = rewrite_attachments(text, &[("/Users/main/.claude/maya/attachments/a.png".into(), std::path::PathBuf::from("/Users/asst/.claude/maya/attachments/1-a.png"))]);
         assert_eq!(out, "look at this\nAttached file: /Users/asst/.claude/maya/attachments/1-a.png");
+    }
+
+    #[test]
+    fn a_name_lookup_has_a_deadline() {
+        let addrs = resolve("127.0.0.1", 4127).unwrap();
+        assert_eq!(addrs, [SocketAddr::from(([127, 0, 0, 1], 4127))]);
+        let began = Instant::now();
+        let slow = resolve_with("desk.local", Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(500));
+            Ok(vec![])
+        });
+        assert_eq!(slow, Err("Could not find desk.local: the lookup took more than 0 s.".to_string()));
+        assert!(began.elapsed() < Duration::from_millis(400), "it does not wait for the lookup");
+        let failed = resolve_with("nowhere", Duration::from_secs(1), || Err(std::io::Error::other("no such host")));
+        assert_eq!(failed, Err("Could not find nowhere: no such host".to_string()));
     }
 
     #[test]
