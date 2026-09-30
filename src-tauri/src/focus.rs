@@ -88,13 +88,11 @@ pub fn activate_terminal_via_osascript() -> Result<(), String> {
     }
 }
 
-/// Brings the Terminal tab hosting `pid` to the front.
-pub fn focus_pid(pid: i32) -> Result<(), String> {
-    let tty = tty_for_pid(pid)?;
-
+/// Brings the Terminal tab hosting `tty` to the front.
+pub fn focus_tty(tty: &str) -> Result<(), String> {
     let out = Command::new("osascript")
         .arg("-e")
-        .arg(applescript_for(&tty))
+        .arg(applescript_for(tty))
         .output()
         .map_err(|e| format!("could not run osascript: {e}"))?;
     if !out.status.success() {
@@ -106,6 +104,11 @@ pub fn focus_pid(pid: i32) -> Result<(), String> {
     } else {
         Err(format!("no Terminal tab found for {tty}"))
     }
+}
+
+/// Brings the Terminal tab hosting `pid` to the front.
+pub fn focus_pid(pid: i32) -> Result<(), String> {
+    focus_tty(&tty_for_pid(pid)?)
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-pub use maya_core::{answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, launch, log, model, net, notify, pr, registry, resume, reviews, state, store, transcript, tty, watcher};
+pub use maya_core::{answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, launch, log, model, net, notify, pr, registry, resume, reviews, state, store, terminal, transcript, tty, watcher};
 
 pub mod dock;
 pub mod ear;
@@ -613,7 +613,7 @@ fn send_reply(app: AppHandle, state: TauriState<AppState>, session_id: String, t
             Some(t) => t,
             None => focus::tty_for_pid(f.pid)?,
         };
-        return answer::type_into_tty(&tty, &line);
+        return terminal_app::type_into_tty(&tty, &line);
     }
     let (socket, pid) = {
         let store = state.store.lock().unwrap();
@@ -636,10 +636,10 @@ fn answer_question(app: AppHandle, state: TauriState<AppState>, session_id: Stri
     answer::check(&card, ask_id, question_index, option_index, now_ms())?;
     let count = card.awaiting.as_ref().map(|a| a.questions.len()).unwrap_or(0);
     let tty = focus::tty_for_pid(card.pid)?;
-    answer::type_into_tty(&tty, &answer::keys_for_option(option_index))?;
+    terminal_app::type_into_tty(&tty, &answer::keys_for_option(option_index))?;
     if answer::needs_submit(question_index, count) {
         std::thread::sleep(Duration::from_millis(answer::SUBMIT_DELAY_MS));
-        answer::type_into_tty(&tty, "")?;
+        terminal_app::type_into_tty(&tty, "")?;
     }
     Ok(())
 }
@@ -765,7 +765,7 @@ fn type_into_session(state: &TauriState<AppState>, session_id: &str, text: &str)
     }
     answer::check_free(&card)?;
     let tty = focus::tty_for_pid(card.pid)?;
-    answer::type_into_tty(&tty, text)
+    terminal_app::type_into_tty(&tty, text)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

@@ -21,6 +21,7 @@ pub mod resume;
 pub mod reviews;
 pub mod state;
 pub mod store;
+pub mod terminal;
 pub mod transcript;
 pub mod tty;
 pub mod watcher;
