@@ -1,4 +1,5 @@
 //! The platform seam: where a session's terminal lives and how keys reach it.
+use std::collections::HashMap;
 use std::path::Path;
 
 pub trait Terminal: Send + Sync {
@@ -11,6 +12,12 @@ pub trait Terminal: Send + Sync {
     fn focus(&self, tty: &str) -> Result<(), String>;
     /// The terminal's own name for the pane hosting `tty`, if it has one.
     fn name_for_tty(&self, tty: &str) -> Option<String>;
+    /// `name_for_tty` for many ttys at once, keyed by tty; ttys without a
+    /// name are left out. A terminal that lists all its panes in one call
+    /// (tmux) overrides this to do so once.
+    fn names_for_ttys(&self, ttys: &[String]) -> HashMap<String, String> {
+        ttys.iter().filter_map(|t| Some((t.clone(), self.name_for_tty(t)?))).collect()
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -19,7 +26,6 @@ pub use test_support::{Call, FakeTerminal};
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
-    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -74,6 +80,15 @@ mod tests {
         let calls = t.calls.lock().unwrap();
         assert!(matches!(&calls[0], Call::Open { label, .. } if label == "maya-1a2b3c4d"));
         assert!(matches!(&calls[1], Call::Type { text, .. } if text == "/compact"));
+    }
+
+    #[test]
+    fn names_for_ttys_asks_for_each_tty_by_default_and_leaves_out_unnamed_ones() {
+        let t = FakeTerminal::default();
+        t.names.lock().unwrap().insert("/dev/pts/3".into(), "maya-1a2b3c4d".into());
+        let names = t.names_for_ttys(&["/dev/pts/3".into(), "/dev/pts/9".into()]);
+        assert_eq!(names.len(), 1);
+        assert_eq!(names.get("/dev/pts/3").map(String::as_str), Some("maya-1a2b3c4d"));
     }
 
     #[test]

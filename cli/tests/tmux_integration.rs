@@ -29,6 +29,7 @@ fn opens_a_session_finds_it_by_tty_and_types_into_it() {
     assert_eq!(t.open(&cmd, dir.path(), &label).unwrap().as_deref(), Some(label.as_str()));
     let tty = String::from_utf8(std::process::Command::new("tmux").args(["display-message", "-p", "-t", &label, "#{pane_tty}"]).output().unwrap().stdout).unwrap().trim().to_string();
     assert_eq!(t.name_for_tty(&tty).as_deref(), Some(label.as_str()));
+    assert_eq!(t.names_for_ttys(&[tty.clone(), "/dev/pts/none".into()]).get(&tty), Some(&label));
     assert!(t.focus(&tty).unwrap_err().ends_with(&format!("tmux attach -t {label}")));
     t.type_line(&tty, "hello").unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);

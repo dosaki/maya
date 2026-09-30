@@ -1,4 +1,5 @@
 use maya_core::terminal::Terminal;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -67,7 +68,15 @@ pub fn pane_for_tty(out: &str, tty: &str) -> Option<(String, String)> {
         .map(|(_, target, session)| (target.to_string(), session.to_string()))
 }
 
+/// Each of `ttys` that has a pane in `list-panes` output `out`, mapped to its session name.
+pub fn names_in(out: &str, ttys: &[String]) -> HashMap<String, String> {
+    ttys.iter().filter_map(|t| Some((t.clone(), pane_for_tty(out, t)?.1))).collect()
+}
+
 impl Tmux {
+    fn list_panes(&self) -> Option<String> {
+        self.run(&["list-panes".into(), "-a".into(), "-F".into(), LIST_PANES_FORMAT.into()]).ok()
+    }
     fn run(&self, args: &[String]) -> Result<String, String> {
         let out = Command::new(&self.binary).args(args).stdin(Stdio::null()).output().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound { format!("tmux is not installed on {}", maya_core::net::local_hostname()) } else { format!("could not run tmux: {e}") }
@@ -76,8 +85,7 @@ impl Tmux {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
     fn pane(&self, tty: &str) -> Option<(String, String)> {
-        let out = self.run(&["list-panes".into(), "-a".into(), "-F".into(), LIST_PANES_FORMAT.into()]).ok()?;
-        pane_for_tty(&out, tty)
+        pane_for_tty(&self.list_panes()?, tty)
     }
 }
 
@@ -96,6 +104,13 @@ impl Terminal for Tmux {
     }
     fn name_for_tty(&self, tty: &str) -> Option<String> {
         self.pane(tty).map(|p| p.1)
+    }
+    /// One `list-panes` for all of them.
+    fn names_for_ttys(&self, ttys: &[String]) -> HashMap<String, String> {
+        if ttys.is_empty() {
+            return HashMap::new();
+        }
+        self.list_panes().map(|out| names_in(&out, ttys)).unwrap_or_default()
     }
 }
 
@@ -152,12 +167,22 @@ mod tests {
     }
 
     #[test]
+    fn names_for_ttys_resolves_every_tty_from_one_listing() {
+        let out = "/dev/pts/3\tmaya-1a2b3c4d:0.0\tmaya-1a2b3c4d\n/dev/pts/31\twork:1.0\twork\n";
+        let names = names_in(out, &["/dev/pts/3".into(), "/dev/pts/31".into(), "/dev/pts/9".into()]);
+        assert_eq!(names.len(), 2);
+        assert_eq!(names["/dev/pts/3"], "maya-1a2b3c4d");
+        assert_eq!(names["/dev/pts/31"], "work");
+    }
+
+    #[test]
     fn a_missing_tmux_binary_names_the_machine() {
         let t = Tmux { binary: PathBuf::from("/nonexistent/tmux") };
         let err = t.open("true", Path::new("/"), "maya-00000000").unwrap_err();
         assert_eq!(err, format!("tmux is not installed on {}", maya_core::net::local_hostname()));
         assert_eq!(t.type_line("/dev/pts/3", "x"), Err(NOT_IN_TMUX.into()));
         assert_eq!(t.name_for_tty("/dev/pts/3"), None);
+        assert!(t.names_for_ttys(&["/dev/pts/3".into()]).is_empty());
         assert_eq!(t.focus("/dev/pts/3"), Err("Attach with: tmux attach -t <session>".into()));
     }
 }

@@ -82,8 +82,12 @@ impl Executor for CliExecutor {
         };
         // A pid that is gone may come back as another process: forget its tty.
         self.ttys.lock().unwrap().retain(|pid, _| cards.iter().any(|c| c.pid == *pid));
+        // One lookup for the whole board: tmux lists its panes once, not once per card.
+        let ttys: Vec<Option<String>> = cards.iter().zip(ttys).map(|(c, tty)| self.tty_of(c.pid, tty.as_deref())).collect();
+        let wanted: Vec<String> = ttys.iter().flatten().cloned().collect();
+        let names = self.terminal.names_for_ttys(&wanted);
         for (c, tty) in cards.iter_mut().zip(ttys) {
-            c.terminal = self.tty_of(c.pid, tty.as_deref()).and_then(|t| self.terminal.name_for_tty(&t));
+            c.terminal = tty.and_then(|t| names.get(&t).cloned());
         }
         let dirs = root.filter(|r| r.is_dir()).map(|r| launch::list_project_dirs(&r)).unwrap_or_default();
         (cards, dirs)
@@ -107,6 +111,42 @@ mod tests {
         let ex = CliExecutor::new(Arc::new(store), Arc::new(fake));
         let (cards, _) = ex.board();
         assert_eq!(cards[0].terminal.as_deref(), Some("maya-1a2b3c4d"));
+        drop(dir);
+    }
+
+    /// Answers names only in bulk, and counts how often it is asked.
+    #[derive(Default)]
+    struct BulkOnly {
+        bulk_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Terminal for BulkOnly {
+        fn open(&self, _: &str, _: &std::path::Path, _: &str) -> Result<Option<String>, String> {
+            unreachable!()
+        }
+        fn type_line(&self, _: &str, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn focus(&self, _: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn name_for_tty(&self, _: &str) -> Option<String> {
+            panic!("the board asks for every name at once")
+        }
+        fn names_for_ttys(&self, ttys: &[String]) -> HashMap<String, String> {
+            self.bulk_calls.fetch_add(1, Ordering::SeqCst);
+            ttys.iter().map(|t| (t.clone(), "maya-bulk".to_string())).collect()
+        }
+    }
+
+    #[test]
+    fn the_board_asks_the_terminal_for_every_name_in_one_call() {
+        let (dir, store) = maya_core::actions::test_support::store_with_session("s1", 4242);
+        let t = Arc::new(BulkOnly::default());
+        let ex = CliExecutor::new(Arc::new(store), t.clone());
+        let (cards, _) = ex.board();
+        assert_eq!(cards[0].terminal.as_deref(), Some("maya-bulk"));
+        assert_eq!(t.bulk_calls.load(Ordering::SeqCst), 1);
         drop(dir);
     }
 
