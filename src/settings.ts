@@ -16,6 +16,8 @@ export interface AssistantStatus {
   name: string;
   hostname: string;
   platform: string;
+  /** Its IP address as the main last saw it; empty when never recorded. */
+  address?: string;
   connected: boolean;
   lastSeen: number | null;
   /** A different Maya version, or a board this Maya could not read. */
@@ -141,7 +143,7 @@ interface NetworkConfigJson {
   name: string;
   assistantId: string;
   token: string;
-  assistants: { id: string; name: string; hostname: string; platform: string; token: string }[];
+  assistants: { id: string; name: string; hostname: string; platform: string; token: string; address?: string }[];
 }
 
 interface ConfigJson {
@@ -592,7 +594,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       const row = document.createElement("div");
       row.className = "settings__assistant";
       const info = document.createElement("span");
-      info.textContent = `${a.name} (${a.platform}) — ${a.connected ? "Connected" : a.lastSeen !== null ? `Last seen ${formatAge(a.lastSeen, nowMs)} ago` : "Never connected"}`;
+      info.textContent = `${a.name} (${[a.platform, a.address].filter(Boolean).join(", ")}) — ${a.connected ? "Connected" : a.lastSeen !== null ? `Last seen ${formatAge(a.lastSeen, nowMs)} ago` : "Never connected"}`;
       if (a.note) {
         const note = document.createElement("div");
         note.className = "settings__hint";

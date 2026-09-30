@@ -400,6 +400,27 @@ describe("Network settings", () => {
     expect(notes).toEqual(["runs Maya 0.3.0; this Mac runs 0.2.0"]);
   });
 
+  it("lists each assistant with its platform and address", () => {
+    const el = renderSettings(
+      {
+        ...voiceBase,
+        networkRole: "main",
+        network: {
+          role: "main",
+          code: null,
+          assistants: [
+            { id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", address: "192.168.55.70", connected: true, lastSeen: null, note: null },
+            { id: "b2", name: "desk", hostname: "h2", platform: "macos", address: "", connected: false, lastSeen: null, note: null },
+          ],
+          assistant: { connected: false, mainName: null, error: null },
+        },
+      },
+      handlers(),
+    );
+    const rows = [...el.querySelectorAll(".settings__assistant span")].map((n) => n.textContent);
+    expect(rows).toEqual(["Gnowee (macos, 192.168.55.70) — Connected", "desk (macos) — Never connected"]);
+  });
+
   it("role assistant shows host, port, name, code, Pair and the status line", () => {
     const h = handlers();
     const el = renderSettings(

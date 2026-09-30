@@ -102,6 +102,8 @@ export interface Card {
   context: ContextUsage | null;
   /** The assistant machine this card came from; absent or null for a local session. */
   machine?: string | null;
+  /** That machine's IP address as the main sees it; absent for a local session. */
+  machineAddress?: string | null;
   /** True when the machine has not reported for a while or is disconnected. */
   stale?: boolean;
 }

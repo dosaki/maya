@@ -23,7 +23,7 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   head.append(el("span", "card__name", card.name));
   if (card.machine) {
     const remote = el("span", "card__remote");
-    remote.title = `Runs on ${card.machine}`;
+    remote.title = card.machineAddress ? `Runs on ${card.machine}, ${card.machineAddress}` : `Runs on ${card.machine}`;
     remote.append(iconElement("remote", 12));
     head.append(remote);
   }
