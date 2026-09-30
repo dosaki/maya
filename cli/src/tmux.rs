@@ -12,25 +12,48 @@ impl Default for Tmux {
 
 fn sq(s: &str) -> String { maya_core::launch::shell_single_quote(s) }
 
+/// tmux splits its command line on any argv element that ends in a bare
+/// `;`, before flag parsing even runs, so an element ending in `;` loses it
+/// (and `a\;` arrives back as `;`). Escaping a trailing `;` as `\;` makes
+/// tmux hand it back whole.
+fn escape_trailing_semicolon(s: &mut String) {
+    if s.ends_with(';') {
+        s.insert(s.len() - 1, '\\');
+    }
+}
+
 pub fn new_session_args(label: &str, cwd: &Path, command: &str) -> Vec<String> {
     let inner = format!("{command}; exec \"${{SHELL:-sh}}\"");
-    ["new-session", "-d", "-s", label, "-c", &cwd.to_string_lossy()].iter().map(|s| s.to_string()).chain([format!("sh -c {}", sq(&inner))]).collect()
+    let mut cwd = cwd.to_string_lossy().into_owned();
+    escape_trailing_semicolon(&mut cwd);
+    ["new-session", "-d", "-s", label, "-c", &cwd].iter().map(|s| s.to_string()).chain([format!("sh -c {}", sq(&inner))]).collect()
 }
 
 pub fn send_keys_args(target: &str, text: &str) -> Vec<Vec<String>> {
-    let base = |rest: &[&str]| -> Vec<String> { ["send-keys", "-t", target].iter().chain(rest).map(|s| s.to_string()).collect() };
+    fn cmd(target: &str, rest: &[&str]) -> Vec<String> { ["send-keys", "-t", target].iter().chain(rest).map(|s| s.to_string()).collect() }
     let mut out = Vec::new();
     let mut literal = String::new();
     let mut keys: Vec<&str> = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
-        if let Some(r) = rest.strip_prefix("\x1b[B") { keys.push("Down"); rest = r; }
-        else if let Some(r) = rest.strip_prefix("\x1b[Z") { keys.push("BTab"); rest = r; }
-        else { let c = rest.chars().next().unwrap(); literal.push(c); rest = &rest[c.len_utf8()..]; }
+        if let Some(r) = rest.strip_prefix("\x1b[B") {
+            if !literal.is_empty() { escape_trailing_semicolon(&mut literal); out.push(cmd(target, &["-l", "--", &literal])); literal.clear(); }
+            keys.push("Down");
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("\x1b[Z") {
+            if !literal.is_empty() { escape_trailing_semicolon(&mut literal); out.push(cmd(target, &["-l", "--", &literal])); literal.clear(); }
+            keys.push("BTab");
+            rest = r;
+        } else {
+            if !keys.is_empty() { out.push(cmd(target, &keys)); keys.clear(); }
+            let c = rest.chars().next().unwrap();
+            literal.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
     }
-    if !literal.is_empty() { out.push(base(&["-l", "--", &literal])); }
-    if !keys.is_empty() { out.push(base(&keys)); }
-    out.push(base(&["Enter"]));
+    if !keys.is_empty() { out.push(cmd(target, &keys)); }
+    if !literal.is_empty() { escape_trailing_semicolon(&mut literal); out.push(cmd(target, &["-l", "--", &literal])); }
+    out.push(cmd(target, &["Enter"]));
     out
 }
 
@@ -89,6 +112,12 @@ mod tests {
     }
 
     #[test]
+    fn new_session_escapes_a_cwd_ending_in_a_semicolon_so_tmux_does_not_split_on_it() {
+        let args = new_session_args("l", Path::new("/tmp/foo;"), "true");
+        assert_eq!(args[5], "/tmp/foo\\;");
+    }
+
+    #[test]
     fn send_keys_types_literal_text_then_enter_and_maps_escape_sequences() {
         let calls = send_keys_args("maya-1:0.0", "/compact");
         assert_eq!(calls, vec![v(&["send-keys", "-t", "maya-1:0.0", "-l", "--", "/compact"]), v(&["send-keys", "-t", "maya-1:0.0", "Enter"])]);
@@ -98,6 +127,19 @@ mod tests {
         assert_eq!(calls[0], v(&["send-keys", "-t", "t", "BTab"]));
         // An empty line is just Enter.
         assert_eq!(send_keys_args("t", ""), vec![v(&["send-keys", "-t", "t", "Enter"])]);
+    }
+
+    #[test]
+    fn send_keys_escapes_a_literal_ending_in_a_semicolon_so_tmux_does_not_split_on_it() {
+        assert_eq!(send_keys_args("t", "a;")[0], v(&["send-keys", "-t", "t", "-l", "--", "a\\;"]));
+    }
+
+    #[test]
+    fn send_keys_flushes_literal_and_key_buffers_in_order_so_mixed_input_types_correctly() {
+        let calls = send_keys_args("t", "abc\x1b[B");
+        assert_eq!(calls, vec![v(&["send-keys", "-t", "t", "-l", "--", "abc"]), v(&["send-keys", "-t", "t", "Down"]), v(&["send-keys", "-t", "t", "Enter"])]);
+        let calls = send_keys_args("t", "\x1b[Babc");
+        assert_eq!(calls, vec![v(&["send-keys", "-t", "t", "Down"]), v(&["send-keys", "-t", "t", "-l", "--", "abc"]), v(&["send-keys", "-t", "t", "Enter"])]);
     }
 
     #[test]
