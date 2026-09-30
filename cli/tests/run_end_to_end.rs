@@ -91,6 +91,13 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     assert!(status.connected);
     assert_eq!(status.main_name.as_deref(), Some("Yhi"));
 
+    // A second run, even in this same process, is refused while the first
+    // holds the lock, and leaves the first's status file alone.
+    assert_eq!(run_cmd::run_with(&claude_dir, Arc::new(FakeTerminal::default()), Arc::new(AtomicBool::new(false))), 2);
+    assert_eq!(status_file::read(&maya_dir).map(|s| s.connected), Some(true));
+    // Nor can pairing swap the credentials under it.
+    assert_eq!(commands::pair(&claude_dir, "127.0.0.1", port, Some("box"), "123456"), Err((2, format!("stop `maya run` first (pid {})", std::process::id()))));
+
     // 4. A command from the main is typed through the terminal.
     assert_eq!(send_command_with(&handle.shared, "box", CommandKind::Compact { session: "s1".into() }, Duration::from_secs(5)), Ok(None));
     assert!(fake.calls.lock().unwrap().iter().any(|c| matches!(c, Call::Type { tty, text } if tty == "/dev/pts/3" && text == "/compact")));

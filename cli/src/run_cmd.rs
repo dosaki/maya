@@ -4,12 +4,13 @@
 //!
 //! Exit codes: 0 after SIGINT or SIGTERM; 1 when the main removed this
 //! assistant or the pairing is gone; 2 when it cannot start (not paired,
-//! the main role, another run alive) or the config on disk stopped being
+//! the main role, another run holding the lock) or the config on disk stopped being
 //! an assistant's while it ran.
 
 use crate::commands::{jq_found, NO_JQ};
 use crate::executor::CliExecutor;
 use crate::notify::CliNotify;
+use crate::run_lock::{self, RunLock};
 use crate::status_file::{self, RunStatus};
 use crate::tmux::Tmux;
 use maya_core::config::{Config, NetworkConfig, NetworkRole};
@@ -24,20 +25,26 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Refuses to start unless this machine is a paired assistant and no other
-/// `maya run` is alive. A status file left by a dead run is ignored.
-pub fn preflight(config: &Config, existing: Option<&RunStatus>, alive: &dyn Fn(u32) -> bool) -> Result<(), (i32, String)> {
+/// `maya run` holds the lock at `lock_path`; the lock, held for the run's
+/// lifetime, otherwise. `existing` (the status file) only names the other
+/// run's pid in the message: a file left by a dead run does not block.
+pub fn preflight(config: &Config, lock_path: &Path, existing: Option<&RunStatus>) -> Result<RunLock, (i32, String)> {
     match config.network.role {
         NetworkRole::Main => return Err((2, "the CLI is assistant-only".into())),
         NetworkRole::Off => return Err((2, "run `maya pair` first".into())),
         NetworkRole::Assistant if config.network.token.is_empty() || config.network.assistant_id.is_empty() => return Err((2, "run `maya pair` first".into())),
         NetworkRole::Assistant => {}
     }
-    if let Some(s) = existing {
-        if s.pid != std::process::id() && alive(s.pid) {
-            return Err((2, format!("maya run is already running (pid {})", s.pid)));
-        }
+    match RunLock::try_take(lock_path) {
+        Ok(Some(lock)) => Ok(lock),
+        Ok(None) => Err((2, format!("maya run is already running{}", pid_suffix(existing)))),
+        Err(e) => Err((2, e)),
     }
-    Ok(())
+}
+
+/// ` (pid N)` from the status file when there is one, else nothing.
+pub fn pid_suffix(existing: Option<&RunStatus>) -> String {
+    existing.map(|s| format!(" (pid {})", s.pid)).unwrap_or_default()
 }
 
 /// How `run` exits once the client stopped: 0 for a signal, 2 when the
@@ -127,11 +134,15 @@ pub fn run(claude_dir: &Path) -> i32 {
 pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<AtomicBool>) -> i32 {
     let maya_dir = claude_dir.join("maya");
     let mut store = Store::new(claude_dir.to_path_buf());
-    if let Err((code, msg)) = preflight(&store.config, status_file::read(&maya_dir).as_ref(), &|pid| maya_core::registry::pid_alive(pid as i32)) {
-        eprintln!("{msg}");
-        return code;
-    }
-    // Only once no other run is alive: it would be rewriting events.jsonl under that run.
+    // Held until this function returns: a second run is refused meanwhile.
+    let _lock = match preflight(&store.config, &run_lock::path(&maya_dir), status_file::read(&maya_dir).as_ref()) {
+        Ok(lock) => lock,
+        Err((code, msg)) => {
+            eprintln!("{msg}");
+            return code;
+        }
+    };
+    // Only once no other run holds the lock: it would be rewriting events.jsonl under that run.
     store.compact_events();
     let config_path = store.config_path();
     let _ = log::init(&maya_dir.join("maya-cli.log"));
@@ -183,17 +194,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preflight_refuses_the_main_role_an_unpaired_config_and_a_running_twin() {
+    fn preflight_refuses_the_main_role_and_an_unpaired_config() {
+        let d = tempfile::tempdir().unwrap();
+        let lock = run_lock::path(d.path());
         let mut c = Config::default();
-        assert_eq!(preflight(&c, None, &|_| false), Err((2, "run `maya pair` first".into())));
+        assert_eq!(preflight(&c, &lock, None).err(), Some((2, "run `maya pair` first".into())));
         c.network.role = NetworkRole::Main;
-        assert_eq!(preflight(&c, None, &|_| false), Err((2, "the CLI is assistant-only".into())));
+        assert_eq!(preflight(&c, &lock, None).err(), Some((2, "the CLI is assistant-only".into())));
+        c.network.role = NetworkRole::Assistant;
+        c.network.token = "t".into();
+        c.network.assistant_id = "a".into();
+        assert!(preflight(&c, &lock, None).is_ok());
+    }
+
+    #[test]
+    fn preflight_refuses_while_another_run_holds_the_lock_and_ignores_a_stale_status_file() {
+        let d = tempfile::tempdir().unwrap();
+        let lock = run_lock::path(d.path());
+        let mut c = Config::default();
         c.network.role = NetworkRole::Assistant;
         c.network.token = "t".into();
         c.network.assistant_id = "a".into();
         let twin = RunStatus { pid: 99, ..Default::default() };
-        assert_eq!(preflight(&c, Some(&twin), &|pid| pid == 99), Err((2, "maya run is already running (pid 99)".into())));
-        assert_eq!(preflight(&c, Some(&twin), &|_| false), Ok(())); // a stale file from a dead run is ignored
+        // A status file with no run holding the lock is left by a dead run.
+        let held = preflight(&c, &lock, Some(&twin)).expect("a stale status file does not block");
+        assert_eq!(preflight(&c, &lock, Some(&twin)).err(), Some((2, "maya run is already running (pid 99)".into())));
+        assert_eq!(preflight(&c, &lock, None).err(), Some((2, "maya run is already running".into())));
+        drop(held);
+        assert!(preflight(&c, &lock, None).is_ok(), "free once the first run's lock is dropped");
     }
 
     #[test]

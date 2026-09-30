@@ -2,6 +2,8 @@
 
 use crate::args::HooksOp;
 use crate::executor::CliExecutor;
+use crate::run_cmd::pid_suffix;
+use crate::run_lock::{self, RunLock};
 use crate::status_file;
 use crate::tmux::Tmux;
 use maya_core::actions;
@@ -33,12 +35,6 @@ pub fn jq_found() -> bool {
     on_path("jq", std::env::var_os("PATH").as_deref())
 }
 
-/// The pid of a live `maya run`, from its status file; a file left by a
-/// dead run does not count.
-fn live_run(claude_dir: &Path) -> Option<u32> {
-    status_file::read(&claude_dir.join("maya")).map(|s| s.pid).filter(|pid| pid_alive(*pid as i32))
-}
-
 /// What `maya pair` prints once paired.
 pub fn paired_message(main: &str, label: &str) -> String {
     format!("Paired with {main} as {label}")
@@ -46,12 +42,16 @@ pub fn paired_message(main: &str, label: &str) -> String {
 
 /// Pairs with a main Maya at `host:port` using its six-digit `code`, stores
 /// the assistant id and token and the link in the config, and returns the
-/// main's name and the label this machine paired under. Errors carry the exit code: 2 while a `maya run` is live
-/// (pairing would swap the credentials under it), else 1.
+/// main's name and the label this machine paired under. Errors carry the exit code: 2 while a `maya run` holds
+/// the run lock (pairing would swap the credentials under it), else 1.
+/// The lock is held while pairing, so no run starts halfway through.
 pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: &str) -> Result<(String, String), (i32, String)> {
-    if let Some(pid) = live_run(claude_dir) {
-        return Err((2, format!("stop `maya run` first (pid {pid})")));
-    }
+    let maya_dir = claude_dir.join("maya");
+    let _lock = match RunLock::try_take(&run_lock::path(&maya_dir)) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Err((2, format!("stop `maya run` first{}", pid_suffix(status_file::read(&maya_dir).as_ref())))),
+        Err(e) => return Err((1, e)),
+    };
     // The main only ever issues six ASCII digits: anything else is refused
     // here, with the main's own message, without contacting it.
     let code = code.trim();
@@ -187,18 +187,22 @@ mod tests {
     }
 
     #[test]
-    fn pair_refuses_while_maya_run_is_live_and_leaves_the_config_alone() {
+    fn pair_refuses_while_maya_run_holds_the_lock_and_leaves_the_config_alone() {
         let dir = claude_dir_with(NetworkRole::Off);
+        let maya_dir = dir.path().join("maya");
+        let _run = RunLock::try_take(&run_lock::path(&maya_dir)).unwrap().unwrap();
+        assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456"), Err((2, "stop `maya run` first".to_string())));
         let me = std::process::id();
-        status_file::write(&dir.path().join("maya"), &RunStatus { pid: me, connected: true, ..Default::default() }).unwrap();
+        status_file::write(&maya_dir, &RunStatus { pid: me, connected: true, ..Default::default() }).unwrap();
         assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456"), Err((2, format!("stop `maya run` first (pid {me})"))));
         assert_eq!(config::load(&dir.path().join("maya/config.json")).network.role, NetworkRole::Off);
     }
 
     #[test]
-    fn a_status_file_left_by_a_dead_run_does_not_block_pairing() {
+    fn a_status_file_with_no_run_holding_the_lock_does_not_block_pairing() {
         let dir = claude_dir_with(NetworkRole::Off);
-        status_file::write(&dir.path().join("maya"), &RunStatus { pid: 2_000_000_000, ..Default::default() }).unwrap();
+        // Even with a live pid (this process): only the lock counts.
+        status_file::write(&dir.path().join("maya"), &RunStatus { pid: std::process::id(), ..Default::default() }).unwrap();
         // Past the check: it tries the main, which is not there.
         let (code, err) = pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456").unwrap_err();
         assert_eq!(code, 1);

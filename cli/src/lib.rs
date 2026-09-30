@@ -3,6 +3,7 @@ pub mod commands;
 mod executor;
 mod notify;
 pub mod run_cmd;
+pub mod run_lock;
 pub mod status_file;
 pub mod tmux;
 

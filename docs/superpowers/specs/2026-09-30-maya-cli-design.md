@@ -49,11 +49,17 @@ maya --version
   code." without contacting the main; the name is trimmed (blank means the
   hostname); port 0 is a usage error (exit 2).
   Pairing again replaces the stored credentials. It refuses while a
-  `maya run` is live (`stop \`maya run\` first (pid N)`, exit 2), since
-  that run holds the old credentials.
+  `maya run` holds the run lock (`stop \`maya run\` first (pid N)`, exit 2),
+  since that run holds the old credentials, and holds the lock itself while
+  it pairs.
 - **run** is the assistant, in the foreground. It refuses to start without
   assistant credentials (`run \`maya pair\` first`, exit 2) or when the
-  config's role is `main` (`the CLI is assistant-only`, exit 2). It watches
+  config's role is `main` (`the CLI is assistant-only`, exit 2). It takes
+  an exclusive `flock` on `~/.claude/maya/cli-run.lock` (mode 0600) for its
+  lifetime and refuses when another run holds it (`maya run is already
+  running (pid N)`, exit 2; the pid comes from the status file and is left
+  out when there is none). The kernel frees the lock when a run dies, so a
+  status file left by a killed run blocks nothing. It watches
   the same files the app watches (the registry, the events log, the Codex
   and Antigravity directories), keeps the board, connects to the main with
   the stored token, pushes boards on change and every 10 s, executes the
