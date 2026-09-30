@@ -31,10 +31,12 @@ pub mod voice;
 pub mod wake;
 pub mod watcher;
 
+use base64::Engine;
 use config::Config;
 use listener::VoiceState;
 use model::Card;
 use net::merge;
+use net::protocol::{Attachment, CommandKind};
 use net::server::Notify;
 use net::{NetChange, NetworkStatus};
 use serde::Serialize;
@@ -42,6 +44,65 @@ use std::sync::Mutex;
 use std::time::Duration;
 use store::{now_ms, Store};
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
+
+/// How long the main waits for a command's result from an assistant.
+const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A remote session's machine, when this Maya is the main and the session
+/// belongs to one of its connected assistants; else `None` for a local one.
+fn remote_machine_of(state: &AppState, session_id: &str) -> Option<String> {
+    merge::machine_of(&remote_boards(state), session_id)
+}
+
+/// Sends `kind` to `machine` and discards its (empty) result.
+fn route_done(app: &AppHandle, machine: &str, kind: CommandKind) -> Result<(), String> {
+    net::server::send_command(app, machine, kind, ROUTE_TIMEOUT).map(|_| ())
+}
+
+/// Sends `kind` to `machine` and deserialises its result into `T`.
+fn route_data<T: for<'de> serde::Deserialize<'de>>(app: &AppHandle, machine: &str, kind: CommandKind) -> Result<T, String> {
+    let value = net::server::send_command(app, machine, kind, ROUTE_TIMEOUT)?;
+    let value = value.ok_or("The assistant sent no result.")?;
+    serde_json::from_value(value).map_err(|e| e.to_string())
+}
+
+/// Reads and base64-encodes local files for a remote reply's attachments;
+/// refuses a missing file or one over 20 MB. `name` on each `Attachment` is
+/// the path exactly as given, since the assistant matches on it.
+fn remote_attachments(paths: &[String]) -> Result<Vec<Attachment>, String> {
+    const MAX_BYTES: u64 = 20 * 1024 * 1024;
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        let meta = std::fs::metadata(p).map_err(|_| format!("Attachment not found: {p}"))?;
+        if meta.len() > MAX_BYTES {
+            return Err("The file is too large (over 20 MB).".into());
+        }
+        let bytes = std::fs::read(p).map_err(|_| format!("Attachment not found: {p}"))?;
+        out.push(Attachment { name: p.clone(), bytes: base64::engine::general_purpose::STANDARD.encode(bytes) });
+    }
+    Ok(out)
+}
+
+/// Builds the `Start` command a "+" dialog on a remote machine sends.
+fn start_kind_for(dir: Option<String>, prompt: String, options: launch::LaunchOptions) -> CommandKind {
+    CommandKind::Start { dir, prompt, options }
+}
+
+/// What Settings' Machine pickers show: each connected assistant's display
+/// name, host and platform.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineInfo {
+    pub name: String,
+    pub hostname: String,
+    pub platform: String,
+    pub connected: bool,
+}
+
+#[tauri::command]
+fn list_machines(state: TauriState<AppState>) -> Vec<MachineInfo> {
+    network_status_of(&state).assistants.into_iter().map(|a| MachineInfo { name: a.name, hostname: a.hostname, platform: a.platform, connected: a.connected }).collect()
+}
 
 pub struct AppState {
     pub store: Mutex<Store>,
@@ -445,7 +506,10 @@ fn focus_session(pid: i32) -> Result<(), String> {
 }
 
 #[tauri::command(async)]
-fn session_history(state: TauriState<AppState>, session_id: String) -> Result<Vec<transcript::Turn>, String> {
+fn session_history(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<Vec<transcript::Turn>, String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_data(&app, &machine, CommandKind::History { session: session_id });
+    }
     let (path, foreign) = {
         let store = state.store.lock().unwrap();
         if let Some(f) = store.foreign(&session_id) {
@@ -462,7 +526,11 @@ fn session_history(state: TauriState<AppState>, session_id: String) -> Result<Ve
 }
 
 #[tauri::command(async)]
-fn send_reply(state: TauriState<AppState>, session_id: String, text: String) -> Result<(), String> {
+fn send_reply(app: AppHandle, state: TauriState<AppState>, session_id: String, text: String, attachments: Vec<String>) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        let attachments = remote_attachments(&attachments)?;
+        return route_done(&app, &machine, CommandKind::Reply { session: session_id, text, attachments });
+    }
     // Other harnesses have no inbox: the reply is typed into their tty as one line.
     let foreign = state.store.lock().unwrap().foreign(&session_id);
     if let Some(f) = foreign {
@@ -488,7 +556,10 @@ fn send_reply(state: TauriState<AppState>, session_id: String, text: String) -> 
 }
 
 #[tauri::command(async)]
-fn answer_question(state: TauriState<AppState>, session_id: String, ask_id: u64, question_index: usize, option_index: usize) -> Result<(), String> {
+fn answer_question(app: AppHandle, state: TauriState<AppState>, session_id: String, ask_id: u64, question_index: usize, option_index: usize) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Answer { session: session_id, ask_id, question: question_index, option: option_index });
+    }
     let card = {
         let mut store = state.store.lock().unwrap();
         store.card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?
@@ -564,7 +635,10 @@ fn open_url(url: String) -> Result<(), String> {
 
 /// Types `/model x` or `/effort y` into the session's Terminal tab.
 #[tauri::command(async)]
-fn set_session_option(state: TauriState<AppState>, session_id: String, setting: String, value: String) -> Result<(), String> {
+fn set_session_option(app: AppHandle, state: TauriState<AppState>, session_id: String, setting: String, value: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::SetOption { session: session_id, setting, value });
+    }
     let text = answer::slash_command(&setting, &value)?;
     type_into_session(&state, &session_id, &text)
 }
@@ -572,20 +646,29 @@ fn set_session_option(state: TauriState<AppState>, session_id: String, setting: 
 /// Types `/rename <name>` into the session's Terminal tab. The new name comes
 /// back through the session registry on the next refresh.
 #[tauri::command(async)]
-fn rename_session(state: TauriState<AppState>, session_id: String, name: String) -> Result<(), String> {
+fn rename_session(app: AppHandle, state: TauriState<AppState>, session_id: String, name: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Rename { session: session_id, name });
+    }
     let text = answer::rename_command(&name)?;
     type_into_session(&state, &session_id, &text)
 }
 
 /// Types `/compact` into the session's Terminal tab.
 #[tauri::command(async)]
-fn compact_session(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+fn compact_session(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Compact { session: session_id });
+    }
     type_into_session(&state, &session_id, answer::COMPACT)
 }
 
 /// Sends Shift+Tab to the session's Terminal tab, cycling its permission mode.
 #[tauri::command(async)]
-fn cycle_session_mode(state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+fn cycle_session_mode(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::CycleMode { session: session_id });
+    }
     type_into_session(&state, &session_id, answer::SHIFT_TAB)
 }
 
@@ -602,10 +685,10 @@ fn type_into_session(state: &TauriState<AppState>, session_id: &str, text: &str)
     answer::type_into_tty(&tty, text)
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StartResult {
     pub dir: String,
-    pub how: &'static str,
+    pub how: String,
 }
 
 fn projects_root(state: &TauriState<AppState>) -> Result<std::path::PathBuf, String> {
@@ -625,9 +708,18 @@ fn project_path(state: &TauriState<AppState>, dir: &str) -> Result<std::path::Pa
     Ok(root.join(dir))
 }
 
+/// `None` or `""` means the machine argument was not given: this Mac.
+fn is_local(machine: &Option<String>) -> bool {
+    machine.as_deref().map_or(true, str::is_empty)
+}
+
 /// Past sessions of a project folder, newest first, with running ones marked.
 #[tauri::command(async)]
-fn list_resumable_sessions(state: TauriState<AppState>, dir: String) -> Result<Vec<resume::ResumableSession>, String> {
+fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: String, machine: Option<String>) -> Result<Vec<resume::ResumableSession>, String> {
+    if !is_local(&machine) {
+        let machine = machine.unwrap();
+        return route_data(&app, &machine, CommandKind::ListResumable { dir });
+    }
     let path = project_path(&state, &dir)?;
     let (claude_dir, running) = {
         let store = state.store.lock().unwrap();
@@ -638,7 +730,11 @@ fn list_resumable_sessions(state: TauriState<AppState>, dir: String) -> Result<V
 
 /// Opens a Terminal in the folder running `claude --resume <id>`.
 #[tauri::command(async)]
-fn resume_session(state: TauriState<AppState>, dir: String, session_id: String) -> Result<(), String> {
+fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>) -> Result<(), String> {
+    if !is_local(&machine) {
+        let machine = machine.unwrap();
+        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id });
+    }
     let path = project_path(&state, &dir)?;
     let (claude_dir, running) = {
         let store = state.store.lock().unwrap();
@@ -654,16 +750,24 @@ fn resume_session(state: TauriState<AppState>, dir: String, session_id: String) 
 }
 
 #[tauri::command(async)]
-fn list_project_dirs(state: TauriState<AppState>) -> Result<Vec<String>, String> {
+fn list_project_dirs(state: TauriState<AppState>, machine: Option<String>) -> Result<Vec<String>, String> {
+    if !is_local(&machine) {
+        let machine = machine.unwrap();
+        return Ok(merge::dirs_of(&remote_boards(&state), &machine));
+    }
     Ok(launch::list_project_dirs(&projects_root(&state)?))
 }
 
 #[tauri::command(async)]
-fn start_session(state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions) -> Result<StartResult, String> {
+fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions, machine: Option<String>) -> Result<StartResult, String> {
     if prompt.trim().is_empty() {
         return Err("Type a prompt first.".into());
     }
     options.validate()?;
+    if !is_local(&machine) {
+        let machine = machine.unwrap();
+        return route_data(&app, &machine, start_kind_for(dir, prompt, options));
+    }
     let root = projects_root(&state)?;
     let maya_dir = state.store.lock().unwrap().claude_dir().join("maya");
     let dirs = launch::list_project_dirs(&root);
@@ -677,7 +781,7 @@ fn start_session(state: TauriState<AppState>, dir: Option<String>, prompt: Strin
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
     let file = launch::write_prompt_file(&maya_dir, &prompt)?;
     launch::open_terminal(&target, &file, &options)?;
-    Ok(StartResult { dir: target.to_string_lossy().into_owned(), how })
+    Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string() })
 }
 
 #[tauri::command(async)]
@@ -875,7 +979,8 @@ pub fn run() {
             network_status,
             network_pairing_code,
             network_remove_assistant,
-            network_pair
+            network_pair,
+            list_machines
         ])
         .setup(move |app| {
             let log_path = dir.join("maya").join("maya.log");
@@ -934,4 +1039,62 @@ pub fn run() {
                 models::abort_all();
             }
         });
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn remote_attachments_encodes_a_small_file() {
+        let dir = std::env::temp_dir().join(format!("maya-route-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.txt");
+        std::fs::write(&path, b"hello there").unwrap();
+        let path_str = path.to_string_lossy().into_owned();
+
+        let out = remote_attachments(&[path_str.clone()]).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, path_str, "the name carries the main's full local path exactly");
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&out[0].bytes).unwrap();
+        assert_eq!(decoded, b"hello there");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remote_attachments_refuses_a_missing_file() {
+        let err = remote_attachments(&["/no/such/file-for-maya-tests.txt".to_string()]).unwrap_err();
+        assert!(err.contains("Attachment not found"), "{err}");
+    }
+
+    #[test]
+    fn remote_attachments_refuses_a_file_over_20_mb() {
+        let dir = std::env::temp_dir().join(format!("maya-route-test-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.bin");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(20 * 1024 * 1024 + 1).unwrap();
+        drop(file);
+        let path_str = path.to_string_lossy().into_owned();
+
+        let err = remote_attachments(&[path_str]).unwrap_err();
+        assert_eq!(err, "The file is too large (over 20 MB).");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn start_kind_for_builds_a_start_command() {
+        let options = launch::LaunchOptions::default();
+        let kind = start_kind_for(Some("proj".into()), "do the thing".into(), options.clone());
+        match kind {
+            CommandKind::Start { dir, prompt, options: got } => {
+                assert_eq!(dir.as_deref(), Some("proj"));
+                assert_eq!(prompt, "do the thing");
+                assert_eq!(got, options);
+            }
+            other => panic!("expected a Start command, got {other:?}"),
+        }
+    }
 }

@@ -50,7 +50,7 @@ pub fn read_tail(path: &Path, max_bytes: u64) -> TranscriptTail {
 
 pub const TURNS_TAIL_BYTES: u64 = 1_048_576;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TurnKind {
     User,
@@ -73,7 +73,7 @@ fn unwrap_peer_message(text: &str) -> Option<String> {
     Some(body.trim().to_string())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Turn {
     pub kind: TurnKind,
     pub text: String,

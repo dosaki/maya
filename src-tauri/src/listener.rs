@@ -171,27 +171,27 @@ fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String,
         }
         "reply" => {
             let text = action["text"].as_str().unwrap_or("").to_string();
-            send_reply(state.clone(), session, text)?;
+            send_reply(app.clone(), state.clone(), session, text, vec![])?;
             Ok("Sent.".into())
         }
         "answer" => {
             // The ask the user confirmed, captured at validation: a newer ask is refused.
             let ask_id = action["askId"].as_u64().ok_or("The question has changed; ask me again.")?;
             let n = action["option"].as_u64().unwrap_or(1) as usize;
-            answer_question(state.clone(), session, ask_id, 0, n.saturating_sub(1))?;
+            answer_question(app.clone(), state.clone(), session, ask_id, 0, n.saturating_sub(1))?;
             Ok("Answered.".into())
         }
         "resume" => {
             let dir = action["dir"].as_str().unwrap_or("").to_string();
-            let sessions = list_resumable_sessions(state.clone(), dir.clone())?;
+            let sessions = list_resumable_sessions(app.clone(), state.clone(), dir.clone(), None)?;
             let latest = sessions.into_iter().find(|s| !s.running).ok_or("Nothing to resume there.")?;
-            resume_session(state.clone(), dir, latest.id)?;
+            resume_session(app.clone(), state.clone(), dir, latest.id, None)?;
             Ok("Resuming.".into())
         }
         "start" => {
             let dir = action["dir"].as_str().unwrap_or("").to_string();
             let prompt = action["prompt"].as_str().unwrap_or("").to_string();
-            start_session(state.clone(), Some(dir), prompt, launch::LaunchOptions::default())?;
+            start_session(app.clone(), state.clone(), Some(dir), prompt, launch::LaunchOptions::default(), None)?;
             Ok("Started.".into())
         }
         "review" => {

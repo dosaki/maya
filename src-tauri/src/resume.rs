@@ -1,6 +1,6 @@
 use crate::launch::shell_single_quote;
 use crate::state::truncate;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +10,7 @@ const HEAD_BYTES: u64 = 65_536;
 const TAIL_BYTES: u64 = 262_144;
 
 /// A past session in a project folder that `claude --resume` can pick up.
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumableSession {
     pub id: String,

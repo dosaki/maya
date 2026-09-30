@@ -569,17 +569,18 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
                 let path = crate::attachments::save(&maya_dir, &a.name, &bytes, now_ms())?;
                 saved.push((a.name, path));
             }
-            done(crate::send_reply(state(), session, rewrite_attachments(&text, &saved)))
+            // The files are already local here; nothing further to attach.
+            done(crate::send_reply(app.clone(), state(), session, rewrite_attachments(&text, &saved), vec![]))
         }
-        CommandKind::Answer { session, ask_id, question, option } => done(crate::answer_question(state(), session, ask_id, question, option)),
-        CommandKind::Compact { session } => done(crate::compact_session(state(), session)),
-        CommandKind::Rename { session, name } => done(crate::rename_session(state(), session, name)),
-        CommandKind::SetOption { session, setting, value } => done(crate::set_session_option(state(), session, setting, value)),
-        CommandKind::CycleMode { session } => done(crate::cycle_session_mode(state(), session)),
-        CommandKind::Start { dir, prompt, options } => to_data(crate::start_session(state(), dir, prompt, options)?),
-        CommandKind::Resume { dir, session } => done(crate::resume_session(state(), dir, session)),
-        CommandKind::ListResumable { dir } => to_data(crate::list_resumable_sessions(state(), dir)?),
-        CommandKind::History { session } => to_data(crate::session_history(state(), session)?),
+        CommandKind::Answer { session, ask_id, question, option } => done(crate::answer_question(app.clone(), state(), session, ask_id, question, option)),
+        CommandKind::Compact { session } => done(crate::compact_session(app.clone(), state(), session)),
+        CommandKind::Rename { session, name } => done(crate::rename_session(app.clone(), state(), session, name)),
+        CommandKind::SetOption { session, setting, value } => done(crate::set_session_option(app.clone(), state(), session, setting, value)),
+        CommandKind::CycleMode { session } => done(crate::cycle_session_mode(app.clone(), state(), session)),
+        CommandKind::Start { dir, prompt, options } => to_data(crate::start_session(app.clone(), state(), dir, prompt, options, None)?),
+        CommandKind::Resume { dir, session } => done(crate::resume_session(app.clone(), state(), dir, session, None)),
+        CommandKind::ListResumable { dir } => to_data(crate::list_resumable_sessions(app.clone(), state(), dir, None)?),
+        CommandKind::History { session } => to_data(crate::session_history(app.clone(), state(), session)?),
     }
 }
 

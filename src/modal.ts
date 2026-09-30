@@ -465,7 +465,7 @@ const guardedSend = makeSendGuard(async (text: string) => {
   if (!current) return;
   const { card } = current.model;
   try {
-    await invoke("send_reply", { sessionId: card.sessionId, text });
+    await invoke("send_reply", { sessionId: card.sessionId, text, attachments: current.model.attachments?.map((a) => a.path) ?? [] });
     const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea");
     if (ta) ta.value = "";
     current.model.draft = "";
