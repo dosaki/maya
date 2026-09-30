@@ -122,11 +122,12 @@ cli/                  maya-cli — binary "maya", depends on maya_core
 `core` receives, by `git mv`, every module that has no Tauri dependency:
 model, store, state, registry, events, transcript, context, foreign, codex,
 antigravity, grok, notify, interpreter, config, log, hook_install, launch,
-resume, inbox, answer, attachments, pr, reviews, wake, models, and `net`
-(protocol, merge, server, client). `net::client` loses its Tauri executor
-and notifier (they move to the app) and keeps the traits. `voice`, `ear`,
-`listener`, `focus`, `dock`, `events` emission and the Tauri commands stay
-in the app.
+resume, inbox, answer, attachments, pr, reviews, and `net` (protocol,
+merge, server, client). `net::client` loses its Tauri executor and notifier
+(they move to the app) and keeps the traits. The voice pipeline (`voice`,
+`ear`, `wake`, `models`, `listener`), `focus`, `dock` and the Tauri commands
+stay in the app: the CLI never listens or speaks, and `dock` and `focus`
+use AppKit.
 
 ### The `Terminal` trait
 
