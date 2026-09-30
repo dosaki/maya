@@ -1221,7 +1221,7 @@ mod route_tests {
             pr: Some(model::PullRequest { number: 7, url: url.into(), state: "open".into() }),
             context: None,
             machine: Some("laptop".into()),
-            machine_address: None,
+            machine_address: None, machine_platform: None,
             stale: false,
         };
         assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));

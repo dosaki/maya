@@ -34,6 +34,13 @@ describe("renderCard: remote cards", () => {
     expect(el.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (192.168.55.70)");
     const plain = renderCard({ ...base, machine: "Gnowee", machineAddress: "192.168.55.70", stale: false }, 0);
     expect(plain.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee, 192.168.55.70");
+    // With the platform: after the label, before the address.
+    const mac = renderCard({ ...base, machine: "Gnowee", machineAddress: "192.168.55.70", machinePlatform: "macos", stale: false }, 0);
+    expect(mac.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (macOS), 192.168.55.70");
+    const twin = renderCard({ ...base, machine: "Gnowee (192.168.55.70)", machineAddress: "192.168.55.70", machinePlatform: "linux", stale: false }, 0);
+    expect(twin.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (192.168.55.70) (Linux)");
+    const other = renderCard({ ...base, machine: "box", machineAddress: "10.0.0.2", machinePlatform: "freebsd", stale: false }, 0);
+    expect(other.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on box (freebsd), 10.0.0.2");
   });
 
   it("shows no remote glyph or machine subtitle for a local card", () => {

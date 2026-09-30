@@ -46,6 +46,7 @@ pub fn merged(local: Vec<Card>, remotes: &[RemoteBoard], now_ms: u64) -> Vec<Car
             let mut c = c.clone();
             c.machine = Some(b.machine.clone());
             c.machine_address = Some(b.address.clone()).filter(|a| !a.is_empty());
+            c.machine_platform = Some(b.platform.clone()).filter(|p| !p.is_empty());
             c.stale = stale;
             out.push(c);
         }
@@ -104,7 +105,7 @@ mod tests {
     use crate::model::{Card, Harness, State};
 
     fn card(id: &str, name: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, stale: false }
+        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, stale: false }
     }
 
     fn board(machine: &str, hostname: &str, ids: &[&str], received_at: u64, connected: bool) -> RemoteBoard {
@@ -119,6 +120,11 @@ mod tests {
         assert_eq!(m[1].machine.as_deref(), Some("laptop"));
         assert_eq!(m[1].machine_address.as_deref(), Some("10.0.0.9"));
         assert_eq!(m[0].machine_address, None);
+        assert_eq!(m[1].machine_platform.as_deref(), Some("macos"), "the platform rides along for the tooltip");
+        assert_eq!(m[0].machine_platform, None);
+        let json = serde_json::to_value(&m[1]).unwrap();
+        assert_eq!(json["machinePlatform"], "macos");
+        assert!(serde_json::to_value(&m[0]).unwrap().get("machinePlatform").is_none(), "a local card carries none");
         assert!(!m[1].stale);
     }
 

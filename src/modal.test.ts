@@ -260,6 +260,8 @@ describe("renderModal", () => {
     expect(plain.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee, 192.168.55.70");
     const twin = renderModal({ card: { ...base, machine: "Gnowee (192.168.55.70)", machineAddress: "192.168.55.70" }, turns: [], status: null, draft: "" }, h);
     expect(twin.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (192.168.55.70)");
+    const win = renderModal({ card: { ...base, machine: "Gnowee", machineAddress: "192.168.55.70", machinePlatform: "windows" }, turns: [], status: null, draft: "" }, h);
+    expect(win.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on Gnowee (Windows), 192.168.55.70");
   });
 
   it("never suggests the terminal in the awaiting banner for a remote card, naming the machine instead", () => {

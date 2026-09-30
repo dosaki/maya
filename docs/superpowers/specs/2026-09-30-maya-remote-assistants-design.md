@@ -135,14 +135,17 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
 ### The main's board
 
 - `Card` gains `machine: Option<String>`: `None` for local cards, the
-  assistant's label for remote ones, and `machine_address`, its IP address
-  as the main sees it. A label is the assistant's name, or `name
+  assistant's label for remote ones, `machine_address`, its IP address
+  as the main sees it, and `machine_platform`, the platform it reported
+  (`macos`, `linux`, `windows`). A label is the assistant's name, or `name
   (address)` for every assistant sharing that name. The board is local cards plus every
   connected assistant's cards, in the same columns and order rules.
-- A remote card shows a small remote glyph after its name, the machine's
-  label as its subtitle, "Runs on <label>, <address>" as the glyph's
-  tooltip (the card's and the modal header's; just "Runs on <label>" when
-  the label already carries the address), and no Terminal button. Everything else on the card and in its modal works: the
+- A remote card shows a small remote glyph after its name, "<project> on
+  <label>" as its subtitle, "Runs on <label>
+  (<platform>), <address>" as the glyph's tooltip (the card's and the
+  modal header's; the platform shown as macOS, Linux or Windows and left
+  out when unknown; the address left out when the label already carries
+  it: "Runs on <label> (<platform>)"), and no Terminal button. Everything else on the card and in its modal works: the
   conversation (fetched with `history` when the card's state, state time
   or snippet moves, and at most every 3 s while it is working, since tool
   calls change none of those), reply with attachments, answer

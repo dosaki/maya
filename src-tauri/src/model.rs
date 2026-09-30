@@ -106,6 +106,10 @@ pub struct Card {
     /// That machine's IP address as the main sees it; None for a local session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_address: Option<String>,
+    /// That machine's platform as it reported it (`macos`, `linux`,
+    /// `windows`); None for a local session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_platform: Option<String>,
     /// True when the machine has not reported for a while or is disconnected.
     #[serde(default)]
     pub stale: bool,
@@ -151,7 +155,7 @@ mod tests {
             pr: Some(PullRequest { number: 781, url: "https://github.com/o/r/pull/781".into(), state: "merged".into() }),
             context: Some(crate::context::ContextUsage { used: 124_000, window: 200_000, percent: 62 }),
             machine: None,
-            machine_address: None,
+            machine_address: None, machine_platform: None,
             stale: false,
         };
         let json = serde_json::to_value(&card).unwrap();
