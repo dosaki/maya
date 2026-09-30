@@ -143,6 +143,10 @@ impl Notify for TauriNetNotify {
         refresh_and_emit(&self.app);
     }
 
+    fn board_seeded(&self, cards: &[Card]) {
+        self.app.state::<AppState>().notifier.lock().unwrap().seed(cards);
+    }
+
     fn status_changed(&self, status: NetworkStatus) {
         let _ = self.app.emit("network", &status);
     }

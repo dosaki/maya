@@ -55,6 +55,10 @@ const DISCONNECTED: &str = "assistant disconnected";
 /// What the server tells the app; the Tauri adapter lives in `lib.rs`.
 pub trait Notify: Send + Sync {
     fn board_changed(&self);
+    /// An assistant's first board since it connected, before it joins the
+    /// boards: what it shows happened while it was away, so nothing on it
+    /// is announced. Later changes are.
+    fn board_seeded(&self, cards: &[crate::model::Card]);
     fn status_changed(&self, status: NetworkStatus);
     fn paired(&self, assistant: &PairedAssistant);
     fn paired_list_changed(&self, assistants: &[PairedAssistant]);
@@ -435,6 +439,8 @@ struct Link {
     serial: u64,
     label: String,
     rx: Receiver<Down>,
+    /// No board has arrived on this connection yet.
+    first_board: std::cell::Cell<bool>,
 }
 
 /// Counts a connection as pre-auth until dropped (`welcome` sent, or it failed).
@@ -611,7 +617,7 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
     if let Some(list) = changed {
         ctx.notify.paired_list_changed(&list);
     }
-    let link = Link { id, serial, label, rx };
+    let link = Link { id, serial, label, rx, first_board: std::cell::Cell::new(true) };
     // Authenticated: boards and results may now be large.
     ws.set_config(|c| {
         c.max_message_size = Some(MAX_FRAME);
@@ -758,6 +764,10 @@ fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
 fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
     match up {
         Up::Board { cards, dirs } => {
+            // Seeded before the board is visible, so no refresh in between announces it.
+            if link.first_board.replace(false) {
+                ctx.notify.board_seeded(&cards);
+            }
             let current = {
                 let mut s = lock(&ctx.shared);
                 let current = s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial);
@@ -935,18 +945,32 @@ mod tests {
 
     pub(crate) type Client = WebSocket<MaybeTlsStream<TcpStream>>;
 
-    /// Counts what the server tells the app.
+    /// Counts what the server tells the app, and announces what the app
+    /// would: the notifier runs over the merged boards on every change.
     #[derive(Default)]
     pub(crate) struct Counter {
         pub boards: AtomicUsize,
         pub statuses: AtomicUsize,
         pub paired: AtomicUsize,
         pub lists: AtomicUsize,
+        /// Session ids announced (asks and finished turns), in order.
+        pub announced: Mutex<Vec<String>>,
+        notifier: Mutex<crate::notify::Notifier>,
+        server: std::sync::OnceLock<Arc<Mutex<Server>>>,
     }
 
     impl Notify for Counter {
         fn board_changed(&self) {
             self.boards.fetch_add(1, Ordering::SeqCst);
+            let Some(shared) = self.server.get() else { return };
+            let boards = shared.lock().unwrap().boards.clone();
+            let cards = super::super::merge::merged(vec![], &boards, now_ms());
+            let mut n = self.notifier.lock().unwrap();
+            let fresh: Vec<Card> = n.take_new(&cards).into_iter().chain(n.take_finished(&cards)).collect();
+            self.announced.lock().unwrap().extend(fresh.into_iter().map(|c| c.session_id));
+        }
+        fn board_seeded(&self, cards: &[Card]) {
+            self.notifier.lock().unwrap().seed(cards);
         }
         fn status_changed(&self, _: NetworkStatus) {
             self.statuses.fetch_add(1, Ordering::SeqCst);
@@ -960,7 +984,8 @@ mod tests {
     }
 
     pub(crate) fn test_server_with(counter: Arc<Counter>) -> (ServerHandle, u16) {
-        let handle = start_with(counter, Arc::new(Mutex::new(NetworkConfig::default())), 0).unwrap();
+        let handle = start_with(counter.clone(), Arc::new(Mutex::new(NetworkConfig::default())), 0).unwrap();
+        let _ = counter.server.set(handle.shared.clone());
         let port = handle.port();
         (handle, port)
     }
@@ -1212,6 +1237,34 @@ mod tests {
         assert!(s.refresh_entry(&first.id, "192.168.55.80", "Gnowee", "TKC-0176", "macos"));
         assert!(!s.refresh_entry(&first.id, "192.168.55.80", "Gnowee", "TKC-0176", "macos"), "nothing new: nothing to save");
         assert_eq!(s.paired[0].address, "192.168.55.80");
+    }
+
+    #[test]
+    fn nothing_on_an_assistants_first_board_is_announced_but_later_changes_are() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let state = |id: &str, state: State, since: u64| Card { state, state_since: since, ..card(id, "x") };
+        let (mut ws, id, token) = pair_client(&handle, port, "desk");
+        // Open when it connected: an ask and a finished turn.
+        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 100), state("r2", State::Completed, 100)], dirs: vec![] });
+        wait_until(|| handle.boards().iter().any(|b| b.cards.len() == 2));
+        // A new ask after that is announced, and only it.
+        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 100), state("r2", State::Completed, 100), state("r3", State::Awaiting, 200)], dirs: vec![] });
+        wait_until(|| !counter.announced.lock().unwrap().is_empty());
+        assert_eq!(*counter.announced.lock().unwrap(), ["r3"]);
+        // It reconnects: what happened while it was away is not replayed.
+        drop(ws);
+        wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
+        let mut ws = connect(port);
+        hello(&mut ws, "desk", Some(&id));
+        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
+        answer(&mut ws, &token, &nonce);
+        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 300), state("r2", State::Completed, 300)], dirs: vec![] });
+        wait_until(|| handle.boards().iter().any(|b| b.connected && b.cards[0].state_since == 300));
+        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 300), state("r2", State::Completed, 400)], dirs: vec![] });
+        wait_until(|| counter.announced.lock().unwrap().len() == 2);
+        assert_eq!(*counter.announced.lock().unwrap(), ["r3", "r2"]);
+        handle.stop();
     }
 
     #[test]

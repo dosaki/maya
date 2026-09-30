@@ -39,6 +39,19 @@ impl Notifier {
         self.primed_finished = true;
         out
     }
+
+    /// Marks the asks and finished turns on `cards` as already announced,
+    /// without announcing them: an assistant's first board after it
+    /// connects says what happened while it was away, not what is new.
+    pub fn seed(&mut self, cards: &[Card]) {
+        for c in cards {
+            match c.state {
+                State::Awaiting => self.seen.insert((c.session_id.clone(), c.state_since)),
+                State::Completed => self.finished.insert((c.session_id.clone(), c.state_since)),
+                _ => false,
+            };
+        }
+    }
 }
 
 /// The session name as speech: dashes and hashes become spaces.
@@ -310,6 +323,21 @@ mod tests {
         assert_eq!(n.take_finished(&[again.clone()]).len(), 1);
         assert!(n.take_finished(&[again.clone()]).is_empty());
         assert!(n.take_finished(&[card("a", State::Working, 300, "")]).is_empty());
+    }
+
+    #[test]
+    fn seeded_cards_are_never_announced_but_later_changes_are() {
+        let mut n = Notifier::default();
+        assert!(n.take_new(&[]).is_empty() && n.take_finished(&[]).is_empty(), "primed");
+        let asked = card("a", State::Awaiting, 100, "Go?");
+        let done = card("b", State::Completed, 100, "");
+        n.seed(&[asked.clone(), done.clone(), card("c", State::Working, 100, "")]);
+        assert!(n.take_new(&[asked.clone(), done.clone()]).is_empty(), "a seeded ask is not announced");
+        assert!(n.take_finished(&[asked.clone(), done.clone()]).is_empty(), "a seeded finished turn is not announced");
+        let asked_again = card("a", State::Awaiting, 200, "And now?");
+        let done_again = card("b", State::Completed, 200, "");
+        assert_eq!(n.take_new(&[asked_again.clone()]).len(), 1);
+        assert_eq!(n.take_finished(&[done_again.clone()]).len(), 1);
     }
 
     fn card_awaiting(name: &str) -> Card {
