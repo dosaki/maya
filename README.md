@@ -126,8 +126,9 @@ quiet.
   pairing code at once, valid for five minutes ("Show pairing code" makes
   a new one). The main accepts incoming connections, so macOS asks once
   whether Maya may do so: allow it. To add an assistant, give it the
-  code; Maya shows each paired assistant and lets you remove them. If the
-  port is taken, Settings says so under the menu.
+  code; Maya lists each paired assistant with its platform and IP address
+  (and when it was last seen) and lets you remove them. If the port is
+  taken, Settings says so under the menu.
 - **Assistant.** Choose "Assistant to a main Maya" in the Network menu and
   enter the main's host, port, a name for this machine (its hostname when
   blank) and the pairing code. Pair once; Maya keeps a token and
@@ -136,8 +137,15 @@ quiet.
   <main>", "Reconnecting…" (with the last error under it) or the error.
   On macOS 15 and later, macOS asks once whether Maya may reach devices on
   the local network: allow it.
-- **Trust.** After pairing, each side proves it holds the token on every
-  connection; an assistant never obeys a main that cannot.
+- **Trust.** While pairing, the main proves it knows the code you typed;
+  an assistant keeps nothing from a main that cannot. After pairing, each
+  side proves it holds the token on every connection; an assistant never
+  obeys a main that cannot.
+- **Names and addresses.** The main tells machines apart by their IP
+  address; names are only labels, on cards and in what Maya says. Two
+  assistants with the same name show as "laptop (192.168.1.20)". A machine
+  that pairs again from the same address (after a reset, say) keeps its
+  place in the list with a new token.
 - **Versions.** Run the same Maya on every machine. The main notes an
   assistant that runs another version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
@@ -146,11 +154,14 @@ quiet.
 - **Plain text on the LAN.** Traffic is not encrypted in this version; all
   data is plain text.
 - **Remote cards.** On the main, an assistant's sessions sit in the same
-  columns as local ones, with a remote glyph and the machine's name under
-  the session name and no Terminal button; the "+" and resume dialogs get
+  columns as local ones, with a remote glyph (its tooltip names the
+  machine and its address) and the machine's name under the session name
+  and no Terminal button; the "+" and resume dialogs get
   a Machine picker, and announcements say "hexgrid on laptop". A card greys
   out thirty seconds after its assistant goes quiet and disappears after
-  five minutes; it comes back when the assistant reconnects.
+  five minutes; it comes back when the assistant reconnects. Whatever was
+  already waiting when an assistant connects is shown but not announced;
+  only what changes after that is.
 
 ## How it works
 

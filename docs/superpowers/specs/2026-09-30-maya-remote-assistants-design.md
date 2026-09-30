@@ -25,7 +25,9 @@ numbers, folder names.
 - **Main.** Settings › Network gains "Act as main Maya" with a port (default
   4127). Ticking it starts the server and shows a six-digit pairing code,
   valid for five minutes, with Regenerate, and the list of paired assistants
-  (name, platform, connected or last seen) with Remove. A Name field (the
+  (label, platform, IP address, connected or last seen) with Remove, e.g.
+  "Gnowee (macos, 192.168.55.70) — Connected". When it was last seen is
+  saved, so a restarted main still shows it. A Name field (the
   computer's hostname when blank) is what assistants show as the main's
   name; changing it restarts the server, and assistants reconnect.
 - **Assistant.** Settings › Network gains "Assistant to a main Maya" with
@@ -40,10 +42,25 @@ numbers, folder names.
 ### Pairing and trust
 
 - Pairing happens over the same WebSocket: the assistant connects, sends
-  `pair` with the code and its name; the main checks the code and its
-  expiry, mints a random 32-byte token, stores it against the assistant's
-  id, and returns it once. Both sides keep the token in their config
+  `pair` with the code and a nonce of its own; the main checks the code and
+  its expiry, mints a random 32-byte token, stores it against the
+  assistant's id, and returns it once in `paired`. Its `welcome` then
+  carries HMAC-SHA256(code, that nonce): proof that it knows the code too.
+  The assistant keeps the id and token only once that proof checks out;
+  otherwise it reports "The main Maya failed to prove it knows the pairing
+  code." and saves nothing. Both sides keep the token in their config
   (`~/.claude/maya/config.json`); it never travels again.
+- The main saves a pairing once `paired` and `welcome` are out. If either
+  cannot be sent (the assistant is already gone), the entry it just made
+  is removed, or for a machine pairing again given back its old token and
+  names, and nothing is saved.
+- **Identity is the address; names are labels.** The main records each
+  assistant's IP address as it sees it, at pairing and on every successful
+  authentication (with the name, hostname and platform the machine just
+  gave), and saves the list. A `pair` from the address of a paired entry
+  that is not connected is the same machine pairing again (its config was
+  reset, say): the entry keeps its id, gets a new token and the new names,
+  and its old board is dropped. Any other `pair` is a new entry.
 - Every later connection is challenge-response: the main sends a random
   nonce, the assistant answers with HMAC-SHA256(token, nonce). A wrong
   answer, an unknown assistant or a removed one is closed with a reason.
@@ -51,10 +68,15 @@ numbers, folder names.
   answer, and the main's `welcome` carries HMAC-SHA256(token, that nonce);
   an assistant that holds a token refuses a `welcome` without a valid proof
   ("The main Maya failed to prove it holds the pairing token.") and tries
-  again after 30 s. Only the `welcome` right after pairing carries no proof.
+  again after 30 s. The `welcome` right after pairing proves the code
+  instead (above).
 - A wrong or expired code is reported on the assistant ("Wrong or expired
   pairing code."). Three wrong codes from one address in five minutes are
   refused for five minutes.
+- At most eight connections may be in their handshake (not yet through
+  `welcome`) at once, and at most two from any one address; a third from
+  the same address is closed before the WebSocket upgrade. An assistant
+  frees its slot on `welcome`.
 - Traffic is plain text on the LAN; encryption is out of scope for this
   version and noted in the README.
 
@@ -67,7 +89,7 @@ with a `type`. Protocol version 1.
 Up (assistant → main):
 
 - `hello { protocol, app, name, hostname, platform }`
-- `pair { code }` (first connection only) or `auth { mac, nonce }`
+- `pair { code, nonce }` (first connection only) or `auth { mac, nonce }`
 - `board { cards, dirs }` — the assistant's cards as the main should show
   them, and its project folders for the "+" dialog. Sent after `welcome`,
   then whenever the board changes, at most once a second.
@@ -77,7 +99,7 @@ Up (assistant → main):
 
 Down (main → assistant):
 
-- `challenge { nonce }`, `welcome { name, mac }`, `paired { token }`,
+- `challenge { nonce }`, `welcome { name, mac }`, `paired { id, token }`,
   `bye { reason }`
 - `command { id, kind, ... }` with kinds `reply { session, text,
   attachments? }`, `answer { session, question, option }`, `compact
@@ -93,11 +115,13 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
 ### The main's board
 
 - `Card` gains `machine: Option<String>`: `None` for local cards, the
-  assistant's name for remote ones. The board is local cards plus every
+  assistant's label for remote ones, and `machine_address`, its IP address
+  as the main sees it. A label is the assistant's name, or `name
+  (address)` for every assistant sharing that name. The board is local cards plus every
   connected assistant's cards, in the same columns and order rules.
-- A remote card shows a small remote glyph after its name, the machine name
-  and platform as its subtitle and the glyph's tooltip, and no Terminal
-  button. Everything else on the card and in its modal works: the
+- A remote card shows a small remote glyph after its name, the machine's
+  label as its subtitle, "Runs on <label>, <address>" as the glyph's
+  tooltip, and no Terminal button. Everything else on the card and in its modal works: the
   conversation (fetched with `history`), reply with attachments, answer
   buttons, compact, rename, model, effort and mode.
 - Every session command in the app (`send_reply`, `answer_question`,
@@ -111,7 +135,8 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
   `board`; start and resume forward to it.
 - A snapshot older than thirty seconds greys the machine's cards (a
   `stale` flag on `Card`); after five minutes without one they disappear.
-  A disconnect greys them at once.
+  A disconnect greys them at once. A session on an expired board is not
+  routed anywhere either.
 - Attachments on a remote reply are sent inline (base64 in the command, the
   same 20 MB cap) and saved by the assistant where it saves its own.
 
@@ -127,14 +152,23 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
   `name`, and an ambiguous name asks "Which one: hexgrid on maya-mini or
   hexgrid on this Mac?". Read-backs say the machine for remote sessions.
   Folders for start and resume are listed as `project (on machine)` for
-  remote machines.
+  remote machines. Voice and notifications use the label.
+- Nothing on an assistant's first board after it connects (pairing or
+  reconnecting) is announced: the server hands that board to
+  `Notify::board_seeded` before it joins the boards, and the app seeds its
+  notifier with it (`Notifier::seed`). Later changes are announced.
 
 ### The assistant
 
 - Shows only its own sessions, exactly as today. The main's cards never
   appear on an assistant.
 - Runs commands from the main through the same functions its own buttons
-  use, and answers each with a `result`.
+  use, and answers each with a `result`. A reply's attachments are saved
+  only after the session is found, and deleted again if a later one or
+  the reply itself fails.
+- Looks the main's host up on a helper thread and gives up after five
+  seconds ("Could not find <host>: the lookup took more than 5 s."), then
+  backs off as for any failed connection.
 - Sends a `board` whenever its own refresh runs and the cards or folders
   changed, throttled to one a second.
 - Logs connection events and every command to the Debug tab under
@@ -147,7 +181,11 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
 - A command for a session that no longer exists returns `ok: false` with
   "Session is no longer running."; the main shows it where the action was
   taken, as it shows local errors.
-- Two assistants with the same name are shown as `name (hostname)`.
+- Two assistants with the same name are shown as `name (address)`, both
+  of them.
+- A board the main cannot decode (a newer Maya's) is noted beside the
+  assistant; the last good board is kept and counts as just received, so
+  its cards stay and do not grey while the note explains why.
 - A removed assistant is sent `bye { reason: "removed" }`, its cards are
   dropped, and it cannot reconnect; on its side the status shows "Removed
   by the main Maya; pair again."
@@ -166,7 +204,10 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
 - `src-tauri/src/net/merge.rs` — merging local and remote cards, stale and
   expiry rules, name de-duplication, routing a session id to a machine
   (pure).
-- `src-tauri/src/model.rs` — `machine`, `stale` on `Card`.
+- `src-tauri/src/model.rs` — `machine`, `machine_address`, `stale` on
+  `Card`.
+- `src-tauri/src/config.rs` — `PairedAssistant` with `address` and
+  `last_seen`.
 - `src-tauri/src/lib.rs` — role setup, the session commands routing to the
   server, `list_machines`, pairing commands for Settings.
 - `src-tauri/src/notify.rs`, `interpreter.rs`, `listener.rs` — machine in
@@ -179,12 +220,17 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
 
 - Unit: encode/decode of every message; pairing code format and expiry;
   HMAC handshake accepts the right answer and refuses the wrong one and a
-  reused nonce; merge order, stale and expiry; routing by session id; name
-  de-duplication; machine-qualified spoken lines and summary lines; the
+  reused nonce; merge order, stale and expiry; routing by session id (and
+  not to an expired board); labels by address; re-pairing by address;
+  handshake slots per address; `Notifier::seed`; machine-qualified spoken lines and summary lines; the
   `name on machine` matcher.
 - Integration (one process, localhost): a server and a client pair, the
   client sends a board, the server merges it, a `reply` command round-trips
-  to a `result`, a wrong HMAC is refused, a removal disconnects.
+  to a `result`, a wrong HMAC is refused, a removal disconnects, an
+  assistant refuses a main that cannot prove the code or the token, the
+  same address pairing again keeps its entry, a third handshake from one
+  address is refused, a client gone right after `pair` leaves no entry,
+  and nothing on a first board is announced.
 - End to end on two Macs: pair, see the remote cards, reply and answer from
   the main, start a session on the assistant from the main, hear the main
   announce a remote decision, and confirm the assistant stays silent.
