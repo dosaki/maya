@@ -187,6 +187,20 @@ export const PAIRING_TICK_MS = 30_000;
  * True while a pairing code is on screen or has just expired: the timer
  * repaints then, so the countdown moves and the code goes when it expires.
  */
+/** Refreshes the code's expiry line in place, or removes the code once it expired. */
+export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: number): void {
+  const code = model.network?.code;
+  const box = panel.querySelector<HTMLElement>(".settings__code");
+  const expiry = panel.querySelector<HTMLElement>(".settings__code-expiry");
+  if (!code || !box) return;
+  if (nowMs > code.expiresAt) {
+    box.remove();
+    expiry?.remove();
+  } else if (expiry) {
+    expiry.textContent = `expires in ${expiresInMinutes(code.expiresAt, nowMs)} min`;
+  }
+}
+
 export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean {
   const code = model.network?.code;
   return (model.networkRole ?? model.network?.role) === "main" && !!code && nowMs <= code.expiresAt + PAIRING_TICK_MS;
@@ -544,7 +558,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       codeBox.textContent = formatPairingCode(net.code.code);
       network.append(codeBox);
       const expiry = document.createElement("div");
-      expiry.className = "settings__hint";
+      expiry.className = "settings__hint settings__code-expiry";
       expiry.textContent = `expires in ${expiresInMinutes(net.code.expiresAt, nowMs)} min`;
       network.append(expiry);
     }
@@ -895,9 +909,12 @@ export async function initSettings(): Promise<void> {
     if (!panel.hidden) paint();
   });
 
-  // The pairing code's countdown, and its end: nothing else repaints then.
+  // The pairing code's countdown, and its end. Updated in place: a full
+  // repaint here would wipe unsaved text in the other sections every 30 s.
   setInterval(() => {
-    if (!panel.hidden && pairingRepaintDue(model, Date.now())) paint();
+    const now = Date.now();
+    if (panel.hidden || !pairingRepaintDue(model, now)) return;
+    tickPairingCode(panel, model, now);
   }, PAIRING_TICK_MS);
 
   await listen<{ id: string; received: number; total: number }>("voice-model", (e) => {

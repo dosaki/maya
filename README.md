@@ -136,7 +136,7 @@ quiet.
   <main>", "Reconnecting…" (with the last error under it) or the error.
   On macOS 15 and later, macOS asks once whether Maya may reach devices on
   the local network: allow it.
-- **Trust.** Each side proves it holds the pairing token on every
+- **Trust.** After pairing, each side proves it holds the token on every
   connection; an assistant never obeys a main that cannot.
 - **Versions.** Run the same Maya on every machine. The main notes an
   assistant that runs another version, or one whose board it cannot read.

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { pairingRepaintDue, renderSettings, type SettingsModel } from "./settings";
+import { pairingRepaintDue, renderSettings, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -335,6 +335,19 @@ describe("Network settings", () => {
     const expired = renderSettings(withCode, handlers(), 300_001);
     expect(expired.querySelector(".settings__code")).toBeNull();
     expect(expired.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Show pairing code");
+    // The tick edits in place, so unsaved text elsewhere in Settings survives.
+    const host = document.createElement("div");
+    host.append(renderSettings(withCode, handlers(), 100_000));
+    const marker = document.createElement("input");
+    marker.value = "typing";
+    host.append(marker);
+    tickPairingCode(host, withCode, 250_000);
+    expect(host.querySelector(".settings__code-expiry")?.textContent).toBe("expires in 1 min");
+    expect(host.querySelector(".settings__code")).not.toBeNull();
+    tickPairingCode(host, withCode, 320_000);
+    expect(host.querySelector(".settings__code")).toBeNull();
+    expect(host.querySelector(".settings__code-expiry")).toBeNull();
+    expect(marker.value).toBe("typing");
     expect(pairingRepaintDue(withCode, 100_000)).toBe(true);
     expect(pairingRepaintDue(withCode, 320_000)).toBe(true);
     expect(pairingRepaintDue(withCode, 340_000)).toBe(false);
