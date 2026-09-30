@@ -128,7 +128,10 @@ mod tests {
     }
 
     #[test]
-    fn the_focus_profile_can_be_read() {
-        assert!(matches!(focus_profile(), Some(0..=2)), "{:?}", focus_profile());
+    fn the_focus_profile_is_a_known_value_when_readable() {
+        // A server without the desktop shell (a CI runner) may not publish it.
+        if let Some(p) = focus_profile() {
+            assert!(p <= 2, "{p}");
+        }
     }
 }

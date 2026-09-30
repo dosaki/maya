@@ -4,10 +4,10 @@
 
 # Maya
 
-**Manage All Your Agents.** Maya is a macOS app that puts every coding-agent
-session running on your Mac on one board, tells you when one needs you, and
-lets you answer without hunting for the right terminal. Say her name and she
-does it by voice.
+**Manage All Your Agents.** Maya is a macOS and Windows app that puts every
+coding-agent session running on your computer on one board, tells you when
+one needs you, and lets you answer without hunting for the right terminal.
+Say her name and she does it by voice.
 
 ## What Maya does
 
@@ -18,7 +18,7 @@ their own logos. Each card shows the session's name, project, what it said
 last, how full its context window is, and the pull request it is working
 on, if any.
 
-**Act from the card.** Jump to the session's Terminal tab, read the whole
+**Act from the card.** Jump to the session's terminal, read the whole
 conversation as rendered markdown, reply (with files and images attached by
 drag-and-drop or paste), or answer the question it is asking with one click.
 Rename a session, change its model, effort or permission mode, and compact
@@ -44,8 +44,8 @@ summary, "Maya, tell hexgrid to go ahead" sends the reply after a read-back
 and your "yes", and "Maya, review collector 14" starts a review. When she
 asks you something back, just answer. See [Voice](#voice).
 
-**Several Macs.** Run Maya on your laptop, desktop and Mac mini. One is the
-main, the others are assistants. The main shows every session from every
+**Several machines.** Run Maya on your laptop, desktop and Mac mini, Macs
+and PCs alike. One is the main, the others are assistants. The main shows every session from every
 machine on one board, tells you what needs you, and drives them all by
 voice. Assistants stay quiet: they show their own sessions and run what
 the main asks, but do not notify, speak or listen for "Maya". Set it up
@@ -53,7 +53,9 @@ in Settings › Network.
 
 ## Install
 
-macOS only, Apple Silicon and Intel. One command:
+### macOS
+
+Apple Silicon and Intel. One command:
 
     curl -fsSL https://raw.githubusercontent.com/dosaki/maya/main/install.sh | sh
 
@@ -66,9 +68,31 @@ Prefer a manual install? Take the `.dmg` for your architecture from the
 [latest release](https://github.com/dosaki/maya/releases/latest), drag Maya
 to Applications, and the first time right-click it and choose Open.
 
+### Windows
+
+Windows 10 or 11, 64-bit. One command, in PowerShell:
+
+    irm https://raw.githubusercontent.com/dosaki/maya/main/install.ps1 | iex
+
+It installs the latest release for your user (no administrator rights) and
+puts Maya in the Start menu. Run it again to update. Prefer the installer?
+Take `Maya_<version>_x64-setup.exe` (or the `.msi`) from the
+[latest release](https://github.com/dosaki/maya/releases/latest). The builds
+are not signed, so SmartScreen asks the first time: choose More info, then
+Run anyway.
+
+On Windows Maya also needs [Git for Windows](https://git-scm.com/download/win),
+which Claude Code needs there anyway: sessions Maya starts run in its Git
+Bash, in a [Windows Terminal](https://aka.ms/terminal) window when it is
+installed. Install Claude Code with its native installer, so that
+`claude.exe` is on the PATH; npm's `claude.cmd` cannot take the multi-line
+prompts Maya sends.
+
+### Both
+
 You need [Claude Code](https://claude.com/claude-code) installed and signed
 in. The Pull Requests tab needs the [GitHub CLI](https://cli.github.com/)
-(`gh auth login`). Voice needs macOS 14 or later.
+(`gh auth login`). Voice needs macOS 14 or later, or Windows 10 or later.
 
 ### First run
 
@@ -103,8 +127,10 @@ resume or start a session, open or review a pull request.
   which needs Dictation turned on (System Settings › Keyboard › Dictation).
   On a work Mac where that switch is locked by a management profile,
   choose *Built-in (Whisper)* under Settings › Voice assistant › Speech
-  recognition and download a model; the 60 MB one is recommended.
-- **Privacy.** Audio never leaves the Mac; both recognisers run on the
+  recognition and download a model; the 60 MB one is recommended. Windows
+  has only *Built-in (Whisper)*: download a model in Settings before
+  turning listening on. Maya's built-in voice there is Microsoft Zira.
+- **Privacy.** Audio never leaves the computer; both recognisers run on the
   device. Only the text of your command, the last few exchanges, and a
   summary of the board and pull-request list go to Claude, through a
   one-shot `claude -p` call with no tools. The one-off model download is
@@ -122,7 +148,7 @@ Run Maya on multiple machines with one as the **main** and the others as
 quiet.
 
 - **Main.** Open Settings › Network and choose "Act as main Maya" in the
-  Network menu. Choose a port (default 4127) and a name for this Mac (its hostname when blank); Maya shows a six-digit
+  Network menu. Choose a port (default 4127) and a name for this machine (its hostname when blank); Maya shows a six-digit
   pairing code at once, valid for five minutes ("Show pairing code" makes
   a new one). The main accepts incoming connections, so macOS asks once
   whether Maya may do so: allow it. To add an assistant, give it the
@@ -239,9 +265,13 @@ write and drives them through their own interfaces.
 - **States** come from the hook events in `~/.claude/maya/events.jsonl`
   when the hook is installed, with a rule-based reading of the transcript
   as the fallback (a turn that ends in a question is "Awaiting Decision").
-- **Replies** go through Claude Code's session inbox socket, or are typed
-  into the session's Terminal tab for the other agents. Terminal actions
-  use AppleScript and AppKit, which is why Maya is macOS only for now.
+- **Replies** go through Claude Code's session inbox (a Unix socket on
+  macOS, a named pipe on Windows, where Maya authenticates with the
+  session's key), or are typed into the session's terminal for the other
+  agents. On macOS terminal actions use AppleScript and AppKit on
+  Terminal.app; on Windows Maya attaches to the session's console to type
+  into it and brings its Windows Terminal window forward (the window, not
+  the tab, when several sessions share one).
 - **Pull requests** come from `gh`, refreshed every two minutes.
 - **Voice** is a small listener sidecar (Apple's recogniser or whisper.cpp)
   streaming text to Maya; a wake-word and confirmation state machine
@@ -250,7 +280,17 @@ write and drives them through their own interfaces.
   board before doing anything.
 
 Settings and data live in `~/.claude/maya/`: `config.json`, `events.jsonl`,
-`hook.sh`, `maya.log`, downloaded speech models under `models/`.
+the hook (`hook.sh`, or `maya-hook.exe` on Windows), `maya.log`, downloaded
+speech models under `models/`.
+
+### Windows, for now
+
+- Codex and Antigravity sessions are not found on Windows yet (Maya finds
+  them with `ps` and `lsof`); Claude Code and Grok Build sessions are.
+- Focus raises the Windows Terminal window hosting a session; when several
+  sessions are tabs of one window, pick the tab yourself.
+- The `maya` command line tool drives sessions through tmux, so on Windows
+  run it inside WSL.
 
 ## Developing
 

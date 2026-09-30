@@ -1,8 +1,9 @@
 # Developing Maya
 
 Maya is a Tauri 2 app: a Rust backend in a Cargo workspace (`core/`,
-`src-tauri/` and `cli/`), a vanilla TypeScript frontend in `src/` (vitest),
-and a Swift listener sidecar in `ear/`.
+`src-tauri/`, `cli/`, `hook/` and `ear-rs/`), a vanilla TypeScript frontend
+in `src/` (vitest), and a listener sidecar: Swift in `ear/` on macOS, Rust
+in `ear-rs/` on Windows.
 
 ## Requirements
 
@@ -32,6 +33,51 @@ puts `Maya.app` in `target/release/bundle/macos/` (with `--target <triple>`,
 features only work from a bundle: the sidecar, the whisper framework and
 the microphone and speech permissions are all tied to it.
 
+## Windows
+
+Requirements: Rust (rustup, the MSVC toolchain), the Visual Studio C++
+build tools, CMake (whisper.cpp is built from source), Node 22+, pnpm, and
+Git for Windows. Then, from Git Bash or PowerShell:
+
+    pnpm install
+    pnpm ear:build      # maya-ear and maya-hook into src-tauri/binaries/
+    pnpm tauri dev
+    pnpm test
+    pnpm ear:test       # the Rust ear's tests
+    cargo test -p maya-core -p maya-hook -p maya-ear -p maya
+
+    pnpm tauri build --bundles nsis,msi
+
+puts the installers in `target/release/bundle/nsis/` and `msi/`
+(`tauri.windows.conf.json` adds the Windows sidecars and bundle targets).
+In PowerShell quote the list, `--bundles "nsis,msi"`, or it becomes two
+arguments.
+
+What is different on Windows, and where:
+
+- **Terminal.** `src-tauri/src/terminal_win.rs`: new sessions open in a
+  Windows Terminal window of their own running Git Bash, which runs the same
+  shell lines as macOS. A session's "tty" is `console:<pid>`;
+  `core/src/win_console.rs` attaches to that console to type key events
+  into it and to find the window showing it.
+- **Inbox.** `core/src/inbox.rs`: a named pipe, opened with the auth line
+  and the token from `~/.claude/sessions/<pid>.<hex>.key`, after checking
+  the pipe's server is the session. `cargo run -p maya-core --example
+  inbox_probe` lists live sessions, and with `<pid> <message>` sends one.
+- **Hook.** Claude Code runs hooks through Git Bash, which has no `jq`, so
+  the hook is `hook/`'s `maya-hook.exe`, copied into `~/.claude/maya/` by
+  Install hook.
+- **Notifications, voice, quiet.** `core/src/notify_win.rs`: toasts, SAPI,
+  and Do not disturb. The ElevenLabs key is in Credential Manager
+  (`src-tauri/src/voice.rs`).
+- **Ear.** `ear-rs/`: the Swift ear's protocol over WASAPI and whisper.cpp,
+  with the VAD ported case for case. `cargo run -p maya-ear --release
+  --example transcribe -- <model.bin> <file.wav>` runs a WAV through it.
+
+The release workflow's `windows` job runs these tests on every push and
+pull request, and on a release push builds the installers and hands them
+to the `macos` job as the `windows-installers` artifact.
+
 ## The CLI
 
 `cli/` builds on its own, with no Node toolchain and no `pnpm ear:build`:
@@ -58,6 +104,9 @@ nothing. Both jobs decide whether to release with
 - `Cargo.toml` — the workspace: shared version, dependencies and release profile.
 - `core/` — `maya_core`, the platform-neutral core: no Tauri, no AppKit.
 - `src-tauri/` — `maya`, the app: Tauri commands, voice, focus and dock; depends on `maya_core`.
+- `hook/` — `maya-hook`, the Claude Code hook on Windows.
+- `ear-rs/` — `maya-ear` for Windows: `vad.rs`, `resample.rs` and the
+  microphone choice in the library, the audio and whisper.cpp in `main.rs`.
 - `cli/` — `maya_cli`, binary `maya-cli`: the headless assistant for
   SSH boxes and containers (`pair`, `run`, `status`, `hooks`, `config`, `start`);
   depends on `maya_core`, no Tauri.
