@@ -1,10 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderModal } from "./modal";
+import { historyRefetchDue, renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
 const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
 const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn() });
+
+describe("historyRefetchDue", () => {
+  it("always refetches a local card, and a remote one only when its state, state time or snippet moved", () => {
+    expect(historyRefetchDue(base, { ...base })).toBe(true);
+    const remote = { ...base, machine: "laptop" };
+    expect(historyRefetchDue(remote, { ...remote })).toBe(false);
+    expect(historyRefetchDue(remote, { ...remote, stale: true, context: { used: 1, window: 2, percent: 50 } })).toBe(false);
+    expect(historyRefetchDue(remote, { ...remote, state: "working" })).toBe(true);
+    expect(historyRefetchDue(remote, { ...remote, stateSince: 5 })).toBe(true);
+    expect(historyRefetchDue(remote, { ...remote, snippet: "done" })).toBe(true);
+  });
+});
 
 describe("renderModal", () => {
   it("shows header, turns with kind classes and a composer", () => {

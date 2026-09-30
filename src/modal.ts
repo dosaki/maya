@@ -535,6 +535,17 @@ export function closeModal(): void {
   document.getElementById("modal-host")?.replaceChildren();
 }
 
+/**
+ * Whether a board refresh should refetch the open card's history. A local
+ * card's is a cheap file read, so always; a remote card's is a round trip
+ * to its assistant (pushed about once a second while it works), so only
+ * when its state, state time or snippet moved.
+ */
+export function historyRefetchDue(before: Card, fresh: Card): boolean {
+  if (!fresh.machine) return true;
+  return fresh.state !== before.state || fresh.stateSince !== before.stateSince || fresh.snippet !== before.snippet;
+}
+
 /** Called on every board refresh: keeps the open modal's card and history current. */
 export function refreshModal(cards: Card[]): void {
   if (!current) return;
@@ -546,6 +557,8 @@ export function refreshModal(cards: Card[]): void {
   }
   const stateChanged =
     fresh.state !== current.model.card.state || fresh.stateSince !== current.model.card.stateSince || fresh.hasInbox !== current.model.card.hasInbox;
+  const refetch = historyRefetchDue(current.model.card, fresh);
   current.model.card = fresh;
-  void loadTurns({ force: stateChanged });
+  if (refetch) void loadTurns({ force: stateChanged });
+  else if (stateChanged) paint();
 }
