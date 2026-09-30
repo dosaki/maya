@@ -80,7 +80,7 @@ pub fn tui_processes(ps: &str) -> Vec<(i32, String, Harness)> {
     for line in ps.lines() {
         let mut parts = line.split_whitespace();
         let (Some(pid), Some(tty), Some(cmd)) = (parts.next(), parts.next(), parts.next()) else { continue };
-        if tty == "??" || tty == "-" {
+        if tty == "??" || tty == "?" || tty == "-" {
             continue;
         }
         let Ok(pid) = pid.parse::<i32>() else { continue };
@@ -288,6 +288,8 @@ mod tests {
             "76470 ttys024 agy --continue\n",
             "  123 ttys001 /usr/local/bin/codex resume abc\n",
             "  999 ttys005 grep codex\n",
+            // Linux's `ps` shows a process with no terminal as `?`.
+            "  777 ?        codex\n",
         );
         let found = tui_processes(ps);
         assert_eq!(found, vec![(39566, "/dev/ttys002".to_string(), Harness::Codex), (76468, "/dev/ttys023".to_string(), Harness::Antigravity), (76470, "/dev/ttys024".to_string(), Harness::Antigravity), (123, "/dev/ttys001".to_string(), Harness::Codex)]);
