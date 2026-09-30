@@ -32,9 +32,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/maya-ear"],
+    "externalBin": [
+      "binaries/maya-ear"
+    ],
     "macOS": {
-      "frameworks": ["../vendor/whisper.xcframework/macos-arm64_x86_64/whisper.framework"]
+      "frameworks": [
+        "../vendor/whisper.xcframework/macos-arm64_x86_64/whisper.framework"
+      ],
+      "entitlements": "Entitlements.plist"
     }
   }
 }

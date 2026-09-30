@@ -53,6 +53,26 @@ jobs:
         id: version
         run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
 
+      # With the three APPLE_* secrets set, Tauri imports the certificate into
+      # a temporary keychain and signs the app, the listener and the whisper
+      # framework with it. Without them the bundles stay ad-hoc signed.
+      - name: Signing identity (when the secrets are set)
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            {
+              echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
+              echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+              echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+            } >> "$GITHUB_ENV"
+            echo "signing as $APPLE_SIGNING_IDENTITY"
+          else
+            echo "no signing secrets; bundles will be ad-hoc signed"
+          fi
+
       - name: Build (Apple Silicon)
         run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
 

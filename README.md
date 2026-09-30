@@ -118,5 +118,18 @@ An Apple Development certificate is free: in Xcode, Settings › Accounts,
 add your Apple ID, then Manage Certificates › + › Apple Development.
 `security find-identity -v -p codesigning` prints the exact name to use.
 Tauri signs the app, the listener sidecar and the whisper framework with
-it. Release builds from CI stay ad-hoc unless Developer ID secrets are
-configured.
+it. If Xcode and the paid developer program are both out of reach, a
+self-signed certificate works on your own Mac: Keychain Access ›
+Certificate Assistant › Create a Certificate, type Code Signing, then
+mark it Always Trust for code signing. `src-tauri/Entitlements.plist`
+disables library validation so the sidecar can load the whisper framework
+under a signature with no Team ID.
+
+To sign release builds in CI, export the certificate with its private key
+(Keychain Access › right-click it › Export, `.p12` with a password) and
+add three repository secrets: `APPLE_CERTIFICATE` (the `.p12` as base64,
+`base64 -i maya.p12 | pbcopy`), `APPLE_CERTIFICATE_PASSWORD` and
+`APPLE_SIGNING_IDENTITY` (the certificate's name). The workflow signs with
+them when present and stays ad-hoc otherwise. A self-signed certificate
+only satisfies Macs that trust it; distributing to others needs a
+Developer ID and notarization.
