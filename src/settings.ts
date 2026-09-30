@@ -182,6 +182,48 @@ function expiresInMinutes(expiresAt: number, nowMs: number): number {
   return Math.max(0, Math.ceil((expiresAt - nowMs) / 60_000));
 }
 
+type Field = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+
+/** The named field in `root` that has focus, and its selection when it has one. */
+interface FocusedField {
+  name: string;
+  start: number | null;
+  end: number | null;
+  direction: "forward" | "backward" | "none" | null;
+}
+
+function isField(el: Element | null): el is Field {
+  return el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement;
+}
+
+function focusedField(root: HTMLElement): FocusedField | null {
+  const el = document.activeElement;
+  if (!isField(el) || !el.name || !root.contains(el)) return null;
+  const focused: FocusedField = { name: el.name, start: null, end: null, direction: null };
+  if (el instanceof HTMLSelectElement) return focused;
+  try {
+    // Null (or a throw, in some engines) for inputs with no caret, such as checkboxes.
+    focused.start = el.selectionStart;
+    focused.end = el.selectionEnd;
+    focused.direction = el.selectionDirection;
+  } catch {
+    // no selection to keep
+  }
+  return focused;
+}
+
+function restoreFocus(root: HTMLElement, f: FocusedField): void {
+  const el = [...root.querySelectorAll("input, select, textarea")].find((e): e is Field => isField(e) && e.name === f.name);
+  if (!el) return;
+  el.focus();
+  if (el instanceof HTMLSelectElement || f.start === null || f.end === null) return;
+  try {
+    el.setSelectionRange(f.start, f.end, f.direction ?? undefined);
+  } catch {
+    // the field changed kind; focus alone will do
+  }
+}
+
 /** How often the pairing code's "expires in N min" line is repainted. */
 export const PAIRING_TICK_MS = 30_000;
 
@@ -805,7 +847,13 @@ export async function initSettings(): Promise<void> {
     });
 
   let stale = false;
-  const paint = () => panel.replaceChildren(renderSettings(model, handlers));
+  // A repaint replaces every field: the one being used gets its focus and
+  // caret back, so a status push never pulls the cursor out from under you.
+  const paint = () => {
+    const focused = focusedField(panel);
+    panel.replaceChildren(renderSettings(model, handlers));
+    if (focused) restoreFocus(panel, focused);
+  };
 
   const run = async (action: () => Promise<void>) => {
     model.error = null;
