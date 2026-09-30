@@ -59,7 +59,7 @@ nothing. Both jobs decide whether to release with
 - `core/` — `maya_core`, the platform-neutral core: no Tauri, no AppKit.
 - `src-tauri/` — `maya`, the app: Tauri commands, voice, focus and dock; depends on `maya_core`.
 - `cli/` — `maya_cli`, binary `maya-cli`: the headless assistant for
-  SSH boxes and containers (`pair`, `run`, `status`, `hooks`, `start`);
+  SSH boxes and containers (`pair`, `run`, `status`, `hooks`, `config`, `start`);
   depends on `maya_core`, no Tauri.
 - `core/src/` — `store.rs` (session cache), `state.rs` (card states),
   `watcher.rs`, `answer.rs` and `launch.rs` (Terminal automation),
@@ -78,7 +78,7 @@ nothing. Both jobs decide whether to release with
   (AppKit), `voice.rs` (ElevenLabs), and `ear.rs`, `wake.rs`,
   `listener.rs`, `models.rs` (the voice assistant).
 - `cli/src/` — `main.rs` and `args.rs` (subcommand parsing), `commands.rs`
-  (`pair`, `status`, `hooks`, `start`), `run_cmd.rs` (`run`, the headless
+  (`pair`, `status`, `hooks`, `config`, `start`), `run_cmd.rs` (`run`, the headless
   loop), `executor.rs` (running the main's commands), `tmux.rs` (named
   sessions for start and resume), `notify.rs` (writes the CLI's own status
   file on connect, disconnect and removal — the CLI never notifies, speaks

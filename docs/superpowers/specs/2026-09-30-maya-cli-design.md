@@ -87,6 +87,12 @@ maya --version
   store reads them; Codex and Antigravity TUIs are found by `ps`/`lsof` as
   today. A `claude` started in tmux, in a plain SSH shell or by `maya start`
   is a card on the main's board.
+- On Linux a session's tty comes from `/proc/<pid>/fd/0` when that is a
+  terminal, else from `ps` (whose "no terminal" is `?` there, `??` on
+  macOS), and a reply's inbox socket is checked for the session's pid with
+  `SO_PEERCRED` (`LOCAL_PEERPID` on macOS).
+- `config.json` (it holds the token) and `cli-status.json` are written
+  with mode 0600.
 - **Start and resume** create `tmux new-session -d -s maya-<8 hex chars>
   -c <project dir> 'sh -c "<the same claude command line the app builds>;
   exec ${SHELL:-sh}"'`, creating the tmux server if needed; the shell that
@@ -222,7 +228,7 @@ watcher change updates the store and marks the board due, as the app's
 
 ## Error handling
 
-- `pair`, `status`, `hooks`, `start`: one line on stderr, exit 1 (2 for a
+- `pair`, `status`, `hooks`, `config`, `start`: one line on stderr, exit 1 (2 for a
   usage or configuration error).
 - `run`: errors from the main's commands go back as the command's error;
   link errors are logged and retried with the client's backoff; a config
