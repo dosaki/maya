@@ -7,7 +7,8 @@
 //! one read. A separate deadline (`SILENCE`) drops a peer that sends nothing,
 //! and the stop flag ends every thread within a tick. Before `welcome` a
 //! connection has `PRE_AUTH_DEADLINE` in all, and at most `MAX_PRE_AUTH`
-//! such connections are open at once. Dropping a
+//! such connections are open at once, `MAX_PRE_AUTH_PER_ADDRESS` of them
+//! from any one address. Dropping a
 //! connection's sender (a newer connection for the same assistant, or its
 //! removal) ends that connection too.
 //!
@@ -23,7 +24,7 @@ use crate::log;
 use crate::store::now_ms;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -44,6 +45,8 @@ const MAX_CONNECTIONS: usize = 32;
 /// Connections not yet through `welcome` beyond this are closed at once, so
 /// strangers cannot hold every slot.
 const MAX_PRE_AUTH: usize = 8;
+/// And beyond this from one address, so one stranger cannot take them all.
+const MAX_PRE_AUTH_PER_ADDRESS: usize = 2;
 /// A connection must get through `welcome` within this, from accept.
 const PRE_AUTH_DEADLINE: Duration = Duration::from_secs(10);
 /// What `fail_pending` answers; `send_command_with` names the machine.
@@ -246,7 +249,40 @@ struct Ctx {
     main_name: String,
     live: AtomicUsize,
     /// Connections accepted and not yet through `welcome`.
-    pre_auth: AtomicUsize,
+    pre_auth: Mutex<HandshakeSlots>,
+}
+
+/// Connections not yet through `welcome`, in all and per peer address.
+#[derive(Default)]
+struct HandshakeSlots {
+    total: usize,
+    by_address: HashMap<IpAddr, usize>,
+}
+
+impl HandshakeSlots {
+    /// Takes a slot for a connection from `ip`, or says why there is none.
+    fn take(&mut self, ip: IpAddr) -> Result<(), &'static str> {
+        if self.total >= MAX_PRE_AUTH {
+            return Err("too many connections still in their handshake");
+        }
+        let n = self.by_address.get(&ip).copied().unwrap_or(0);
+        if n >= MAX_PRE_AUTH_PER_ADDRESS {
+            return Err("too many connections from this address still in their handshake");
+        }
+        self.by_address.insert(ip, n + 1);
+        self.total += 1;
+        Ok(())
+    }
+
+    fn release(&mut self, ip: IpAddr) {
+        self.total = self.total.saturating_sub(1);
+        if let Some(n) = self.by_address.get_mut(&ip) {
+            *n -= 1;
+            if *n == 0 {
+                self.by_address.remove(&ip);
+            }
+        }
+    }
 }
 
 impl Ctx {
@@ -350,7 +386,7 @@ pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>
     let paired = lock(&config_view).assistants.clone();
     let shared = Arc::new(Mutex::new(Server::new(paired)));
     let stop = Arc::new(AtomicBool::new(false));
-    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name: main_name_of(&config_view.lock().unwrap()), live: AtomicUsize::new(0), pre_auth: AtomicUsize::new(0) });
+    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name: main_name_of(&config_view.lock().unwrap()), live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()) });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
     log::line("network", format!("listening on port {port}"));
@@ -365,12 +401,12 @@ fn accept_loop(listener: TcpListener, ctx: Arc<Ctx>) {
                     log::line("network", format!("{addr}: refused, too many connections"));
                     continue;
                 }
-                if ctx.pre_auth.load(Ordering::SeqCst) >= MAX_PRE_AUTH {
-                    log::line("network", format!("{addr}: refused, too many connections still in their handshake"));
+                // Refused before the WebSocket upgrade: dropping the stream closes it.
+                if let Err(why) = lock(&ctx.pre_auth).take(addr.ip()) {
+                    log::line("network", format!("{addr}: refused, {why}"));
                     continue;
                 }
                 ctx.live.fetch_add(1, Ordering::SeqCst);
-                ctx.pre_auth.fetch_add(1, Ordering::SeqCst);
                 let c = ctx.clone();
                 let spawned = std::thread::Builder::new().name("net-conn".into()).spawn(move || {
                     serve(&c, stream, addr);
@@ -378,7 +414,7 @@ fn accept_loop(listener: TcpListener, ctx: Arc<Ctx>) {
                 });
                 if let Err(e) = spawned {
                     ctx.live.fetch_sub(1, Ordering::SeqCst);
-                    ctx.pre_auth.fetch_sub(1, Ordering::SeqCst);
+                    lock(&ctx.pre_auth).release(addr.ip());
                     log::line("network", format!("{addr}: no thread for the connection: {e}"));
                 }
             }
@@ -402,16 +438,16 @@ struct Link {
 }
 
 /// Counts a connection as pre-auth until dropped (`welcome` sent, or it failed).
-struct PreAuth<'a>(&'a Ctx);
+struct PreAuth<'a>(&'a Ctx, IpAddr);
 
 impl Drop for PreAuth<'_> {
     fn drop(&mut self) {
-        self.0.pre_auth.fetch_sub(1, Ordering::SeqCst);
+        lock(&self.0.pre_auth).release(self.1);
     }
 }
 
 fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
-    let pre_auth = PreAuth(ctx);
+    let pre_auth = PreAuth(ctx, addr.ip());
     let deadline = Instant::now() + PRE_AUTH_DEADLINE;
     // Accepted sockets inherit the listener's non-blocking flag on macOS.
     let _ = stream.set_nonblocking(false);
@@ -1197,17 +1233,49 @@ mod tests {
     #[test]
     fn strangers_in_their_handshake_cannot_take_every_slot() {
         let (handle, port) = test_server();
-        // Eight sockets that never even start the WebSocket handshake.
-        let strangers: Vec<TcpStream> = (0..MAX_PRE_AUTH).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
-        wait_until(|| handle.ctx.pre_auth.load(Ordering::SeqCst) == MAX_PRE_AUTH);
-        assert!(tungstenite::connect(format!("ws://127.0.0.1:{port}/")).is_err(), "a ninth is closed at once");
+        let (desk, id, token) = pair_client(&handle, port, "desk");
+        let in_handshake = |handle: &ServerHandle| handle.ctx.pre_auth.lock().unwrap().total;
+        wait_until(|| in_handshake(&handle) == 0);
+        // Two sockets from this address that never even start the WebSocket handshake.
+        let strangers: Vec<TcpStream> = (0..MAX_PRE_AUTH_PER_ADDRESS).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
+        wait_until(|| in_handshake(&handle) == MAX_PRE_AUTH_PER_ADDRESS);
+        assert!(tungstenite::connect(format!("ws://127.0.0.1:{port}/")).is_err(), "a third from the same address is closed at once");
+        assert!(handle.status().assistants[0].connected, "an assistant through welcome holds no slot");
         drop(strangers);
-        wait_until(|| handle.ctx.pre_auth.load(Ordering::SeqCst) == 0);
-        // Real assistants get in again, and one through welcome no longer counts.
-        let (_ws, _, _) = pair_client(&handle, port, "desk");
-        wait_until(|| handle.ctx.pre_auth.load(Ordering::SeqCst) == 0);
+        wait_until(|| in_handshake(&handle) == 0);
+        // The assistant reconnects with its token, and is through welcome.
+        drop(desk);
+        wait_until(|| !handle.status().assistants[0].connected);
+        let mut ws = connect(port);
+        hello(&mut ws, "desk", Some(&id));
+        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
+        answer(&mut ws, &token, &nonce);
+        wait_until(|| in_handshake(&handle) == 0);
         assert_eq!(handle.ctx.live.load(Ordering::SeqCst), 1);
         handle.stop();
+    }
+
+    #[test]
+    fn handshake_slots_cap_each_address_and_all_of_them() {
+        let ip = |n: u8| IpAddr::from([10, 0, 0, n]);
+        let mut slots = HandshakeSlots::default();
+        assert!(slots.take(ip(1)).is_ok() && slots.take(ip(1)).is_ok());
+        assert!(slots.take(ip(1)).is_err(), "a third from one address");
+        for n in 2..=(MAX_PRE_AUTH as u8 - 1) {
+            assert!(slots.take(ip(n)).is_ok());
+        }
+        assert_eq!(slots.total, MAX_PRE_AUTH);
+        assert!(slots.take(ip(100)).is_err(), "a ninth from anywhere");
+        slots.release(ip(1));
+        assert!(slots.take(ip(100)).is_ok(), "a freed slot is free for anyone");
+        for n in [1, 100] {
+            slots.release(ip(n));
+        }
+        for n in 2..=(MAX_PRE_AUTH as u8 - 1) {
+            slots.release(ip(n));
+        }
+        assert_eq!(slots.total, 0);
+        assert!(slots.by_address.is_empty(), "addresses with no slot are forgotten");
     }
 
     #[test]
