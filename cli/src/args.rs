@@ -98,12 +98,13 @@ fn parse_pair(rest: &[String]) -> Result<Cmd, String> {
 }
 
 fn parse_hooks(rest: &[String]) -> Result<Cmd, String> {
-    match rest.first().map(String::as_str) {
-        Some("install") => Ok(Cmd::Hooks(HooksOp::Install)),
-        Some("remove") => Ok(Cmd::Hooks(HooksOp::Remove)),
-        Some("status") => Ok(Cmd::Hooks(HooksOp::Status)),
-        _ => Err(format!("{USAGE}\nhooks needs one of: install|remove|status")),
-    }
+    let op = match rest.first().map(String::as_str) {
+        Some("install") => HooksOp::Install,
+        Some("remove") => HooksOp::Remove,
+        Some("status") => HooksOp::Status,
+        _ => return Err(format!("{USAGE}\nhooks needs one of: install|remove|status")),
+    };
+    no_more(&rest[1..], Cmd::Hooks(op))
 }
 
 fn parse_config(rest: &[String]) -> Result<Cmd, String> {
@@ -168,6 +169,13 @@ mod tests {
             assert!(err.starts_with("usage:"), "{line}: {err}");
             assert!(err.ends_with(&format!("\nunexpected argument: {stray}")), "{line}: {err}");
         }
+    }
+
+    #[test]
+    fn hooks_takes_exactly_one_operation() {
+        assert_eq!(parse(&a("hooks remove")).unwrap(), Cmd::Hooks(HooksOp::Remove));
+        assert!(parse(&a("hooks install typo")).unwrap_err().ends_with("\nunexpected argument: typo"));
+        assert!(parse(&a("hooks dance")).unwrap_err().contains("install|remove|status"));
     }
 
     #[test]

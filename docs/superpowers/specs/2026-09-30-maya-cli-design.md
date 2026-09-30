@@ -231,8 +231,8 @@ watcher change updates the store and marks the board due, as the app's
 - `pair`, `status`, `hooks`, `config`, `start`: one line on stderr, exit 1 (2 for a
   usage or configuration error).
 - A token after a command that takes none (`run`, `status`, `--version`,
-  `--help`) is a usage error naming it (`unexpected argument: <token>`),
-  exit 2.
+  `--help`) or after `hooks`' one operation is a usage error naming it
+  (`unexpected argument: <token>`), exit 2.
 - `run`: errors from the main's commands go back as the command's error;
   link errors are logged and retried with the client's backoff; a config
   that stops being an assistant (the file edited while running) ends `run`
