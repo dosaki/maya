@@ -41,12 +41,17 @@ the microphone and speech permissions are all tied to it.
 
 `maya-cli` depends only on `maya_core`, so unlike the rest of the workspace
 it also builds and tests on Linux. The release workflow's `linux` job runs
-`cargo test -p maya-core -p maya-cli` on Ubuntu on every push to `main` —
-the guard that keeps `maya_core` free of macOS-only code — and, on a
-release push, cross-compiles `maya-cli` for
-`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with `cross`
-(needs Docker) and uploads both to the same GitHub release the macOS job
-creates.
+first, on every pull request to `main` and every push to it: it runs
+`cargo test -p maya-core -p maya-cli` on Ubuntu (with tmux installed) —
+the guard that keeps `maya_core` free of macOS-only code. On a release
+push it also cross-compiles `maya-cli` for `x86_64-unknown-linux-musl`
+and `aarch64-unknown-linux-musl` with `cross` 0.2.5 (needs Docker) and
+hands both binaries to the `macos` job as the `linux-binaries` artifact.
+The `macos` job runs on pushes only and after `linux` succeeds; it tests
+the whole workspace, builds the app and the macOS binaries, and creates
+the release with every asset at once, so a failed Linux build publishes
+nothing. Both jobs decide whether to release with
+`scripts/release-version.sh`.
 
 ## Layout
 
@@ -97,7 +102,8 @@ release version; bump it everywhere, commit and push to `main`:
 The workflow publishes `v0.2.0` for both architectures, with notes generated
 from the merged pull requests and commits. A push whose version already has
 a release only runs the tests; a mismatch between `tauri.conf.json`,
-`package.json` and `Cargo.toml` fails the run.
+`package.json` and `Cargo.toml` fails the run. A pull request runs only
+the Linux tests.
 
 ## Signing
 

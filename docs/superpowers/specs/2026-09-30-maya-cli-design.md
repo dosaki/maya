@@ -100,13 +100,18 @@ maya --version
 
 ### Release
 
-- The release workflow gains a `cli` job that builds `cli/` for
-  `aarch64-apple-darwin`, `x86_64-apple-darwin` (signed with the "Maya
-  Development" identity when the signing secrets are present, else
-  unsigned), `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`
-  (via `cross`), and attaches `maya-macos-arm64`, `maya-macos-x86_64`,
-  `maya-linux-x86_64`, `maya-linux-aarch64` to the same `v<version>`
-  release. `maya --version` prints the workspace version.
+- The release workflow builds `cli/` for `aarch64-apple-darwin`,
+  `x86_64-apple-darwin` (signed with the "Maya Development" identity when
+  the signing secrets are present, else unsigned), `x86_64-unknown-linux-musl`
+  and `aarch64-unknown-linux-musl` (via `cross`), and attaches
+  `maya-macos-arm64`, `maya-macos-x86_64`, `maya-linux-x86_64`,
+  `maya-linux-aarch64` to the same `v<version>` release. The `linux` job
+  runs first (tests on pull requests and pushes; on a release push it also
+  builds the Linux binaries and uploads them as an artifact); the `macos`
+  job runs after it on pushes only and creates the release with every
+  asset at once, so a failed Linux build publishes nothing.
+  `scripts/release-version.sh` makes the release decision for both.
+  `maya --version` prints the workspace version.
 - CI runs `cargo test` for `core` and `cli` on macOS and Linux runners, so
   core stays portable.
 
