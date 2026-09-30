@@ -200,6 +200,7 @@ body { margin: 0; background: var(--bg); }
 .pr__chip--draft { border-color: var(--awaiting); color: var(--awaiting); }
 .pr__title { font-size: 13px; }
 .pr__meta { font-size: 12px; color: var(--muted); }
+.pr__machine { align-self: center; font-size: 12px; color: var(--gold); }
 
 .turn__text .md > :first-child { margin-top: 0; }
 .turn__text .md > :last-child { margin-bottom: 0; }
