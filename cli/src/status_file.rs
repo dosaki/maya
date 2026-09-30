@@ -17,8 +17,6 @@ pub fn path(maya_dir: &Path) -> PathBuf {
 }
 
 /// Writes via a temp file and rename, so a half-written file is never read.
-/// Called by `maya run` (Task 7); unused outside tests until then.
-#[allow(dead_code)]
 pub fn write(maya_dir: &Path, s: &RunStatus) -> Result<(), String> {
     std::fs::create_dir_all(maya_dir).map_err(|e| e.to_string())?;
     let text = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
@@ -33,8 +31,6 @@ pub fn read(maya_dir: &Path) -> Option<RunStatus> {
     serde_json::from_str(&text).ok()
 }
 
-/// Called by `maya run` (Task 7); unused outside tests until then.
-#[allow(dead_code)]
 pub fn remove(maya_dir: &Path) {
     let _ = std::fs::remove_file(path(maya_dir));
 }

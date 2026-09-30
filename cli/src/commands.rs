@@ -1,8 +1,9 @@
 //! The `pair`, `status` and `hooks` subcommands.
 
 use crate::args::HooksOp;
-use crate::executor::PairingExecutor;
+use crate::executor::CliExecutor;
 use crate::status_file;
+use crate::tmux::Tmux;
 use maya_core::config::{self, NetworkRole};
 use maya_core::hook_install;
 use maya_core::net::client::{self, Executor};
@@ -17,7 +18,7 @@ use std::sync::{Arc, Mutex};
 pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: &str) -> Result<String, String> {
     let name = name.map(str::to_string).unwrap_or_else(maya_core::net::local_hostname);
     let store = Arc::new(Mutex::new(Store::new(claude_dir.to_path_buf())));
-    let exec: Arc<dyn Executor> = Arc::new(PairingExecutor { store: store.clone() });
+    let exec: Arc<dyn Executor> = Arc::new(CliExecutor::new(store.clone(), Arc::new(Tmux::default())));
     let (main, id, token) = client::pair_with(exec, host, port, &name, code)?;
     let mut s = store.lock().unwrap();
     s.config.network.role = NetworkRole::Assistant;
