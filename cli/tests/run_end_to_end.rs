@@ -1,5 +1,6 @@
 //! `maya run` against a real main on localhost: pair, connect, show the
-//! board, run a command through the terminal, stop cleanly on a signal.
+//! board, run a command through the terminal, reply into the session's
+//! inbox socket, stop cleanly on a signal.
 
 use maya_cli::{commands, run_cmd, status_file};
 use maya_core::config::{NetworkConfig, PairedAssistant};
@@ -8,6 +9,8 @@ use maya_core::net::protocol::CommandKind;
 use maya_core::net::server::{send_command_with, start_with, Notify};
 use maya_core::net::NetworkStatus;
 use maya_core::terminal::{Call, FakeTerminal};
+use std::io::Read;
+use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -48,11 +51,20 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     let handle = start_with(recorder.clone(), Arc::new(Mutex::new(NetworkConfig { name: "Yhi".into(), ..Default::default() })), 0).unwrap();
     let port = handle.port();
 
-    // A registry session owned by this (live) process, on /dev/pts/3.
-    let (dir, store) = maya_core::actions::test_support::store_with_session("s1", std::process::id() as i32);
+    // A registry session owned by this (live) process, on /dev/pts/3, with
+    // an inbox socket this test listens on: the socket's owner is the
+    // session's pid, as with a real Claude Code session.
+    let pid = std::process::id() as i32;
+    let (dir, store) = maya_core::actions::test_support::store_with_session("s1", pid);
     drop(store);
     let claude_dir = dir.path().to_path_buf();
     let maya_dir = claude_dir.join("maya");
+    let socket = claude_dir.join("s1.sock");
+    let inbox = UnixListener::bind(&socket).unwrap();
+    let entry_path = claude_dir.join(format!("sessions/{pid}.json"));
+    let mut entry: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&entry_path).unwrap()).unwrap();
+    entry["messagingSocketPath"] = socket.to_string_lossy().into_owned().into();
+    std::fs::write(&entry_path, entry.to_string()).unwrap();
 
     // 1. Pair.
     let (code, _) = handle.open_pairing(maya_core::now_ms());
@@ -81,7 +93,18 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     assert_eq!(send_command_with(&handle.shared, "box", CommandKind::Compact { session: "s1".into() }, Duration::from_secs(5)), Ok(None));
     assert!(fake.calls.lock().unwrap().iter().any(|c| matches!(c, Call::Type { tty, text } if tty == "/dev/pts/3" && text == "/compact")));
 
-    // 5. A signal ends the run with 0 and removes the status file.
+    // 5. A reply from the main is written into the session's inbox as one line.
+    let reader = std::thread::spawn(move || {
+        let (mut s, _) = inbox.accept().unwrap();
+        let mut got = String::new();
+        s.read_to_string(&mut got).unwrap();
+        got
+    });
+    let reply = CommandKind::Reply { session: "s1".into(), text: "hello".into(), attachments: vec![] };
+    assert_eq!(send_command_with(&handle.shared, "box", reply, Duration::from_secs(5)), Ok(None));
+    assert_eq!(reader.join().unwrap(), maya_core::inbox::message_line("hello"));
+
+    // 6. A signal ends the run with 0 and removes the status file.
     stop.store(true, Ordering::SeqCst);
     let end = Instant::now() + Duration::from_secs(5);
     while !runner.is_finished() {
