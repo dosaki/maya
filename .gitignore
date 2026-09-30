@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Built listener sidecar binaries
+src-tauri/binaries/
+
+# Vendored whisper.cpp framework (fetched by scripts/fetch-whisper.sh)
+vendor/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

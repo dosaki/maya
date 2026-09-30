@@ -4,6 +4,7 @@ pub mod attachments;
 pub mod codex;
 pub mod config;
 pub mod dock;
+pub mod ear;
 pub mod foreign;
 pub mod grok;
 pub mod context;
@@ -11,8 +12,12 @@ pub mod events;
 pub mod focus;
 pub mod hook_install;
 pub mod inbox;
+pub mod interpreter;
 pub mod launch;
+pub mod listener;
+pub mod log;
 pub mod model;
+pub mod models;
 pub mod notify;
 pub mod pr;
 pub mod registry;
@@ -22,10 +27,13 @@ pub mod state;
 pub mod store;
 pub mod transcript;
 pub mod voice;
+pub mod wake;
 pub mod watcher;
 
 use config::Config;
+use listener::VoiceState;
 use model::Card;
+use serde::Serialize;
 use std::sync::Mutex;
 use std::time::Duration;
 use store::{now_ms, Store};
@@ -35,6 +43,7 @@ pub struct AppState {
     pub store: Mutex<Store>,
     pub notifier: Mutex<notify::Notifier>,
     pub reviews: Mutex<ReviewState>,
+    pub voice: Mutex<VoiceState>,
 }
 
 /// The last PR list fetched, and the error from the last attempt if it failed.
@@ -57,11 +66,89 @@ fn poll_reviews(app: &AppHandle) {
                 r.error = None;
                 r.fetched_at = Some(now_ms());
             }
-            Err(e) => r.error = Some(e),
+            Err(e) => {
+                log::line("app", format!("pull requests: {e}"));
+                r.error = Some(e);
+            }
         }
         r.clone()
     };
     let _ = app.emit("reviews", &snapshot);
+}
+
+/// The lines kept for the Debug tab, oldest first.
+#[tauri::command]
+fn log_lines() -> Vec<log::Line> {
+    log::lines()
+}
+
+/// Forgets the lines shown on the Debug tab; the file keeps everything.
+#[tauri::command]
+fn log_clear() {
+    log::clear();
+}
+
+/// Where this launch's log file is.
+#[tauri::command]
+fn log_path(state: TauriState<AppState>) -> String {
+    state.store.lock().unwrap().claude_dir().join("maya").join("maya.log").display().to_string()
+}
+
+#[tauri::command]
+fn list_whisper_models(state: TauriState<AppState>) -> Vec<models::ModelInfo> {
+    let claude = state.store.lock().unwrap().claude_dir().to_path_buf();
+    models::list(&claude)
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ModelProgress {
+    id: String,
+    received: u64,
+    total: u64,
+}
+
+/// Downloads one model, reporting progress as `voice-model` events.
+#[tauri::command(async)]
+fn download_whisper_model(app: AppHandle, state: TauriState<AppState>, id: String) -> Result<(), String> {
+    if models::is_in_flight(&id) {
+        return Err("That model is already downloading.".into());
+    }
+    let claude = state.store.lock().unwrap().claude_dir().to_path_buf();
+    log::line("app", format!("downloading whisper model {id}"));
+    let handle = app.clone();
+    let name = id.clone();
+    models::download(&claude, &id, &move |received, total| {
+        let _ = handle.emit("voice-model", ModelProgress { id: name.clone(), received, total });
+    })
+    .map(|_| {
+        log::line("app", format!("whisper model {id} ready"));
+        let config = state.store.lock().unwrap().config.clone();
+        if listener::should_start_after_download(&config, &id) {
+            log::line("app", "model downloaded; starting the listener");
+            state.voice.lock().unwrap().failures = 0;
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                let _ = listener::start_listening(&handle);
+            });
+        }
+    })
+    .map_err(|e| {
+        log::line("app", format!("whisper model {id}: {e}"));
+        e
+    })
+}
+
+#[tauri::command]
+fn remove_whisper_model(state: TauriState<AppState>, id: String) -> Result<(), String> {
+    let (claude, in_use) = {
+        let store = state.store.lock().unwrap();
+        (store.claude_dir().to_path_buf(), store.config.recognizer == config::Recognizer::Builtin && store.config.whisper_model == id)
+    };
+    if in_use {
+        return Err("That model is in use; pick another first.".into());
+    }
+    models::remove(&claude, &id)
 }
 
 /// The clones directory with `~` expanded, so the page can recognise review clones.
@@ -138,21 +225,25 @@ fn refresh_and_emit(app: &AppHandle) {
     };
     // A Focus mode (Do Not Disturb and friends) keeps Maya quiet; banners are
     // left to macOS, which filters them by the Focus's own rules.
-    let speak = speak && !((!fresh.is_empty() || !finished.is_empty()) && notify::focus_active());
+    let focus = (!fresh.is_empty() || !finished.is_empty()) && notify::focus_active();
+    if focus {
+        log::line("app", "focus mode is on: announcements stay silent");
+    }
+    let speak = speak && !focus;
     if wants_notify {
         for c in &fresh {
             // With a voice the banner stays silent; the sound is replaced, not doubled.
             notify::notify(c, !speak);
             if speak {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(notify::Utterance { text: line, eleven: eleven.clone() });
+                    notify::speak(notify::Utterance::new(line, eleven.clone()));
                 }
             }
         }
         if speak {
             for c in &finished {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(notify::Utterance { text: line, eleven: eleven.clone() });
+                    notify::speak(notify::Utterance::new(line, eleven.clone()));
                 }
             }
         }
@@ -451,14 +542,10 @@ fn try_voice(state: TauriState<AppState>) -> Result<(), String> {
         let store = state.store.lock().unwrap();
         eleven_settings(&store)
     };
+    // Through the one speech queue, so listening pauses and she does not
+    // wake herself on "Maya here".
     let line = "Maya here. hexgrid needs a decision".to_string();
-    match eleven {
-        Some((dir, key, voice_id)) => voice::speak(&dir, &key, &voice_id, &line),
-        None => {
-            notify::say_builtin(&line);
-            Ok(())
-        }
-    }
+    notify::speak_and_wait(notify::Utterance { fallback: false, ..notify::Utterance::new(line, eleven) })
 }
 
 #[tauri::command]
@@ -476,10 +563,31 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
             return Err(format!("Projects directory does not exist: {}.", dir.display()));
         }
     }
-    {
+    let before = {
         let mut store = state.store.lock().unwrap();
+        let before = store.config.clone();
         config::save(&store.config_path(), &config)?;
         store.config = config.clone();
+        before
+    };
+    match listener::listening_change(&before, &config) {
+        listener::ListenChange::Restart => {
+            log::line("listener", "settings changed; restarting");
+            state.voice.lock().unwrap().failures = 0;
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                let _ = listener::start_listening(&handle);
+            });
+        }
+        listener::ListenChange::Start => {
+            state.voice.lock().unwrap().failures = 0;
+            let handle = app.clone();
+            std::thread::spawn(move || {
+                let _ = listener::start_listening(&handle);
+            });
+        }
+        listener::ListenChange::Stop => listener::stop_listening(&app),
+        listener::ListenChange::None => {}
     }
     refresh_and_emit(&app);
     Ok(config)
@@ -492,7 +600,7 @@ pub fn run() {
     store.compact_events();
 
     tauri::Builder::default()
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), voice: Mutex::new(VoiceState::default()) })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             focus_session,
@@ -522,10 +630,31 @@ pub fn run() {
             set_elevenlabs_key,
             has_elevenlabs_key,
             list_elevenlabs_voices,
-            try_voice
+            try_voice,
+            listener::voice_listen,
+            listener::voice_confirm,
+            listener::voice_status,
+            listener::voice_history,
+            listener::voice_selftest,
+            log_lines,
+            log_clear,
+            log_path,
+            list_whisper_models,
+            download_whisper_model,
+            remove_whisper_model
         ])
         .setup(move |app| {
+            let log_path = dir.join("maya").join("maya.log");
+            if let Err(e) = log::init(&log_path) {
+                eprintln!("{e}");
+            }
+            let log_handle = app.handle().clone();
+            log::install_emitter(move |l| {
+                let _ = log_handle.emit("log", l);
+            });
+            log::line("app", format!("Maya {} started; log at {}", env!("CARGO_PKG_VERSION"), log_path.display()));
             focus::install_app_handle(app.handle().clone());
+            listener::install_speech_hook(app.handle().clone());
             dock::set_dock_icon();
             let handle = app.handle().clone();
             let sessions_dir = dir.join("sessions");
@@ -543,8 +672,22 @@ pub fn run() {
                 poll_reviews(&review_handle);
                 std::thread::sleep(Duration::from_secs(120));
             });
+            if app.state::<AppState>().store.lock().unwrap().config.listen {
+                let voice_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let _ = listener::start_listening(&voice_handle);
+                });
+            }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            // A stalled model download otherwise keeps its curl child alive
+            // under launchd after Maya quits, writing a 60-190 MB `.part`
+            // file to nowhere.
+            if let tauri::RunEvent::Exit = event {
+                models::abort_all();
+            }
+        });
 }

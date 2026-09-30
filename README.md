@@ -45,17 +45,63 @@ macOS only because it drives Terminal through AppleScript and AppKit.
 Settings and data live in `~/.claude/maya/` (`config.json`, `events.jsonl`,
 `hook.sh`, short-lived `prompts/`).
 
+## Voice (macOS 14+)
+
+Maya can listen for her name and act on what you say: "Maya, what's
+waiting?", "Maya, tell hexgrid to go ahead", focus, compact, resume or start
+a session, and "Maya, review collector 14" or "open" for the pull requests
+on the Pull Requests tab.
+
+- Off by default. Turn on "Listen for 'Maya'" in Settings; a microphone
+  then appears in the top bar, and clicking it opens the voice panel. macOS
+  asks for microphone and speech recognition access the first time.
+- The wake word is "Maya". Say it with the command, or say it alone and she
+  answers "Yes?" and waits for the command. When she asks you something
+  back, just answer: she listens for eight seconds without the wake word,
+  and remembers the last few exchanges so you can clarify.
+- Audio never leaves the Mac: speech recognition runs on the device. Only
+  the command text, the last few voice exchanges and a summary of the board
+  go to Claude (`claude -p`, Haiku by default, with no tools and only your
+  user-level Claude settings).
+- Sending text, answering a question, starting or resuming a session is read
+  back first and needs a "yes" (or the Yes button in the panel).
+- Listening pauses while Maya speaks, so she does not hear herself.
+
+Voice needs macOS 14 or later. Speech recognition is Apple's by default, which needs Dictation turned on
+(System Settings › Keyboard › Dictation). On a Mac where that switch is
+locked by a management profile, choose **Built-in (Whisper)** under
+Settings › Voice assistant › Speech recognition and download a model
+(60 MB recommended). Recognition then runs on this Mac through whisper.cpp;
+the one-off model download from Hugging Face is its only network access.
+
+The Debug tab shows what Maya heard, what she made of it, what she asked
+Claude, what came back, what ran and what she said, plus errors from the
+pull-request poller. The same lines go to `~/.claude/maya/maya.log`, which
+starts afresh on every launch.
+
 ## Develop
 
     pnpm install
+    pnpm ear:build      # build the voice listener sidecar (once, and after ear/ changes)
+    pnpm ear:test       # run sidecar tests
     pnpm tauri dev      # run
     pnpm test           # frontend tests
     cd src-tauri && cargo test   # Rust tests
 
-Requires Rust (rustup), Node 20+, pnpm, and `jq` on PATH for the hook.
+Requires Rust (rustup), Node 20+, pnpm, `jq` on PATH for the hook, and the
+Xcode Command Line Tools (`xcode-select --install`) for `swiftc`.
+
+`pnpm ear:build` also fetches whisper.cpp's framework (53 MB, once, into
+`vendor/`), then compiles `ear/main.swift` into
+`src-tauri/binaries/maya-ear-<target>`. That binary is not in git, and
+`pnpm tauri dev`, `pnpm tauri build` and `cargo test` all fail until it
+exists, because Tauri bundles it as a sidecar.
 
 ## Build
 
+    pnpm ear:build      # fetches whisper.cpp framework (53 MB, once, into vendor/)
     pnpm tauri build
 
-The app bundle lands in `src-tauri/target/release/bundle/`.
+The app bundle lands in `src-tauri/target/release/bundle/`. The build fails
+without the sidecar binary, so run `pnpm ear:build` first (it needs the
+Xcode Command Line Tools).

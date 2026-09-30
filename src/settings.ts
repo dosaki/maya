@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { VoiceStatus } from "./voice";
 
 export interface SettingsModel {
   hookInstalled: boolean | null;
@@ -12,6 +14,16 @@ export interface SettingsModel {
   elevenVoices: ElevenVoice[];
   elevenVoiceId: string;
   error: string | null;
+  listen: boolean;
+  microphone: string;
+  microphones: string[];
+  interpreterModel: string;
+  /** Why the listener stopped (Dictation off, no microphone…), shown under the toggle. */
+  listenError: string | null;
+  recognizer: Recognizer;
+  whisperModel: string;
+  models: ModelInfo[];
+  downloading: { id: string; received: number; total: number } | null;
 }
 
 export type VoiceProvider = "builtin" | "elevenlabs";
@@ -19,6 +31,14 @@ export interface ElevenVoice {
   voiceId: string;
   name: string;
 }
+
+export interface ModelInfo {
+  id: string;
+  label: string;
+  bytes: number;
+  downloaded: boolean;
+}
+export type Recognizer = "system" | "builtin";
 
 export interface SettingsHandlers {
   onInstall(): void;
@@ -32,6 +52,13 @@ export interface SettingsHandlers {
   onElevenKey(key: string): void;
   onElevenVoice(voiceId: string): void;
   onTryVoice(): void;
+  onListen(on: boolean): void;
+  onMicrophone(name: string): void;
+  onInterpreter(model: string): void;
+  onRecognizer(r: Recognizer): void;
+  onWhisperModel(id: string): void;
+  onDownloadModel(id: string): void;
+  onRemoveModel(id: string): void;
 }
 
 interface ConfigJson {
@@ -42,11 +69,31 @@ interface ConfigJson {
   speakNotifications: boolean;
   voiceProvider: VoiceProvider;
   elevenlabsVoiceId?: string | null;
+  listen: boolean;
+  microphone?: string | null;
+  interpreterModel: string;
+  recognizer: Recognizer;
+  whisperModel: string;
+}
+
+/** A titled card in the settings grid. */
+function section(title: string): HTMLElement {
+  const s = document.createElement("section");
+  s.className = "settings__section";
+  const heading = document.createElement("h2");
+  heading.className = "settings__heading";
+  heading.textContent = title;
+  s.append(heading);
+  return s;
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLElement {
   const root = document.createElement("div");
   root.className = "settings__body";
+  const sessions = section("Sessions");
+  const notifications = section("Notifications");
+  const assistant = section("Voice assistant");
+  root.append(sessions, notifications, assistant);
 
   const status = document.createElement("div");
   status.className = "settings__status";
@@ -56,7 +103,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
       : model.hookInstalled
         ? "Claude Code hook is installed. Awaiting Decision and Completed are precise."
         : "Claude Code hook is not installed. Permission prompts will show as Working.";
-  root.append(status);
+  sessions.append(status);
 
   const btn = document.createElement("button");
   btn.type = "button";
@@ -70,7 +117,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
     btn.disabled = model.hookInstalled === null;
     btn.addEventListener("click", () => h.onInstall());
   }
-  root.append(btn);
+  sessions.append(btn);
 
   const label = document.createElement("label");
   label.textContent = "Completed decays to Idle after (minutes)";
@@ -84,7 +131,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
     if (Number.isFinite(n) && n >= 1) h.onTimeout(Math.floor(n));
   });
   label.append(input);
-  root.append(label);
+  sessions.append(label);
 
   const dirLabel = document.createElement("label");
   dirLabel.textContent = "Projects directory";
@@ -95,7 +142,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   dirInput.value = model.projectsDir;
   dirInput.addEventListener("change", () => h.onProjectsDir(dirInput.value.trim()));
   dirLabel.append(dirInput);
-  root.append(dirLabel);
+  sessions.append(dirLabel);
 
   const clonesLabel = document.createElement("label");
   clonesLabel.textContent = "Clones directory (for PR reviews)";
@@ -106,7 +153,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   clonesInput.value = model.clonesDir;
   clonesInput.addEventListener("change", () => h.onClonesDir(clonesInput.value.trim()));
   clonesLabel.append(clonesInput);
-  root.append(clonesLabel);
+  sessions.append(clonesLabel);
 
   const notifyLabel = document.createElement("label");
   notifyLabel.className = "settings__check";
@@ -116,7 +163,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   notifyBox.checked = model.notifyOnAwaiting;
   notifyBox.addEventListener("change", () => h.onNotify(notifyBox.checked));
   notifyLabel.append(notifyBox, document.createTextNode(" Notify me when a session awaits a decision"));
-  root.append(notifyLabel);
+  notifications.append(notifyLabel);
 
   const speakLabel = document.createElement("label");
   speakLabel.className = "settings__check";
@@ -126,7 +173,150 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   speakBox.checked = model.speakNotifications;
   speakBox.addEventListener("change", () => h.onSpeak(speakBox.checked));
   speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
-  root.append(speakLabel);
+  notifications.append(speakLabel);
+
+  const listenLabel = document.createElement("label");
+  listenLabel.className = "settings__check";
+  const listenBox = document.createElement("input");
+  listenBox.type = "checkbox";
+  listenBox.name = "listen";
+  listenBox.checked = model.listen;
+  listenBox.addEventListener("change", () => h.onListen(listenBox.checked));
+  listenLabel.append(listenBox, document.createTextNode(' Listen for "Maya" (on-device speech recognition)'));
+  assistant.append(listenLabel);
+  if (model.listenError) {
+    // The listener stopped on its own (Dictation off, no microphone…): say
+    // why right under the toggle, or an unticked box looks like a glitch.
+    const err = document.createElement("div");
+    err.className = "settings__error";
+    err.dataset.for = "listen";
+    err.textContent = model.listenError;
+    assistant.append(err);
+  }
+
+  const recLabel = document.createElement("label");
+  recLabel.textContent = "Speech recognition";
+  const rec = document.createElement("select");
+  rec.name = "recognizer";
+  for (const [v, text] of [["system", "System (Apple)"], ["builtin", "Built-in (Whisper, runs on this Mac)"]] as const) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = text;
+    rec.append(o);
+  }
+  rec.value = model.recognizer;
+  rec.addEventListener("change", () => h.onRecognizer(rec.value === "builtin" ? "builtin" : "system"));
+  recLabel.append(rec);
+  assistant.append(recLabel);
+
+  if (model.recognizer === "builtin") {
+    const mb = (n: number) => `${Math.round(n / 1_000_000)} MB`;
+    const chosen = model.models.find((m) => m.id === model.whisperModel);
+    const modelPickerLabel = document.createElement("label");
+    modelPickerLabel.textContent = "Model";
+    const sel = document.createElement("select");
+    sel.name = "whisperModel";
+    for (const m of model.models) {
+      const o = document.createElement("option");
+      o.value = m.id;
+      o.textContent = m.downloaded ? `${m.label} ✓` : m.label;
+      sel.append(o);
+    }
+    sel.value = model.whisperModel;
+    sel.addEventListener("change", () => h.onWhisperModel(sel.value));
+    modelPickerLabel.append(sel);
+    assistant.append(modelPickerLabel);
+
+    const row = document.createElement("div");
+    row.className = "settings__row";
+    if (chosen && !chosen.downloaded) {
+      const dl = document.createElement("button");
+      dl.type = "button";
+      dl.dataset.action = "download-model";
+      if (model.downloading?.id === chosen.id) {
+        dl.textContent = `Downloading ${chosen.label}…`;
+      } else if (model.downloading) {
+        dl.textContent = "Wait for the current download";
+      } else {
+        dl.textContent = `Download (${mb(chosen.bytes)})`;
+      }
+      dl.disabled = model.downloading !== null;
+      dl.addEventListener("click", () => h.onDownloadModel(chosen.id));
+      row.append(dl);
+      if (!model.downloading) {
+        const hint = document.createElement("div");
+        hint.className = "settings__hint";
+        hint.textContent = "Download the model once; it stays on this Mac.";
+        row.append(hint);
+      }
+    }
+    if (chosen?.downloaded) {
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.dataset.action = "remove-model";
+      rm.dataset.model = chosen.id;
+      rm.textContent = "Remove";
+      rm.disabled = true;
+      rm.title = "The model in use cannot be removed; pick another first.";
+      row.append(rm);
+    }
+    for (const m of model.models) {
+      if (!m.downloaded || m.id === model.whisperModel) continue;
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.dataset.action = "remove-model";
+      rm.dataset.model = m.id;
+      rm.textContent = `Remove ${m.label.split(" (")[0]}`;
+      rm.addEventListener("click", () => h.onRemoveModel(m.id));
+      row.append(rm);
+    }
+    assistant.append(row);
+    if (model.downloading) {
+      const bar = document.createElement("progress");
+      bar.setAttribute("name", "modelDownload");
+      bar.max = model.downloading.total;
+      bar.value = model.downloading.received;
+      const downloadingLabel = model.models.find((m) => m.id === model.downloading!.id)?.label ?? model.downloading.id;
+      const pct = document.createElement("div");
+      pct.className = "settings__progress";
+      pct.textContent = `Downloading ${downloadingLabel}… ${Math.round((100 * model.downloading.received) / Math.max(1, model.downloading.total))}%`;
+      assistant.append(bar, pct);
+    }
+  }
+
+  const micLabel = document.createElement("label");
+  micLabel.textContent = "Microphone";
+  const mic = document.createElement("select");
+  mic.name = "microphone";
+  const auto = document.createElement("option");
+  auto.value = "";
+  auto.textContent = "Built-in (recommended)";
+  mic.append(auto);
+  for (const name of model.microphones) {
+    const o = document.createElement("option");
+    o.value = name;
+    o.textContent = name;
+    mic.append(o);
+  }
+  mic.value = model.microphones.includes(model.microphone) ? model.microphone : "";
+  mic.addEventListener("change", () => h.onMicrophone(mic.value));
+  micLabel.append(mic);
+  assistant.append(micLabel);
+
+  const modelLabel = document.createElement("label");
+  modelLabel.textContent = "Voice interpreter";
+  const modelSel = document.createElement("select");
+  modelSel.name = "interpreterModel";
+  for (const [v, text] of [["haiku", "Haiku (fast)"], ["sonnet", "Sonnet"], ["opus", "Opus"]] as const) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = text;
+    modelSel.append(o);
+  }
+  modelSel.value = model.interpreterModel;
+  modelSel.addEventListener("change", () => h.onInterpreter(modelSel.value));
+  modelLabel.append(modelSel);
+  assistant.append(modelLabel);
 
   const providerLabel = document.createElement("label");
   providerLabel.textContent = "Voice";
@@ -141,7 +331,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   provider.value = model.voiceProvider;
   provider.addEventListener("change", () => h.onVoiceProvider(provider.value === "elevenlabs" ? "elevenlabs" : "builtin"));
   providerLabel.append(provider);
-  root.append(providerLabel);
+  notifications.append(providerLabel);
 
   if (model.voiceProvider === "elevenlabs") {
     const keyLabel = document.createElement("label");
@@ -157,7 +347,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
       key.value = "";
     });
     keyLabel.append(key);
-    root.append(keyLabel);
+    notifications.append(keyLabel);
 
     const voiceLabel = document.createElement("label");
     voiceLabel.textContent = "ElevenLabs voice";
@@ -173,7 +363,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
     voice.disabled = model.elevenVoices.length === 0;
     voice.addEventListener("change", () => h.onElevenVoice(voice.value));
     voiceLabel.append(voice);
-    root.append(voiceLabel);
+    notifications.append(voiceLabel);
   }
 
   const tryBtn = document.createElement("button");
@@ -181,7 +371,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
   tryBtn.dataset.action = "try-voice";
   tryBtn.textContent = "Try the voice";
   tryBtn.addEventListener("click", () => h.onTryVoice());
-  root.append(tryBtn);
+  notifications.append(tryBtn);
 
   if (model.error) {
     const err = document.createElement("div");
@@ -194,10 +384,9 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers): HTMLE
 
 export async function initSettings(): Promise<void> {
   const panel = document.getElementById("settings");
-  const toggle = document.getElementById("settings-toggle");
-  if (!panel || !toggle) return;
+  if (!panel) return;
 
-  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null };
+  const model: SettingsModel = { hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku", listenError: null, recognizer: "system", whisperModel: "base.en-q5_1", models: [], downloading: null };
 
   const loadVoices = async () => {
     if (model.voiceProvider !== "elevenlabs") return;
@@ -206,9 +395,21 @@ export async function initSettings(): Promise<void> {
     model.elevenVoices = await invoke<ElevenVoice[]>("list_elevenlabs_voices");
   };
 
+  const loadModels = async () => {
+    try {
+      model.models = await invoke<ModelInfo[]>("list_whisper_models");
+    } catch {
+      model.models = [];
+    }
+  };
+
   const saveConfig = async (patch: Partial<ConfigJson>) => {
+    // The local model can be stale for fields it doesn't own (e.g. `listen`,
+    // which the voice panel can flip independently), so fetch the freshest
+    // config and merge the patch onto that rather than onto `model`.
+    const fresh = await invoke<ConfigJson>("get_config");
     const c = await invoke<ConfigJson>("set_config", {
-      config: { completedTimeoutMinutes: model.completedTimeoutMinutes, projectsDir: model.projectsDir || null, clonesDir: model.clonesDir || null, notifyOnAwaiting: model.notifyOnAwaiting, speakNotifications: model.speakNotifications, voiceProvider: model.voiceProvider, elevenlabsVoiceId: model.elevenVoiceId || null, ...patch },
+      config: { ...fresh, ...patch },
     });
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
@@ -217,6 +418,11 @@ export async function initSettings(): Promise<void> {
     model.speakNotifications = c.speakNotifications;
     model.voiceProvider = c.voiceProvider;
     model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
+    model.listen = c.listen;
+    model.microphone = c.microphone ?? "";
+    model.interpreterModel = c.interpreterModel;
+    model.recognizer = c.recognizer;
+    model.whisperModel = c.whisperModel;
   };
 
   const paint = () => panel.replaceChildren(renderSettings(model, handlers));
@@ -243,10 +449,44 @@ export async function initSettings(): Promise<void> {
     onElevenKey: (key) => void run(async () => { await invoke("set_elevenlabs_key", { key }); await loadVoices(); }),
     onElevenVoice: (voiceId) => void run(() => saveConfig({ elevenlabsVoiceId: voiceId || null })),
     onTryVoice: () => void run(() => invoke("try_voice")),
+    onListen: (on) => void run(async () => { await invoke("voice_listen", { on }); model.listen = on; }),
+    onMicrophone: (name) => void run(() => saveConfig({ microphone: name || null })),
+    onInterpreter: (m) => void run(() => saveConfig({ interpreterModel: m })),
+    onRecognizer: (r) => void run(() => saveConfig({ recognizer: r })),
+    onWhisperModel: (id) => void run(() => saveConfig({ whisperModel: id })),
+    onDownloadModel: (id) => {
+      model.downloading = { id, received: 0, total: model.models.find((m) => m.id === id)?.bytes ?? 0 };
+      paint();
+      void run(async () => {
+        try {
+          await invoke("download_whisper_model", { id });
+        } finally {
+          model.downloading = null;
+          await loadModels();
+        }
+      });
+    },
+    onRemoveModel: (id) => void run(async () => { await invoke("remove_whisper_model", { id }); await loadModels(); }),
   };
 
-  toggle.addEventListener("click", () => {
-    panel.hidden = !panel.hidden;
+  // The voice panel can turn listening on or off on its own; mirror that
+  // into the model so the Settings checkbox doesn't show a stale state.
+  // Every partial transcript emits `voice`: repaint only when listening
+  // actually changed, or a repaint would wipe a field being typed in.
+  await listen<VoiceStatus>("voice", (e) => {
+    const listenError = e.payload.state === "error" && e.payload.detail ? e.payload.detail : null;
+    if (model.listen === e.payload.listening && model.listenError === listenError) return;
+    model.listen = e.payload.listening;
+    model.listenError = listenError;
+    if (!panel.hidden) paint();
+  });
+
+  await listen<{ id: string; received: number; total: number }>("voice-model", (e) => {
+    // Only one model downloads at a time; ignore stray events for any other
+    // id (e.g. a late event from a download that was superseded).
+    if (model.downloading === null || e.payload.id !== model.downloading.id) return;
+    model.downloading = e.payload.received >= e.payload.total ? null : e.payload;
+    if (!panel.hidden) paint();
   });
 
   await run(async () => {
@@ -259,6 +499,19 @@ export async function initSettings(): Promise<void> {
     model.speakNotifications = config.speakNotifications;
     model.voiceProvider = config.voiceProvider;
     model.elevenVoiceId = config.elevenlabsVoiceId ?? "";
+    model.listen = config.listen;
+    model.microphone = config.microphone ?? "";
+    model.interpreterModel = config.interpreterModel;
+    model.recognizer = config.recognizer;
+    model.whisperModel = config.whisperModel;
     await loadVoices();
+    await loadModels();
+    try {
+      const raw = await invoke<string>("voice_selftest");
+      const parsed = JSON.parse(raw) as { devices?: string[] };
+      model.microphones = parsed.devices ?? [];
+    } catch {
+      // ignore: the microphone list is a nicety, not required to use settings
+    }
   });
 }
