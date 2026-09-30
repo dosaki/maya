@@ -48,7 +48,10 @@ pub struct AssistantStatus {
 pub struct AssistantLink {
     pub connected: bool,
     pub main_name: Option<String>,
+    /// The last failure; while `retrying`, the page shows it under "Reconnecting…".
     pub error: Option<String>,
+    /// The client is waiting to try again (not removed, not unpaired).
+    pub retrying: bool,
 }
 
 /// The running side of the network role: the main's server or the assistant's client.

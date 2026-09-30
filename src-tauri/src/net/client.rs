@@ -525,13 +525,16 @@ impl ClientNotify for TauriClientNotify {
     fn paired(&self, _: &str, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
-        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None });
+        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false });
     }
     fn disconnected(&self, error: &str) {
         log::line("network", format!("disconnected: {error}"));
+        // `reconnect` tries again after every failure but these two.
+        let retrying = error != NOT_PAIRED && error != REMOVED;
         self.set(|l| {
             l.connected = false;
             l.error = Some(error.to_string());
+            l.retrying = retrying;
         });
     }
     fn removed(&self) {
@@ -539,6 +542,7 @@ impl ClientNotify for TauriClientNotify {
         self.set(|l| {
             l.connected = false;
             l.error = Some(REMOVED.into());
+            l.retrying = false;
         });
     }
 }

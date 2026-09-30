@@ -26,6 +26,8 @@ export interface AssistantLink {
   connected: boolean;
   mainName: string | null;
   error: string | null;
+  /** The client waits to try again; `error` is then the last failure. */
+  retrying?: boolean;
 }
 
 /** The live `network_status`/`network` event payload. */
@@ -663,7 +665,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       : net.role === "assistant"
         ? net.assistant.connected
           ? `Connected to ${net.assistant.mainName ?? ""}`
-          : net.assistant.error
+          : net.assistant.error && !net.assistant.retrying
             ? net.assistant.error
             : "Reconnecting…"
         : null;
@@ -672,6 +674,15 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       statusEl.className = "settings__status settings__status--network";
       statusEl.textContent = statusText;
       network.append(statusEl);
+      // While it retries, the last failure sits under "Reconnecting…".
+      if (!model.networkError && net.role === "assistant" && !net.assistant.connected && net.assistant.retrying && net.assistant.error) {
+        statusEl.title = net.assistant.error;
+        const last = document.createElement("div");
+        last.className = "settings__hint";
+        last.dataset.for = "network-last-error";
+        last.textContent = `Last error: ${net.assistant.error}`;
+        network.append(last);
+      }
     }
   }
 

@@ -448,6 +448,26 @@ describe("Network settings", () => {
     expect(removed.querySelector(".settings__status--network")?.textContent).toBe("Removed by the main Maya; pair again.");
   });
 
+  it("says Reconnecting… while the client retries, with the last error under it", () => {
+    const retrying = renderSettings(
+      {
+        ...voiceBase,
+        networkRole: "assistant",
+        networkPaired: true,
+        network: { role: "assistant", code: null, assistants: [], assistant: { connected: false, mainName: null, error: "The main Maya closed the connection.", retrying: true } },
+      },
+      handlers(),
+    );
+    expect(retrying.querySelector(".settings__status--network")?.textContent).toBe("Reconnecting…");
+    expect(retrying.querySelector("[data-for=network-last-error]")?.textContent).toBe("Last error: The main Maya closed the connection.");
+    const back = renderSettings(
+      { ...voiceBase, networkRole: "assistant", networkPaired: true, network: { role: "assistant", code: null, assistants: [], assistant: { connected: true, mainName: "desk", error: null, retrying: false } } },
+      handlers(),
+    );
+    expect(back.querySelector(".settings__status--network")?.textContent).toBe("Connected to desk");
+    expect(back.querySelector("[data-for=network-last-error]")).toBeNull();
+  });
+
   it("shows a failed Pair's message in the status line even on a never-paired machine", () => {
     const neverPaired = renderSettings({ ...voiceBase, networkRole: "assistant", networkError: "Wrong or expired pairing code." }, handlers());
     expect(neverPaired.querySelector(".settings__status--network")?.textContent).toBe("Wrong or expired pairing code.");
