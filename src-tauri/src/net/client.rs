@@ -14,7 +14,7 @@
 //! Locks: none of its own. The Tauri adapters take `network` or `store` one
 //! at a time, never one while holding the other.
 
-use super::protocol::{decode_down, encode, mac, mac_matches, new_nonce, CommandKind, Down, Up, DEFAULT_PORT, MAX_FRAME, PROTOCOL};
+use super::protocol::{decode_down, encode, mac, mac_matches, new_nonce, Attachment, CommandKind, Down, Up, DEFAULT_PORT, MAX_FRAME, PROTOCOL};
 use super::AssistantLink;
 use crate::config::{NetworkConfig, NetworkRole};
 use crate::log;
@@ -24,7 +24,7 @@ use crate::AppState;
 use base64::Engine;
 use serde_json::Value;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
@@ -110,6 +110,33 @@ pub fn rewrite_attachments(text: &str, saved: &[(String, PathBuf)]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Runs a reply from the main that carries attachments. Nothing is written
+/// unless `session_exists`; the files are saved under `maya_dir`, `send`
+/// gets the text pointing at them, and on any failure the files saved so
+/// far are deleted again.
+pub fn reply_with_attachments(maya_dir: &Path, session_exists: bool, text: &str, attachments: Vec<Attachment>, now_ms: u64, send: impl FnOnce(String) -> Result<(), String>) -> Result<(), String> {
+    if !session_exists {
+        return Err("Session is no longer running.".into());
+    }
+    let mut saved: Vec<(String, PathBuf)> = Vec::with_capacity(attachments.len());
+    let out = save_attachments(maya_dir, attachments, now_ms, &mut saved).and_then(|()| send(rewrite_attachments(text, &saved)));
+    if out.is_err() {
+        for (_, path) in &saved {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    out
+}
+
+fn save_attachments(maya_dir: &Path, attachments: Vec<Attachment>, now_ms: u64, saved: &mut Vec<(String, PathBuf)>) -> Result<(), String> {
+    for a in attachments {
+        let bytes = base64::engine::general_purpose::STANDARD.decode(a.bytes.as_bytes()).map_err(|_| format!("The attachment {} could not be read.", clean(&a.name)))?;
+        let path = crate::attachments::save(maya_dir, &a.name, &bytes, now_ms)?;
+        saved.push((a.name, path));
+    }
+    Ok(())
 }
 
 /// Text from the main, stripped of control characters and kept short.
@@ -627,15 +654,13 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
     let done = |r: Result<(), String>| r.map(|_| None);
     match kind {
         CommandKind::Reply { session, text, attachments } => {
-            let maya_dir = state().store.lock().unwrap().claude_dir().join("maya");
-            let mut saved = Vec::with_capacity(attachments.len());
-            for a in attachments {
-                let bytes = base64::engine::general_purpose::STANDARD.decode(a.bytes.as_bytes()).map_err(|_| format!("The attachment {} could not be read.", clean(&a.name)))?;
-                let path = crate::attachments::save(&maya_dir, &a.name, &bytes, now_ms())?;
-                saved.push((a.name, path));
-            }
-            // The files are already local here; nothing further to attach.
-            done(crate::send_reply(app.clone(), state(), session, rewrite_attachments(&text, &saved), vec![]))
+            let (maya_dir, exists) = {
+                let state = state();
+                let mut store = state.store.lock().unwrap();
+                (store.claude_dir().join("maya"), store.card_for(&session, now_ms()).is_some())
+            };
+            // The files are local once saved; nothing further to attach.
+            done(reply_with_attachments(&maya_dir, exists, &text, attachments, now_ms(), |text| crate::send_reply(app.clone(), state(), session, text, vec![])))
         }
         CommandKind::Answer { session, ask_id, question, option } => done(crate::answer_question(app.clone(), state(), session, ask_id, question, option)),
         CommandKind::Compact { session } => done(crate::compact_session(app.clone(), state(), session)),
@@ -663,6 +688,35 @@ mod tests {
         let text = "look at this\nAttached file: /Users/main/.claude/maya/attachments/a.png";
         let out = rewrite_attachments(text, &[("/Users/main/.claude/maya/attachments/a.png".into(), std::path::PathBuf::from("/Users/asst/.claude/maya/attachments/1-a.png"))]);
         assert_eq!(out, "look at this\nAttached file: /Users/asst/.claude/maya/attachments/1-a.png");
+    }
+
+    #[test]
+    fn attachments_are_saved_only_for_a_live_session_and_removed_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = || std::fs::read_dir(dir.path().join("attachments")).map(|d| d.count()).unwrap_or(0);
+        let file = |name: &str, bytes: &str| Attachment { name: name.into(), bytes: bytes.into() };
+        let good = || file("/main/a.png", "aGVsbG8=");
+        // A session that is gone: nothing is written, nothing is sent.
+        let out = reply_with_attachments(dir.path(), false, "hi", vec![good()], 1, |_| panic!("not sent"));
+        assert_eq!(out, Err("Session is no longer running.".to_string()));
+        assert_eq!(files(), 0);
+        // The second attachment is unreadable: the first is deleted again.
+        let out = reply_with_attachments(dir.path(), true, "hi", vec![good(), file("/main/b.png", "not base64!")], 2, |_| panic!("not sent"));
+        assert_eq!(out, Err("The attachment /main/b.png could not be read.".to_string()));
+        assert_eq!(files(), 0);
+        // The reply itself fails: the saved files go too.
+        let out = reply_with_attachments(dir.path(), true, "hi", vec![good()], 3, |_| Err("no inbox".into()));
+        assert_eq!(out, Err("no inbox".to_string()));
+        assert_eq!(files(), 0);
+        // All good: the files stay and the text points at them.
+        let mut sent = String::new();
+        let out = reply_with_attachments(dir.path(), true, "look\nAttached file: /main/a.png", vec![good()], 4, |t| {
+            sent = t;
+            Ok(())
+        });
+        assert_eq!(out, Ok(()));
+        assert_eq!(files(), 1);
+        assert_eq!(sent, format!("look\nAttached file: {}", dir.path().join("attachments/4-a.png").display()));
     }
 
     #[test]
