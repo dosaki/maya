@@ -107,7 +107,24 @@ pub const LOGIN_SHELL: &str = "zsh";
 #[cfg(not(target_os = "macos"))]
 pub const LOGIN_SHELL: &str = "sh";
 
+/// The first file named `name` plus one of `PATHEXT`'s extensions (or
+/// `name` itself when it has one) in one of `path`'s folders.
+#[cfg(windows)]
+pub fn find_on_path(path: &str, name: &str) -> Option<PathBuf> {
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let candidates: Vec<String> = if Path::new(name).extension().is_some() {
+        vec![name.to_string()]
+    } else {
+        exts.split(';').filter(|e| !e.is_empty()).map(|e| format!("{name}{}", e.to_ascii_lowercase())).collect()
+    };
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| candidates.iter().map(move |c| dir.join(c)))
+        .find(|p| std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false))
+}
+
 /// The first executable file named `name` in one of `path`'s folders.
+#[cfg(unix)]
 pub fn find_on_path(path: &str, name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     std::env::split_paths(path)
@@ -116,8 +133,21 @@ pub fn find_on_path(path: &str, name: &str) -> Option<PathBuf> {
         .find(|p| std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false))
 }
 
+/// The native `claude.exe`: from this process's PATH, then where the
+/// installer puts it. npm's `claude.cmd` is passed over: Windows cannot hand
+/// a batch file the multi-line prompts Maya sends.
+#[cfg(windows)]
+pub fn claude_binary() -> Option<PathBuf> {
+    if let Some(p) = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, "claude.exe")) {
+        return Some(p);
+    }
+    let home = dirs::home_dir()?;
+    Some(home.join(".local").join("bin").join("claude.exe")).filter(|p| p.is_file())
+}
+
 /// The `claude` binary: from this process's PATH, then the usual install
 /// locations, then the login shell's PATH.
+#[cfg(unix)]
 pub fn claude_binary() -> Option<PathBuf> {
     if let Some(p) = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, "claude")) {
         return Some(p);
@@ -252,12 +282,23 @@ pub fn resolve_target(root: &Path, dirs: &[String], dir: Option<&str>, picked: O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     fn dirs() -> Vec<String> {
         vec!["a".into(), "b".into(), "sonarqube".into()]
     }
 
+    /// A `claude.cmd` running `body`.
+    #[cfg(windows)]
+    fn fake_binary(dir: &Path, body: &str) -> PathBuf {
+        let p = dir.join("claude.cmd");
+        std::fs::write(&p, format!("@echo off\r\n{body}\r\n")).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
     fn fake_binary(dir: &Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join("claude");
@@ -379,6 +420,9 @@ mod tests {
         assert!(!s.contains("activate"), "activation happens via AppKit, not AppleScript");
     }
 
+    // A fake claude on Windows is a batch file, which cannot take the
+    // classifier's multi-line prompt; the real one is claude.exe.
+    #[cfg(unix)]
     #[test]
     fn classify_uses_the_reply_and_ignores_none() {
         let t = tempfile::tempdir().unwrap();
@@ -388,6 +432,7 @@ mod tests {
         assert_eq!(classify(&bin, t.path(), "p", &dirs(), Duration::from_secs(5)), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn classify_times_out_and_falls_back() {
         let t = tempfile::tempdir().unwrap();
@@ -405,7 +450,7 @@ mod tests {
         let old = prompts.join("1.txt");
         std::fs::write(&old, "old").unwrap();
         let stale = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 3600);
-        std::fs::File::open(&old).unwrap().set_modified(stale).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&old).unwrap().set_modified(stale).unwrap();
         let fresh = prompts.join("2.txt");
         std::fs::write(&fresh, "fresh").unwrap();
 

@@ -44,13 +44,66 @@ pub fn parse(json: &str) -> Result<RegistrySession, serde_json::Error> {
     serde_json::from_str(json)
 }
 
-/// `~/.claude/projects/<cwd with "/" -> "-">/<sessionId>.jsonl`
+/// Longest project folder name before Claude Code shortens it.
+const PROJECT_NAME_MAX: usize = 200;
+
+/// The folder under `~/.claude/projects` Claude Code keeps `cwd`'s
+/// transcripts in: every UTF-16 unit that is not an ASCII letter or digit
+/// becomes `-` (`/Users/x/my.app` is `-Users-x-my-app`, `E:\dev\maya` is
+/// `E--dev-maya`), and a name over 200 characters is cut and suffixed with
+/// a base-36 hash of `cwd`, as Claude Code does.
+pub fn project_dir_name(cwd: &str) -> String {
+    let name: String = cwd.chars().flat_map(|c| std::iter::repeat_n(if c.is_ascii_alphanumeric() { c } else { '-' }, if c.is_ascii_alphanumeric() { 1 } else { c.len_utf16() })).collect();
+    if name.len() <= PROJECT_NAME_MAX {
+        return name;
+    }
+    let hash = cwd.encode_utf16().fold(0i32, |h, u| h.wrapping_shl(5).wrapping_sub(h).wrapping_add(u as i32));
+    format!("{}-{}", &name[..PROJECT_NAME_MAX], base36((hash as i64).unsigned_abs()))
+}
+
+fn base36(mut n: u64) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    loop {
+        out.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// `~/.claude/projects/<project_dir_name(cwd)>/<sessionId>.jsonl`
 pub fn transcript_path(claude_dir: &Path, s: &RegistrySession) -> PathBuf {
-    let project = s.cwd.replace('/', "-");
-    claude_dir.join("projects").join(project).join(format!("{}.jsonl", s.session_id))
+    claude_dir.join("projects").join(project_dir_name(&s.cwd)).join(format!("{}.jsonl", s.session_id))
+}
+
+/// True if a process with this pid exists and has not exited.
+#[cfg(windows)]
+pub fn pid_alive(pid: i32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: OpenProcess returns null or a handle we close; the exit code is written to a valid u32.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if h.is_null() {
+            // Access denied still means the process exists.
+            return std::io::Error::last_os_error().raw_os_error() == Some(5);
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0;
+        CloseHandle(h);
+        ok && code == STILL_ACTIVE as u32
+    }
 }
 
 /// True if a process with this pid exists (EPERM also means it exists).
+#[cfg(unix)]
 pub fn pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -85,6 +138,26 @@ pub fn list(dir: &Path, alive: &dyn Fn(i32) -> bool) -> Vec<RegistrySession> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_dir_names_match_claude_code() {
+        assert_eq!(project_dir_name("/Users/x/dev/eye"), "-Users-x-dev-eye");
+        assert_eq!(project_dir_name("E:\\dev\\maya"), "E--dev-maya");
+        assert_eq!(project_dir_name("C:\\WINDOWS\\system32"), "C--WINDOWS-system32");
+        assert_eq!(project_dir_name("/Users/x/my.app_v2"), "-Users-x-my-app-v2");
+        // One UTF-16 unit is one dash: two for a character outside the BMP.
+        assert_eq!(project_dir_name("/caf\u{e9}/\u{1f600}"), "-caf----");
+    }
+
+    #[test]
+    fn long_project_dir_names_are_cut_and_hashed() {
+        // "feo44x" is what Claude Code's `Math.abs(hash).toString(36)` gives for this path.
+        let name = project_dir_name(&format!("/{}", "a".repeat(250)));
+        assert_eq!(name, format!("-{}-feo44x", "a".repeat(199)));
+        assert_eq!(base36(0), "0");
+        assert_eq!(base36(36), "10");
+        assert_eq!(base36(2_147_483_648), "zik0zk", "the abs of i32::MIN");
+    }
     use std::path::Path;
 
     fn fixtures() -> std::path::PathBuf {

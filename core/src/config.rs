@@ -204,6 +204,7 @@ pub fn save(path: &Path, config: &Config) -> Result<(), String> {
 
 /// Writes `bytes` to `path` with mode 0600: created that way, and an
 /// existing file's mode is tightened before it is written.
+#[cfg(unix)]
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -212,10 +213,19 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.write_all(bytes)
 }
 
+/// Writes `bytes` to `path`. On Windows the file inherits the ACL of its
+/// folder under the user's profile, which only the user (and SYSTEM and
+/// administrators) can read.
+#[cfg(windows)]
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn save_leaves_the_config_readable_by_its_owner_only() {
         use std::os::unix::fs::PermissionsExt;

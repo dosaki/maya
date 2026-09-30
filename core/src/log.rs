@@ -88,7 +88,10 @@ pub fn file_line(l: &Line) -> String {
 pub fn clock(at_ms: u64) -> String {
     let secs = (at_ms / 1000) as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    #[cfg(unix)]
     unsafe { libc::localtime_r(&secs, &mut tm) };
+    #[cfg(windows)]
+    unsafe { libc::localtime_s(&mut tm, &secs) };
     format!("{:02}:{:02}:{:02}.{:03}", tm.tm_hour, tm.tm_min, tm.tm_sec, at_ms % 1000)
 }
 

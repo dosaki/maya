@@ -618,7 +618,7 @@ mod tests {
         });
         assert_eq!(out, Ok(()));
         assert_eq!(files(), 1);
-        assert_eq!(sent, format!("look\nAttached file: {}", dir.path().join("attachments/4-a.png").display()));
+        assert_eq!(sent, format!("look\nAttached file: {}", dir.path().join("attachments").join("4-a.png").display()));
     }
 
     #[test]
