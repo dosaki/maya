@@ -14,7 +14,12 @@
 //!
 //! Locks: `Server` sits behind one mutex held only for bookkeeping. `Notify`
 //! is never called with it held, so the Tauri adapter may take the app's own
-//! locks (network, then server, then store) without a cycle.
+//! locks (network, then server, then store) without a cycle, with one
+//! exception: the saves, `Notify::paired` and `Notify::paired_list_changed`,
+//! are made with it held, so they land in the order the list changed and an
+//! older snapshot can never overwrite a newer one. Their adapter takes only
+//! `store`, which comes after the server's mutex in that order (`AppState`
+//! in lib.rs), and nothing takes the server's mutex while holding `store`.
 
 use super::merge::{display_names, RemoteBoard};
 use super::protocol::{decode_up, encode, mac, mac_matches, new_id, new_nonce, new_token, Attempts, CommandKind, Down, NonceLog, PairingWindow, Up, MAX_FRAME, PROTOCOL};
@@ -53,6 +58,8 @@ const PRE_AUTH_DEADLINE: Duration = Duration::from_secs(10);
 const DISCONNECTED: &str = "assistant disconnected";
 
 /// What the server tells the app; the Tauri adapter lives in `lib.rs`.
+/// `paired` and `paired_list_changed` are called with the server's mutex
+/// held (see the module docs) and must not take it; the others never are.
 pub trait Notify: Send + Sync {
     fn board_changed(&self);
     /// An assistant's first board when this run of the main holds none for
@@ -345,7 +352,7 @@ impl ServerHandle {
     /// Forgets an assistant: it is told `bye removed`, its cards go, and its
     /// token no longer opens a connection.
     pub fn remove_assistant(&self, id: &str) {
-        let (list, label, status) = {
+        let (label, status) = {
             let mut s = lock(&self.shared);
             let label = s.label(id);
             s.paired.retain(|p| p.id != id);
@@ -355,10 +362,10 @@ impl ServerHandle {
             s.by_id.remove(id);
             s.peers.remove(id);
             s.sync_boards();
-            (s.paired.clone(), label, s.status(now_ms()))
+            self.ctx.notify.paired_list_changed(&s.paired);
+            (label, s.status(now_ms()))
         };
         log::line("network", format!("{label}: removed"));
-        self.ctx.notify.paired_list_changed(&list);
         self.ctx.notify.status_changed(status);
         self.ctx.notify.board_changed();
     }
@@ -630,18 +637,20 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
             }
             s.sync_boards();
             // A fresh pairing is saved after `welcome`, below.
-            Some((serial, s.label(&id), pairing.is_none().then(|| s.paired.clone())))
+            // Saved here, under the lock; a fresh pairing is saved after
+            // `welcome`, below. A stopped server's list is no longer the truth.
+            if pairing.is_none() && !ctx.stopped() {
+                ctx.notify.paired_list_changed(&s.paired);
+            }
+            Some((serial, s.label(&id)))
         } else {
             None
         }
     };
-    let Some((serial, label, changed)) = registered else {
+    let Some((serial, label)) = registered else {
         bye(ws, "removed");
         return None;
     };
-    if let Some(list) = changed {
-        ctx.notify.paired_list_changed(&list);
-    }
     let link = Link { id, serial, label, rx, first_board: std::cell::Cell::new(true) };
     // Authenticated: boards and results may now be large.
     ws.set_config(|c| {
@@ -657,9 +666,9 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         return None;
     }
     if pairing.is_some() {
-        let entry = lock(&ctx.shared).paired.iter().find(|p| p.id == link.id).cloned();
-        if let Some(entry) = entry {
-            ctx.notify.paired(&entry);
+        let s = lock(&ctx.shared);
+        if let Some(entry) = s.paired.iter().find(|p| p.id == link.id) {
+            ctx.notify.paired(entry);
         }
     }
     log::line("network", format!("{}: connected from {ip}", link.label));
@@ -915,7 +924,7 @@ fn mark_board(ctx: &Ctx, link: &Link, unreadable: bool) {
 /// Forgets a closed connection: its board greys, its commands fail, and
 /// when it was last seen is saved.
 fn leave(ctx: &Ctx, link: &Link, reason: &str) {
-    let (current, list) = {
+    let current = {
         let mut s = lock(&ctx.shared);
         let current = s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial);
         if current {
@@ -928,14 +937,17 @@ fn leave(ctx: &Ctx, link: &Link, reason: &str) {
             if let Some(p) = s.paired.iter_mut().find(|p| p.id == link.id) {
                 p.last_seen = Some(seen);
             }
+            // Saved under the lock; a stopped server's list is no longer
+            // the truth (a new one may be running).
+            if !ctx.stopped() {
+                ctx.notify.paired_list_changed(&s.paired);
+            }
         }
         s.fail_pending(link.serial);
-        (current, s.paired.clone())
+        current
     };
     log::line("network", format!("{}: disconnected ({reason})", link.label));
-    // A stopped server's list is no longer the truth: a new one may be running.
     if current && !ctx.stopped() {
-        ctx.notify.paired_list_changed(&list);
         ctx.announce();
         ctx.notify.board_changed();
     }
@@ -1025,6 +1037,8 @@ mod tests {
         pub announced: Mutex<Vec<String>>,
         /// The paired list as last saved.
         pub saved: Mutex<Vec<crate::config::PairedAssistant>>,
+        /// Saves made without the server's lock held (there should be none).
+        pub saves_outside_lock: AtomicUsize,
         notifier: Mutex<crate::notify::Notifier>,
         server: std::sync::OnceLock<Arc<Mutex<Server>>>,
     }
@@ -1045,11 +1059,28 @@ mod tests {
         fn status_changed(&self, _: NetworkStatus) {
             self.statuses.fetch_add(1, Ordering::SeqCst);
         }
-        fn paired(&self, _: &crate::config::PairedAssistant) {
+        fn paired(&self, assistant: &crate::config::PairedAssistant) {
+            self.check_under_lock();
             self.paired.fetch_add(1, Ordering::SeqCst);
+            let mut saved = self.saved.lock().unwrap();
+            match saved.iter_mut().find(|a| a.id == assistant.id) {
+                Some(a) => *a = assistant.clone(),
+                None => saved.push(assistant.clone()),
+            }
         }
         fn paired_list_changed(&self, list: &[crate::config::PairedAssistant]) {
+            self.check_under_lock();
             *self.saved.lock().unwrap() = list.to_vec();
+        }
+    }
+
+    impl Counter {
+        /// Saves must happen with the server's lock held, so they land in the
+        /// order the list changed. A save made without it finds the lock free.
+        fn check_under_lock(&self) {
+            if self.server.get().is_some_and(|s| s.try_lock().is_ok()) {
+                self.saves_outside_lock.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 
@@ -1394,6 +1425,36 @@ mod tests {
         assert!(handle.status().assistants.is_empty(), "no paired entry is left behind");
         assert_eq!(counter.paired.load(Ordering::SeqCst), 0, "nothing was saved");
         assert!(handle.status().code.is_none(), "the main read the code and paired, then took the pairing back");
+        handle.stop();
+    }
+
+    #[test]
+    fn the_paired_list_is_saved_under_the_server_lock_so_no_older_snapshot_wins() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let reconnect = |id: &str, token: &str| {
+            let mut ws = connect(port);
+            hello(&mut ws, "desk", Some(id));
+            let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
+            answer(&mut ws, token, &nonce);
+            ws
+        };
+        // Every kind of save: a pairing, a disconnect, a connect, a removal.
+        let (desk, id, token) = pair_client(&handle, port, "desk");
+        let (_twin, twin, _) = pair_client(&handle, port, "twin");
+        wait_until(|| counter.paired.load(Ordering::SeqCst) == 2);
+        drop(desk);
+        wait_until(|| counter.saved.lock().unwrap().iter().any(|a| a.id == id && a.last_seen.is_some()) && !handle.status().assistants[0].connected);
+        let desk = reconnect(&id, &token);
+        handle.remove_assistant(&twin);
+        drop(desk);
+        wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
+        // Each save was made with the lock held, so saves land in the order
+        // the list changed and the last one is the current list.
+        assert_eq!(counter.saves_outside_lock.load(Ordering::SeqCst), 0, "every save is made under the server lock");
+        let ids = |l: &[crate::config::PairedAssistant]| l.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+        wait_until(|| ids(&counter.saved.lock().unwrap()) == ids(&handle.shared.lock().unwrap().paired));
+        assert_eq!(ids(&counter.saved.lock().unwrap()), [id]);
         handle.stop();
     }
 
