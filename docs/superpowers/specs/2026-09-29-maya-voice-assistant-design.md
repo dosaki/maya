@@ -41,7 +41,10 @@ except the listener, which is plain speech recognition.
   reading a few times a second for the indicator.
 - Maya starts the helper when "Listen for Maya" is on in Settings and stops
   it when it is off or Maya quits. Nothing listens when Maya is not running.
-- While Maya speaks, listening pauses so she does not hear herself.
+- While Maya speaks a line of three words or more, listening pauses so she
+  does not hear herself. Short prompts ("Yes?", "Cancelled.") leave the ear
+  open, since people talk across them; her words are stripped from the front
+  of the next segment instead.
 
 ### Wake word
 

@@ -94,8 +94,12 @@ fn remember(app: &AppHandle, who: &str, text: &str) {
 fn on_speech(v: &mut VoiceState, phase: &notify::SpeechPhase) {
     match phase {
         notify::SpeechPhase::Starting(text) => {
-            if let Some(e) = v.ear.as_mut() {
-                e.pause();
+            // A short prompt ("Yes?") leaves the ear open so the user can
+            // talk over it; the flow strips her words from what comes back.
+            if pauses_ear_for(text) {
+                if let Some(e) = v.ear.as_mut() {
+                    e.pause();
+                }
             }
             if let Some(f) = v.flow.as_mut() {
                 f.ignore_line(text);
@@ -254,6 +258,13 @@ fn reply_then_idle(app: &AppHandle, generation: u64, text: &str, inbox: Option<&
     }
     drop(v);
     emit_voice(app);
+}
+
+/// Lines of three words or more mute the ear while spoken; shorter prompts
+/// ("Yes?", "Cancelled.") are over before a pause would help and the user
+/// often talks across them.
+pub(crate) fn pauses_ear_for(text: &str) -> bool {
+    text.split_whitespace().count() >= 3
 }
 
 /// A spoken line that ends in a question mark expects an answer.
@@ -986,6 +997,14 @@ mod tests {
         on_speech(&mut v, &SpeechPhase::Starting("Maya here. hexgrid needs a decision".into()));
         on_speech(&mut v, &SpeechPhase::Finished);
         assert_eq!(v.flow.as_mut().unwrap().on_segment("Maya here hexgrid needs a decision", 1000), vec![]);
+    }
+
+    #[test]
+    fn only_lines_of_three_words_or_more_mute_the_ear() {
+        assert!(!pauses_ear_for("Yes?"));
+        assert!(!pauses_ear_for("Cancelled."));
+        assert!(pauses_ear_for("Telling hexgrid: go ahead. Yes?"));
+        assert!(pauses_ear_for("Nothing is waiting on you."));
     }
 
     #[test]

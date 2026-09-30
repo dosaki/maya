@@ -148,15 +148,32 @@ impl Flow {
         Flow { state: State::Idle, ignore: None }
     }
 
-    /// Remembers Maya's last spoken line so hearing it back does nothing —
-    /// but only when it's long enough not to collide with her own short
-    /// prompts (like "Yes?", which would otherwise normalise to "yes" and
-    /// swallow the user's real answer). The stored line is one-shot: it is
-    /// cleared by the very next `on_segment` call whether or not it matched.
+    /// Remembers Maya's last spoken line so hearing it back does nothing.
+    /// The ear stays open while she says a short prompt ("Yes?"), so the
+    /// user may talk over it and the next segment can start with her words:
+    /// `on_segment` strips them from the front. A short line heard back on
+    /// its own is dropped except while a confirmation waits, where "yes" is
+    /// the user's real answer. The stored line is one-shot: it is cleared by
+    /// the very next `on_segment` call whether or not it matched.
     pub fn ignore_line(&mut self, spoken: &str) {
         let n = normalise(spoken);
-        if n.split_whitespace().count() >= 3 {
+        if !n.is_empty() {
             self.ignore = Some(n);
+        }
+    }
+
+    /// The segment with Maya's ignored line removed from its front, or None
+    /// when the whole segment was just her line and should be dropped.
+    fn without_ignored(&self, ignored: &str, text: &str) -> Option<String> {
+        let seg = normalise(text);
+        let short = ignored.split_whitespace().count() < 3;
+        if seg == ignored {
+            // Her own short prompt while a confirmation waits is the user's answer.
+            return if short && matches!(self.state, State::AwaitingConfirm { .. }) { Some(text.to_string()) } else { None };
+        }
+        match seg.strip_prefix(ignored) {
+            Some(rest) if rest.starts_with(' ') => Some(rest.trim().to_string()),
+            _ => Some(text.to_string()),
         }
     }
 
@@ -202,11 +219,17 @@ impl Flow {
 
     pub fn on_segment(&mut self, text: &str, now_ms: u64) -> Vec<Effect> {
         self.expire(now_ms);
-        if let Some(ignored) = self.ignore.take() {
-            if ignored == normalise(text) {
-                return vec![];
-            }
-        }
+        let owned;
+        let text = match self.ignore.take() {
+            Some(ignored) => match self.without_ignored(&ignored, text) {
+                Some(rest) => {
+                    owned = rest;
+                    owned.as_str()
+                }
+                None => return vec![],
+            },
+            None => text,
+        };
         // With the wake word and a command, the command wins over a no-word
         // inside it: "Maya tell coral stop" is a new command, not a cancel.
         if let (State::AwaitingConfirm { .. }, Wake::Command(c)) = (&self.state, extract(text)) {
@@ -376,6 +399,23 @@ mod tests {
         assert!(f.drop_expired(1000 + CONFIRM_WAIT_MS + 1));
         assert!(!f.has_pending());
         assert!(!f.drop_expired(1000 + CONFIRM_WAIT_MS + 2), "nothing left to drop");
+    }
+
+    #[test]
+    fn her_short_prompt_is_stripped_from_the_front_of_what_the_user_says_over_it() {
+        // The ear keeps listening while she says "Yes?", so the segment can
+        // start with her own word followed by the user's command.
+        let mut f = Flow::new();
+        f.await_reply(1_000);
+        f.ignore_line("Yes?");
+        assert_eq!(f.on_segment("Yes? Tell Collector 2 to approve.", 2_000), vec![Effect::Interpret("tell collector 2 to approve".into())]);
+        // Her "Yes?" heard back on its own means nothing while she waits for a command.
+        f.await_reply(3_000);
+        f.ignore_line("Yes?");
+        assert_eq!(f.on_segment("Yes?", 3_500), vec![]);
+        assert_eq!(f.state(3_600), "awaiting-command", "the window stays open");
+        // Without an ignored line, a segment is untouched.
+        assert_eq!(f.on_segment("tell coral to stop", 4_000), vec![Effect::Interpret("tell coral to stop".into())]);
     }
 
     #[test]

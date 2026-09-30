@@ -21,7 +21,7 @@ pub struct Reply {
 fn options_of(a: &crate::model::Awaiting) -> String {
     let labels: Vec<String> = a.questions.first().map(|q| q.options.iter().enumerate().map(|(i, o)| format!("{} {}", i + 1, o.label)).collect()).unwrap_or_default();
     if labels.is_empty() {
-        String::new()
+        " (free text: use reply)".into()
     } else {
         format!(" [{}]", labels.join(", "))
     }
@@ -62,7 +62,7 @@ pub fn system_prompt() -> String {
 Actions (use the session's name or id from the board):
 {"kind":"report"}                                   nothing to do; the answer is in say
 {"kind":"reply","session":"<name>","text":"<text>"} send text to that session
-{"kind":"answer","session":"<name>","option":<1-based number>} pick an option on its open question
+{"kind":"answer","session":"<name>","option":<1-based number>} pick one of the numbered options of its open question; a question marked "free text" has none, so use reply with the words to send
 {"kind":"focus","session":"<name>"}                 bring its terminal forward
 {"kind":"compact","session":"<name>"}               compact its context
 {"kind":"resume","dir":"<project folder>"}          resume the latest session of that folder
@@ -221,6 +221,9 @@ pub fn validate(action: &Value, cards: &[Card], dirs: &[String], prs: &[ReviewPr
             if kind == "answer" {
                 let n = a["option"].as_u64().unwrap_or(0) as usize;
                 let options = c.awaiting.as_ref().and_then(|w| w.questions.first()).map(|q| q.options.as_slice()).unwrap_or(&[]);
+                if options.is_empty() {
+                    return Err(format!("{} asked a free-text question. What should I tell it?", c.name));
+                }
                 if n == 0 || n > options.len() {
                     return Err(format!("{} has no option {n}", c.name));
                 }
@@ -365,6 +368,17 @@ mod tests {
     }
 
     #[test]
+    fn a_free_text_ask_is_marked_and_cannot_be_answered_by_number() {
+        let cards = [card("a", "Collector 2", State::Awaiting, Some("Approve, or amend?"))];
+        let s = board_summary(&cards);
+        assert!(s.contains("asks: Approve, or amend? (free text: use reply)"), "{s}");
+        let err = validate(&json!({"kind":"answer","session":"Collector 2","option":1}), &cards, &[], &[]).unwrap_err();
+        assert!(err.contains("What should I tell"), "{err}");
+        assert!(err.ends_with('?'), "the failure asks a question so the follow-up window opens: {err}");
+        assert!(system_prompt().contains("numbered options"));
+    }
+
+    #[test]
     fn review_and_open_resolve_a_pull_request_loosely() {
         let prs = [pr("dosaki/collector", 14, "Add ERD overlay", "alex", false), pr("dosaki/maya", 3, "Voice assistant", "tiago", true)];
         let by_number = validate(&json!({"kind":"review","pr":"#14"}), &[], &[], &prs).unwrap();
@@ -423,7 +437,7 @@ mod tests {
         assert!(validate(&serde_json::json!({"kind":"focus","session":"nautilus"}), &cards, &dirs, &[]).unwrap_err().contains("nautilus"));
         assert!(validate(&serde_json::json!({"kind":"start","dir":"nowhere","prompt":"x"}), &cards, &dirs, &[]).unwrap_err().contains("nowhere"));
         assert!(validate(&serde_json::json!({"kind":"start","dir":"maya","prompt":"x"}), &cards, &dirs, &[]).is_ok());
-        assert!(validate(&serde_json::json!({"kind":"answer","session":"a","option":3}), &cards, &dirs, &[]).unwrap_err().contains("option"));
+        assert!(validate(&serde_json::json!({"kind":"answer","session":"a","option":3}), &cards, &dirs, &[]).unwrap_err().contains("free-text"), "a prose ask cannot be answered by number");
         assert!(validate(&serde_json::json!({"kind":"dance"}), &cards, &dirs, &[]).unwrap_err().contains("dance"));
         assert!(validate(&serde_json::json!({"kind":"report"}), &cards, &dirs, &[]).is_ok());
 
@@ -459,7 +473,7 @@ mod tests {
         let s = board_summary(&[asking("a", "hexgrid", &["Postgres", "SQLite"])]);
         assert!(s.contains("| asks: Which stack? [1 Postgres, 2 SQLite]"), "{s}");
         let plain = board_summary(&[card("b", "coral", State::Awaiting, Some("Push now?"))]);
-        assert!(plain.ends_with("| asks: Push now?"), "no options, no brackets: {plain}");
+        assert!(plain.ends_with("| asks: Push now? (free text: use reply)"), "no options, so marked free text: {plain}");
     }
 
     #[test]
