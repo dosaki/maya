@@ -45,6 +45,26 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return n;
 }
 
+/**
+ * What to do when the chosen machine has no folders to offer: on this Mac,
+ * set the projects directory here; on an assistant, set it over there.
+ */
+function renderSetup(m: { machine: string; machines: MachineChoice[] }, h: { onOpenSettings(): void }): HTMLElement {
+  const setup = el("div", "modal__setup");
+  if (m.machine !== "") {
+    const name = m.machines.find((mm) => mm.value === m.machine)?.name ?? m.machine;
+    setup.append(el("p", "", `Set a projects directory in Settings on ${name}. Its subfolders become the choices here.`));
+    return setup;
+  }
+  setup.append(el("p", "", "Set a projects directory in Settings first. Its subfolders become the choices here."));
+  const open = el("button", "card__btn card__btn--primary", "Open Settings");
+  open.type = "button";
+  open.dataset.action = "open-settings";
+  open.addEventListener("click", () => h.onOpenSettings());
+  setup.append(open);
+  return setup;
+}
+
 /** Step one: pick a directory. Step two: pick one of its sessions. */
 export function renderResume(m: ResumeModel, h: ResumeHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = el("div", "modal");
@@ -65,21 +85,9 @@ export function renderResume(m: ResumeModel, h: ResumeHandlers, nowMs: number = 
   head.append(titles, close);
   panel.append(head);
 
-  if (m.needsSetup) {
-    const setup = el("div", "modal__setup");
-    setup.append(el("p", "", "Set a projects directory in Settings first. Its subfolders become the choices here."));
-    const open = el("button", "card__btn card__btn--primary", "Open Settings");
-    open.type = "button";
-    open.dataset.action = "open-settings";
-    open.addEventListener("click", () => h.onOpenSettings());
-    setup.append(open);
-    panel.append(setup);
-    root.append(backdrop, panel);
-    return root;
-  }
-
   const form = el("div", "newsession");
 
+  // The picker comes first, so a machine without folders can still be left for another.
   if (m.machines.length > 1) {
     const machineLabel = el("label", "newsession__field");
     machineLabel.append(el("span", "newsession__label", "Machine"));
@@ -95,6 +103,13 @@ export function renderResume(m: ResumeModel, h: ResumeHandlers, nowMs: number = 
     machineSelect.addEventListener("change", () => h.onMachine(machineSelect.value));
     machineLabel.append(machineSelect);
     form.append(machineLabel);
+  }
+
+  if (m.needsSetup) {
+    if (form.childElementCount > 0) panel.append(form);
+    panel.append(renderSetup(m, h));
+    root.append(backdrop, panel);
+    return root;
   }
 
   const dirLabel = el("label", "newsession__field");
@@ -184,6 +199,8 @@ async function loadDirs(machine: string): Promise<void> {
     const dirs = await invoke<string[]>("list_project_dirs", { machine });
     if (current !== me || me.model.machine !== machine) return;
     me.model.dirs = dirs;
+    // An assistant with no folders has no projects directory set over there.
+    me.model.needsSetup = machine !== "" && dirs.length === 0;
     const last = rememberedDir();
     if (machine === "" && last && dirs.includes(last)) {
       await loadSessions(last);
@@ -192,7 +209,7 @@ async function loadDirs(machine: string): Promise<void> {
   } catch (e) {
     if (current !== me || me.model.machine !== machine) return;
     const msg = String(e);
-    if (msg.includes("projects directory")) me.model.needsSetup = true;
+    if (machine === "" && msg.includes("projects directory")) me.model.needsSetup = true;
     else me.model.status = { ok: false, text: msg };
   }
   paint();
@@ -203,6 +220,8 @@ async function chooseMachine(machine: string): Promise<void> {
   current.model.machine = machine;
   current.model.dir = null;
   current.model.dirs = [];
+  // Setup belongs to the machine that needed it; `loadDirs` decides again for this one.
+  current.model.needsSetup = false;
   current.model.sessions = [];
   paint();
   await loadDirs(machine);

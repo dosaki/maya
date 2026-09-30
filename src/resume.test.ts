@@ -140,4 +140,46 @@ describe("resume flow", () => {
     expect(invoke).toHaveBeenLastCalledWith("list_project_dirs", { machine: "laptop" });
     expect([...document.querySelectorAll<HTMLOptionElement>("select[name=dir] option")].map((o) => o.textContent)).toEqual(["Choose a directory…", "remote-proj"]);
   });
+
+  it("keeps the Machine picker when this Mac has no projects directory, and lists a chosen assistant's folders", async () => {
+    invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "list_project_dirs") return args.machine ? Promise.resolve(["remote-proj"]) : Promise.reject("Set a projects directory in Settings first.");
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openResume();
+    await flush();
+    expect(document.querySelector(".modal__setup")).not.toBeNull();
+    const machineSel = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    expect([...machineSel.options].map((o) => o.textContent)).toEqual(["This Mac", "laptop"]);
+    machineSel.value = "laptop";
+    machineSel.dispatchEvent(new Event("change"));
+    await flush();
+    expect(document.querySelector(".modal__setup")).toBeNull();
+    expect([...document.querySelectorAll<HTMLOptionElement>("select[name=dir] option")].map((o) => o.textContent)).toEqual(["Choose a directory…", "remote-proj"]);
+    // Back on this Mac, the setup hint returns.
+    const again = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    again.value = "";
+    again.dispatchEvent(new Event("change"));
+    await flush();
+    expect(document.querySelector(".modal__setup")?.textContent).toContain("Set a projects directory in Settings first.");
+  });
+
+  it("says to set the projects directory on the assistant when a remote machine lists no folders", async () => {
+    invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "list_project_dirs") return Promise.resolve(args.machine ? [] : ["eye"]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openResume();
+    await flush();
+    const machineSel = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+    machineSel.value = "laptop";
+    machineSel.dispatchEvent(new Event("change"));
+    await flush();
+    const setup = document.querySelector(".modal__setup")!;
+    expect(setup.textContent).toContain("Set a projects directory in Settings on laptop");
+    expect(setup.querySelector("button[data-action=open-settings]")).toBeNull();
+    expect(document.querySelector("select[name=machine]")).not.toBeNull();
+  });
 });

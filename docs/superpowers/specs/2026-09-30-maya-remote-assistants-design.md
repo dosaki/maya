@@ -155,7 +155,11 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
   id run locally.
 - The "+" and resume dialogs gain a Machine picker, "This Mac" first, then
   each connected assistant. A remote machine's folders come from its last
-  `board`; start and resume forward to it.
+  `board`; start and resume forward to it. The picker shows even when this
+  Mac has no projects directory: the setup hint ("Set a projects directory
+  in Settings first.") belongs to "This Mac" and goes while another
+  machine is chosen. An assistant with no folders gets its own hint: "Set
+  a projects directory in Settings on <label>."
 - A snapshot older than thirty seconds greys the machine's cards (a
   `stale` flag on `Card`); after five minutes without one they disappear.
   A disconnect greys them at once. A session on an expired board is not
