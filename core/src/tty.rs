@@ -1,6 +1,7 @@
 //! The terminal device a process runs on: on Linux from `/proc/<pid>/fd/0`,
 //! else (and as the fallback) from `ps`.
 
+#[cfg(unix)]
 use std::process::Command;
 
 /// Turns `ps -o tty= -p <pid>` output into `/dev/ttysNNN` (macOS) or
@@ -28,7 +29,19 @@ fn tty_from_proc(pid: i32) -> Option<String> {
     tty_from_fd_link(&link.to_string_lossy())
 }
 
+/// Windows has no ttys: a session is reached through its process's console,
+/// keyed `console:<pid>`.
+#[cfg(windows)]
+pub fn tty_for_pid(pid: i32) -> Result<String, String> {
+    if crate::registry::pid_alive(pid) {
+        Ok(crate::win_console::console_key(pid))
+    } else {
+        Err(format!("no console for process {pid}"))
+    }
+}
+
 /// The terminal device hosting `pid`.
+#[cfg(unix)]
 pub fn tty_for_pid(pid: i32) -> Result<String, String> {
     #[cfg(target_os = "linux")]
     if let Some(t) = tty_from_proc(pid) {

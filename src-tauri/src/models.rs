@@ -46,12 +46,42 @@ pub fn is_downloaded(claude_dir: &Path, id: &str) -> bool {
     }
 }
 
+/// Hex SHA-256 of the file at `path`, read in 1 MB chunks.
 fn sha256_of(path: &Path) -> Result<String, String> {
-    let out = Command::new("shasum").args(["-a", "256"]).arg(path).output().map_err(|e| format!("could not run shasum: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("shasum failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
     }
-    Ok(String::from_utf8_lossy(&out.stdout).split_whitespace().next().unwrap_or("").to_string())
+    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Stops the download child `pid`.
+#[cfg(unix)]
+fn kill(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+}
+
+/// Stops the download child `pid`.
+#[cfg(windows)]
+fn kill(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    // SAFETY: OpenProcess returns null or a handle we close.
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !h.is_null() {
+            TerminateProcess(h, 1);
+            CloseHandle(h);
+        }
+    }
 }
 
 /// Model ids currently downloading, mapped to the curl child's pid. Guards
@@ -69,7 +99,7 @@ pub fn is_in_flight(id: &str) -> bool {
 /// Kills every curl child still downloading, for a clean app exit.
 pub fn abort_all() {
     for pid in IN_FLIGHT.lock().unwrap().values() {
-        unsafe { libc::kill(*pid as i32, libc::SIGTERM) };
+        kill(*pid);
     }
 }
 

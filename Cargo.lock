@@ -1928,6 +1928,7 @@ dependencies = [
  "tauri-build",
  "tempfile",
  "tungstenite",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

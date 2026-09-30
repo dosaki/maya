@@ -26,6 +26,8 @@ pub mod terminal;
 pub mod transcript;
 pub mod tty;
 pub mod watcher;
+#[cfg(windows)]
+pub mod win_console;
 
 /// `~/.claude`, or `/.claude` when the home directory is unknown.
 pub fn claude_dir() -> std::path::PathBuf {

@@ -6,6 +6,8 @@ use maya_core::terminal::Terminal;
 use std::path::Path;
 use std::process::Command;
 
+pub use crate::focus::focus_pid;
+
 /// Runs `cmd` in a new Terminal window.
 pub fn open_terminal_with(cmd: &str) -> Result<(), String> {
     let out = Command::new("osascript")

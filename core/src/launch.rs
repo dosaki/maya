@@ -133,6 +133,23 @@ pub fn find_on_path(path: &str, name: &str) -> Option<PathBuf> {
         .find(|p| std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false))
 }
 
+/// Git for Windows' `bash.exe`, which Claude Code itself needs on Windows
+/// and which runs Maya's shell lines there: `CLAUDE_CODE_GIT_BASH_PATH`,
+/// the usual install folders, then beside the `git` on PATH.
+#[cfg(windows)]
+pub fn git_bash() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH").map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let program_files = [std::env::var_os("ProgramFiles"), std::env::var_os("ProgramFiles(x86)"), std::env::var_os("LOCALAPPDATA").map(|l| Path::new(&l).join("Programs").into_os_string())];
+    if let Some(p) = program_files.into_iter().flatten().map(|d| Path::new(&d).join("Git").join("bin").join("bash.exe")).find(|p| p.is_file()) {
+        return Some(p);
+    }
+    // git.exe lives in <Git>\cmd; bash.exe in <Git>in.
+    let git = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, "git.exe"))?;
+    Some(git.parent()?.parent()?.join("bin").join("bash.exe")).filter(|p| p.is_file())
+}
+
 /// The native `claude.exe`: from this process's PATH, then where the
 /// installer puts it. npm's `claude.cmd` is passed over: Windows cannot hand
 /// a batch file the multi-line prompts Maya sends.

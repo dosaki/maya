@@ -1,14 +1,54 @@
 pub use maya_core::{actions, answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, launch, log, model, net, notify, pr, registry, resume, reviews, state, store, terminal, transcript, tty, watcher};
 
+#[cfg(target_os = "macos")]
 pub mod dock;
 pub mod ear;
+#[cfg(target_os = "macos")]
 pub mod focus;
 pub mod listener;
 pub mod models;
 pub mod net_app;
+#[cfg(target_os = "macos")]
 pub mod terminal_app;
+#[cfg(windows)]
+pub mod terminal_win;
 pub mod voice;
 pub mod wake;
+
+/// This platform's terminal: `TERMINAL`, `open_terminal_with` and `focus_pid`.
+#[cfg(target_os = "macos")]
+pub(crate) use terminal_app as term;
+#[cfg(windows)]
+pub(crate) use terminal_win as term;
+
+/// Opens an http(s) URL in the default browser.
+#[cfg(target_os = "macos")]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    let ok = std::process::Command::new("open").arg(url).status().map_err(|e| format!("could not open the browser: {e}"))?;
+    if ok.success() {
+        Ok(())
+    } else {
+        Err("The browser refused to open the link.".into())
+    }
+}
+
+/// Opens an http(s) URL in the default browser. ShellExecute takes the URL
+/// as one argument; no shell reads it, so `&` and the like stay literal.
+#[cfg(windows)]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let (verb, file) = (wide("open"), wide(url));
+    // SAFETY: NUL-terminated strings that outlive the call.
+    let r = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
+    // Values above 32 mean success.
+    if r as isize > 32 {
+        Ok(())
+    } else {
+        Err("The browser refused to open the link.".into())
+    }
+}
 
 use base64::Engine;
 use config::Config;
@@ -286,12 +326,7 @@ fn review_pr_for(state: &TauriState<AppState>, repo: &str, number: u64) -> Resul
 #[tauri::command(async)]
 fn open_review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<(), String> {
     let pr = review_pr_for(&state, &repo, number)?;
-    let ok = std::process::Command::new("open").arg(&pr.url).status().map_err(|e| format!("could not open the browser: {e}"))?;
-    if ok.success() {
-        Ok(())
-    } else {
-        Err("The browser refused to open the pull request.".into())
-    }
+    open_in_browser(&pr.url)
 }
 
 /// Opens a Terminal that reviews a listed PR with /should-i-approve, in the
@@ -306,7 +341,7 @@ fn review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<S
     };
     let projects = projects.ok_or("Set a projects directory in Settings first.")?;
     let target = reviews::resolve_target(&projects, &clones, &pr.repo, pr.number, &live);
-    terminal_app::open_terminal_with(&reviews::shell_command(&target, &pr.repo, pr.number))?;
+    term::open_terminal_with(&reviews::shell_command(&target, &pr.repo, pr.number))?;
     Ok(target.dir.to_string_lossy().into_owned())
 }
 
@@ -569,9 +604,9 @@ fn network_pair(app: AppHandle, state: TauriState<AppState>, host: String, port:
     Ok(network_status_of(&state))
 }
 
-/// This Maya's sessions over Terminal.app, for the core's local actions.
+/// This Maya's sessions over this platform's terminal, for the core's local actions.
 pub(crate) fn local(state: &AppState) -> actions::Local<'_> {
-    actions::Local { store: &state.store, terminal: &terminal_app::TERMINAL }
+    actions::Local { store: &state.store, terminal: &term::TERMINAL }
 }
 
 /// Brings forward the terminal of the local session running as `pid`.
@@ -580,7 +615,7 @@ fn focus_session(state: TauriState<AppState>, pid: i32) -> Result<(), String> {
     let session_id = state.store.lock().unwrap().refresh(now_ms()).into_iter().find(|c| c.pid == pid && c.machine.is_none()).map(|c| c.session_id);
     match session_id {
         Some(id) => actions::focus_session(&local(&state), &id),
-        None => focus::focus_pid(pid),
+        None => term::focus_pid(pid),
     }
 }
 
@@ -632,12 +667,7 @@ fn open_pr(state: TauriState<AppState>, session_id: String) -> Result<(), String
         store.card_for(&session_id, now_ms()).ok_or("Session is no longer running.")?
     };
     let url = pr_link(&card)?;
-    let ok = std::process::Command::new("open").arg(&url).status().map_err(|e| format!("could not open the browser: {e}"))?;
-    if ok.success() {
-        Ok(())
-    } else {
-        Err("The browser refused to open the pull request.".into())
-    }
+    open_in_browser(&url)
 }
 
 /// Looks up PRs for session directories whose result is missing or stale,
@@ -673,12 +703,7 @@ fn open_url(url: String) -> Result<(), String> {
     if !attachments::is_web_url(&url) {
         return Err("Only web links can be opened.".into());
     }
-    let ok = std::process::Command::new("open").arg(url.trim()).status().map_err(|e| format!("could not open the browser: {e}"))?;
-    if ok.success() {
-        Ok(())
-    } else {
-        Err("The browser refused to open the link.".into())
-    }
+    open_in_browser(url.trim())
 }
 
 /// Types `/model x` or `/effort y` into the session's Terminal tab.
@@ -974,9 +999,11 @@ pub fn run() {
                 let _ = log_handle.emit("log", l);
             });
             log::line("app", format!("Maya {} started; log at {}", env!("CARGO_PKG_VERSION"), log_path.display()));
+            #[cfg(target_os = "macos")]
             focus::install_app_handle(app.handle().clone());
             notify::set_eleven_speaker(voice::speak);
             listener::install_speech_hook(app.handle().clone());
+            #[cfg(target_os = "macos")]
             dock::set_dock_icon();
             let handle = app.handle().clone();
             let sessions_dir = dir.join("sessions");

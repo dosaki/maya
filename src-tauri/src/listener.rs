@@ -5,7 +5,7 @@
 //! while the interpreter runs; take what is needed, release, then act.
 
 use crate::store::now_ms;
-use crate::{config, ear, eleven_settings, focus, interpreter, launch, log, notify, wake};
+use crate::{config, ear, eleven_settings, interpreter, launch, log, notify, wake};
 use crate::{answer_question, compact_session, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, AppState};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
@@ -175,7 +175,7 @@ fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String,
                 return Err(msg);
             }
             let pid = state.store.lock().unwrap().card_for(&session, now_ms()).map(|c| c.pid).ok_or("Session is no longer running.")?;
-            focus::focus_pid(pid)?;
+            crate::term::focus_pid(pid)?;
             Ok("Done.".into())
         }
         "compact" => {
