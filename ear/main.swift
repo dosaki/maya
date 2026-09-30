@@ -220,7 +220,11 @@ final class WhisperRecogniser: Recogniser {
             cparams.use_gpu = true
             let t0 = Date()
             guard let c = whisper_init_from_file_with_params(self.modelPath, cparams) else {
-                Out.emit(["type": "state", "state": "error", "detail": "could not load model: \(self.modelPath)"]); exit(8)
+                Out.emit(["type": "state", "state": "error", "detail": "could not load model: \(self.modelPath)"])
+                // Same _exit path as quit(): whisper.cpp's Metal backend can
+                // abort in its own static destructors once a context has
+                // held GPU residency sets, and exit() would run those.
+                fflush(stdout); _exit(8)
             }
             self.ctx = c
             Out.emit(["type": "note", "text": String(format: "model loaded in %.1f s", Date().timeIntervalSince(t0))])
