@@ -6,7 +6,7 @@ authors.workspace = true
 description = "Maya's headless assistant for SSH boxes and containers"
 
 [[bin]]
-name = "maya"
+name = "maya-cli"
 path = "src/main.rs"
 
 [lib]

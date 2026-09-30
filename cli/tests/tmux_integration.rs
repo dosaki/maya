@@ -1,6 +1,5 @@
 use maya_cli::tmux::Tmux;
 use maya_core::terminal::Terminal;
-use std::path::Path;
 
 fn tmux_available() -> bool {
     std::process::Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false)
