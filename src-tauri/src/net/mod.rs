@@ -4,7 +4,7 @@ pub mod merge;
 pub mod server;
 pub mod client;
 
-use crate::config::{Config, NetworkRole};
+use crate::config::{Config, NetworkRole, PairedAssistant};
 use serde::Serialize;
 
 /// What the Network section of Settings shows, sent as the `network` event.
@@ -18,6 +18,8 @@ pub struct NetworkStatus {
     pub assistants: Vec<AssistantStatus>,
     /// An assistant's link to its main.
     pub assistant: AssistantLink,
+    /// Why the main's server is not running (the port is taken…); `None` once it starts.
+    pub main_error: Option<String>,
 }
 
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
@@ -86,6 +88,17 @@ pub fn network_change(before: &Config, after: &Config) -> Vec<NetChange> {
     out
 }
 
+/// The paired list as the main shows it while its server is down: every
+/// assistant disconnected, named as they would be on cards.
+pub fn paired_offline(paired: &[PairedAssistant]) -> Vec<AssistantStatus> {
+    let entries: Vec<(String, String, String)> = paired.iter().map(|p| (p.name.clone(), p.hostname.clone(), p.id.clone())).collect();
+    paired
+        .iter()
+        .zip(merge::display_names(&entries))
+        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), connected: false, last_seen: None })
+        .collect()
+}
+
 /// This computer's name without `.local`, for the main's `welcome`.
 pub fn local_hostname() -> String {
     let mut buf = [0u8; 256];
@@ -129,6 +142,17 @@ mod tests {
         assert_eq!(network_change(&asst, &with(Assistant, |c| c.network.main_host = "10.0.0.3".into())), vec![RestartAssistant]);
         assert_eq!(network_change(&asst, &asst.clone()), vec![]);
         assert_eq!(network_change(&asst, &off), vec![StopAssistant]);
+    }
+
+    #[test]
+    fn a_main_that_cannot_listen_says_why_and_keeps_its_paired_list() {
+        let p = |id: &str, name: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), token: "t".into() };
+        let status = NetworkStatus { role: NetworkRole::Main, assistants: paired_offline(&[p("a1", "laptop"), p("b2", "desk")]), main_error: Some("Could not listen on port 4127: Address already in use".into()), ..Default::default() };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["mainError"], "Could not listen on port 4127: Address already in use");
+        assert_eq!(json["assistants"][0]["name"], "laptop");
+        assert_eq!(json["assistants"][1]["connected"], false);
+        assert_eq!(serde_json::to_value(NetworkStatus::default()).unwrap()["mainError"], serde_json::Value::Null);
     }
 
     #[test]

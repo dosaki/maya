@@ -168,7 +168,7 @@ impl Server {
                 AssistantStatus { id: p.id.clone(), name, hostname, platform, connected: self.conns.contains_key(&p.id), last_seen: self.peers.get(&p.id).map(|x| x.last_seen) }
             })
             .collect();
-        NetworkStatus { role: NetworkRole::Main, code, assistants, assistant: Default::default() }
+        NetworkStatus { role: NetworkRole::Main, code, assistants, ..Default::default() }
     }
 }
 
@@ -273,7 +273,7 @@ pub fn start(app: AppHandle, port: u16) -> Result<ServerHandle, String> {
 /// `config_view` supplies the paired assistants at start; from then on the
 /// server's own list is the truth and `Notify` reports changes to it.
 pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>>, port: u16) -> Result<ServerHandle, String> {
-    let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("Could not listen on port {port}: {e}"))?;
+    let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("Could not listen on port {port}: {e}. Choose another port."))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let paired = lock(&config_view).assistants.clone();
@@ -991,6 +991,14 @@ mod tests {
             assert!(t.join().unwrap().is_ok());
         }
         handle.stop();
+    }
+
+    #[test]
+    fn a_busy_port_is_an_error_that_names_the_port() {
+        let taken = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let Err(err) = start_with(Arc::new(Counter::default()), Arc::new(Mutex::new(NetworkConfig::default())), port) else { panic!("the port is taken") };
+        assert!(err.starts_with(&format!("Could not listen on port {port}: ")) && err.ends_with("Choose another port."), "{err}");
     }
 
     #[test]

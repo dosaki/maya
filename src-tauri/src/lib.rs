@@ -391,7 +391,17 @@ fn network_status_of(state: &AppState) -> NetworkStatus {
     };
     match server {
         Some(s) => s.status(),
-        None => NetworkStatus { role: state.store.lock().unwrap().config.network.role, code: None, assistants: vec![], ..stored },
+        None => {
+            let (role, paired) = {
+                let store = state.store.lock().unwrap();
+                (store.config.network.role, store.config.network.assistants.clone())
+            };
+            let main = role == config::NetworkRole::Main;
+            // A main whose server is down still lists its assistants, disconnected.
+            let assistants = if main { net::paired_offline(&paired) } else { vec![] };
+            let main_error = if main { stored.main_error.clone() } else { None };
+            NetworkStatus { role, code: None, assistants, main_error, ..stored }
+        }
     }
 }
 
@@ -403,8 +413,17 @@ fn network_status(state: TauriState<AppState>) -> NetworkStatus {
 /// Opens pairing, or regenerates the code when it is already open.
 #[tauri::command]
 fn network_pairing_code(state: TauriState<AppState>) -> Result<NetworkStatus, String> {
-    let server = state.network.lock().unwrap().server.clone();
-    let server = server.ok_or("Turn on \"Act as main Maya\" first.")?;
+    let (server, main_error) = {
+        let n = state.network.lock().unwrap();
+        (n.server.clone(), n.status.main_error.clone())
+    };
+    let Some(server) = server else {
+        let main = state.store.lock().unwrap().config.network.role == config::NetworkRole::Main;
+        return Err(match main_error {
+            Some(e) if main => e,
+            _ => "Turn on \"Act as main Maya\" first.".into(),
+        });
+    };
     server.open_pairing(now_ms());
     Ok(server.status())
 }
@@ -441,21 +460,36 @@ fn start_main(app: &AppHandle) {
     match started {
         Ok(handle) => {
             // Another start may have finished meanwhile; the displaced server stops.
-            let displaced = app.state::<AppState>().network.lock().unwrap().server.replace(handle);
+            let displaced = {
+                let state = app.state::<AppState>();
+                let mut n = state.network.lock().unwrap();
+                n.status.main_error = None;
+                n.server.replace(handle)
+            };
             if let Some(old) = displaced {
                 old.stop();
             }
         }
-        Err(e) => log::line("network", e),
+        Err(e) => {
+            log::line("network", &e);
+            // Shown under the role in Settings until a start succeeds.
+            app.state::<AppState>().network.lock().unwrap().status.main_error = Some(e);
+        }
     }
     let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
 }
 
 /// Stops the main's server, if running, and drops the remote cards.
 fn stop_main(app: &AppHandle) {
-    let server = app.state::<AppState>().network.lock().unwrap().server.take();
-    if let Some(s) = server {
+    let (server, had_error) = {
+        let state = app.state::<AppState>();
+        let mut n = state.network.lock().unwrap();
+        (n.server.take(), n.status.main_error.take().is_some())
+    };
+    if let Some(s) = &server {
         s.stop();
+    }
+    if server.is_some() || had_error {
         let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
     }
 }

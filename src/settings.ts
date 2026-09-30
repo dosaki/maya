@@ -32,6 +32,8 @@ export interface NetworkStatus {
   code: PairingCode | null;
   assistants: AssistantStatus[];
   assistant: AssistantLink;
+  /** Why the main's server is not running (the port is taken…). */
+  mainError?: string | null;
 }
 
 const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } };
@@ -488,6 +490,14 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   roleSel.addEventListener("change", () => h.onRole(roleSel.value === "main" || roleSel.value === "assistant" ? roleSel.value : "off"));
   roleLabel.append(roleSel);
   network.append(roleLabel);
+
+  if (netRole === "main" && net.mainError) {
+    const err = document.createElement("div");
+    err.className = "settings__error";
+    err.dataset.for = "network";
+    err.textContent = net.mainError;
+    network.append(err);
+  }
 
   if (netRole === "main") {
     const portLabel = document.createElement("label");

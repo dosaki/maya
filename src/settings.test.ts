@@ -322,6 +322,28 @@ describe("Network settings", () => {
     expect(el.querySelector("input[name=networkHost]")).toBeNull();
   });
 
+  it("a main that cannot listen shows why under the role and keeps its paired list", () => {
+    const el = renderSettings(
+      {
+        ...voiceBase,
+        networkRole: "main",
+        network: {
+          role: "main",
+          code: null,
+          assistants: [{ id: "a1", name: "laptop", hostname: "h", platform: "macos", connected: false, lastSeen: null }],
+          assistant: { connected: false, mainName: null, error: null },
+          mainError: "Could not listen on port 4127: Address already in use (os error 48). Choose another port.",
+        },
+      },
+      handlers(),
+    );
+    const err = el.querySelector(".settings__error[data-for=network]");
+    expect(err?.textContent).toBe("Could not listen on port 4127: Address already in use (os error 48). Choose another port.");
+    expect(el.querySelector("select[name=networkRole]")!.closest("label")!.nextElementSibling).toBe(err);
+    expect(el.querySelector(".settings__assistant")?.textContent).toContain("laptop");
+    expect(renderSettings({ ...voiceBase, networkRole: "main" }, handlers()).querySelector(".settings__error[data-for=network]")).toBeNull();
+  });
+
   it("role assistant shows host, port, name, code, Pair and the status line", () => {
     const h = handlers();
     const el = renderSettings(
