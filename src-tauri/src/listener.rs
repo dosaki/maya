@@ -6,7 +6,7 @@
 
 use crate::store::now_ms;
 use crate::{answer, config, ear, eleven_settings, focus, interpreter, launch, log, notify, wake};
-use crate::{answer_question, list_resumable_sessions, resume_session, send_reply, start_session, type_into_session, AppState};
+use crate::{answer_question, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, type_into_session, AppState};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 
@@ -190,6 +190,18 @@ fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String,
             start_session(state.clone(), Some(dir), prompt, launch::LaunchOptions::default())?;
             Ok("Started.".into())
         }
+        "review" => {
+            let repo = action["repo"].as_str().unwrap_or("").to_string();
+            let number = action["number"].as_u64().unwrap_or(0);
+            review_pr(state.clone(), repo, number)?;
+            Ok("Review started.".into())
+        }
+        "open" => {
+            let repo = action["repo"].as_str().unwrap_or("").to_string();
+            let number = action["number"].as_u64().unwrap_or(0);
+            open_review_pr(state.clone(), repo, number)?;
+            Ok("Opened.".into())
+        }
         other => Err(format!("I don't know how to {other}")),
     }
 }
@@ -267,12 +279,13 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
         let dirs = store.config.projects_dir_path().map(|r| launch::list_project_dirs(&r)).unwrap_or_default();
         (cards, dirs, store.config.interpreter_model.clone(), store.claude_dir().join("maya"))
     };
+    let prs = app.state::<AppState>().reviews.lock().unwrap().prs.clone();
     let history = recent_exchanges(app);
     let Some(binary) = launch::claude_binary() else {
         reply_then_idle(app, generation, "I can't find the claude command.", inbox);
         return;
     };
-    let reply = match interpreter::run(&binary, &model, cmd, &cards, &history, &maya_dir, interpreter::TIMEOUT) {
+    let reply = match interpreter::run(&binary, &model, cmd, &cards, &prs, &history, &maya_dir, interpreter::TIMEOUT) {
         Ok(r) => r,
         Err(interpreter::RunError::TimedOut) => {
             reply_then_idle(app, generation, "Sorry, that took too long.", inbox);
@@ -293,7 +306,7 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
         reply_then_idle(app, generation, &reply.say, inbox);
         return;
     };
-    match interpreter::validate(proposed, &cards, &dirs) {
+    match interpreter::validate(proposed, &cards, &dirs, &prs) {
         Err(why) => {
             log::line("action", format!("rejected: {why}"));
             reply_then_idle(app, generation, &why, inbox)
@@ -878,6 +891,11 @@ fn sentence(text: &str) -> String {
 /// never from the model's `say`: the read-back for actions that need a yes,
 /// the line for focus and compact. None for a report, whose answer is the
 /// model's `say`.
+/// `owner/name` spoken as just `name`.
+fn repo_name(repo: &str) -> &str {
+    repo.rsplit('/').next().unwrap_or(repo)
+}
+
 pub(crate) fn spoken_for(action: &serde_json::Value) -> Option<String> {
     let s = |k: &str| action[k].as_str().unwrap_or("").trim().to_string();
     Some(match action["kind"].as_str()? {
@@ -888,6 +906,8 @@ pub(crate) fn spoken_for(action: &serde_json::Value) -> Option<String> {
         "resume" => format!("Resuming the latest {} session. Yes?", s("dir")),
         "focus" => format!("Focusing {}.", s("name")),
         "compact" => format!("Compacting {}.", s("name")),
+        "review" => format!("Reviewing {} #{}, {}. Yes?", repo_name(&s("repo")), action["number"].as_u64().unwrap_or(0), s("title")),
+        "open" => format!("Opening {} #{}.", repo_name(&s("repo")), action["number"].as_u64().unwrap_or(0)),
         _ => return None,
     })
 }
@@ -911,6 +931,8 @@ mod tests {
         assert_eq!(spoken_for(&resume).unwrap(), "Resuming the latest maya session. Yes?");
         assert_eq!(spoken_for(&json!({"kind":"focus","session":"id-1","name":"coral"})).unwrap(), "Focusing coral.");
         assert_eq!(spoken_for(&json!({"kind":"compact","session":"id-1","name":"coral"})).unwrap(), "Compacting coral.");
+        assert_eq!(spoken_for(&json!({"kind":"review","repo":"dosaki/collector","number":14,"title":"Add ERD overlay"})).unwrap(), "Reviewing collector #14, Add ERD overlay. Yes?");
+        assert_eq!(spoken_for(&json!({"kind":"open","repo":"dosaki/collector","number":14,"title":"Add ERD overlay"})).unwrap(), "Opening collector #14.");
         assert_eq!(spoken_for(&json!({"kind":"report"})), None, "a report speaks the model's own answer");
     }
 

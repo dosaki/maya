@@ -49,7 +49,8 @@ Settings and data live in `~/.claude/maya/` (`config.json`, `events.jsonl`,
 
 Maya can listen for her name and act on what you say: "Maya, what's
 waiting?", "Maya, tell hexgrid to go ahead", focus, compact, resume or start
-a session.
+a session, and "Maya, review collector 14" or "open" for the pull requests
+on the Pull Requests tab.
 
 - Off by default. Turn on "Listen for 'Maya'" in Settings; a microphone
   then appears in the top bar, and clicking it opens the voice panel. macOS

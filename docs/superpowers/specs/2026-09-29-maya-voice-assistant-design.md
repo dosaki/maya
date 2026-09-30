@@ -65,7 +65,8 @@ except the listener, which is plain speech recognition.
 ### Understanding
 
 - The command text, the board summary (each session's name, harness, state,
-  project and any open ask), and the last six voice exchanges go to
+  project and any open ask), the pull requests waiting for review (repo,
+  number, title, author), and the last six voice exchanges go to
   `claude -p` with Haiku and JSON output, under a fixed system prompt that
   lists the allowed actions.
 - The model returns `{ "say": "...", "action": {...} | null, "confirm": bool }`
@@ -76,14 +77,17 @@ except the listener, which is plain speech recognition.
   - `focus { session }` — bring the session's terminal forward
   - `compact { session }`
   - `resume { dir, session }` and `start { dir, prompt }`
+  - `review { pr }` — start a review session for a pull request on the
+    Pull Requests tab (the same as its Review button)
+  - `open { pr }` — open that pull request in the browser
 - Maya validates the action before doing anything: the session must be on
   the board, the option must exist, the folder must be a project folder.
   Anything invalid becomes a spoken "I couldn't find a session called …".
 
 ### Confirmation
 
-- Actions that send text, answer a question, start or resume a session are
-  read back first: "Telling hexgrid: go ahead and push. Yes?" The next
+- Actions that send text, answer a question, start or resume a session, or
+  start a review are read back first: "Telling hexgrid: go ahead and push. Yes?" The next
   utterance within ten seconds decides, without the wake word: "yes", "go
   ahead", "do it" confirm; "no", "cancel", "stop" abort; anything else is
   treated as a new command. Report, focus and compact run at once.
