@@ -150,7 +150,9 @@ quiet.
   address; names are only labels, on cards and in what Maya says. Two
   assistants with the same name show as "laptop (192.168.1.20)". A machine
   that pairs again from the same address (after a reset, say) keeps its
-  place in the list with a new token.
+  place in the list with a new token. So does another machine that later
+  gets a disconnected assistant's address (from the router, say) and
+  pairs: it takes over that entry.
 - **Versions.** Run the same Maya on every machine. The main notes an
   assistant that runs another version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
