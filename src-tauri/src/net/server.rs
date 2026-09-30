@@ -540,13 +540,14 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         log::line("network", format!("{ip}: runs Maya {app}; this Mac runs {}", env!("CARGO_PKG_VERSION")));
     }
     let name = Some(clean(&name)).filter(|n| !n.is_empty()).or_else(|| Some(hostname.clone()).filter(|h| !h.is_empty())).unwrap_or_else(|| "assistant".into());
-    // `proof` answers the assistant's own nonce; a fresh pairing has none to answer.
+    // `proof` answers the assistant's own nonce: under the token when it
+    // authenticates, under the pairing code when it pairs.
     let (id, proof) = match id {
         Some(id) => {
             let proof = authenticate(ctx, ws, &id, &name, deadline)?;
             (id, proof)
         }
-        None => (pair(ctx, ws, &ip, &name, &hostname, &platform, deadline)?, String::new()),
+        None => pair(ctx, ws, &ip, &name, &hostname, &platform, deadline)?,
     };
     let (tx, rx) = channel();
     let registered = {
@@ -618,9 +619,12 @@ fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str, deadline: Instant)
     Some(mac(&token, &theirs))
 }
 
-fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: &str, deadline: Instant) -> Option<String> {
-    let code = match read_up(ctx, ws, ip, deadline) {
-        Ok(Up::Pair { code }) => code,
+/// Pairs a new assistant, or the same machine again; returns its id and
+/// the main's proof for `welcome`: the MAC, under the code, of the nonce
+/// the assistant sent with it.
+fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: &str, deadline: Instant) -> Option<(String, String)> {
+    let (code, nonce) = match read_up(ctx, ws, ip, deadline) {
+        Ok(Up::Pair { code, nonce }) => (code, nonce),
         Ok(_) => {
             bye(ws, "protocol");
             return None;
@@ -655,7 +659,7 @@ fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: 
             ctx.notify.paired(&a);
             log::line("network", format!("{name}: {} from {ip}", if again { "paired again (same entry, new key)" } else { "paired" }));
             send_down(ws, &Down::Paired { id: a.id.clone(), token: a.token.clone() }).ok()?;
-            Some(a.id)
+            Some((a.id, mac(code.trim(), &nonce)))
         }
     }
 }
@@ -916,9 +920,11 @@ mod tests {
         let (code, _) = handle.open_pairing(crate::store::now_ms());
         let mut ws = connect(port);
         hello(&mut ws, name, None);
-        send(&mut ws, &Up::Pair { code });
+        let nonce = crate::net::protocol::new_nonce();
+        send(&mut ws, &Up::Pair { code: code.clone(), nonce: nonce.clone() });
         let Down::Paired { id, token } = recv(&mut ws) else { panic!("expected paired") };
-        assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
+        let Down::Welcome { mac: proof, .. } = recv(&mut ws) else { panic!("expected welcome") };
+        assert!(crate::net::protocol::mac_matches(&code, &nonce, &proof), "the main proves it knows the code");
         (ws, id, token)
     }
 
@@ -970,7 +976,7 @@ mod tests {
         let (code, _) = handle.open_pairing(crate::store::now_ms());
         let mut ws = connect(port);
         send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), id: None });
-        send(&mut ws, &Up::Pair { code });
+        send(&mut ws, &Up::Pair { code, nonce: "n".into() });
         let Down::Paired { id, token } = recv(&mut ws) else { panic!("expected paired") };
         assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
         send(&mut ws, &Up::Board { cards: vec![card("r1", "remote")], dirs: vec!["proj".into()] });
@@ -999,7 +1005,7 @@ mod tests {
         assert!(matches!(recv(&mut ws), Down::Bye { .. }), "unknown assistant");
         let mut ws = connect(port);
         send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "x".into(), hostname: "h".into(), platform: "macos".into(), id: None });
-        send(&mut ws, &Up::Pair { code: "000000".into() });
+        send(&mut ws, &Up::Pair { code: "000000".into(), nonce: "n".into() });
         assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason.contains("pairing code")));
         let err = send_command_with(&handle.shared, "ghost", CommandKind::Compact { session: "r".into() }, Duration::from_millis(300)).unwrap_err();
         assert!(err.contains("not connected"), "{err}");
@@ -1041,13 +1047,13 @@ mod tests {
         for _ in 0..3 {
             let mut w = connect(port);
             hello(&mut w, "x", None);
-            send(&mut w, &Up::Pair { code: "999999x".into() });
+            send(&mut w, &Up::Pair { code: "999999x".into(), nonce: "n".into() });
             assert!(matches!(recv(&mut w), Down::Bye { .. }));
         }
         let (code, _) = handle.open_pairing(crate::store::now_ms());
         let mut w = connect(port);
         hello(&mut w, "x", None);
-        send(&mut w, &Up::Pair { code });
+        send(&mut w, &Up::Pair { code, nonce: "n".into() });
         assert!(matches!(recv(&mut w), Down::Bye { reason } if reason == "too many attempts"));
         // Removal says bye, drops the cards, and the token no longer opens a connection.
         let mut ws = connect(port);
@@ -1174,7 +1180,7 @@ mod tests {
         let (code, _) = handle.open_pairing(now_ms());
         let mut same = connect(port);
         send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), id: None });
-        send(&mut same, &Up::Pair { code });
+        send(&mut same, &Up::Pair { code, nonce: "n".into() });
         let Down::Paired { id: twin, .. } = recv(&mut same) else { panic!("expected paired") };
         assert!(matches!(recv(&mut same), Down::Welcome { .. }));
         assert_eq!(handle.status().assistants.iter().find(|a| a.id == twin).unwrap().note, None);
@@ -1300,6 +1306,44 @@ mod tests {
             let _ = ws.read();
         });
         port
+    }
+
+    /// A stranger that takes any pairing code: answers `pair` with an id and
+    /// a token, then `welcome` carrying `proof`. Returns its port.
+    fn fake_pairing_main(proof: &'static str) -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let read = |ws: &mut WebSocket<TcpStream>| loop {
+                if let Message::Text(t) = ws.read().unwrap() {
+                    return crate::net::protocol::decode_up(&t).unwrap();
+                }
+            };
+            assert!(matches!(read(&mut ws), Up::Hello { .. }));
+            assert!(matches!(read(&mut ws), Up::Pair { nonce, .. } if !nonce.is_empty()), "the assistant sends a nonce with its code");
+            let _ = ws.send(Message::text(encode(&Down::Paired { id: "evil-id".into(), token: "evil-token".into() })));
+            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into() })));
+            let _ = ws.read();
+        });
+        port
+    }
+
+    #[test]
+    fn the_client_keeps_no_credentials_from_a_main_that_cannot_prove_it_knows_the_code() {
+        for proof in ["00", ""] {
+            let port = fake_pairing_main(proof);
+            let exec = Arc::new(FakeExec::default());
+            let notify = Arc::new(FakeClientNotify::default());
+            let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, ..Default::default() };
+            let out = client::run_once(&config, exec.clone(), notify.clone(), &AtomicBool::new(false), Some("123456"));
+            assert_eq!(out, Err(client::PAIRING_UNPROVEN.to_string()), "proof {proof:?}");
+            assert!(notify.creds.lock().unwrap().is_none(), "nothing is saved");
+            assert!(notify.main.lock().unwrap().is_none(), "never reported as connected");
+            assert_eq!(*notify.errors.lock().unwrap(), [client::PAIRING_UNPROVEN]);
+        }
     }
 
     #[test]

@@ -35,7 +35,9 @@ pub struct Attachment {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Up {
     Hello { protocol: u32, app: String, name: String, hostname: String, platform: String, #[serde(default)] id: Option<String> },
-    Pair { code: String },
+    /// The code the user typed, and a nonce the main must answer in
+    /// `welcome` to prove it knows the code too.
+    Pair { code: String, #[serde(default)] nonce: String },
     /// The answer to the main's challenge, and this assistant's own nonce
     /// for the main to answer in `welcome`.
     Auth { mac: String, nonce: String },
@@ -50,8 +52,8 @@ pub enum Up {
 pub enum Down {
     Challenge { nonce: String },
     /// `mac` is `mac(token, nonce)` for the assistant's `auth` nonce: the
-    /// main's proof that it holds the token. Empty right after pairing, where
-    /// the token came from the code just typed.
+    /// main's proof that it holds the token. Right after pairing it is
+    /// `mac(code, nonce)` for the `pair` nonce: proof it knows the code.
     Welcome { name: String, #[serde(default)] mac: String },
     Paired { id: String, token: String },
     Bye { reason: String },
@@ -204,7 +206,12 @@ mod tests {
         assert_eq!(decode_up(&s).unwrap(), auth);
         let welcome = Down::Welcome { name: "desk".into(), mac: "cd".into() };
         assert_eq!(decode_down(&encode(&welcome)).unwrap(), welcome);
-        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk"}"#).unwrap(), Down::Welcome { name: "desk".into(), mac: String::new() }, "a welcome after pairing may carry no proof");
+        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk"}"#).unwrap(), Down::Welcome { name: "desk".into(), mac: String::new() }, "a welcome without a proof still decodes; the assistant refuses it");
+        // Pairing is mutual too: `pair` carries a nonce the main answers in `welcome`.
+        let pair = Up::Pair { code: "123456".into(), nonce: "n2".into() };
+        let s = encode(&pair);
+        assert!(s.contains("\"type\":\"pair\"") && s.contains("\"code\":\"123456\"") && s.contains("\"nonce\":\"n2\""), "{s}");
+        assert_eq!(decode_up(&s).unwrap(), pair);
         assert!(decode_up(r#"{"type":"auth","mac":"ab"}"#).is_err(), "an auth without the assistant's nonce is refused");
     }
 

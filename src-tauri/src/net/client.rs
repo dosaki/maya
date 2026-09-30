@@ -52,6 +52,7 @@ const STEADY: Duration = Duration::from_secs(60);
 pub const REMOVED: &str = "Removed by the main Maya; pair again.";
 pub const NOT_PAIRED: &str = "Not paired with a main Maya yet; pair in Settings.";
 pub const MAIN_UNPROVEN: &str = "The main Maya failed to prove it holds the pairing token.";
+pub const PAIRING_UNPROVEN: &str = "The main Maya failed to prove it knows the pairing code.";
 /// How long the client waits before trying again after `MAIN_UNPROVEN`.
 const UNPROVEN_WAIT_MS: u64 = 30_000;
 
@@ -268,12 +269,17 @@ fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, sto
     let id = if code.is_some() { None } else { Some(config.assistant_id.clone()) };
     let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), id };
     send_up(ws, &hello)?;
-    if let Some(code) = code {
-        send_up(ws, &Up::Pair { code: code.trim().to_string() })?;
-    }
-    let mut paired = false;
-    // The nonce this side sent with its answer; the main must answer it in `welcome`.
+    let code = code.map(str::trim);
+    // The nonce this side sent with `pair` or `auth`; the main must answer it
+    // in `welcome`, under the code or the token.
     let mut ours: Option<String> = None;
+    if let Some(code) = code {
+        let mine = new_nonce();
+        send_up(ws, &Up::Pair { code: code.to_string(), nonce: mine.clone() })?;
+        ours = Some(mine);
+    }
+    // The id and token from `paired`, kept until the main proves it knows the code.
+    let mut creds: Option<(String, String)> = None;
     loop {
         match read_down(ws, stop, deadline)? {
             Down::Challenge { nonce } if code.is_none() => {
@@ -285,18 +291,29 @@ fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, sto
                 if id.is_empty() || token.is_empty() {
                     return Err("The main Maya sent an empty key.".into());
                 }
-                paired = true;
-                notify.paired(&id, &token);
+                creds = Some((id, token));
             }
             Down::Welcome { name, mac: proof } => {
-                if code.is_some() && !paired {
-                    return Err("The main Maya did not pair this assistant.".into());
-                }
-                // With a stored token, the main proves it holds it too; after a
-                // fresh pairing the token came from the code just typed.
-                if code.is_none() && !ours.as_ref().is_some_and(|n| mac_matches(&config.token, n, &proof)) {
-                    log::line("network", "the main did not prove it holds the token");
-                    return Err(MAIN_UNPROVEN.into());
+                let proven = |key: &str| ours.as_ref().is_some_and(|n| mac_matches(key, n, &proof));
+                match code {
+                    Some(code) => {
+                        let Some((id, token)) = creds.take() else {
+                            return Err("The main Maya did not pair this assistant.".into());
+                        };
+                        // Whatever answered must know the code just typed;
+                        // only then are the credentials worth keeping.
+                        if !proven(code) {
+                            log::line("network", "the main did not prove it knows the pairing code");
+                            return Err(PAIRING_UNPROVEN.into());
+                        }
+                        notify.paired(&id, &token);
+                    }
+                    // With a stored token, the main proves it holds it too.
+                    None if !proven(&config.token) => {
+                        log::line("network", "the main did not prove it holds the token");
+                        return Err(MAIN_UNPROVEN.into());
+                    }
+                    None => {}
                 }
                 let name = clean(&name);
                 return Ok(if name.is_empty() { "the main Maya".into() } else { name });
