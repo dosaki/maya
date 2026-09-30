@@ -45,11 +45,20 @@ numbers, folder names.
   `pair` with the code and a nonce of its own; the main checks the code and
   its expiry, mints a random 32-byte token, stores it against the
   assistant's id, and returns it once in `paired`. Its `welcome` then
-  carries HMAC-SHA256(code, that nonce): proof that it knows the code too.
+  carries HMAC-SHA256(code, that nonce): proof that it received the code.
   The assistant keeps the id and token only once that proof checks out;
   otherwise it reports "The main Maya failed to prove it knows the pairing
   code." and saves nothing. Both sides keep the token in their config
   (`~/.claude/maya/config.json`); it never travels again.
+- What that proof does and does not give: the code travels in plain text
+  to the host the user typed, and whatever answers there proves only that
+  it received the code. A wrong host that is not a Maya main fails the
+  handshake, and nothing is kept. It does not authenticate the main: an
+  active impostor at the typed host (on a network the user does not
+  trust) can read the code from `pair` and compute the proof, so pairing
+  is not protected against it. A password-authenticated key exchange
+  (PAKE) over the code would close this; it is out of scope for this
+  version.
 - The main saves a pairing once `paired` and `welcome` are out. If either
   cannot be sent (the assistant is already gone), the entry it just made
   is removed, or for a machine pairing again given back its old token and

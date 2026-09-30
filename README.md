@@ -137,10 +137,15 @@ quiet.
   <main>", "Reconnecting…" (with the last error under it) or the error.
   On macOS 15 and later, macOS asks once whether Maya may reach devices on
   the local network: allow it.
-- **Trust.** While pairing, the main proves it knows the code you typed;
-  an assistant keeps nothing from a main that cannot. After pairing, each
-  side proves it holds the token on every connection; an assistant never
-  obeys a main that cannot.
+- **Trust.** Pairing sends the code, in plain text, to the host you typed.
+  Whatever answers there must send back proof that it received that code;
+  a host that is not a Maya main fails the handshake and the assistant
+  keeps nothing. That proof does not show the answer came from your main:
+  on a network you do not trust, an impostor that controls the typed host
+  could read the code and pair in its place, so pair on a network you
+  trust. (A password-authenticated key exchange would close this gap; this
+  version does not have one.) After pairing, each side proves it holds the
+  token on every connection; an assistant never obeys a main that cannot.
 - **Names and addresses.** The main tells machines apart by their IP
   address; names are only labels, on cards and in what Maya says. Two
   assistants with the same name show as "laptop (192.168.1.20)". A machine
