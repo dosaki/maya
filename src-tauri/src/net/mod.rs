@@ -2,6 +2,7 @@
 pub mod protocol;
 pub mod merge;
 pub mod server;
+pub mod client;
 
 use crate::config::{Config, NetworkRole};
 use serde::Serialize;
@@ -45,10 +46,11 @@ pub struct AssistantLink {
     pub error: Option<String>,
 }
 
-/// The running side of the network role. The assistant's client joins in Task 4.
+/// The running side of the network role: the main's server or the assistant's client.
 #[derive(Default)]
 pub struct NetworkState {
     pub server: Option<server::ServerHandle>,
+    pub client: Option<client::ClientHandle>,
     pub status: NetworkStatus,
 }
 

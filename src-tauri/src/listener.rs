@@ -803,6 +803,9 @@ pub(crate) fn stop_listening(app: &AppHandle) {
 pub(crate) fn voice_listen(app: AppHandle, state: TauriState<AppState>, on: bool) -> Result<(), String> {
     {
         let mut store = state.store.lock().unwrap();
+        if on && store.config.network.role == config::NetworkRole::Assistant {
+            return Err("The main Maya notifies and listens for this machine.".into());
+        }
         store.config.listen = on;
         config::save(&store.config_path(), &store.config)?;
     }

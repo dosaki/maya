@@ -678,7 +678,7 @@ fn leave(ctx: &Ctx, link: &Link, reason: &str) {
     }
 }
 
-fn kind_name(kind: &CommandKind) -> &'static str {
+pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
     match kind {
         CommandKind::Reply { .. } => "reply",
         CommandKind::Answer { .. } => "answer",
@@ -736,8 +736,10 @@ pub fn send_command(app: &AppHandle, machine: &str, kind: CommandKind, timeout: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::NetworkConfig;
+    use crate::config::{NetworkConfig, NetworkRole};
     use crate::model::{Card, Harness, State};
+    use crate::net::client;
+    use std::sync::atomic::AtomicBool;
     use crate::net::protocol::{decode_down, encode, mac, CommandKind, Down, Up, PROTOCOL};
     use std::net::TcpStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1002,6 +1004,82 @@ mod tests {
         big.snippet = "y".repeat(4 * PRE_AUTH_FRAME);
         send(&mut ws, &Up::Board { cards: vec![big], dirs: vec![] });
         wait_until(|| handle.boards().iter().any(|b| b.cards.len() == 1));
+        handle.stop();
+    }
+
+    /// The client's executor: records each command and serves one card.
+    #[derive(Default)]
+    struct FakeExec {
+        kinds: Mutex<Vec<CommandKind>>,
+    }
+
+    impl client::Executor for FakeExec {
+        fn execute(&self, kind: CommandKind) -> Result<Option<Value>, String> {
+            self.kinds.lock().unwrap().push(kind);
+            Ok(None)
+        }
+        fn board(&self) -> (Vec<Card>, Vec<String>) {
+            (vec![card("r1", "remote")], vec!["proj".into()])
+        }
+    }
+
+    /// What the client tells the app.
+    #[derive(Default)]
+    struct FakeClientNotify {
+        main: Mutex<Option<String>>,
+        creds: Mutex<Option<(String, String)>>,
+        errors: Mutex<Vec<String>>,
+        removed: AtomicUsize,
+    }
+
+    impl client::ClientNotify for FakeClientNotify {
+        fn paired(&self, id: &str, token: &str) {
+            *self.creds.lock().unwrap() = Some((id.into(), token.into()));
+        }
+        fn connected(&self, main_name: &str) {
+            *self.main.lock().unwrap() = Some(main_name.into());
+        }
+        fn disconnected(&self, error: &str) {
+            self.errors.lock().unwrap().push(error.into());
+        }
+        fn removed(&self) {
+            self.removed.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn the_client_pairs_sends_its_board_runs_a_command_reconnects_and_is_removed() {
+        let (handle, port) = test_server();
+        let exec = Arc::new(FakeExec::default());
+        let notify = Arc::new(FakeClientNotify::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), ..Default::default() };
+        let run = |config: NetworkConfig, code: Option<String>| {
+            let (e, n, s) = (exec.clone(), notify.clone(), stop.clone());
+            std::thread::spawn(move || client::run_once(&config, e, n, &s, code.as_deref()))
+        };
+        // No pairing window is open, so any code is wrong.
+        let err = run(config.clone(), Some("123456".into())).join().unwrap().unwrap_err();
+        assert_eq!(err, "Wrong or expired pairing code.");
+        let (code, _) = handle.open_pairing(now_ms());
+        let t = run(config.clone(), Some(code));
+        wait_until(|| handle.boards().iter().any(|b| b.machine == "laptop" && b.cards.len() == 1 && b.dirs == ["proj"]));
+        assert_eq!(notify.main.lock().unwrap().clone(), Some(crate::net::local_hostname()));
+        let (id, token) = notify.creds.lock().unwrap().clone().expect("the client was paired");
+        // A command from the main runs on the client's executor and its result comes back.
+        let out = send_command_with(&handle.shared, "laptop", CommandKind::Compact { session: "r1".into() }, Duration::from_secs(5));
+        assert_eq!(out, Ok(None));
+        assert_eq!(*exec.kinds.lock().unwrap(), [CommandKind::Compact { session: "r1".into() }]);
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(t.join().unwrap(), Ok(()), "a stop ends the connection cleanly");
+        wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
+        // With the token it reconnects by challenge-response; removal ends it for good.
+        stop.store(false, Ordering::SeqCst);
+        let t = run(NetworkConfig { assistant_id: id.clone(), token, ..config }, None);
+        wait_until(|| handle.status().assistants.iter().any(|a| a.connected));
+        handle.remove_assistant(&id);
+        assert_eq!(t.join().unwrap().unwrap_err(), client::REMOVED);
+        assert_eq!(notify.removed.load(Ordering::SeqCst), 1);
         handle.stop();
     }
 }

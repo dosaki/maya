@@ -22,6 +22,9 @@ pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
+    /// The file's path on the main, exactly as the reply's `Attached file:`
+    /// line gives it; the assistant saves the copy under its file name and
+    /// points that line at the copy.
     pub name: String,
     /// The file's bytes, base64.
     pub bytes: String,

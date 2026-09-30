@@ -260,12 +260,12 @@ fn eleven_settings(store: &Store) -> Option<(std::path::PathBuf, String, String)
 }
 
 fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify, speak, eleven) = {
+    let (cards, wants_notify, speak, eleven, assistant) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
         let cards = store.refresh(now_ms());
         let eleven = if store.config.speak_notifications { eleven_settings(&store) } else { None };
-        (cards, store.config.notify_on_awaiting, store.config.speak_notifications, eleven)
+        (cards, store.config.notify_on_awaiting, store.config.speak_notifications, eleven, store.config.network.role == config::NetworkRole::Assistant)
     };
     // Remote cards join after the store lock is released (lock order), so
     // the notifier below announces remote decisions too.
@@ -278,12 +278,13 @@ fn refresh_and_emit(app: &AppHandle) {
     };
     // A Focus mode (Do Not Disturb and friends) keeps Maya quiet; banners are
     // left to macOS, which filters them by the Focus's own rules.
-    let focus = (!fresh.is_empty() || !finished.is_empty()) && notify::focus_active();
+    // An assistant stays quiet: its main notifies and speaks for it.
+    let focus = !assistant && (!fresh.is_empty() || !finished.is_empty()) && notify::focus_active();
     if focus {
         log::line("app", "focus mode is on: announcements stay silent");
     }
     let speak = speak && !focus;
-    if wants_notify {
+    if wants_notify && !assistant {
         for c in &fresh {
             // With a voice the banner stays silent; the sound is replaced, not doubled.
             notify::notify(c, !speak);
@@ -302,6 +303,9 @@ fn refresh_and_emit(app: &AppHandle) {
         }
     }
     let _ = app.emit("sessions", &cards);
+    if assistant {
+        net::client::push_board(app);
+    }
 }
 
 #[tauri::command(async)]
@@ -385,6 +389,54 @@ fn stop_main(app: &AppHandle) {
         s.stop();
         let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
     }
+}
+
+/// Starts the assistant's client with the stored link, replacing any running one.
+fn start_assistant(app: &AppHandle) {
+    let handle = net::client::start(app.clone());
+    let displaced = {
+        let state = app.state::<AppState>();
+        let mut n = state.network.lock().unwrap();
+        n.status.assistant = Default::default();
+        n.client.replace(handle)
+    };
+    if let Some(old) = displaced {
+        old.stop();
+    }
+    let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
+}
+
+/// Stops the assistant's client, if running.
+fn stop_assistant(app: &AppHandle) {
+    let client = {
+        let state = app.state::<AppState>();
+        let mut n = state.network.lock().unwrap();
+        let client = n.client.take();
+        if client.is_some() {
+            n.status.assistant = Default::default();
+        }
+        client
+    };
+    if let Some(c) = client {
+        c.stop();
+        let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
+    }
+}
+
+/// Pairs this Maya with a main as its assistant and starts the client.
+#[tauri::command(async)]
+fn network_pair(app: AppHandle, state: TauriState<AppState>, host: String, port: u16, name: String, code: String) -> Result<NetworkStatus, String> {
+    let host = host.trim();
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c == '/') {
+        return Err("Type the main Maya's host name or address.".into());
+    }
+    let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+        return Err("The pairing code has six digits.".into());
+    }
+    let port = if port == 0 { net::protocol::DEFAULT_PORT } else { port };
+    net::client::pair(&app, host, port, &name, &code)?;
+    Ok(network_status_of(&state))
 }
 
 #[tauri::command(async)]
@@ -695,17 +747,48 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
         }
     }
     let mut config = config;
+    // The main notifies and listens for an assistant.
+    if config.network.role == config::NetworkRole::Assistant {
+        config.listen = false;
+    }
     let before = {
         let mut store = state.store.lock().unwrap();
         let before = store.config.clone();
-        // The paired list belongs to the server: pairing and removal write it,
-        // and a page holding an older config must not undo either.
+        // The paired list belongs to the server and the assistant's id and
+        // token to pairing; a page holding an older config must not undo them.
         config.network.assistants = before.network.assistants.clone();
+        config.network.assistant_id = before.network.assistant_id.clone();
+        config.network.token = before.network.token.clone();
         config::save(&store.config_path(), &config)?;
         store.config = config.clone();
         before
     };
-    match listener::listening_change(&before, &config) {
+    apply_config_change(&app, &before, &config);
+    refresh_and_emit(&app);
+    Ok(config)
+}
+
+/// Changes the stored config with `f`, saves it, and starts or stops what the change asks for.
+pub(crate) fn update_config(app: &AppHandle, f: impl FnOnce(&mut Config)) -> Result<Config, String> {
+    let (before, after) = {
+        let state = app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        let before = store.config.clone();
+        let mut after = before.clone();
+        f(&mut after);
+        config::save(&store.config_path(), &after)?;
+        store.config = after.clone();
+        (before, after)
+    };
+    apply_config_change(app, &before, &after);
+    refresh_and_emit(app);
+    Ok(after)
+}
+
+/// Starts, stops or restarts the listener, the server and the client after a config change.
+fn apply_config_change(app: &AppHandle, before: &Config, config: &Config) {
+    let state = app.state::<AppState>();
+    match listener::listening_change(before, config) {
         listener::ListenChange::Restart => {
             log::line("listener", "settings changed; restarting");
             state.voice.lock().unwrap().failures = 0;
@@ -721,22 +804,23 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
                 let _ = listener::start_listening(&handle);
             });
         }
-        listener::ListenChange::Stop => listener::stop_listening(&app),
+        listener::ListenChange::Stop => listener::stop_listening(app),
         listener::ListenChange::None => {}
     }
-    for change in net::network_change(&before, &config) {
+    for change in net::network_change(before, config) {
         match change {
             NetChange::StartMain | NetChange::RestartMain => {
                 log::line("network", "settings changed; starting the main's server");
-                start_main(&app);
+                start_main(app);
             }
-            NetChange::StopMain => stop_main(&app),
-            // The assistant's client comes with Task 4.
-            NetChange::StartAssistant | NetChange::StopAssistant | NetChange::RestartAssistant => {}
+            NetChange::StopMain => stop_main(app),
+            NetChange::StartAssistant | NetChange::RestartAssistant => {
+                log::line("network", "settings changed; starting the assistant's client");
+                start_assistant(app);
+            }
+            NetChange::StopAssistant => stop_assistant(app),
         }
     }
-    refresh_and_emit(&app);
-    Ok(config)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -790,7 +874,8 @@ pub fn run() {
             remove_whisper_model,
             network_status,
             network_pairing_code,
-            network_remove_assistant
+            network_remove_assistant,
+            network_pair
         ])
         .setup(move |app| {
             let log_path = dir.join("maya").join("maya.log");
@@ -821,11 +906,17 @@ pub fn run() {
                 poll_reviews(&review_handle);
                 std::thread::sleep(Duration::from_secs(120));
             });
-            if app.state::<AppState>().store.lock().unwrap().config.network.role == config::NetworkRole::Main {
-                let net_handle = app.handle().clone();
-                std::thread::spawn(move || start_main(&net_handle));
+            let role = app.state::<AppState>().store.lock().unwrap().config.network.role;
+            match role {
+                config::NetworkRole::Main => {
+                    let net_handle = app.handle().clone();
+                    std::thread::spawn(move || start_main(&net_handle));
+                }
+                config::NetworkRole::Assistant => start_assistant(app.handle()),
+                config::NetworkRole::Off => {}
             }
-            if app.state::<AppState>().store.lock().unwrap().config.listen {
+            // The main listens for an assistant.
+            if app.state::<AppState>().store.lock().unwrap().config.listen && role != config::NetworkRole::Assistant {
                 let voice_handle = app.handle().clone();
                 std::thread::spawn(move || {
                     let _ = listener::start_listening(&voice_handle);
