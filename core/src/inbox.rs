@@ -15,19 +15,39 @@ pub fn message_line(text: &str) -> String {
 }
 
 /// Pid of the process on the other end of a Unix socket (macOS LOCAL_PEERPID).
+#[cfg(target_os = "macos")]
 pub fn peer_pid(stream: &UnixStream) -> Option<i32> {
-    const SOL_LOCAL: libc::c_int = 0;
-    const LOCAL_PEERPID: libc::c_int = 0x002;
     let mut pid: libc::pid_t = 0;
     let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
     let r = unsafe {
-        libc::getsockopt(stream.as_raw_fd(), SOL_LOCAL, LOCAL_PEERPID, &mut pid as *mut _ as *mut libc::c_void, &mut len)
+        libc::getsockopt(stream.as_raw_fd(), libc::SOL_LOCAL, libc::LOCAL_PEERPID, &mut pid as *mut _ as *mut libc::c_void, &mut len)
     };
     if r == 0 {
         Some(pid)
     } else {
         None
     }
+}
+
+/// Pid of the process on the other end of a Unix socket (Linux SO_PEERCRED).
+#[cfg(target_os = "linux")]
+pub fn peer_pid(stream: &UnixStream) -> Option<i32> {
+    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let r = unsafe {
+        libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, &mut cred as *mut _ as *mut libc::c_void, &mut len)
+    };
+    if r == 0 {
+        Some(cred.pid)
+    } else {
+        None
+    }
+}
+
+/// Elsewhere the owner cannot be checked, so `send` refuses.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn peer_pid(_stream: &UnixStream) -> Option<i32> {
+    None
 }
 
 /// Posts `text` into the session inbox at `socket_path`, refusing unless the
@@ -68,6 +88,14 @@ mod tests {
         assert_eq!(message_line("hi"), "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n");
         let v: serde_json::Value = serde_json::from_str(message_line("a \"q\"\nb").trim()).unwrap();
         assert_eq!(v["message"]["content"], "a \"q\"\nb");
+    }
+
+    #[test]
+    fn peer_pid_is_the_listening_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_listener, path) = listen(dir.path());
+        let stream = UnixStream::connect(&path).unwrap();
+        assert_eq!(peer_pid(&stream), Some(std::process::id() as i32));
     }
 
     #[test]
