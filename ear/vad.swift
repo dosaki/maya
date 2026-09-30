@@ -17,12 +17,12 @@ enum VadEvent {
 /// decays up); speech is `floor + margin`.
 struct Vad {
     static let frameSamples = 320
-    static let preRollFrames = 15
+    static let preRollFrames = 30
     static let endQuietFrames = 40
     static let maxFrames = 600
     static let partialEveryFrames = 75
     static let startLoudFrames = 3
-    static let margin: Float = 0.012
+    static let margin: Float = 0.004
     static let floorDecay: Float = 0.0005
 
     var floor: Float = 1.0

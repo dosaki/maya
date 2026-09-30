@@ -85,7 +85,7 @@ the two. Apple's stays the default.
   with `AVAudioConverter`.
 - Utterances are cut by an energy voice-activity detector over 20 ms frames:
   speech starts when three consecutive frames exceed the speech threshold,
-  and ends after 0.8 s under it, or at 12 s. A 0.3 s pre-roll before the
+  and ends after 0.8 s under it, or at 12 s. A 0.6 s pre-roll before the
   start is kept so the first syllable is not lost. Thresholds adapt to the
   room: the noise floor is the running minimum of frame energy, and speech
   is the floor plus a fixed margin.
