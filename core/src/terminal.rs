@@ -1,5 +1,5 @@
 //! The platform seam: where a session's terminal lives and how keys reach it.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub trait Terminal: Send + Sync {
     /// Runs `command` (a shell line) in a visible terminal in `cwd`, under
@@ -20,6 +20,7 @@ pub use test_support::{Call, FakeTerminal};
 pub mod test_support {
     use super::*;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     #[derive(Debug, Clone, PartialEq)]
