@@ -1,6 +1,44 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkRole {
+    #[default]
+    Off,
+    Main,
+    Assistant,
+}
+
+/// An assistant the main has paired with; the token is what it must prove it holds.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairedAssistant {
+    pub id: String,
+    pub name: String,
+    pub hostname: String,
+    pub platform: String,
+    pub token: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NetworkConfig {
+    pub role: NetworkRole,
+    /// The main's listening port; 0 means `protocol::DEFAULT_PORT`.
+    pub port: u16,
+    pub main_host: String,
+    pub main_port: u16,
+    /// The assistant's display name; blank means the hostname.
+    pub name: String,
+    /// Minted by the main at pairing.
+    pub assistant_id: String,
+    /// The assistant's token, from pairing.
+    pub token: String,
+    /// The main's paired assistants.
+    pub assistants: Vec<PairedAssistant>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -39,6 +77,8 @@ pub struct Config {
     /// Whisper model id for the built-in recogniser.
     #[serde(default = "default_whisper_model")]
     pub whisper_model: String,
+    #[serde(default)]
+    pub network: NetworkConfig,
 }
 
 /// Which speech recogniser the listener uses.
@@ -79,6 +119,7 @@ impl Default for Config {
             interpreter_model: "haiku".into(),
             recognizer: Recognizer::System,
             whisper_model: crate::models::DEFAULT_MODEL.into(),
+            network: NetworkConfig::default(),
         }
     }
 }
@@ -96,6 +137,22 @@ impl Config {
     /// The clones directory with `~` expanded; `DEFAULT_CLONES_DIR` when unset or blank.
     pub fn clones_dir_path(&self) -> PathBuf {
         expand_home(self.clones_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_CLONES_DIR))
+    }
+
+    pub fn listen_port(&self) -> u16 {
+        if self.network.port == 0 {
+            crate::net::protocol::DEFAULT_PORT
+        } else {
+            self.network.port
+        }
+    }
+
+    pub fn main_port(&self) -> u16 {
+        if self.network.main_port == 0 {
+            crate::net::protocol::DEFAULT_PORT
+        } else {
+            self.network.main_port
+        }
     }
 }
 
@@ -221,5 +278,21 @@ mod tests {
         save(&p, &Config { completed_timeout_minutes: 5, projects_dir: None, ..Default::default() }).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("completedTimeoutMinutes"));
         assert_eq!(load(&p).completed_timeout_minutes, 5);
+    }
+
+    #[test]
+    fn network_defaults_to_off_and_round_trips() {
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5}"#).unwrap();
+        assert_eq!(c.network.role, NetworkRole::Off);
+        assert_eq!(c.network.port, 0, "0 means the default port");
+        assert!(c.network.assistants.is_empty());
+        let mut c = Config::default();
+        c.network.role = NetworkRole::Assistant;
+        c.network.main_host = "10.0.0.2".into();
+        c.network.token = "abc".into();
+        c.network.assistants.push(PairedAssistant { id: "x".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into() });
+        let text = serde_json::to_string(&c).unwrap();
+        assert!(text.contains("\"role\":\"assistant\"") && text.contains("\"mainHost\":\"10.0.0.2\"") && text.contains("\"assistants\":[{"), "{text}");
+        assert_eq!(serde_json::from_str::<Config>(&text).unwrap(), c);
     }
 }
