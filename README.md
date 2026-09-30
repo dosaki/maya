@@ -1,150 +1,135 @@
 # Maya
 
-**Manage All Your Agents.** A macOS desktop board for your local Claude Code
-sessions. Every running session is a card in one of four columns: Idle,
-Working, Awaiting Decision, Completed. From a card you can jump to its
-Terminal tab, read the conversation and reply, or answer the question it is
-asking with one click. The Idle column's "+" starts a new session in one of
-your project folders, or lets Claude pick the folder from your prompt.
+**Manage All Your Agents.** Maya is a macOS app that puts every coding-agent
+session running on your Mac on one board, tells you when one needs you, and
+lets you answer without hunting for the right terminal. Say her name and she
+does it by voice.
+
+## What Maya does
+
+**One board for all your sessions.** Every running Claude Code session is a
+card in one of four columns: Idle, Working, Awaiting Decision, Completed.
+Codex, Antigravity and Grok Build sessions appear on the same board with
+their own logos. Each card shows the session's name, project, what it said
+last, how full its context window is, and the pull request it is working
+on, if any.
+
+**Act from the card.** Jump to the session's Terminal tab, read the whole
+conversation as rendered markdown, reply (with files and images attached by
+drag-and-drop or paste), or answer the question it is asking with one click.
+Rename a session, change its model, effort or permission mode, and compact
+its context when the meter passes 75%.
+
+**Start and resume.** The "+" in the Idle column starts a new session in one
+of your project folders, or lets Claude pick the folder from your prompt.
+The resume button lists the earlier sessions of a folder so you can pick one
+up where it stopped.
+
+**Know when you are needed.** When a session starts waiting on a decision,
+or finishes, Maya tells you: a system notification, or her voice saying
+"hexgrid needs a decision". She stays quiet under a Focus mode. An
+ElevenLabs voice is optional.
+
+**Review pull requests.** The Pull Requests tab lists the pull requests
+waiting for your review. One click opens the pull request; another starts a
+review session in the right checkout, cloning the repository first if you
+do not have one, and asks Claude whether it should be approved.
+
+**Talk to her.** With voice on, "Maya, what's waiting on me?" gets a spoken
+summary, "Maya, tell hexgrid to go ahead" sends the reply after a read-back
+and your "yes", and "Maya, review collector 14" starts a review. When she
+asks you something back, just answer. See [Voice](#voice).
 
 ## Install
 
-macOS only for now (Apple Silicon and Intel). One command:
+macOS only, Apple Silicon and Intel. One command:
 
     curl -fsSL https://raw.githubusercontent.com/dosaki/maya/main/install.sh | sh
 
 It downloads the latest release, puts `Maya.app` in `/Applications` (or
-`~/Applications` when that is not writable), and clears the quarantine flag,
-since the builds are not signed or notarised. Then `open -a Maya`.
+`~/Applications` when that is not writable) and clears the quarantine flag,
+since the builds are not notarised. Then `open -a Maya`. Run the same
+command again to update; set `MAYA_INSTALL_DIR` to install somewhere else.
 
-Prefer a manual install? Grab the `.dmg` for your architecture from the
+Prefer a manual install? Take the `.dmg` for your architecture from the
 [latest release](https://github.com/dosaki/maya/releases/latest), drag Maya
 to Applications, and the first time right-click it and choose Open.
 
-To update, run the same command again. Set `MAYA_INSTALL_DIR` to install
-somewhere else.
+You need [Claude Code](https://claude.com/claude-code) installed and signed
+in. The Pull Requests tab needs the [GitHub CLI](https://cli.github.com/)
+(`gh auth login`). Voice needs macOS 14 or later.
 
-Releases follow semver and are cut when the version changes (see Releasing
-below). Linux and Windows builds will follow once the terminal integration
-is portable; today the board is macOS only because it drives Terminal
-through AppleScript and AppKit.
+### First run
+
+1. Open Settings (the tab on the right) and press **Install hook**. The hook
+   is what makes "Awaiting Decision" and "Completed" exact; without it a
+   permission prompt shows as Working. It never blocks Claude Code and a
+   backup of your `settings.json` is taken before every change.
+2. Set your **projects directory** (for example `~/dev`) so the "+" can list
+   your folders, and a **clones directory** for pull-request reviews.
+3. Optionally turn on **Listen for "Maya"** and pick a speech recogniser
+   (see Voice).
+
+## Voice
+
+Maya listens for her name and acts on what you say. Everything she can do
+from a card she can do by voice: report what is waiting, reply to a
+session, answer its question, bring its terminal forward, compact it,
+resume or start a session, open or review a pull request.
+
+- **Off by default.** Turn on "Listen for 'Maya'" in Settings. A microphone
+  appears in the top bar; clicking it opens the voice panel with the
+  conversation and a Yes / No for the current read-back. macOS asks for
+  microphone and speech-recognition access the first time.
+- **The wake word is "Maya".** Say it with the command, or alone: she says
+  "Yes?" and waits. When she asks you something back, answer without the
+  wake word; she listens for eight seconds and remembers the last few
+  exchanges, so "the second one" works.
+- **Sending is read back first.** Anything that sends text, answers a
+  question, starts or resumes a session or starts a review is read back and
+  needs a "yes". Reports, focus and compact happen at once.
+- **Two speech recognisers.** *System* uses Apple's on-device recognition,
+  which needs Dictation turned on (System Settings › Keyboard › Dictation).
+  On a work Mac where that switch is locked by a management profile,
+  choose *Built-in (Whisper)* under Settings › Voice assistant › Speech
+  recognition and download a model; the 60 MB one is recommended.
+- **Privacy.** Audio never leaves the Mac; both recognisers run on the
+  device. Only the text of your command, the last few exchanges, and a
+  summary of the board and pull-request list go to Claude, through a
+  one-shot `claude -p` call with no tools. The one-off model download is
+  the Built-in recogniser's only network access.
+
+The Debug tab shows what she heard, what she made of it, what she asked
+Claude, what came back, what ran and what she said. The same lines go to
+`~/.claude/maya/maya.log`, which starts afresh on every launch. Paste them
+into an issue if something goes wrong.
 
 ## How it works
 
-- Reads the session registry Claude Code keeps at `~/.claude/sessions/`.
-- Optionally installs a Claude Code hook (Settings → Install hook) that appends
-  hook payloads to `~/.claude/maya/events.jsonl`. This is what makes permission
-  prompts and finished turns show precisely. The hook never blocks and prints
-  nothing; a backup of `settings.json` is taken before every change.
-- Reads the tail of each session transcript for the card snippet and the
-  conversation history.
-- Replies go through the session's documented inbox socket; answers to
-  questions are typed into the session's Terminal tab.
-- New sessions open in a new Terminal window; "Let Claude choose" runs a
-  short headless Haiku call to match the prompt to a folder.
+Maya does not run an agent of her own; she reads what the agents already
+write and drives them through their own interfaces.
 
-Settings and data live in `~/.claude/maya/` (`config.json`, `events.jsonl`,
-`hook.sh`, short-lived `prompts/`).
+- **Sessions** come from the registry Claude Code keeps in
+  `~/.claude/sessions/` and the tail of each session transcript. Codex,
+  Antigravity and Grok Build sessions are found through their running
+  processes and their own session files.
+- **States** come from the hook events in `~/.claude/maya/events.jsonl`
+  when the hook is installed, with a rule-based reading of the transcript
+  as the fallback (a turn that ends in a question is "Awaiting Decision").
+- **Replies** go through Claude Code's session inbox socket, or are typed
+  into the session's Terminal tab for the other agents. Terminal actions
+  use AppleScript and AppKit, which is why Maya is macOS only for now.
+- **Pull requests** come from `gh`, refreshed every two minutes.
+- **Voice** is a small listener sidecar (Apple's recogniser or whisper.cpp)
+  streaming text to Maya; a wake-word and confirmation state machine
+  decides what to do; the command, board and pull requests go to Claude
+  (Haiku by default) for one JSON action, which Maya validates against the
+  board before doing anything.
 
-## Voice (macOS 14+)
+Settings and data live in `~/.claude/maya/`: `config.json`, `events.jsonl`,
+`hook.sh`, `maya.log`, downloaded speech models under `models/`.
 
-Maya can listen for her name and act on what you say: "Maya, what's
-waiting?", "Maya, tell hexgrid to go ahead", focus, compact, resume or start
-a session, and "Maya, review collector 14" or "open" for the pull requests
-on the Pull Requests tab.
+## Developing
 
-- Off by default. Turn on "Listen for 'Maya'" in Settings; a microphone
-  then appears in the top bar, and clicking it opens the voice panel. macOS
-  asks for microphone and speech recognition access the first time.
-- The wake word is "Maya". Say it with the command, or say it alone and she
-  answers "Yes?" and waits for the command. When she asks you something
-  back, just answer: she listens for eight seconds without the wake word,
-  and remembers the last few exchanges so you can clarify.
-- Audio never leaves the Mac: speech recognition runs on the device. Only
-  the command text, the last few voice exchanges and a summary of the board
-  go to Claude (`claude -p`, Haiku by default, with no tools and only your
-  user-level Claude settings).
-- Sending text, answering a question, starting or resuming a session is read
-  back first and needs a "yes" (or the Yes button in the panel).
-- Listening pauses while Maya speaks, so she does not hear herself.
-
-Voice needs macOS 14 or later. Speech recognition is Apple's by default, which needs Dictation turned on
-(System Settings › Keyboard › Dictation). On a Mac where that switch is
-locked by a management profile, choose **Built-in (Whisper)** under
-Settings › Voice assistant › Speech recognition and download a model
-(60 MB recommended). Recognition then runs on this Mac through whisper.cpp;
-the one-off model download from Hugging Face is its only network access.
-
-The Debug tab shows what Maya heard, what she made of it, what she asked
-Claude, what came back, what ran and what she said, plus errors from the
-pull-request poller. The same lines go to `~/.claude/maya/maya.log`, which
-starts afresh on every launch.
-
-## Develop
-
-    pnpm install
-    pnpm ear:build      # build the voice listener sidecar (once, and after ear/ changes)
-    pnpm ear:test       # run sidecar tests
-    pnpm tauri dev      # run
-    pnpm test           # frontend tests
-    cd src-tauri && cargo test   # Rust tests
-
-Requires Rust (rustup), Node 20+, pnpm, `jq` on PATH for the hook, and the
-Xcode Command Line Tools (`xcode-select --install`) for `swiftc`.
-
-`pnpm ear:build` also fetches whisper.cpp's framework (53 MB, once, into
-`vendor/`), then compiles `ear/main.swift` into
-`src-tauri/binaries/maya-ear-<target>`. That binary is not in git, and
-`pnpm tauri dev`, `pnpm tauri build` and `cargo test` all fail until it
-exists, because Tauri bundles it as a sidecar.
-
-## Build
-
-    pnpm ear:build      # fetches whisper.cpp framework (53 MB, once, into vendor/)
-    pnpm tauri build
-
-The app bundle lands in `src-tauri/target/release/bundle/`. The build fails
-without the sidecar binary, so run `pnpm ear:build` first (it needs the
-Xcode Command Line Tools).
-
-### Releasing
-
-The version in `src-tauri/tauri.conf.json` is the release version. To cut
-one, bump it everywhere, commit and push to `main`:
-
-    sh scripts/set-version.sh 0.2.0      # or: pnpm version:set 0.2.0
-    git commit -am "chore: release 0.2.0"
-    git push
-
-The workflow publishes `v0.2.0` with notes generated from the merged pull
-requests and commits. A push whose version already has a release only runs
-the tests; a mismatch between `tauri.conf.json`, `package.json` and
-`Cargo.toml` fails the run.
-
-### Signing
-
-Without a signing identity the bundle is ad-hoc signed, and macOS treats
-every rebuild as a new app: the microphone and speech-recognition prompts
-come back each time. Sign with a stable identity to keep the grants:
-
-    APPLE_SIGNING_IDENTITY="Apple Development: Your Name (TEAMID)" pnpm tauri build --bundles app
-
-An Apple Development certificate is free: in Xcode, Settings › Accounts,
-add your Apple ID, then Manage Certificates › + › Apple Development.
-`security find-identity -v -p codesigning` prints the exact name to use.
-Tauri signs the app, the listener sidecar and the whisper framework with
-it. If Xcode and the paid developer program are both out of reach, a
-self-signed certificate works on your own Mac: Keychain Access ›
-Certificate Assistant › Create a Certificate, type Code Signing, then
-mark it Always Trust for code signing. `src-tauri/Entitlements.plist`
-disables library validation so the sidecar can load the whisper framework
-under a signature with no Team ID.
-
-To sign release builds in CI, export the certificate with its private key
-(Keychain Access › right-click it › Export, `.p12` with a password) and
-add three repository secrets: `APPLE_CERTIFICATE` (the `.p12` as base64,
-`base64 -i maya.p12 | pbcopy`), `APPLE_CERTIFICATE_PASSWORD` and
-`APPLE_SIGNING_IDENTITY` (the certificate's name). The workflow signs with
-them when present and stays ad-hoc otherwise. A self-signed certificate
-only satisfies Macs that trust it; distributing to others needs a
-Developer ID and notarization.
+Building from source, cutting a release and code signing are covered in
+[docs/DEVELOPING.md](docs/DEVELOPING.md).
