@@ -146,15 +146,16 @@ impl Server {
     /// Records a pairing from `address`. A disconnected entry already paired
     /// from that address is the same machine pairing again: it keeps its id,
     /// gets a new token and the names just given, and its old board goes.
-    /// Otherwise the pairing is a new entry. Returns the entry and whether it
-    /// was an existing one.
-    fn record_pairing(&mut self, address: &str, name: &str, hostname: &str, platform: &str) -> (PairedAssistant, bool) {
+    /// Otherwise the pairing is a new entry. Returns the entry, and what it
+    /// was before when it already existed (for `undo_pairing`).
+    fn record_pairing(&mut self, address: &str, name: &str, hostname: &str, platform: &str) -> (PairedAssistant, Option<PairedAssistant>) {
         let again = self.paired.iter().position(|p| p.address == address && !self.conns.contains_key(&p.id));
         let Some(i) = again else {
             let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token(), address: address.into() };
             self.paired.push(a.clone());
-            return (a, false);
+            return (a, None);
         };
+        let previous = self.paired[i].clone();
         let p = &mut self.paired[i];
         p.name = name.into();
         p.hostname = hostname.into();
@@ -164,7 +165,25 @@ impl Server {
         self.by_id.remove(&a.id);
         self.peers.remove(&a.id);
         self.sync_boards();
-        (a, true)
+        (a, Some(previous))
+    }
+
+    /// Takes back a pairing the assistant never completed: a new entry goes,
+    /// an existing one gets its old token and names back.
+    fn undo_pairing(&mut self, id: &str, previous: Option<PairedAssistant>) {
+        match previous {
+            Some(p) => {
+                if let Some(e) = self.paired.iter_mut().find(|e| e.id == id) {
+                    *e = p;
+                }
+            }
+            None => {
+                self.paired.retain(|e| e.id != id);
+                self.by_id.remove(id);
+            }
+        }
+        self.peers.remove(id);
+        self.sync_boards();
     }
 
     /// Brings a paired entry up to date with what its machine just said and
@@ -584,12 +603,16 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
     let name = Some(clean(&name)).filter(|n| !n.is_empty()).or_else(|| Some(hostname.clone()).filter(|h| !h.is_empty())).unwrap_or_else(|| "assistant".into());
     // `proof` answers the assistant's own nonce: under the token when it
     // authenticates, under the pairing code when it pairs.
-    let (id, proof) = match id {
+    // A fresh pairing is only saved once `welcome` is out.
+    let (id, proof, pairing) = match id {
         Some(id) => {
             let proof = authenticate(ctx, ws, &id, &name, deadline)?;
-            (id, proof)
+            (id, proof, None)
         }
-        None => pair(ctx, ws, &ip, &name, &hostname, &platform, deadline)?,
+        None => {
+            let (p, proof) = pair(ctx, ws, &ip, &name, &hostname, &platform, deadline)?;
+            (p.entry.id.clone(), proof, Some(p))
+        }
     };
     let (tx, rx) = channel();
     let registered = {
@@ -625,7 +648,13 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
     });
     if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone(), mac: proof }) {
         leave(ctx, &link, &e);
+        if let Some(p) = pairing {
+            p.undo(ctx, &e);
+        }
         return None;
+    }
+    if let Some(p) = &pairing {
+        ctx.notify.paired(&p.entry);
     }
     log::line("network", format!("{}: connected from {ip}", link.label));
     ctx.announce();
@@ -661,10 +690,26 @@ fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str, deadline: Instant)
     Some(mac(&token, &theirs))
 }
 
-/// Pairs a new assistant, or the same machine again; returns its id and
-/// the main's proof for `welcome`: the MAC, under the code, of the nonce
-/// the assistant sent with it.
-fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: &str, deadline: Instant) -> Option<(String, String)> {
+/// A pairing recorded but not yet saved: it is saved once `welcome` is out,
+/// and undone if `paired` or `welcome` cannot be sent, so an assistant
+/// that never got its token leaves no entry behind.
+struct NewPairing {
+    entry: PairedAssistant,
+    previous: Option<PairedAssistant>,
+}
+
+impl NewPairing {
+    fn undo(self, ctx: &Ctx, why: &str) {
+        log::line("network", format!("{}: pairing not completed ({why}); nothing kept", self.entry.name));
+        lock(&ctx.shared).undo_pairing(&self.entry.id, self.previous);
+        ctx.announce();
+    }
+}
+
+/// Pairs a new assistant, or the same machine again; returns the pairing
+/// and the main's proof for `welcome`: the MAC, under the code, of the
+/// nonce the assistant sent with it.
+fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: &str, deadline: Instant) -> Option<(NewPairing, String)> {
     let (code, nonce) = match read_up(ctx, ws, ip, deadline) {
         Ok(Up::Pair { code, nonce }) => (code, nonce),
         Ok(_) => {
@@ -697,11 +742,15 @@ fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: 
             bye(ws, reason);
             None
         }
-        Ok((a, again)) => {
-            ctx.notify.paired(&a);
+        Ok((entry, previous)) => {
+            let again = previous.is_some();
+            let pairing = NewPairing { entry, previous };
+            if let Err(e) = send_down(ws, &Down::Paired { id: pairing.entry.id.clone(), token: pairing.entry.token.clone() }) {
+                pairing.undo(ctx, &e);
+                return None;
+            }
             log::line("network", format!("{name}: {} from {ip}", if again { "paired again (same entry, new key)" } else { "paired" }));
-            send_down(ws, &Down::Paired { id: a.id.clone(), token: a.token.clone() }).ok()?;
-            Some((a.id, mac(code.trim(), &nonce)))
+            Some((pairing, mac(code.trim(), &nonce)))
         }
     }
 }
@@ -1100,7 +1149,8 @@ mod tests {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
         let (mut ws, id, token) = pair_client(&handle, port, "desk");
-        assert_eq!(counter.paired.load(Ordering::SeqCst), 1);
+        // Saved once `welcome` is out, which the client may read first.
+        wait_until(|| counter.paired.load(Ordering::SeqCst) == 1);
         assert!(handle.status().code.is_none(), "a code pairs one assistant");
         // Garbage is skipped; the next good frame still lands.
         ws.send(Message::text("not json")).unwrap();
@@ -1212,31 +1262,38 @@ mod tests {
     #[test]
     fn pairings_are_told_apart_by_address_and_equal_names_carry_it() {
         let mut s = Server::new(vec![]);
-        let (first, again) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos");
-        assert!(!again);
+        let (first, previous) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos");
+        assert!(previous.is_none());
         s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], received_at: 0, connected: false });
-        let (second, again) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos");
-        assert!(again, "the same address, disconnected: the same machine");
+        let (second, previous) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos");
+        assert_eq!(previous.as_ref(), Some(&first), "the same address, disconnected: the same machine");
         assert_eq!(second.id, first.id);
         assert_ne!(second.token, first.token);
         assert_eq!(s.paired.len(), 1);
         assert!(s.by_id.is_empty(), "its old board is dropped");
         // Another address with the same name is another machine.
-        let (other, again) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos");
-        assert!(!again);
+        let (other, previous) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos");
+        assert!(previous.is_none());
         assert_ne!(other.id, first.id);
         let names: Vec<(String, String)> = s.status(0).assistants.into_iter().map(|a| (a.name, a.address)).collect();
         assert_eq!(names, [("Gnowee (192.168.55.70)".to_string(), "192.168.55.70".to_string()), ("Gnowee (192.168.55.71)".to_string(), "192.168.55.71".to_string())]);
         // A connected entry is never taken over by a new pairing.
         s.conns.insert(other.id.clone(), Conn { tx: channel().0, serial: 1 });
-        let (third, again) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos");
-        assert!(!again);
+        let (third, previous) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos");
+        assert!(previous.is_none());
         assert_eq!(s.paired.len(), 3);
         assert_ne!(third.id, other.id);
         // Authentication brings the entry up to date: a new address, a new name.
         assert!(s.refresh_entry(&first.id, "192.168.55.80", "Gnowee", "TKC-0176", "macos"));
         assert!(!s.refresh_entry(&first.id, "192.168.55.80", "Gnowee", "TKC-0176", "macos"), "nothing new: nothing to save");
         assert_eq!(s.paired[0].address, "192.168.55.80");
+        // A pairing the assistant never completed is taken back.
+        s.undo_pairing(&third.id, None);
+        assert_eq!(s.paired.len(), 2);
+        let (again, previous) = s.record_pairing("192.168.55.80", "Renamed", "TKC-0176", "macos");
+        s.undo_pairing(&again.id, previous);
+        assert_eq!(s.paired[0].name, "Gnowee", "an entry paired again gets its old self back");
+        assert_eq!(s.paired[0].token, second.token);
     }
 
     #[test]
@@ -1264,6 +1321,35 @@ mod tests {
         send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 300), state("r2", State::Completed, 400)], dirs: vec![] });
         wait_until(|| counter.announced.lock().unwrap().len() == 2);
         assert_eq!(*counter.announced.lock().unwrap(), ["r3", "r2"]);
+        handle.stop();
+    }
+
+    /// Closes `ws` with a reset rather than a FIN, so the main's next write fails.
+    fn reset(ws: Client) {
+        use std::os::fd::AsRawFd;
+        let MaybeTlsStream::Plain(s) = ws.get_ref() else { panic!("plain socket") };
+        let linger = libc::linger { l_onoff: 1, l_linger: 0 };
+        // SAFETY: a valid socket, and a linger struct of the size given.
+        let rc = unsafe { libc::setsockopt(s.as_raw_fd(), libc::SOL_SOCKET, libc::SO_LINGER, &linger as *const _ as *const libc::c_void, std::mem::size_of::<libc::linger>() as libc::socklen_t) };
+        assert_eq!(rc, 0);
+        drop(ws);
+    }
+
+    #[test]
+    fn an_assistant_gone_right_after_sending_pair_leaves_no_entry() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (code, _) = handle.open_pairing(now_ms());
+        let mut ws = connect(port);
+        // `hello` and `pair` in one write, then the socket goes.
+        ws.write(Message::text(encode(&Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "ghost".into(), hostname: "h".into(), platform: "macos".into(), id: None }))).unwrap();
+        ws.write(Message::text(encode(&Up::Pair { code, nonce: "n".into() }))).unwrap();
+        ws.flush().unwrap();
+        reset(ws);
+        wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
+        assert!(handle.status().assistants.is_empty(), "no paired entry is left behind");
+        assert_eq!(counter.paired.load(Ordering::SeqCst), 0, "nothing was saved");
+        assert!(handle.status().code.is_none(), "the main read the code and paired, then took the pairing back");
         handle.stop();
     }
 
