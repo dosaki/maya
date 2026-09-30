@@ -25,7 +25,9 @@ numbers, folder names.
 - **Main.** Settings › Network gains "Act as main Maya" with a port (default
   4127). Ticking it starts the server and shows a six-digit pairing code,
   valid for five minutes, with Regenerate, and the list of paired assistants
-  (name, platform, connected or last seen) with Remove.
+  (name, platform, connected or last seen) with Remove. A Name field (the
+  computer's hostname when blank) is what assistants show as the main's
+  name; changing it restarts the server, and assistants reconnect.
 - **Assistant.** Settings › Network gains "Assistant to a main Maya" with
   Host, Port (default 4127), Name (the computer's hostname when blank), a
   Pairing code field and a Pair button. After pairing, a status line shows

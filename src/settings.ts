@@ -527,6 +527,21 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   roleLabel.append(roleSel);
   network.append(roleLabel);
 
+  // Both roles carry a name: assistants show the main's in "Connected to …",
+  // and the main shows an assistant's on its cards.
+  const nameField = () => {
+    const nameLabel = document.createElement("label");
+    nameLabel.textContent = "This machine's name";
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.name = "networkName";
+    nameInput.placeholder = "blank uses this computer's hostname";
+    nameInput.value = netName;
+    nameInput.addEventListener("input", () => { model.networkName = nameInput.value; });
+    nameInput.addEventListener("change", () => h.onName(nameInput.value.trim()));
+    nameLabel.append(nameInput);
+    return nameLabel;
+  };
   if (netRole === "main" && net.mainError) {
     const err = document.createElement("div");
     err.className = "settings__error";
@@ -551,6 +566,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     portInput.addEventListener("change", () => h.onPort(readPort()));
     portLabel.append(portInput);
     network.append(portLabel);
+    network.append(nameField());
 
     if (net.code && nowMs <= net.code.expiresAt) {
       const codeBox = document.createElement("div");
@@ -626,17 +642,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     mainPortLabel.append(mainPortInput);
     network.append(mainPortLabel);
 
-    const nameLabel = document.createElement("label");
-    nameLabel.textContent = "This machine's name";
-    const nameInput = document.createElement("input");
-    nameInput.type = "text";
-    nameInput.name = "networkName";
-    nameInput.placeholder = "blank uses this computer's hostname";
-    nameInput.value = netName;
-    nameInput.addEventListener("input", () => { model.networkName = nameInput.value; });
-    nameInput.addEventListener("change", () => h.onName(nameInput.value.trim()));
-    nameLabel.append(nameInput);
-    network.append(nameLabel);
+    network.append(nameField());
 
     if (model.networkPaired && !model.networkRepair) {
       const again = document.createElement("button");

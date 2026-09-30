@@ -330,6 +330,7 @@ describe("Network settings", () => {
       networkRole: "main",
       network: { role: "main", code: { code: "483921", expiresAt: 300_000 }, assistants: [], assistant: { connected: false, mainName: null, error: null } },
     };
+    expect(renderSettings(withCode, handlers(), 100_000).querySelector("input[name=networkName]")).not.toBeNull();
     expect(renderSettings(withCode, handlers(), 100_000).querySelector(".settings__hint")?.textContent).toBe("expires in 4 min");
     expect(renderSettings(withCode, handlers(), 250_000).querySelector(".settings__hint")?.textContent).toBe("expires in 1 min");
     const expired = renderSettings(withCode, handlers(), 300_001);

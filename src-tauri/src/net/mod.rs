@@ -81,7 +81,8 @@ pub fn network_change(before: &Config, after: &Config) -> Vec<NetChange> {
     match (b.role == Main, a.role == Main) {
         (true, false) => out.push(NetChange::StopMain),
         (false, true) => out.push(NetChange::StartMain),
-        (true, true) if before.listen_port() != after.listen_port() => out.push(NetChange::RestartMain),
+        // A new port or a new name: assistants reconnect within seconds and see both.
+        (true, true) if before.listen_port() != after.listen_port() || before.network.name != after.network.name => out.push(NetChange::RestartMain),
         _ => {}
     }
     let link = |c: &Config| (c.network.main_host.clone(), c.main_port(), c.network.name.clone(), c.network.assistant_id.clone(), c.network.token.clone());
@@ -140,6 +141,7 @@ mod tests {
         assert_eq!(network_change(&main, &off), vec![StopMain]);
         assert_eq!(network_change(&main, &main), vec![]);
         assert_eq!(network_change(&main, &with(Main, |c| c.network.port = 5000)), vec![RestartMain]);
+        assert_eq!(network_change(&main, &with(Main, |c| c.network.name = "desk".into())), vec![RestartMain], "renaming the main restarts it so assistants see the name");
         assert_eq!(network_change(&main, &with(Main, |c| c.network.port = protocol::DEFAULT_PORT)), vec![], "0 and the default port are the same port");
         assert_eq!(network_change(&main, &with(Main, |c| c.completed_timeout_minutes += 1)), vec![], "other settings leave the server alone");
         let asst = with(Assistant, |c| c.network.main_host = "10.0.0.2".into());

@@ -355,6 +355,13 @@ pub fn start(app: AppHandle, port: u16) -> Result<ServerHandle, String> {
 /// Binds `port` on every interface (0 picks a free one) and starts accepting.
 /// `config_view` supplies the paired assistants at start; from then on the
 /// server's own list is the truth and `Notify` reports changes to it.
+/// What assistants see as the main's name in `welcome`: the configured
+/// name, or this computer's hostname when it is blank.
+pub fn main_name_of(c: &NetworkConfig) -> String {
+    let n = c.name.trim();
+    if n.is_empty() { super::local_hostname() } else { n.to_string() }
+}
+
 pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>>, port: u16) -> Result<ServerHandle, String> {
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("Could not listen on port {port}: {e}. Choose another port."))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -362,7 +369,7 @@ pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>
     let paired = lock(&config_view).assistants.clone();
     let shared = Arc::new(Mutex::new(Server::new(paired)));
     let stop = Arc::new(AtomicBool::new(false));
-    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name: super::local_hostname(), live: AtomicUsize::new(0), pre_auth: AtomicUsize::new(0) });
+    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name: main_name_of(&config_view.lock().unwrap()), live: AtomicUsize::new(0), pre_auth: AtomicUsize::new(0) });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
     log::line("network", format!("listening on port {port}"));
@@ -1320,6 +1327,10 @@ mod tests {
         let t = run(config.clone(), Some(code));
         wait_until(|| handle.boards().iter().any(|b| b.machine == "laptop" && b.cards.len() == 1 && b.dirs == ["proj"]));
         assert_eq!(notify.main.lock().unwrap().clone(), Some(crate::net::local_hostname()));
+        let mut named = NetworkConfig::default();
+        named.name = "  desk  ".into();
+        assert_eq!(main_name_of(&named), "desk", "a configured name is what assistants see");
+        assert_eq!(main_name_of(&NetworkConfig::default()), crate::net::local_hostname());
         let (id, token) = notify.creds.lock().unwrap().clone().expect("the client was paired");
         // A command from the main runs on the client's executor and its result comes back.
         let out = send_command_with(&handle.shared, "laptop", CommandKind::Compact { session: "r1".into() }, Duration::from_secs(5));

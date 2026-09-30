@@ -122,7 +122,7 @@ Run Maya on multiple machines with one as the **main** and the others as
 quiet.
 
 - **Main.** Open Settings › Network and choose "Act as main Maya" in the
-  Network menu. Choose a port (default 4127); Maya shows a six-digit
+  Network menu. Choose a port (default 4127) and a name for this Mac (its hostname when blank); Maya shows a six-digit
   pairing code at once, valid for five minutes ("Show pairing code" makes
   a new one). The main accepts incoming connections, so macOS asks once
   whether Maya may do so: allow it. To add an assistant, give it the
