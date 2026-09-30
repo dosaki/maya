@@ -24,9 +24,10 @@ to Applications, and the first time right-click it and choose Open.
 To update, run the same command again. Set `MAYA_INSTALL_DIR` to install
 somewhere else.
 
-Every push to `main` builds and publishes a release. Linux and Windows builds
-will follow once the terminal integration is portable; today the board is
-macOS only because it drives Terminal through AppleScript and AppKit.
+Releases follow semver and are cut when the version changes (see Releasing
+below). Linux and Windows builds will follow once the terminal integration
+is portable; today the board is macOS only because it drives Terminal
+through AppleScript and AppKit.
 
 ## How it works
 
@@ -105,6 +106,20 @@ exists, because Tauri bundles it as a sidecar.
 The app bundle lands in `src-tauri/target/release/bundle/`. The build fails
 without the sidecar binary, so run `pnpm ear:build` first (it needs the
 Xcode Command Line Tools).
+
+### Releasing
+
+The version in `src-tauri/tauri.conf.json` is the release version. To cut
+one, bump it everywhere, commit and push to `main`:
+
+    sh scripts/set-version.sh 0.2.0      # or: pnpm version:set 0.2.0
+    git commit -am "chore: release 0.2.0"
+    git push
+
+The workflow publishes `v0.2.0` with notes generated from the merged pull
+requests and commits. A push whose version already has a release only runs
+the tests; a mismatch between `tauri.conf.json`, `package.json` and
+`Cargo.toml` fails the run.
 
 ### Signing
 

@@ -49,14 +49,36 @@ jobs:
           sh scripts/test-ear.sh
           cd src-tauri && cargo test
 
+      # The version in src-tauri/tauri.conf.json is the release version
+      # (`sh scripts/set-version.sh 0.2.0` sets it everywhere). A push whose
+      # version already has a release only runs the tests.
       - name: Read version
         id: version
-        run: echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          pkg="$(node -p "require('./package.json').version")"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)"
+          if [ "$version" != "$pkg" ] || [ "$version" != "$cargo_version" ]; then
+            echo "version mismatch: tauri.conf.json=$version package.json=$pkg Cargo.toml=$cargo_version" >&2
+            echo "run: sh scripts/set-version.sh $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "v$version is already released; bump the version to publish another"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
 
       # With the three APPLE_* secrets set, Tauri imports the certificate into
       # a temporary keychain and signs the app, the listener and the whisper
       # framework with it. Without them the bundles stay ad-hoc signed.
       - name: Signing identity (when the secrets are set)
+        if: steps.version.outputs.release == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -74,12 +96,15 @@ jobs:
           fi
 
       - name: Build (Apple Silicon)
+        if: steps.version.outputs.release == 'true'
         run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
 
       - name: Build (Intel)
+        if: steps.version.outputs.release == 'true'
         run: pnpm tauri build --target x86_64-apple-darwin --bundles app,dmg
 
       - name: Package
+        if: steps.version.outputs.release == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -94,12 +119,13 @@ jobs:
           ls -la dist-release
 
       - name: Release
+        if: steps.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          tag="v${VERSION}-${GITHUB_RUN_NUMBER}"
-          gh release create "$tag" dist-release/* \
-            --title "Maya ${VERSION} (build ${GITHUB_RUN_NUMBER})" \
-            --notes "Built from ${GITHUB_SHA} on main. Unsigned macOS build: install with the one-line installer in the README, which clears the quarantine flag, or right-click the app and choose Open the first time."
+          gh release create "v${VERSION}" dist-release/* \
+            --title "Maya v${VERSION}" \
+            --generate-notes \
+            --notes "Built from ${GITHUB_SHA} on main. macOS builds are not notarised: install with the one-line installer in the README, which clears the quarantine flag, or right-click the app and choose Open the first time."

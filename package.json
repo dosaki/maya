@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "test": "vitest run",
     "ear:build": "sh scripts/build-ear.sh",
-    "ear:test": "sh scripts/test-ear.sh"
+    "ear:test": "sh scripts/test-ear.sh",
+    "version:set": "sh scripts/set-version.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
