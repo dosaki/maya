@@ -74,8 +74,10 @@ maya --version
   today. A `claude` started in tmux, in a plain SSH shell or by `maya start`
   is a card on the main's board.
 - **Start and resume** create `tmux new-session -d -s maya-<8 hex chars>
-  -c <project dir> '<the same claude command line the app builds>'`,
-  creating the tmux server if needed. The prompt goes through the prompt
+  -c <project dir> 'sh -c "<the same claude command line the app builds>;
+  exec ${SHELL:-sh}"'`, creating the tmux server if needed; the shell that
+  follows keeps the pane, and the session's last screen, after `claude`
+  exits. The prompt goes through the prompt
   file as in the app. The card's remote tooltip on the main shows the tmux
   session name (`attach: tmux attach -t maya-1a2b3c4d`) when the assistant
   reports one; app assistants report none.
@@ -133,19 +135,45 @@ use AppKit.
 
 ```rust
 pub trait Terminal: Send + Sync {
-    /// Runs `command` in a terminal the user can see, in `cwd`; returns a
-    /// handle the card can show (a tmux session name, or None for Terminal.app).
+    /// Runs `command` in a terminal the user can see, in `cwd`, under `label`
+    /// (the tmux session name; Terminal.app ignores it). Returns the name the
+    /// card can show (the tmux session, or None for Terminal.app).
     fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String>;
-    /// Brings the session's terminal forward; Err carries what to do instead.
+    /// Types `text` followed by Enter into the terminal hosting `tty`: replies
+    /// to sessions without an inbox, answers (arrow keys), slash commands,
+    /// Shift+Tab. Err says why it cannot ("not in tmux", "no Terminal tab").
+    fn type_line(&self, tty: &str, text: &str) -> Result<(), String>;
+    /// Brings the terminal hosting `tty` forward; Err carries what to do instead.
     fn focus(&self, tty: &str) -> Result<(), String>;
+    /// The terminal's name for the card hosting `tty` (a tmux session), if any.
+    fn name_for_tty(&self, tty: &str) -> Option<String>;
 }
 ```
 
+Typing into a session is what answers, slash commands and Shift+Tab are
+made of: today `answer::type_into_tty` runs AppleScript's `do script … in
+tab` for the tab whose tty matches. That is Terminal.app only, so it is
+part of the seam too.
+
 - App: `open` runs the AppleScript `do script` in Terminal.app as
-  `launch::open_terminal_with` does today and returns `None`; `focus` is
-  the current `focus.rs` behaviour.
-- CLI: `open` runs tmux and returns `Some("maya-…")`; `focus` returns
-  `Err("Attach with: tmux attach -t <name>")`.
+  `launch::open_terminal_with` does today and returns `None`; `type_line`
+  is today's `type_into_tty`; `focus` is today's `focus.rs` behaviour;
+  `name_for_tty` is `None`.
+- CLI: `open` runs `tmux new-session -d -s <label> -c <cwd> …` and returns
+  `Some(label)`; `type_line` finds the pane whose `pane_tty` is `tty` with
+  `tmux list-panes -a` and runs `tmux send-keys` (literal text, then
+  `Enter`; the escape sequences for Down and Shift+Tab are sent as the tmux
+  keys `Down` and `BTab`); `focus` returns `Err("Attach with: tmux attach
+  -t <name>")`; `name_for_tty` is the pane's session name.
+- A `claude` running headless outside tmux (a plain SSH shell) is shown on
+  the board and can be replied to through its inbox, but answers, slash
+  commands and Shift+Tab fail with `This session is not in tmux; only
+  replies reach it.` Sessions the user starts inside tmux themselves work
+  fully: the seam looks pane up by tty, not by who started it.
+
+The assistant fills each card's `terminal` from `name_for_tty(tty of pid)`
+when it builds a board (the CLI executor caches the tty per pid); the app
+leaves it empty. No store state is needed for it.
 
 ### Local actions in core
 
@@ -160,9 +188,8 @@ and call the core function for local ones. `net::client::execute` calls the
 same core functions, so the app's and the CLI's executors share one body.
 
 The `Card` gains `terminal: Option<String>` (`#[serde(default)]`,
-`skip_serializing_if`), set by the assistant when it knows the tmux session
-for a card (kept in the store keyed by session id after a start or resume;
-sessions found otherwise have none).
+`skip_serializing_if`), set by the assistant as described under the
+`Terminal` trait.
 
 ### The CLI process
 
