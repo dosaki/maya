@@ -121,14 +121,25 @@ Run Maya on multiple machines with one as the **main** and the others as
 **assistants**. The main shows all sessions on one board; assistants go
 quiet.
 
-- **Main.** Open Settings › Network and turn on "Act as main Maya". Choose
-  a port (default 4127) and Maya shows a six-digit pairing code, valid for
-  five minutes. To add an assistant, give it the code; Maya shows each
-  paired assistant and lets you remove them.
-- **Assistant.** Turn on "Assistant to a main Maya" and enter the main's
-  host, port, a name for this machine (its hostname when blank) and the
-  pairing code. Pair once; Maya keeps a token and reconnects on its own. A
-  status line shows "Connected to <main>", "Reconnecting…" or the error.
+- **Main.** Open Settings › Network and choose "Act as main Maya" in the
+  Network menu. Choose a port (default 4127); Maya shows a six-digit
+  pairing code at once, valid for five minutes ("Show pairing code" makes
+  a new one). The main accepts incoming connections, so macOS asks once
+  whether Maya may do so: allow it. To add an assistant, give it the
+  code; Maya shows each paired assistant and lets you remove them. If the
+  port is taken, Settings says so under the menu.
+- **Assistant.** Choose "Assistant to a main Maya" in the Network menu and
+  enter the main's host, port, a name for this machine (its hostname when
+  blank) and the pairing code. Pair once; Maya keeps a token and
+  reconnects on its own, also after you switch the role Off and back on.
+  "Pair again" pairs with a fresh code. A status line shows "Connected to
+  <main>", "Reconnecting…" (with the last error under it) or the error.
+  On macOS 15 and later, macOS asks once whether Maya may reach devices on
+  the local network: allow it.
+- **Trust.** Each side proves it holds the pairing token on every
+  connection; an assistant never obeys a main that cannot.
+- **Versions.** Run the same Maya on every machine. The main notes an
+  assistant that runs another version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
   names and attachments (up to 20 MB). Commands run on the assistant; the
   main never touches the assistant's files.
