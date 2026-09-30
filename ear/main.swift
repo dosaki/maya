@@ -388,16 +388,16 @@ final class Ear {
         if recogniser is SystemRecogniser {
             // A status that is already decided needs no request, and the
             // request itself has been seen to never answer (its daemon
-            // wedged): give it 20 s, then report instead of listening forever.
+            // wedged, or a prompt is waiting): give it a minute, then report.
             let known = SFSpeechRecognizer.authorizationStatus()
             if known == .authorized {
                 startAudio()
                 return
             }
             var answered = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
                 if !answered {
-                    Out.emit(["type": "state", "state": "error", "detail": "speech recognition did not answer the permission request; try again, or switch Speech recognition to Built-in in Settings"]); exit(9)
+                    Out.emit(["type": "state", "state": "error", "detail": "no answer to the speech recognition permission prompt within a minute; approve it and listen again, or switch Speech recognition to Built-in in Settings"]); exit(9)
                 }
             }
             SFSpeechRecognizer.requestAuthorization { status in
