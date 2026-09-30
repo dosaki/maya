@@ -734,6 +734,7 @@ fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
                     Err(e) if unreadable_board(&t) => {
                         // Keep the last good board; say why it no longer updates.
                         log::line("network", format!("{}: could not read its board: {e}", link.label));
+                        keep_board_fresh(ctx, link);
                         mark_board(ctx, link, true);
                     }
                     Err(e) => log::line("network", format!("{}: ignored a message: {e}", link.label)),
@@ -797,6 +798,27 @@ fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
         Up::Hello { .. } | Up::Pair { .. } | Up::Auth { .. } => log::line("network", format!("{}: ignored a handshake message after welcome", link.label)),
     }
     Ok(())
+}
+
+/// An unreadable board still says the assistant is alive: the kept board
+/// counts as just received, so its cards neither grey nor expire.
+fn keep_board_fresh(ctx: &Ctx, link: &Link) {
+    let kept = {
+        let mut s = lock(&ctx.shared);
+        let current = s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial);
+        s.touch(&link.id);
+        match s.by_id.get_mut(&link.id) {
+            Some(b) if current => {
+                b.received_at = now_ms();
+                s.sync_boards();
+                true
+            }
+            _ => false,
+        }
+    };
+    if kept {
+        ctx.notify.board_changed();
+    }
 }
 
 /// Records whether the assistant's last board was unreadable; the status
@@ -1209,6 +1231,18 @@ mod tests {
         wait_until(|| note(&handle).is_some_and(|n| n.ends_with(UNREADABLE_BOARD)));
         assert_eq!(note(&handle).unwrap(), format!("runs Maya t; this Mac runs {ours}; {UNREADABLE_BOARD}"));
         assert_eq!(handle.boards()[0].cards[0].session_id, "r1", "the last good board stays");
+        // It stays fresh too: the assistant is alive, only its board is unreadable.
+        {
+            let mut s = handle.shared.lock().unwrap();
+            s.by_id.get_mut(&id).unwrap().received_at = 1;
+            s.sync_boards();
+        }
+        ws.send(Message::text(future.to_string())).unwrap();
+        wait_until(|| handle.boards()[0].received_at > 1);
+        let cards = super::super::merge::merged(vec![], &handle.boards(), now_ms());
+        assert_eq!(cards.len(), 1);
+        assert!(!cards[0].stale, "the kept cards stay un-stale while the note explains why they do not change");
+        assert!(note(&handle).unwrap().ends_with(UNREADABLE_BOARD));
         // A readable board clears the note.
         send(&mut ws, &Up::Board { cards: vec![card("r3", "z")], dirs: vec![] });
         wait_until(|| note(&handle).is_some_and(|n| !n.contains(UNREADABLE_BOARD)));
