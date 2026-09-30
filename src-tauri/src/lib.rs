@@ -67,16 +67,24 @@ fn route_data<T: for<'de> serde::Deserialize<'de>>(app: &AppHandle, machine: &st
 }
 
 /// Reads and base64-encodes local files for a remote reply's attachments;
-/// refuses a missing file or one over 20 MB. `name` on each `Attachment` is
-/// the path exactly as given, since the assistant matches on it.
+/// refuses a missing file, one over 20 MB, or files over 20 MB together
+/// (the command must fit in one frame). `name` on each `Attachment` is the
+/// path exactly as given, since the assistant matches on it.
 fn remote_attachments(paths: &[String]) -> Result<Vec<Attachment>, String> {
     const MAX_BYTES: u64 = 20 * 1024 * 1024;
-    let mut out = Vec::with_capacity(paths.len());
+    let mut total = 0u64;
     for p in paths {
         let meta = std::fs::metadata(p).map_err(|_| format!("Attachment not found: {p}"))?;
         if meta.len() > MAX_BYTES {
             return Err("The file is too large (over 20 MB).".into());
         }
+        total += meta.len();
+    }
+    if total > MAX_BYTES {
+        return Err("Attachments total more than 20 MB.".into());
+    }
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
         let bytes = std::fs::read(p).map_err(|_| format!("Attachment not found: {p}"))?;
         out.push(Attachment { name: p.clone(), bytes: base64::engine::general_purpose::STANDARD.encode(bytes) });
     }
@@ -1145,6 +1153,22 @@ mod route_tests {
         let err = remote_attachments(&[path_str]).unwrap_err();
         assert_eq!(err, "The file is too large (over 20 MB).");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn remote_attachments_refuses_files_over_20_mb_together() {
+        let dir = std::env::temp_dir().join(format!("maya-route-test-total-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<String> = (0..2)
+            .map(|i| {
+                let path = dir.join(format!("part{i}.bin"));
+                std::fs::File::create(&path).unwrap().set_len(11 * 1024 * 1024).unwrap();
+                path.to_string_lossy().into_owned()
+            })
+            .collect();
+        assert!(remote_attachments(&paths[..1]).is_ok(), "one alone fits");
+        assert_eq!(remote_attachments(&paths).unwrap_err(), "Attachments total more than 20 MB.");
         std::fs::remove_dir_all(&dir).ok();
     }
 
