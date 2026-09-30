@@ -1,3 +1,7 @@
+//! The headless assistant drives sessions through tmux, so it is built for
+//! Unix only; on Windows run it inside WSL.
+#![cfg(unix)]
+
 pub mod args;
 pub mod commands;
 mod executor;

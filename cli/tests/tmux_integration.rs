@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use maya_cli::tmux::Tmux;
 use maya_core::terminal::Terminal;
 use std::time::{Duration, Instant};
