@@ -172,6 +172,41 @@ quiet.
   that is. When an assistant reconnects, what began while it was away is
   announced.
 
+### Headless machines (the `maya` command)
+
+A Linux box, a container, or a Mac reached only over SSH can be an assistant
+too, with no desktop and no app: the `maya` command line tool.
+
+- **Download.** Get the binary for the machine from the
+  [latest release](https://github.com/dosaki/maya/releases/latest) and save
+  it as `maya` (swap in `maya-linux-aarch64`, `maya-macos-arm64` or
+  `maya-macos-x86_64` as needed):
+
+      curl -L -o maya https://github.com/dosaki/maya/releases/latest/download/maya-linux-x86_64 && chmod +x maya
+
+- **Hook.** `./maya hooks install` installs the same Claude Code hook the
+  app uses, so Awaiting Decision and Completed are exact.
+- **Pair.** `./maya pair <main host> --code <code> --name <label>`, with the
+  code from the main's Settings › Network (`--name` is optional; the
+  machine's hostname is used when it is left out).
+- **Run.** `./maya run` runs in the foreground, logging to stdout and to
+  `~/.claude/maya/maya-cli.log`. Keep it running with whichever fits the
+  machine:
+  - in `tmux`: `tmux new -d -s maya './maya run'`
+  - with `nohup`: `nohup ./maya run >/dev/null 2>&1 &`
+  - as a service: a systemd unit (Linux) or launchd agent (macOS) that runs
+    `maya run`
+- **What works.** Every action the main can send an assistant: reply,
+  answer, compact, rename, change model, effort or mode, start and resume.
+  Start and resume land in a tmux session named `maya-<8 hex>`, shown in the
+  card's tooltip on the main as `attach: tmux attach -t …`; answering, slash
+  commands and Shift+Tab need that session to be inside tmux — a `claude`
+  started in a plain SSH shell is shown on the board but can only be
+  replied to through its inbox. The CLI never notifies, speaks or listens;
+  those stay app-only.
+- **Status.** `./maya status` shows whether it is paired, connected and
+  running; `./maya hooks status` checks the hook.
+
 ## How it works
 
 Maya does not run an agent of her own; she reads what the agents already

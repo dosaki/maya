@@ -1,7 +1,7 @@
 # Maya CLI: a headless assistant for SSH boxes and containers — design
 
 Date: 2026-09-30
-Status: draft for review
+Status: implemented
 Builds on: `2026-09-30-maya-remote-assistants-design.md`
 
 ## Purpose

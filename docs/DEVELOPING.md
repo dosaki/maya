@@ -1,8 +1,8 @@
 # Developing Maya
 
-Maya is a Tauri 2 app: a Rust backend in a Cargo workspace (`core/` and
-`src-tauri/`), a vanilla TypeScript frontend in `src/` (vitest), and a Swift
-listener sidecar in `ear/`.
+Maya is a Tauri 2 app: a Rust backend in a Cargo workspace (`core/`,
+`src-tauri/` and `cli/`), a vanilla TypeScript frontend in `src/` (vitest),
+and a Swift listener sidecar in `ear/`.
 
 ## Requirements
 
@@ -32,11 +32,30 @@ puts `Maya.app` in `target/release/bundle/macos/` (with `--target <triple>`,
 features only work from a bundle: the sidecar, the whisper framework and
 the microphone and speech permissions are all tied to it.
 
+## The CLI
+
+`cli/` builds on its own, with no Node toolchain and no `pnpm ear:build`:
+
+    cargo build -p maya-cli --release        # target/release/maya-cli
+    cargo test -p maya-core -p maya-cli
+
+`maya-cli` depends only on `maya_core`, so unlike the rest of the workspace
+it also builds and tests on Linux. The release workflow's `linux` job runs
+`cargo test -p maya-core -p maya-cli` on Ubuntu on every push to `main` —
+the guard that keeps `maya_core` free of macOS-only code — and, on a
+release push, cross-compiles `maya-cli` for
+`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with `cross`
+(needs Docker) and uploads both to the same GitHub release the macOS job
+creates.
+
 ## Layout
 
 - `Cargo.toml` — the workspace: shared version, dependencies and release profile.
 - `core/` — `maya_core`, the platform-neutral core: no Tauri, no AppKit.
 - `src-tauri/` — `maya`, the app: Tauri commands, voice, focus and dock; depends on `maya_core`.
+- `cli/` — `maya_cli`, binary `maya-cli`: the headless assistant for
+  SSH boxes and containers (`pair`, `run`, `status`, `hooks`, `start`);
+  depends on `maya_core`, no Tauri.
 - `core/src/` — `store.rs` (session cache), `state.rs` (card states),
   `watcher.rs`, `answer.rs` and `launch.rs` (Terminal automation),
   `inbox.rs` (Claude Code's session socket), `foreign.rs` with `codex.rs`,
@@ -53,6 +72,13 @@ the microphone and speech permissions are all tied to it.
   `terminal_app.rs` (opening Terminal windows), `focus.rs` and `dock.rs`
   (AppKit), `voice.rs` (ElevenLabs), and `ear.rs`, `wake.rs`,
   `listener.rs`, `models.rs` (the voice assistant).
+- `cli/src/` — `main.rs` and `args.rs` (subcommand parsing), `commands.rs`
+  (`pair`, `status`, `hooks`, `start`), `run_cmd.rs` (`run`, the headless
+  loop), `executor.rs` (running the main's commands), `tmux.rs` (named
+  sessions for start and resume), `notify.rs` (writes the CLI's own status
+  file on connect, disconnect and removal — the CLI never notifies, speaks
+  or listens like the app), and `status_file.rs`
+  (`~/.claude/maya/cli-status.json`, read by `maya status`).
 - `src/` — `main.ts`, `board.ts`, `card.ts`, `modal.ts`, `reviews.ts`,
   `settings.ts`, `voice.ts`, `debug.ts`, `tabs.ts`.
 - `ear/` — `main.swift` (audio capture, the System and Whisper engines),
