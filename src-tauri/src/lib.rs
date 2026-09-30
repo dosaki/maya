@@ -34,6 +34,9 @@ pub mod watcher;
 use config::Config;
 use listener::VoiceState;
 use model::Card;
+use net::merge;
+use net::server::Notify;
+use net::{NetChange, NetworkStatus};
 use serde::Serialize;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -45,6 +48,52 @@ pub struct AppState {
     pub notifier: Mutex<notify::Notifier>,
     pub reviews: Mutex<ReviewState>,
     pub voice: Mutex<VoiceState>,
+    /// Lock order: `network`, then the server's own mutex, then `store`.
+    pub network: Mutex<net::NetworkState>,
+}
+
+/// The server's line to the app: repaints the board, tells the page about
+/// pairing and connections, and keeps the paired list in the config file.
+pub(crate) struct TauriNetNotify {
+    pub app: AppHandle,
+}
+
+impl TauriNetNotify {
+    fn save_assistants(&self, f: impl FnOnce(&mut Vec<config::PairedAssistant>)) {
+        let state = self.app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        f(&mut store.config.network.assistants);
+        if let Err(e) = config::save(&store.config_path(), &store.config) {
+            log::line("network", format!("could not save the paired assistants: {e}"));
+        }
+    }
+}
+
+impl Notify for TauriNetNotify {
+    fn board_changed(&self) {
+        refresh_and_emit(&self.app);
+    }
+
+    fn status_changed(&self, status: NetworkStatus) {
+        let _ = self.app.emit("network", &status);
+    }
+
+    fn paired(&self, assistant: &config::PairedAssistant) {
+        self.save_assistants(|list| {
+            list.retain(|a| a.id != assistant.id);
+            list.push(assistant.clone());
+        });
+    }
+
+    fn paired_list_changed(&self, assistants: &[config::PairedAssistant]) {
+        self.save_assistants(|list| *list = assistants.to_vec());
+    }
+}
+
+/// The assistants' last snapshots when this Maya is the main; else none.
+fn remote_boards(state: &AppState) -> Vec<merge::RemoteBoard> {
+    let server = state.network.lock().unwrap().server.clone();
+    server.map(|s| s.boards()).unwrap_or_default()
 }
 
 /// The last PR list fetched, and the error from the last attempt if it failed.
@@ -218,6 +267,9 @@ fn refresh_and_emit(app: &AppHandle) {
         let eleven = if store.config.speak_notifications { eleven_settings(&store) } else { None };
         (cards, store.config.notify_on_awaiting, store.config.speak_notifications, eleven)
     };
+    // Remote cards join after the store lock is released (lock order), so
+    // the notifier below announces remote decisions too.
+    let cards = merge::merged(cards, &remote_boards(&app.state::<AppState>()), now_ms());
     // Track every refresh so a toggle-on later does not replay old events.
     let (fresh, finished) = {
         let state = app.state::<AppState>();
@@ -254,7 +306,79 @@ fn refresh_and_emit(app: &AppHandle) {
 
 #[tauri::command(async)]
 fn list_sessions(state: TauriState<AppState>) -> Vec<Card> {
-    state.store.lock().unwrap().refresh(now_ms())
+    let cards = state.store.lock().unwrap().refresh(now_ms());
+    merge::merged(cards, &remote_boards(&state), now_ms())
+}
+
+/// What the Network section of Settings shows.
+fn network_status_of(state: &AppState) -> NetworkStatus {
+    let (server, stored) = {
+        let n = state.network.lock().unwrap();
+        (n.server.clone(), n.status.clone())
+    };
+    match server {
+        Some(s) => s.status(),
+        None => NetworkStatus { role: state.store.lock().unwrap().config.network.role, code: None, assistants: vec![], ..stored },
+    }
+}
+
+#[tauri::command]
+fn network_status(state: TauriState<AppState>) -> NetworkStatus {
+    network_status_of(&state)
+}
+
+/// Opens pairing, or regenerates the code when it is already open.
+#[tauri::command]
+fn network_pairing_code(state: TauriState<AppState>) -> Result<NetworkStatus, String> {
+    let server = state.network.lock().unwrap().server.clone();
+    let server = server.ok_or("Turn on \"Act as main Maya\" first.")?;
+    server.open_pairing(now_ms());
+    Ok(server.status())
+}
+
+/// Forgets a paired assistant; a connected one is told and closed.
+#[tauri::command]
+fn network_remove_assistant(app: AppHandle, state: TauriState<AppState>, id: String) -> NetworkStatus {
+    // The handle is cloned out so the network lock is not held while the
+    // server notifies (its adapter takes `network` again to repaint).
+    let server = state.network.lock().unwrap().server.clone();
+    match server {
+        Some(s) => s.remove_assistant(&id),
+        None => {
+            TauriNetNotify { app: app.clone() }.save_assistants(|list| list.retain(|a| a.id != id));
+            log::line("network", format!("{id}: removed"));
+        }
+    }
+    network_status_of(&state)
+}
+
+/// Starts the main's server on the configured port, replacing any running one.
+fn start_main(app: &AppHandle) {
+    stop_main(app);
+    let port = app.state::<AppState>().store.lock().unwrap().config.listen_port();
+    // A server just stopped lets go of the port within a tick; retry briefly.
+    let mut started = net::server::start(app.clone(), port);
+    for _ in 0..5 {
+        if started.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        started = net::server::start(app.clone(), port);
+    }
+    match started {
+        Ok(handle) => app.state::<AppState>().network.lock().unwrap().server = Some(handle),
+        Err(e) => log::line("network", e),
+    }
+    let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
+}
+
+/// Stops the main's server, if running, and drops the remote cards.
+fn stop_main(app: &AppHandle) {
+    let server = app.state::<AppState>().network.lock().unwrap().server.take();
+    if let Some(s) = server {
+        s.stop();
+        let _ = app.emit("network", network_status_of(&app.state::<AppState>()));
+    }
 }
 
 #[tauri::command(async)]
@@ -564,9 +688,13 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
             return Err(format!("Projects directory does not exist: {}.", dir.display()));
         }
     }
+    let mut config = config;
     let before = {
         let mut store = state.store.lock().unwrap();
         let before = store.config.clone();
+        // The paired list belongs to the server: pairing and removal write it,
+        // and a page holding an older config must not undo either.
+        config.network.assistants = before.network.assistants.clone();
         config::save(&store.config_path(), &config)?;
         store.config = config.clone();
         before
@@ -590,6 +718,17 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
         listener::ListenChange::Stop => listener::stop_listening(&app),
         listener::ListenChange::None => {}
     }
+    for change in net::network_change(&before, &config) {
+        match change {
+            NetChange::StartMain | NetChange::RestartMain => {
+                log::line("network", "settings changed; starting the main's server");
+                start_main(&app);
+            }
+            NetChange::StopMain => stop_main(&app),
+            // The assistant's client comes with Task 4.
+            NetChange::StartAssistant | NetChange::StopAssistant | NetChange::RestartAssistant => {}
+        }
+    }
     refresh_and_emit(&app);
     Ok(config)
 }
@@ -601,7 +740,7 @@ pub fn run() {
     store.compact_events();
 
     tauri::Builder::default()
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), voice: Mutex::new(VoiceState::default()) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()) })
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             focus_session,
@@ -642,7 +781,10 @@ pub fn run() {
             log_path,
             list_whisper_models,
             download_whisper_model,
-            remove_whisper_model
+            remove_whisper_model,
+            network_status,
+            network_pairing_code,
+            network_remove_assistant
         ])
         .setup(move |app| {
             let log_path = dir.join("maya").join("maya.log");
@@ -673,6 +815,10 @@ pub fn run() {
                 poll_reviews(&review_handle);
                 std::thread::sleep(Duration::from_secs(120));
             });
+            if app.state::<AppState>().store.lock().unwrap().config.network.role == config::NetworkRole::Main {
+                let net_handle = app.handle().clone();
+                std::thread::spawn(move || start_main(&net_handle));
+            }
             if app.state::<AppState>().store.lock().unwrap().config.listen {
                 let voice_handle = app.handle().clone();
                 std::thread::spawn(move || {
