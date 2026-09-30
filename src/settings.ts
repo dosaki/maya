@@ -178,6 +178,18 @@ function expiresInMinutes(expiresAt: number, nowMs: number): number {
   return Math.max(0, Math.ceil((expiresAt - nowMs) / 60_000));
 }
 
+/** How often the pairing code's "expires in N min" line is repainted. */
+export const PAIRING_TICK_MS = 30_000;
+
+/**
+ * True while a pairing code is on screen or has just expired: the timer
+ * repaints then, so the countdown moves and the code goes when it expires.
+ */
+export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean {
+  const code = model.network?.code;
+  return (model.networkRole ?? model.network?.role) === "main" && !!code && nowMs <= code.expiresAt + PAIRING_TICK_MS;
+}
+
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = document.createElement("div");
   root.className = "settings__body";
@@ -524,7 +536,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     portLabel.append(portInput);
     network.append(portLabel);
 
-    if (net.code) {
+    if (net.code && nowMs <= net.code.expiresAt) {
       const codeBox = document.createElement("div");
       codeBox.className = "settings__code";
       codeBox.textContent = formatPairingCode(net.code.code);
@@ -538,7 +550,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const regen = document.createElement("button");
     regen.type = "button";
     regen.dataset.action = "regenerate-code";
-    regen.textContent = net.code ? "Regenerate" : "Show pairing code";
+    regen.textContent = net.code && nowMs <= net.code.expiresAt ? "Regenerate" : "Show pairing code";
     regen.addEventListener("click", () => h.onRegenerate());
     network.append(regen);
 
@@ -871,6 +883,11 @@ export async function initSettings(): Promise<void> {
     if (!previewingAssistant) model.networkRole = e.payload.role;
     if (!panel.hidden) paint();
   });
+
+  // The pairing code's countdown, and its end: nothing else repaints then.
+  setInterval(() => {
+    if (!panel.hidden && pairingRepaintDue(model, Date.now())) paint();
+  }, PAIRING_TICK_MS);
 
   await listen<{ id: string; received: number; total: number }>("voice-model", (e) => {
     // Only one model downloads at a time; ignore stray events for any other

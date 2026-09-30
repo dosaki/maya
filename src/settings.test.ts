@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderSettings, type SettingsModel } from "./settings";
+import { pairingRepaintDue, renderSettings, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -322,6 +322,23 @@ describe("Network settings", () => {
     remove.click();
     expect(h.onRemoveAssistant).toHaveBeenCalledWith("a1");
     expect(el.querySelector("input[name=networkHost]")).toBeNull();
+  });
+
+  it("an expired pairing code is not shown, and the timer repaints until just after it expires", () => {
+    const withCode: SettingsModel = {
+      ...voiceBase,
+      networkRole: "main",
+      network: { role: "main", code: { code: "483921", expiresAt: 300_000 }, assistants: [], assistant: { connected: false, mainName: null, error: null } },
+    };
+    expect(renderSettings(withCode, handlers(), 100_000).querySelector(".settings__hint")?.textContent).toBe("expires in 4 min");
+    expect(renderSettings(withCode, handlers(), 250_000).querySelector(".settings__hint")?.textContent).toBe("expires in 1 min");
+    const expired = renderSettings(withCode, handlers(), 300_001);
+    expect(expired.querySelector(".settings__code")).toBeNull();
+    expect(expired.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Show pairing code");
+    expect(pairingRepaintDue(withCode, 100_000)).toBe(true);
+    expect(pairingRepaintDue(withCode, 320_000)).toBe(true);
+    expect(pairingRepaintDue(withCode, 340_000)).toBe(false);
+    expect(pairingRepaintDue({ ...voiceBase, networkRole: "main" }, 0)).toBe(false);
   });
 
   it("a main that cannot listen shows why under the role and keeps its paired list", () => {
