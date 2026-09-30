@@ -56,10 +56,16 @@ const MAX_PRE_AUTH_PER_ADDRESS: usize = 2;
 const PRE_AUTH_DEADLINE: Duration = Duration::from_secs(10);
 /// What `fail_pending` answers; `send_command_with` names the machine.
 const DISCONNECTED: &str = "assistant disconnected";
+/// The `bye` reason when the main could not save a pairing; the assistant
+/// keeps nothing and says "The main could not save the pairing."
+pub(crate) const PAIRING_NOT_SAVED: &str = "could not save the pairing";
 
 /// What the server tells the app; the Tauri adapter lives in `lib.rs`.
 /// `paired` and `paired_list_changed` are called with the server's mutex
 /// held (see the module docs) and must not take it; the others never are.
+/// Both saves say whether they reached the disk: a pairing or a removal
+/// that could not be saved is not made; a refresh on connect or disconnect
+/// (address, last seen) that could not be saved is only logged.
 pub trait Notify: Send + Sync {
     fn board_changed(&self);
     /// An assistant's first board when this run of the main holds none for
@@ -67,8 +73,8 @@ pub trait Notify: Send + Sync {
     /// boards: nothing on it is announced. Later changes are.
     fn board_seeded(&self, cards: &[crate::model::Card]);
     fn status_changed(&self, status: NetworkStatus);
-    fn paired(&self, assistant: &PairedAssistant);
-    fn paired_list_changed(&self, assistants: &[PairedAssistant]);
+    fn paired(&self, assistant: &PairedAssistant) -> Result<(), String>;
+    fn paired_list_changed(&self, assistants: &[PairedAssistant]) -> Result<(), String>;
 }
 
 struct Conn {
@@ -350,24 +356,27 @@ impl ServerHandle {
     }
 
     /// Forgets an assistant: it is told `bye removed`, its cards go, and its
-    /// token no longer opens a connection.
-    pub fn remove_assistant(&self, id: &str) {
+    /// token no longer opens a connection. The shorter list is saved first;
+    /// if that fails nothing changes and the error comes back.
+    pub fn remove_assistant(&self, id: &str) -> Result<(), String> {
         let (label, status) = {
             let mut s = lock(&self.shared);
             let label = s.label(id);
-            s.paired.retain(|p| p.id != id);
+            let after: Vec<PairedAssistant> = s.paired.iter().filter(|p| p.id != id).cloned().collect();
+            self.ctx.notify.paired_list_changed(&after)?;
+            s.paired = after;
             if let Some(c) = s.conns.remove(id) {
                 let _ = c.tx.send(Down::Bye { reason: "removed".into() });
             }
             s.by_id.remove(id);
             s.peers.remove(id);
             s.sync_boards();
-            self.ctx.notify.paired_list_changed(&s.paired);
             (label, s.status(now_ms()))
         };
         log::line("network", format!("{label}: removed"));
         self.ctx.notify.status_changed(status);
         self.ctx.notify.board_changed();
+        Ok(())
     }
 
     pub fn port(&self) -> u16 {
@@ -610,7 +619,6 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
     let name = Some(clean(&name)).filter(|n| !n.is_empty()).or_else(|| Some(hostname.clone()).filter(|h| !h.is_empty())).unwrap_or_else(|| "assistant".into());
     // `proof` answers the assistant's own nonce: under the token when it
     // authenticates, under the pairing code when it pairs.
-    // A fresh pairing is only saved once `welcome` is out.
     let (id, proof, pairing) = match id {
         Some(id) => {
             let proof = authenticate(ctx, ws, &id, &name, deadline)?;
@@ -622,33 +630,57 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         }
     };
     let (tx, rx) = channel();
-    let registered = {
+    // `Err(None)`: no longer paired; `Err(Some(e))`: a fresh pairing that
+    // could not be saved.
+    let registered: Result<(u64, String), Option<String>> = {
         let mut s = lock(&ctx.shared);
         if s.is_paired(&id) {
-            let serial = s.next();
             // The entry follows the machine: its address, and the names it just gave.
             let now = now_ms();
             s.refresh_entry(&id, &ip, &name, &hostname, &platform, now);
-            s.peers.insert(id.clone(), Peer { app, last_seen: now, unreadable_board: false });
-            // A newer connection replaces an older one; dropping its sender ends it.
-            s.conns.insert(id.clone(), Conn { tx, serial });
-            if let Some(b) = s.by_id.get_mut(&id) {
-                b.connected = true;
+            // Saved here, under the lock, before `welcome`: a fresh pairing
+            // that cannot be saved is answered with `bye` instead, so neither
+            // side keeps it. A refresh that cannot be saved is only logged,
+            // and a stopped server's list is no longer the truth.
+            let saved = match &pairing {
+                Some(_) => s.paired.iter().find(|p| p.id == id).map_or(Ok(()), |entry| ctx.notify.paired(entry)),
+                None if !ctx.stopped() => {
+                    let _ = ctx.notify.paired_list_changed(&s.paired);
+                    Ok(())
+                }
+                None => Ok(()),
+            };
+            match saved {
+                Ok(()) => {
+                    let serial = s.next();
+                    s.peers.insert(id.clone(), Peer { app, last_seen: now, unreadable_board: false });
+                    // A newer connection replaces an older one; dropping its sender ends it.
+                    s.conns.insert(id.clone(), Conn { tx, serial });
+                    if let Some(b) = s.by_id.get_mut(&id) {
+                        b.connected = true;
+                    }
+                    s.sync_boards();
+                    Ok((serial, s.label(&id)))
+                }
+                Err(e) => Err(Some(e)),
             }
-            s.sync_boards();
-            // Saved here, under the lock; a fresh pairing is saved after
-            // `welcome`, below. A stopped server's list is no longer the truth.
-            if pairing.is_none() && !ctx.stopped() {
-                ctx.notify.paired_list_changed(&s.paired);
-            }
-            Some((serial, s.label(&id)))
         } else {
-            None
+            Err(None)
         }
     };
-    let Some((serial, label)) = registered else {
-        bye(ws, "removed");
-        return None;
+    let (serial, label) = match registered {
+        Ok(r) => r,
+        Err(None) => {
+            bye(ws, "removed");
+            return None;
+        }
+        Err(Some(e)) => {
+            if let Some(p) = pairing {
+                p.undo(ctx, &format!("could not save it: {e}"));
+            }
+            bye(ws, PAIRING_NOT_SAVED);
+            return None;
+        }
     };
     let link = Link { id, serial, label, rx, first_board: std::cell::Cell::new(true) };
     // Authenticated: boards and results may now be large.
@@ -657,18 +689,13 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         c.max_frame_size = Some(MAX_FRAME);
     });
     if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone(), mac: proof }) {
-        // Undone first, so `leave` never saves the pairing it takes back.
+        // Undone first, so the list `leave` saves no longer holds the
+        // pairing it takes back.
         if let Some(p) = pairing {
             p.undo(ctx, &e);
         }
         leave(ctx, &link, &e);
         return None;
-    }
-    if pairing.is_some() {
-        let s = lock(&ctx.shared);
-        if let Some(entry) = s.paired.iter().find(|p| p.id == link.id) {
-            ctx.notify.paired(entry);
-        }
     }
     log::line("network", format!("{}: connected from {ip}", link.label));
     ctx.announce();
@@ -704,9 +731,10 @@ fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str, deadline: Instant)
     Some(mac(&token, &theirs))
 }
 
-/// A pairing recorded but not yet saved: it is saved once `welcome` is out,
-/// and undone if `paired` or `welcome` cannot be sent, so an assistant
-/// that never got its token leaves no entry behind.
+/// A pairing recorded but not yet saved: it is saved once `paired` is out,
+/// just before `welcome`, and undone if `paired` cannot be sent, the save
+/// fails, or `welcome` cannot be sent, so an assistant that never got its
+/// token (or was told the main could not keep it) leaves no entry behind.
 struct NewPairing {
     entry: PairedAssistant,
     previous: Option<PairedAssistant>,
@@ -939,7 +967,7 @@ fn leave(ctx: &Ctx, link: &Link, reason: &str) {
             // Saved under the lock; a stopped server's list is no longer
             // the truth (a new one may be running).
             if !ctx.stopped() {
-                ctx.notify.paired_list_changed(&s.paired);
+                let _ = ctx.notify.paired_list_changed(&s.paired);
             }
         }
         s.fail_pending(link.serial);
@@ -1038,6 +1066,8 @@ mod tests {
         pub saved: Mutex<Vec<crate::config::PairedAssistant>>,
         /// Saves made without the server's lock held (there should be none).
         pub saves_outside_lock: AtomicUsize,
+        /// Every save fails while set (a full disk, a read-only config).
+        pub fail_saves: AtomicBool,
         notifier: Mutex<crate::notify::Notifier>,
         server: std::sync::OnceLock<Arc<Mutex<Server>>>,
     }
@@ -1058,18 +1088,26 @@ mod tests {
         fn status_changed(&self, _: NetworkStatus) {
             self.statuses.fetch_add(1, Ordering::SeqCst);
         }
-        fn paired(&self, assistant: &crate::config::PairedAssistant) {
+        fn paired(&self, assistant: &crate::config::PairedAssistant) -> Result<(), String> {
             self.check_under_lock();
+            if self.fail_saves.load(Ordering::SeqCst) {
+                return Err("disk full".into());
+            }
             self.paired.fetch_add(1, Ordering::SeqCst);
             let mut saved = self.saved.lock().unwrap();
             match saved.iter_mut().find(|a| a.id == assistant.id) {
                 Some(a) => *a = assistant.clone(),
                 None => saved.push(assistant.clone()),
             }
+            Ok(())
         }
-        fn paired_list_changed(&self, list: &[crate::config::PairedAssistant]) {
+        fn paired_list_changed(&self, list: &[crate::config::PairedAssistant]) -> Result<(), String> {
             self.check_under_lock();
+            if self.fail_saves.load(Ordering::SeqCst) {
+                return Err("disk full".into());
+            }
             *self.saved.lock().unwrap() = list.to_vec();
+            Ok(())
         }
     }
 
@@ -1244,7 +1282,7 @@ mod tests {
         hello(&mut ws, "desk", Some(&id));
         let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
         answer(&mut ws, &token, &nonce);
-        handle.remove_assistant(&id);
+        handle.remove_assistant(&id).unwrap();
         assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == "removed"));
         assert!(handle.boards().is_empty());
         assert!(handle.status().assistants.is_empty());
@@ -1445,7 +1483,7 @@ mod tests {
         drop(desk);
         wait_until(|| counter.saved.lock().unwrap().iter().any(|a| a.id == id && a.last_seen.is_some()) && !handle.status().assistants[0].connected);
         let desk = reconnect(&id, &token);
-        handle.remove_assistant(&twin);
+        handle.remove_assistant(&twin).unwrap();
         drop(desk);
         wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
         // Each save was made with the lock held, so saves land in the order
@@ -1724,6 +1762,72 @@ mod tests {
     }
 
     #[test]
+    fn a_pairing_the_main_cannot_save_is_undone_and_the_assistant_keeps_nothing() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        counter.fail_saves.store(true, Ordering::SeqCst);
+        // On the wire: `paired`, then `bye` instead of `welcome`.
+        let (code, _) = handle.open_pairing(now_ms());
+        let mut ws = connect(port);
+        hello(&mut ws, "desk", None);
+        send(&mut ws, &Up::Pair { code, nonce: "n".into() });
+        assert!(matches!(recv(&mut ws), Down::Paired { .. }));
+        assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == PAIRING_NOT_SAVED));
+        wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
+        assert!(handle.status().assistants.is_empty(), "no entry on the main");
+        assert!(counter.saved.lock().unwrap().is_empty());
+        // The real client reports it and keeps no credentials.
+        let (code, _) = handle.open_pairing(now_ms());
+        let notify = Arc::new(FakeClientNotify::default());
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "desk".into(), ..Default::default() };
+        let out = client::run_once(&config, Arc::new(FakeExec::default()), notify.clone(), &AtomicBool::new(false), Some(&code));
+        assert_eq!(out, Err("The main could not save the pairing.".to_string()));
+        assert!(notify.creds.lock().unwrap().is_none(), "nothing is stored on the assistant");
+        assert!(notify.main.lock().unwrap().is_none(), "never reported as connected");
+        wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
+        assert!(handle.status().assistants.is_empty());
+        // A machine pairing again whose save fails keeps its old entry and key.
+        counter.fail_saves.store(false, Ordering::SeqCst);
+        let (first, id, token) = pair_client(&handle, port, "desk");
+        wait_until(|| counter.paired.load(Ordering::SeqCst) == 1);
+        drop(first);
+        wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
+        counter.fail_saves.store(true, Ordering::SeqCst);
+        let (code, _) = handle.open_pairing(now_ms());
+        let mut ws = connect(port);
+        hello(&mut ws, "renamed", None);
+        send(&mut ws, &Up::Pair { code, nonce: "n".into() });
+        assert!(matches!(recv(&mut ws), Down::Paired { id: again, .. } if again == id));
+        assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == PAIRING_NOT_SAVED));
+        wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
+        let kept = handle.shared.lock().unwrap().paired.clone();
+        assert_eq!(kept.iter().map(|a| (a.id.as_str(), a.name.as_str(), a.token.as_str())).collect::<Vec<_>>(), [(id.as_str(), "desk", token.as_str())]);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_removal_the_main_cannot_save_changes_nothing() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (mut ws, id, _) = pair_client(&handle, port, "desk");
+        send(&mut ws, &Up::Board { cards: vec![card("r1", "remote")], dirs: vec![] });
+        wait_until(|| !handle.boards().is_empty());
+        counter.fail_saves.store(true, Ordering::SeqCst);
+        let err = handle.remove_assistant(&id).unwrap_err();
+        assert!(err.contains("disk full"), "{err}");
+        let status = handle.status();
+        assert_eq!(status.assistants.len(), 1, "still paired");
+        assert!(status.assistants[0].connected, "still connected: no bye went out");
+        assert_eq!(handle.boards().len(), 1, "its cards stay");
+        counter.fail_saves.store(false, Ordering::SeqCst);
+        assert_eq!(handle.remove_assistant(&id), Ok(()));
+        assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == "removed"));
+        assert!(handle.status().assistants.is_empty());
+        assert!(counter.saved.lock().unwrap().is_empty());
+        handle.stop();
+    }
+
+    #[test]
     fn pair_again_stops_the_running_client_first_and_keeps_the_entry() {
         let (handle, port) = test_server();
         let exec = Arc::new(FakeExec::default());
@@ -1791,7 +1895,7 @@ mod tests {
         stop.store(false, Ordering::SeqCst);
         let t = run(NetworkConfig { assistant_id: id.clone(), token, ..config }, None);
         wait_until(|| handle.status().assistants.iter().any(|a| a.connected));
-        handle.remove_assistant(&id);
+        handle.remove_assistant(&id).unwrap();
         assert_eq!(t.join().unwrap().unwrap_err(), client::REMOVED);
         assert_eq!(notify.removed.load(Ordering::SeqCst), 1);
         handle.stop();

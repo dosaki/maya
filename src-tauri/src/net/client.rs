@@ -152,6 +152,7 @@ fn bye_message(reason: &str) -> String {
         "too many attempts" => "Too many wrong codes; wait five minutes and try again.".into(),
         "authentication failed" => "The main Maya did not accept this assistant's key; pair again.".into(),
         "protocol" => "The main Maya runs a different version of Maya.".into(),
+        "could not save the pairing" => "The main could not save the pairing.".into(),
         other => format!("The main Maya closed the connection ({}).", clean(other)),
     }
 }

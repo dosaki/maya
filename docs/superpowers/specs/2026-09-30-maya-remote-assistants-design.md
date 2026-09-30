@@ -59,10 +59,14 @@ numbers, folder names.
   is not protected against it. A password-authenticated key exchange
   (PAKE) over the code would close this; it is out of scope for this
   version.
-- The main saves a pairing once `paired` and `welcome` are out. If either
-  cannot be sent (the assistant is already gone), the entry it just made
-  is removed, or for a machine pairing again given back its old token and
-  names, and nothing is saved.
+- The main saves a pairing once `paired` is out, before it sends
+  `welcome`. If `paired` cannot be sent (the assistant is already gone),
+  the entry it just made is removed, or for a machine pairing again given
+  back its old token and names, and nothing is saved. If the save fails,
+  the entry is taken back the same way and the assistant gets `bye
+  { reason: "could not save the pairing" }` instead of `welcome`: it keeps
+  nothing and shows "The main could not save the pairing." If `welcome`
+  cannot be sent, the entry is taken back and the list saved without it.
 - **Identity is the address; names are labels.** The main records each
   assistant's IP address as it sees it, at pairing and on every successful
   authentication (with the name, hostname and platform the machine just
@@ -212,7 +216,10 @@ Cards in `board` are the assistant's own `Card` values with `pid` and
   its cards stay and do not grey while the note explains why.
 - A removed assistant is sent `bye { reason: "removed" }`, its cards are
   dropped, and it cannot reconnect; on its side the status shows "Removed
-  by the main Maya; pair again."
+  by the main Maya; pair again." The shorter list is saved first; if that
+  fails, Remove shows the error and nothing changes. A save when an
+  assistant connects or disconnects (its address, when it was last seen)
+  that fails is only logged.
 - Ticking off "Act as main Maya" closes every connection and drops remote
   cards; assistants show "Reconnecting…" until it is back.
 

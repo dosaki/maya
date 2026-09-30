@@ -130,14 +130,25 @@ pub(crate) struct TauriNetNotify {
 }
 
 impl TauriNetNotify {
-    fn save_assistants(&self, f: impl FnOnce(&mut Vec<config::PairedAssistant>)) {
+    fn save_assistants(&self, f: impl FnOnce(&mut Vec<config::PairedAssistant>)) -> Result<(), String> {
         let state = self.app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
-        f(&mut store.config.network.assistants);
-        if let Err(e) = config::save(&store.config_path(), &store.config) {
-            log::line("network", format!("could not save the paired assistants: {e}"));
-        }
+        let path = store.config_path();
+        save_paired(&path, &mut store.config, f)
     }
+}
+
+/// Changes the paired list with `f` and saves the config to `path`; the
+/// config in memory changes only once the save succeeded.
+fn save_paired(path: &std::path::Path, config: &mut Config, f: impl FnOnce(&mut Vec<config::PairedAssistant>)) -> Result<(), String> {
+    let mut next = config.clone();
+    f(&mut next.network.assistants);
+    if let Err(e) = config::save(path, &next) {
+        log::line("network", format!("could not save the paired assistants: {e}"));
+        return Err(format!("Could not save the paired assistants: {e}"));
+    }
+    *config = next;
+    Ok(())
 }
 
 impl Notify for TauriNetNotify {
@@ -153,16 +164,16 @@ impl Notify for TauriNetNotify {
         let _ = self.app.emit("network", &status);
     }
 
-    fn paired(&self, assistant: &config::PairedAssistant) {
+    fn paired(&self, assistant: &config::PairedAssistant) -> Result<(), String> {
         // A machine pairing again keeps its entry, and its place in the list.
         self.save_assistants(|list| match list.iter_mut().find(|a| a.id == assistant.id) {
             Some(a) => *a = assistant.clone(),
             None => list.push(assistant.clone()),
-        });
+        })
     }
 
-    fn paired_list_changed(&self, assistants: &[config::PairedAssistant]) {
-        self.save_assistants(|list| *list = assistants.to_vec());
+    fn paired_list_changed(&self, assistants: &[config::PairedAssistant]) -> Result<(), String> {
+        self.save_assistants(|list| *list = assistants.to_vec())
     }
 }
 
@@ -443,20 +454,22 @@ fn network_pairing_code(state: TauriState<AppState>) -> Result<NetworkStatus, St
     Ok(server.status())
 }
 
-/// Forgets a paired assistant; a connected one is told and closed.
+/// Forgets a paired assistant; a connected one is told and closed. The
+/// shorter list is saved first: if that fails, nothing changes and the
+/// page gets the error.
 #[tauri::command]
-fn network_remove_assistant(app: AppHandle, state: TauriState<AppState>, id: String) -> NetworkStatus {
+fn network_remove_assistant(app: AppHandle, state: TauriState<AppState>, id: String) -> Result<NetworkStatus, String> {
     // The handle is cloned out so the network lock is not held while the
     // server notifies (its adapter takes `network` again to repaint).
     let server = state.network.lock().unwrap().server.clone();
     match server {
-        Some(s) => s.remove_assistant(&id),
+        Some(s) => s.remove_assistant(&id)?,
         None => {
-            TauriNetNotify { app: app.clone() }.save_assistants(|list| list.retain(|a| a.id != id));
+            TauriNetNotify { app: app.clone() }.save_assistants(|list| list.retain(|a| a.id != id))?;
             log::line("network", format!("{id}: removed"));
         }
     }
-    network_status_of(&state)
+    Ok(network_status_of(&state))
 }
 
 /// Starts the main's server on the configured port, replacing any running
@@ -1215,6 +1228,26 @@ mod route_tests {
         assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
         assert_eq!(pr_link(&card("/Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
         assert_eq!(pr_link(&Card { pr: None, ..card("") }).unwrap_err(), "No pull request is known for this session yet.");
+    }
+
+    #[test]
+    fn a_paired_list_that_cannot_be_saved_is_not_changed() {
+        let dir = std::env::temp_dir().join(format!("maya-save-paired-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = |id: &str| config::PairedAssistant { id: id.into(), name: id.into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "10.0.0.5".into(), last_seen: None };
+        let mut config = Config::default();
+        config.network.assistants = vec![p("a1"), p("b2")];
+        // A file where the config's directory should be: the save fails.
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let err = save_paired(&blocker.join("maya/config.json"), &mut config, |l| l.retain(|a| a.id != "a1")).unwrap_err();
+        assert!(err.starts_with("Could not save the paired assistants: "), "{err}");
+        assert_eq!(config.network.assistants.len(), 2, "the removal is not made");
+        let path = dir.join("maya/config.json");
+        assert_eq!(save_paired(&path, &mut config, |l| l.retain(|a| a.id != "a1")), Ok(()));
+        assert_eq!(config.network.assistants.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["b2"]);
+        assert_eq!(config::load(&path).network.assistants.len(), 1, "and it is on disk");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
