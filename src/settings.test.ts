@@ -314,6 +314,7 @@ describe("Network settings", () => {
     expect(el.querySelector(".settings__code")?.textContent).toBe("483 921");
     expect(el.querySelector(".settings__hint")?.textContent).toContain("3 min");
     const regen = el.querySelector<HTMLButtonElement>("button[data-action=regenerate-code]")!;
+    expect(regen.textContent).toBe("Regenerate");
     regen.click();
     expect(h.onRegenerate).toHaveBeenCalled();
     const remove = el.querySelector<HTMLButtonElement>("button[data-action=remove-assistant]")!;
@@ -342,7 +343,9 @@ describe("Network settings", () => {
     expect(err?.textContent).toBe("Could not listen on port 4127: Address already in use (os error 48). Choose another port.");
     expect(el.querySelector("select[name=networkRole]")!.closest("label")!.nextElementSibling).toBe(err);
     expect(el.querySelector(".settings__assistant")?.textContent).toContain("laptop");
-    expect(renderSettings({ ...voiceBase, networkRole: "main" }, handlers()).querySelector(".settings__error[data-for=network]")).toBeNull();
+    const plain = renderSettings({ ...voiceBase, networkRole: "main" }, handlers());
+    expect(plain.querySelector(".settings__error[data-for=network]")).toBeNull();
+    expect(plain.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Show pairing code");
   });
 
   it("shows an assistant's note (a different version, an unreadable board) in the list", () => {

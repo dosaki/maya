@@ -444,8 +444,9 @@ fn network_remove_assistant(app: AppHandle, state: TauriState<AppState>, id: Str
     network_status_of(&state)
 }
 
-/// Starts the main's server on the configured port, replacing any running one.
-fn start_main(app: &AppHandle) {
+/// Starts the main's server on the configured port, replacing any running
+/// one; with `show_code` (the role just turned on) it opens pairing at once.
+fn start_main(app: &AppHandle, show_code: bool) {
     stop_main(app);
     let port = app.state::<AppState>().store.lock().unwrap().config.listen_port();
     // A server just stopped lets go of the port within a tick; retry briefly.
@@ -468,6 +469,12 @@ fn start_main(app: &AppHandle) {
             };
             if let Some(old) = displaced {
                 old.stop();
+            }
+            if show_code {
+                let server = app.state::<AppState>().network.lock().unwrap().server.clone();
+                if let Some(server) = server {
+                    server.open_pairing(now_ms());
+                }
             }
         }
         Err(e) => {
@@ -971,7 +978,8 @@ fn apply_config_change(app: &AppHandle, before: &Config, config: &Config) {
         match change {
             NetChange::StartMain | NetChange::RestartMain => {
                 log::line("network", "settings changed; starting the main's server");
-                start_main(app);
+                // Turning the role on shows a pairing code without a click.
+                start_main(app, change == NetChange::StartMain);
             }
             NetChange::StopMain => stop_main(app),
             NetChange::StartAssistant | NetChange::RestartAssistant => {
@@ -1071,7 +1079,7 @@ pub fn run() {
             match role {
                 config::NetworkRole::Main => {
                     let net_handle = app.handle().clone();
-                    std::thread::spawn(move || start_main(&net_handle));
+                    std::thread::spawn(move || start_main(&net_handle, false));
                 }
                 config::NetworkRole::Assistant => start_assistant(app.handle()),
                 config::NetworkRole::Off => {}

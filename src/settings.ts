@@ -538,7 +538,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const regen = document.createElement("button");
     regen.type = "button";
     regen.dataset.action = "regenerate-code";
-    regen.textContent = "Regenerate";
+    regen.textContent = net.code ? "Regenerate" : "Show pairing code";
     regen.addEventListener("click", () => h.onRegenerate());
     network.append(regen);
 
