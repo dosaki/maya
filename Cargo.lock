@@ -1931,6 +1931,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "maya-cli"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "maya-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "maya-core"
 version = "0.1.0"
 dependencies = [
