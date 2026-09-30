@@ -188,6 +188,7 @@ pub fn derive(i: &DeriveInput) -> Card {
         pr: None,
         context: None,
         machine: None,
+        machine_address: None,
         stale: false,
     }
 }

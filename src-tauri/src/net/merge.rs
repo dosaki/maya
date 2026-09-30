@@ -12,6 +12,8 @@ pub struct RemoteBoard {
     pub machine: String,
     pub hostname: String,
     pub platform: String,
+    /// The assistant's IP address as the main sees it.
+    pub address: String,
     pub cards: Vec<Card>,
     pub dirs: Vec<String>,
     pub received_at: u64,
@@ -43,6 +45,7 @@ pub fn merged(local: Vec<Card>, remotes: &[RemoteBoard], now_ms: u64) -> Vec<Car
             seen.insert(c.session_id.clone());
             let mut c = c.clone();
             c.machine = Some(b.machine.clone());
+            c.machine_address = Some(b.address.clone()).filter(|a| !a.is_empty());
             c.stale = stale;
             out.push(c);
         }
@@ -50,19 +53,19 @@ pub fn merged(local: Vec<Card>, remotes: &[RemoteBoard], now_ms: u64) -> Vec<Car
     out
 }
 
-/// Names as shown on cards, from `(name, hostname, id)`: a name shared by two
-/// machines gets its hostname, and one still shared (the same machine paired
-/// twice) also gets the first four characters of its id.
-pub fn display_names(entries: &[(String, String, String)]) -> Vec<String> {
+/// Labels as shown on cards and said by Maya, from `(name, address)`: the
+/// plain name, or `name (address)` for every entry sharing its name.
+/// Machines are told apart by address; names are only labels.
+pub fn display_names(entries: &[(String, String)]) -> Vec<String> {
     entries
         .iter()
-        .map(|(name, host, id)| {
-            let same_name = entries.iter().filter(|(n, _, _)| n == name).count() > 1;
-            let same_host = entries.iter().filter(|(n, h, _)| n == name && h == host).count() > 1;
-            match (same_name, same_host) {
-                (false, _) => name.clone(),
-                (true, false) => format!("{name} ({host})"),
-                (true, true) => format!("{name} ({host}, {})", id.chars().take(4).collect::<String>()),
+        .map(|(name, address)| {
+            if entries.iter().filter(|(n, _)| n == name).count() < 2 {
+                name.clone()
+            } else if address.is_empty() {
+                format!("{name} (address unknown)")
+            } else {
+                format!("{name} ({address})")
             }
         })
         .collect()
@@ -85,11 +88,11 @@ mod tests {
     use crate::model::{Card, Harness, State};
 
     fn card(id: &str, name: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, stale: false }
+        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, stale: false }
     }
 
     fn board(machine: &str, hostname: &str, ids: &[&str], received_at: u64, connected: bool) -> RemoteBoard {
-        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], received_at, connected }
+        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], received_at, connected }
     }
 
     #[test]
@@ -98,6 +101,8 @@ mod tests {
         assert_eq!(m.iter().map(|c| c.session_id.as_str()).collect::<Vec<_>>(), ["l1", "r1", "r2"]);
         assert_eq!(m[0].machine, None);
         assert_eq!(m[1].machine.as_deref(), Some("laptop"));
+        assert_eq!(m[1].machine_address.as_deref(), Some("10.0.0.9"));
+        assert_eq!(m[0].machine_address, None);
         assert!(!m[1].stale);
     }
 
@@ -133,12 +138,12 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_names_get_the_hostname() {
-        let e = |n: &str, h: &str, id: &str| (n.to_string(), h.to_string(), id.to_string());
-        let names = display_names(&[e("laptop", "h1", "a1"), e("laptop", "h2", "b2"), e("desk", "h3", "c3")]);
-        assert_eq!(names, ["laptop (h1)", "laptop (h2)", "desk"]);
-        let twice = display_names(&[e("laptop", "h1", "abcdef"), e("laptop", "h1", "wxyz12"), e("laptop", "h2", "q")]);
-        assert_eq!(twice, ["laptop (h1, abcd)", "laptop (h1, wxyz)", "laptop (h2)"], "the same machine paired twice stays distinct");
+    fn two_equal_names_both_carry_their_address() {
+        let e = |n: &str, a: &str| (n.to_string(), a.to_string());
+        let names = display_names(&[e("Gnowee", "192.168.55.70"), e("Gnowee", "192.168.55.71"), e("desk", "192.168.55.72")]);
+        assert_eq!(names, ["Gnowee (192.168.55.70)", "Gnowee (192.168.55.71)", "desk"]);
+        assert_eq!(display_names(&[e("laptop", "10.0.0.5")]), ["laptop"], "a unique name stays plain");
+        assert_eq!(display_names(&[e("laptop", ""), e("laptop", "10.0.0.5")]), ["laptop (address unknown)", "laptop (10.0.0.5)"], "an entry saved before addresses were kept");
     }
 
     #[test]

@@ -36,6 +36,8 @@ pub struct AssistantStatus {
     pub name: String,
     pub hostname: String,
     pub platform: String,
+    /// Its IP address as the main last saw it; empty if never recorded.
+    pub address: String,
     pub connected: bool,
     pub last_seen: Option<u64>,
     /// Something the user should know: a different Maya version, or a board
@@ -98,11 +100,11 @@ pub fn network_change(before: &Config, after: &Config) -> Vec<NetChange> {
 /// The paired list as the main shows it while its server is down: every
 /// assistant disconnected, named as they would be on cards.
 pub fn paired_offline(paired: &[PairedAssistant]) -> Vec<AssistantStatus> {
-    let entries: Vec<(String, String, String)> = paired.iter().map(|p| (p.name.clone(), p.hostname.clone(), p.id.clone())).collect();
+    let entries: Vec<(String, String)> = paired.iter().map(|p| (p.name.clone(), p.address.clone())).collect();
     paired
         .iter()
         .zip(merge::display_names(&entries))
-        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), connected: false, last_seen: None, note: None })
+        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: false, last_seen: None, note: None })
         .collect()
 }
 
@@ -154,11 +156,14 @@ mod tests {
 
     #[test]
     fn a_main_that_cannot_listen_says_why_and_keeps_its_paired_list() {
-        let p = |id: &str, name: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), token: "t".into() };
-        let status = NetworkStatus { role: NetworkRole::Main, assistants: paired_offline(&[p("a1", "laptop"), p("b2", "desk")]), main_error: Some("Could not listen on port 4127: Address already in use".into()), ..Default::default() };
+        let p = |id: &str, name: &str, address: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: address.into() };
+        let status = NetworkStatus { role: NetworkRole::Main, assistants: paired_offline(&[p("a1", "laptop", "10.0.0.5"), p("b2", "desk", "10.0.0.6")]), main_error: Some("Could not listen on port 4127: Address already in use".into()), ..Default::default() };
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["mainError"], "Could not listen on port 4127: Address already in use");
         assert_eq!(json["assistants"][0]["name"], "laptop");
+        assert_eq!(json["assistants"][0]["address"], "10.0.0.5");
+        let twins = paired_offline(&[p("a1", "laptop", "10.0.0.5"), p("b2", "laptop", "10.0.0.6")]);
+        assert_eq!(twins.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["laptop (10.0.0.5)", "laptop (10.0.0.6)"]);
         assert_eq!(json["assistants"][1]["connected"], false);
         assert_eq!(serde_json::to_value(NetworkStatus::default()).unwrap()["mainError"], serde_json::Value::Null);
     }

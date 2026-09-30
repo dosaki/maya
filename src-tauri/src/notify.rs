@@ -277,6 +277,7 @@ mod tests {
             pr: None,
             context: None,
             machine: None,
+            machine_address: None,
             stale: false,
         }
     }
@@ -326,6 +327,7 @@ mod tests {
             pr: None,
             context: None,
             machine: None,
+            machine_address: None,
             stale: false,
         }
     }

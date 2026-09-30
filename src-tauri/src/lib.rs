@@ -148,9 +148,10 @@ impl Notify for TauriNetNotify {
     }
 
     fn paired(&self, assistant: &config::PairedAssistant) {
-        self.save_assistants(|list| {
-            list.retain(|a| a.id != assistant.id);
-            list.push(assistant.clone());
+        // A machine pairing again keeps its entry, and its place in the list.
+        self.save_assistants(|list| match list.iter_mut().find(|a| a.id == assistant.id) {
+            Some(a) => *a = assistant.clone(),
+            None => list.push(assistant.clone()),
         });
     }
 
@@ -1188,6 +1189,7 @@ mod route_tests {
             pr: Some(model::PullRequest { number: 7, url: url.into(), state: "open".into() }),
             context: None,
             machine: Some("laptop".into()),
+            machine_address: None,
             stale: false,
         };
         assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));

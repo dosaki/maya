@@ -22,7 +22,7 @@ use crate::config::{NetworkConfig, NetworkRole, PairedAssistant};
 use crate::log;
 use crate::store::now_ms;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -67,11 +67,9 @@ struct Pending {
     tx: Sender<Result<Option<Value>, String>>,
 }
 
-/// What an assistant said about itself in its last `hello`.
+/// What the main knows of a connected (or once connected) assistant beyond
+/// its paired entry, which holds its name, hostname, platform and address.
 struct Peer {
-    name: String,
-    hostname: String,
-    platform: String,
     /// The Maya version it runs.
     app: String,
     last_seen: u64,
@@ -79,7 +77,6 @@ struct Peer {
     unreadable_board: bool,
 }
 
-pub(crate) const REPLACED: &str = "replaced: this machine paired again; you can remove this entry";
 pub(crate) const UNREADABLE_BOARD: &str = "sent a board this version cannot read; update Maya on both machines";
 
 impl Peer {
@@ -116,14 +113,11 @@ pub struct Server {
     nonces: NonceLog,
     paired: Vec<PairedAssistant>,
     peers: HashMap<String, Peer>,
-    /// Entries whose machine paired again under a new id and connected;
-    /// they keep an id-suffixed label so the new entry gets the plain name.
-    replaced: HashSet<String>,
 }
 
 impl Server {
     fn new(paired: Vec<PairedAssistant>) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new(), replaced: HashSet::new() }
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new() }
     }
 
     fn next(&mut self) -> u64 {
@@ -135,55 +129,50 @@ impl Server {
         self.paired.iter().any(|p| p.id == id)
     }
 
-    /// The name and hostname an assistant last gave.
-    fn name_of(&self, p: &PairedAssistant) -> (String, String) {
-        self.peers.get(&p.id).map_or((p.name.clone(), p.hostname.clone()), |x| (x.name.clone(), x.hostname.clone()))
-    }
-
-    /// Each paired assistant's id and display name, unique across the list.
-    /// A replaced entry is left out of the naming, so the machine's current
-    /// pairing gets the plain name, and is shown with its id instead.
+    /// Each paired assistant's id and label: its name, with its address
+    /// when another entry has the same name.
     fn labels(&self) -> Vec<(String, String)> {
-        let entries: Vec<(String, String, String)> = self
-            .paired
-            .iter()
-            .filter(|p| !self.replaced.contains(&p.id))
-            .map(|p| {
-                let (name, host) = self.name_of(p);
-                (name, host, p.id.clone())
-            })
-            .collect();
-        let mut names = display_names(&entries).into_iter();
-        self.paired
-            .iter()
-            .map(|p| {
-                let label = if self.replaced.contains(&p.id) {
-                    let (name, host) = self.name_of(p);
-                    format!("{name} ({host}, {})", p.id.chars().take(4).collect::<String>())
-                } else {
-                    names.next().unwrap_or_default()
-                };
-                (p.id.clone(), label)
-            })
-            .collect()
+        let entries: Vec<(String, String)> = self.paired.iter().map(|p| (p.name.clone(), p.address.clone())).collect();
+        self.paired.iter().zip(display_names(&entries)).map(|(p, label)| (p.id.clone(), label)).collect()
     }
 
-    /// A machine that paired again under a new id and connected as `id`:
-    /// its older, disconnected entries are replaced and their boards dropped.
-    fn replace_older(&mut self, id: &str, name: &str, hostname: &str) -> Vec<String> {
-        let older: Vec<String> = self
-            .paired
-            .iter()
-            .filter(|p| p.id != id && !self.conns.contains_key(&p.id) && self.name_of(p) == (name.to_string(), hostname.to_string()))
-            .map(|p| p.id.clone())
-            .collect();
-        for old in &older {
-            self.replaced.insert(old.clone());
-            self.by_id.remove(old);
+    /// Records a pairing from `address`. A disconnected entry already paired
+    /// from that address is the same machine pairing again: it keeps its id,
+    /// gets a new token and the names just given, and its old board goes.
+    /// Otherwise the pairing is a new entry. Returns the entry and whether it
+    /// was an existing one.
+    fn record_pairing(&mut self, address: &str, name: &str, hostname: &str, platform: &str) -> (PairedAssistant, bool) {
+        let again = self.paired.iter().position(|p| p.address == address && !self.conns.contains_key(&p.id));
+        let Some(i) = again else {
+            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token(), address: address.into() };
+            self.paired.push(a.clone());
+            return (a, false);
+        };
+        let p = &mut self.paired[i];
+        p.name = name.into();
+        p.hostname = hostname.into();
+        p.platform = platform.into();
+        p.token = new_token();
+        let a = p.clone();
+        self.by_id.remove(&a.id);
+        self.peers.remove(&a.id);
+        self.sync_boards();
+        (a, true)
+    }
+
+    /// Brings a paired entry up to date with what its machine just said and
+    /// the address it connected from; true when anything changed.
+    fn refresh_entry(&mut self, id: &str, address: &str, name: &str, hostname: &str, platform: &str) -> bool {
+        let Some(p) = self.paired.iter_mut().find(|p| p.id == id) else { return false };
+        let fresh = (address, name, hostname, platform);
+        if (p.address.as_str(), p.name.as_str(), p.hostname.as_str(), p.platform.as_str()) == fresh {
+            return false;
         }
-        // The one connecting is current again, even if it had been replaced.
-        self.replaced.remove(id);
-        older
+        p.address = address.into();
+        p.name = name.into();
+        p.hostname = hostname.into();
+        p.platform = platform.into();
+        true
     }
 
     fn label(&self, id: &str) -> String {
@@ -196,27 +185,22 @@ impl Server {
         ids.iter().find(|i| self.conns.contains_key(*i)).or(ids.first()).cloned()
     }
 
-    fn host_of(&self, id: &str) -> (String, String) {
-        match (self.peers.get(id), self.paired.iter().find(|p| p.id == id)) {
-            (Some(x), _) => (x.hostname.clone(), x.platform.clone()),
-            (None, Some(p)) => (p.hostname.clone(), p.platform.clone()),
-            _ => (String::new(), String::new()),
-        }
-    }
-
     fn touch(&mut self, id: &str) {
         if let Some(p) = self.peers.get_mut(id) {
             p.last_seen = now_ms();
         }
     }
 
-    /// Rebuilds `boards` from the snapshots, relabelled and sorted by machine.
+    /// Rebuilds `boards` from the snapshots, relabelled, with each machine's
+    /// hostname, platform and address, and sorted by machine.
     fn sync_boards(&mut self) {
         let labels = self.labels();
-        let mut boards: Vec<RemoteBoard> = labels
+        let mut boards: Vec<RemoteBoard> = self
+            .paired
             .iter()
-            .filter_map(|(id, label)| {
-                self.by_id.get(id).map(|b| RemoteBoard { machine: label.clone(), ..b.clone() })
+            .zip(labels)
+            .filter_map(|(p, (id, label))| {
+                self.by_id.get(&id).map(|b| RemoteBoard { machine: label, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), ..b.clone() })
             })
             .collect();
         boards.sort_by(|a, b| a.machine.cmp(&b.machine));
@@ -242,10 +226,8 @@ impl Server {
             .iter()
             .zip(labels)
             .map(|(p, (_, name))| {
-                let (hostname, platform) = self.host_of(&p.id);
                 let peer = self.peers.get(&p.id);
-                let note = if self.replaced.contains(&p.id) { Some(REPLACED.to_string()) } else { peer.and_then(Peer::note) };
-                AssistantStatus { id: p.id.clone(), name, hostname, platform, connected: self.conns.contains_key(&p.id), last_seen: peer.map(|x| x.last_seen), note }
+                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: self.conns.contains_key(&p.id), last_seen: peer.map(|x| x.last_seen), note: peer.and_then(Peer::note) }
             })
             .collect();
         NetworkStatus { role: NetworkRole::Main, code, assistants, ..Default::default() }
@@ -316,7 +298,6 @@ impl ServerHandle {
             }
             s.by_id.remove(id);
             s.peers.remove(id);
-            s.replaced.remove(id);
             s.sync_boards();
             (s.paired.clone(), label, s.status(now_ms()))
         };
@@ -572,25 +553,26 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         let mut s = lock(&ctx.shared);
         if s.is_paired(&id) {
             let serial = s.next();
-            let replaced: Vec<String> = s.replace_older(&id, &name, &hostname).iter().map(|old| s.label(old)).collect();
-            s.peers.insert(id.clone(), Peer { name, hostname, platform, app, last_seen: now_ms(), unreadable_board: false });
+            // The entry follows the machine: its address, and the names it just gave.
+            let changed = s.refresh_entry(&id, &ip, &name, &hostname, &platform);
+            s.peers.insert(id.clone(), Peer { app, last_seen: now_ms(), unreadable_board: false });
             // A newer connection replaces an older one; dropping its sender ends it.
             s.conns.insert(id.clone(), Conn { tx, serial });
             if let Some(b) = s.by_id.get_mut(&id) {
                 b.connected = true;
             }
             s.sync_boards();
-            Some((serial, s.label(&id), replaced))
+            Some((serial, s.label(&id), changed.then(|| s.paired.clone())))
         } else {
             None
         }
     };
-    let Some((serial, label, replaced)) = registered else {
+    let Some((serial, label, changed)) = registered else {
         bye(ws, "removed");
         return None;
     };
-    for old in replaced {
-        log::line("network", format!("{old}: replaced by a newer pairing of the same machine"));
+    if let Some(list) = changed {
+        ctx.notify.paired_list_changed(&list);
     }
     let link = Link { id, serial, label, rx };
     // Authenticated: boards and results may now be large.
@@ -657,11 +639,10 @@ fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: 
             s.attempts.failed(ip, now);
             Err("wrong or expired pairing code")
         } else {
-            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token() };
-            s.paired.push(a.clone());
+            let pairing = s.record_pairing(ip, name, hostname, platform);
             // One code, one assistant.
             s.pairing = None;
-            Ok(a)
+            Ok(pairing)
         }
     };
     match outcome {
@@ -670,9 +651,9 @@ fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: 
             bye(ws, reason);
             None
         }
-        Ok(a) => {
+        Ok((a, again)) => {
             ctx.notify.paired(&a);
-            log::line("network", format!("{name}: paired from {ip}"));
+            log::line("network", format!("{name}: {} from {ip}", if again { "paired again (same entry, new key)" } else { "paired" }));
             send_down(ws, &Down::Paired { id: a.id.clone(), token: a.token.clone() }).ok()?;
             Some(a.id)
         }
@@ -741,9 +722,8 @@ fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
                 let current = s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial);
                 if current {
                     s.touch(&link.id);
-                    let (hostname, platform) = s.host_of(&link.id);
-                    let now = now_ms();
-                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname, platform, cards, dirs, received_at: now, connected: true });
+                    // `sync_boards` fills in the label, hostname, platform and address.
+                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, received_at: now_ms(), connected: true });
                     s.sync_boards();
                 }
                 current
@@ -981,7 +961,7 @@ mod tests {
     }
 
     pub(crate) fn card(id: &str, name: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, stale: false }
+        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, stale: false }
     }
 
     #[test]
@@ -1105,41 +1085,69 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_paired_again_replaces_its_old_entry_and_twins_route_to_the_right_one() {
+    fn a_machine_pairing_again_from_its_address_keeps_its_entry_with_a_new_token() {
         let (handle, port) = test_server();
         let (mut old, old_id, old_token) = pair_client(&handle, port, "laptop");
         send(&mut old, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![] });
-        wait_until(|| handle.boards().iter().any(|b| b.machine == "laptop"));
+        wait_until(|| handle.boards().iter().any(|b| b.machine == "laptop" && b.address == "127.0.0.1"));
         drop(old);
         wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
-        // Its config was reset: it pairs again with the same name and hostname.
-        let (mut new, new_id, _) = pair_client(&handle, port, "laptop");
-        let status = |id: &str| handle.status().assistants.into_iter().find(|a| a.id == id).unwrap();
-        assert_eq!(status(&new_id).name, "laptop", "the current pairing gets the plain name");
-        assert_eq!(status(&old_id).note.as_deref(), Some(REPLACED));
-        assert!(status(&old_id).name.starts_with("laptop (h, "), "{}", status(&old_id).name);
+        // Its config was reset: it pairs again from the same address.
+        let (mut new, new_id, new_token) = pair_client(&handle, port, "laptop");
+        assert_eq!(new_id, old_id, "the same machine keeps its entry");
+        assert_ne!(new_token, old_token, "with a new token");
+        let status = handle.status();
+        assert_eq!(status.assistants.len(), 1);
+        assert_eq!((status.assistants[0].name.as_str(), status.assistants[0].address.as_str()), ("laptop", "127.0.0.1"));
         assert!(handle.boards().iter().all(|b| !b.cards.iter().any(|c| c.session_id == "r1")), "the old snapshot is dropped at once");
-        send(&mut new, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![] });
-        wait_until(|| handle.boards().iter().any(|b| b.machine == "laptop" && b.connected));
-        assert_eq!(super::super::merge::machine_of(&handle.boards(), "r1").as_deref(), Some("laptop"));
-        // The old one comes back too: both are current, with distinct labels,
-        // and each label reaches its own socket.
-        let mut old = connect(port);
-        hello(&mut old, "laptop", Some(&old_id));
-        let Down::Challenge { nonce } = recv(&mut old) else { panic!("expected challenge") };
-        answer(&mut old, &old_token, &nonce);
-        let (old_label, new_label) = (status(&old_id).name, status(&new_id).name);
-        assert_ne!(old_label, new_label);
-        assert!(new_label.starts_with("laptop (h, "), "{new_label}");
-        assert_eq!(status(&old_id).note.as_deref(), Some("runs Maya t; this Mac runs ".to_string() + env!("CARGO_PKG_VERSION")).as_deref());
-        for (target, ws) in [(new_label.clone(), &mut new), (old_label.clone(), &mut old)] {
-            let shared = handle.shared.clone();
-            let t = std::thread::spawn(move || send_command_with(&shared, &target, CommandKind::Compact { session: "r1".into() }, Duration::from_secs(5)));
-            let Down::Command { id, .. } = recv(ws) else { panic!("expected command") };
-            send(ws, &Up::Result { id, ok: true, error: None, data: None });
-            assert!(t.join().unwrap().is_ok());
-        }
+        send(&mut new, &Up::Board { cards: vec![card("r2", "x")], dirs: vec![] });
+        wait_until(|| handle.boards().iter().any(|b| b.machine == "laptop" && b.connected && b.cards[0].session_id == "r2"));
+        let shared = handle.shared.clone();
+        let t = std::thread::spawn(move || send_command_with(&shared, "laptop", CommandKind::Compact { session: "r2".into() }, Duration::from_secs(5)));
+        let Down::Command { id, .. } = recv(&mut new) else { panic!("expected command") };
+        send(&mut new, &Up::Result { id, ok: true, error: None, data: None });
+        assert!(t.join().unwrap().is_ok());
+        // The old token no longer opens a connection.
+        let mut stale = connect(port);
+        hello(&mut stale, "laptop", Some(&old_id));
+        let Down::Challenge { nonce } = recv(&mut stale) else { panic!("expected challenge") };
+        send(&mut stale, &Up::Auth { mac: mac(&old_token, &nonce), nonce: crate::net::protocol::new_nonce() });
+        assert!(matches!(recv(&mut stale), Down::Bye { reason } if reason == "authentication failed"));
+        // While it is connected, another pairing from its address is another machine.
+        let (_twin, twin_id, _) = pair_client(&handle, port, "desk");
+        assert_ne!(twin_id, new_id);
+        assert_eq!(handle.status().assistants.len(), 2);
         handle.stop();
+    }
+
+    #[test]
+    fn pairings_are_told_apart_by_address_and_equal_names_carry_it() {
+        let mut s = Server::new(vec![]);
+        let (first, again) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos");
+        assert!(!again);
+        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], received_at: 0, connected: false });
+        let (second, again) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos");
+        assert!(again, "the same address, disconnected: the same machine");
+        assert_eq!(second.id, first.id);
+        assert_ne!(second.token, first.token);
+        assert_eq!(s.paired.len(), 1);
+        assert!(s.by_id.is_empty(), "its old board is dropped");
+        // Another address with the same name is another machine.
+        let (other, again) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos");
+        assert!(!again);
+        assert_ne!(other.id, first.id);
+        let names: Vec<(String, String)> = s.status(0).assistants.into_iter().map(|a| (a.name, a.address)).collect();
+        assert_eq!(names, [("Gnowee (192.168.55.70)".to_string(), "192.168.55.70".to_string()), ("Gnowee (192.168.55.71)".to_string(), "192.168.55.71".to_string())]);
+        // A connected entry is never taken over by a new pairing.
+        s.conns.insert(other.id.clone(), Conn { tx: channel().0, serial: 1 });
+        let (third, again) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos");
+        assert!(!again);
+        assert_eq!(s.paired.len(), 3);
+        assert_ne!(third.id, other.id);
+        // Authentication brings the entry up to date: a new address, a new name.
+        assert!(s.refresh_entry(&first.id, "192.168.55.80", "Gnowee", "TKC-0176", "macos"));
+        assert!(!s.refresh_entry(&first.id, "192.168.55.80", "Gnowee", "TKC-0176", "macos"), "nothing new: nothing to save");
+        assert_eq!(s.paired[0].address, "192.168.55.80");
     }
 
     #[test]

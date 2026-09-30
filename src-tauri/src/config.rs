@@ -19,6 +19,10 @@ pub struct PairedAssistant {
     pub hostname: String,
     pub platform: String,
     pub token: String,
+    /// The peer's IP address as the main saw it at pairing or at its last
+    /// authentication; what tells two machines apart (names are labels).
+    #[serde(default)]
+    pub address: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
@@ -290,9 +294,16 @@ mod tests {
         c.network.role = NetworkRole::Assistant;
         c.network.main_host = "10.0.0.2".into();
         c.network.token = "abc".into();
-        c.network.assistants.push(PairedAssistant { id: "x".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into() });
+        c.network.assistants.push(PairedAssistant { id: "x".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "192.168.55.70".into() });
         let text = serde_json::to_string(&c).unwrap();
         assert!(text.contains("\"role\":\"assistant\"") && text.contains("\"mainHost\":\"10.0.0.2\"") && text.contains("\"assistants\":[{"), "{text}");
+        assert!(text.contains("\"address\":\"192.168.55.70\""), "{text}");
         assert_eq!(serde_json::from_str::<Config>(&text).unwrap(), c);
+    }
+
+    #[test]
+    fn a_paired_assistant_saved_before_addresses_loads_without_one() {
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "network": {"assistants": [{"id": "x", "name": "laptop", "hostname": "h", "platform": "macos", "token": "t"}]}}"#).unwrap();
+        assert_eq!(c.network.assistants[0].address, "");
     }
 }
