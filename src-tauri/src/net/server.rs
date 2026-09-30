@@ -5,7 +5,9 @@
 //! socket. The socket's read timeout (`TICK`) is the loop's tick: each turn
 //! writes the `Down` frames queued on the connection's channel, then tries
 //! one read. A separate deadline (`SILENCE`) drops a peer that sends nothing,
-//! and the stop flag ends every thread within a tick. Dropping a
+//! and the stop flag ends every thread within a tick. Before `welcome` a
+//! connection has `PRE_AUTH_DEADLINE` in all, and at most `MAX_PRE_AUTH`
+//! such connections are open at once. Dropping a
 //! connection's sender (a newer connection for the same assistant, or its
 //! removal) ends that connection too.
 //!
@@ -39,6 +41,11 @@ const SILENCE: Duration = Duration::from_secs(15);
 const PRE_AUTH_FRAME: usize = 64 * 1024;
 /// Connections beyond this are closed at once.
 const MAX_CONNECTIONS: usize = 32;
+/// Connections not yet through `welcome` beyond this are closed at once, so
+/// strangers cannot hold every slot.
+const MAX_PRE_AUTH: usize = 8;
+/// A connection must get through `welcome` within this, from accept.
+const PRE_AUTH_DEADLINE: Duration = Duration::from_secs(10);
 const DISCONNECTED: &str = "assistant disconnected";
 
 /// What the server tells the app; the Tauri adapter lives in `lib.rs`.
@@ -255,6 +262,8 @@ struct Ctx {
     stop: Arc<AtomicBool>,
     main_name: String,
     live: AtomicUsize,
+    /// Connections accepted and not yet through `welcome`.
+    pre_auth: AtomicUsize,
 }
 
 impl Ctx {
@@ -352,7 +361,7 @@ pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>
     let paired = lock(&config_view).assistants.clone();
     let shared = Arc::new(Mutex::new(Server::new(paired)));
     let stop = Arc::new(AtomicBool::new(false));
-    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name: super::local_hostname(), live: AtomicUsize::new(0) });
+    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name: super::local_hostname(), live: AtomicUsize::new(0), pre_auth: AtomicUsize::new(0) });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
     log::line("network", format!("listening on port {port}"));
@@ -367,7 +376,12 @@ fn accept_loop(listener: TcpListener, ctx: Arc<Ctx>) {
                     log::line("network", format!("{addr}: refused, too many connections"));
                     continue;
                 }
+                if ctx.pre_auth.load(Ordering::SeqCst) >= MAX_PRE_AUTH {
+                    log::line("network", format!("{addr}: refused, too many connections still in their handshake"));
+                    continue;
+                }
                 ctx.live.fetch_add(1, Ordering::SeqCst);
+                ctx.pre_auth.fetch_add(1, Ordering::SeqCst);
                 let c = ctx.clone();
                 let spawned = std::thread::Builder::new().name("net-conn".into()).spawn(move || {
                     serve(&c, stream, addr);
@@ -375,6 +389,7 @@ fn accept_loop(listener: TcpListener, ctx: Arc<Ctx>) {
                 });
                 if let Err(e) = spawned {
                     ctx.live.fetch_sub(1, Ordering::SeqCst);
+                    ctx.pre_auth.fetch_sub(1, Ordering::SeqCst);
                     log::line("network", format!("{addr}: no thread for the connection: {e}"));
                 }
             }
@@ -397,20 +412,33 @@ struct Link {
     rx: Receiver<Down>,
 }
 
+/// Counts a connection as pre-auth until dropped (`welcome` sent, or it failed).
+struct PreAuth<'a>(&'a Ctx);
+
+impl Drop for PreAuth<'_> {
+    fn drop(&mut self) {
+        self.0.pre_auth.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
+    let pre_auth = PreAuth(ctx);
+    let deadline = Instant::now() + PRE_AUTH_DEADLINE;
     // Accepted sockets inherit the listener's non-blocking flag on macOS.
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(TICK));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_nodelay(true);
-    let mut ws = match upgrade(ctx, stream) {
+    let mut ws = match upgrade(ctx, stream, deadline) {
         Ok(ws) => ws,
         Err(e) => {
             log::line("network", format!("{addr}: no WebSocket handshake: {e}"));
             return;
         }
     };
-    let Some(link) = admit(ctx, &mut ws, addr) else {
+    let admitted = admit(ctx, &mut ws, addr, deadline);
+    drop(pre_auth);
+    let Some(link) = admitted else {
         finish(&mut ws);
         return;
     };
@@ -419,9 +447,8 @@ fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
     leave(ctx, &link, &reason);
 }
 
-fn upgrade(ctx: &Ctx, stream: TcpStream) -> Result<Ws, String> {
+fn upgrade(ctx: &Ctx, stream: TcpStream, deadline: Instant) -> Result<Ws, String> {
     let config = WebSocketConfig::default().max_message_size(Some(PRE_AUTH_FRAME)).max_frame_size(Some(PRE_AUTH_FRAME));
-    let deadline = Instant::now() + SILENCE;
     let mut attempt = tungstenite::accept_with_config(stream, Some(config));
     loop {
         match attempt {
@@ -472,9 +499,8 @@ fn finish(ws: &mut Ws) {
     }
 }
 
-/// The next frame that parses; garbage is logged and skipped.
-fn read_up(ctx: &Ctx, ws: &mut Ws, who: &str) -> Result<Up, String> {
-    let deadline = Instant::now() + SILENCE;
+/// The next frame that parses, by `deadline`; garbage is logged and skipped.
+fn read_up(ctx: &Ctx, ws: &mut Ws, who: &str, deadline: Instant) -> Result<Up, String> {
     loop {
         if ctx.stopped() {
             return Err("the main stopped".into());
@@ -488,7 +514,7 @@ fn read_up(ctx: &Ctx, ws: &mut Ws, who: &str) -> Result<Up, String> {
             Ok(other) => skip_frame(who, &other),
             Err(e) if is_timeout(&e) => {
                 if Instant::now() > deadline {
-                    return Err("silent for 15 s".into());
+                    return Err("no answer within 10 s of connecting".into());
                 }
             }
             Err(e) => return Err(e.to_string()),
@@ -501,9 +527,9 @@ fn clean(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(64).collect()
 }
 
-fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr) -> Option<Link> {
+fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<Link> {
     let ip = addr.ip().to_string();
-    let hello = match read_up(ctx, ws, &ip) {
+    let hello = match read_up(ctx, ws, &ip, deadline) {
         Ok(up) => up,
         Err(e) => {
             log::line("network", format!("{ip}: no hello: {e}"));
@@ -528,10 +554,10 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr) -> Option<Link> {
     // `proof` answers the assistant's own nonce; a fresh pairing has none to answer.
     let (id, proof) = match id {
         Some(id) => {
-            let proof = authenticate(ctx, ws, &id, &name)?;
+            let proof = authenticate(ctx, ws, &id, &name, deadline)?;
             (id, proof)
         }
-        None => (pair(ctx, ws, &ip, &name, &hostname, &platform)?, String::new()),
+        None => (pair(ctx, ws, &ip, &name, &hostname, &platform, deadline)?, String::new()),
     };
     let (tx, rx) = channel();
     let registered = {
@@ -575,7 +601,7 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr) -> Option<Link> {
 
 /// Challenge-response for a paired assistant; returns the main's proof for
 /// `welcome`: the MAC of the nonce the assistant sent with its answer.
-fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str) -> Option<String> {
+fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str, deadline: Instant) -> Option<String> {
     let token = lock(&ctx.shared).paired.iter().find(|p| p.id == id).map(|p| p.token.clone());
     let Some(token) = token else {
         // Unknown ids are removed ones (or paired with another main): pairing again is the fix.
@@ -585,7 +611,7 @@ fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str) -> Option<String> 
     };
     let nonce = new_nonce();
     send_down(ws, &Down::Challenge { nonce: nonce.clone() }).ok()?;
-    let (ok, theirs) = match read_up(ctx, ws, name) {
+    let (ok, theirs) = match read_up(ctx, ws, name, deadline) {
         Ok(Up::Auth { mac, nonce: theirs }) => (mac_matches(&token, &nonce, &mac) && !theirs.is_empty() && lock(&ctx.shared).nonces.first_use(&nonce, now_ms()), theirs),
         Ok(_) => (false, String::new()),
         Err(e) => {
@@ -601,8 +627,8 @@ fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str) -> Option<String> 
     Some(mac(&token, &theirs))
 }
 
-fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: &str) -> Option<String> {
-    let code = match read_up(ctx, ws, ip) {
+fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: &str, deadline: Instant) -> Option<String> {
+    let code = match read_up(ctx, ws, ip, deadline) {
         Ok(Up::Pair { code }) => code,
         Ok(_) => {
             bye(ws, "protocol");
@@ -1142,6 +1168,22 @@ mod tests {
         assert!(unreadable_board(r#"{"type":"board","cards":[{"harness":"future"}],"dirs":[]}"#));
         assert!(!unreadable_board(r#"{"type":"dance"}"#));
         assert!(!unreadable_board("not json"));
+    }
+
+    #[test]
+    fn strangers_in_their_handshake_cannot_take_every_slot() {
+        let (handle, port) = test_server();
+        // Eight sockets that never even start the WebSocket handshake.
+        let strangers: Vec<TcpStream> = (0..MAX_PRE_AUTH).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
+        wait_until(|| handle.ctx.pre_auth.load(Ordering::SeqCst) == MAX_PRE_AUTH);
+        assert!(tungstenite::connect(format!("ws://127.0.0.1:{port}/")).is_err(), "a ninth is closed at once");
+        drop(strangers);
+        wait_until(|| handle.ctx.pre_auth.load(Ordering::SeqCst) == 0);
+        // Real assistants get in again, and one through welcome no longer counts.
+        let (_ws, _, _) = pair_client(&handle, port, "desk");
+        wait_until(|| handle.ctx.pre_auth.load(Ordering::SeqCst) == 0);
+        assert_eq!(handle.ctx.live.load(Ordering::SeqCst), 1);
+        handle.stop();
     }
 
     #[test]
