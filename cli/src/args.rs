@@ -35,14 +35,23 @@ const DEFAULT_PORT: u16 = 4127;
 pub fn parse(args: &[String]) -> Result<Cmd, String> {
     let Some(cmd) = args.first() else { return Ok(Cmd::Help) };
     match cmd.as_str() {
-        "--version" => Ok(Cmd::Version),
+        "--help" => no_more(&args[1..], Cmd::Help),
+        "--version" => no_more(&args[1..], Cmd::Version),
         "pair" => parse_pair(&args[1..]),
-        "run" => Ok(Cmd::Run),
-        "status" => Ok(Cmd::Status),
+        "run" => no_more(&args[1..], Cmd::Run),
+        "status" => no_more(&args[1..], Cmd::Status),
         "hooks" => parse_hooks(&args[1..]),
         "config" => parse_config(&args[1..]),
         "start" => parse_start(&args[1..]),
         other => Err(format!("{USAGE}\nunknown command: {other}")),
+    }
+}
+
+/// `cmd` when nothing follows it; a usage error naming the first stray token otherwise.
+fn no_more(rest: &[String], cmd: Cmd) -> Result<Cmd, String> {
+    match rest.first() {
+        None => Ok(cmd),
+        Some(extra) => Err(format!("{USAGE}\nunexpected argument: {extra}")),
     }
 }
 
@@ -149,6 +158,16 @@ mod tests {
         assert_eq!(parse(&a("")).unwrap(), Cmd::Help);
         assert!(parse(&a("dance")).unwrap_err().starts_with("usage:"));
         assert!(parse(&a("hooks")).unwrap_err().contains("install|remove|status"));
+    }
+
+    #[test]
+    fn commands_without_arguments_refuse_a_trailing_token() {
+        assert_eq!(parse(&a("--help")).unwrap(), Cmd::Help);
+        for (line, stray) in [("run --foo", "--foo"), ("status now", "now"), ("--version x", "x"), ("--help run", "run"), ("run a b", "a")] {
+            let err = parse(&a(line)).unwrap_err();
+            assert!(err.starts_with("usage:"), "{line}: {err}");
+            assert!(err.ends_with(&format!("\nunexpected argument: {stray}")), "{line}: {err}");
+        }
     }
 
     #[test]
