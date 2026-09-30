@@ -14,7 +14,7 @@
 //! locks (network, then server, then store) without a cycle.
 
 use super::merge::{display_names, RemoteBoard};
-use super::protocol::{decode_up, encode, mac_matches, new_id, new_nonce, new_token, Attempts, CommandKind, Down, NonceLog, PairingWindow, Up, MAX_FRAME, PROTOCOL};
+use super::protocol::{decode_up, encode, mac, mac_matches, new_id, new_nonce, new_token, Attempts, CommandKind, Down, NonceLog, PairingWindow, Up, MAX_FRAME, PROTOCOL};
 use super::{AssistantStatus, NetworkStatus, PairingCode};
 use crate::config::{NetworkConfig, NetworkRole, PairedAssistant};
 use crate::log;
@@ -449,12 +449,13 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr) -> Option<Link> {
     }
     let (hostname, platform) = (clean(&hostname), clean(&platform));
     let name = Some(clean(&name)).filter(|n| !n.is_empty()).or_else(|| Some(hostname.clone()).filter(|h| !h.is_empty())).unwrap_or_else(|| "assistant".into());
-    let id = match id {
+    // `proof` answers the assistant's own nonce; a fresh pairing has none to answer.
+    let (id, proof) = match id {
         Some(id) => {
-            authenticate(ctx, ws, &id, &name)?;
-            id
+            let proof = authenticate(ctx, ws, &id, &name)?;
+            (id, proof)
         }
-        None => pair(ctx, ws, &ip, &name, &hostname, &platform)?,
+        None => (pair(ctx, ws, &ip, &name, &hostname, &platform)?, String::new()),
     };
     let (tx, rx) = channel();
     let registered = {
@@ -483,7 +484,7 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr) -> Option<Link> {
         c.max_message_size = Some(MAX_FRAME);
         c.max_frame_size = Some(MAX_FRAME);
     });
-    if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone() }) {
+    if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone(), mac: proof }) {
         leave(ctx, &link, &e);
         return None;
     }
@@ -493,7 +494,9 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr) -> Option<Link> {
     Some(link)
 }
 
-fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str) -> Option<()> {
+/// Challenge-response for a paired assistant; returns the main's proof for
+/// `welcome`: the MAC of the nonce the assistant sent with its answer.
+fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str) -> Option<String> {
     let token = lock(&ctx.shared).paired.iter().find(|p| p.id == id).map(|p| p.token.clone());
     let Some(token) = token else {
         // Unknown ids are removed ones (or paired with another main): pairing again is the fix.
@@ -503,9 +506,9 @@ fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str) -> Option<()> {
     };
     let nonce = new_nonce();
     send_down(ws, &Down::Challenge { nonce: nonce.clone() }).ok()?;
-    let ok = match read_up(ctx, ws, name) {
-        Ok(Up::Auth { mac }) => mac_matches(&token, &nonce, &mac) && lock(&ctx.shared).nonces.first_use(&nonce, now_ms()),
-        Ok(_) => false,
+    let (ok, theirs) = match read_up(ctx, ws, name) {
+        Ok(Up::Auth { mac, nonce: theirs }) => (mac_matches(&token, &nonce, &mac) && !theirs.is_empty() && lock(&ctx.shared).nonces.first_use(&nonce, now_ms()), theirs),
+        Ok(_) => (false, String::new()),
         Err(e) => {
             log::line("network", format!("{name}: no answer to the challenge: {e}"));
             return None;
@@ -516,7 +519,7 @@ fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str) -> Option<()> {
         bye(ws, "authentication failed");
         return None;
     }
-    Some(())
+    Some(mac(&token, &theirs))
 }
 
 fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: &str) -> Option<String> {
@@ -799,6 +802,15 @@ mod tests {
         (ws, id, token)
     }
 
+    /// Answers the main's challenge with a nonce of this side's own, and
+    /// checks the `welcome` proves the main holds the same token.
+    pub(crate) fn answer(ws: &mut Client, token: &str, nonce: &str) {
+        let ours = crate::net::protocol::new_nonce();
+        send(ws, &Up::Auth { mac: mac(token, nonce), nonce: ours.clone() });
+        let Down::Welcome { mac: proof, .. } = recv(ws) else { panic!("expected welcome") };
+        assert!(crate::net::protocol::mac_matches(token, &ours, &proof), "the main proves it holds the token");
+    }
+
     pub(crate) fn connect(port: u16) -> Client {
         let (ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}/")).unwrap();
         if let MaybeTlsStream::Plain(s) = ws.get_ref() {
@@ -855,8 +867,7 @@ mod tests {
         let mut ws = connect(port);
         send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), id: Some(id.clone()) });
         let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
-        send(&mut ws, &Up::Auth { mac: mac(&token, &nonce) });
-        assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
+        answer(&mut ws, &token, &nonce);
         handle.stop();
     }
 
@@ -904,7 +915,7 @@ mod tests {
         let mut bad = connect(port);
         hello(&mut bad, "desk", Some(&id));
         let Down::Challenge { .. } = recv(&mut bad) else { panic!("expected challenge") };
-        send(&mut bad, &Up::Auth { mac: "00".repeat(32) });
+        send(&mut bad, &Up::Auth { mac: "00".repeat(32), nonce: crate::net::protocol::new_nonce() });
         assert!(matches!(recv(&mut bad), Down::Bye { reason } if reason == "authentication failed"));
         // Three wrong codes lock the address out, even with the right code after.
         for _ in 0..3 {
@@ -922,8 +933,7 @@ mod tests {
         let mut ws = connect(port);
         hello(&mut ws, "desk", Some(&id));
         let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
-        send(&mut ws, &Up::Auth { mac: mac(&token, &nonce) });
-        assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
+        answer(&mut ws, &token, &nonce);
         handle.remove_assistant(&id);
         assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == "removed"));
         assert!(handle.boards().is_empty());
@@ -972,8 +982,7 @@ mod tests {
         let mut old = connect(port);
         hello(&mut old, "laptop", Some(&old_id));
         let Down::Challenge { nonce } = recv(&mut old) else { panic!("expected challenge") };
-        send(&mut old, &Up::Auth { mac: mac(&old_token, &nonce) });
-        assert!(matches!(recv(&mut old), Down::Welcome { .. }));
+        answer(&mut old, &old_token, &nonce);
         for (target, ws) in [(new_label.clone(), &mut new), (old_label.clone(), &mut old)] {
             let shared = handle.shared.clone();
             let t = std::thread::spawn(move || send_command_with(&shared, &target, CommandKind::Compact { session: "r1".into() }, Duration::from_secs(5)));
@@ -1044,6 +1053,48 @@ mod tests {
         }
         fn removed(&self) {
             self.removed.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A stranger at the main's address: answers one connection with
+    /// `welcome` (after a challenge when `challenge`) carrying `proof`, then
+    /// sends a command. Returns its port.
+    fn fake_main(challenge: bool, proof: &'static str) -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut ws = tungstenite::accept(stream).unwrap();
+            let read = |ws: &mut WebSocket<TcpStream>| loop {
+                if let Message::Text(t) = ws.read().unwrap() {
+                    return crate::net::protocol::decode_up(&t).unwrap();
+                }
+            };
+            assert!(matches!(read(&mut ws), Up::Hello { .. }));
+            if challenge {
+                ws.send(Message::text(encode(&Down::Challenge { nonce: "n".into() }))).unwrap();
+                assert!(matches!(read(&mut ws), Up::Auth { .. }));
+            }
+            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into() })));
+            let _ = ws.send(Message::text(encode(&Down::Command { id: 1, kind: CommandKind::Compact { session: "r1".into() } })));
+            let _ = ws.read();
+        });
+        port
+    }
+
+    #[test]
+    fn the_client_refuses_a_main_that_cannot_prove_it_holds_the_token() {
+        for (challenge, proof) in [(true, "00"), (true, ""), (false, "")] {
+            let port = fake_main(challenge, proof);
+            let exec = Arc::new(FakeExec::default());
+            let notify = Arc::new(FakeClientNotify::default());
+            let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, assistant_id: "a1".into(), token: crate::net::protocol::new_token(), ..Default::default() };
+            let out = client::run_once(&config, exec.clone(), notify.clone(), &AtomicBool::new(false), None);
+            assert_eq!(out, Err(client::MAIN_UNPROVEN.to_string()), "challenge {challenge}, proof {proof:?}");
+            assert!(exec.kinds.lock().unwrap().is_empty(), "no command from an unproven main runs");
+            assert!(notify.main.lock().unwrap().is_none(), "never reported as connected");
+            assert_eq!(*notify.errors.lock().unwrap(), [client::MAIN_UNPROVEN]);
         }
     }
 

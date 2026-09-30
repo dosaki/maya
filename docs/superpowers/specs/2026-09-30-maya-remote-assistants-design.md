@@ -45,6 +45,11 @@ numbers, folder names.
 - Every later connection is challenge-response: the main sends a random
   nonce, the assistant answers with HMAC-SHA256(token, nonce). A wrong
   answer, an unknown assistant or a removed one is closed with a reason.
+  The handshake is mutual: the assistant sends a nonce of its own with its
+  answer, and the main's `welcome` carries HMAC-SHA256(token, that nonce);
+  an assistant that holds a token refuses a `welcome` without a valid proof
+  ("The main Maya failed to prove it holds the pairing token.") and tries
+  again after 30 s. Only the `welcome` right after pairing carries no proof.
 - A wrong or expired code is reported on the assistant ("Wrong or expired
   pairing code."). Three wrong codes from one address in five minutes are
   refused for five minutes.
@@ -60,7 +65,7 @@ with a `type`. Protocol version 1.
 Up (assistant → main):
 
 - `hello { protocol, app, name, hostname, platform }`
-- `pair { code }` (first connection only) or `auth { mac }`
+- `pair { code }` (first connection only) or `auth { mac, nonce }`
 - `board { cards, dirs }` — the assistant's cards as the main should show
   them, and its project folders for the "+" dialog. Sent after `welcome`,
   then whenever the board changes, at most once a second.
@@ -70,7 +75,7 @@ Up (assistant → main):
 
 Down (main → assistant):
 
-- `challenge { nonce }`, `welcome { name }`, `paired { token }`,
+- `challenge { nonce }`, `welcome { name, mac }`, `paired { token }`,
   `bye { reason }`
 - `command { id, kind, ... }` with kinds `reply { session, text,
   attachments? }`, `answer { session, question, option }`, `compact

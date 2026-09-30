@@ -14,7 +14,7 @@
 //! Locks: none of its own. The Tauri adapters take `network` or `store` one
 //! at a time, never one while holding the other.
 
-use super::protocol::{decode_down, encode, mac, CommandKind, Down, Up, DEFAULT_PORT, MAX_FRAME, PROTOCOL};
+use super::protocol::{decode_down, encode, mac, mac_matches, new_nonce, CommandKind, Down, Up, DEFAULT_PORT, MAX_FRAME, PROTOCOL};
 use super::AssistantLink;
 use crate::config::{NetworkConfig, NetworkRole};
 use crate::log;
@@ -51,6 +51,9 @@ const STEADY: Duration = Duration::from_secs(60);
 
 pub const REMOVED: &str = "Removed by the main Maya; pair again.";
 pub const NOT_PAIRED: &str = "Not paired with a main Maya yet; pair in Settings.";
+pub const MAIN_UNPROVEN: &str = "The main Maya failed to prove it holds the pairing token.";
+/// How long the client waits before trying again after `MAIN_UNPROVEN`.
+const UNPROVEN_WAIT_MS: u64 = 30_000;
 
 /// Runs the main's commands on this Maya and describes its board.
 pub trait Executor: Send + Sync {
@@ -269,9 +272,15 @@ fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, sto
         send_up(ws, &Up::Pair { code: code.trim().to_string() })?;
     }
     let mut paired = false;
+    // The nonce this side sent with its answer; the main must answer it in `welcome`.
+    let mut ours: Option<String> = None;
     loop {
         match read_down(ws, stop, deadline)? {
-            Down::Challenge { nonce } if code.is_none() => send_up(ws, &Up::Auth { mac: mac(&config.token, &nonce) })?,
+            Down::Challenge { nonce } if code.is_none() => {
+                let mine = new_nonce();
+                send_up(ws, &Up::Auth { mac: mac(&config.token, &nonce), nonce: mine.clone() })?;
+                ours = Some(mine);
+            }
             Down::Paired { id, token } if code.is_some() => {
                 if id.is_empty() || token.is_empty() {
                     return Err("The main Maya sent an empty key.".into());
@@ -279,9 +288,15 @@ fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, sto
                 paired = true;
                 notify.paired(&id, &token);
             }
-            Down::Welcome { name } => {
+            Down::Welcome { name, mac: proof } => {
                 if code.is_some() && !paired {
                     return Err("The main Maya did not pair this assistant.".into());
+                }
+                // With a stored token, the main proves it holds it too; after a
+                // fresh pairing the token came from the code just typed.
+                if code.is_none() && !ours.as_ref().is_some_and(|n| mac_matches(&config.token, n, &proof)) {
+                    log::line("network", "the main did not prove it holds the token");
+                    return Err(MAIN_UNPROVEN.into());
                 }
                 let name = clean(&name);
                 return Ok(if name.is_empty() { "the main Maya".into() } else { name });
@@ -415,7 +430,9 @@ fn reconnect(app: &AppHandle, exec: Arc<dyn Executor>, notify: Arc<dyn ClientNot
                 if began.elapsed() >= STEADY {
                     attempt = 0;
                 }
-                let wait = backoff_ms(attempt);
+                // Whatever answered at the main's address could not prove it
+                // holds the token: do not hammer it.
+                let wait = if e == MAIN_UNPROVEN { UNPROVEN_WAIT_MS } else { backoff_ms(attempt) };
                 attempt = attempt.saturating_add(1);
                 log::line("network", format!("{e} Retrying in {} s.", wait / 1_000));
                 let end = Instant::now() + Duration::from_millis(wait);

@@ -36,7 +36,9 @@ pub struct Attachment {
 pub enum Up {
     Hello { protocol: u32, app: String, name: String, hostname: String, platform: String, #[serde(default)] id: Option<String> },
     Pair { code: String },
-    Auth { mac: String },
+    /// The answer to the main's challenge, and this assistant's own nonce
+    /// for the main to answer in `welcome`.
+    Auth { mac: String, nonce: String },
     Board { cards: Vec<Card>, dirs: Vec<String> },
     Result { id: u64, ok: bool, #[serde(default)] error: Option<String>, #[serde(default)] data: Option<Value> },
     Ping,
@@ -47,7 +49,10 @@ pub enum Up {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Down {
     Challenge { nonce: String },
-    Welcome { name: String },
+    /// `mac` is `mac(token, nonce)` for the assistant's `auth` nonce: the
+    /// main's proof that it holds the token. Empty right after pairing, where
+    /// the token came from the code just typed.
+    Welcome { name: String, #[serde(default)] mac: String },
     Paired { id: String, token: String },
     Bye { reason: String },
     Command { id: u64, #[serde(flatten)] kind: CommandKind },
@@ -113,7 +118,7 @@ pub fn mac(token: &str, nonce: &str) -> String {
     m.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Constant-time check of a MAC the assistant sent.
+/// Constant-time check of a MAC the other side sent.
 pub fn mac_matches(token: &str, nonce: &str, given: &str) -> bool {
     let Ok(given) = (0..given.len()).step_by(2).map(|i| u8::from_str_radix(given.get(i..i + 2).unwrap_or("zz"), 16)).collect::<Result<Vec<u8>, _>>() else {
         return false;
@@ -192,6 +197,15 @@ mod tests {
         assert_eq!(decode_down(&s).unwrap(), down);
         let result = Up::Result { id: 7, ok: false, error: Some("no".into()), data: None };
         assert_eq!(decode_up(&encode(&result)).unwrap(), result);
+        // The handshake is mutual: `auth` carries the assistant's nonce and `welcome` the main's proof.
+        let auth = Up::Auth { mac: "ab".into(), nonce: "n1".into() };
+        let s = encode(&auth);
+        assert!(s.contains("\"type\":\"auth\"") && s.contains("\"nonce\":\"n1\""), "{s}");
+        assert_eq!(decode_up(&s).unwrap(), auth);
+        let welcome = Down::Welcome { name: "desk".into(), mac: "cd".into() };
+        assert_eq!(decode_down(&encode(&welcome)).unwrap(), welcome);
+        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk"}"#).unwrap(), Down::Welcome { name: "desk".into(), mac: String::new() }, "a welcome after pairing may carry no proof");
+        assert!(decode_up(r#"{"type":"auth","mac":"ab"}"#).is_err(), "an auth without the assistant's nonce is refused");
     }
 
     #[test]
