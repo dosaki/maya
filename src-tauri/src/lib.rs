@@ -10,6 +10,8 @@ pub mod models;
 pub mod net_app;
 #[cfg(target_os = "macos")]
 pub mod terminal_app;
+#[cfg(target_os = "linux")]
+pub mod terminal_linux;
 #[cfg(windows)]
 pub mod terminal_win;
 pub mod voice;
@@ -20,11 +22,38 @@ pub mod wake;
 pub(crate) use terminal_app as term;
 #[cfg(windows)]
 pub(crate) use terminal_win as term;
+#[cfg(target_os = "linux")]
+pub(crate) use terminal_linux as term;
+
+/// This platform's one terminal, as the core's seam.
+#[cfg(not(target_os = "linux"))]
+fn terminal() -> &'static dyn terminal::Terminal {
+    &term::TERMINAL
+}
+#[cfg(target_os = "linux")]
+fn terminal() -> &'static dyn terminal::Terminal {
+    &*term::TERMINAL
+}
 
 /// Opens an http(s) URL in the default browser.
 #[cfg(target_os = "macos")]
 fn open_in_browser(url: &str) -> Result<(), String> {
     let ok = std::process::Command::new("open").arg(url).status().map_err(|e| format!("could not open the browser: {e}"))?;
+    if ok.success() {
+        Ok(())
+    } else {
+        Err("The browser refused to open the link.".into())
+    }
+}
+
+/// Opens an http(s) URL in the default browser. The URL is one argument to
+/// `xdg-open`; no shell reads it. A browser started here outlives Maya, so
+/// it starts without the AppImage's environment.
+#[cfg(target_os = "linux")]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("xdg-open");
+    maya_core::launch::scrub_appimage_env(&mut cmd);
+    let ok = cmd.arg(url).stdin(std::process::Stdio::null()).status().map_err(|e| format!("could not open the browser: {e}"))?;
     if ok.success() {
         Ok(())
     } else {
@@ -349,23 +378,76 @@ fn claude_dir() -> std::path::PathBuf {
     dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")).join(".claude")
 }
 
-/// The ElevenLabs settings for one utterance, when the provider is chosen
-/// and both a key and a voice exist; else None for the built-in voice.
-fn eleven_settings(store: &Store) -> Option<(std::path::PathBuf, String, String)> {
-    let cfg = &store.config;
-    let key = voice::load_key();
-    if !voice::use_elevenlabs(cfg.voice_provider, key.is_some(), cfg.elevenlabs_voice_id.as_deref()) {
+/// Maya's folder and the ElevenLabs voice id when the config asks for that
+/// voice; None for the built-in one. Read under the store lock; the key is
+/// looked up only when this says yes, and after the lock is released.
+pub(crate) fn eleven_wanted(cfg: &Config, claude_dir: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
+    // A key is assumed here: looking it up is what this check spares.
+    if !voice::use_elevenlabs(cfg.voice_provider, true, cfg.elevenlabs_voice_id.as_deref()) {
         return None;
     }
-    Some((store.claude_dir().join("maya"), key?, cfg.elevenlabs_voice_id.clone()?))
+    Some((claude_dir.join("maya"), cfg.elevenlabs_voice_id.clone()?))
+}
+
+/// The ElevenLabs settings for one utterance, when `eleven_wanted` said yes
+/// and a key is stored; else None for the built-in voice. Never call it
+/// holding the store lock: the key lookup can block (on Linux a locked
+/// GNOME keyring asks to be unlocked).
+pub(crate) fn eleven_settings(wanted: Option<(std::path::PathBuf, String)>) -> Option<(std::path::PathBuf, String, String)> {
+    let (maya_dir, voice_id) = wanted?;
+    Some((maya_dir, voice::load_key()?, voice_id))
+}
+
+/// The local cards as the board shows them: on Linux each carries the name
+/// of the tmux session it runs in, so the page knows which ones a terminal
+/// window can attach to.
+pub(crate) fn local_cards(store: &mut store::Store) -> Vec<Card> {
+    #[allow(unused_mut)]
+    let mut cards = store.refresh(now_ms());
+    #[cfg(target_os = "linux")]
+    fill_terminal_names(store, &mut cards);
+    cards
+}
+
+/// Forgets the tty of every pid no longer on the board: a pid that is gone
+/// may come back as another process.
+#[cfg(any(test, target_os = "linux"))]
+fn prune_ttys(cache: &mut std::collections::HashMap<i32, Option<String>>, live_pids: &std::collections::HashSet<i32>) {
+    cache.retain(|pid, _| live_pids.contains(pid));
+}
+
+/// Sets each card's `terminal` to its tmux session's name, as the CLI's
+/// board does: the tty from the registry (or the foreign session), else
+/// from the pid, cached per pid (a pid with no terminal too, so it is not
+/// asked again each refresh); then one `tmux list-panes` for them all.
+#[cfg(target_os = "linux")]
+fn fill_terminal_names(store: &store::Store, cards: &mut [Card]) {
+    static TTYS: Mutex<Option<std::collections::HashMap<i32, Option<String>>>> = Mutex::new(None);
+    let mut cache = TTYS.lock().unwrap();
+    let cache = cache.get_or_insert_with(Default::default);
+    prune_ttys(cache, &cards.iter().map(|c| c.pid).collect());
+    let mut ttys = Vec::with_capacity(cards.len());
+    for c in cards.iter() {
+        let known = store.session(&c.session_id).and_then(|s| s.tty).or_else(|| store.foreign(&c.session_id).and_then(|f| f.tty));
+        let tty = match known {
+            Some(t) => Some(t),
+            None => cache.entry(c.pid).or_insert_with(|| tty::tty_for_pid(c.pid).ok()).clone(),
+        };
+        ttys.push(tty);
+    }
+    let wanted: Vec<String> = ttys.iter().flatten().cloned().collect();
+    let names = terminal().names_for_ttys(&wanted);
+    for (c, tty) in cards.iter_mut().zip(ttys) {
+        c.terminal = tty.and_then(|t| names.get(&t).cloned());
+    }
 }
 
 fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify, speak, eleven, assistant) = {
+    let (cards, wants_notify, speak, eleven_voice, assistant) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
-        let cards = store.refresh(now_ms());
-        let eleven = if store.config.speak_notifications { eleven_settings(&store) } else { None };
+        let cards = local_cards(&mut store);
+        let eleven = if store.config.speak_notifications { eleven_wanted(&store.config, store.claude_dir()) } else { None };
         (cards, store.config.notify_on_awaiting, store.config.speak_notifications, eleven, store.config.network.role == config::NetworkRole::Assistant)
     };
     // Remote cards join after the store lock is released (lock order), so
@@ -386,6 +468,8 @@ fn refresh_and_emit(app: &AppHandle) {
     }
     let speak = speak && !focus;
     if wants_notify && !assistant {
+        // The key is looked up only when there is something to say.
+        let eleven = if speak && (!fresh.is_empty() || !finished.is_empty()) { eleven_settings(eleven_voice) } else { None };
         for c in &fresh {
             // With a voice the banner stays silent; the sound is replaced, not doubled.
             notify::notify(c, !speak);
@@ -414,7 +498,7 @@ fn refresh_and_emit(app: &AppHandle) {
 /// releasing it before `remote_boards` takes `network` (lock order: never
 /// hold `store` while taking `network`).
 pub(crate) fn merged_cards(state: &AppState) -> Vec<Card> {
-    let cards = state.store.lock().unwrap().refresh(now_ms());
+    let cards = local_cards(&mut state.store.lock().unwrap());
     merge::merged(cards, &remote_boards(state), now_ms())
 }
 
@@ -606,7 +690,7 @@ fn network_pair(app: AppHandle, state: TauriState<AppState>, host: String, port:
 
 /// This Maya's sessions over this platform's terminal, for the core's local actions.
 pub(crate) fn local(state: &AppState) -> actions::Local<'_> {
-    actions::Local { store: &state.store, terminal: &term::TERMINAL }
+    actions::Local { store: &state.store, terminal: terminal() }
 }
 
 /// Brings forward the terminal of the local session running as `pid`.
@@ -848,8 +932,9 @@ fn list_elevenlabs_voices() -> Result<Vec<voice::Voice>, String> {
 fn try_voice(state: TauriState<AppState>) -> Result<(), String> {
     let eleven = {
         let store = state.store.lock().unwrap();
-        eleven_settings(&store)
+        eleven_wanted(&store.config, store.claude_dir())
     };
+    let eleven = eleven_settings(eleven);
     // Through the one speech queue, so listening pauses and she does not
     // wake herself on "Maya here".
     let line = "Maya here. hexgrid needs a decision".to_string();
@@ -1072,6 +1157,24 @@ pub fn run() {
 #[cfg(test)]
 mod route_tests {
     use super::*;
+
+    #[test]
+    fn the_elevenlabs_key_is_wanted_only_for_the_elevenlabs_provider_with_a_voice() {
+        let dir = std::path::Path::new("/home/u/.claude");
+        let cfg = |provider, voice: Option<&str>| Config { voice_provider: provider, elevenlabs_voice_id: voice.map(String::from), ..Default::default() };
+        assert_eq!(eleven_wanted(&cfg(voice::VoiceProvider::Builtin, Some("v")), dir), None);
+        assert_eq!(eleven_wanted(&cfg(voice::VoiceProvider::Elevenlabs, None), dir), None);
+        assert_eq!(eleven_wanted(&cfg(voice::VoiceProvider::Elevenlabs, Some("  ")), dir), None);
+        assert_eq!(eleven_wanted(&cfg(voice::VoiceProvider::Elevenlabs, Some("v")), dir), Some((dir.join("maya"), "v".to_string())));
+        assert_eq!(eleven_settings(None), None, "no key lookup when the voice is not wanted");
+    }
+
+    #[test]
+    fn prune_ttys_forgets_pids_no_longer_on_the_board() {
+        let mut cache: std::collections::HashMap<i32, Option<String>> = [(1, Some("/dev/pts/1".to_string())), (2, Some("/dev/pts/2".to_string())), (4, None)].into();
+        prune_ttys(&mut cache, &[2, 3, 4].into());
+        assert_eq!(cache, [(2, Some("/dev/pts/2".to_string())), (4, None)].into());
+    }
 
     #[test]
     fn remote_attachments_encodes_a_small_file() {

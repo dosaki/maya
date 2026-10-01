@@ -1,7 +1,7 @@
-//! Maya's ear on Windows: the microphone through WASAPI, speech found by the
-//! energy VAD and transcribed by whisper.cpp, streamed as JSON lines. It
-//! speaks the Swift ear's protocol (`ear/main.swift`) line for line, so the
-//! app's listener drives either one:
+//! Maya's ear on Windows and Linux: the microphone through cpal (WASAPI,
+//! ALSA), speech found by the energy VAD and transcribed by whisper.cpp,
+//! streamed as JSON lines. It speaks the Swift ear's protocol
+//! (`ear/main.swift`) line for line, so the app's listener drives either one:
 //!
 //! - arguments: `[--device <name>] --engine whisper --model <path>`, or
 //!   `--selftest`;
@@ -10,19 +10,19 @@
 //! - stdin: `pause`, `resume`, `quit` (EOF quits too);
 //! - exit codes: 3 audio, 4 no microphone, 7 model missing, 8 model load.
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn main() {
-    windows_ear::run()
+    ear::run()
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn main() {
-    eprintln!("This ear runs on Windows; macOS has the Swift one in ear/.");
+    eprintln!("This ear runs on Windows and Linux; macOS has the Swift one in ear/.");
     std::process::exit(2)
 }
 
-#[cfg(windows)]
-mod windows_ear {
+#[cfg(any(windows, target_os = "linux"))]
+mod ear {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use maya_ear::resample::{downmix, Resampler, TARGET_RATE};
     use maya_ear::vad::{is_filler, Vad, VadEvent, FRAME_SAMPLES, PRE_ROLL_FRAMES};
@@ -79,14 +79,14 @@ mod windows_ear {
         let devices = inputs(&host);
         let names: Vec<String> = devices.iter().map(|(n, _)| n.clone()).collect();
         if args.iter().any(|a| a == "--selftest") {
-            // No system recogniser on Windows: only the built-in one.
+            // No system recogniser on Windows and Linux: only the built-in one.
             emit(json!({"type": "selftest", "available": false, "onDevice": false, "speechAuth": 0, "devices": names}));
             return;
         }
         emit(json!({"type": "devices", "names": names}));
         let engine = arg(&args, "--engine").unwrap_or_else(|| "whisper".into());
         if engine != "whisper" {
-            fail("only the built-in (whisper) recogniser runs on Windows", 7);
+            fail("only the built-in (whisper) recogniser runs on Windows and Linux", 7);
         }
         let Some(model) = arg(&args, "--model") else { fail("--engine whisper needs --model <path>", 7) };
         // Checked before the microphone opens: a missing model is always fatal.

@@ -1,4 +1,4 @@
-use maya_core::terminal::Terminal;
+use crate::terminal::Terminal;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -11,7 +11,7 @@ impl Default for Tmux {
     fn default() -> Self { Self { binary: PathBuf::from("tmux") } }
 }
 
-fn sq(s: &str) -> String { maya_core::launch::shell_single_quote(s) }
+fn sq(s: &str) -> String { crate::launch::shell_single_quote(s) }
 
 /// tmux splits its command line on any argv element that ends in a bare
 /// `;`, before flag parsing even runs, so an element ending in `;` loses it
@@ -77,9 +77,13 @@ impl Tmux {
     fn list_panes(&self) -> Option<String> {
         self.run(&["list-panes".into(), "-a".into(), "-F".into(), LIST_PANES_FORMAT.into()]).ok()
     }
+    /// Runs one tmux command. The first one starts the tmux server, which
+    /// outlives Maya, so it starts without the AppImage's environment.
     fn run(&self, args: &[String]) -> Result<String, String> {
-        let out = Command::new(&self.binary).args(args).stdin(Stdio::null()).output().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound { format!("tmux is not installed on {}", maya_core::net::local_hostname()) } else { format!("could not run tmux: {e}") }
+        let mut cmd = Command::new(&self.binary);
+        crate::launch::scrub_appimage_env(&mut cmd);
+        let out = cmd.args(args).stdin(Stdio::null()).output().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound { format!("tmux is not installed on {}", crate::net::local_hostname()) } else { format!("could not run tmux: {e}") }
         })?;
         if !out.status.success() { return Err(format!("tmux failed: {}", String::from_utf8_lossy(&out.stderr).trim())); }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -179,7 +183,7 @@ mod tests {
     fn a_missing_tmux_binary_names_the_machine() {
         let t = Tmux { binary: PathBuf::from("/nonexistent/tmux") };
         let err = t.open("true", Path::new("/"), "maya-00000000").unwrap_err();
-        assert_eq!(err, format!("tmux is not installed on {}", maya_core::net::local_hostname()));
+        assert_eq!(err, format!("tmux is not installed on {}", crate::net::local_hostname()));
         assert_eq!(t.type_line("/dev/pts/3", "x"), Err(NOT_IN_TMUX.into()));
         assert_eq!(t.name_for_tty("/dev/pts/3"), None);
         assert!(t.names_for_ttys(&["/dev/pts/3".into()]).is_empty());

@@ -3,7 +3,7 @@
 Maya is a Tauri 2 app: a Rust backend in a Cargo workspace (`core/`,
 `src-tauri/`, `cli/`, `hook/` and `ear-rs/`), a vanilla TypeScript frontend
 in `src/` (vitest), and a listener sidecar: Swift in `ear/` on macOS, Rust
-in `ear-rs/` on Windows.
+in `ear-rs/` on Windows and Linux.
 
 ## Requirements
 
@@ -87,6 +87,154 @@ What is different on Windows, and where:
 The `windows` job of the build workflow (see [CI](#ci)) runs these tests
 and builds the installers.
 
+## Linux
+
+Requirements (Ubuntu 24.04 or later): Rust (rustup), Node 22+, pnpm, and
+
+    sudo apt install build-essential pkg-config libssl-dev cmake clang \
+      libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+      librsvg2-dev patchelf libasound2-dev tmux libnotify-bin \
+      speech-dispatcher pulseaudio-utils libsecret-tools wmctrl
+
+Then:
+
+    pnpm install
+    pnpm ear:build      # maya-ear and maya-hook into src-tauri/binaries/
+    pnpm tauri dev
+    pnpm test
+    pnpm ear:test       # the Rust ear's tests
+    cargo test --workspace
+
+    pnpm tauri build --bundles deb,appimage
+
+puts the `.deb` and the AppImage in `target/release/bundle/deb/` and
+`appimage/` (`tauri.linux.conf.json` adds the sidecars, the bundle targets
+and the `.deb`'s dependencies).
+
+What is different on Linux, and where:
+
+- **Terminal.** `src-tauri/src/terminal_linux.rs`: a session Maya starts
+  or resumes runs in a tmux session `maya-<8 hex>`
+  (`core/src/terminal_tmux.rs`, shared with the CLI), shown in
+  `gnome-terminal --title <label> -- tmux attach -t <label>` (else
+  `ptyxis --new-window`, else `x-terminal-emulator`; an emulator that
+  exits non-zero within 1.5 s is reported). Typing goes through `tmux send-keys` to the pane
+  whose tty is the session's; a session outside tmux refuses typing with
+  `NOT_IN_TMUX` and its card has no Terminal button (`src/card.ts`). Focus
+  raises the window by title with `wmctrl -a` (X11, XWayland); GNOME on
+  Wayland lets no other process raise a window, so there it opens a fresh
+  window attached to the same tmux session. `lib.rs`'s
+  `fill_terminal_names` gives each card its tmux session's name.
+- **Inbox.** As on macOS, the session's Unix socket (`core/src/inbox.rs`),
+  its owner checked with `SO_PEERCRED`; no token.
+- **Hook.** `core/src/hook_install.rs`: the hook is `hook/`'s `maya-hook`,
+  bundled beside the app (as `maya-hook` or Tauri's
+  `maya-hook-<triple>`), copied to `~/.claude/maya/maya-hook` (0755) by
+  Install Claude hook, so the app needs no `jq`. The Codex hook buttons
+  use it too (`core/src/codex_hooks.rs`). The CLI, a single binary, still
+  installs the `jq` script.
+- **Notifications, voice, quiet.** `core/src/notify.rs`: banners with
+  `notify-send`, the sound with `canberra-gtk-play`, the built-in voice
+  with `spd-say -w` (else `espeak-ng`), and GNOME's Do not disturb from
+  `gsettings get org.gnome.desktop.notifications show-banners`. The
+  ElevenLabs key is in GNOME Keyring through `secret-tool`, and playback
+  is `paplay`, else `ffplay` (`src-tauri/src/voice.rs`); `aplay` cannot
+  decode MP3.
+- **Other agents.** As on macOS: `ps` and `lsof`.
+- **Ear.** `ear-rs/`, as on Windows: the microphone through cpal's ALSA
+  host (PipeWire and PulseAudio show as ALSA devices), whisper.cpp built
+  in. Settings offers only *Built-in (Whisper)* (`src/platform.ts`).
+- **Page.** `src/platform.ts`'s `isLinux()`: "This computer", Ctrl+Enter,
+  "speech-dispatcher", "GNOME Keyring".
+
+This is developed from a Mac, so `scripts/linux-vm.sh` drives an Ubuntu
+24.04 VM through [Multipass](https://multipass.run) to build, test and
+run it:
+
+    sh scripts/linux-vm.sh create    # once: launch the VM and install the toolchain (~15 min)
+    sh scripts/linux-vm.sh sync      # copy the working tree to ~/maya in the VM
+    sh scripts/linux-vm.sh run 'cargo test --workspace'
+    sh scripts/linux-vm.sh shell     # an interactive shell in the VM
+    sh scripts/linux-vm.sh destroy   # tear the VM down
+
+`create` launches `maya-ubuntu` (4 CPUs, 8 GB, 40 GB) and installs the
+Rust and Node toolchains plus the GTK/WebKit/tmux packages the app and its
+tests need, and `xvfb`, `weston` and ImageMagick to run it without a
+display. `sync` copies the working tree to `~/maya` in the VM, leaving
+out `target/`, `node_modules/`, `dist*/`, `vendor/`, `.superpowers/` and
+`src-tauri/binaries/`, then runs `pnpm install` there; re-run it after
+local changes before `run` (it replaces `~/maya`, so the next build starts
+from scratch). `run '<command>'` runs a shell line in `~/maya` in the VM
+with `~/.cargo/bin` on `PATH`. `MAYA_VM` overrides the VM name if more
+than one is needed. To see the app, build the AppImage in the VM and run
+the `linux-app` job's smoke test there (below), then copy the screenshot
+out with `multipass transfer maya-ubuntu:<path> .`.
+
+The `linux-app` job of the build workflow (see [CI](#ci)) runs the whole
+workspace's tests, builds the `.deb` and the AppImage on an x86_64 and an
+arm64 runner, and smoke-tests the AppImage: under `xvfb-run`, from a path
+with a space in it and with an empty `HOME`, it must log `started` to
+`~/.claude/maya/maya.log` within 60 s and still be running 3 s later. The
+screen is kept as the `smoke-<arch>` run artifact, to see that the board
+painted. The VM cannot prove sound, the microphone or GNOME's own banners;
+those are the hand checks the README lists.
+
+Beyond `cargo test --workspace`, four checks exercise the parts a click
+cannot reach headless. They need the sidecars rebuilt after every `sync`
+(`sh scripts/build-ear.sh aarch64-unknown-linux-gnu`) and the AppImage
+built once (`pnpm tauri build --bundles appimage`):
+
+- **A headless Wayland session.** `weston --backend=headless-backend.so
+  --socket=<name> --width=1280 --height=800 &`, with `XDG_RUNTIME_DIR` set
+  to a writable directory, then the AppImage with `WAYLAND_DISPLAY=<name>
+  GDK_BACKEND=wayland`. It painted and logged `started` after about 30 s,
+  the same as under X11. `weston-screenshooter` could not capture it on
+  this VM's weston 13.0.0 (`screenshot_create_shm_buffer: Assertion
+  'width > 0' failed`, aborting the client, even with `--width`/`--height`
+  set on the backend); the fallback is `GDK_BACKEND=x11` under
+  `xvfb-run -a` with `import -window root` — the `linux-app` smoke test's
+  own recipe — which does capture the board.
+- **A session round trip without clicking.** Clicking a card is not
+  scriptable headless, so the same code the buttons use is driven from the
+  CLI: `mkdir -p ~/proj/demo && cargo run -p maya-cli -- config
+  projects-dir ~/proj && cargo run -p maya-cli -- start --dir demo
+  --prompt "hello"` (the target directory must exist before `config
+  projects-dir`, which checks it) exercises `Tmux::open` and the label the
+  same way the app's Start button does. `tmux ls` lists `maya-<hex>`, and
+  `tmux capture-pane -p` shows the pane left open with `claude: not
+  found` (the VM has no `claude` binary) rather than closing — the
+  `exec $SHELL` fallback the tmux integration test covers; typing into the
+  pane is that test's job, not this one's.
+- **The hook install.** The Linux-gated test,
+  `cargo test -p maya-core hook_install::`, is the check for what a click
+  on Install Claude hook cannot run headless. Extracting the AppImage
+  (`--appimage-extract`) and listing `squashfs-root/usr/bin` shows `maya`,
+  `maya-hook` and `maya-ear` side by side, which is what `hook_source_in`
+  expects next to the running binary.
+- **Notifications, focus and speech.** `core/examples/linux_probe.rs`
+  builds one Awaiting card named "collector" and calls `notify::notify`,
+  `notify::focus_active` and `notify::speak_and_wait`, the way the Tauri
+  commands do, from a terminal: `cargo run -p maya-core --example
+  linux_probe`. Run under `dbus-run-session` with a `dbus-monitor` on the
+  session bus filtering `interface=org.freedesktop.Notifications`, no
+  `Notify` call appears: `notify-send` only gets as far as
+  `GetServerInformation` and gives up, because `dbus-run-session` starts a
+  bare session bus with no notification daemon on it
+  (`notify-send` by hand confirms the reason: it exits 1 with
+  `GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown`). `notify()`
+  swallows that error and does not panic. `focus_active` reads `false`
+  (no GNOME schema in the VM). `speak_and_wait` picks `spd-say -w`
+  (installed) and does not panic either. On this VM `spd-say -w` never
+  finishes: there is no PulseAudio server (`pactl info` refuses the
+  connection) and no ALSA playback device (`/dev/snd` has only `seq` and
+  `timer`, no card), so speech-dispatcher's output module has nothing to
+  play to. The line's deadline (15 s plus 1 s per 12 characters) stops it,
+  and `speak_and_wait` returns after about 15 s; the `spd-say -C` that
+  follows hangs the same way and is killed after 2 s by the app (the probe
+  exits sooner and leaves it behind; kill it by pid). That nothing is
+  heard is a gap the VM cannot close: a developer with a sound card should
+  expect the call to return once it has actually spoken.
+
 ## The CLI
 
 `cli/` builds on its own, with no Node toolchain and no `pnpm ear:build`:
@@ -94,8 +242,8 @@ and builds the installers.
     cargo build -p maya-cli --release        # target/release/maya-cli
     cargo test -p maya-core -p maya-cli
 
-`maya-cli` depends only on `maya_core`, so unlike the rest of the workspace
-it also builds and tests on Linux. The build workflow's `linux` job runs
+`maya-cli` depends only on `maya_core`, so it builds without GTK or
+WebKit, and statically for musl. The build workflow's `linux` job runs
 `cargo test -p maya-core -p maya-cli` on Ubuntu (with tmux installed) —
 the guard that keeps `maya_core` free of macOS-only code — and builds
 `maya-cli` natively for its musl target (`musl-tools`, no
@@ -106,10 +254,12 @@ and an `ubuntu-24.04-arm` runner.
 
 Three workflows in `.github/workflows/`:
 
-- `build.yml` tests and builds on Linux (x86_64 and aarch64), Windows and
-  macOS, the jobs running in parallel, and keeps what each built as run
-  artifacts (`maya-linux-<arch>`, `maya-windows`, `maya-macos`). It is
-  only ever called by the other two.
+- `build.yml` tests and builds on Linux (x86_64 and aarch64: the CLI in
+  `linux`, the app in `linux-app`), Windows and macOS, the jobs running in
+  parallel, and keeps what each built as run artifacts
+  (`maya-linux-<arch>`, `maya-linux-app-<arch>`, `maya-windows`,
+  `maya-macos`; and `smoke-<arch>`, the Linux smoke test's screenshot,
+  which is not released). It is only ever called by the other two.
 - `ci.yml` ("CI") runs on every pull request to `main`: `build.yml`
   unsigned, and a check that the version files agree. Nothing is
   published, so a pull request shows everything building before the merge.
@@ -126,14 +276,15 @@ Three workflows in `.github/workflows/`:
 - `Cargo.toml` — the workspace: shared version, dependencies and release profile.
 - `core/` — `maya_core`, the platform-neutral core: no Tauri, no AppKit.
 - `src-tauri/` — `maya`, the app: Tauri commands, voice, focus and dock; depends on `maya_core`.
-- `hook/` — `maya-hook`, the Claude Code hook on Windows.
-- `ear-rs/` — `maya-ear` for Windows: `vad.rs`, `resample.rs` and the
+- `hook/` — `maya-hook`, the Claude Code hook on Windows and Linux.
+- `ear-rs/` — `maya-ear` for Windows and Linux: `vad.rs`, `resample.rs` and the
   microphone choice in the library, the audio and whisper.cpp in `main.rs`.
 - `cli/` — `maya_cli`, binary `maya-cli`: the headless assistant for
   SSH boxes and containers (`pair`, `run`, `status`, `hooks`, `config`, `start`);
   depends on `maya_core`, no Tauri.
 - `core/src/` — `store.rs` (session cache), `state.rs` (card states),
   `watcher.rs`, `answer.rs` and `launch.rs` (Terminal automation),
+  `terminal_tmux.rs` (tmux sessions, for the CLI and the Linux app),
   `inbox.rs` (Claude Code's session socket), `foreign.rs` with `codex.rs`,
   `antigravity.rs`, `grok.rs` (other agents), `reviews.rs` and `pr.rs`
   (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
@@ -145,13 +296,13 @@ Three workflows in `.github/workflows/`:
   and expiry rules, routing).
 - `src-tauri/src/` — `lib.rs` (Tauri commands), `net_app.rs` (the network's
   Tauri side: starting server and client, command execution),
-  `terminal_app.rs` (opening Terminal windows), `focus.rs` and `dock.rs`
+  `terminal_app.rs` (opening Terminal windows), `terminal_win.rs` and
+  `terminal_linux.rs` (their Windows and Linux counterparts), `focus.rs` and `dock.rs`
   (AppKit), `voice.rs` (ElevenLabs), and `ear.rs`, `wake.rs`,
   `listener.rs`, `models.rs` (the voice assistant).
 - `cli/src/` — `main.rs` and `args.rs` (subcommand parsing), `commands.rs`
   (`pair`, `status`, `hooks`, `config`, `start`), `run_cmd.rs` (`run`, the headless
-  loop), `executor.rs` (running the main's commands), `tmux.rs` (named
-  sessions for start and resume), `notify.rs` (writes the CLI's own status
+  loop), `executor.rs` (running the main's commands), `notify.rs` (writes the CLI's own status
   file on connect, disconnect and removal — the CLI never notifies, speaks
   or listens like the app), and `status_file.rs`
   (`~/.claude/maya/cli-status.json`, read by `maya status`).

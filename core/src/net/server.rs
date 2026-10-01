@@ -790,6 +790,31 @@ fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: 
     }
 }
 
+/// Why a connection ends when the main no longer counts it: a newer
+/// connection replaced it, or the assistant was removed (`bye` queued).
+const NOT_CURRENT: &str = "replaced by a newer connection";
+
+/// Writes the frames queued for this connection, up to a `bye`. `Some(why)`
+/// when the connection ends: the `bye` went out, a write failed, or the
+/// sender is gone (a newer connection replaced this one).
+fn send_queued(ws: &mut Ws, link: &Link) -> Option<String> {
+    loop {
+        match link.rx.try_recv() {
+            Ok(down) => {
+                let last = matches!(down, Down::Bye { .. });
+                if let Err(e) = send_down(ws, &down) {
+                    return Some(e);
+                }
+                if last {
+                    return Some("removed".into());
+                }
+            }
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => return Some(NOT_CURRENT.into()),
+        }
+    }
+}
+
 /// Runs a registered connection until it closes; returns why.
 fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
     let mut deadline = Instant::now() + SILENCE;
@@ -797,30 +822,21 @@ fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
         if ctx.stopped() {
             return "the main stopped".into();
         }
-        loop {
-            match link.rx.try_recv() {
-                Ok(down) => {
-                    let last = matches!(down, Down::Bye { .. });
-                    if let Err(e) = send_down(ws, &down) {
-                        return e;
-                    }
-                    if last {
-                        return "removed".into();
-                    }
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return "replaced by a newer connection".into(),
-            }
+        if let Some(why) = send_queued(ws, link) {
+            return why;
         }
         match ws.read() {
             Ok(Message::Text(t)) => {
                 deadline = Instant::now() + SILENCE;
                 match decode_up(&t) {
-                    Ok(up) => {
-                        if let Err(e) = handle(ctx, ws, link, up) {
-                            return e;
-                        }
-                    }
+                    Ok(up) => match handle(ctx, ws, link, up) {
+                        Ok(()) => {}
+                        // Removed while this frame was in flight: the `bye`
+                        // `remove_assistant` queued (under the same lock
+                        // `handle` checked) goes out before the close.
+                        Err(e) if e == NOT_CURRENT => return send_queued(ws, link).unwrap_or(e),
+                        Err(e) => return e,
+                    },
                     Err(e) if unreadable_board(&t) => {
                         // Keep the last good board; say why it no longer updates.
                         log::line("network", format!("{}: could not read its board: {e}", link.label));
@@ -871,7 +887,7 @@ fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
                 current
             };
             if !current {
-                return Err("replaced by a newer connection".into());
+                return Err(NOT_CURRENT.into());
             }
             mark_board(ctx, link, false);
             ctx.notify.board_changed();
@@ -1903,6 +1919,47 @@ mod tests {
         handle.remove_assistant(&id).unwrap();
         assert_eq!(t.join().unwrap().unwrap_err(), client::REMOVED);
         assert_eq!(notify.removed.load(Ordering::SeqCst), 1);
+        handle.stop();
+    }
+    /// The client's executor that holds its first board until told: the
+    /// connection is welcomed and the main's pump is reading when it goes.
+    struct GatedExec {
+        gate: Mutex<Receiver<()>>,
+        holding: AtomicBool,
+    }
+
+    impl client::Executor for GatedExec {
+        fn execute(&self, _: CommandKind) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+        fn board(&self) -> (Vec<Card>, Vec<String>) {
+            self.holding.store(true, Ordering::SeqCst);
+            let _ = self.gate.lock().unwrap().recv_timeout(Duration::from_secs(5));
+            (vec![card("r1", "remote")], vec![])
+        }
+    }
+
+    #[test]
+    fn a_client_removed_while_its_board_is_on_the_way_is_told_it_was_removed() {
+        let (handle, port) = test_server();
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), ..Default::default() };
+        for round in 0..25 {
+            let (code, _) = handle.open_pairing(now_ms());
+            let (go, gate) = channel();
+            let exec = Arc::new(GatedExec { gate: Mutex::new(gate), holding: AtomicBool::new(false) });
+            let notify = Arc::new(FakeClientNotify::default());
+            let (c, e, n) = (config.clone(), exec.clone(), notify.clone());
+            let t = std::thread::spawn(move || client::run_once(&c, e, n, &AtomicBool::new(false), Some(&code)));
+            // Welcomed, its first board not yet sent.
+            wait_until(|| exec.holding.load(Ordering::SeqCst));
+            let (id, _) = notify.creds.lock().unwrap().clone().expect("the client was paired");
+            handle.remove_assistant(&id).unwrap();
+            // The board reaches a main that no longer counts the connection.
+            go.send(()).unwrap();
+            assert_eq!(t.join().unwrap(), Err(client::REMOVED.to_string()), "round {round}");
+            assert_eq!(notify.removed.load(Ordering::SeqCst), 1, "round {round}");
+            wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
+        }
         handle.stop();
     }
 }

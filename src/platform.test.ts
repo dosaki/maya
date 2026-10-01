@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { builtinVoiceName, isWindows, recognizerOptions, secretStore, sendShortcut, thisComputer } from "./platform";
+import { builtinVoiceName, isLinux, isWindows, recognizerOptions, secretStore, sendShortcut, thisComputer } from "./platform";
 
 const original = navigator.userAgent;
 
@@ -28,5 +28,18 @@ describe("platform wording", () => {
     expect(builtinVoiceName()).toBe("Zira");
     expect(secretStore()).toBe("Credential Manager");
     expect(recognizerOptions()).toEqual([["builtin", "Built-in (Whisper, runs on this PC)"]]);
+  });
+
+  it("tells Linux apart from Android and from the other desktops", () => {
+    pretend("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15");
+    expect(isLinux()).toBe(true);
+    expect(thisComputer()).toBe("This computer");
+    expect(sendShortcut()).toBe("Ctrl+Enter");
+    expect(builtinVoiceName()).toBe("speech-dispatcher");
+    expect(secretStore()).toBe("GNOME Keyring");
+    expect(recognizerOptions().map(([v]) => v)).toEqual(["builtin"]);
+
+    pretend("Mozilla/5.0 (Linux; Android 14)");
+    expect(isLinux()).toBe(false);
   });
 });

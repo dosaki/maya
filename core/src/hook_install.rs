@@ -1,15 +1,33 @@
 use serde_json::{json, Map, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 pub const HOOK_MARKER: &str = ".claude/maya/hook.sh";
+/// The app on Linux bundles Maya's own `maya-hook`, as on Windows, so it
+/// needs no jq.
+#[cfg(target_os = "linux")]
+pub const HOOK_MARKER: &str = ".claude/maya/maya-hook";
 /// Claude Code runs hook commands through Git Bash on Windows, which has
 /// no jq, so the hook there is Maya's own `maya-hook.exe`.
 #[cfg(windows)]
 pub const HOOK_MARKER: &str = ".claude/maya/maya-hook.exe";
-/// The hook binary's file name on Windows, next to Maya's own executable
-/// and, once installed, in `~/.claude/maya`.
+/// Where `install_script_to` puts the jq hook script: the hook on macOS,
+/// and the headless CLI's on Linux, whose single binary has no `maya-hook`
+/// beside it.
+#[cfg(unix)]
+pub const SCRIPT_MARKER: &str = ".claude/maya/hook.sh";
+/// The hook binary's file name on Windows and Linux, next to Maya's own
+/// executable and, once installed, in `~/.claude/maya`.
+#[cfg(windows)]
 pub const HOOK_EXE: &str = "maya-hook.exe";
+#[cfg(not(windows))]
+pub const HOOK_EXE: &str = "maya-hook";
+/// The hooks counted as installed and replaced on install: on Linux the
+/// app's binary and the CLI's script are both Maya's current hook.
+#[cfg(target_os = "linux")]
+const CURRENT_MARKERS: &[&str] = &[HOOK_MARKER, SCRIPT_MARKER];
+#[cfg(not(target_os = "linux"))]
+const CURRENT_MARKERS: &[&str] = &[HOOK_MARKER];
 /// Longest string kept from a `tool_input` field, in characters.
 const FIELD_MAX: usize = 400;
 /// Markers of earlier releases; removed on install, never counted as installed.
@@ -116,9 +134,10 @@ pub fn event_name(payload: &str) -> Option<String> {
     serde_json::from_str::<Value>(payload).ok()?.get("hook_event_name")?.as_str().map(str::to_string)
 }
 
-/// Events hooked only so the hook sees a session's inbox token at once: on
-/// Windows, SessionStart. They are not appended to `events.jsonl`, whose
-/// readers know nothing of them.
+/// Events hooked only so the hook sees a session's inbox token at once:
+/// on Windows, SessionStart. Only the Windows named-pipe inbox has a token;
+/// on unix the inbox trusts the socket peer's pid. They are not appended to
+/// `events.jsonl`, whose readers know nothing of them.
 #[cfg(windows)]
 pub const TOKEN_ONLY_EVENTS: &[&str] = &["SessionStart"];
 #[cfg(unix)]
@@ -146,13 +165,13 @@ fn group_matches(group: &Value, markers: &[&str]) -> bool {
 
 /// Ours, current or legacy: what `remove` strips.
 fn group_is_ours(group: &Value) -> bool {
-    group_matches(group, &[HOOK_MARKER]) || group_matches(group, LEGACY_MARKERS)
+    group_matches(group, CURRENT_MARKERS) || group_matches(group, LEGACY_MARKERS)
 }
 
 pub fn is_installed(settings: &Value) -> bool {
     settings["hooks"]
         .as_object()
-        .map(|hooks| hooks.values().any(|groups| groups.as_array().map_or(false, |g| g.iter().any(|g| group_matches(g, &[HOOK_MARKER])))))
+        .map(|hooks| hooks.values().any(|groups| groups.as_array().map_or(false, |g| g.iter().any(|g| group_matches(g, CURRENT_MARKERS)))))
         .unwrap_or(false)
 }
 
@@ -213,8 +232,15 @@ fn write_settings_with_backup(claude_dir: &Path, settings: &Value) -> Result<(),
     std::fs::write(&path, text + "\n").map_err(|e| format!("cannot write settings.json: {e}"))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 pub fn install_to(claude_dir: &Path) -> Result<(), String> {
+    install_script_to(claude_dir)
+}
+
+/// Writes the jq hook script to `claude_dir/maya/hook.sh` and points every
+/// hook at it: `install_to` on macOS, and the headless CLI everywhere.
+#[cfg(unix)]
+pub fn install_script_to(claude_dir: &Path) -> Result<(), String> {
     let settings = read_settings(claude_dir)?;
     let maya_dir = claude_dir.join("maya");
     std::fs::create_dir_all(&maya_dir).map_err(|e| format!("cannot create {}: {e}", maya_dir.display()))?;
@@ -224,8 +250,34 @@ pub fn install_to(claude_dir: &Path) -> Result<(), String> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     }
-    let command = "\"$HOME/.claude/maya/hook.sh\"";
-    write_settings_with_backup(claude_dir, &install(settings, command))
+    let command = format!("\"$HOME/{SCRIPT_MARKER}\"");
+    write_settings_with_backup(claude_dir, &install(settings, &command))
+}
+
+/// The hook binary in `dir`, the folder of Maya's own executable: Tauri
+/// strips the target triple from a bundled sidecar's name, a dev build
+/// keeps it (`maya-hook-<triple>`).
+pub fn hook_source_in(dir: &Path) -> Option<PathBuf> {
+    let plain = dir.join(HOOK_EXE);
+    if plain.is_file() {
+        return Some(plain);
+    }
+    let prefix = format!("{HOOK_EXE}-");
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.starts_with(&prefix)) && p.is_file())
+}
+
+/// Copies `maya-hook` from beside this executable into `claude_dir/maya`
+/// and points every hook at it.
+#[cfg(target_os = "linux")]
+pub fn install_to(claude_dir: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find Maya's own folder: {e}"))?;
+    let dir = exe.parent().ok_or("cannot find Maya's own folder")?;
+    let source = hook_source_in(dir).ok_or("Maya's hook binary (maya-hook) is not next to the app")?;
+    install_with(claude_dir, &source)
 }
 
 /// Copies `maya-hook.exe` from beside this executable into
@@ -239,8 +291,9 @@ pub fn install_to(claude_dir: &Path) -> Result<(), String> {
 
 /// `install_to` with the hook binary taken from `source`. The copy is
 /// skipped when the installed one is already identical, since Windows
-/// refuses to overwrite a binary a running hook holds open.
-#[cfg(windows)]
+/// refuses to overwrite a binary a running hook holds open; on Linux the
+/// new one is renamed into place for the same reason and made executable.
+#[cfg(any(windows, target_os = "linux"))]
 pub fn install_with(claude_dir: &Path, source: &Path) -> Result<(), String> {
     let settings = read_settings(claude_dir)?;
     let maya_dir = claude_dir.join("maya");
@@ -248,7 +301,24 @@ pub fn install_with(claude_dir: &Path, source: &Path) -> Result<(), String> {
     let bytes = std::fs::read(source).map_err(|e| format!("cannot read {}: {e}", source.display()))?;
     let target = maya_dir.join(HOOK_EXE);
     if std::fs::read(&target).ok().as_deref() != Some(&bytes[..]) {
+        #[cfg(windows)]
         std::fs::write(&target, &bytes).map_err(|e| format!("cannot write {HOOK_EXE} (a hook may be running; try again): {e}"))?;
+        #[cfg(unix)]
+        {
+            let fresh = maya_dir.join(format!("{HOOK_EXE}.new"));
+            std::fs::write(&fresh, &bytes).map_err(|e| format!("cannot write {HOOK_EXE}: {e}"))?;
+            // Executable before it is in place: a hook firing right after the
+            // rename must never find it without its mode.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("cannot make {HOOK_EXE} executable: {e}"))?;
+            std::fs::rename(&fresh, &target).map_err(|e| format!("cannot replace {HOOK_EXE}: {e}"))?;
+        }
+    }
+    // An identical copy already there is skipped above; it still gets the mode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("cannot make {HOOK_EXE} executable: {e}"))?;
     }
     let command = format!("\"$HOME/{HOOK_MARKER}\"");
     write_settings_with_backup(claude_dir, &install(settings, &command))
@@ -340,10 +410,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn install_to_writes_script_backup_and_settings() {
+    fn install_script_to_writes_script_backup_and_settings() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("settings.json"), "{\"model\":\"opus\"}").unwrap();
-        install_to(dir.path()).unwrap();
+        install_script_to(dir.path()).unwrap();
 
         let script = dir.path().join("maya/hook.sh");
         assert!(script.exists());
@@ -361,14 +431,14 @@ mod tests {
         assert!(!status(dir.path()).unwrap());
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     fn install_here(dir: &Path) -> Result<(), String> {
         install_to(dir)
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     fn install_here(dir: &Path) -> Result<(), String> {
-        let exe = dir.join("source-hook.exe");
+        let exe = dir.join("source-hook");
         std::fs::write(&exe, b"MZ fake hook").unwrap();
         install_with(dir, &exe)
     }
@@ -416,6 +486,50 @@ mod tests {
         assert_eq!(token_path(d, r"\\.\pipe\LOCAL\.."), None, "only the last component is used, and .. is not plain");
         assert_eq!(token_path(d, ""), None);
         assert_eq!(token_path(d, "cc-msg-ab"), Some(d.join("inbox").join("cc-msg-ab.token")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn hook_source_prefers_the_plain_name_then_a_triple_suffixed_one() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(hook_source_in(d.path()), None);
+        std::fs::write(d.path().join("maya-hook-x86_64-unknown-linux-gnu"), b"x").unwrap();
+        assert_eq!(hook_source_in(d.path()).unwrap().file_name().unwrap(), "maya-hook-x86_64-unknown-linux-gnu");
+        std::fs::write(d.path().join("maya-hook"), b"x").unwrap();
+        assert_eq!(hook_source_in(d.path()).unwrap().file_name().unwrap(), "maya-hook");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn install_with_copies_the_binary_executable_and_points_hooks_at_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("settings.json"), "{}").unwrap();
+        let src = d.path().join("src-hook");
+        std::fs::write(&src, b"#!/bin/sh\n").unwrap();
+        install_with(d.path(), &src).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let installed = d.path().join("maya").join("maya-hook");
+        assert_eq!(std::fs::metadata(&installed).unwrap().permissions().mode() & 0o777, 0o755);
+        assert!(status(d.path()).unwrap());
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(d.path().join("settings.json")).unwrap()).unwrap();
+        assert_eq!(s["hooks"]["Stop"][0]["hooks"][0]["command"], "\"$HOME/.claude/maya/maya-hook\"");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_cli_script_counts_as_installed_and_the_app_binary_replaces_it() {
+        let d = tempfile::tempdir().unwrap();
+        install_script_to(d.path()).unwrap();
+        assert!(status(d.path()).unwrap());
+        let src = d.path().join("src-hook");
+        std::fs::write(&src, b"#!/bin/sh\n").unwrap();
+        install_with(d.path(), &src).unwrap();
+        let text = std::fs::read_to_string(d.path().join("settings.json")).unwrap();
+        assert!(!text.contains("hook.sh"), "{text}");
+        let s: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(s["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        remove_from(d.path()).unwrap();
+        assert!(!status(d.path()).unwrap());
     }
 
     #[test]

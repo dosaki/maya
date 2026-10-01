@@ -1,6 +1,10 @@
 use crate::model::{AwaitKind, Card, State};
 use crate::state::truncate;
 use std::collections::HashSet;
+#[cfg(any(test, target_os = "linux"))]
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Mutex, OnceLock};
@@ -85,10 +89,10 @@ pub fn pick_voice(installed: &str) -> Option<String> {
     VOICES.iter().find(|v| names.contains(v)).map(|v| v.to_string())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 static VOICE: OnceLock<Option<String>> = OnceLock::new();
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn voice() -> Option<String> {
     VOICE
         .get_or_init(|| {
@@ -151,7 +155,7 @@ pub fn focus_active() -> bool {
 }
 
 /// Whether a Focus mode is on right now. Unreadable state counts as off.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 pub fn focus_active() -> bool {
     let Some(home) = dirs::home_dir() else { return false };
     let path = home.join("Library/DoNotDisturb/DB/Assertions.json");
@@ -182,7 +186,7 @@ fn say_builtin(line: &str) {
 }
 
 /// Speaks with the built-in female voice.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn say_builtin(line: &str) {
     let mut cmd = Command::new("say");
     if let Some(v) = voice() {
@@ -300,9 +304,162 @@ pub fn notify(card: &Card, sound: bool) {
     crate::notify_win::show_toast(&card.name, &subtitle_for(card), &body_for(card), sound);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 pub fn notify(card: &Card, sound: bool) {
     let _ = Command::new("osascript").arg("-e").arg(applescript_notify(&card.name, &subtitle_for(card), &body_for(card), sound)).output();
+}
+
+/// `notify-send`'s arguments for a banner from Maya: the app name, the
+/// icon when there is one, the session as the title and the subtitle and
+/// body on two lines (GNOME banners have no subtitle).
+#[cfg(any(test, target_os = "linux"))]
+pub fn notify_send_args(icon: Option<&Path>, title: &str, subtitle: &str, body: &str) -> Vec<String> {
+    let mut a = vec!["--app-name".to_string(), "Maya".to_string()];
+    if let Some(i) = icon {
+        a.extend(["--icon".to_string(), i.to_string_lossy().into_owned()]);
+    }
+    let text = if subtitle.is_empty() {
+        body.to_string()
+    } else if body.is_empty() {
+        subtitle.to_string()
+    } else {
+        format!("{subtitle}\n{body}")
+    };
+    a.extend(["--".to_string(), title.to_string(), text]);
+    a
+}
+
+/// True when `gsettings get org.gnome.desktop.notifications show-banners`
+/// says `false`: GNOME's Do Not Disturb is on. Anything else (true, an
+/// error, no GNOME) counts as off.
+#[cfg(any(test, target_os = "linux"))]
+pub fn dnd_from_gsettings(out: &str) -> bool {
+    out.trim() == "false"
+}
+
+/// The speech synthesiser on `path` (a `PATH` string) and its arguments
+/// before the line: speech-dispatcher's `spd-say -w` (waits until spoken),
+/// else `espeak-ng`; None when neither is installed.
+#[cfg(any(test, target_os = "linux"))]
+pub fn speech_command(path: &str) -> Option<(&'static str, Vec<String>)> {
+    if crate::launch::find_on_path(path, "spd-say").is_some() {
+        return Some(("spd-say", vec!["-w".to_string()]));
+    }
+    crate::launch::find_on_path(path, "espeak-ng").map(|_| ("espeak-ng", Vec::new()))
+}
+
+/// Maya's icon for banners: inside the AppImage (`$APPDIR`) or where the
+/// .deb installs it; None when the file is not there.
+#[cfg(target_os = "linux")]
+pub fn app_icon_path() -> Option<PathBuf> {
+    let rel = "usr/share/icons/hicolor/128x128/apps/maya.png";
+    let p = match std::env::var("APPDIR") {
+        Ok(d) => Path::new(&d).join(rel),
+        Err(_) => Path::new("/").join(rel),
+    };
+    p.is_file().then_some(p)
+}
+
+/// Whether GNOME's Do Not Disturb is on. Unreadable state counts as off.
+#[cfg(target_os = "linux")]
+pub fn focus_active() -> bool {
+    Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.notifications", "show-banners"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| dnd_from_gsettings(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or(false)
+}
+
+/// The fixed part of a line's speech deadline.
+#[cfg(any(test, target_os = "linux"))]
+const SPEECH_BASE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long a line may take to speak: 15 s plus 1 s per 12 characters.
+#[cfg(any(test, target_os = "linux"))]
+pub fn speech_deadline(line: &str) -> std::time::Duration {
+    speech_deadline_from(SPEECH_BASE, line)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn speech_deadline_from(base: std::time::Duration, line: &str) -> std::time::Duration {
+    base + std::time::Duration::from_secs((line.chars().count() / 12) as u64)
+}
+
+/// Runs the synthesiser `bin` on `line` and waits for it, up to `base` plus
+/// 1 s per 12 characters. With no audio sink `spd-say -w` and `espeak-ng`
+/// never return, which would block the speech queue (and leave the ear
+/// paused) for good, so past the deadline the process is killed, an
+/// `spd-say` is told to cancel what it queued, and the line is logged.
+/// True when the synthesiser finished in time.
+#[cfg(target_os = "linux")]
+pub(crate) fn speak_within(bin: &Path, args: &[String], line: &str, base: std::time::Duration) -> bool {
+    use std::time::{Duration, Instant};
+    let Ok(mut child) = Command::new(bin).args(args).arg("--").arg(line).stdin(Stdio::null()).spawn() else {
+        return false;
+    };
+    let limit = speech_deadline_from(base, line);
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            _ => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let name = bin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if name == "spd-say" {
+        // On a thread of its own and killed after 2 s: with no audio sink
+        // the cancel hangs too, and must neither block the queue nor
+        // linger.
+        if let Ok(mut cancel) = Command::new(bin).arg("-C").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while matches!(cancel.try_wait(), Ok(None)) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let _ = cancel.kill();
+                let _ = cancel.wait();
+            });
+        }
+    }
+    crate::log::line("speech", format!("{name} did not finish in {} s; stopped", limit.as_secs()));
+    false
+}
+
+/// Speaks with speech-dispatcher or eSpeak NG, whichever is installed;
+/// without either, logs once and stays silent.
+#[cfg(target_os = "linux")]
+fn say_builtin(line: &str) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    match speech_command(&std::env::var("PATH").unwrap_or_default()) {
+        Some((bin, args)) => {
+            speak_within(Path::new(bin), &args, line, SPEECH_BASE);
+        }
+        None => WARNED.call_once(|| crate::log::line("notify", "no speech synthesiser: install speech-dispatcher or espeak-ng")),
+    }
+}
+
+/// A GNOME banner through `notify-send`, with the freedesktop "message"
+/// sound unless the line is being spoken instead.
+#[cfg(target_os = "linux")]
+pub fn notify(card: &Card, sound: bool) {
+    static MISSING: std::sync::Once = std::sync::Once::new();
+    let icon = app_icon_path();
+    if let Err(e) = Command::new("notify-send").args(notify_send_args(icon.as_deref(), &card.name, &subtitle_for(card), &body_for(card))).stdin(Stdio::null()).output() {
+        crate::log::missing_once(&MISSING, &e, "notify", "notify-send is not installed, so no banners: install libnotify-bin");
+    }
+    if sound {
+        // Reaped on a thread: the sound must not hold up the watcher.
+        if let Ok(mut child) = Command::new("canberra-gtk-play").args(["-i", "message"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -492,5 +649,81 @@ mod tests {
         assert_eq!(body_for(&bold), "Would you like me to commit?");
         let under = card("a", State::Awaiting, 1, "_Ready?_ ");
         assert_eq!(body_for(&under), "Ready?");
+    }
+
+    #[test]
+    fn notify_send_args_carry_app_name_icon_title_and_two_line_body() {
+        let args = notify_send_args(Some(Path::new("/usr/share/icons/hicolor/128x128/apps/maya.png")), "collector", "needs a decision", "Allow Bash?");
+        assert_eq!(args, ["--app-name", "Maya", "--icon", "/usr/share/icons/hicolor/128x128/apps/maya.png", "--", "collector", "needs a decision\nAllow Bash?"].map(String::from).to_vec());
+        assert_eq!(notify_send_args(None, "a", "", "b"), ["--app-name", "Maya", "--", "a", "b"].map(String::from).to_vec());
+    }
+
+    #[test]
+    fn dnd_is_only_an_explicit_false_from_gsettings() {
+        assert!(dnd_from_gsettings("false\n"));
+        assert!(!dnd_from_gsettings("true\n"));
+        assert!(!dnd_from_gsettings(""));
+        assert!(!dnd_from_gsettings("No such schema"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn speech_prefers_spd_say_then_espeak_then_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = |name: &str| {
+            let p = d.path().join(name);
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        assert_eq!(speech_command(""), None);
+        exe("espeak-ng");
+        assert_eq!(speech_command(&d.path().to_string_lossy()).map(|c| c.0), Some("espeak-ng"));
+        exe("spd-say");
+        assert_eq!(speech_command(&d.path().to_string_lossy()), Some(("spd-say", vec!["-w".to_string()])));
+    }
+
+    #[test]
+    fn speech_gets_fifteen_seconds_plus_one_per_twelve_characters() {
+        assert_eq!(speech_deadline(""), std::time::Duration::from_secs(15));
+        assert_eq!(speech_deadline(&"a".repeat(120)), std::time::Duration::from_secs(25));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_synthesiser_that_never_returns_is_stopped_and_cancelled_at_the_deadline() {
+        let d = tempfile::tempdir().unwrap();
+        let marker = d.path().join("cancelled");
+        let fake = d.path().join("spd-say");
+        // The cancel hangs as well, as it does with no audio sink.
+        std::fs::write(&fake, format!("#!/bin/sh\nif [ \"$1\" = -C ]; then echo $$ > '{}'; exec sleep 60; fi\nexec sleep 60\n", marker.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        assert!(!speak_within(&fake, &["-w".to_string()], "x", std::time::Duration::from_secs(1)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "took {:?}", started.elapsed());
+        let waited = std::time::Instant::now();
+        let written = || std::fs::read_to_string(&marker).map(|s| s.ends_with('\n')).unwrap_or(false);
+        while !written() && waited.elapsed() < std::time::Duration::from_secs(2) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(written(), "spd-say -C was not run");
+        let cancel = std::path::PathBuf::from(format!("/proc/{}", std::fs::read_to_string(&marker).unwrap().trim()));
+        let waited = std::time::Instant::now();
+        while cancel.exists() && waited.elapsed() < std::time::Duration::from_secs(4) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(!cancel.exists(), "a hung spd-say -C is stopped too");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_synthesiser_that_returns_in_time_is_left_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let fake = d.path().join("espeak-ng");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(speak_within(&fake, &[], "hello", std::time::Duration::from_secs(5)));
     }
 }

@@ -137,7 +137,7 @@ impl Executor for TauriExecutor {
         let (cards, root) = {
             let state = self.app.state::<AppState>();
             let mut store = state.store.lock().unwrap();
-            (store.refresh(now_ms()), store.config.projects_dir_path())
+            (crate::local_cards(&mut store), store.config.projects_dir_path())
         };
         let dirs = root.filter(|r| r.is_dir()).map(|r| crate::launch::list_project_dirs(&r)).unwrap_or_default();
         (cards, dirs)

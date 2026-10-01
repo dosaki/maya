@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { renderCard } from "./card";
 import { remoteTerminalToast, type Card } from "./types";
 
@@ -61,5 +61,33 @@ describe("renderCard: remote cards", () => {
     expect(el.querySelector(".card__remote")).toBeNull();
     expect(el.querySelector(".card__project")?.textContent).toBe("proj");
     expect(el.classList.contains("card--stale")).toBe(false);
+  });
+});
+
+describe("renderCard: the Terminal button on Linux", () => {
+  const original = navigator.userAgent;
+  const linuxUa = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
+  afterEach(() => Object.defineProperty(navigator, "userAgent", { value: original, configurable: true }));
+
+  it("shows the Terminal button only for a local card that is inside tmux", () => {
+    Object.defineProperty(navigator, "userAgent", { value: linuxUa, configurable: true });
+    const withTmux = renderCard({ ...base, terminal: "maya-1a2b3c4d" }, 0);
+    const button = withTmux.querySelector<HTMLButtonElement>("button[data-action=terminal]");
+    expect(button).not.toBeNull();
+    expect(button?.title).toBe("Open the terminal attached to maya-1a2b3c4d");
+
+    const withoutTmux = renderCard(base, 0);
+    expect(withoutTmux.querySelector("button[data-action=terminal]")).toBeNull();
+  });
+
+  it("still shows the Terminal button for a local card on macOS and Windows, with or without tmux", () => {
+    Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15", configurable: true });
+    expect(renderCard(base, 0).querySelector("button[data-action=terminal]")).not.toBeNull();
+    expect(renderCard({ ...base, terminal: "maya-1a2b3c4d" }, 0).querySelector("button[data-action=terminal]")).not.toBeNull();
+
+    Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0", configurable: true });
+    expect(renderCard(base, 0).querySelector("button[data-action=terminal]")).not.toBeNull();
+    expect(renderCard({ ...base, terminal: "maya-1a2b3c4d" }, 0).querySelector("button[data-action=terminal]")).not.toBeNull();
   });
 });

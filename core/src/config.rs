@@ -137,7 +137,7 @@ impl Default for Config {
             listen: false,
             microphone: None,
             interpreter_model: "haiku".into(),
-            recognizer: if cfg!(windows) { Recognizer::Builtin } else { Recognizer::System },
+            recognizer: if cfg!(any(windows, target_os = "linux")) { Recognizer::Builtin } else { Recognizer::System },
             whisper_model: DEFAULT_MODEL.into(),
             network: NetworkConfig::default(),
         }
@@ -194,10 +194,11 @@ pub fn load(path: &Path) -> Config {
 }
 
 impl Config {
-    /// This config as this platform can run it: Windows has no system
-    /// recogniser, so the listener there always runs the built-in one.
+    /// This config as this platform can run it: Windows and Linux have no
+    /// system recogniser Maya drives, so the listener there always runs the
+    /// built-in one.
     pub fn for_this_platform(mut self) -> Config {
-        if cfg!(windows) {
+        if cfg!(any(windows, target_os = "linux")) {
             self.recognizer = Recognizer::Builtin;
         }
         self
@@ -329,7 +330,7 @@ mod tests {
     #[test]
     fn recogniser_defaults_to_system_and_round_trips() {
         let c: Config = serde_json::from_str::<Config>(r#"{"completedTimeoutMinutes": 5}"#).unwrap().for_this_platform();
-        assert_eq!(c.recognizer, if cfg!(windows) { Recognizer::Builtin } else { Recognizer::System });
+        assert_eq!(c.recognizer, if cfg!(any(windows, target_os = "linux")) { Recognizer::Builtin } else { Recognizer::System });
         assert_eq!(c.whisper_model, "base.en-q5_1");
         let c = Config { recognizer: Recognizer::Builtin, whisper_model: "tiny.en".into(), ..Default::default() };
         let text = serde_json::to_string(&c).unwrap();
@@ -338,11 +339,11 @@ mod tests {
     }
 
     #[test]
-    fn windows_always_runs_the_built_in_recogniser() {
+    fn windows_and_linux_always_run_the_built_in_recogniser() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("config.json");
         save(&p, &Config { recognizer: Recognizer::System, ..Default::default() }).unwrap();
-        let expected = if cfg!(windows) { Recognizer::Builtin } else { Recognizer::System };
+        let expected = if cfg!(any(windows, target_os = "linux")) { Recognizer::Builtin } else { Recognizer::System };
         assert_eq!(load(&p).recognizer, expected);
         assert_eq!(Config { recognizer: Recognizer::System, ..Default::default() }.for_this_platform().recognizer, expected);
     }

@@ -5,7 +5,7 @@
 //! while the interpreter runs; take what is needed, release, then act.
 
 use crate::store::now_ms;
-use crate::{config, ear, eleven_settings, interpreter, launch, log, notify, wake};
+use crate::{config, ear, eleven_settings, eleven_wanted, interpreter, launch, log, notify, wake};
 use crate::{answer_question, compact_session, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, AppState};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
@@ -145,8 +145,9 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
     let eleven = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
-        eleven_settings(&store)
+        eleven_wanted(&store.config, store.claude_dir())
     };
+    let eleven = eleven_settings(eleven);
     // No lock is held here: the speech hook takes the voice lock.
     let _ = notify::speak_and_wait(notify::Utterance::new(text.to_string(), eleven));
     is_current(app, generation)
