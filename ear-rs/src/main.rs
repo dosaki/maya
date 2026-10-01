@@ -79,14 +79,14 @@ mod ear {
         let devices = inputs(&host);
         let names: Vec<String> = devices.iter().map(|(n, _)| n.clone()).collect();
         if args.iter().any(|a| a == "--selftest") {
-            // No system recogniser on Windows: only the built-in one.
+            // No system recogniser on Windows and Linux: only the built-in one.
             emit(json!({"type": "selftest", "available": false, "onDevice": false, "speechAuth": 0, "devices": names}));
             return;
         }
         emit(json!({"type": "devices", "names": names}));
         let engine = arg(&args, "--engine").unwrap_or_else(|| "whisper".into());
         if engine != "whisper" {
-            fail("only the built-in (whisper) recogniser runs on Windows", 7);
+            fail("only the built-in (whisper) recogniser runs on Windows and Linux", 7);
         }
         let Some(model) = arg(&args, "--model") else { fail("--engine whisper needs --model <path>", 7) };
         // Checked before the microphone opens: a missing model is always fatal.
