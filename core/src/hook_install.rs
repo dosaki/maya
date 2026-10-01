@@ -134,13 +134,13 @@ pub fn event_name(payload: &str) -> Option<String> {
     serde_json::from_str::<Value>(payload).ok()?.get("hook_event_name")?.as_str().map(str::to_string)
 }
 
-/// Events hooked only so the hook binary sees a session's inbox token at
-/// once: on Windows and Linux, SessionStart. They are not appended to
-/// `events.jsonl`, whose readers know nothing of them, and the jq script
-/// is never hooked to them.
-#[cfg(any(windows, target_os = "linux"))]
+/// Events hooked only so the hook sees a session's inbox token at once:
+/// on Windows, SessionStart. Only the Windows named-pipe inbox has a token;
+/// on unix the inbox trusts the socket peer's pid. They are not appended to
+/// `events.jsonl`, whose readers know nothing of them.
+#[cfg(windows)]
 pub const TOKEN_ONLY_EVENTS: &[&str] = &["SessionStart"];
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub const TOKEN_ONLY_EVENTS: &[&str] = &[];
 
 /// (event name, matcher)
@@ -177,15 +177,10 @@ pub fn is_installed(settings: &Value) -> bool {
 
 /// Removes our entries, then adds one group per event. Idempotent.
 pub fn install(settings: Value, command: &str) -> Value {
-    install_events(settings, command, TOKEN_ONLY_EVENTS)
-}
-
-/// `install` with `token_only` hooked as well as `HOOK_EVENTS`.
-fn install_events(settings: Value, command: &str, token_only: &[&str]) -> Value {
     let settings = remove(settings);
     let mut root = settings.as_object().cloned().unwrap_or_default();
     let mut hooks = root.get("hooks").and_then(|h| h.as_object()).cloned().unwrap_or_default();
-    let token_only = token_only.iter().map(|e| (*e, None));
+    let token_only = TOKEN_ONLY_EVENTS.iter().map(|e| (*e, None));
     for (event, matcher) in HOOK_EVENTS.iter().copied().chain(token_only) {
         let mut group = Map::new();
         if let Some(m) = matcher {
@@ -256,7 +251,7 @@ pub fn install_script_to(claude_dir: &Path) -> Result<(), String> {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     }
     let command = format!("\"$HOME/{SCRIPT_MARKER}\"");
-    write_settings_with_backup(claude_dir, &install_events(settings, &command, &[]))
+    write_settings_with_backup(claude_dir, &install(settings, &command))
 }
 
 /// The hook binary in `dir`, the folder of Maya's own executable: Tauri
@@ -312,9 +307,14 @@ pub fn install_with(claude_dir: &Path, source: &Path) -> Result<(), String> {
         {
             let fresh = maya_dir.join(format!("{HOOK_EXE}.new"));
             std::fs::write(&fresh, &bytes).map_err(|e| format!("cannot write {HOOK_EXE}: {e}"))?;
+            // Executable before it is in place: a hook firing right after the
+            // rename must never find it without its mode.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("cannot make {HOOK_EXE} executable: {e}"))?;
             std::fs::rename(&fresh, &target).map_err(|e| format!("cannot replace {HOOK_EXE}: {e}"))?;
         }
     }
+    // An identical copy already there is skipped above; it still gets the mode.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -521,8 +521,6 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         install_script_to(d.path()).unwrap();
         assert!(status(d.path()).unwrap());
-        let text = std::fs::read_to_string(d.path().join("settings.json")).unwrap();
-        assert!(!text.contains("SessionStart"), "the script is not hooked to token-only events: {text}");
         let src = d.path().join("src-hook");
         std::fs::write(&src, b"#!/bin/sh\n").unwrap();
         install_with(d.path(), &src).unwrap();
@@ -535,9 +533,9 @@ mod tests {
     }
 
     #[test]
-    fn token_only_events_are_hooked_where_the_hook_is_a_binary() {
+    fn token_only_events_are_hooked_on_windows_alone() {
         let out = install(json!({}), &cmd());
-        assert_eq!(out["hooks"].get("SessionStart").is_some(), cfg!(any(windows, target_os = "linux")));
+        assert_eq!(out["hooks"].get("SessionStart").is_some(), cfg!(windows));
         assert!(!is_installed(&remove(out.clone())));
         assert_eq!(event_name(r#"{"hook_event_name":"SessionStart"}"#).as_deref(), Some("SessionStart"));
         assert_eq!(event_name("nope"), None);

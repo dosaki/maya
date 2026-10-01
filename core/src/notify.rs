@@ -379,7 +379,7 @@ fn say_builtin(line: &str) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     match speech_command(&std::env::var("PATH").unwrap_or_default()) {
         Some((bin, args)) => {
-            let _ = Command::new(bin).args(&args).arg(line).stdin(Stdio::null()).status();
+            let _ = Command::new(bin).args(&args).arg("--").arg(line).stdin(Stdio::null()).status();
         }
         None => WARNED.call_once(|| crate::log::line("notify", "no speech synthesiser: install speech-dispatcher or espeak-ng")),
     }
