@@ -73,8 +73,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Pinned, not ubuntu-latest: that moves to 26.04, whose glibc
+          # (2.43) the bundles would then need, and they would no longer
+          # run on 24.04.
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             deb: amd64
           - arch: aarch64

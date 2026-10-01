@@ -181,8 +181,10 @@ Decisions taken during design:
   `scripts/test-ear.sh` runs `cargo test -p maya-ear` on Linux.
 - **`src/platform.ts`**: `isLinux()` and the five functions above;
   `settings.ts` hints use `thisComputer()` where they say "this PC".
-- **CI**: `build.yml` gains `linux-app` (matrix x86_64/aarch64, runners as
-  the CLI job): apt installs `libwebkit2gtk-4.1-dev libgtk-3-dev
+- **CI**: `build.yml` gains `linux-app` (matrix x86_64/aarch64 on the
+  pinned `ubuntu-24.04` and `ubuntu-24.04-arm` runners, never
+  `ubuntu-latest`: a bundle built on a newer Ubuntu needs its newer glibc
+  and does not run on 24.04): apt installs `libwebkit2gtk-4.1-dev libgtk-3-dev
   libayatana-appindicator3-dev librsvg2-dev patchelf tmux libnotify-bin
   speech-dispatcher pulseaudio-utils`, `pnpm install`, `sh
   scripts/build-ear.sh <triple>`, `pnpm test`, `cargo test --workspace`
