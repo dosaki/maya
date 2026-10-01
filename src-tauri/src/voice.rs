@@ -1,8 +1,8 @@
 //! ElevenLabs as an optional voice. The key lives in the macOS Keychain (the
 //! Windows Credential Manager on Windows, GNOME Keyring through `secret-tool`
 //! on Linux), synthesised lines are cached under `<maya_dir>/voice/`, and
-//! playback uses the built-in `afplay` (MCI on Windows, `paplay`, `aplay` or
-//! `ffplay` on Linux). Anything that fails falls back to the built-in voice.
+//! playback uses the built-in `afplay` (MCI on Windows, `paplay` or `ffplay`
+//! on Linux). Anything that fails falls back to the built-in voice.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -131,10 +131,11 @@ pub fn secret_tool_lookup_args() -> Vec<String> {
 }
 
 /// The first audio player on `path` and its arguments before the file:
-/// PulseAudio's (PipeWire answers it too), then ALSA's, then ffmpeg's.
+/// PulseAudio's (PipeWire answers it too), then ffmpeg's. Both decode the
+/// MP3 ElevenLabs sends; ALSA's `aplay` does not (it plays it as static).
 #[cfg(any(test, target_os = "linux"))]
 pub fn player_command(path: &str) -> Option<(&'static str, Vec<String>)> {
-    for (bin, args) in [("paplay", vec![]), ("aplay", vec![]), ("ffplay", vec!["-nodisp".to_string(), "-autoexit".to_string()])] {
+    for (bin, args) in [("paplay", vec![]), ("ffplay", vec!["-nodisp".to_string(), "-autoexit".to_string()])] {
         if maya_core::launch::find_on_path(path, bin).is_some() {
             return Some((bin, args));
         }
@@ -360,7 +361,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn player_is_paplay_then_aplay_then_ffplay() {
+    fn player_is_paplay_then_ffplay_never_aplay() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().to_string_lossy().into_owned();
         let exe = |name: &str| {
@@ -374,7 +375,7 @@ mod tests {
         exe("ffplay");
         assert_eq!(player_command(&path), Some(("ffplay", vec!["-nodisp".to_string(), "-autoexit".to_string()])));
         exe("aplay");
-        assert_eq!(player_command(&path).map(|c| c.0), Some("aplay"));
+        assert_eq!(player_command(&path).map(|c| c.0), Some("ffplay"), "aplay cannot decode MP3");
         exe("paplay");
         assert_eq!(player_command(&path).map(|c| c.0), Some("paplay"));
     }

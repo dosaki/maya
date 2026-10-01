@@ -1,6 +1,6 @@
 //! Linux: sessions live in tmux and show in a terminal window attached to
-//! them. Keys go through tmux; focus raises the window Maya opened when the
-//! desktop lets it (wmctrl on X11 and XWayland), else opens a fresh one.
+//! them. Keys go through tmux; focus raises the window Maya opened on an X11
+//! session (wmctrl), else (GNOME on Wayland) opens a fresh one.
 use maya_core::launch::find_on_path;
 use maya_core::terminal::Terminal;
 use maya_core::terminal_tmux::{Tmux, NOT_IN_TMUX};
@@ -46,19 +46,25 @@ impl LinuxTerminal {
 
     fn open_window(&self, label: &str) -> Result<(), String> {
         let (bin, args) = terminal_command(&std::env::var("PATH").unwrap_or_default(), label)?;
-        Command::new(bin)
+        let mut child = Command::new(bin)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("could not open a terminal: {e}"))?;
+        // gnome-terminal's client exits at once (the server owns the
+        // window); reaping it keeps it from lingering as a zombie.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         self.remember(label);
         Ok(())
     }
 
-    /// wmctrl raises by title on X11 and for XWayland windows; on pure
-    /// Wayland it fails and the caller opens a fresh window instead.
+    /// wmctrl raises the window by title on an X11 session. Under GNOME on
+    /// Wayland gnome-terminal is a native Wayland window, so wmctrl fails
+    /// there and Focus opens a fresh window attached to the session instead.
     fn activate(&self, label: &str) -> bool {
         self.opened(label)
             && Command::new("wmctrl")
