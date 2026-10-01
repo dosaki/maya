@@ -16,6 +16,14 @@ case "$target" in
       echo "built src-tauri/binaries/$bin-$target.exe"
     done
     exit 0 ;;
+  *-unknown-linux-gnu)
+    mkdir -p src-tauri/binaries
+    cargo build --release --target "$target" -p maya-ear -p maya-hook
+    for bin in maya-ear maya-hook; do
+      cp "target/$target/release/$bin" "src-tauri/binaries/$bin-$target"
+      echo "built src-tauri/binaries/$bin-$target"
+    done
+    exit 0 ;;
   *) echo "unsupported target $target" >&2; exit 1 ;;
 esac
 sh scripts/fetch-whisper.sh

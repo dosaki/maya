@@ -3,7 +3,7 @@ name = "maya-ear"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Maya's ear on Windows: whisper.cpp speech recognition streamed as JSON lines"
+description = "Maya's ear on Windows and Linux: whisper.cpp speech recognition streamed as JSON lines"
 
 [lib]
 name = "maya_ear"
@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 serde_json.workspace = true
 
-# The audio and the recogniser are Windows-only: macOS has the Swift ear.
-[target.'cfg(windows)'.dependencies]
+# The audio and the recogniser run on Windows and Linux: macOS has the Swift ear.
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 cpal = "0.18"
 whisper-rs = "0.16"
