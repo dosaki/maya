@@ -91,7 +91,8 @@ prompts Maya sends.
 ### Linux
 
 Ubuntu 24.04 or later with GNOME, on Wayland or X11; x86_64 and arm64.
-Other distributions can run the AppImage. One command:
+Other distributions with glibc 2.39 or newer (Ubuntu 24.04, Debian 13,
+Fedora 40 and later) can run the AppImage. One command:
 
     curl -fsSL https://raw.githubusercontent.com/dosaki/maya/main/install.sh | sh
 
