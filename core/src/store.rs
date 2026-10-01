@@ -98,9 +98,16 @@ impl Store {
         let procs = (self.processes)();
         let live: std::collections::HashSet<i32> = procs.iter().map(|p| p.0).collect();
         self.foreign.retain(|pid, _| live.contains(pid));
-        let fresh: Vec<_> = procs.into_iter().filter(|p| !self.foreign.contains_key(&p.0)).collect();
+        // On Windows an agy process's log is re-read every refresh, cheaply, so
+        // a conversation it starts or switches to replaces the one it had.
+        let recheck = |h: Harness| cfg!(windows) && h == Harness::Antigravity;
+        let fresh: Vec<_> = procs.into_iter().filter(|p| !self.foreign.contains_key(&p.0) || recheck(p.2)).collect();
         if !fresh.is_empty() {
-            for s in foreign::discover(&fresh, foreign::proc_info, &self.codex_dir, &self.agy_dir) {
+            #[cfg(unix)]
+            let found = foreign::discover(&fresh, foreign::proc_info, &self.codex_dir, &self.agy_dir);
+            #[cfg(windows)]
+            let found = foreign::discover_from_files(&fresh, crate::win_process::holders, &self.codex_dir, &self.agy_dir);
+            for s in found {
                 self.foreign.insert(s.pid, s);
             }
         }

@@ -30,6 +30,8 @@ pub mod watcher;
 pub mod notify_win;
 #[cfg(windows)]
 pub mod win_console;
+#[cfg(windows)]
+pub mod win_process;
 
 /// `~/.claude`, or `/.claude` when the home directory is unknown.
 pub fn claude_dir() -> std::path::PathBuf {

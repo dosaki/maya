@@ -75,6 +75,11 @@ What is different on Windows, and where:
 - **Notifications, voice, quiet.** `core/src/notify_win.rs`: toasts, SAPI,
   and Do not disturb. The ElevenLabs key is in Credential Manager
   (`src-tauri/src/voice.rs`).
+- **Other agents.** `core/src/win_process.rs` lists processes (ToolHelp)
+  and names the processes holding a file open (the Restart Manager).
+  `foreign::discover_from_files` maps an `agy` pid to its conversation
+  through its own `log/cli-*.log`, and a `codex` pid to its thread through
+  the `thread-writer-locks/<id>.lock` it holds.
 - **Ear.** `ear-rs/`: the Swift ear's protocol over WASAPI and whisper.cpp,
   with the VAD ported case for case. `cargo run -p maya-ear --release
   --example transcribe -- <model.bin> <file.wav>` runs a WAV through it.

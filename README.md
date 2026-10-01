@@ -289,8 +289,10 @@ speech models under `models/`.
 
 ### Windows, for now
 
-- Codex and Antigravity sessions are not found on Windows yet (Maya finds
-  them with `ps` and `lsof`); Claude Code and Grok Build sessions are.
+- Without `ps` and `lsof`, Maya finds Antigravity sessions in each `agy`
+  process's own log (its pid, workspace and conversation), and Codex
+  sessions by which `codex` process holds a thread's writer lock. A new
+  `agy` shows once its first prompt starts a conversation.
 - Focus raises the Windows Terminal window hosting a session; when several
   sessions are tabs of one window, pick the tab yourself.
 - The `maya` command line tool drives sessions through tmux, so on Windows
