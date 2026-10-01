@@ -107,13 +107,14 @@ With the AppImage, install what Maya runs:
     sudo apt install tmux libnotify-bin speech-dispatcher
 
 and, for the ElevenLabs voice, `pulseaudio-utils` (for `paplay`; `ffplay`
-works too) and `libsecret-tools`. `gnome-terminal` comes with Ubuntu's
-desktop.
+works too) and `libsecret-tools`. Sessions open in GNOME Terminal,
+Ptyxis or any `x-terminal-emulator`; the `.deb` recommends
+`gnome-terminal`.
 
 What is different on Linux:
 
 - **Sessions run in tmux.** A session Maya starts or resumes runs in a
-  tmux session (`maya-<8 hex>`) shown in a GNOME Terminal window, and Maya
+  tmux session (`maya-<8 hex>`) shown in a terminal window, and Maya
   types answers and slash commands into it through tmux. A session you
   started by hand outside tmux is on the board and takes replies, but
   Maya cannot type into it and its card has no Terminal button.

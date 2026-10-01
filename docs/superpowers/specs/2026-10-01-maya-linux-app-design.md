@@ -38,10 +38,15 @@ Decisions taken during design:
 - **Start and resume** create a tmux session `maya-<8 hex>` (the CLI's
   label and command line) and open a terminal window attached to it:
   `gnome-terminal --title <label> -- tmux attach -t <label>` when
-  `gnome-terminal` is on the PATH, else `x-terminal-emulator -e tmux attach
-  -t <label>`, else the error `No terminal emulator found: install
-  gnome-terminal.` The pane stays after `claude` exits (the CLI's `exec
-  $SHELL` rule).
+  `gnome-terminal` is on the PATH, else `ptyxis --new-window --title
+  <label> -- tmux attach -t <label>` (Ubuntu 25.04 and later, where
+  `x-terminal-emulator` is Ptyxis and rejects `-T`/`-e`), else
+  `x-terminal-emulator -T <label> -e tmux attach -t <label>`, else the
+  error `No terminal emulator found: install gnome-terminal.` The emulator
+  is found before the tmux session is made, so that error leaves no
+  session behind. An emulator that exits non-zero within 1.5 s fails the
+  action with `The terminal (<name>) exited at once: <status>`. The pane
+  stays after `claude` exits (the CLI's `exec $SHELL` rule).
 - **Typing** (answers, slash commands, Shift+Tab, replies to agents without
   an inbox) goes through tmux `send-keys` to the pane whose tty is the
   session's, exactly as the CLI does. A session outside tmux (started by
@@ -142,9 +147,9 @@ Decisions taken during design:
   `NOT_IN_TMUX`. The CLI re-exports it.
 - **`src-tauri/src/terminal_linux.rs`**: `LinuxTerminal` implements
   `Terminal`:
-  - `open(command, cwd, label)`: `Tmux::open`, then `open_window(label)`
-    (the emulator command line above, built by a pure
-    `terminal_command(emulator, label) -> Vec<String>`), records
+  - `open(command, cwd, label)`: the emulator command line above (a pure
+    `terminal_command(path, label)`), then `Tmux::open`, then the window
+    (watched for 1.5 s for an early failure), records
     `label → launched pid` in a `Mutex<HashMap<String, Window>>`, returns
     `Some(label)`;
   - `type_line`, `name_for_tty`, `names_for_ttys`: delegate to `Tmux`;
