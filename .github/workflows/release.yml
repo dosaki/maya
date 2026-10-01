@@ -1,301 +1,72 @@
 name: Release
 
+# Every push to main builds Linux, Windows and macOS again, in parallel, and
+# then, when the version in src-tauri/tauri.conf.json has no release yet,
+# publishes v<version> with everything they built. A push whose version is
+# already released only builds (`sh scripts/set-version.sh 0.3.0` sets the
+# version everywhere; see CLAUDE.md for when to bump it).
 on:
   push:
-    branches: [main]
-  pull_request:
     branches: [main]
 
 permissions:
   contents: write
 
-# Pushes to main run one at a time, so two releases never race; each pull
-# request has its own group, and a newer push to it cancels the older run.
+# Pushes to main run one at a time, so two releases never race.
 concurrency:
-  group: ${{ github.event_name == 'push' && 'release' || format('pr-{0}', github.ref) }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  # Runs first, on pushes and pull requests alike: the tests that keep
-  # maya_core and the CLI portable, then (on a pull request or a release
-  # push) the Linux binary for its architecture. A release hands it to the
-  # macOS job, which publishes the release only once every binary exists.
-  linux:
-    name: Test core and CLI, build Linux binaries (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
+  version:
+    name: Version
+    runs-on: ubuntu-latest
     # A docs commit (conventional type `docs`, with or without a scope)
     # changes nothing that needs building or releasing.
     if: >-
       !startsWith(github.event.head_commit.message, 'docs:') &&
       !startsWith(github.event.head_commit.message, 'docs(')
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: swatinem/rust-cache@v2
-      # tmux for the integration test; musl-tools links the static binary.
-      - name: Install tmux and musl-tools
-        run: sudo apt-get update && sudo apt-get install -y tmux musl-tools
-      - name: Test core and the CLI on Linux
-        run: cargo test -p maya-core -p maya-cli
-      # version=, release= (a push to main whose version has no release yet)
-      # and build= (a release, or any pull request: a pull request builds
-      # everything and publishes nothing).
       - name: Read version
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-        run: sh scripts/ci-version.sh >> "$GITHUB_OUTPUT"
-      # Each architecture builds on its own runner, so no cross-compilation
-      # container is involved (the cross-rs images lag the toolchain).
-      - name: Build the Linux binary
-        if: steps.version.outputs.build == 'true'
-        run: |
-          set -euo pipefail
-          cargo build -p maya-cli --release --target ${{ matrix.target }}
-          mkdir -p dist-linux
-          cp target/${{ matrix.target }}/release/maya-cli dist-linux/maya-linux-${{ matrix.arch }}
-          ./dist-linux/maya-linux-${{ matrix.arch }} --version
-      - name: Hand the binary to the macOS job
-        if: steps.version.outputs.build == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-binaries-${{ matrix.arch }}
-          path: dist-linux/*
-          if-no-files-found: error
+        run: sh scripts/release-version.sh >> "$GITHUB_OUTPUT"
 
-  # Runs alongside the linux job, on pushes and pull requests alike: the
-  # Windows port's tests, then (on a pull request or a release push) the
-  # installers. A release hands them to the macOS job, which publishes it.
-  windows:
-    name: Test and build (Windows)
-    runs-on: windows-latest
-    if: >-
-      !startsWith(github.event.head_commit.message, 'docs:') &&
-      !startsWith(github.event.head_commit.message, 'docs(')
-    defaults:
-      run:
-        shell: bash
+  build:
+    name: Build
+    needs: version
+    uses: ./.github/workflows/build.yml
+    with:
+      sign: ${{ needs.version.outputs.release == 'true' }}
+    secrets: inherit
+
+  # Only once every platform has built, so no release ever lacks an asset.
+  release:
+    name: Release
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
+      - uses: actions/download-artifact@v4
         with:
-          version: 11
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      # maya-ear (whisper.cpp built in) and maya-hook, as Tauri sidecars.
-      - name: Build the sidecars
-        run: sh scripts/build-ear.sh x86_64-pc-windows-msvc
-
-      - name: Test
-        run: |
-          pnpm test
-          cargo test -p maya-core -p maya-hook -p maya-ear -p maya
-
-      # version=, release= (a push to main whose version has no release yet)
-      # and build= (a release, or any pull request: a pull request builds
-      # everything and publishes nothing).
-      - name: Read version
-        id: version
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-        run: sh scripts/ci-version.sh >> "$GITHUB_OUTPUT"
-
-      # The installers are not Authenticode-signed yet, so SmartScreen warns
-      # on first run.
-      - name: Build the installers
-        if: steps.version.outputs.build == 'true'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          pnpm tauri build --bundles nsis,msi
-          mkdir -p dist-windows
-          cp target/release/bundle/nsis/*-setup.exe "dist-windows/Maya_${VERSION}_x64-setup.exe"
-          cp target/release/bundle/msi/*.msi "dist-windows/Maya_${VERSION}_x64.msi"
-          ls -la dist-windows
-
-      - name: Hand the installers to the macOS job
-        if: steps.version.outputs.build == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installers
-          path: dist-windows/*
-          if-no-files-found: error
-
-  macos:
-    name: Build and release (macOS)
-    runs-on: macos-latest
-    needs: [linux, windows]
-    # Pull requests build both apps so a merge is known to build; only a
-    # release push signs and publishes. The docs skip is the linux job's.
-    if: >-
-      !startsWith(github.event.head_commit.message, 'docs:') &&
-      !startsWith(github.event.head_commit.message, 'docs(')
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: .
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build the listener (both architectures)
-        run: |
-          sh scripts/build-ear.sh aarch64-apple-darwin
-          sh scripts/build-ear.sh x86_64-apple-darwin
-
-      - name: Test
-        run: |
-          pnpm test
-          sh scripts/test-ear.sh
-          cargo test --workspace
-
-      # The version in src-tauri/tauri.conf.json is the release version
-      # (`sh scripts/set-version.sh 0.2.0` sets it everywhere). A push whose
-      # version already has a release only runs the tests.
-      # version=, release= (a push to main whose version has no release yet)
-      # and build= (a release, or any pull request: a pull request builds
-      # everything and publishes nothing).
-      - name: Read version
-        id: version
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-        run: sh scripts/ci-version.sh >> "$GITHUB_OUTPUT"
-
-      # With the three APPLE_* secrets set, the certificate goes into a
-      # keychain of its own and is marked trusted for code signing (a
-      # self-signed certificate is not, and Tauri only accepts identities
-      # that `find-identity -v` lists). Tauri then signs the app, the
-      # listener and the whisper framework with APPLE_SIGNING_IDENTITY.
-      # Without the secrets the bundles stay ad-hoc signed.
-      - name: Signing identity (when the secrets are set)
-        if: steps.version.outputs.release == 'true'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -euo pipefail
-          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_SIGNING_IDENTITY" ]; then
-            echo "no signing secrets; bundles will be ad-hoc signed"
-            exit 0
-          fi
-          keychain="$RUNNER_TEMP/signing.keychain-db"
-          keychain_password="$(openssl rand -hex 24)"
-          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/signing.p12"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
-          existing="$(security list-keychains -d user | tr -d '" ' | tr '\n' ' ')"
-          # shellcheck disable=SC2086 # the existing keychains are a space-separated list
-          security list-keychains -d user -s "$keychain" $existing
-          security find-certificate -c "$APPLE_SIGNING_IDENTITY" -p "$keychain" > "$RUNNER_TEMP/signing.pem"
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.pem"
-          rm -f "$RUNNER_TEMP/signing.p12"
-          security find-identity -v -p codesigning "$keychain"
-          echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
-          echo "signing as $APPLE_SIGNING_IDENTITY"
-
-      - name: Build (Apple Silicon)
-        if: steps.version.outputs.build == 'true'
-        run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
-
-      - name: Build (Intel)
-        if: steps.version.outputs.build == 'true'
-        run: pnpm tauri build --target x86_64-apple-darwin --bundles app,dmg
-
-      - name: Package
-        if: steps.version.outputs.build == 'true'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir -p dist-release
-          cargo build -p maya-cli --release --target aarch64-apple-darwin
-          cargo build -p maya-cli --release --target x86_64-apple-darwin
-          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/aarch64-apple-darwin/release/maya-cli
-            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/x86_64-apple-darwin/release/maya-cli
-          fi
-          cp target/aarch64-apple-darwin/release/maya-cli dist-release/maya-macos-arm64
-          cp target/x86_64-apple-darwin/release/maya-cli dist-release/maya-macos-x86_64
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            arch="${target%%-*}"
-            bundle="target/$target/release/bundle"
-            tar -C "$bundle/macos" -czf "dist-release/Maya_${VERSION}_${arch}.app.tar.gz" Maya.app
-            cp "$bundle"/dmg/*.dmg "dist-release/Maya_${VERSION}_${arch}.dmg"
-          done
-          ls -la dist-release
-
-      - name: Add the Linux binaries
-        if: steps.version.outputs.release == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          pattern: linux-binaries-*
+          pattern: maya-*
           merge-multiple: true
-          path: dist-release
-
-      - name: Add the Windows installers
-        if: steps.version.outputs.release == 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-installers
-          path: dist-release
-
+          path: dist
       - name: Release
-        if: steps.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          gh release create "v${VERSION}" dist-release/* \
+          ls -la dist
+          gh release create "v${VERSION}" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
             --title "Maya v${VERSION}" \
             --generate-notes \
             --notes "Built from ${GITHUB_SHA} on main. macOS builds are not notarised: install with the one-line installer in the README, which clears the quarantine flag, or right-click the app and choose Open the first time. Windows installers are not signed: SmartScreen asks once, choose More info, then Run anyway."

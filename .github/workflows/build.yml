@@ -1,0 +1,208 @@
+name: Build
+
+# Tests and builds Maya on Linux, Windows and macOS, the three in parallel,
+# and keeps what each built as run artifacts. Called by ci.yml for every
+# pull request and by release.yml for every push to main; it never
+# publishes anything itself.
+on:
+  workflow_call:
+    inputs:
+      sign:
+        description: Sign the macOS apps when the APPLE_* secrets are set (releases only).
+        type: boolean
+        default: false
+    secrets:
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_SIGNING_IDENTITY:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # The tests that keep maya_core and the CLI portable, then the CLI built
+  # natively for each architecture on its own runner (the cross-rs images
+  # lag the toolchain).
+  linux:
+    name: Linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+      # tmux for the integration test; musl-tools links the static binary.
+      - name: Install tmux and musl-tools
+        run: sudo apt-get update && sudo apt-get install -y tmux musl-tools
+      - name: Test core and the CLI
+        run: cargo test -p maya-core -p maya-cli
+      - name: Build the CLI
+        run: |
+          set -euo pipefail
+          cargo build -p maya-cli --release --target ${{ matrix.target }}
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/maya-cli dist/maya-linux-${{ matrix.arch }}
+          ./dist/maya-linux-${{ matrix.arch }} --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: maya-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The Windows port's tests, then the sidecars and the NSIS and MSI
+  # installers. The installers are not Authenticode-signed yet, so
+  # SmartScreen warns on first run.
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      # maya-ear (whisper.cpp built in) and maya-hook, as Tauri sidecars.
+      - name: Build the sidecars
+        run: sh scripts/build-ear.sh x86_64-pc-windows-msvc
+      - name: Test
+        run: |
+          pnpm test
+          cargo test -p maya-core -p maya-hook -p maya-ear -p maya
+      - name: Build the installers
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          pnpm tauri build --bundles nsis,msi
+          mkdir -p dist
+          cp target/release/bundle/nsis/*-setup.exe "dist/Maya_${version}_x64-setup.exe"
+          cp target/release/bundle/msi/*.msi "dist/Maya_${version}_x64.msi"
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: maya-windows
+          path: dist/*
+          if-no-files-found: error
+
+  # The whole workspace's tests, then both apps, their disk images and the
+  # macOS CLI binaries, for Apple Silicon and Intel.
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the listener (both architectures)
+        run: |
+          sh scripts/build-ear.sh aarch64-apple-darwin
+          sh scripts/build-ear.sh x86_64-apple-darwin
+      - name: Test
+        run: |
+          pnpm test
+          sh scripts/test-ear.sh
+          cargo test --workspace
+
+      # For a release with the three APPLE_* secrets set, the certificate
+      # goes into a keychain of its own and is marked trusted for code
+      # signing (a self-signed certificate is not, and Tauri only accepts
+      # identities that `find-identity -v` lists). Tauri then signs the app,
+      # the listener and the whisper framework with APPLE_SIGNING_IDENTITY.
+      # Otherwise, and on every pull request, the bundles stay ad-hoc signed.
+      - name: Signing identity (releases with the secrets set)
+        if: inputs.sign
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "no signing secrets; bundles will be ad-hoc signed"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          existing="$(security list-keychains -d user | tr -d '" ' | tr '\n' ' ')"
+          # shellcheck disable=SC2086 # the existing keychains are a space-separated list
+          security list-keychains -d user -s "$keychain" $existing
+          security find-certificate -c "$APPLE_SIGNING_IDENTITY" -p "$keychain" > "$RUNNER_TEMP/signing.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.pem"
+          rm -f "$RUNNER_TEMP/signing.p12"
+          security find-identity -v -p codesigning "$keychain"
+          echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          echo "signing as $APPLE_SIGNING_IDENTITY"
+
+      - name: Build (Apple Silicon)
+        run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
+      - name: Build (Intel)
+        run: pnpm tauri build --target x86_64-apple-darwin --bundles app,dmg
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          mkdir -p dist
+          cargo build -p maya-cli --release --target aarch64-apple-darwin
+          cargo build -p maya-cli --release --target x86_64-apple-darwin
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/aarch64-apple-darwin/release/maya-cli
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/x86_64-apple-darwin/release/maya-cli
+          fi
+          cp target/aarch64-apple-darwin/release/maya-cli dist/maya-macos-arm64
+          cp target/x86_64-apple-darwin/release/maya-cli dist/maya-macos-x86_64
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            arch="${target%%-*}"
+            bundle="target/$target/release/bundle"
+            tar -C "$bundle/macos" -czf "dist/Maya_${version}_${arch}.app.tar.gz" Maya.app
+            cp "$bundle"/dmg/*.dmg "dist/Maya_${version}_${arch}.dmg"
+          done
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: maya-macos
+          path: dist/*
+          if-no-files-found: error

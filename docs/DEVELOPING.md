@@ -84,10 +84,8 @@ What is different on Windows, and where:
   with the VAD ported case for case. `cargo run -p maya-ear --release
   --example transcribe -- <model.bin> <file.wav>` runs a WAV through it.
 
-The release workflow's `windows` job runs these tests on every push and
-pull request, and builds the installers on every pull request and every
-release push; a release hands them to the `macos` job as the
-`windows-installers` artifact.
+The `windows` job of the build workflow (see [CI](#ci)) runs these tests
+and builds the installers.
 
 ## The CLI
 
@@ -97,24 +95,31 @@ release push; a release hands them to the `macos` job as the
     cargo test -p maya-core -p maya-cli
 
 `maya-cli` depends only on `maya_core`, so unlike the rest of the workspace
-it also builds and tests on Linux. The release workflow's `linux` job runs
-first, on every pull request to `main` and every push to it, once per
-architecture (an x86_64 runner and an `ubuntu-24.04-arm` runner): it runs
+it also builds and tests on Linux. The build workflow's `linux` job runs
 `cargo test -p maya-core -p maya-cli` on Ubuntu (with tmux installed) —
-the guard that keeps `maya_core` free of macOS-only code. On a pull
-request or a release push each leg also builds `maya-cli` natively for
-its musl target (`musl-tools`, no cross-compilation container); a release
-hands the binary to the `macos` job as the `linux-binaries-<arch>`
-artifact. The `macos` job runs after `linux` and `windows` succeed; it
-tests the whole workspace and builds both apps and the macOS binaries,
-and on a release push signs them and creates the release with every
-asset at once, so a failed build on any platform publishes nothing.
+the guard that keeps `maya_core` free of macOS-only code — and builds
+`maya-cli` natively for its musl target (`musl-tools`, no
+cross-compilation container), once per architecture on an x86_64 runner
+and an `ubuntu-24.04-arm` runner.
 
-So a pull request to `main` builds everything a release would, on all
-three platforms, and publishes nothing. Every job decides what to do with
-`scripts/ci-version.sh`: `release=true` only for a push to `main` whose
-version has no release yet (`scripts/release-version.sh`), `build=true`
-for that and for every pull request.
+## CI
+
+Three workflows in `.github/workflows/`:
+
+- `build.yml` tests and builds on Linux (x86_64 and aarch64), Windows and
+  macOS, the jobs running in parallel, and keeps what each built as run
+  artifacts (`maya-linux-<arch>`, `maya-windows`, `maya-macos`). It is
+  only ever called by the other two.
+- `ci.yml` ("CI") runs on every pull request to `main`: `build.yml`
+  unsigned, and a check that the version files agree. Nothing is
+  published, so a pull request shows everything building before the merge.
+- `release.yml` ("Release") runs on every push to `main`: `build.yml`
+  again, signing the macOS apps when this push releases, and then, only
+  once every platform has built, a `release` job that publishes
+  `v<version>` with all the artifacts. It releases when
+  `scripts/release-version.sh` finds no release for the version yet; a
+  push whose version is released only builds, and a `docs` commit skips
+  the run.
 
 ## Layout
 
@@ -165,12 +170,11 @@ release version; bump it everywhere, commit and push to `main`:
     git commit -am "chore: release 0.2.0"
     git push
 
-The workflow publishes `v0.2.0` for both architectures, with notes generated
+The Release workflow publishes `v0.2.0` for every platform, with notes generated
 from the merged pull requests and commits. A push whose version already has
-a release only runs the tests; a mismatch between `tauri.conf.json`,
-`package.json` and `Cargo.toml` fails the run, a pull request's too. A
-pull request runs every test and build on Linux, Windows and macOS, and
-publishes nothing. Pull requests bump the version themselves: see the rule in
+a release only builds; a mismatch between `tauri.conf.json`,
+`package.json` and `Cargo.toml` fails the run, a pull request's too (see
+[CI](#ci)). Pull requests bump the version themselves: see the rule in
 [CLAUDE.md](../CLAUDE.md).
 
 ## Signing

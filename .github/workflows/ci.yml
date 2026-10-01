@@ -1,0 +1,33 @@
+name: CI
+
+# Every pull request to main: tests and builds on Linux, Windows and macOS
+# in parallel, so a merge is known to build everywhere. Nothing is signed
+# or published.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to a pull request cancels its older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The version files agree, as a release needs (a mismatch fails here
+  # rather than after the merge).
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/release-version.sh
+
+  build:
+    name: Build
+    uses: ./.github/workflows/build.yml
