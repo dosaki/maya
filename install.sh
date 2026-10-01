@@ -62,11 +62,15 @@ if [ "$os" = Linux ]; then
   [ -n "$url" ] || fail "no Linux $arch AppImage found in the latest release of $REPO"
   dest="${MAYA_INSTALL_DIR:-$HOME/.local/bin}"
   mkdir -p "$dest"
+  # Absolute, for the desktop entry's Exec line.
+  dest="$(CDPATH='' cd -- "$dest" && pwd -P)"
+  trap 'rm -rf "$tmp" "$dest/.maya-app.new"' EXIT
   printf 'Downloading %s\n' "$url"
-  curl -fsSL "$url" -o "$tmp/maya-app"
-  chmod +x "$tmp/maya-app"
-  # A new file in place of the old, so a running Maya keeps its own copy.
-  mv -f "$tmp/maya-app" "$dest/maya-app"
+  # Downloaded beside the old one and renamed over it: the rename is atomic
+  # on one filesystem, and a running Maya keeps its own copy.
+  curl -fsSL "$url" -o "$dest/.maya-app.new"
+  chmod +x "$dest/.maya-app.new"
+  mv -f "$dest/.maya-app.new" "$dest/maya-app"
 
   # The icon from inside the AppImage, where the desktop entry finds it.
   icons="$HOME/.local/share/icons/hicolor/128x128/apps"
@@ -86,6 +90,7 @@ Type=Application
 Name=Maya
 Exec="$dest/maya-app"
 Icon=maya
+StartupWMClass=maya
 Categories=Development;
 DESKTOP
 
