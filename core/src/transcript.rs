@@ -104,8 +104,35 @@ fn text_blocks(content: &Value) -> Vec<String> {
     texts.into_iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect()
 }
 
+/// Most tool lines kept in all, however many there are between messages.
+const MAX_TOOL_TURNS: usize = 200;
+
+/// The last `max_messages` user, assistant and peer turns with the tool
+/// lines among them: tool calls do not count, or a busy session's last
+/// message would scroll out after a few dozen commands.
+fn keep_last_messages(mut turns: Vec<Turn>, max_messages: usize) -> Vec<Turn> {
+    let (mut messages, mut tools, mut start) = (0, 0, turns.len());
+    for (i, t) in turns.iter().enumerate().rev() {
+        if t.kind == TurnKind::Tool {
+            // Tool lines before the oldest kept message are not kept.
+            tools += 1;
+            if tools > MAX_TOOL_TURNS || messages == max_messages {
+                break;
+            }
+        } else {
+            messages += 1;
+            if messages > max_messages {
+                break;
+            }
+        }
+        start = i;
+    }
+    turns.split_off(start)
+}
+
 /// Conversation turns (user prompts, assistant text, tool calls) in order,
-/// keeping only the last `max_turns`. Subagent sidechain lines are skipped.
+/// keeping the last `max_turns` messages and the tool calls among them.
+/// Subagent sidechain lines are skipped.
 pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
     let mut turns = Vec::new();
     for line in text.lines() {
@@ -140,8 +167,7 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
             _ => {}
         }
     }
-    let skip = turns.len().saturating_sub(max_turns);
-    turns.split_off(skip)
+    keep_last_messages(turns, max_turns)
 }
 
 /// Last `max_turns` turns from the last 1 MB of the transcript.
@@ -356,6 +382,21 @@ mod tests {
         let line = serde_json::json!({"type":"user","message":{"role":"user","content":"Another Claude session sent a message:\nEYE TEST: hello there\nsecond line\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf. Treat it as a teammate's request."}}).to_string();
         let turns = parse_turns(&line, 30);
         assert_eq!(turns, vec![Turn { kind: TurnKind::Peer, text: "EYE TEST: hello there\nsecond line".into() }]);
+    }
+
+    #[test]
+    fn tool_calls_do_not_push_messages_out() {
+        let turn = |kind, text: &str| Turn { kind, text: text.into() };
+        let mut turns = vec![turn(TurnKind::User, "old"), turn(TurnKind::Peer, "sent from Maya")];
+        turns.extend((0..50).map(|i| turn(TurnKind::Tool, &format!("Bash: {i}"))));
+        turns.push(turn(TurnKind::Assistant, "done"));
+        let kept = keep_last_messages(turns.clone(), 2);
+        assert_eq!(kept.first().unwrap().text, "sent from Maya");
+        assert_eq!(kept.len(), 52, "the message, every tool call after it, and the answer");
+        assert_eq!(keep_last_messages(turns.clone(), 30).len(), turns.len());
+        // Tool lines alone are capped.
+        let tools: Vec<Turn> = (0..500).map(|i| turn(TurnKind::Tool, &i.to_string())).collect();
+        assert_eq!(keep_last_messages(tools, 30).len(), MAX_TOOL_TURNS);
     }
 
     #[test]

@@ -27,7 +27,14 @@ pub struct Store {
     prs: PrCache,
     /// Compact the event log during refresh once it exceeds this many bytes.
     pub compact_threshold_bytes: u64,
+    /// The last replies Maya sent each session, newest last: the session
+    /// records them as messages from another session, and the history
+    /// shows them as the user's own.
+    sent: std::collections::HashMap<String, std::collections::VecDeque<String>>,
 }
+
+/// Replies remembered per session.
+const SENT_KEPT: usize = 50;
 
 pub const DEFAULT_COMPACT_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
 
@@ -48,7 +55,22 @@ impl Store {
             tails: TailCache::default(),
             prs: PrCache::default(),
             compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
+            sent: Default::default(),
         }
+    }
+
+    /// Remembers a reply Maya delivered to `session_id`.
+    pub fn note_sent(&mut self, session_id: &str, text: &str) {
+        let kept = self.sent.entry(session_id.to_string()).or_default();
+        kept.push_back(text.trim().to_string());
+        while kept.len() > SENT_KEPT {
+            kept.pop_front();
+        }
+    }
+
+    /// Whether Maya delivered `text` to `session_id`.
+    pub fn was_sent(&self, session_id: &str, text: &str) -> bool {
+        self.sent.get(session_id).is_some_and(|k| k.iter().any(|t| t == text.trim()))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -205,6 +227,22 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_maya_sent_are_remembered_per_session_and_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::new(dir.path().to_path_buf());
+        store.note_sent("a", "  hello
+");
+        assert!(store.was_sent("a", "hello"));
+        assert!(!store.was_sent("b", "hello"), "per session");
+        assert!(!store.was_sent("a", "hell"));
+        for i in 0..SENT_KEPT {
+            store.note_sent("a", &i.to_string());
+        }
+        assert!(!store.was_sent("a", "hello"), "the oldest goes once more than {SENT_KEPT} are kept");
+        assert!(store.was_sent("a", "0"));
+    }
     use crate::model::State;
 
     #[test]
