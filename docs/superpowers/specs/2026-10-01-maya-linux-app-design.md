@@ -185,11 +185,16 @@ Decisions taken during design:
   `ARGV0`, `OWD`) and linuxdeploy's GTK hook (`GDK_BACKEND`, `GTK_THEME`,
   `GTK_PATH`, `GTK_EXE_PREFIX`, `GTK_DATA_PREFIX`, `GIO_EXTRA_MODULES`,
   `GSETTINGS_SCHEMA_DIR`, `GDK_PIXBUF_MODULE_FILE`, `GI_TYPELIB_PATH`, and
-  `$APPDIR/usr/share` first in `XDG_DATA_DIRS`) point into the mount.
-  `launch::scrub_appimage_env(&mut Command)` removes them (and the mount's
-  `XDG_DATA_DIRS` entries) when `APPIMAGE` is set, for the processes that
-  outlive Maya: every `tmux` command (the first starts the server), the
-  terminal window, and `xdg-open`.
+  `$APPDIR/usr/share` first in `XDG_DATA_DIRS`) point into the mount, and
+  the AppRun also puts the mount first in `PATH` and `LD_LIBRARY_PATH` and
+  sets `PYTHONHOME`, `PYTHONPATH`, `PERLLIB`, `QT_PLUGIN_PATH`,
+  `GST_PLUGIN_SYSTEM_PATH(_1_0)`, `GIO_MODULE_DIR` and
+  `GTK_IM_MODULE_FILE` into it. `launch::scrub_appimage_env(&mut Command)`,
+  when `APPIMAGE` is set, removes the named variables and drops the
+  mount's entries from every other variable that mentions `$APPDIR`
+  (unsetting it when nothing is left), for the processes that outlive
+  Maya: every `tmux` command (the first starts the server), the terminal
+  window, and `xdg-open`.
 - **`core/src/hook_install.rs`**: the Windows `install_with` becomes
   `cfg(any(windows, target_os = "linux"))` with `HOOK_EXE` = `maya-hook`
   on Linux and the 0755 mode set; `install_to` on Linux finds the binary

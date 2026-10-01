@@ -101,9 +101,12 @@ pub fn clean_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, S
 }
 
 /// What the AppImage's runtime (`APPDIR`, `APPIMAGE`, `ARGV0`, `OWD`) and
-/// linuxdeploy's GTK hook export into Maya's environment. They point into
-/// the AppImage's mount, so a tmux server, terminal or browser that inherits
-/// them breaks once Maya quits and the mount goes away.
+/// linuxdeploy's GTK hook export into Maya's environment, removed outright
+/// from the processes that outlive Maya. Every other variable that points
+/// into the mount (`PATH`, `LD_LIBRARY_PATH`, `XDG_DATA_DIRS`, `PYTHONHOME`,
+/// `GIO_MODULE_DIR` and more, set by the AppImage's AppRun) loses the
+/// entries inside it. Inherited, they break a tmux server, terminal or
+/// browser once Maya quits and the mount goes away.
 #[cfg(any(test, target_os = "linux"))]
 pub const APPIMAGE_VARS: &[&str] = &[
     "GDK_BACKEND",
@@ -121,8 +124,8 @@ pub const APPIMAGE_VARS: &[&str] = &[
     "OWD",
 ];
 
-/// `XDG_DATA_DIRS` without the entries inside the AppImage's mount `appdir`
-/// (the GTK hook puts `$APPDIR/usr/share` first).
+/// A `:`-separated list (`XDG_DATA_DIRS`, `PATH`, …) without the entries
+/// inside the AppImage's mount `appdir`, which the AppImage puts first.
 pub fn without_appdir_prefix(xdg: &str, appdir: &str) -> String {
     let appdir = appdir.trim_end_matches('/');
     if appdir.is_empty() {
@@ -132,29 +135,39 @@ pub fn without_appdir_prefix(xdg: &str, appdir: &str) -> String {
 }
 
 /// Clears the AppImage's environment from `cmd` when Maya runs as one
-/// (`APPIMAGE` set); `get` reads Maya's own environment.
+/// (`APPIMAGE` set in `env`, Maya's own environment).
 #[cfg(any(test, target_os = "linux"))]
-fn scrub_with(cmd: &mut std::process::Command, get: impl Fn(&str) -> Option<String>) {
+fn scrub_with(cmd: &mut std::process::Command, env: Vec<(String, String)>) {
+    let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
     if get("APPIMAGE").is_none() {
         return;
     }
     for var in APPIMAGE_VARS {
         cmd.env_remove(var);
     }
-    if let Some(xdg) = get("XDG_DATA_DIRS") {
-        match without_appdir_prefix(&xdg, &get("APPDIR").unwrap_or_default()) {
-            rest if rest.is_empty() => cmd.env_remove("XDG_DATA_DIRS"),
-            rest => cmd.env("XDG_DATA_DIRS", rest),
-        };
+    let appdir = get("APPDIR").unwrap_or_default().trim_end_matches('/');
+    if appdir.is_empty() {
+        return;
+    }
+    for (k, v) in &env {
+        if APPIMAGE_VARS.contains(&k.as_str()) || !v.contains(appdir) {
+            continue;
+        }
+        let kept = without_appdir_prefix(v, appdir);
+        if kept.split(':').all(str::is_empty) {
+            cmd.env_remove(k);
+        } else if kept != *v {
+            cmd.env(k, kept);
+        }
     }
 }
 
-/// Starts `cmd` without the AppImage's GTK and runtime environment, for the
-/// processes that outlive Maya (the tmux server, terminal windows, the
-/// browser). A no-op outside an AppImage and on other platforms.
+/// Starts `cmd` without the AppImage's environment, for the processes that
+/// outlive Maya (the tmux server, terminal windows, the browser). A no-op
+/// outside an AppImage and on other platforms.
 #[cfg(target_os = "linux")]
 pub fn scrub_appimage_env(cmd: &mut std::process::Command) {
-    scrub_with(cmd, |k| std::env::var(k).ok());
+    scrub_with(cmd, std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect());
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -408,34 +421,52 @@ mod tests {
         assert_eq!(without_appdir_prefix("/a:/b", ""), "/a:/b");
     }
 
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
     #[test]
     fn a_child_of_the_appimage_loses_the_bundles_environment() {
         use std::collections::HashMap;
         use std::ffi::OsStr;
+        // What a Tauri AppImage's AppRun and GTK hook really set (seen in
+        // /proc/<pid>/environ on Ubuntu 24.04), mount shortened.
+        let m = "/tmp/.mount_maya-aDfnLHi";
         let mut cmd = std::process::Command::new("true");
-        scrub_with(&mut cmd, |k| match k {
-            "APPIMAGE" => Some("/home/u/.local/bin/maya-app".into()),
-            "APPDIR" => Some("/tmp/.mount_MayaAb12".into()),
-            "XDG_DATA_DIRS" => Some("/tmp/.mount_MayaAb12/usr/share:/usr/share".into()),
-            _ => None,
-        });
+        scrub_with(
+            &mut cmd,
+            env(&[
+                ("APPIMAGE", "/home/u/.local/bin/maya-app"),
+                ("APPDIR", m),
+                ("ARGV0", "/home/u/.local/bin/maya-app"),
+                ("OWD", "/home/u"),
+                ("GTK_THEME", "Adwaita:light"),
+                ("GTK_PATH", &format!("{m}//usr/lib/gtk-3.0")),
+                ("XDG_DATA_DIRS", &format!("{m}/usr/share/:{m}/usr/share:/usr/share:/usr/local/share")),
+                ("PATH", &format!("{m}/usr/bin/:{m}/bin/:/home/u/.local/bin:/usr/bin:/bin")),
+                ("LD_LIBRARY_PATH", &format!("{m}/usr/lib/:{m}/lib/:")),
+                ("PYTHONHOME", &format!("{m}/usr/")),
+                ("GIO_MODULE_DIR", &format!("{m}//usr/lib/gio/modules")),
+                ("GTK_IM_MODULE_FILE", &format!("{m}//usr/lib/gtk-3.0/3.0.0/immodules.cache")),
+                ("HOME", "/home/u"),
+                ("LANG", "en_GB.UTF-8"),
+            ]),
+        );
         let envs: HashMap<&OsStr, Option<&OsStr>> = cmd.get_envs().collect();
         for var in APPIMAGE_VARS {
             assert_eq!(envs.get(OsStr::new(var)), Some(&None), "{var} is removed");
         }
-        assert_eq!(envs.get(OsStr::new("XDG_DATA_DIRS")), Some(&Some(OsStr::new("/usr/share"))));
+        let set = |k: &str| envs.get(OsStr::new(k)).copied();
+        assert_eq!(set("XDG_DATA_DIRS"), Some(Some(OsStr::new("/usr/share:/usr/local/share"))));
+        assert_eq!(set("PATH"), Some(Some(OsStr::new("/home/u/.local/bin:/usr/bin:/bin"))));
+        for gone in ["LD_LIBRARY_PATH", "PYTHONHOME", "GIO_MODULE_DIR", "GTK_IM_MODULE_FILE"] {
+            assert_eq!(set(gone), Some(None), "{gone}: nothing left outside the mount, so unset");
+        }
+        assert_eq!(set("HOME"), None, "untouched");
+        assert_eq!(set("LANG"), None, "untouched");
 
         let mut cmd = std::process::Command::new("true");
-        scrub_with(&mut cmd, |k| match k {
-            "APPIMAGE" => Some("/x/maya-app".into()),
-            "APPDIR" => Some("/tmp/.mount_M".into()),
-            "XDG_DATA_DIRS" => Some("/tmp/.mount_M/usr/share".into()),
-            _ => None,
-        });
-        assert_eq!(cmd.get_envs().find(|(k, _)| *k == "XDG_DATA_DIRS"), Some((OsStr::new("XDG_DATA_DIRS"), None)), "nothing left: unset, so the default applies");
-
-        let mut cmd = std::process::Command::new("true");
-        scrub_with(&mut cmd, |k| (k == "GTK_PATH").then(|| "/somewhere".to_string()));
+        scrub_with(&mut cmd, env(&[("GTK_PATH", "/somewhere"), ("PATH", "/usr/bin")]));
         assert_eq!(cmd.get_envs().count(), 0, "outside an AppImage nothing changes");
     }
 
