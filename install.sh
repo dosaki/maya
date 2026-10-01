@@ -84,7 +84,7 @@ if [ "$os" = Linux ]; then
 [Desktop Entry]
 Type=Application
 Name=Maya
-Exec=$dest/maya-app
+Exec="$dest/maya-app"
 Icon=maya
 Categories=Development;
 DESKTOP
