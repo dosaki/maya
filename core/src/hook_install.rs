@@ -76,6 +76,50 @@ pub fn append_record(maya_dir: &Path, payload: &str, received_at: u64) -> std::i
     f.write_all(line.as_bytes())
 }
 
+/// The file holding the inbox token of the session whose inbox is
+/// `socket`, named after the pipe (`cc-msg-<hex>`); None for a name that
+/// is not plain letters, digits and dashes.
+pub fn token_path(maya_dir: &Path, socket: &str) -> Option<std::path::PathBuf> {
+    let name = socket.rsplit(['\\', '/']).next()?;
+    let plain = !name.is_empty() && name.len() <= 128 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    plain.then(|| maya_dir.join("inbox").join(format!("{name}.token")))
+}
+
+/// Keeps the token Claude Code gives the hook (`CLAUDE_CODE_MESSAGING_TOKEN`,
+/// for `CLAUDE_CODE_MESSAGING_SOCKET`) where Maya's replies find it: on
+/// Windows every inbox connection must open with it. Written only when it
+/// changed; removed when the session ends.
+pub fn record_token(maya_dir: &Path, event: &str, socket: Option<&str>, token: Option<&str>) -> std::io::Result<()> {
+    let Some(path) = socket.and_then(|s| token_path(maya_dir, s)) else { return Ok(()) };
+    if event == "SessionEnd" {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) else { return Ok(()) };
+    if std::fs::read_to_string(&path).is_ok_and(|t| t == token) {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::config::write_private(&path, token.as_bytes())
+}
+
+/// The hook event name in a payload, if any.
+pub fn event_name(payload: &str) -> Option<String> {
+    serde_json::from_str::<Value>(payload).ok()?.get("hook_event_name")?.as_str().map(str::to_string)
+}
+
+/// Events hooked only so the hook sees a session's inbox token at once: on
+/// Windows, SessionStart. They are not appended to `events.jsonl`, whose
+/// readers know nothing of them.
+#[cfg(windows)]
+pub const TOKEN_ONLY_EVENTS: &[&str] = &["SessionStart"];
+#[cfg(unix)]
+pub const TOKEN_ONLY_EVENTS: &[&str] = &[];
+
 /// (event name, matcher)
 pub const HOOK_EVENTS: &[(&str, Option<&str>)] = &[
     ("PermissionRequest", None),
@@ -113,7 +157,8 @@ pub fn install(settings: Value, command: &str) -> Value {
     let settings = remove(settings);
     let mut root = settings.as_object().cloned().unwrap_or_default();
     let mut hooks = root.get("hooks").and_then(|h| h.as_object()).cloned().unwrap_or_default();
-    for (event, matcher) in HOOK_EVENTS {
+    let token_only = TOKEN_ONLY_EVENTS.iter().map(|e| (*e, None));
+    for (event, matcher) in HOOK_EVENTS.iter().copied().chain(token_only) {
         let mut group = Map::new();
         if let Some(m) = matcher {
             group.insert("matcher".into(), json!(m));
@@ -339,6 +384,43 @@ mod tests {
         install_here(dir.path()).unwrap();
         remove_from(dir.path()).unwrap();
         assert!(!status(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn tokens_are_kept_per_pipe_and_dropped_when_the_session_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = r"\\.\pipe\LOCAL\cc-msg-0123abcd";
+        let path = dir.path().join("inbox").join("cc-msg-0123abcd.token");
+        assert_eq!(token_path(dir.path(), pipe), Some(path.clone()));
+        record_token(dir.path(), "PostToolUse", Some(pipe), Some(" tok1 ")).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tok1");
+        record_token(dir.path(), "Stop", Some(pipe), Some("tok2")).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tok2");
+        // No token or no socket leaves what is there.
+        record_token(dir.path(), "Stop", Some(pipe), None).unwrap();
+        record_token(dir.path(), "Stop", None, Some("tok3")).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tok2");
+        record_token(dir.path(), "SessionEnd", Some(pipe), Some("tok2")).unwrap();
+        assert!(!path.exists());
+        record_token(dir.path(), "SessionEnd", Some(pipe), None).unwrap();
+    }
+
+    #[test]
+    fn token_files_are_named_only_after_plain_pipe_names() {
+        let d = Path::new("m");
+        assert_eq!(token_path(d, "/tmp/cc-socks/49643.sock"), None, "a dot is not plain");
+        assert_eq!(token_path(d, r"\\.\pipe\LOCAL\.."), None, "only the last component is used, and .. is not plain");
+        assert_eq!(token_path(d, ""), None);
+        assert_eq!(token_path(d, "cc-msg-ab"), Some(d.join("inbox").join("cc-msg-ab.token")));
+    }
+
+    #[test]
+    fn token_only_events_are_hooked_on_windows_alone() {
+        let out = install(json!({}), &cmd());
+        assert_eq!(out["hooks"].get("SessionStart").is_some(), cfg!(windows));
+        assert!(!is_installed(&remove(out.clone())));
+        assert_eq!(event_name(r#"{"hook_event_name":"SessionStart"}"#).as_deref(), Some("SessionStart"));
+        assert_eq!(event_name("nope"), None);
     }
 
     #[test]

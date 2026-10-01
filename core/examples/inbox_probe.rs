@@ -14,7 +14,16 @@ fn main() {
     let pid: i32 = pid.parse().expect("pid");
     let s = maya_core::registry::list(&sessions, &maya_core::registry::pid_alive).into_iter().find(|s| s.pid == pid).expect("no live session with that pid");
     let socket = s.messaging_socket_path.expect("session has no inbox");
-    match maya_core::inbox::send(std::path::Path::new(&socket), pid, text) {
+    // `--env-token`: authenticate with this process's own
+    // CLAUDE_CODE_MESSAGING_TOKEN, as a hook or Bash command of that session may.
+    #[cfg(windows)]
+    let result = match std::env::var("MAYA_PROBE_ENV_TOKEN").ok().and(std::env::var("CLAUDE_CODE_MESSAGING_TOKEN").ok()) {
+        Some(token) => maya_core::inbox::send_with_token(std::path::Path::new(&socket), pid, &token, text),
+        None => maya_core::inbox::send(std::path::Path::new(&socket), pid, text),
+    };
+    #[cfg(not(windows))]
+    let result = maya_core::inbox::send(std::path::Path::new(&socket), pid, text);
+    match result {
         Ok(()) => println!("sent to {} ({})", s.name, s.cwd),
         Err(e) => {
             eprintln!("failed: {e}");

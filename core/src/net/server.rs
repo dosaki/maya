@@ -1461,7 +1461,12 @@ mod tests {
         wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
         assert!(handle.status().assistants.is_empty(), "no paired entry is left behind");
         assert_eq!(counter.paired.load(Ordering::SeqCst), 0, "nothing was saved");
-        assert!(handle.status().code.is_none(), "the main read the code and paired, then took the pairing back");
+        // On Windows a reset can discard what the main had not read yet, so
+        // the main may never see `pair` and the code stays open: as safe,
+        // but only Unix delivers the buffered `pair` before the reset.
+        if cfg!(unix) {
+            assert!(handle.status().code.is_none(), "the main read the code and paired, then took the pairing back");
+        }
         handle.stop();
     }
 

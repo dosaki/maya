@@ -266,9 +266,13 @@ write and drives them through their own interfaces.
   when the hook is installed, with a rule-based reading of the transcript
   as the fallback (a turn that ends in a question is "Awaiting Decision").
 - **Replies** go through Claude Code's session inbox (a Unix socket on
-  macOS, a named pipe on Windows, where Maya authenticates with the
-  session's key), or are typed into the session's terminal for the other
-  agents. On macOS terminal actions use AppleScript and AppKit on
+  macOS, a named pipe on Windows), or are typed into the session's
+  terminal for the other agents. On Windows every inbox connection must
+  open with the session's token, which Claude Code gives only to the
+  session's hooks, so replies there need the hook installed: the hook keeps
+  each session's token in `~/.claude/maya/inbox/`, and a session that was
+  already running when the hook went in takes replies after its next hook
+  event (your next prompt in it, say). On macOS terminal actions use AppleScript and AppKit on
   Terminal.app; on Windows Maya attaches to the session's console to type
   into it and brings its Windows Terminal window forward (the window, not
   the tab, when several sessions share one).

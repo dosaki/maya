@@ -61,12 +61,17 @@ What is different on Windows, and where:
   `core/src/win_console.rs` attaches to that console to type key events
   into it and to find the window showing it.
 - **Inbox.** `core/src/inbox.rs`: a named pipe, opened with the auth line
-  and the token from `~/.claude/sessions/<pid>.<hex>.key`, after checking
-  the pipe's server is the session. `cargo run -p maya-core --example
-  inbox_probe` lists live sessions, and with `<pid> <message>` sends one.
+  `{"type":"auth","token":…}` after checking the pipe's server is the
+  session. The token is the session's `CLAUDE_CODE_MESSAGING_TOKEN`, which
+  Claude Code exports only to the session's hooks and Bash commands; the
+  hook keeps it in `~/.claude/maya/inbox/<pipe name>.token`. (The
+  `<pid>.<hex>.key` beside the registry record is not that token: a
+  connection opened with it is accepted, then dropped without a word.)
+  `cargo run -p maya-core --example inbox_probe` lists live sessions, and
+  with `<pid> <message>` sends one.
 - **Hook.** Claude Code runs hooks through Git Bash, which has no `jq`, so
   the hook is `hook/`'s `maya-hook.exe`, copied into `~/.claude/maya/` by
-  Install hook.
+  Install hook. It also hooks SessionStart, only to record the token.
 - **Notifications, voice, quiet.** `core/src/notify_win.rs`: toasts, SAPI,
   and Do not disturb. The ElevenLabs key is in Credential Manager
   (`src-tauri/src/voice.rs`).

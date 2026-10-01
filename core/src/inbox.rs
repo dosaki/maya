@@ -72,26 +72,16 @@ pub fn auth_line(token: &str) -> String {
     format!("{v}\n")
 }
 
-/// The session's key file, `<pid>.<64 hex>.key` beside its registry
-/// record. Claude Code on Windows accepts its contents as the inbox token.
-pub fn key_file(sessions_dir: &Path, pid: i32) -> Option<std::path::PathBuf> {
-    let prefix = format!("{pid}.");
-    std::fs::read_dir(sessions_dir).ok()?.flatten().map(|e| e.path()).find(|p| {
-        let Some(name) = p.file_name().and_then(|n| n.to_str()) else { return false };
-        let Some(hex) = name.strip_prefix(&prefix).and_then(|r| r.strip_suffix(".key")) else { return false };
-        hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())
-    })
-}
-
-/// The token in `pid`'s key file, whitespace trimmed.
+/// The inbox token Maya's hook recorded for the session on `pipe_path`
+/// (Claude Code hands it to hooks as `CLAUDE_CODE_MESSAGING_TOKEN`).
 #[cfg(windows)]
-fn session_token(pid: i32) -> Result<String, String> {
-    let sessions = crate::claude_dir().join("sessions");
-    let path = key_file(&sessions, pid).ok_or("This session has no inbox key. Use the terminal.")?;
-    let token = std::fs::read_to_string(&path).map_err(|e| format!("Could not read the session's inbox key: {e}."))?;
+fn session_token(maya_dir: &Path, pipe_path: &Path) -> Result<String, String> {
+    let missing = "Maya has not seen this session's inbox token yet: it arrives with the session's next hook event (install the hook in Settings), or use the terminal.";
+    let path = crate::hook_install::token_path(maya_dir, &pipe_path.to_string_lossy()).ok_or(missing)?;
+    let token = std::fs::read_to_string(&path).map_err(|_| missing)?;
     let token = token.trim();
     if token.is_empty() {
-        return Err("The session's inbox key is empty.".into());
+        return Err(missing.into());
     }
     Ok(token.to_string())
 }
@@ -108,17 +98,17 @@ pub fn pipe_server_pid(file: &std::fs::File) -> Option<i32> {
 }
 
 /// Posts `text` into the session inbox on the named pipe `pipe_path`: the
-/// auth line with `pid`'s key, then the message. Refused unless the pipe
-/// was created by `expected_pid`.
+/// auth line with the session's token, then the message. Refused unless
+/// the pipe was created by `expected_pid`.
 #[cfg(windows)]
 pub fn send(pipe_path: &Path, expected_pid: i32, text: &str) -> Result<(), String> {
     check_text(text)?;
-    let token = session_token(expected_pid)?;
+    let token = session_token(&crate::claude_dir().join("maya"), pipe_path)?;
     send_with_token(pipe_path, expected_pid, &token, text)
 }
 
 #[cfg(windows)]
-fn send_with_token(pipe_path: &Path, expected_pid: i32, token: &str, text: &str) -> Result<(), String> {
+pub fn send_with_token(pipe_path: &Path, expected_pid: i32, token: &str, text: &str) -> Result<(), String> {
     use std::io::Write;
     if !pipe_path.to_string_lossy().starts_with(r"\\.\pipe\") {
         return Err("Refusing to send: the session's inbox is not a named pipe.".into());
@@ -167,18 +157,6 @@ mod tests {
     #[test]
     fn auth_line_is_the_documented_json() {
         assert_eq!(auth_line("ab\"c"), "{\"type\":\"auth\",\"token\":\"ab\\\"c\"}\n");
-    }
-
-    #[test]
-    fn key_file_is_the_pids_hex_named_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let hex = "a".repeat(64);
-        for name in [format!("12.{hex}.key"), format!("7.{hex}.key"), format!("712.{hex}.key"), "7.short.key".into(), format!("7.{}.key", "g".repeat(64)), "7.json".into()] {
-            std::fs::write(dir.path().join(name), "k").unwrap();
-        }
-        assert_eq!(key_file(dir.path(), 7), Some(dir.path().join(format!("7.{hex}.key"))));
-        assert_eq!(key_file(dir.path(), 8), None);
-        assert_eq!(key_file(&dir.path().join("missing"), 7), None);
     }
 
     #[test]
@@ -240,6 +218,16 @@ mod windows_tests {
         let err = send_with_token(&path, 1, "tok", "x").unwrap_err();
         assert!(err.contains("not owned by that session"), "{err}");
         assert_eq!(server.join().unwrap(), "");
+    }
+
+    #[test]
+    fn the_token_is_the_one_the_hook_recorded_for_that_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = Path::new(r"\\.\pipe\LOCAL\cc-msg-feed");
+        assert!(session_token(dir.path(), pipe).unwrap_err().contains("next hook event"));
+        crate::hook_install::record_token(dir.path(), "Stop", Some(&pipe.to_string_lossy()), Some("tok")).unwrap();
+        assert_eq!(session_token(dir.path(), pipe).unwrap(), "tok");
+        assert!(session_token(dir.path(), Path::new(r"\\.\pipe\LOCAL\cc-msg-other")).is_err());
     }
 
     #[test]
