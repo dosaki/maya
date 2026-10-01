@@ -444,7 +444,12 @@ pub fn notify(card: &Card, sound: bool) {
     let icon = app_icon_path();
     let _ = Command::new("notify-send").args(notify_send_args(icon.as_deref(), &card.name, &subtitle_for(card), &body_for(card))).stdin(Stdio::null()).output();
     if sound {
-        let _ = Command::new("canberra-gtk-play").args(["-i", "message"]).stdin(Stdio::null()).status();
+        // Reaped on a thread: the sound must not hold up the watcher.
+        if let Ok(mut child) = Command::new("canberra-gtk-play").args(["-i", "message"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
     }
 }
 
