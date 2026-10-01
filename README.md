@@ -4,7 +4,7 @@
 
 # Maya
 
-**Manage All Your Agents.** Maya is a macOS and Windows app that puts every
+**Manage All Your Agents.** Maya is a macOS, Windows and Linux app that puts every
 coding-agent session running on your computer on one board, tells you when
 one needs you, and lets you answer without hunting for the right terminal.
 Say her name and she does it by voice.
@@ -44,8 +44,8 @@ summary, "Maya, tell hexgrid to go ahead" sends the reply after a read-back
 and your "yes", and "Maya, review collector 14" starts a review. When she
 asks you something back, just answer. See [Voice](#voice).
 
-**Several machines.** Run Maya on your laptop, desktop and Mac mini, Macs
-and PCs alike. One is the main, the others are assistants. The main shows every session from every
+**Several machines.** Run Maya on your laptop, desktop and Mac mini, Macs,
+PCs and Linux machines alike. One is the main, the others are assistants. The main shows every session from every
 machine on one board, tells you what needs you, and drives them all by
 voice. Assistants stay quiet: they show their own sessions and run what
 the main asks, but do not notify, speak or listen for "Maya". Set it up
@@ -88,11 +88,59 @@ installed. Install Claude Code with its native installer, so that
 `claude.exe` is on the PATH; npm's `claude.cmd` cannot take the multi-line
 prompts Maya sends.
 
-### Both
+### Linux
+
+Ubuntu 24.04 or later with GNOME, on Wayland or X11; x86_64 and arm64.
+Other distributions can run the AppImage. One command:
+
+    curl -fsSL https://raw.githubusercontent.com/dosaki/maya/main/install.sh | sh
+
+It downloads the latest release's AppImage to `~/.local/bin/maya-app` (set
+`MAYA_INSTALL_DIR` to put it elsewhere) and adds Maya to the app grid. Run
+it again to update. Prefer `apt`? Take `Maya_<version>_amd64.deb` (or
+`_arm64.deb`) from the
+[latest release](https://github.com/dosaki/maya/releases/latest) and
+`sudo apt install ./Maya_<version>_amd64.deb`; it pulls in what Maya needs.
+
+With the AppImage, install what Maya runs:
+
+    sudo apt install tmux libnotify-bin speech-dispatcher
+
+and, for the ElevenLabs voice, `pulseaudio-utils` (for `paplay`; `ffplay`
+works too) and `libsecret-tools`. `gnome-terminal` comes with Ubuntu's
+desktop.
+
+What is different on Linux:
+
+- **Sessions run in tmux.** A session Maya starts or resumes runs in a
+  tmux session (`maya-<8 hex>`) shown in a GNOME Terminal window, and Maya
+  types answers and slash commands into it through tmux. A session you
+  started by hand outside tmux is on the board and takes replies, but
+  Maya cannot type into it and its card has no Terminal button.
+- **The Terminal button.** On X11 it raises the window Maya opened
+  (with `wmctrl` installed; without it, it opens a new one). On
+  GNOME's Wayland, which lets no other app raise a window, it opens a
+  fresh window attached to the same tmux session; close the old one when
+  you like, the session lives on in tmux.
+- **The ElevenLabs key** is kept in GNOME Keyring. The built-in voice is
+  speech-dispatcher's, and notifications are GNOME banners (libnotify);
+  GNOME's Do Not Disturb keeps Maya quiet.
+- **Speech recognition** is *Built-in (Whisper)* only: download a model in
+  Settings before turning listening on.
+- **The Claude hook** is Maya's own `maya-hook` binary, which ships with
+  the app, so the app needs no `jq`.
+
+The Linux build is tested in CI under a virtual display, not yet on real
+hardware. On a real Ubuntu machine, check what a virtual display cannot:
+that you hear a notification and the voice, that "Maya, what's waiting on
+me?" gets an answer, and that Terminal on a card brings up its session.
+
+### All platforms
 
 You need [Claude Code](https://claude.com/claude-code) installed and signed
 in. The Pull Requests tab needs the [GitHub CLI](https://cli.github.com/)
-(`gh auth login`). Voice needs macOS 14 or later, or Windows 10 or later.
+(`gh auth login`). Voice needs macOS 14 or later, Windows 10 or later, or
+Ubuntu 24.04 or later.
 
 ### First run
 
@@ -130,6 +178,8 @@ resume or start a session, open or review a pull request.
   recognition and download a model; the 60 MB one is recommended. Windows
   has only *Built-in (Whisper)*: download a model in Settings before
   turning listening on. Maya's built-in voice there is Microsoft Zira.
+  Linux, too, has only *Built-in (Whisper)*; its built-in voice is
+  speech-dispatcher's.
 - **Privacy.** Audio never leaves the computer; both recognisers run on the
   device. Only the text of your command, the last few exchanges, and a
   summary of the board and pull-request list go to Claude, through a
@@ -266,7 +316,7 @@ write and drives them through their own interfaces.
   when the hook is installed, with a rule-based reading of the transcript
   as the fallback (a turn that ends in a question is "Awaiting Decision").
 - **Replies** go through Claude Code's session inbox (a Unix socket on
-  macOS, a named pipe on Windows), or are typed into the session's
+  macOS and Linux, a named pipe on Windows), or are typed into the session's
   terminal for the other agents. On Windows every inbox connection must
   open with the session's token, which Claude Code gives only to the
   session's hooks, so replies there need the hook installed: the hook keeps
@@ -275,7 +325,8 @@ write and drives them through their own interfaces.
   event (your next prompt in it, say). On macOS terminal actions use AppleScript and AppKit on
   Terminal.app; on Windows Maya attaches to the session's console to type
   into it and brings its Windows Terminal window forward (the window, not
-  the tab, when several sessions share one).
+  the tab, when several sessions share one); on Linux the sessions Maya
+  starts run in tmux, which types into them, shown in GNOME Terminal.
 - **Pull requests** come from `gh`, refreshed every two minutes.
 - **Voice** is a small listener sidecar (Apple's recogniser or whisper.cpp)
   streaming text to Maya; a wake-word and confirmation state machine
@@ -284,7 +335,8 @@ write and drives them through their own interfaces.
   board before doing anything.
 
 Settings and data live in `~/.claude/maya/`: `config.json`, `events.jsonl`,
-the hook (`hook.sh`, or `maya-hook.exe` on Windows), `maya.log`, downloaded
+the hook (`hook.sh` on macOS, `maya-hook` on Linux, `maya-hook.exe` on
+Windows), `maya.log`, downloaded
 speech models under `models/`.
 
 ### Windows, for now
@@ -314,5 +366,5 @@ to review and trust Maya's hooks before they run. See the [Codex hook documentat
 The hooks report prompts, tool calls, permission requests, completion, interruption, and session end.
 Maya combines these events with Codex transcripts; process and writer-lock discovery still identifies
 live sessions, so a new session can appear after its first message. Events are stored separately in
-`~/.claude/maya/codex-events.jsonl`. Windows uses Maya's bundled hook helper; macOS uses `jq`,
+`~/.claude/maya/codex-events.jsonl`. Windows and Linux use Maya's bundled hook helper; macOS uses `jq`,
 as the Claude hook does. Removing hooks leaves other handlers and saved backups intact.

@@ -1,7 +1,7 @@
 # Maya on Linux (Ubuntu, GNOME, Wayland) — design
 
 Date: 2026-10-01
-Status: draft for review
+Status: implemented
 Builds on: `2026-09-30-maya-cli-design.md` (the workspace and the
 `Terminal` seam) and the Windows port (PR #8: `ear-rs`, `maya-hook`, the
 platform gates, `build.yml`).
@@ -214,7 +214,7 @@ Decisions taken during design:
   app crate's own tests run on Linux).
 - **CI smoke test** (the `linux-app` job, after the bundle is built):
   under `xvfb-run` the AppImage is started with `--appimage-extract-and-run`
-  and a temporary `HOME`; the job waits up to 20 s for
+  and a temporary `HOME`; the job waits up to 60 s for
   `~/.claude/maya/maya.log` to contain `started`, takes a screenshot with
   `import -window root` (ImageMagick) uploaded as an artifact, sends
   `SIGTERM`, and fails if the process died early or never logged. This

@@ -3,7 +3,7 @@
 Maya is a Tauri 2 app: a Rust backend in a Cargo workspace (`core/`,
 `src-tauri/`, `cli/`, `hook/` and `ear-rs/`), a vanilla TypeScript frontend
 in `src/` (vitest), and a listener sidecar: Swift in `ear/` on macOS, Rust
-in `ear-rs/` on Windows.
+in `ear-rs/` on Windows and Linux.
 
 ## Requirements
 
@@ -89,30 +89,94 @@ and builds the installers.
 
 ## Linux
 
-The app crate (`src-tauri/`, `maya`) does not yet build on Linux (Ubuntu,
-GNOME, Wayland); only `maya-cli` and `maya_core` do (see
-[The CLI](#the-cli)). Porting the app needs a real Ubuntu build, and this
-is developed from a Mac, so `scripts/linux-vm.sh` drives an Ubuntu 24.04
-VM through [Multipass](https://multipass.run) to build, test and run it:
+Requirements (Ubuntu 24.04 or later): Rust (rustup), Node 22+, pnpm, and
+
+    sudo apt install build-essential pkg-config libssl-dev cmake clang \
+      libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+      librsvg2-dev patchelf libasound2-dev tmux libnotify-bin \
+      speech-dispatcher pulseaudio-utils libsecret-tools wmctrl
+
+Then:
+
+    pnpm install
+    pnpm ear:build      # maya-ear and maya-hook into src-tauri/binaries/
+    pnpm tauri dev
+    pnpm test
+    pnpm ear:test       # the Rust ear's tests
+    cargo test --workspace
+
+    pnpm tauri build --bundles deb,appimage
+
+puts the `.deb` and the AppImage in `target/release/bundle/deb/` and
+`appimage/` (`tauri.linux.conf.json` adds the sidecars, the bundle targets
+and the `.deb`'s dependencies).
+
+What is different on Linux, and where:
+
+- **Terminal.** `src-tauri/src/terminal_linux.rs`: a session Maya starts
+  or resumes runs in a tmux session `maya-<8 hex>`
+  (`core/src/terminal_tmux.rs`, shared with the CLI), shown in
+  `gnome-terminal --title <label> -- tmux attach -t <label>` (else
+  `x-terminal-emulator`). Typing goes through `tmux send-keys` to the pane
+  whose tty is the session's; a session outside tmux refuses typing with
+  `NOT_IN_TMUX` and its card has no Terminal button (`src/card.ts`). Focus
+  raises the window by title with `wmctrl -a` (X11, XWayland); GNOME on
+  Wayland lets no other process raise a window, so there it opens a fresh
+  window attached to the same tmux session. `lib.rs`'s
+  `fill_terminal_names` gives each card its tmux session's name.
+- **Inbox.** As on macOS, the session's Unix socket (`core/src/inbox.rs`),
+  its owner checked with `SO_PEERCRED`; no token.
+- **Hook.** `core/src/hook_install.rs`: the hook is `hook/`'s `maya-hook`,
+  bundled beside the app (as `maya-hook` or Tauri's
+  `maya-hook-<triple>`), copied to `~/.claude/maya/maya-hook` (0755) by
+  Install Claude hook, so the app needs no `jq`. The Codex hook buttons
+  use it too (`core/src/codex_hooks.rs`). The CLI, a single binary, still
+  installs the `jq` script.
+- **Notifications, voice, quiet.** `core/src/notify.rs`: banners with
+  `notify-send`, the sound with `canberra-gtk-play`, the built-in voice
+  with `spd-say -w` (else `espeak-ng`), and GNOME's Do not disturb from
+  `gsettings get org.gnome.desktop.notifications show-banners`. The
+  ElevenLabs key is in GNOME Keyring through `secret-tool`, and playback
+  is `paplay`, else `ffplay` (`src-tauri/src/voice.rs`); `aplay` cannot
+  decode MP3.
+- **Other agents.** As on macOS: `ps` and `lsof`.
+- **Ear.** `ear-rs/`, as on Windows: the microphone through cpal's ALSA
+  host (PipeWire and PulseAudio show as ALSA devices), whisper.cpp built
+  in. Settings offers only *Built-in (Whisper)* (`src/platform.ts`).
+- **Page.** `src/platform.ts`'s `isLinux()`: "This computer", Ctrl+Enter,
+  "speech-dispatcher", "GNOME Keyring".
+
+This is developed from a Mac, so `scripts/linux-vm.sh` drives an Ubuntu
+24.04 VM through [Multipass](https://multipass.run) to build, test and
+run it:
 
     sh scripts/linux-vm.sh create    # once: launch the VM and install the toolchain (~15 min)
     sh scripts/linux-vm.sh sync      # copy the working tree to ~/maya in the VM
-    sh scripts/linux-vm.sh run 'cargo test -p maya-core -p maya-cli'
+    sh scripts/linux-vm.sh run 'cargo test --workspace'
     sh scripts/linux-vm.sh shell     # an interactive shell in the VM
     sh scripts/linux-vm.sh destroy   # tear the VM down
 
 `create` launches `maya-ubuntu` (4 CPUs, 8 GB, 40 GB) and installs the
 Rust and Node toolchains plus the GTK/WebKit/tmux packages the app and its
-tests need. `sync` copies the working tree to `~/maya` in the VM, leaving
+tests need, and `xvfb`, `weston` and ImageMagick to run it without a
+display. `sync` copies the working tree to `~/maya` in the VM, leaving
 out `target/`, `node_modules/`, `dist*/`, `vendor/`, `.superpowers/` and
 `src-tauri/binaries/`, then runs `pnpm install` there; re-run it after
-local changes before `run`. `run '<command>'` runs a shell line in
-`~/maya` in the VM with `~/.cargo/bin` on `PATH`. `MAYA_VM` overrides the
-VM name if more than one is needed.
+local changes before `run` (it replaces `~/maya`, so the next build starts
+from scratch). `run '<command>'` runs a shell line in `~/maya` in the VM
+with `~/.cargo/bin` on `PATH`. `MAYA_VM` overrides the VM name if more
+than one is needed. To see the app, build the AppImage in the VM and run
+the `linux-app` job's smoke test there (below), then copy the screenshot
+out with `multipass transfer maya-ubuntu:<path> .`.
 
-CI's `linux-app` job is the authority on whether the app crate builds and
-runs on Ubuntu/GNOME/Wayland; the VM is for local iteration against it,
-not a replacement for it.
+The `linux-app` job of the build workflow (see [CI](#ci)) runs the whole
+workspace's tests, builds the `.deb` and the AppImage on an x86_64 and an
+arm64 runner, and smoke-tests the AppImage: under `xvfb-run`, from a path
+with a space in it and with an empty `HOME`, it must log `started` to
+`~/.claude/maya/maya.log` within 60 s and still be running 3 s later. The
+screen is kept as the `smoke-<arch>` run artifact, to see that the board
+painted. The VM cannot prove sound, the microphone or GNOME's own banners;
+those are the hand checks the README lists.
 
 ## The CLI
 
@@ -121,8 +185,8 @@ not a replacement for it.
     cargo build -p maya-cli --release        # target/release/maya-cli
     cargo test -p maya-core -p maya-cli
 
-`maya-cli` depends only on `maya_core`, so unlike the rest of the workspace
-it also builds and tests on Linux. The build workflow's `linux` job runs
+`maya-cli` depends only on `maya_core`, so it builds without GTK or
+WebKit, and statically for musl. The build workflow's `linux` job runs
 `cargo test -p maya-core -p maya-cli` on Ubuntu (with tmux installed) —
 the guard that keeps `maya_core` free of macOS-only code — and builds
 `maya-cli` natively for its musl target (`musl-tools`, no
@@ -133,10 +197,12 @@ and an `ubuntu-24.04-arm` runner.
 
 Three workflows in `.github/workflows/`:
 
-- `build.yml` tests and builds on Linux (x86_64 and aarch64), Windows and
-  macOS, the jobs running in parallel, and keeps what each built as run
-  artifacts (`maya-linux-<arch>`, `maya-windows`, `maya-macos`). It is
-  only ever called by the other two.
+- `build.yml` tests and builds on Linux (x86_64 and aarch64: the CLI in
+  `linux`, the app in `linux-app`), Windows and macOS, the jobs running in
+  parallel, and keeps what each built as run artifacts
+  (`maya-linux-<arch>`, `maya-linux-app-<arch>`, `maya-windows`,
+  `maya-macos`; and `smoke-<arch>`, the Linux smoke test's screenshot,
+  which is not released). It is only ever called by the other two.
 - `ci.yml` ("CI") runs on every pull request to `main`: `build.yml`
   unsigned, and a check that the version files agree. Nothing is
   published, so a pull request shows everything building before the merge.
@@ -153,14 +219,15 @@ Three workflows in `.github/workflows/`:
 - `Cargo.toml` — the workspace: shared version, dependencies and release profile.
 - `core/` — `maya_core`, the platform-neutral core: no Tauri, no AppKit.
 - `src-tauri/` — `maya`, the app: Tauri commands, voice, focus and dock; depends on `maya_core`.
-- `hook/` — `maya-hook`, the Claude Code hook on Windows.
-- `ear-rs/` — `maya-ear` for Windows: `vad.rs`, `resample.rs` and the
+- `hook/` — `maya-hook`, the Claude Code hook on Windows and Linux.
+- `ear-rs/` — `maya-ear` for Windows and Linux: `vad.rs`, `resample.rs` and the
   microphone choice in the library, the audio and whisper.cpp in `main.rs`.
 - `cli/` — `maya_cli`, binary `maya-cli`: the headless assistant for
   SSH boxes and containers (`pair`, `run`, `status`, `hooks`, `config`, `start`);
   depends on `maya_core`, no Tauri.
 - `core/src/` — `store.rs` (session cache), `state.rs` (card states),
   `watcher.rs`, `answer.rs` and `launch.rs` (Terminal automation),
+  `terminal_tmux.rs` (tmux sessions, for the CLI and the Linux app),
   `inbox.rs` (Claude Code's session socket), `foreign.rs` with `codex.rs`,
   `antigravity.rs`, `grok.rs` (other agents), `reviews.rs` and `pr.rs`
   (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
@@ -172,13 +239,13 @@ Three workflows in `.github/workflows/`:
   and expiry rules, routing).
 - `src-tauri/src/` — `lib.rs` (Tauri commands), `net_app.rs` (the network's
   Tauri side: starting server and client, command execution),
-  `terminal_app.rs` (opening Terminal windows), `focus.rs` and `dock.rs`
+  `terminal_app.rs` (opening Terminal windows), `terminal_win.rs` and
+  `terminal_linux.rs` (their Windows and Linux counterparts), `focus.rs` and `dock.rs`
   (AppKit), `voice.rs` (ElevenLabs), and `ear.rs`, `wake.rs`,
   `listener.rs`, `models.rs` (the voice assistant).
 - `cli/src/` — `main.rs` and `args.rs` (subcommand parsing), `commands.rs`
   (`pair`, `status`, `hooks`, `config`, `start`), `run_cmd.rs` (`run`, the headless
-  loop), `executor.rs` (running the main's commands), `tmux.rs` (named
-  sessions for start and resume), `notify.rs` (writes the CLI's own status
+  loop), `executor.rs` (running the main's commands), `notify.rs` (writes the CLI's own status
   file on connect, disconnect and removal — the CLI never notifies, speaks
   or listens like the app), and `status_file.rs`
   (`~/.claude/maya/cli-status.json`, read by `maya status`).
