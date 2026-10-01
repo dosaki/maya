@@ -82,7 +82,8 @@ Decisions taken during design:
 - **ElevenLabs**: the key lives in GNOME Keyring through `secret-tool
   store --label "Maya ElevenLabs" service maya account elevenlabs` and
   `secret-tool lookup service maya account elevenlabs`; playback through
-  `paplay <file>`, else `aplay`, else `ffplay -nodisp -autoexit`; with none
+  `paplay <file>`, else `ffplay -nodisp -autoexit` (not `aplay`: it
+  cannot decode MP3); with none
   of them the Settings "Try" button shows `No audio player found: install
   pulseaudio-utils.`
 - The Settings page names the store "GNOME Keyring" and the built-in
@@ -150,13 +151,13 @@ Decisions taken during design:
   `Terminal`:
   - `open(command, cwd, label)`: the emulator command line above (a pure
     `terminal_command(path, label)`), then `Tmux::open`, then the window
-    (watched for 1.5 s for an early failure), records
-    `label → launched pid` in a `Mutex<HashMap<String, Window>>`, returns
+    (watched for 1.5 s for an early failure), records the label in a
+    `Mutex<HashSet<String>>` of windows Maya opened, returns
     `Some(label)`;
   - `type_line`, `name_for_tty`, `names_for_ttys`: delegate to `Tmux`;
-  - `focus(tty)`: pane → label → recorded window → `activate(window)`;
+  - `focus(tty)`: pane → label → recorded label → `activate(label)`;
     on failure `open_window(label)`; no pane → `Err(NOT_IN_TMUX)`.
-  - `activate(window)`: GNOME Terminal is one server process, so an
+  - `activate(label)`: GNOME Terminal is one server process, so an
     activation token minted by Maya cannot be handed to an existing
     window, and GNOME Shell exposes no activation call to third-party
     processes. So `activate` runs `wmctrl -a <title>` (works on X11 and
@@ -168,13 +169,15 @@ Decisions taken during design:
   - `open_terminal_with(cmd)` for the PR review flow: a tmux session
     `maya-review-<8 hex>` running `cmd`, opened the same way.
 - **`core/src/notify.rs`**: `cfg(target_os = "linux")` branches for
-  `notify`, `say_builtin`, `voice()` (speech-dispatcher's default voice
-  name from `spd-say -L` first line, cached), `focus_active`; the macOS
+  `notify`, `say_builtin`, `focus_active`; there is no `voice()` on
+  Linux: `spd-say` speaks with speech-dispatcher's default voice, which
+  the user picks in speech-dispatcher's own settings. The macOS
   branches become `cfg(target_os = "macos")`. Pure helpers:
   `notify_send_args`, `dnd_from_gsettings(&str) -> bool`.
 - **`src-tauri/src/voice.rs`**: `cfg(target_os = "linux")` `store_key`,
-  `load_key` (`secret-tool`), `play` (`paplay`/`aplay`/`ffplay`), with
-  pure `secret_tool_args`.
+  `load_key` (`secret-tool`), `play` (`paplay`, else `ffplay`; never
+  `aplay`, which cannot decode ElevenLabs' MP3 and plays it as static),
+  with pure `secret_tool_args`.
 - **`src-tauri/src/lib.rs`**: `open_in_browser` with `xdg-open`; `term`
   alias to `terminal_linux` on Linux; no `dock`/`focus` on Linux.
 - **AppImage environment**: the AppImage's runtime (`APPDIR`, `APPIMAGE`,
