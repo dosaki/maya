@@ -117,7 +117,8 @@ What is different on Linux, and where:
   or resumes runs in a tmux session `maya-<8 hex>`
   (`core/src/terminal_tmux.rs`, shared with the CLI), shown in
   `gnome-terminal --title <label> -- tmux attach -t <label>` (else
-  `x-terminal-emulator`). Typing goes through `tmux send-keys` to the pane
+  `ptyxis --new-window`, else `x-terminal-emulator`; an emulator that
+  exits non-zero within 1.5 s is reported). Typing goes through `tmux send-keys` to the pane
   whose tty is the session's; a session outside tmux refuses typing with
   `NOT_IN_TMUX` and its card has no Terminal button (`src/card.ts`). Focus
   raises the window by title with `wmctrl -a` (X11, XWayland); GNOME on
