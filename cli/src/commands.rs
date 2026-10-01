@@ -115,7 +115,7 @@ pub fn status(claude_dir: &Path) -> Result<String, String> {
 /// Installs, removes or reports the Claude Code hooks Maya listens to.
 pub fn hooks(claude_dir: &Path, op: HooksOp) -> Result<String, String> {
     match op {
-        HooksOp::Install => hook_install::install_to(claude_dir).map(|_| "hooks installed".to_string()),
+        HooksOp::Install => hook_install::install_script_to(claude_dir).map(|_| "hooks installed".to_string()),
         HooksOp::Remove => hook_install::remove_from(claude_dir).map(|_| "hooks removed".to_string()),
         HooksOp::Status => hook_install::status(claude_dir).map(|installed| if installed { "hooks: installed".to_string() } else { "hooks: not installed".to_string() }),
     }

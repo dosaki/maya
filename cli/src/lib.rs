@@ -9,7 +9,7 @@ mod notify;
 pub mod run_cmd;
 pub mod run_lock;
 pub mod status_file;
-pub mod tmux;
+pub use maya_core::terminal_tmux as tmux;
 
 pub fn run(args: Vec<String>) -> i32 {
     let claude_dir = maya_core::claude_dir();

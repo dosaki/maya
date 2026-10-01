@@ -1,6 +1,10 @@
 use crate::model::{AwaitKind, Card, State};
 use crate::state::truncate;
 use std::collections::HashSet;
+#[cfg(any(test, target_os = "linux"))]
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Mutex, OnceLock};
@@ -85,10 +89,10 @@ pub fn pick_voice(installed: &str) -> Option<String> {
     VOICES.iter().find(|v| names.contains(v)).map(|v| v.to_string())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 static VOICE: OnceLock<Option<String>> = OnceLock::new();
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn voice() -> Option<String> {
     VOICE
         .get_or_init(|| {
@@ -151,7 +155,7 @@ pub fn focus_active() -> bool {
 }
 
 /// Whether a Focus mode is on right now. Unreadable state counts as off.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 pub fn focus_active() -> bool {
     let Some(home) = dirs::home_dir() else { return false };
     let path = home.join("Library/DoNotDisturb/DB/Assertions.json");
@@ -182,7 +186,7 @@ fn say_builtin(line: &str) {
 }
 
 /// Speaks with the built-in female voice.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn say_builtin(line: &str) {
     let mut cmd = Command::new("say");
     if let Some(v) = voice() {
@@ -300,9 +304,96 @@ pub fn notify(card: &Card, sound: bool) {
     crate::notify_win::show_toast(&card.name, &subtitle_for(card), &body_for(card), sound);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 pub fn notify(card: &Card, sound: bool) {
     let _ = Command::new("osascript").arg("-e").arg(applescript_notify(&card.name, &subtitle_for(card), &body_for(card), sound)).output();
+}
+
+/// `notify-send`'s arguments for a banner from Maya: the app name, the
+/// icon when there is one, the session as the title and the subtitle and
+/// body on two lines (GNOME banners have no subtitle).
+#[cfg(any(test, target_os = "linux"))]
+pub fn notify_send_args(icon: Option<&Path>, title: &str, subtitle: &str, body: &str) -> Vec<String> {
+    let mut a = vec!["--app-name".to_string(), "Maya".to_string()];
+    if let Some(i) = icon {
+        a.extend(["--icon".to_string(), i.to_string_lossy().into_owned()]);
+    }
+    let text = if subtitle.is_empty() {
+        body.to_string()
+    } else if body.is_empty() {
+        subtitle.to_string()
+    } else {
+        format!("{subtitle}\n{body}")
+    };
+    a.extend(["--".to_string(), title.to_string(), text]);
+    a
+}
+
+/// True when `gsettings get org.gnome.desktop.notifications show-banners`
+/// says `false`: GNOME's Do Not Disturb is on. Anything else (true, an
+/// error, no GNOME) counts as off.
+#[cfg(any(test, target_os = "linux"))]
+pub fn dnd_from_gsettings(out: &str) -> bool {
+    out.trim() == "false"
+}
+
+/// The speech synthesiser on `path` (a `PATH` string) and its arguments
+/// before the line: speech-dispatcher's `spd-say -w` (waits until spoken),
+/// else `espeak-ng`; None when neither is installed.
+#[cfg(any(test, target_os = "linux"))]
+pub fn speech_command(path: &str) -> Option<(&'static str, Vec<String>)> {
+    if crate::launch::find_on_path(path, "spd-say").is_some() {
+        return Some(("spd-say", vec!["-w".to_string()]));
+    }
+    crate::launch::find_on_path(path, "espeak-ng").map(|_| ("espeak-ng", Vec::new()))
+}
+
+/// Maya's icon for banners: inside the AppImage (`$APPDIR`) or where the
+/// .deb installs it; None when the file is not there.
+#[cfg(target_os = "linux")]
+pub fn app_icon_path() -> Option<PathBuf> {
+    let rel = "usr/share/icons/hicolor/128x128/apps/maya.png";
+    let p = match std::env::var("APPDIR") {
+        Ok(d) => Path::new(&d).join(rel),
+        Err(_) => Path::new("/").join(rel),
+    };
+    p.is_file().then_some(p)
+}
+
+/// Whether GNOME's Do Not Disturb is on. Unreadable state counts as off.
+#[cfg(target_os = "linux")]
+pub fn focus_active() -> bool {
+    Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.notifications", "show-banners"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| dnd_from_gsettings(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or(false)
+}
+
+/// Speaks with speech-dispatcher or eSpeak NG, whichever is installed;
+/// without either, logs once and stays silent.
+#[cfg(target_os = "linux")]
+fn say_builtin(line: &str) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    match speech_command(&std::env::var("PATH").unwrap_or_default()) {
+        Some((bin, args)) => {
+            let _ = Command::new(bin).args(&args).arg(line).stdin(Stdio::null()).status();
+        }
+        None => WARNED.call_once(|| crate::log::line("notify", "no speech synthesiser: install speech-dispatcher or espeak-ng")),
+    }
+}
+
+/// A GNOME banner through `notify-send`, with the freedesktop "message"
+/// sound unless the line is being spoken instead.
+#[cfg(target_os = "linux")]
+pub fn notify(card: &Card, sound: bool) {
+    let icon = app_icon_path();
+    let _ = Command::new("notify-send").args(notify_send_args(icon.as_deref(), &card.name, &subtitle_for(card), &body_for(card))).stdin(Stdio::null()).output();
+    if sound {
+        let _ = Command::new("canberra-gtk-play").args(["-i", "message"]).stdin(Stdio::null()).status();
+    }
 }
 
 #[cfg(test)]
@@ -492,5 +583,37 @@ mod tests {
         assert_eq!(body_for(&bold), "Would you like me to commit?");
         let under = card("a", State::Awaiting, 1, "_Ready?_ ");
         assert_eq!(body_for(&under), "Ready?");
+    }
+
+    #[test]
+    fn notify_send_args_carry_app_name_icon_title_and_two_line_body() {
+        let args = notify_send_args(Some(Path::new("/usr/share/icons/hicolor/128x128/apps/maya.png")), "collector", "needs a decision", "Allow Bash?");
+        assert_eq!(args, ["--app-name", "Maya", "--icon", "/usr/share/icons/hicolor/128x128/apps/maya.png", "--", "collector", "needs a decision\nAllow Bash?"].map(String::from).to_vec());
+        assert_eq!(notify_send_args(None, "a", "", "b"), ["--app-name", "Maya", "--", "a", "b"].map(String::from).to_vec());
+    }
+
+    #[test]
+    fn dnd_is_only_an_explicit_false_from_gsettings() {
+        assert!(dnd_from_gsettings("false\n"));
+        assert!(!dnd_from_gsettings("true\n"));
+        assert!(!dnd_from_gsettings(""));
+        assert!(!dnd_from_gsettings("No such schema"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn speech_prefers_spd_say_then_espeak_then_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let exe = |name: &str| {
+            let p = d.path().join(name);
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        assert_eq!(speech_command(""), None);
+        exe("espeak-ng");
+        assert_eq!(speech_command(&d.path().to_string_lossy()).map(|c| c.0), Some("espeak-ng"));
+        exe("spd-say");
+        assert_eq!(speech_command(&d.path().to_string_lossy()), Some(("spd-say", vec!["-w".to_string()])));
     }
 }

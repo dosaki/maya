@@ -24,6 +24,7 @@ pub mod reviews;
 pub mod state;
 pub mod store;
 pub mod terminal;
+pub mod terminal_tmux;
 pub mod transcript;
 pub mod tty;
 pub mod watcher;
