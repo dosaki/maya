@@ -37,6 +37,13 @@ pub struct Store {
 /// Replies remembered per session.
 const SENT_KEPT: usize = 50;
 
+/// Hex SHA-256 of a reply as it reads trimmed: enough to recognise it in
+/// the transcript, without keeping a second copy of what was said.
+fn sent_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.trim().as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub const DEFAULT_COMPACT_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
 
 impl Store {
@@ -61,18 +68,41 @@ impl Store {
         }
     }
 
-    /// Remembers a reply Maya delivered to `session_id`.
+    /// Where the hashes of replies Maya sent `session_id` are kept, so its
+    /// history still shows them as the user's after Maya restarts. None for
+    /// an id that is not a plain file name.
+    fn sent_path(&self, session_id: &str) -> Option<PathBuf> {
+        let plain = !session_id.is_empty() && session_id.len() <= 128 && session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        plain.then(|| self.claude_dir.join("maya").join("sent").join(format!("{session_id}.json")))
+    }
+
+    /// Remembers a reply Maya delivered to `session_id`: its hash, among the
+    /// last `SENT_KEPT`, in memory and on disk.
     pub fn note_sent(&mut self, session_id: &str, text: &str) {
-        let kept = self.sent.entry(session_id.to_string()).or_default();
-        kept.push_back(text.trim().to_string());
+        let mut kept = self.sent_hashes(session_id);
+        kept.push_back(sent_hash(text));
         while kept.len() > SENT_KEPT {
             kept.pop_front();
         }
+        if let Some(path) = self.sent_path(session_id) {
+            if let (Some(dir), Ok(json)) = (path.parent(), serde_json::to_string(&kept)) {
+                let _ = std::fs::create_dir_all(dir).and_then(|_| config::write_private(&path, json.as_bytes()));
+            }
+        }
+        self.sent.insert(session_id.to_string(), kept);
     }
 
-    /// Whether Maya delivered `text` to `session_id`.
+    /// Hashes of the replies Maya delivered to `session_id`, oldest first.
+    fn sent_hashes(&self, session_id: &str) -> std::collections::VecDeque<String> {
+        if let Some(k) = self.sent.get(session_id) {
+            return k.clone();
+        }
+        self.sent_path(session_id).and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+
+    /// Whether Maya delivered `text` to `session_id`, in this run or an earlier one.
     pub fn was_sent(&self, session_id: &str, text: &str) -> bool {
-        self.sent.get(session_id).is_some_and(|k| k.iter().any(|t| t == text.trim()))
+        self.sent_hashes(session_id).contains(&sent_hash(text))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -167,11 +197,15 @@ impl Store {
         self.refresh(now_ms).into_iter().find(|c| c.session_id == session_id)
     }
 
-    /// Drops event-log lines for sessions no longer in the registry.
+    /// Drops event-log lines for sessions no longer in the registry. A Codex
+    /// thread is kept while its writer lock exists, which holds from its
+    /// start, whether or not a refresh has matched it to a process yet (at
+    /// startup none has).
     pub fn compact_events(&mut self) {
         let keep: HashSet<String> = self.registry().into_iter().map(|s| s.session_id).collect();
         let _ = self.events.compact(&keep);
-        let keep = self.foreign.values().filter(|s| s.harness == Harness::Codex).map(|s| s.session_id.clone()).collect();
+        let mut keep: HashSet<String> = crate::codex::locked_threads(&self.codex_dir).into_iter().map(|(id, _)| id).collect();
+        keep.extend(self.foreign.values().filter(|s| s.harness == Harness::Codex).map(|s| s.session_id.clone()));
         let _ = self.codex_events.compact(&keep);
     }
 
@@ -257,6 +291,16 @@ mod tests {
         }
         assert!(!store.was_sent("a", "hello"), "the oldest goes once more than {SENT_KEPT} are kept");
         assert!(store.was_sent("a", "0"));
+        // A restarted Maya still knows them, from hashes rather than the text.
+        let again = Store::new(dir.path().to_path_buf());
+        assert!(again.was_sent("a", "0") && again.was_sent("a", &(SENT_KEPT - 1).to_string()));
+        assert!(!again.was_sent("a", "hello"));
+        let saved = std::fs::read_to_string(dir.path().join("maya/sent/a.json")).unwrap();
+        assert!(!saved.contains("\"0\""), "no reply text on disk: {saved}");
+        // An id that is not a file name is remembered for this run only.
+        store.note_sent("../x", "hi");
+        assert!(store.was_sent("../x", "hi"));
+        assert!(!dir.path().join("maya/x.json").exists());
     }
     use crate::model::State;
 

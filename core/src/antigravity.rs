@@ -145,10 +145,36 @@ pub fn process_log(state_dir: &Path, pid: i32) -> Option<ProcessLog> {
     logs.sort();
     logs.reverse();
     logs.into_iter().find_map(|p| {
-        let text = crate::transcript::tail_text(&p, 8 << 20).or_else(|| std::fs::read_to_string(&p).ok())?;
-        let log = parse_process_log(&text);
-        (log.pid == Some(pid)).then_some(log)
+        // The pid and workspace are logged at start; the conversation as it
+        // changes. A log of any length is read at its head and its tail.
+        let head = read_head(&p, LOG_HEAD_BYTES)?;
+        let start = parse_process_log(&head);
+        if start.pid != Some(pid) {
+            return None;
+        }
+        let long = std::fs::metadata(&p).map(|m| m.len() > LOG_HEAD_BYTES).unwrap_or(false);
+        let later = if long { parse_process_log(&crate::transcript::tail_text(&p, LOG_TAIL_BYTES).unwrap_or_default()) } else { start.clone() };
+        Some(ProcessLog { pid: start.pid, workspace: later.workspace.or(start.workspace), conversation: later.conversation.or(start.conversation) })
     })
+}
+
+/// How much of the start of an `agy` log names its pid and workspace.
+const LOG_HEAD_BYTES: u64 = 64 << 10;
+/// How much of the end of a long log is searched for the conversation.
+const LOG_TAIL_BYTES: u64 = 8 << 20;
+
+/// The first `bytes` of `path`, cut back to its last whole line.
+fn read_head(path: &Path, bytes: u64) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path).ok()?.take(bytes).read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if buf.len() as u64 == bytes {
+        if let Some(i) = text.rfind('\n') {
+            return Some(text[..=i].to_string());
+        }
+    }
+    Some(text)
 }
 
 pub fn transcript_path(state_dir: &Path, id: &str) -> PathBuf {
@@ -197,6 +223,25 @@ I1001 08:08:19.406162    2713 server.go:3175] GetConversationDetail: found conve
         assert_eq!(process_log(dir.path(), 504176).unwrap().conversation.as_deref(), Some("c7cddf6f-4e9e-4bae-9d31-ce941cbfb391"));
         assert_eq!(process_log(dir.path(), 506660).unwrap().pid, Some(506660));
         assert_eq!(process_log(dir.path(), 1), None);
+    }
+
+    #[test]
+    fn a_long_log_keeps_its_pid_from_the_head_and_conversation_from_the_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("log")).unwrap();
+        let mut log = String::from("] Starting language server process with pid 42\n] Initializing CLI store manager for workspace /w\n] Created conversation 11111111-1111-1111-1111-111111111111\n");
+        // Well past the tail window: the first conversation is out of reach,
+        // the pid at the head and the last conversation at the end are not.
+        let filler = "] noise noise noise noise noise noise noise noise noise noise\n";
+        while (log.len() as u64) < LOG_TAIL_BYTES + LOG_HEAD_BYTES {
+            log.push_str(filler);
+        }
+        log.push_str("] Starting conversation update stream for 22222222-2222-2222-2222-222222222222\n");
+        std::fs::write(dir.path().join("log/cli-1.log"), log).unwrap();
+        let found = process_log(dir.path(), 42).unwrap();
+        assert_eq!(found.pid, Some(42));
+        assert_eq!(found.workspace.as_deref(), Some("/w"));
+        assert_eq!(found.conversation.as_deref(), Some("22222222-2222-2222-2222-222222222222"));
     }
 
     #[test]

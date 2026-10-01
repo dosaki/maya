@@ -53,8 +53,16 @@ pub fn open_terminal_in(cmd: &str, cwd: &Path, title: &str) -> Result<(), String
     let script = launch_script(&maya_core::claude_dir().join("maya").join("launch"), cmd)?;
     let result = match windows_terminal() {
         Some(wt) => Command::new(wt).args(wt_args(&bash, &script, cwd, title)).creation_flags(CREATE_NO_WINDOW).spawn().map(drop),
-        // Without Windows Terminal, a console window of its own.
-        None => Command::new(&bash).args(["-l".as_ref(), script.as_os_str()]).current_dir(cwd).creation_flags(CREATE_NEW_CONSOLE).spawn().map(drop),
+        // Without Windows Terminal, a console window of its own, in `cwd`
+        // when there is one (a review's script changes folder itself).
+        None => {
+            let mut cmd = Command::new(&bash);
+            cmd.args(["-l".as_ref(), script.as_os_str()]).creation_flags(CREATE_NEW_CONSOLE);
+            if !cwd.as_os_str().is_empty() {
+                cmd.current_dir(cwd);
+            }
+            cmd.spawn().map(drop)
+        }
     };
     result.map_err(|e| {
         let _ = std::fs::remove_file(&script);

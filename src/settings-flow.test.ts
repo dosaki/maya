@@ -59,6 +59,24 @@ describe("settings flow", () => {
     expect(document.querySelector<HTMLInputElement>("input[name=timeout]")!.value).toBe("45");
   });
 
+  it("loads the rest of Settings when the Codex hook status cannot be read", async () => {
+    const config = { completedTimeoutMinutes: 42, projectsDir: "/p", clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku" };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.reject("hooks.json is not valid JSON, refusing to modify it");
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    expect(document.querySelector<HTMLInputElement>("input[name=timeout]")!.value).toBe("42");
+    expect(document.querySelector<HTMLInputElement>("input[name=projectsDir]")!.value).toBe("/p");
+    expect(document.querySelector("button[data-action=install-codex]")?.textContent).toBe("Install Codex hook");
+    expect(document.body.textContent).toContain("Remove Claude hook");
+  });
+
   it("repaints on a voice event only when listening changes, so typing survives", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: true, microphone: null, interpreterModel: "haiku" };
     invoke.mockImplementation((cmd: string) => {

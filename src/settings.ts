@@ -1033,7 +1033,11 @@ export async function initSettings(): Promise<void> {
   });
 
   await run(async () => {
-    const [installed, config, codexInstalled] = await Promise.all([invoke<boolean>("hook_status"), invoke<ConfigJson>("get_config"), invoke<boolean>("codex_hook_status")]);
+    // An unreadable ~/.codex/hooks.json must not keep the rest of Settings
+    // from loading: the Codex hook then shows as not installed, and
+    // installing it reports what is wrong with the file.
+    const codexStatus = invoke<boolean>("codex_hook_status").catch(() => false);
+    const [installed, config, codexInstalled] = await Promise.all([invoke<boolean>("hook_status"), invoke<ConfigJson>("get_config"), codexStatus]);
     model.hookInstalled = installed;
     model.codexHookInstalled = codexInstalled;
     model.completedTimeoutMinutes = config.completedTimeoutMinutes;

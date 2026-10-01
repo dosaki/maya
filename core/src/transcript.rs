@@ -111,23 +111,29 @@ const MAX_TOOL_TURNS: usize = 200;
 /// lines among them: tool calls do not count, or a busy session's last
 /// message would scroll out after a few dozen commands.
 fn keep_last_messages(mut turns: Vec<Turn>, max_messages: usize) -> Vec<Turn> {
-    let (mut messages, mut tools, mut start) = (0, 0, turns.len());
+    // From the oldest kept message (or the start, when there are fewer),
+    // then the oldest tool lines past the cap go: tools never cost a message.
+    let mut messages = 0;
+    let mut start = 0;
     for (i, t) in turns.iter().enumerate().rev() {
-        if t.kind == TurnKind::Tool {
-            // Tool lines before the oldest kept message are not kept.
-            tools += 1;
-            if tools > MAX_TOOL_TURNS || messages == max_messages {
-                break;
-            }
-        } else {
+        if t.kind != TurnKind::Tool {
             messages += 1;
-            if messages > max_messages {
+            if messages == max_messages {
+                start = i;
                 break;
             }
         }
-        start = i;
     }
-    turns.split_off(start)
+    let mut kept = turns.split_off(start);
+    let mut excess = kept.iter().filter(|t| t.kind == TurnKind::Tool).count().saturating_sub(MAX_TOOL_TURNS);
+    kept.retain(|t| {
+        let drop = excess > 0 && t.kind == TurnKind::Tool;
+        if drop {
+            excess -= 1;
+        }
+        !drop
+    });
+    kept
 }
 
 /// Conversation turns (user prompts, assistant text, tool calls) in order,
@@ -394,9 +400,18 @@ mod tests {
         assert_eq!(kept.first().unwrap().text, "sent from Maya");
         assert_eq!(kept.len(), 52, "the message, every tool call after it, and the answer");
         assert_eq!(keep_last_messages(turns.clone(), 30).len(), turns.len());
-        // Tool lines alone are capped.
+        // Tool lines alone are capped, the oldest going first.
         let tools: Vec<Turn> = (0..500).map(|i| turn(TurnKind::Tool, &i.to_string())).collect();
-        assert_eq!(keep_last_messages(tools, 30).len(), MAX_TOOL_TURNS);
+        let kept = keep_last_messages(tools, 30);
+        assert_eq!(kept.len(), MAX_TOOL_TURNS);
+        assert_eq!(kept[0].text, "300");
+        // However many tool calls follow them, the messages stay.
+        let mut busy = vec![turn(TurnKind::User, "do it"), turn(TurnKind::Assistant, "on it")];
+        busy.extend((0..MAX_TOOL_TURNS + 50).map(|i| turn(TurnKind::Tool, &i.to_string())));
+        let kept = keep_last_messages(busy, 30);
+        assert_eq!(kept.iter().filter(|t| t.kind != TurnKind::Tool).count(), 2);
+        assert_eq!(kept.len(), 2 + MAX_TOOL_TURNS);
+        assert_eq!(kept[2].text, "50", "the oldest tool lines go, not the messages");
     }
 
     #[test]
