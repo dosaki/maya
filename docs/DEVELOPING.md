@@ -161,8 +161,10 @@ release version; bump it everywhere, commit and push to `main`:
 The workflow publishes `v0.2.0` for both architectures, with notes generated
 from the merged pull requests and commits. A push whose version already has
 a release only runs the tests; a mismatch between `tauri.conf.json`,
-`package.json` and `Cargo.toml` fails the run. A pull request runs only
-the Linux tests.
+`package.json` and `Cargo.toml` fails the run. A pull request runs the
+Linux and Windows tests; the macOS job runs on pushes to `main` only.
+Pull requests bump the version themselves: see the rule in
+[CLAUDE.md](../CLAUDE.md).
 
 ## Signing
 
