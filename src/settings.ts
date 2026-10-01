@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
-import { builtinVoiceName, isWindows, recognizerOptions, secretStore } from "./platform";
+import { builtinVoiceName, recognizerOptions, secretStore, thisComputerLower } from "./platform";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -457,7 +457,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       if (!model.downloading) {
         const hint = document.createElement("div");
         hint.className = "settings__hint";
-        hint.textContent = `Download the model once; it stays on ${isWindows() ? "this PC" : "this Mac"}.`;
+        hint.textContent = `Download the model once; it stays on ${thisComputerLower()}.`;
         row.append(hint);
       }
     }

@@ -258,6 +258,17 @@ describe("renderSettings", () => {
     expect(tiny.querySelector(".settings__hint")?.textContent).toContain("Download");
   });
 
+  it("says the model stays on this computer, under the Linux user agent", () => {
+    const original = navigator.userAgent;
+    Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15", configurable: true });
+    try {
+      const tiny = renderSettings({ ...voiceBase, recognizer: "builtin", whisperModel: "tiny.en", models }, handlers());
+      expect(tiny.querySelector(".settings__hint")?.textContent).toBe("Download the model once; it stays on this computer.");
+    } finally {
+      Object.defineProperty(navigator, "userAgent", { value: original, configurable: true });
+    }
+  });
+
   it("shows download progress and disables the button meanwhile", () => {
     const el = renderSettings({ ...voiceBase, recognizer: "builtin", whisperModel: "tiny.en", models, downloading: { id: "tiny.en", received: 38852357, total: 77704715 } }, handlers());
     const bar = el.querySelector<HTMLProgressElement>("progress[name=modelDownload]")!;

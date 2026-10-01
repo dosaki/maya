@@ -2,6 +2,7 @@ import { formatAge, projectName } from "./format";
 import { OPEN_DELAY_MS, renderOptions } from "./options";
 import { harnessBadge } from "./harness";
 import { iconButton, iconElement } from "./icons";
+import { isLinux } from "./platform";
 import { COMPACT_AT, compactButton, contextMeter, prButton, remoteTitle, type Card } from "./types";
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -45,8 +46,9 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   const actions = el("div", "card__actions");
   const reply = iconButton("reply", "Reply", "card__btn card__btn--primary");
   reply.dataset.action = "reply";
-  if (!card.machine) {
-    const terminal = iconButton("terminal", "Open terminal");
+  if (!card.machine && (!isLinux() || card.terminal)) {
+    const label = isLinux() && card.terminal ? `Open the terminal attached to ${card.terminal}` : "Open terminal";
+    const terminal = iconButton("terminal", label);
     terminal.dataset.action = "terminal";
     actions.append(terminal);
   }
