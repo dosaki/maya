@@ -6,7 +6,8 @@ use crate::context;
 use crate::model::{AwaitKind, Awaiting, Card, Harness, State};
 use crate::state::{asking_line, truncate, SNIPPET_CHARS};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::process::Stdio;
 
 /// A live session of another harness.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,8 +100,27 @@ pub fn tui_processes(ps: &str) -> Vec<(i32, String, Harness)> {
     out
 }
 
+/// The harness an executable name belongs to on Windows.
+pub fn harness_for_exe(name: &str) -> Option<Harness> {
+    match name.to_ascii_lowercase().as_str() {
+        "codex.exe" => Some(Harness::Codex),
+        "agy.exe" => Some(Harness::Antigravity),
+        _ => None,
+    }
+}
+
+/// `(pid, console key, harness)` for every `codex` or `agy` process.
+#[cfg(windows)]
 pub fn list_tui_processes() -> Vec<(i32, String, Harness)> {
-    Command::new("ps")
+    crate::win_process::list()
+        .into_iter()
+        .filter_map(|(pid, name)| Some((pid as i32, crate::win_console::console_key(pid as i32), harness_for_exe(&name)?)))
+        .collect()
+}
+
+#[cfg(unix)]
+pub fn list_tui_processes() -> Vec<(i32, String, Harness)> {
+    crate::command("ps")
         .args(["-axo", "pid=,tty=,command="])
         .stdin(Stdio::null())
         .output()
@@ -188,6 +208,36 @@ pub fn turns_for(s: &ForeignSession, max_turns: usize) -> Vec<crate::transcript:
     }
 }
 
+/// Sessions for the given processes on Windows, where no `lsof` names a
+/// process's working directory or open files: an `agy` process is found
+/// in its own log (pid, workspace, conversation), a `codex` process by the
+/// thread writer lock it holds (`holders` names a lock's processes).
+pub fn discover_from_files(procs: &[(i32, String, Harness)], holders: impl Fn(&std::path::Path) -> Vec<u32>, codex_dir: &std::path::Path, agy_dir: &std::path::Path) -> Vec<ForeignSession> {
+    let mut out = Vec::new();
+    let codex_locks = if procs.iter().any(|p| p.2 == Harness::Codex) { crate::codex::locked_threads(codex_dir) } else { vec![] };
+    for (pid, tty, harness) in procs {
+        match harness {
+            Harness::Antigravity => {
+                let Some(log) = crate::antigravity::process_log(agy_dir, *pid) else { continue };
+                let (Some(id), Some(cwd)) = (log.conversation, log.workspace) else { continue };
+                let history = std::fs::read_to_string(agy_dir.join("history.jsonl")).unwrap_or_default();
+                let name = crate::antigravity::conversation_name(&history, &id).unwrap_or_else(|| format!("agy-{pid}"));
+                let path = crate::antigravity::transcript_path(agy_dir, &id);
+                out.push(ForeignSession { harness: *harness, pid: *pid, tty: Some(tty.clone()), session_id: id, cwd, name, transcript_path: path });
+            }
+            Harness::Codex => {
+                let Some(id) = codex_locks.iter().find(|(_, lock)| holders(lock).contains(&(*pid as u32))).map(|(id, _)| id.clone()) else { continue };
+                let Some((path, cwd)) = crate::codex::rollout_for_id(codex_dir, &id) else { continue };
+                let index = std::fs::read_to_string(codex_dir.join("session_index.jsonl")).unwrap_or_default();
+                let name = crate::codex::thread_name(&index, &id).unwrap_or_else(|| format!("codex-{pid}"));
+                out.push(ForeignSession { harness: *harness, pid: *pid, tty: Some(tty.clone()), session_id: id, cwd, name, transcript_path: path });
+            }
+            Harness::ClaudeCode | Harness::Grok => {}
+        }
+    }
+    out
+}
+
 /// Live Grok Build sessions from its registry, for pids that are running.
 pub fn grok_sessions(grok_dir: &std::path::Path, alive: &dyn Fn(i32) -> bool, tty_of: &dyn Fn(i32) -> Option<String>) -> Vec<ForeignSession> {
     let text = std::fs::read_to_string(grok_dir.join("active_sessions.json")).unwrap_or_default();
@@ -203,8 +253,9 @@ pub fn grok_sessions(grok_dir: &std::path::Path, alive: &dyn Fn(i32) -> bool, tt
         .collect()
 }
 
+#[cfg(unix)]
 pub fn proc_info(pid: i32) -> ProcInfo {
-    Command::new("lsof")
+    crate::command("lsof")
         .args(["-p", &pid.to_string(), "-Fn", "-w"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -215,6 +266,37 @@ pub fn proc_info(pid: i32) -> ProcInfo {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn concurrent_agy_and_codex_processes_each_find_their_own_session() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let (agy, codex) = (dir.path().join("agy"), dir.path().join("codex"));
+        std::fs::create_dir_all(agy.join("log")).unwrap();
+        let log = |pid: i32, ws: &str, id: &str| format!("] Starting language server process with pid {pid}\n] Initializing CLI store manager for workspace {ws}\n] Created conversation {id}\n");
+        std::fs::write(agy.join("log/cli-1.log"), log(11, "/one", "11111111-1111-1111-1111-111111111111")).unwrap();
+        std::fs::write(agy.join("log/cli-2.log"), log(22, "/two", "22222222-2222-2222-2222-222222222222")).unwrap();
+        // A third agy that has not started a conversation yet.
+        std::fs::write(agy.join("log/cli-3.log"), "] Starting language server process with pid 33\n").unwrap();
+        let day = codex.join("sessions/2026/10/01");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::create_dir_all(codex.join("thread-writer-locks")).unwrap();
+        for (id, cwd) in [("t1", "/c1"), ("t2", "/c2")] {
+            let meta = serde_json::json!({"type": "session_meta", "payload": {"id": id, "cwd": cwd}});
+            std::fs::write(day.join(format!("rollout-x-{id}.jsonl")), format!("{meta}\n")).unwrap();
+            std::fs::write(codex.join(format!("thread-writer-locks/{id}.lock")), "").unwrap();
+        }
+        let procs = vec![(11, "console:11".to_string(), Harness::Antigravity), (22, "console:22".into(), Harness::Antigravity), (33, "console:33".into(), Harness::Antigravity), (44, "console:44".into(), Harness::Codex), (55, "console:55".into(), Harness::Codex)];
+        // pid 44 holds t2's lock; 55 is a helper holding none.
+        let holders = |p: &std::path::Path| if p.ends_with("t2.lock") { vec![44] } else { vec![] };
+        let mut found: Vec<(i32, String, String)> = discover_from_files(&procs, holders, &codex, &agy).into_iter().map(|s| (s.pid, s.session_id, s.cwd)).collect();
+        found.sort();
+        assert_eq!(found, vec![
+            (11, "11111111-1111-1111-1111-111111111111".into(), "/one".into()),
+            (22, "22222222-2222-2222-2222-222222222222".into(), "/two".into()),
+            (44, "t2".into(), "/c2".into()),
+        ]);
+    }
+
     use super::*;
     use crate::model::{AwaitKind, Harness, State};
 

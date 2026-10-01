@@ -1423,6 +1423,20 @@ mod tests {
     }
 
     /// Closes `ws` with a reset rather than a FIN, so the main's next write fails.
+    #[cfg(windows)]
+    fn reset(ws: Client) {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{setsockopt, LINGER, SOL_SOCKET, SO_LINGER};
+        let MaybeTlsStream::Plain(s) = ws.get_ref() else { panic!("plain socket") };
+        let linger = LINGER { l_onoff: 1, l_linger: 0 };
+        // SAFETY: a valid socket, and a linger struct of the size given.
+        let rc = unsafe { setsockopt(s.as_raw_socket() as usize, SOL_SOCKET, SO_LINGER, &linger as *const _ as *const u8, std::mem::size_of::<LINGER>() as i32) };
+        assert_eq!(rc, 0);
+        drop(ws);
+    }
+
+    /// Closes `ws` with a reset rather than a FIN, so the main's next write fails.
+    #[cfg(unix)]
     fn reset(ws: Client) {
         use std::os::fd::AsRawFd;
         let MaybeTlsStream::Plain(s) = ws.get_ref() else { panic!("plain socket") };
@@ -1447,7 +1461,12 @@ mod tests {
         wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
         assert!(handle.status().assistants.is_empty(), "no paired entry is left behind");
         assert_eq!(counter.paired.load(Ordering::SeqCst), 0, "nothing was saved");
-        assert!(handle.status().code.is_none(), "the main read the code and paired, then took the pairing back");
+        // On Windows a reset can discard what the main had not read yet, so
+        // the main may never see `pair` and the code stays open: as safe,
+        // but only Unix delivers the buffered `pair` before the reset.
+        if cfg!(unix) {
+            assert!(handle.status().code.is_none(), "the main read the code and paired, then took the pairing back");
+        }
         handle.stop();
     }
 

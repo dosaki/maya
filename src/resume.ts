@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { formatAge } from "./format";
 import { showToast } from "./toast";
+import { thisComputer } from "./platform";
 
 export interface ResumableSession {
   id: string;
@@ -280,7 +281,7 @@ export async function openResume(): Promise<void> {
     if (e.key === "Escape") closeResume();
   };
   current = {
-    model: { dirs: [], dir: null, sessions: [], loading: false, status: null, needsSetup: false, machines: [{ name: "This Mac", value: "" }], machine: "" },
+    model: { dirs: [], dir: null, sessions: [], loading: false, status: null, needsSetup: false, machines: [{ name: thisComputer(), value: "" }], machine: "" },
     keyHandler,
   };
   document.addEventListener("keydown", keyHandler);
@@ -288,7 +289,7 @@ export async function openResume(): Promise<void> {
   void invoke<{ name: string; hostname: string; platform: string; connected: boolean }[]>("list_machines")
     .then((machines) => {
       if (!current) return;
-      current.model.machines = [{ name: "This Mac", value: "" }, ...machines.filter((m) => m.connected).map((m) => ({ name: m.name, value: m.name }))];
+      current.model.machines = [{ name: thisComputer(), value: "" }, ...machines.filter((m) => m.connected).map((m) => ({ name: m.name, value: m.name }))];
       paint();
     })
     .catch(() => undefined);

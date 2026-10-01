@@ -1,8 +1,9 @@
 # Developing Maya
 
 Maya is a Tauri 2 app: a Rust backend in a Cargo workspace (`core/`,
-`src-tauri/` and `cli/`), a vanilla TypeScript frontend in `src/` (vitest),
-and a Swift listener sidecar in `ear/`.
+`src-tauri/`, `cli/`, `hook/` and `ear-rs/`), a vanilla TypeScript frontend
+in `src/` (vitest), and a listener sidecar: Swift in `ear/` on macOS, Rust
+in `ear-rs/` on Windows.
 
 ## Requirements
 
@@ -32,6 +33,60 @@ puts `Maya.app` in `target/release/bundle/macos/` (with `--target <triple>`,
 features only work from a bundle: the sidecar, the whisper framework and
 the microphone and speech permissions are all tied to it.
 
+## Windows
+
+Requirements: Rust (rustup, the MSVC toolchain), the Visual Studio C++
+build tools, CMake (whisper.cpp is built from source), Node 22+, pnpm, and
+Git for Windows. Then, from Git Bash or PowerShell:
+
+    pnpm install
+    pnpm ear:build      # maya-ear and maya-hook into src-tauri/binaries/
+    pnpm tauri dev
+    pnpm test
+    pnpm ear:test       # the Rust ear's tests
+    cargo test -p maya-core -p maya-hook -p maya-ear -p maya
+
+    pnpm tauri build --bundles nsis,msi
+
+puts the installers in `target/release/bundle/nsis/` and `msi/`
+(`tauri.windows.conf.json` adds the Windows sidecars and bundle targets).
+In PowerShell quote the list, `--bundles "nsis,msi"`, or it becomes two
+arguments.
+
+What is different on Windows, and where:
+
+- **Terminal.** `src-tauri/src/terminal_win.rs`: new sessions open in a
+  Windows Terminal window of their own running Git Bash, which runs the same
+  shell lines as macOS. A session's "tty" is `console:<pid>`;
+  `core/src/win_console.rs` attaches to that console to type key events
+  into it and to find the window showing it.
+- **Inbox.** `core/src/inbox.rs`: a named pipe, opened with the auth line
+  `{"type":"auth","token":…}` after checking the pipe's server is the
+  session. The token is the session's `CLAUDE_CODE_MESSAGING_TOKEN`, which
+  Claude Code exports only to the session's hooks and Bash commands; the
+  hook keeps it in `~/.claude/maya/inbox/<pipe name>.token`. (The
+  `<pid>.<hex>.key` beside the registry record is not that token: a
+  connection opened with it is accepted, then dropped without a word.)
+  `cargo run -p maya-core --example inbox_probe` lists live sessions, and
+  with `<pid> <message>` sends one.
+- **Hook.** Claude Code runs hooks through Git Bash, which has no `jq`, so
+  the hook is `hook/`'s `maya-hook.exe`, copied into `~/.claude/maya/` by
+  Install Claude hook. It also hooks SessionStart, only to record the token.
+- **Notifications, voice, quiet.** `core/src/notify_win.rs`: toasts, SAPI,
+  and Do not disturb. The ElevenLabs key is in Credential Manager
+  (`src-tauri/src/voice.rs`).
+- **Other agents.** `core/src/win_process.rs` lists processes (ToolHelp)
+  and names the processes holding a file open (the Restart Manager).
+  `foreign::discover_from_files` maps an `agy` pid to its conversation
+  through its own `log/cli-*.log`, and a `codex` pid to its thread through
+  the `thread-writer-locks/<id>.lock` it holds.
+- **Ear.** `ear-rs/`: the Swift ear's protocol over WASAPI and whisper.cpp,
+  with the VAD ported case for case. `cargo run -p maya-ear --release
+  --example transcribe -- <model.bin> <file.wav>` runs a WAV through it.
+
+The `windows` job of the build workflow (see [CI](#ci)) runs these tests
+and builds the installers.
+
 ## The CLI
 
 `cli/` builds on its own, with no Node toolchain and no `pnpm ear:build`:
@@ -40,25 +95,40 @@ the microphone and speech permissions are all tied to it.
     cargo test -p maya-core -p maya-cli
 
 `maya-cli` depends only on `maya_core`, so unlike the rest of the workspace
-it also builds and tests on Linux. The release workflow's `linux` job runs
-first, on every pull request to `main` and every push to it, once per
-architecture (an x86_64 runner and an `ubuntu-24.04-arm` runner): it runs
+it also builds and tests on Linux. The build workflow's `linux` job runs
 `cargo test -p maya-core -p maya-cli` on Ubuntu (with tmux installed) —
-the guard that keeps `maya_core` free of macOS-only code. On a release
-push each leg also builds `maya-cli` natively for its musl target
-(`musl-tools`, no cross-compilation container) and hands the binary to
-the `macos` job as the `linux-binaries-<arch>` artifact.
-The `macos` job runs on pushes only and after `linux` succeeds; it tests
-the whole workspace, builds the app and the macOS binaries, and creates
-the release with every asset at once, so a failed Linux build publishes
-nothing. Both jobs decide whether to release with
-`scripts/release-version.sh`.
+the guard that keeps `maya_core` free of macOS-only code — and builds
+`maya-cli` natively for its musl target (`musl-tools`, no
+cross-compilation container), once per architecture on an x86_64 runner
+and an `ubuntu-24.04-arm` runner.
+
+## CI
+
+Three workflows in `.github/workflows/`:
+
+- `build.yml` tests and builds on Linux (x86_64 and aarch64), Windows and
+  macOS, the jobs running in parallel, and keeps what each built as run
+  artifacts (`maya-linux-<arch>`, `maya-windows`, `maya-macos`). It is
+  only ever called by the other two.
+- `ci.yml` ("CI") runs on every pull request to `main`: `build.yml`
+  unsigned, and a check that the version files agree. Nothing is
+  published, so a pull request shows everything building before the merge.
+- `release.yml` ("Release") runs on every push to `main`: `build.yml`
+  again, signing the macOS apps when this push releases, and then, only
+  once every platform has built, a `release` job that publishes
+  `v<version>` with all the artifacts. It releases when
+  `scripts/release-version.sh` finds no release for the version yet; a
+  push whose version is released only builds, and a `docs` commit skips
+  the run.
 
 ## Layout
 
 - `Cargo.toml` — the workspace: shared version, dependencies and release profile.
 - `core/` — `maya_core`, the platform-neutral core: no Tauri, no AppKit.
 - `src-tauri/` — `maya`, the app: Tauri commands, voice, focus and dock; depends on `maya_core`.
+- `hook/` — `maya-hook`, the Claude Code hook on Windows.
+- `ear-rs/` — `maya-ear` for Windows: `vad.rs`, `resample.rs` and the
+  microphone choice in the library, the audio and whisper.cpp in `main.rs`.
 - `cli/` — `maya_cli`, binary `maya-cli`: the headless assistant for
   SSH boxes and containers (`pair`, `run`, `status`, `hooks`, `config`, `start`);
   depends on `maya_core`, no Tauri.
@@ -100,11 +170,12 @@ release version; bump it everywhere, commit and push to `main`:
     git commit -am "chore: release 0.2.0"
     git push
 
-The workflow publishes `v0.2.0` for both architectures, with notes generated
+The Release workflow publishes `v0.2.0` for every platform, with notes generated
 from the merged pull requests and commits. A push whose version already has
-a release only runs the tests; a mismatch between `tauri.conf.json`,
-`package.json` and `Cargo.toml` fails the run. A pull request runs only
-the Linux tests.
+a release only builds; a mismatch between `tauri.conf.json`,
+`package.json` and `Cargo.toml` fails the run, a pull request's too (see
+[CI](#ci)). Pull requests bump the version themselves: see the rule in
+[CLAUDE.md](../CLAUDE.md).
 
 ## Signing
 

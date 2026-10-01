@@ -1,7 +1,17 @@
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
+#[cfg(unix)]
 pub const HOOK_MARKER: &str = ".claude/maya/hook.sh";
+/// Claude Code runs hook commands through Git Bash on Windows, which has
+/// no jq, so the hook there is Maya's own `maya-hook.exe`.
+#[cfg(windows)]
+pub const HOOK_MARKER: &str = ".claude/maya/maya-hook.exe";
+/// The hook binary's file name on Windows, next to Maya's own executable
+/// and, once installed, in `~/.claude/maya`.
+pub const HOOK_EXE: &str = "maya-hook.exe";
+/// Longest string kept from a `tool_input` field, in characters.
+const FIELD_MAX: usize = 400;
 /// Markers of earlier releases; removed on install, never counted as installed.
 pub const LEGACY_MARKERS: &[&str] = &[".claude/eye/hook.sh"];
 
@@ -23,6 +33,96 @@ jq -c --arg t "$t" '{
 } | with_entries(select(.value != null))' >> "$dir/events.jsonl" 2>/dev/null
 exit 0
 "#;
+
+/// What `HOOK_SCRIPT` appends for one hook payload, without the newline:
+/// the fields Maya reads, `tool_input` strings cut to 400 characters, and
+/// `received_at`. `None` when the payload is not a JSON object.
+pub fn record(payload: &str, received_at: u64) -> Option<String> {
+    let v: Value = serde_json::from_str(payload).ok()?;
+    let v = v.as_object()?;
+    let mut out = Map::new();
+    for key in ["session_id", "hook_event_name", "tool_name", "notification_type", "transcript_path", "agent_id"] {
+        if let Some(x) = v.get(key).filter(|x| !x.is_null()) {
+            out.insert(key.into(), x.clone());
+        }
+    }
+    let mut input = Map::new();
+    if let Some(ti) = v.get("tool_input").and_then(Value::as_object) {
+        for key in ["command", "file_path", "path", "questions"] {
+            match ti.get(key) {
+                None | Some(Value::Null) => {}
+                Some(Value::String(t)) => {
+                    input.insert(key.into(), Value::String(t.chars().take(FIELD_MAX).collect()));
+                }
+                Some(x) => {
+                    input.insert(key.into(), x.clone());
+                }
+            }
+        }
+    }
+    out.insert("tool_input".into(), Value::Object(input));
+    out.insert("received_at".into(), json!(received_at));
+    serde_json::to_string(&Value::Object(out)).ok()
+}
+
+/// Appends `record(payload)` to `maya_dir/events.jsonl` in one write, so
+/// concurrent hooks never interleave. Errors are the caller's to ignore.
+pub fn append_record(maya_dir: &Path, payload: &str, received_at: u64) -> std::io::Result<()> {
+    append_record_named(maya_dir, "events.jsonl", payload, received_at)
+}
+
+pub fn append_record_named(maya_dir: &Path, filename: &str, payload: &str, received_at: u64) -> std::io::Result<()> {
+    use std::io::Write;
+    let Some(mut line) = record(payload, received_at) else { return Ok(()) };
+    line.push('\n');
+    std::fs::create_dir_all(maya_dir)?;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(maya_dir.join(filename))?;
+    f.write_all(line.as_bytes())
+}
+
+/// The file holding the inbox token of the session whose inbox is
+/// `socket`, named after the pipe (`cc-msg-<hex>`); None for a name that
+/// is not plain letters, digits and dashes.
+pub fn token_path(maya_dir: &Path, socket: &str) -> Option<std::path::PathBuf> {
+    let name = socket.rsplit(['\\', '/']).next()?;
+    let plain = !name.is_empty() && name.len() <= 128 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    plain.then(|| maya_dir.join("inbox").join(format!("{name}.token")))
+}
+
+/// Keeps the token Claude Code gives the hook (`CLAUDE_CODE_MESSAGING_TOKEN`,
+/// for `CLAUDE_CODE_MESSAGING_SOCKET`) where Maya's replies find it: on
+/// Windows every inbox connection must open with it. Written only when it
+/// changed; removed when the session ends.
+pub fn record_token(maya_dir: &Path, event: &str, socket: Option<&str>, token: Option<&str>) -> std::io::Result<()> {
+    let Some(path) = socket.and_then(|s| token_path(maya_dir, s)) else { return Ok(()) };
+    if event == "SessionEnd" {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) else { return Ok(()) };
+    if std::fs::read_to_string(&path).is_ok_and(|t| t == token) {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    crate::config::write_private(&path, token.as_bytes())
+}
+
+/// The hook event name in a payload, if any.
+pub fn event_name(payload: &str) -> Option<String> {
+    serde_json::from_str::<Value>(payload).ok()?.get("hook_event_name")?.as_str().map(str::to_string)
+}
+
+/// Events hooked only so the hook sees a session's inbox token at once: on
+/// Windows, SessionStart. They are not appended to `events.jsonl`, whose
+/// readers know nothing of them.
+#[cfg(windows)]
+pub const TOKEN_ONLY_EVENTS: &[&str] = &["SessionStart"];
+#[cfg(unix)]
+pub const TOKEN_ONLY_EVENTS: &[&str] = &[];
 
 /// (event name, matcher)
 pub const HOOK_EVENTS: &[(&str, Option<&str>)] = &[
@@ -61,7 +161,8 @@ pub fn install(settings: Value, command: &str) -> Value {
     let settings = remove(settings);
     let mut root = settings.as_object().cloned().unwrap_or_default();
     let mut hooks = root.get("hooks").and_then(|h| h.as_object()).cloned().unwrap_or_default();
-    for (event, matcher) in HOOK_EVENTS {
+    let token_only = TOKEN_ONLY_EVENTS.iter().map(|e| (*e, None));
+    for (event, matcher) in HOOK_EVENTS.iter().copied().chain(token_only) {
         let mut group = Map::new();
         if let Some(m) = matcher {
             group.insert("matcher".into(), json!(m));
@@ -112,6 +213,7 @@ fn write_settings_with_backup(claude_dir: &Path, settings: &Value) -> Result<(),
     std::fs::write(&path, text + "\n").map_err(|e| format!("cannot write settings.json: {e}"))
 }
 
+#[cfg(unix)]
 pub fn install_to(claude_dir: &Path) -> Result<(), String> {
     let settings = read_settings(claude_dir)?;
     let maya_dir = claude_dir.join("maya");
@@ -124,6 +226,32 @@ pub fn install_to(claude_dir: &Path) -> Result<(), String> {
     }
     let command = "\"$HOME/.claude/maya/hook.sh\"";
     write_settings_with_backup(claude_dir, &install(settings, command))
+}
+
+/// Copies `maya-hook.exe` from beside this executable into
+/// `claude_dir/maya` and points every hook at it.
+#[cfg(windows)]
+pub fn install_to(claude_dir: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find Maya's own folder: {e}"))?;
+    let source = exe.parent().map(|d| d.join(HOOK_EXE)).ok_or("cannot find Maya's own folder")?;
+    install_with(claude_dir, &source)
+}
+
+/// `install_to` with the hook binary taken from `source`. The copy is
+/// skipped when the installed one is already identical, since Windows
+/// refuses to overwrite a binary a running hook holds open.
+#[cfg(windows)]
+pub fn install_with(claude_dir: &Path, source: &Path) -> Result<(), String> {
+    let settings = read_settings(claude_dir)?;
+    let maya_dir = claude_dir.join("maya");
+    std::fs::create_dir_all(&maya_dir).map_err(|e| format!("cannot create {}: {e}", maya_dir.display()))?;
+    let bytes = std::fs::read(source).map_err(|e| format!("cannot read {}: {e}", source.display()))?;
+    let target = maya_dir.join(HOOK_EXE);
+    if std::fs::read(&target).ok().as_deref() != Some(&bytes[..]) {
+        std::fs::write(&target, &bytes).map_err(|e| format!("cannot write {HOOK_EXE} (a hook may be running; try again): {e}"))?;
+    }
+    let command = format!("\"$HOME/{HOOK_MARKER}\"");
+    write_settings_with_backup(claude_dir, &install(settings, &command))
 }
 
 pub fn remove_from(claude_dir: &Path) -> Result<(), String> {
@@ -140,9 +268,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// This platform's hook command, as `install_to` writes it.
+    fn cmd() -> String {
+        format!("\"$HOME/{HOOK_MARKER}\"")
+    }
+
     #[test]
     fn install_adds_every_event_with_marker_command() {
-        let out = install(json!({"model": "opus"}), "\"$HOME/.claude/maya/hook.sh\"");
+        let out = install(json!({"model": "opus"}), &cmd());
         assert_eq!(out["model"], "opus");
         let hooks = out["hooks"].as_object().unwrap();
         for (event, matcher) in HOOK_EVENTS {
@@ -160,8 +293,8 @@ mod tests {
     #[test]
     fn install_is_idempotent_and_preserves_other_hooks() {
         let existing = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}});
-        let once = install(existing, "\"$HOME/.claude/maya/hook.sh\"");
-        let twice = install(once.clone(), "\"$HOME/.claude/maya/hook.sh\"");
+        let once = install(existing, &cmd());
+        let twice = install(once.clone(), &cmd());
         assert_eq!(once, twice);
         let stop = twice["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(stop.len(), 2);
@@ -171,7 +304,7 @@ mod tests {
     #[test]
     fn remove_strips_only_marker_entries() {
         let existing = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "say done"}]}]}});
-        let installed = install(existing, "\"$HOME/.claude/maya/hook.sh\"");
+        let installed = install(existing, &cmd());
         let removed = remove(installed);
         assert!(!is_installed(&removed));
         assert_eq!(removed["hooks"]["Stop"].as_array().unwrap().len(), 1);
@@ -181,7 +314,7 @@ mod tests {
     #[test]
     fn install_and_remove_preserve_existing_key_order() {
         let existing: Value = serde_json::from_str(r#"{"zeta":1,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]},"alpha":2}"#).unwrap();
-        let installed = install(existing, "x/.claude/maya/hook.sh");
+        let installed = install(existing, &format!("x/{HOOK_MARKER}"));
         let out = serde_json::to_string(&installed).unwrap();
         assert!(out.starts_with(r#"{"zeta":1,"hooks":"#), "{out}");
         assert!(out.ends_with(r#""alpha":2}"#), "{out}");
@@ -192,7 +325,7 @@ mod tests {
     #[test]
     fn install_replaces_legacy_eye_entries() {
         let legacy = json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "\"$HOME/.claude/eye/hook.sh\""}]}], "PostToolUse": [{"hooks": [{"type": "command", "command": "\"$HOME/.claude/eye/hook.sh\""}]}]}});
-        let out = install(legacy, "\"$HOME/.claude/maya/hook.sh\"");
+        let out = install(legacy, &cmd());
         let text = serde_json::to_string(&out).unwrap();
         assert!(!text.contains(".claude/eye/hook.sh"), "{text}");
         assert!(is_installed(&out));
@@ -205,6 +338,7 @@ mod tests {
         assert!(!is_installed(&json!({"hooks": {}})));
     }
 
+    #[cfg(unix)]
     #[test]
     fn install_to_writes_script_backup_and_settings() {
         let dir = tempfile::tempdir().unwrap();
@@ -227,19 +361,127 @@ mod tests {
         assert!(!status(dir.path()).unwrap());
     }
 
+    #[cfg(unix)]
+    fn install_here(dir: &Path) -> Result<(), String> {
+        install_to(dir)
+    }
+
+    #[cfg(windows)]
+    fn install_here(dir: &Path) -> Result<(), String> {
+        let exe = dir.join("source-hook.exe");
+        std::fs::write(&exe, b"MZ fake hook").unwrap();
+        install_with(dir, &exe)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn install_with_copies_the_hook_and_points_settings_at_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.json"), "{\"model\":\"opus\"}").unwrap();
+        install_here(dir.path()).unwrap();
+        assert_eq!(std::fs::read(dir.path().join("maya").join(HOOK_EXE)).unwrap(), b"MZ fake hook");
+        let s: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("settings.json")).unwrap()).unwrap();
+        assert_eq!(s["model"], "opus");
+        assert_eq!(s["hooks"]["Stop"][0]["hooks"][0]["command"], "\"$HOME/.claude/maya/maya-hook.exe\"");
+        assert!(status(dir.path()).unwrap());
+        // Installing again with the same binary is fine, even when it is in use.
+        install_here(dir.path()).unwrap();
+        remove_from(dir.path()).unwrap();
+        assert!(!status(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn tokens_are_kept_per_pipe_and_dropped_when_the_session_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = r"\\.\pipe\LOCAL\cc-msg-0123abcd";
+        let path = dir.path().join("inbox").join("cc-msg-0123abcd.token");
+        assert_eq!(token_path(dir.path(), pipe), Some(path.clone()));
+        record_token(dir.path(), "PostToolUse", Some(pipe), Some(" tok1 ")).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tok1");
+        record_token(dir.path(), "Stop", Some(pipe), Some("tok2")).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tok2");
+        // No token or no socket leaves what is there.
+        record_token(dir.path(), "Stop", Some(pipe), None).unwrap();
+        record_token(dir.path(), "Stop", None, Some("tok3")).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "tok2");
+        record_token(dir.path(), "SessionEnd", Some(pipe), Some("tok2")).unwrap();
+        assert!(!path.exists());
+        record_token(dir.path(), "SessionEnd", Some(pipe), None).unwrap();
+    }
+
+    #[test]
+    fn token_files_are_named_only_after_plain_pipe_names() {
+        let d = Path::new("m");
+        assert_eq!(token_path(d, "/tmp/cc-socks/49643.sock"), None, "a dot is not plain");
+        assert_eq!(token_path(d, r"\\.\pipe\LOCAL\.."), None, "only the last component is used, and .. is not plain");
+        assert_eq!(token_path(d, ""), None);
+        assert_eq!(token_path(d, "cc-msg-ab"), Some(d.join("inbox").join("cc-msg-ab.token")));
+    }
+
+    #[test]
+    fn token_only_events_are_hooked_on_windows_alone() {
+        let out = install(json!({}), &cmd());
+        assert_eq!(out["hooks"].get("SessionStart").is_some(), cfg!(windows));
+        assert!(!is_installed(&remove(out.clone())));
+        assert_eq!(event_name(r#"{"hook_event_name":"SessionStart"}"#).as_deref(), Some("SessionStart"));
+        assert_eq!(event_name("nope"), None);
+    }
+
+    #[test]
+    fn record_projects_only_needed_fields() {
+        let payload = r#"{"session_id":"s1","hook_event_name":"PostToolUse","agent_id":"ag","transcript_path":"/t.jsonl","cwd":"/x","tool_name":"Bash","tool_input":{"command":"ls","description":"list","questions":null},"tool_response":{"stdout":"HUGE"},"permission_mode":"auto"}"#;
+        let v: Value = serde_json::from_str(&record(payload, 1_790_000_000_000).unwrap()).unwrap();
+        assert!(v.get("tool_response").is_none());
+        assert!(v.get("permission_mode").is_none());
+        assert!(v.get("cwd").is_none());
+        assert_eq!(v["agent_id"], "ag");
+        assert_eq!(v["transcript_path"], "/t.jsonl");
+        assert_eq!(v["tool_input"], json!({"command": "ls"}));
+        assert_eq!(v["received_at"], 1_790_000_000_000u64);
+    }
+
+    #[test]
+    fn record_caps_long_strings_by_characters() {
+        let payload = format!(r#"{{"session_id":"s1","tool_input":{{"command":"{}"}}}}"#, "é".repeat(20_000));
+        let line = record(&payload, 1).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["tool_input"]["command"].as_str().unwrap().chars().count(), 400);
+        assert!(line.len() < 1000, "{}", line.len());
+    }
+
+    #[test]
+    fn record_ignores_what_is_not_an_object() {
+        assert_eq!(record("not json", 1), None);
+        assert_eq!(record("[1]", 1), None);
+        assert_eq!(record("{}", 7).as_deref(), Some(r#"{"tool_input":{},"received_at":7}"#));
+    }
+
+    #[test]
+    fn append_record_adds_one_line_per_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let maya = dir.path().join("maya");
+        append_record(&maya, r#"{"session_id":"a","hook_event_name":"Stop"}"#, 1).unwrap();
+        append_record(&maya, "garbage", 2).unwrap();
+        append_record(&maya, r#"{"session_id":"b"}"#, 3).unwrap();
+        let log = std::fs::read_to_string(maya.join("events.jsonl")).unwrap();
+        let ids: Vec<String> = log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["session_id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(ids, ["a", "b"]);
+    }
+
     #[test]
     fn install_to_creates_settings_when_missing_and_refuses_invalid_json() {
         let dir = tempfile::tempdir().unwrap();
-        install_to(dir.path()).unwrap();
+        install_here(dir.path()).unwrap();
         assert!(status(dir.path()).unwrap());
 
         let bad = tempfile::tempdir().unwrap();
         std::fs::write(bad.path().join("settings.json"), "{ not json").unwrap();
-        let err = install_to(bad.path()).unwrap_err();
+        let err = install_here(bad.path()).unwrap_err();
         assert!(err.contains("settings.json"));
         assert_eq!(std::fs::read_to_string(bad.path().join("settings.json")).unwrap(), "{ not json");
     }
 
+    #[cfg(unix)]
     #[test]
     fn hook_script_projects_only_needed_fields() {
         let dir = tempfile::tempdir().unwrap();
@@ -271,6 +513,7 @@ mod tests {
         assert!(v["received_at"].as_u64().unwrap() > 1_700_000_000_000);
     }
 
+    #[cfg(unix)]
     #[test]
     fn hook_script_caps_long_command_text() {
         let dir = tempfile::tempdir().unwrap();
@@ -296,6 +539,7 @@ mod tests {
         assert!(log.len() < 1000, "line should be small: {}", log.len());
     }
 
+    #[cfg(unix)]
     #[test]
     fn hook_script_appends_payload_with_received_at() {
         let dir = tempfile::tempdir().unwrap();

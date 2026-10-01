@@ -159,6 +159,26 @@ fn first_line(path: &Path) -> Option<String> {
     Some(line)
 }
 
+/// The rollout of thread `id` and the working directory it records.
+pub fn rollout_for_id(codex_dir: &Path, id: &str) -> Option<(PathBuf, String)> {
+    let suffix = format!("-{id}.jsonl");
+    let path = rollout_files(codex_dir).into_iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&suffix)))?;
+    let first = first_line(&path)?;
+    let v: Value = serde_json::from_str(first.trim()).ok()?;
+    let cwd = v["payload"]["cwd"].as_str()?.to_string();
+    Some((path, cwd))
+}
+
+/// The thread ids with a writer lock: the live threads.
+pub fn locked_threads(codex_dir: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(codex_dir.join("thread-writer-locks")) else { return vec![] };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter_map(|p| Some((p.file_name()?.to_str()?.strip_suffix(".lock")?.to_string(), p.clone())))
+        .collect()
+}
+
 /// The (thread id, rollout path) of the newest live thread whose recorded
 /// working directory is `cwd`. Live means a writer lock exists for it.
 pub fn live_rollout_for(codex_dir: &Path, cwd: &str) -> Option<(String, PathBuf)> {
@@ -239,6 +259,22 @@ mod tests {
         );
         assert_eq!(thread_name(index, "a").as_deref(), Some("Renamed"));
         assert_eq!(thread_name(index, "zzz"), None);
+    }
+
+    #[test]
+    fn a_rollout_is_found_by_thread_id_with_its_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let day = dir.path().join("sessions/2026/10/01");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-2026-10-01T08-00-00-abc.jsonl"), "{\"type\":\"session_meta\",\"payload\":{\"id\":\"abc\",\"cwd\":\"E:\\\\dev\\\\x\"}}\n").unwrap();
+        let (path, cwd) = rollout_for_id(dir.path(), "abc").unwrap();
+        assert!(path.ends_with("rollout-2026-10-01T08-00-00-abc.jsonl"));
+        assert_eq!(cwd, "E:\\dev\\x");
+        assert_eq!(rollout_for_id(dir.path(), "zzz"), None);
+        std::fs::create_dir_all(dir.path().join("thread-writer-locks")).unwrap();
+        std::fs::write(dir.path().join("thread-writer-locks/abc.lock"), "").unwrap();
+        std::fs::write(dir.path().join("thread-writer-locks/notes.txt"), "").unwrap();
+        assert_eq!(locked_threads(dir.path()).into_iter().map(|(id, _)| id).collect::<Vec<_>>(), ["abc"]);
     }
 
     #[test]

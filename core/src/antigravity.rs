@@ -87,6 +87,96 @@ pub fn conversation_id(open_paths: &[String], state_dir: &Path) -> Option<String
     })
 }
 
+/// What an `agy` process's own log (`<state_dir>/log/cli-<start>.log`)
+/// says about it: its pid, its workspace, and the conversation it is in.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ProcessLog {
+    pub pid: Option<i32>,
+    pub workspace: Option<String>,
+    /// The last conversation it created or opened.
+    pub conversation: Option<String>,
+}
+
+fn uuid_at(s: &str) -> Option<String> {
+    let id: String = s.chars().take(36).collect();
+    let dashes_ok = id.len() == 36 && [8, 13, 18, 23].iter().all(|&i| id.as_bytes()[i] == b'-');
+    let hex_ok = id.bytes().enumerate().all(|(i, b)| [8, 13, 18, 23].contains(&i) || b.is_ascii_hexdigit());
+    (dashes_ok && hex_ok).then_some(id)
+}
+
+pub fn parse_process_log(text: &str) -> ProcessLog {
+    const PID: &str = "Starting language server process with pid ";
+    const WORKSPACE: &str = "Initializing CLI store manager for workspace ";
+    const DIRS: &str = "workspaceDirs=[";
+    const OPENED: [&str; 2] = ["Created conversation ", "Starting conversation update stream for "];
+    let mut log = ProcessLog::default();
+    for line in text.lines() {
+        if log.pid.is_none() {
+            if let Some(rest) = line.split_once(PID).map(|(_, r)| r) {
+                log.pid = rest.split(|c: char| !c.is_ascii_digit()).next().and_then(|d| d.parse().ok());
+            }
+        }
+        if let Some((_, rest)) = line.split_once(WORKSPACE) {
+            log.workspace = Some(rest.trim().to_string());
+        } else if log.workspace.is_none() {
+            // One directory between the brackets; several are ambiguous with spaces.
+            if let Some((_, rest)) = line.split_once(DIRS) {
+                log.workspace = rest.split_once(']').map(|(d, _)| d.trim().to_string()).filter(|d| !d.is_empty());
+            }
+        }
+        for marker in OPENED {
+            if let Some(id) = line.split_once(marker).and_then(|(_, r)| uuid_at(r)) {
+                log.conversation = Some(id);
+            }
+        }
+    }
+    log
+}
+
+/// The log of the `agy` process `pid`: newest logs first, since a process
+/// writes only its own.
+pub fn process_log(state_dir: &Path, pid: i32) -> Option<ProcessLog> {
+    let mut logs: Vec<PathBuf> = std::fs::read_dir(state_dir.join("log"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("cli-") && n.ends_with(".log")))
+        .collect();
+    logs.sort();
+    logs.reverse();
+    logs.into_iter().find_map(|p| {
+        // The pid and workspace are logged at start; the conversation as it
+        // changes. A log of any length is read at its head and its tail.
+        let head = read_head(&p, LOG_HEAD_BYTES)?;
+        let start = parse_process_log(&head);
+        if start.pid != Some(pid) {
+            return None;
+        }
+        let long = std::fs::metadata(&p).map(|m| m.len() > LOG_HEAD_BYTES).unwrap_or(false);
+        let later = if long { parse_process_log(&crate::transcript::tail_text(&p, LOG_TAIL_BYTES).unwrap_or_default()) } else { start.clone() };
+        Some(ProcessLog { pid: start.pid, workspace: later.workspace.or(start.workspace), conversation: later.conversation.or(start.conversation) })
+    })
+}
+
+/// How much of the start of an `agy` log names its pid and workspace.
+const LOG_HEAD_BYTES: u64 = 64 << 10;
+/// How much of the end of a long log is searched for the conversation.
+const LOG_TAIL_BYTES: u64 = 8 << 20;
+
+/// The first `bytes` of `path`, cut back to its last whole line.
+fn read_head(path: &Path, bytes: u64) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path).ok()?.take(bytes).read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    if buf.len() as u64 == bytes {
+        if let Some(i) = text.rfind('\n') {
+            return Some(text[..=i].to_string());
+        }
+    }
+    Some(text)
+}
+
 pub fn transcript_path(state_dir: &Path, id: &str) -> PathBuf {
     state_dir.join("brain").join(id).join(".system_generated/logs/transcript.jsonl")
 }
@@ -98,6 +188,60 @@ mod tests {
 
     fn fixture() -> String {
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/antigravity/transcript.jsonl")).unwrap()
+    }
+
+    const LOG: &str = "I1001 08:28:47.532823      66 server.go:1586] Starting language server process with pid 506660
+I1001 08:28:47.848211       1 auto_updater.go:334] Spawned background update process with PID 504360
+I1001 08:28:47.848723       1 server.go:323] Creating CLI server backend: product=antigravity workspaceDirs=[C:\\Users\\lordg] appDataDir=C:\\Users\\lordg\\.gemini\\antigravity-cli
+I1001 08:28:47.858978       1 manager.go:448] Initializing CLI store manager for workspace C:\\Users\\lordg\\My Projects\\app
+I1001 08:06:19.406162    2713 server.go:1248] Created conversation c7cddf6f-4e9e-4bae-9d31-ce941cbfb391
+I1001 08:07:19.406162    2713 server.go:1257] Starting conversation update stream for d1e2f3a4-0000-4bae-9d31-ce941cbfb391
+I1001 08:08:19.406162    2713 server.go:3175] GetConversationDetail: found conversation c7cddf6f-4e9e-4bae-9d31-ce941cbfb391 (active=true)
+";
+
+    #[test]
+    fn a_process_log_names_its_pid_workspace_and_latest_conversation() {
+        let log = parse_process_log(LOG);
+        assert_eq!(log.pid, Some(506660), "the language server's pid, not the updater's");
+        assert_eq!(log.workspace.as_deref(), Some("C:\\Users\\lordg\\My Projects\\app"), "the full path, spaces and all");
+        assert_eq!(log.conversation.as_deref(), Some("d1e2f3a4-0000-4bae-9d31-ce941cbfb391"), "the last one created or opened, not merely looked up");
+    }
+
+    #[test]
+    fn a_fresh_process_has_no_conversation_and_falls_back_to_workspace_dirs() {
+        let log = parse_process_log("x] Starting language server process with pid 7\ny] Creating CLI server backend: workspaceDirs=[/Users/x/dev/eye] appDataDir=/a\n");
+        assert_eq!(log, ProcessLog { pid: Some(7), workspace: Some("/Users/x/dev/eye".into()), conversation: None });
+        assert_eq!(parse_process_log("Created conversation not-a-uuid"), ProcessLog::default());
+    }
+
+    #[test]
+    fn the_process_log_is_found_by_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("log")).unwrap();
+        std::fs::write(dir.path().join("log/cli-20261001_074928.log"), "] Starting language server process with pid 504176\n] Created conversation c7cddf6f-4e9e-4bae-9d31-ce941cbfb391\n").unwrap();
+        std::fs::write(dir.path().join("log/cli-20261001_082847.log"), LOG).unwrap();
+        assert_eq!(process_log(dir.path(), 504176).unwrap().conversation.as_deref(), Some("c7cddf6f-4e9e-4bae-9d31-ce941cbfb391"));
+        assert_eq!(process_log(dir.path(), 506660).unwrap().pid, Some(506660));
+        assert_eq!(process_log(dir.path(), 1), None);
+    }
+
+    #[test]
+    fn a_long_log_keeps_its_pid_from_the_head_and_conversation_from_the_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("log")).unwrap();
+        let mut log = String::from("] Starting language server process with pid 42\n] Initializing CLI store manager for workspace /w\n] Created conversation 11111111-1111-1111-1111-111111111111\n");
+        // Well past the tail window: the first conversation is out of reach,
+        // the pid at the head and the last conversation at the end are not.
+        let filler = "] noise noise noise noise noise noise noise noise noise noise\n";
+        while (log.len() as u64) < LOG_TAIL_BYTES + LOG_HEAD_BYTES {
+            log.push_str(filler);
+        }
+        log.push_str("] Starting conversation update stream for 22222222-2222-2222-2222-222222222222\n");
+        std::fs::write(dir.path().join("log/cli-1.log"), log).unwrap();
+        let found = process_log(dir.path(), 42).unwrap();
+        assert_eq!(found.pid, Some(42));
+        assert_eq!(found.workspace.as_deref(), Some("/w"));
+        assert_eq!(found.conversation.as_deref(), Some("22222222-2222-2222-2222-222222222222"));
     }
 
     #[test]

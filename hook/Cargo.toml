@@ -1,0 +1,14 @@
+[package]
+name = "maya-hook"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Maya's Claude Code hook for Windows: appends each payload to events.jsonl"
+
+[[bin]]
+name = "maya-hook"
+path = "src/main.rs"
+
+[dependencies]
+maya-core = { path = "../core" }
+dirs.workspace = true

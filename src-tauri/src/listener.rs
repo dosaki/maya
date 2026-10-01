@@ -5,7 +5,7 @@
 //! while the interpreter runs; take what is needed, release, then act.
 
 use crate::store::now_ms;
-use crate::{config, ear, eleven_settings, focus, interpreter, launch, log, notify, wake};
+use crate::{config, ear, eleven_settings, interpreter, launch, log, notify, wake};
 use crate::{answer_question, compact_session, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, AppState};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
@@ -175,7 +175,7 @@ fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String,
                 return Err(msg);
             }
             let pid = state.store.lock().unwrap().card_for(&session, now_ms()).map(|c| c.pid).ok_or("Session is no longer running.")?;
-            focus::focus_pid(pid)?;
+            crate::term::focus_pid(pid)?;
             Ok("Done.".into())
         }
         "compact" => {
@@ -883,7 +883,7 @@ pub(crate) fn voice_history(state: TauriState<AppState>) -> Vec<VoiceTurn> {
 #[tauri::command(async)]
 pub(crate) fn voice_selftest() -> Result<String, String> {
     let path = ear::sidecar_path().ok_or("The listener (maya-ear) is not built. Run `pnpm ear:build`.")?;
-    let out = std::process::Command::new(path).arg("--selftest").output().map_err(|e| e.to_string())?;
+    let out = maya_core::command(path).arg("--selftest").output().map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
@@ -1064,22 +1064,24 @@ mod tests {
     #[test]
     fn changing_the_recogniser_restarts_a_running_listener() {
         use crate::config::{Config, Recognizer};
-        let off = Config::default();
-        let on = Config { listen: true, ..Default::default() };
-        let on_builtin = Config { listen: true, recognizer: Recognizer::Builtin, ..Default::default() };
-        let on_tiny = Config { listen: true, recognizer: Recognizer::Builtin, whisper_model: "tiny.en".into(), ..Default::default() };
-        let on_mic = Config { listen: true, microphone: Some("USB".into()), ..Default::default() };
+        // Starts from System, which Windows does not have, to cover both.
+        let base = Config { recognizer: Recognizer::System, ..Default::default() };
+        let off = base.clone();
+        let on = Config { listen: true, ..base.clone() };
+        let on_builtin = Config { listen: true, recognizer: Recognizer::Builtin, ..base.clone() };
+        let on_tiny = Config { listen: true, recognizer: Recognizer::Builtin, whisper_model: "tiny.en".into(), ..base.clone() };
+        let on_mic = Config { listen: true, microphone: Some("USB".into()), ..base.clone() };
         assert_eq!(listening_change(&off, &on), ListenChange::Start);
         assert_eq!(listening_change(&on, &off), ListenChange::Stop);
         assert_eq!(listening_change(&on, &on_builtin), ListenChange::Restart);
         assert_eq!(listening_change(&on_builtin, &on_tiny), ListenChange::Restart);
         assert_eq!(listening_change(&on, &on_mic), ListenChange::Restart);
-        assert_eq!(listening_change(&off, &Config { recognizer: Recognizer::Builtin, ..Default::default() }), ListenChange::None, "no run to restart while off");
-        assert_eq!(listening_change(&on, &Config { listen: true, completed_timeout_minutes: 5, ..Default::default() }), ListenChange::None);
+        assert_eq!(listening_change(&off, &Config { recognizer: Recognizer::Builtin, ..base.clone() }), ListenChange::None, "no run to restart while off");
+        assert_eq!(listening_change(&on, &Config { listen: true, completed_timeout_minutes: 5, ..base.clone() }), ListenChange::None);
         // The model picker is hidden under System: a stale whisperModel
         // value changing must not restart a System listener.
         assert_eq!(
-            listening_change(&on, &Config { listen: true, whisper_model: "tiny.en".into(), ..Default::default() }),
+            listening_change(&on, &Config { listen: true, whisper_model: "tiny.en".into(), ..base.clone() }),
             ListenChange::None,
             "a model change under System is not a restart"
         );

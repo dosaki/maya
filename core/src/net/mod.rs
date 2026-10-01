@@ -109,6 +109,13 @@ pub fn paired_offline(paired: &[PairedAssistant]) -> Vec<AssistantStatus> {
 }
 
 /// This computer's name without `.local`, for the main's `welcome`.
+#[cfg(windows)]
+pub fn local_hostname() -> String {
+    std::env::var("COMPUTERNAME").ok().filter(|n| !n.is_empty()).unwrap_or_else(|| "this PC".into())
+}
+
+/// This computer's name without `.local`, for the main's `welcome`.
+#[cfg(unix)]
 pub fn local_hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: the buffer is valid for its length and gethostname NUL-terminates within it.

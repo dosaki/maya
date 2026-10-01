@@ -407,7 +407,7 @@ pub fn run(binary: &Path, model: &str, command: &str, cards: &[Card], prs: &[Rev
     let pr_lines = pr_summary(prs);
     let prompt = user_prompt(command, &summary, &pr_lines, history);
     crate::log::line("interpreter", format!("asking {model}: {command}\nboard:\n{summary}\npull requests:\n{}\nrecent exchanges: {}", if pr_lines.is_empty() { "none" } else { pr_lines.as_str() }, history.len()));
-    let mut cmd = Command::new(binary);
+    let mut cmd = crate::command(binary);
     cmd.args(claude_args(model, &system_prompt(), &prompt)).current_dir(cwd).env_clear().envs(crate::launch::clean_env(std::env::vars()));
     let started = std::time::Instant::now();
     let out = output_within(cmd, timeout).inspect_err(|e| crate::log::line("interpreter", format!("failed after {:.1}s: {e}", started.elapsed().as_secs_f32())))?;

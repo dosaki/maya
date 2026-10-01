@@ -23,8 +23,10 @@ export default defineConfig(() => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell Vite to ignore the Rust side: `src-tauri`, the other crates
+      //    and the workspace's build output, whose running binaries Windows
+      //    keeps locked
+      ignored: ["**/src-tauri/**", "**/target/**", "**/core/**", "**/cli/**", "**/hook/**", "**/vendor/**"],
     },
   },
 }));

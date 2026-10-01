@@ -21,12 +21,27 @@ pub struct Store {
     /// The process lister, replaceable in tests.
     processes: Box<dyn Fn() -> Vec<(i32, String, Harness)> + Send>,
     events: EventLog,
+    codex_events: EventLog,
     pub config: Config,
     alive: Box<dyn Fn(i32) -> bool + Send>,
     tails: TailCache,
     prs: PrCache,
     /// Compact the event log during refresh once it exceeds this many bytes.
     pub compact_threshold_bytes: u64,
+    /// The last replies Maya sent each session, newest last: the session
+    /// records them as messages from another session, and the history
+    /// shows them as the user's own.
+    sent: std::collections::HashMap<String, std::collections::VecDeque<String>>,
+}
+
+/// Replies remembered per session.
+const SENT_KEPT: usize = 50;
+
+/// Hex SHA-256 of a reply as it reads trimmed: enough to recognise it in
+/// the transcript, without keeping a second copy of what was said.
+fn sent_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.trim().as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub const DEFAULT_COMPACT_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
@@ -36,9 +51,10 @@ impl Store {
         let config = config::load(&claude_dir.join("maya/config.json"));
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         Self {
+            codex_events: EventLog::new(claude_dir.join("maya/codex-events.jsonl")),
             events: EventLog::new(claude_dir.join("maya/events.jsonl")),
             claude_dir,
-            codex_dir: home.join(".codex"),
+            codex_dir: crate::codex_hooks::dir(),
             agy_dir: home.join(".gemini/antigravity-cli"),
             grok_dir: home.join(".grok"),
             foreign: std::collections::HashMap::new(),
@@ -48,7 +64,45 @@ impl Store {
             tails: TailCache::default(),
             prs: PrCache::default(),
             compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
+            sent: Default::default(),
         }
+    }
+
+    /// Where the hashes of replies Maya sent `session_id` are kept, so its
+    /// history still shows them as the user's after Maya restarts. None for
+    /// an id that is not a plain file name.
+    fn sent_path(&self, session_id: &str) -> Option<PathBuf> {
+        let plain = !session_id.is_empty() && session_id.len() <= 128 && session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        plain.then(|| self.claude_dir.join("maya").join("sent").join(format!("{session_id}.json")))
+    }
+
+    /// Remembers a reply Maya delivered to `session_id`: its hash, among the
+    /// last `SENT_KEPT`, in memory and on disk.
+    pub fn note_sent(&mut self, session_id: &str, text: &str) {
+        let mut kept = self.sent_hashes(session_id);
+        kept.push_back(sent_hash(text));
+        while kept.len() > SENT_KEPT {
+            kept.pop_front();
+        }
+        if let Some(path) = self.sent_path(session_id) {
+            if let (Some(dir), Ok(json)) = (path.parent(), serde_json::to_string(&kept)) {
+                let _ = std::fs::create_dir_all(dir).and_then(|_| config::write_private(&path, json.as_bytes()));
+            }
+        }
+        self.sent.insert(session_id.to_string(), kept);
+    }
+
+    /// Hashes of the replies Maya delivered to `session_id`, oldest first.
+    fn sent_hashes(&self, session_id: &str) -> std::collections::VecDeque<String> {
+        if let Some(k) = self.sent.get(session_id) {
+            return k.clone();
+        }
+        self.sent_path(session_id).and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+
+    /// Whether Maya delivered `text` to `session_id`, in this run or an earlier one.
+    pub fn was_sent(&self, session_id: &str, text: &str) -> bool {
+        self.sent_hashes(session_id).contains(&sent_hash(text))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -76,9 +130,16 @@ impl Store {
         let procs = (self.processes)();
         let live: std::collections::HashSet<i32> = procs.iter().map(|p| p.0).collect();
         self.foreign.retain(|pid, _| live.contains(pid));
-        let fresh: Vec<_> = procs.into_iter().filter(|p| !self.foreign.contains_key(&p.0)).collect();
+        // On Windows an agy process's log is re-read every refresh, cheaply, so
+        // a conversation it starts or switches to replaces the one it had.
+        let recheck = |h: Harness| cfg!(windows) && h == Harness::Antigravity;
+        let fresh: Vec<_> = procs.into_iter().filter(|p| !self.foreign.contains_key(&p.0) || recheck(p.2)).collect();
         if !fresh.is_empty() {
-            for s in foreign::discover(&fresh, foreign::proc_info, &self.codex_dir, &self.agy_dir) {
+            #[cfg(unix)]
+            let found = foreign::discover(&fresh, foreign::proc_info, &self.codex_dir, &self.agy_dir);
+            #[cfg(windows)]
+            let found = foreign::discover_from_files(&fresh, crate::win_process::holders, &self.codex_dir, &self.agy_dir);
+            for s in found {
                 self.foreign.insert(s.pid, s);
             }
         }
@@ -136,10 +197,16 @@ impl Store {
         self.refresh(now_ms).into_iter().find(|c| c.session_id == session_id)
     }
 
-    /// Drops event-log lines for sessions no longer in the registry.
+    /// Drops event-log lines for sessions no longer in the registry. A Codex
+    /// thread is kept while its writer lock exists, which holds from its
+    /// start, whether or not a refresh has matched it to a process yet (at
+    /// startup none has).
     pub fn compact_events(&mut self) {
         let keep: HashSet<String> = self.registry().into_iter().map(|s| s.session_id).collect();
         let _ = self.events.compact(&keep);
+        let mut keep: HashSet<String> = crate::codex::locked_threads(&self.codex_dir).into_iter().map(|(id, _)| id).collect();
+        keep.extend(self.foreign.values().filter(|s| s.harness == Harness::Codex).map(|s| s.session_id.clone()));
+        let _ = self.codex_events.compact(&keep);
     }
 
     /// Directories of live sessions whose PR lookup is missing or stale.
@@ -162,11 +229,12 @@ impl Store {
     }
 
     pub fn refresh(&mut self, now_ms: u64) -> Vec<Card> {
-        if self.events.file_len() > self.compact_threshold_bytes {
+        if self.events.file_len() > self.compact_threshold_bytes || self.codex_events.file_len() > self.compact_threshold_bytes {
             self.compact_events();
         }
         let default_1m = self.default_window_is_1m();
         let _ = self.events.read_new();
+        let _ = self.codex_events.read_new();
         self.refresh_foreign();
         let sessions = self.registry();
         let mut cards = Vec::with_capacity(sessions.len() + self.foreign.len());
@@ -189,7 +257,10 @@ impl Store {
         self.tails.retain(&paths);
         let timeout = self.config.completed_timeout_ms();
         for s in self.foreign.values() {
-            let tail = foreign::tail_for(s);
+            let mut tail = foreign::tail_for(s);
+            if s.harness == Harness::Codex {
+                crate::codex_hooks::apply(&mut tail, self.codex_events.events_for(&s.session_id));
+            }
             let mut card = foreign::derive(s, &tail, now_ms, timeout);
             card.pr = self.prs.get(&s.cwd);
             cards.push(card);
@@ -205,6 +276,32 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replies_maya_sent_are_remembered_per_session_and_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::new(dir.path().to_path_buf());
+        store.note_sent("a", "  hello
+");
+        assert!(store.was_sent("a", "hello"));
+        assert!(!store.was_sent("b", "hello"), "per session");
+        assert!(!store.was_sent("a", "hell"));
+        for i in 0..SENT_KEPT {
+            store.note_sent("a", &i.to_string());
+        }
+        assert!(!store.was_sent("a", "hello"), "the oldest goes once more than {SENT_KEPT} are kept");
+        assert!(store.was_sent("a", "0"));
+        // A restarted Maya still knows them, from hashes rather than the text.
+        let again = Store::new(dir.path().to_path_buf());
+        assert!(again.was_sent("a", "0") && again.was_sent("a", &(SENT_KEPT - 1).to_string()));
+        assert!(!again.was_sent("a", "hello"));
+        let saved = std::fs::read_to_string(dir.path().join("maya/sent/a.json")).unwrap();
+        assert!(!saved.contains("\"0\""), "no reply text on disk: {saved}");
+        // An id that is not a file name is remembered for this run only.
+        store.note_sent("../x", "hi");
+        assert!(store.was_sent("../x", "hi"));
+        assert!(!dir.path().join("maya/x.json").exists());
+    }
     use crate::model::State;
 
     #[test]
@@ -306,6 +403,14 @@ mod tests {
         assert!(store.foreign("aaa").is_some());
         assert_eq!(store.live_session_ids(), vec!["aaa".to_string()]);
         assert_eq!(store.card_for("aaa", 1_790_671_680_000).unwrap().session_id, "aaa");
+        crate::hook_install::append_record_named(&store.claude_dir.join("maya"), "codex-events.jsonl",
+            r#"{"session_id":"aaa","hook_event_name":"PermissionRequest","tool_input":{"command":"cargo test"}}"#, 1_800_000_000_000).unwrap();
+        let card = store.card_for("aaa", 1_800_000_000_001).unwrap();
+        assert_eq!(card.state, State::Awaiting);
+        assert_eq!(card.awaiting.unwrap().detail, "Approve: cargo test");
+        crate::hook_install::append_record_named(&store.claude_dir.join("maya"), "codex-events.jsonl",
+            r#"{"session_id":"aaa","hook_event_name":"Stop"}"#, 1_800_000_000_002).unwrap();
+        assert_eq!(store.card_for("aaa", 1_800_000_000_003).unwrap().state, State::Completed);
     }
 
     #[test]

@@ -51,7 +51,7 @@ pub fn title_from(text: &str) -> Option<String> {
 }
 
 fn store_for(claude_dir: &Path, dir: &str) -> PathBuf {
-    claude_dir.join("projects").join(dir.replace('/', "-"))
+    claude_dir.join("projects").join(crate::registry::project_dir_name(dir))
 }
 
 fn head_and_tail(path: &Path) -> String {
@@ -90,7 +90,7 @@ pub fn list_sessions(claude_dir: &Path, dir: &str, running_ids: &[String]) -> Ve
 /// True when `id` names a transcript of `dir` (ids are file stems, so a
 /// path-like id never matches).
 pub fn transcript_exists(claude_dir: &Path, dir: &str, id: &str) -> bool {
-    !id.contains('/') && !id.contains("..") && store_for(claude_dir, dir).join(format!("{id}.jsonl")).is_file()
+    !id.contains(['/', '\\']) && !id.contains("..") && store_for(claude_dir, dir).join(format!("{id}.jsonl")).is_file()
 }
 
 /// The shell line that resumes `id` inside `dir`.
@@ -122,7 +122,7 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, body).unwrap();
         let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
-        std::fs::File::open(&p).unwrap().set_modified(when).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&p).unwrap().set_modified(when).unwrap();
     }
 
     #[test]

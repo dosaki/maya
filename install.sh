@@ -15,7 +15,8 @@ fail() { printf 'maya install: %s\n' "$1" >&2; exit 1; }
 os="$(uname -s)"
 case "$os" in
   Darwin) ;;
-  Linux) fail "Linux is not supported yet; only macOS builds are published today." ;;
+  Linux) fail "Linux is not supported yet; only macOS and Windows builds are published today." ;;
+  MINGW*|MSYS*|CYGWIN*) fail "on Windows, install from PowerShell: irm https://raw.githubusercontent.com/dosaki/maya/main/install.ps1 | iex" ;;
   *) fail "unsupported platform: $os" ;;
 esac
 

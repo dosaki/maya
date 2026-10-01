@@ -10,6 +10,7 @@ import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
 import { harnessBadge } from "./harness";
 import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, remoteTitle, type Card, type Turn } from "./types";
+import { sendShortcut } from "./platform";
 
 export interface ModalModel {
   card: Card;
@@ -244,8 +245,8 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const form = el("div", "modal__composer");
     const ta = el("textarea", "modal__input");
     ta.placeholder = claude
-      ? "Message this session… (⌘↵ to send, paste or drop files to attach)"
-      : "Message this session… (⌘↵ to send; typed into its terminal as one line)";
+      ? `Message this session… (${sendShortcut()} to send, paste or drop files to attach)`
+      : `Message this session… (${sendShortcut()} to send; typed into its terminal as one line)`;
     ta.value = m.draft;
     ta.rows = 3;
     const trySend = () => {

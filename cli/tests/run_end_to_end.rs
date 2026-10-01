@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! `maya run` against a real main on localhost: pair, connect, show the
 //! board, run a command through the terminal, reply into the session's
 //! inbox socket, stop cleanly on a signal.

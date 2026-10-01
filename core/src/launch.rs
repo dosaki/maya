@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 pub const CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(90);
@@ -107,7 +107,24 @@ pub const LOGIN_SHELL: &str = "zsh";
 #[cfg(not(target_os = "macos"))]
 pub const LOGIN_SHELL: &str = "sh";
 
+/// The first file named `name` plus one of `PATHEXT`'s extensions (or
+/// `name` itself when it has one) in one of `path`'s folders.
+#[cfg(windows)]
+pub fn find_on_path(path: &str, name: &str) -> Option<PathBuf> {
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    let candidates: Vec<String> = if Path::new(name).extension().is_some() {
+        vec![name.to_string()]
+    } else {
+        exts.split(';').filter(|e| !e.is_empty()).map(|e| format!("{name}{}", e.to_ascii_lowercase())).collect()
+    };
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| candidates.iter().map(move |c| dir.join(c)))
+        .find(|p| std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false))
+}
+
 /// The first executable file named `name` in one of `path`'s folders.
+#[cfg(unix)]
 pub fn find_on_path(path: &str, name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     std::env::split_paths(path)
@@ -116,8 +133,38 @@ pub fn find_on_path(path: &str, name: &str) -> Option<PathBuf> {
         .find(|p| std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false))
 }
 
+/// Git for Windows' `bash.exe`, which Claude Code itself needs on Windows
+/// and which runs Maya's shell lines there: `CLAUDE_CODE_GIT_BASH_PATH`,
+/// the usual install folders, then beside the `git` on PATH.
+#[cfg(windows)]
+pub fn git_bash() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CLAUDE_CODE_GIT_BASH_PATH").map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let program_files = [std::env::var_os("ProgramFiles"), std::env::var_os("ProgramFiles(x86)"), std::env::var_os("LOCALAPPDATA").map(|l| Path::new(&l).join("Programs").into_os_string())];
+    if let Some(p) = program_files.into_iter().flatten().map(|d| Path::new(&d).join("Git").join("bin").join("bash.exe")).find(|p| p.is_file()) {
+        return Some(p);
+    }
+    // git.exe lives in <Git>\cmd; bash.exe in <Git>in.
+    let git = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, "git.exe"))?;
+    Some(git.parent()?.parent()?.join("bin").join("bash.exe")).filter(|p| p.is_file())
+}
+
+/// The native `claude.exe`: from this process's PATH, then where the
+/// installer puts it. npm's `claude.cmd` is passed over: Windows cannot hand
+/// a batch file the multi-line prompts Maya sends.
+#[cfg(windows)]
+pub fn claude_binary() -> Option<PathBuf> {
+    if let Some(p) = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, "claude.exe")) {
+        return Some(p);
+    }
+    let home = dirs::home_dir()?;
+    Some(home.join(".local").join("bin").join("claude.exe")).filter(|p| p.is_file())
+}
+
 /// The `claude` binary: from this process's PATH, then the usual install
 /// locations, then the login shell's PATH.
+#[cfg(unix)]
 pub fn claude_binary() -> Option<PathBuf> {
     if let Some(p) = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, "claude")) {
         return Some(p);
@@ -127,7 +174,7 @@ pub fn claude_binary() -> Option<PathBuf> {
     if let Some(p) = candidates.iter().find(|p| p.is_file()) {
         return Some(p.clone());
     }
-    let out = Command::new(LOGIN_SHELL).args(["-lc", "command -v claude"]).output().ok()?;
+    let out = crate::command(LOGIN_SHELL).args(["-lc", "command -v claude"]).output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if out.status.success() && !s.is_empty() {
         Some(PathBuf::from(s))
@@ -138,7 +185,7 @@ pub fn claude_binary() -> Option<PathBuf> {
 
 /// Runs the headless picker; None on NONE, no match, timeout or any error.
 pub fn classify(binary: &Path, root: &Path, user_prompt: &str, dirs: &[String], timeout: Duration) -> Option<String> {
-    let mut child = Command::new(binary)
+    let mut child = crate::command(binary)
         .args(["-p", "--strict-mcp-config", "--disable-slash-commands", "--model", "haiku", "--output-format", "text", "--no-session-persistence", "--max-turns", "1"])
         .arg(classifier_prompt(user_prompt, dirs))
         .current_dir(root)
@@ -252,12 +299,23 @@ pub fn resolve_target(root: &Path, dirs: &[String], dir: Option<&str>, picked: O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     fn dirs() -> Vec<String> {
         vec!["a".into(), "b".into(), "sonarqube".into()]
     }
 
+    /// A `claude.cmd` running `body`.
+    #[cfg(windows)]
+    fn fake_binary(dir: &Path, body: &str) -> PathBuf {
+        let p = dir.join("claude.cmd");
+        std::fs::write(&p, format!("@echo off\r\n{body}\r\n")).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
     fn fake_binary(dir: &Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join("claude");
@@ -379,6 +437,9 @@ mod tests {
         assert!(!s.contains("activate"), "activation happens via AppKit, not AppleScript");
     }
 
+    // A fake claude on Windows is a batch file, which cannot take the
+    // classifier's multi-line prompt; the real one is claude.exe.
+    #[cfg(unix)]
     #[test]
     fn classify_uses_the_reply_and_ignores_none() {
         let t = tempfile::tempdir().unwrap();
@@ -388,6 +449,7 @@ mod tests {
         assert_eq!(classify(&bin, t.path(), "p", &dirs(), Duration::from_secs(5)), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn classify_times_out_and_falls_back() {
         let t = tempfile::tempdir().unwrap();
@@ -405,7 +467,7 @@ mod tests {
         let old = prompts.join("1.txt");
         std::fs::write(&old, "old").unwrap();
         let stale = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 3600);
-        std::fs::File::open(&old).unwrap().set_modified(stale).unwrap();
+        std::fs::OpenOptions::new().write(true).open(&old).unwrap().set_modified(stale).unwrap();
         let fresh = prompts.join("2.txt");
         std::fs::write(&fresh, "fresh").unwrap();
 

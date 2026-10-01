@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { showToast } from "./toast";
+import { sendShortcut, thisComputer } from "./platform";
 
 /** Choices for a new `claude` session; "" means "use the defaults". */
 export interface SessionOptions {
@@ -176,7 +177,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   const ta = el("textarea", "modal__input");
   ta.name = "prompt";
   ta.rows = 5;
-  ta.placeholder = "What should this session do? (⌘↵ to start)";
+  ta.placeholder = `What should this session do? (${sendShortcut()} to start)`;
   ta.value = m.prompt;
   promptLabel.append(ta);
 
@@ -342,7 +343,7 @@ export async function openNewSession(): Promise<void> {
     if (e.key === "Escape") closeNewSession();
   };
   current = {
-    model: { dirs: [], dir: null, prompt: draft, options: { ...lastOptions }, status: null, busy: false, needsSetup: false, machines: [{ name: "This Mac", value: "" }], machine: "" },
+    model: { dirs: [], dir: null, prompt: draft, options: { ...lastOptions }, status: null, busy: false, needsSetup: false, machines: [{ name: thisComputer(), value: "" }], machine: "" },
     keyHandler,
   };
   document.addEventListener("keydown", keyHandler);
@@ -350,7 +351,7 @@ export async function openNewSession(): Promise<void> {
   void invoke<{ name: string; hostname: string; platform: string; connected: boolean }[]>("list_machines")
     .then((machines) => {
       if (!current) return;
-      current.model.machines = [{ name: "This Mac", value: "" }, ...machines.filter((m) => m.connected).map((m) => ({ name: m.name, value: m.name }))];
+      current.model.machines = [{ name: thisComputer(), value: "" }, ...machines.filter((m) => m.connected).map((m) => ({ name: m.name, value: m.name }))];
       paint();
     })
     .catch(() => undefined);

@@ -137,7 +137,7 @@ impl Default for Config {
             listen: false,
             microphone: None,
             interpreter_model: "haiku".into(),
-            recognizer: Recognizer::System,
+            recognizer: if cfg!(windows) { Recognizer::Builtin } else { Recognizer::System },
             whisper_model: DEFAULT_MODEL.into(),
             network: NetworkConfig::default(),
         }
@@ -190,7 +190,18 @@ pub fn expand_home(s: &str) -> PathBuf {
 
 /// Missing or unreadable file gives `Config::default()`.
 pub fn load(path: &Path) -> Config {
-    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Config>(&t).ok()).unwrap_or_default().for_this_platform()
+}
+
+impl Config {
+    /// This config as this platform can run it: Windows has no system
+    /// recogniser, so the listener there always runs the built-in one.
+    pub fn for_this_platform(mut self) -> Config {
+        if cfg!(windows) {
+            self.recognizer = Recognizer::Builtin;
+        }
+        self
+    }
 }
 
 /// Writes the config readable by its owner only: it holds the network token.
@@ -204,6 +215,7 @@ pub fn save(path: &Path, config: &Config) -> Result<(), String> {
 
 /// Writes `bytes` to `path` with mode 0600: created that way, and an
 /// existing file's mode is tightened before it is written.
+#[cfg(unix)]
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -212,10 +224,19 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     f.write_all(bytes)
 }
 
+/// Writes `bytes` to `path`. On Windows the file inherits the ACL of its
+/// folder under the user's profile, which only the user (and SYSTEM and
+/// administrators) can read.
+#[cfg(windows)]
+pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn save_leaves_the_config_readable_by_its_owner_only() {
         use std::os::unix::fs::PermissionsExt;
@@ -307,13 +328,23 @@ mod tests {
 
     #[test]
     fn recogniser_defaults_to_system_and_round_trips() {
-        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5}"#).unwrap();
-        assert_eq!(c.recognizer, Recognizer::System);
+        let c: Config = serde_json::from_str::<Config>(r#"{"completedTimeoutMinutes": 5}"#).unwrap().for_this_platform();
+        assert_eq!(c.recognizer, if cfg!(windows) { Recognizer::Builtin } else { Recognizer::System });
         assert_eq!(c.whisper_model, "base.en-q5_1");
         let c = Config { recognizer: Recognizer::Builtin, whisper_model: "tiny.en".into(), ..Default::default() };
         let text = serde_json::to_string(&c).unwrap();
         assert!(text.contains("\"recognizer\":\"builtin\""));
         assert!(text.contains("\"whisperModel\":\"tiny.en\""));
+    }
+
+    #[test]
+    fn windows_always_runs_the_built_in_recogniser() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.json");
+        save(&p, &Config { recognizer: Recognizer::System, ..Default::default() }).unwrap();
+        let expected = if cfg!(windows) { Recognizer::Builtin } else { Recognizer::System };
+        assert_eq!(load(&p).recognizer, expected);
+        assert_eq!(Config { recognizer: Recognizer::System, ..Default::default() }.for_this_platform().recognizer, expected);
     }
 
     #[test]

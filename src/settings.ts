@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
+import { builtinVoiceName, isWindows, recognizerOptions, secretStore } from "./platform";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -46,6 +47,7 @@ const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assista
 
 export interface SettingsModel {
   hookInstalled: boolean | null;
+  codexHookInstalled?: boolean | null;
   completedTimeoutMinutes: number;
   projectsDir: string;
   clonesDir: string;
@@ -106,6 +108,8 @@ export type Recognizer = "system" | "builtin";
 
 export interface SettingsHandlers {
   onInstall(): void;
+  onCodexInstall?(): void;
+  onCodexRemove?(): void;
   onRemove(): void;
   onTimeout(minutes: number): void;
   onProjectsDir(path: string): void;
@@ -278,7 +282,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   status.className = "settings__status";
   status.textContent =
     model.hookInstalled === null
-      ? "Checking hook…"
+      ? "Checking Claude Code hook…"
       : model.hookInstalled
         ? "Claude Code hook is installed. Awaiting Decision and Completed are precise."
         : "Claude Code hook is not installed. Permission prompts will show as Working.";
@@ -288,15 +292,30 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   btn.type = "button";
   if (model.hookInstalled) {
     btn.dataset.action = "remove";
-    btn.textContent = "Remove hook";
+    btn.textContent = "Remove Claude hook";
     btn.addEventListener("click", () => h.onRemove());
   } else {
     btn.dataset.action = "install";
-    btn.textContent = "Install hook";
+    btn.textContent = "Install Claude hook";
     btn.disabled = model.hookInstalled === null;
     btn.addEventListener("click", () => h.onInstall());
   }
   sessions.append(btn);
+
+  const codexStatus = document.createElement("div");
+  codexStatus.className = "settings__status";
+  codexStatus.textContent = model.codexHookInstalled == null
+    ? "Checking Codex hook…"
+    : model.codexHookInstalled
+      ? "Codex hook is installed. Restart Codex and use /hooks to review and trust it for session updates."
+      : "Codex hook is not installed. Session state is inferred from transcripts.";
+  const codexButton = document.createElement("button");
+  codexButton.type = "button";
+  codexButton.dataset.action = model.codexHookInstalled ? "remove-codex" : "install-codex";
+  codexButton.textContent = model.codexHookInstalled ? "Remove Codex hook" : "Install Codex hook";
+  codexButton.disabled = model.codexHookInstalled == null;
+  codexButton.addEventListener("click", () => model.codexHookInstalled ? h.onCodexRemove?.() : h.onCodexInstall?.());
+  sessions.append(codexStatus, codexButton);
 
   const label = document.createElement("label");
   label.textContent = "Completed decays to Idle after (minutes)";
@@ -390,7 +409,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   recLabel.textContent = "Speech recognition";
   const rec = document.createElement("select");
   rec.name = "recognizer";
-  for (const [v, text] of [["system", "System (Apple)"], ["builtin", "Built-in (Whisper, runs on this Mac)"]] as const) {
+  for (const [v, text] of recognizerOptions()) {
     const o = document.createElement("option");
     o.value = v;
     o.textContent = text;
@@ -438,7 +457,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       if (!model.downloading) {
         const hint = document.createElement("div");
         hint.className = "settings__hint";
-        hint.textContent = "Download the model once; it stays on this Mac.";
+        hint.textContent = `Download the model once; it stays on ${isWindows() ? "this PC" : "this Mac"}.`;
         row.append(hint);
       }
     }
@@ -514,7 +533,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   providerLabel.textContent = "Voice";
   const provider = document.createElement("select");
   provider.name = "voiceProvider";
-  for (const [v, text] of [["builtin", "Samantha (built in)"], ["elevenlabs", "ElevenLabs"]] as const) {
+  for (const [v, text] of [["builtin", `${builtinVoiceName()} (built in)`], ["elevenlabs", "ElevenLabs"]] as const) {
     const o = document.createElement("option");
     o.value = v;
     o.textContent = text;
@@ -531,7 +550,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const key = document.createElement("input");
     key.type = "password";
     key.name = "elevenKey";
-    key.placeholder = model.elevenKeySet ? "saved in Keychain; paste to replace" : "paste your key";
+    key.placeholder = model.elevenKeySet ? `saved in ${secretStore()}; paste to replace` : "paste your key";
     key.autocomplete = "off";
     key.addEventListener("change", () => {
       const k = key.value.trim();
@@ -877,6 +896,8 @@ export async function initSettings(): Promise<void> {
   };
 
   const handlers: SettingsHandlers = {
+    onCodexInstall: () => void run(async () => { model.codexHookInstalled = await invoke<boolean>("install_codex_hook"); }),
+    onCodexRemove: () => void run(async () => { model.codexHookInstalled = await invoke<boolean>("remove_codex_hook"); }),
     onInstall: () => void run(async () => { model.hookInstalled = await invoke<boolean>("install_hook"); }),
     onRemove: () => void run(async () => { model.hookInstalled = await invoke<boolean>("remove_hook"); }),
     onTimeout: (minutes) => void run(() => saveConfig({ completedTimeoutMinutes: minutes })),
@@ -1012,8 +1033,13 @@ export async function initSettings(): Promise<void> {
   });
 
   await run(async () => {
-    const [installed, config] = await Promise.all([invoke<boolean>("hook_status"), invoke<ConfigJson>("get_config")]);
+    // An unreadable ~/.codex/hooks.json must not keep the rest of Settings
+    // from loading: the Codex hook then shows as not installed, and
+    // installing it reports what is wrong with the file.
+    const codexStatus = invoke<boolean>("codex_hook_status").catch(() => false);
+    const [installed, config, codexInstalled] = await Promise.all([invoke<boolean>("hook_status"), invoke<ConfigJson>("get_config"), codexStatus]);
     model.hookInstalled = installed;
+    model.codexHookInstalled = codexInstalled;
     model.completedTimeoutMinutes = config.completedTimeoutMinutes;
     model.projectsDir = config.projectsDir ?? "";
     model.clonesDir = config.clonesDir ?? "";

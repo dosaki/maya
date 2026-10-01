@@ -58,7 +58,18 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String>
         let socket = s.messaging_socket_path.clone().ok_or("This session has no inbox. Use the terminal.")?;
         (socket, s.pid)
     };
-    inbox::send(Path::new(&socket), pid, text)
+    let result = inbox::send(Path::new(&socket), pid, text);
+    if result.is_ok() {
+        l.store.lock().unwrap().note_sent(session_id, text);
+    }
+    crate::log::line(
+        "reply",
+        match &result {
+            Ok(()) => format!("sent {} characters to {session_id} (pid {pid}) at {socket}", text.chars().count()),
+            Err(e) => format!("could not send to {session_id} (pid {pid}) at {socket}: {e}"),
+        },
+    );
+    result
 }
 
 /// Picks `option` of `question` in the session's open ask `ask_id`.
@@ -127,7 +138,15 @@ pub fn session_history(l: &Local, session_id: &str) -> Result<Vec<transcript::Tu
     };
     match foreign {
         Some(f) => Ok(foreign::turns_for(&f, 30)),
-        None => Ok(transcript::read_turns(&path, 30)),
+        None => {
+            // What Maya sent arrives as a message from another session: it is the user's.
+            let mut turns = transcript::read_turns(&path, 30);
+            let store = l.store.lock().unwrap();
+            for t in turns.iter_mut().filter(|t| t.kind == transcript::TurnKind::Peer && store.was_sent(session_id, &t.text)) {
+                t.kind = transcript::TurnKind::User;
+            }
+            Ok(turns)
+        }
     }
 }
 

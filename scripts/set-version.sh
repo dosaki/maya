@@ -8,12 +8,14 @@ case "$v" in
   [0-9]*.[0-9]*.[0-9]*) ;;
   *) echo "usage: sh scripts/set-version.sh <major.minor.patch>" >&2; exit 1 ;;
 esac
-sed -i '' -E "s/^(  \"version\": \")[^\"]+(\",)$/\1$v\2/" package.json src-tauri/tauri.conf.json
+# `-i.bak` works with both BSD (macOS) and GNU (Linux, Git Bash) sed.
+sed -i.bak -E "s/^(  \"version\": \")[^\"]+(\",)$/\1$v\2/" package.json src-tauri/tauri.conf.json
 # The workspace root carries the version; every crate inherits it.
-sed -i '' -E "s/^(version = \")[^\"]+(\")$/\1$v\2/" Cargo.toml
-# Cargo.lock records the crates' own versions too.
+sed -i.bak -E "s/^(version = \")[^\"]+(\")$/\1$v\2/" Cargo.toml
+rm -f package.json.bak src-tauri/tauri.conf.json.bak Cargo.toml.bak
+# Cargo.lock records the crates' own versions too: every workspace member.
 if [ -f Cargo.lock ]; then
-  cargo update -p maya -p maya-core --offline >/dev/null 2>&1 || cargo generate-lockfile --offline >/dev/null 2>&1 || true
+  cargo update --workspace --offline >/dev/null 2>&1 || cargo generate-lockfile --offline >/dev/null 2>&1 || true
 fi
 grep -H '"version"' package.json src-tauri/tauri.conf.json
 grep -H '^version' Cargo.toml
