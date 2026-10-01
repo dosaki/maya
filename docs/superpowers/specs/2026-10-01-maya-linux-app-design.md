@@ -54,12 +54,13 @@ Decisions taken during design:
   inbox, and refuses typing with `This session is not in tmux; only
   replies reach it.`
 - **Terminal button**: for a card whose session is in tmux, Maya looks up
-  the window it opened for that label; if it is still open it activates it
-  (on Wayland through an activation token the app requests from GTK, on
-  X11 through the same GTK call, which raises directly); if that fails or
-  there is no record it opens a fresh attached window, which the desktop
-  focuses because Maya launched it. A session outside tmux has no Terminal
-  button (as remote cards today).
+  the window it opened for that label; if there is one it raises it by
+  title with `wmctrl -a <label>`, which works on X11 and for XWayland
+  terminals. If there is no record or that fails (a native Wayland
+  terminal, or `wmctrl` missing) it opens a fresh attached window, which
+  the desktop focuses because Maya launched it; on pure Wayland the button
+  therefore opens a new attached window each time. A session outside tmux
+  has no Terminal button (as remote cards today).
 - **Focus by pid** (the review cards) resolves the pid's tty, then the tmux
   pane, then the same rule.
 
@@ -88,7 +89,7 @@ Decisions taken during design:
   of them the Settings "Try" button shows `No audio player found: install
   pulseaudio-utils.`
 - The Settings page names the store "GNOME Keyring" and the built-in
-  voice "speech-dispatcher's voice".
+  voice "speech-dispatcher (built in)".
 
 ### Voice assistant
 
@@ -121,7 +122,8 @@ Decisions taken during design:
 - `platform.ts` gains `isLinux()` (WebKitGTK's user agent contains
   `Linux` and not `Android`): `thisComputer()` → "This computer",
   `sendShortcut()` → "Ctrl+Enter", `builtinVoiceName()` →
-  "speech-dispatcher", `secretStore()` → "GNOME Keyring",
+  "speech-dispatcher" (the voice menu shows "speech-dispatcher (built
+  in)"), `secretStore()` → "GNOME Keyring",
   `recognizerOptions()` → Whisper only.
 
 ### Packaging, install, release
