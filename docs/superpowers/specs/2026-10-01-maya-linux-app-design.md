@@ -189,8 +189,11 @@ Decisions taken during design:
   `cfg(any(windows, target_os = "linux"))`; `Cargo.toml` target
   dependencies likewise; `main.rs`'s module is renamed `ear`; the
   non-Linux-non-Windows stub stays for macOS. `scripts/build-ear.sh`
-  handles `*-unknown-linux-gnu`: `cargo build --release -p maya-ear -p
-  maya-hook` and copies both as `src-tauri/binaries/<name>-<triple>`.
+  handles `*-unknown-linux-gnu`: `GGML_NATIVE=OFF cargo build --release
+  -p maya-ear -p maya-hook` (whisper.cpp otherwise tunes for the build
+  machine's CPU, and CI's arm64 runner has SVE2; the Windows branch sets it
+  too, and CI's cache key changes with it because whisper-rs-sys does not
+  rebuild on that variable) and copies both as `src-tauri/binaries/<name>-<triple>`.
   `scripts/test-ear.sh` runs `cargo test -p maya-ear` on Linux.
 - **`src/platform.ts`**: `isLinux()` and the five functions above;
   `settings.ts` hints use `thisComputer()` where they say "this PC".

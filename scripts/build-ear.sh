@@ -10,7 +10,10 @@ case "$target" in
     # Windows: the Rust ear (whisper.cpp built in) and the hook, named the
     # way Tauri looks for sidecars.
     mkdir -p src-tauri/binaries
-    cargo build --release --target "$target" -p maya-ear -p maya-hook
+    # whisper.cpp tunes for the build machine's CPU by default; a release
+    # must run on any CPU of the architecture (whisper-rs-sys passes
+    # GGML_* on to CMake).
+    GGML_NATIVE=OFF cargo build --release --target "$target" -p maya-ear -p maya-hook
     for bin in maya-ear maya-hook; do
       cp "target/$target/release/$bin.exe" "src-tauri/binaries/$bin-$target.exe"
       echo "built src-tauri/binaries/$bin-$target.exe"
@@ -18,7 +21,9 @@ case "$target" in
     exit 0 ;;
   *-unknown-linux-gnu)
     mkdir -p src-tauri/binaries
-    cargo build --release --target "$target" -p maya-ear -p maya-hook
+    # Not -march=native/-mcpu=native: CI's arm64 runner has SVE2, and an
+    # ear built for it would die with SIGILL on CPUs without it.
+    GGML_NATIVE=OFF cargo build --release --target "$target" -p maya-ear -p maya-hook
     for bin in maya-ear maya-hook; do
       cp "target/$target/release/$bin" "src-tauri/binaries/$bin-$target"
       echo "built src-tauri/binaries/$bin-$target"

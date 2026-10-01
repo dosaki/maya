@@ -97,6 +97,10 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: .
+          # whisper-rs-sys does not rebuild when GGML_NATIVE changes, so a
+          # cache from before scripts/build-ear.sh set it would keep a
+          # whisper.cpp tuned for the runner's CPU.
+          key: ggml-portable
       - name: Install the GTK, audio and desktop tools
         run: |
           sudo apt-get update
@@ -169,6 +173,10 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: .
+          # whisper-rs-sys does not rebuild when GGML_NATIVE changes, so a
+          # cache from before scripts/build-ear.sh set it would keep a
+          # whisper.cpp tuned for the runner's CPU.
+          key: ggml-portable
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       # maya-ear (whisper.cpp built in) and maya-hook, as Tauri sidecars.
