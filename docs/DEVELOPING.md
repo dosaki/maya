@@ -85,8 +85,9 @@ What is different on Windows, and where:
   --example transcribe -- <model.bin> <file.wav>` runs a WAV through it.
 
 The release workflow's `windows` job runs these tests on every push and
-pull request, and on a release push builds the installers and hands them
-to the `macos` job as the `windows-installers` artifact.
+pull request, and builds the installers on every pull request and every
+release push; a release hands them to the `macos` job as the
+`windows-installers` artifact.
 
 ## The CLI
 
@@ -100,15 +101,20 @@ it also builds and tests on Linux. The release workflow's `linux` job runs
 first, on every pull request to `main` and every push to it, once per
 architecture (an x86_64 runner and an `ubuntu-24.04-arm` runner): it runs
 `cargo test -p maya-core -p maya-cli` on Ubuntu (with tmux installed) —
-the guard that keeps `maya_core` free of macOS-only code. On a release
-push each leg also builds `maya-cli` natively for its musl target
-(`musl-tools`, no cross-compilation container) and hands the binary to
-the `macos` job as the `linux-binaries-<arch>` artifact.
-The `macos` job runs on pushes only and after `linux` succeeds; it tests
-the whole workspace, builds the app and the macOS binaries, and creates
-the release with every asset at once, so a failed Linux build publishes
-nothing. Both jobs decide whether to release with
-`scripts/release-version.sh`.
+the guard that keeps `maya_core` free of macOS-only code. On a pull
+request or a release push each leg also builds `maya-cli` natively for
+its musl target (`musl-tools`, no cross-compilation container); a release
+hands the binary to the `macos` job as the `linux-binaries-<arch>`
+artifact. The `macos` job runs after `linux` and `windows` succeed; it
+tests the whole workspace and builds both apps and the macOS binaries,
+and on a release push signs them and creates the release with every
+asset at once, so a failed build on any platform publishes nothing.
+
+So a pull request to `main` builds everything a release would, on all
+three platforms, and publishes nothing. Every job decides what to do with
+`scripts/ci-version.sh`: `release=true` only for a push to `main` whose
+version has no release yet (`scripts/release-version.sh`), `build=true`
+for that and for every pull request.
 
 ## Layout
 
@@ -162,9 +168,9 @@ release version; bump it everywhere, commit and push to `main`:
 The workflow publishes `v0.2.0` for both architectures, with notes generated
 from the merged pull requests and commits. A push whose version already has
 a release only runs the tests; a mismatch between `tauri.conf.json`,
-`package.json` and `Cargo.toml` fails the run. A pull request runs the
-Linux and Windows tests; the macOS job runs on pushes to `main` only.
-Pull requests bump the version themselves: see the rule in
+`package.json` and `Cargo.toml` fails the run, a pull request's too. A
+pull request runs every test and build on Linux, Windows and macOS, and
+publishes nothing. Pull requests bump the version themselves: see the rule in
 [CLAUDE.md](../CLAUDE.md).
 
 ## Signing

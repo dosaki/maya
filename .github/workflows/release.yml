@@ -17,9 +17,9 @@ concurrency:
 
 jobs:
   # Runs first, on pushes and pull requests alike: the tests that keep
-  # maya_core and the CLI portable. On a release push it also builds the
-  # Linux binary for its architecture and hands it to the macOS job, which
-  # publishes the release only once both exist, so no release ever lacks them.
+  # maya_core and the CLI portable, then (on a pull request or a release
+  # push) the Linux binary for its architecture. A release hands it to the
+  # macOS job, which publishes the release only once every binary exists.
   linux:
     name: Test core and CLI, build Linux binaries (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -49,16 +49,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux musl-tools
       - name: Test core and the CLI on Linux
         run: cargo test -p maya-core -p maya-cli
+      # version=, release= (a push to main whose version has no release yet)
+      # and build= (a release, or any pull request: a pull request builds
+      # everything and publishes nothing).
       - name: Read version
         id: version
-        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: sh scripts/release-version.sh >> "$GITHUB_OUTPUT"
+          EVENT: ${{ github.event_name }}
+        run: sh scripts/ci-version.sh >> "$GITHUB_OUTPUT"
       # Each architecture builds on its own runner, so no cross-compilation
       # container is involved (the cross-rs images lag the toolchain).
       - name: Build the Linux binary
-        if: steps.version.outputs.release == 'true'
+        if: steps.version.outputs.build == 'true'
         run: |
           set -euo pipefail
           cargo build -p maya-cli --release --target ${{ matrix.target }}
@@ -66,7 +69,7 @@ jobs:
           cp target/${{ matrix.target }}/release/maya-cli dist-linux/maya-linux-${{ matrix.arch }}
           ./dist-linux/maya-linux-${{ matrix.arch }} --version
       - name: Hand the binary to the macOS job
-        if: steps.version.outputs.release == 'true'
+        if: steps.version.outputs.build == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: linux-binaries-${{ matrix.arch }}
@@ -74,8 +77,8 @@ jobs:
           if-no-files-found: error
 
   # Runs alongside the linux job, on pushes and pull requests alike: the
-  # Windows port's tests. On a release push it also builds the installers
-  # and hands them to the macOS job, which publishes the release.
+  # Windows port's tests, then (on a pull request or a release push) the
+  # installers. A release hands them to the macOS job, which publishes it.
   windows:
     name: Test and build (Windows)
     runs-on: windows-latest
@@ -115,17 +118,20 @@ jobs:
           pnpm test
           cargo test -p maya-core -p maya-hook -p maya-ear -p maya
 
+      # version=, release= (a push to main whose version has no release yet)
+      # and build= (a release, or any pull request: a pull request builds
+      # everything and publishes nothing).
       - name: Read version
         id: version
-        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: sh scripts/release-version.sh >> "$GITHUB_OUTPUT"
+          EVENT: ${{ github.event_name }}
+        run: sh scripts/ci-version.sh >> "$GITHUB_OUTPUT"
 
       # The installers are not Authenticode-signed yet, so SmartScreen warns
       # on first run.
       - name: Build the installers
-        if: steps.version.outputs.release == 'true'
+        if: steps.version.outputs.build == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -137,7 +143,7 @@ jobs:
           ls -la dist-windows
 
       - name: Hand the installers to the macOS job
-        if: steps.version.outputs.release == 'true'
+        if: steps.version.outputs.build == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: windows-installers
@@ -148,10 +154,9 @@ jobs:
     name: Build and release (macOS)
     runs-on: macos-latest
     needs: [linux, windows]
-    # Pushes to main only; pull requests stop at the linux job. The docs
-    # skip is the linux job's.
+    # Pull requests build both apps so a merge is known to build; only a
+    # release push signs and publishes. The docs skip is the linux job's.
     if: >-
-      github.event_name == 'push' &&
       !startsWith(github.event.head_commit.message, 'docs:') &&
       !startsWith(github.event.head_commit.message, 'docs(')
     steps:
@@ -191,11 +196,15 @@ jobs:
       # The version in src-tauri/tauri.conf.json is the release version
       # (`sh scripts/set-version.sh 0.2.0` sets it everywhere). A push whose
       # version already has a release only runs the tests.
+      # version=, release= (a push to main whose version has no release yet)
+      # and build= (a release, or any pull request: a pull request builds
+      # everything and publishes nothing).
       - name: Read version
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
-        run: sh scripts/release-version.sh >> "$GITHUB_OUTPUT"
+          EVENT: ${{ github.event_name }}
+        run: sh scripts/ci-version.sh >> "$GITHUB_OUTPUT"
 
       # With the three APPLE_* secrets set, the certificate goes into a
       # keychain of its own and is marked trusted for code signing (a
@@ -234,15 +243,15 @@ jobs:
           echo "signing as $APPLE_SIGNING_IDENTITY"
 
       - name: Build (Apple Silicon)
-        if: steps.version.outputs.release == 'true'
+        if: steps.version.outputs.build == 'true'
         run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
 
       - name: Build (Intel)
-        if: steps.version.outputs.release == 'true'
+        if: steps.version.outputs.build == 'true'
         run: pnpm tauri build --target x86_64-apple-darwin --bundles app,dmg
 
       - name: Package
-        if: steps.version.outputs.release == 'true'
+        if: steps.version.outputs.build == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
