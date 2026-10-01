@@ -30,7 +30,9 @@ fn read(dir: &Path) -> Result<Value, String> {
 }
 
 pub fn remove(mut value: Value) -> Value {
-    if let Some(hooks) = value["hooks"].as_object_mut() {
+    // `get_mut`, not `value["hooks"]`: indexing inserts a null `hooks`,
+    // which `install` then refuses as not an object.
+    if let Some(hooks) = value.get_mut("hooks").and_then(Value::as_object_mut) {
         for groups in hooks.values_mut() {
             if let Some(groups) = groups.as_array_mut() {
                 for group in groups.iter_mut() {
@@ -107,32 +109,67 @@ pub fn remove_from(dir: &Path) -> Result<bool, String> {
 }
 
 pub fn install_to(dir: &Path) -> Result<bool, String> {
-    let value = read(dir)?;
-    let target_dir = dir.join("maya");
-    std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
-    #[cfg(windows)]
-    let command = {
-        let source = std::env::current_exe()
-            .map_err(|e| e.to_string())?
-            .with_file_name(crate::hook_install::HOOK_EXE);
-        let target = target_dir.join("maya-codex-hook.exe");
-        let bytes =
-            std::fs::read(source).map_err(|e| format!("cannot read Maya's hook helper: {e}"))?;
-        if std::fs::read(&target).ok().as_deref() != Some(bytes.as_slice()) {
-            std::fs::write(&target, bytes).map_err(|e| e.to_string())?;
-        }
-        format!("\"{}\" --codex", target.display())
-    };
-    #[cfg(unix)]
-    let command = {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let exe_dir = exe.parent().ok_or("cannot find Maya's own folder")?;
+        let source = crate::hook_install::hook_source_in(exe_dir).ok_or_else(|| format!("Maya's hook helper ({}) is not next to the app", crate::hook_install::HOOK_EXE))?;
+        install_binary_with(dir, &source)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let value = read(dir)?;
+        let target_dir = dir.join("maya");
+        std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
         use std::os::unix::fs::PermissionsExt;
         let target = target_dir.join("maya-codex-hook.sh");
         let script = crate::hook_install::HOOK_SCRIPT.replace("events.jsonl", "codex-events.jsonl");
         std::fs::write(&target, script).map_err(|e| e.to_string())?;
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| e.to_string())?;
-        format!("'{}'", target.display().to_string().replace('\'', "'\\''"))
-    };
+        let command = format!("'{}'", target.display().to_string().replace('\'', "'\\''"));
+        write(dir, &install(value, &command)?)?;
+        status(dir)
+    }
+}
+
+/// The installed copy of the hook binary, named so the command carries `MARKER`.
+#[cfg(windows)]
+const CODEX_HOOK_EXE: &str = "maya-codex-hook.exe";
+#[cfg(target_os = "linux")]
+const CODEX_HOOK_EXE: &str = "maya-codex-hook";
+
+/// `install_to` with Maya's hook binary taken from `source`: copied into
+/// `dir/maya` (skipped when identical, since a running hook holds it open;
+/// renamed into place on Linux, executable first) and run with `--codex`.
+#[cfg(any(windows, target_os = "linux"))]
+pub fn install_binary_with(dir: &Path, source: &Path) -> Result<bool, String> {
+    let value = read(dir)?;
+    let target_dir = dir.join("maya");
+    std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+    let target = target_dir.join(CODEX_HOOK_EXE);
+    let bytes = std::fs::read(source).map_err(|e| format!("cannot read Maya's hook helper: {e}"))?;
+    if std::fs::read(&target).ok().as_deref() != Some(bytes.as_slice()) {
+        #[cfg(windows)]
+        std::fs::write(&target, &bytes).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let fresh = target_dir.join(format!("{CODEX_HOOK_EXE}.new"));
+            std::fs::write(&fresh, &bytes).map_err(|e| e.to_string())?;
+            std::fs::set_permissions(&fresh, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+            std::fs::rename(&fresh, &target).map_err(|e| e.to_string())?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    #[cfg(windows)]
+    let command = format!("\"{}\" --codex", target.display());
+    #[cfg(unix)]
+    let command = format!("{} --codex", crate::launch::shell_single_quote(&target.to_string_lossy()));
     write(dir, &install(value, &command)?)?;
     status(dir)
 }
@@ -198,6 +235,31 @@ mod tests {
             once
         );
         assert_eq!(remove(once), other);
+        assert_eq!(remove(json!({})), json!({}));
+        assert!(install(json!({}), "maya-codex-hook --codex").unwrap()["hooks"]["Stop"].is_array(), "a Codex without hooks.json yet");
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn the_binary_hook_is_copied_beside_the_config_and_run_with_codex() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("hook-source");
+        std::fs::write(&source, b"first").unwrap();
+        let dir = temp.path().join("codex");
+        assert!(install_binary_with(&dir, &source).unwrap());
+        let target = dir.join("maya").join(CODEX_HOOK_EXE);
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o755);
+        }
+        let commands: Vec<String> = read(&dir).unwrap()["hooks"]["Stop"].as_array().unwrap().iter().map(|g| g["hooks"][0]["command"].as_str().unwrap().to_string()).collect();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].contains(CODEX_HOOK_EXE) && commands[0].ends_with(" --codex"), "{}", commands[0]);
+        std::fs::write(&source, b"second").unwrap();
+        assert!(install_binary_with(&dir, &source).unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"second");
+        assert_eq!(read(&dir).unwrap()["hooks"]["Stop"].as_array().unwrap().len(), 1, "a reinstall replaces, never doubles");
     }
     #[test]
     fn hooks_override_stale_rollouts_and_clear_approvals() {
