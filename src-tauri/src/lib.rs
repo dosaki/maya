@@ -791,6 +791,21 @@ fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String
 }
 
 #[tauri::command(async)]
+fn codex_hook_status() -> Result<bool, String> {
+    maya_core::codex_hooks::status(&maya_core::codex_hooks::dir())
+}
+
+#[tauri::command(async)]
+fn install_codex_hook() -> Result<bool, String> {
+    maya_core::codex_hooks::install_to(&maya_core::codex_hooks::dir())
+}
+
+#[tauri::command(async)]
+fn remove_codex_hook() -> Result<bool, String> {
+    maya_core::codex_hooks::remove_from(&maya_core::codex_hooks::dir())
+}
+
+#[tauri::command(async)]
 fn hook_status(state: TauriState<AppState>) -> Result<bool, String> {
     let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
     hook_install::status(&dir)
@@ -963,6 +978,9 @@ pub fn run() {
             list_resumable_sessions,
             resume_session,
             start_session,
+            codex_hook_status,
+            install_codex_hook,
+            remove_codex_hook,
             hook_status,
             install_hook,
             remove_hook,

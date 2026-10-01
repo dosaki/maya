@@ -68,11 +68,15 @@ pub fn record(payload: &str, received_at: u64) -> Option<String> {
 /// Appends `record(payload)` to `maya_dir/events.jsonl` in one write, so
 /// concurrent hooks never interleave. Errors are the caller's to ignore.
 pub fn append_record(maya_dir: &Path, payload: &str, received_at: u64) -> std::io::Result<()> {
+    append_record_named(maya_dir, "events.jsonl", payload, received_at)
+}
+
+pub fn append_record_named(maya_dir: &Path, filename: &str, payload: &str, received_at: u64) -> std::io::Result<()> {
     use std::io::Write;
     let Some(mut line) = record(payload, received_at) else { return Ok(()) };
     line.push('\n');
     std::fs::create_dir_all(maya_dir)?;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(maya_dir.join("events.jsonl"))?;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(maya_dir.join(filename))?;
     f.write_all(line.as_bytes())
 }
 

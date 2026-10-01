@@ -60,6 +60,18 @@ const handlers = () => ({
 });
 
 describe("renderSettings", () => {
+  it("installs and removes Codex hooks independently of Claude", () => {
+    const h = { ...handlers(), onCodexInstall: vi.fn(), onCodexRemove: vi.fn() };
+    const missing = renderSettings({ ...voiceBase, codexHookInstalled: false }, h);
+    missing.querySelector<HTMLButtonElement>("button[data-action=install-codex]")!.click();
+    expect(h.onCodexInstall).toHaveBeenCalledOnce();
+    expect(h.onInstall).not.toHaveBeenCalled();
+    const installed = renderSettings({ ...voiceBase, codexHookInstalled: true }, h);
+    expect(installed.textContent).toContain("/hooks");
+    installed.querySelector<HTMLButtonElement>("button[data-action=remove-codex]")!.click();
+    expect(h.onCodexRemove).toHaveBeenCalledOnce();
+    expect(h.onRemove).not.toHaveBeenCalled();
+  });
   it("offers install when the hook is missing", () => {
     const h = handlers();
     const el = renderSettings({ hookInstalled: false, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], interpreterModel: "haiku", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);

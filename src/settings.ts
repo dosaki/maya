@@ -47,6 +47,7 @@ const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assista
 
 export interface SettingsModel {
   hookInstalled: boolean | null;
+  codexHookInstalled?: boolean | null;
   completedTimeoutMinutes: number;
   projectsDir: string;
   clonesDir: string;
@@ -107,6 +108,8 @@ export type Recognizer = "system" | "builtin";
 
 export interface SettingsHandlers {
   onInstall(): void;
+  onCodexInstall?(): void;
+  onCodexRemove?(): void;
   onRemove(): void;
   onTimeout(minutes: number): void;
   onProjectsDir(path: string): void;
@@ -298,6 +301,21 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     btn.addEventListener("click", () => h.onInstall());
   }
   sessions.append(btn);
+
+  const codexStatus = document.createElement("div");
+  codexStatus.className = "settings__status";
+  codexStatus.textContent = model.codexHookInstalled == null
+    ? "Checking Codex hook?"
+    : model.codexHookInstalled
+      ? "Codex hook is installed. Restart Codex and use /hooks to review and trust it for session updates."
+      : "Codex hook is not installed. Session state is inferred from transcripts.";
+  const codexButton = document.createElement("button");
+  codexButton.type = "button";
+  codexButton.dataset.action = model.codexHookInstalled ? "remove-codex" : "install-codex";
+  codexButton.textContent = model.codexHookInstalled ? "Remove Codex hook" : "Install Codex hook";
+  codexButton.disabled = model.codexHookInstalled == null;
+  codexButton.addEventListener("click", () => model.codexHookInstalled ? h.onCodexRemove?.() : h.onCodexInstall?.());
+  sessions.append(codexStatus, codexButton);
 
   const label = document.createElement("label");
   label.textContent = "Completed decays to Idle after (minutes)";
@@ -878,6 +896,8 @@ export async function initSettings(): Promise<void> {
   };
 
   const handlers: SettingsHandlers = {
+    onCodexInstall: () => void run(async () => { model.codexHookInstalled = await invoke<boolean>("install_codex_hook"); }),
+    onCodexRemove: () => void run(async () => { model.codexHookInstalled = await invoke<boolean>("remove_codex_hook"); }),
     onInstall: () => void run(async () => { model.hookInstalled = await invoke<boolean>("install_hook"); }),
     onRemove: () => void run(async () => { model.hookInstalled = await invoke<boolean>("remove_hook"); }),
     onTimeout: (minutes) => void run(() => saveConfig({ completedTimeoutMinutes: minutes })),
@@ -1013,8 +1033,9 @@ export async function initSettings(): Promise<void> {
   });
 
   await run(async () => {
-    const [installed, config] = await Promise.all([invoke<boolean>("hook_status"), invoke<ConfigJson>("get_config")]);
+    const [installed, config, codexInstalled] = await Promise.all([invoke<boolean>("hook_status"), invoke<ConfigJson>("get_config"), invoke<boolean>("codex_hook_status")]);
     model.hookInstalled = installed;
+    model.codexHookInstalled = codexInstalled;
     model.completedTimeoutMinutes = config.completedTimeoutMinutes;
     model.projectsDir = config.projectsDir ?? "";
     model.clonesDir = config.clonesDir ?? "";

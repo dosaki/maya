@@ -302,3 +302,16 @@ speech models under `models/`.
 
 Building from source, cutting a release and code signing are covered in
 [docs/DEVELOPING.md](docs/DEVELOPING.md).
+
+### Codex lifecycle hooks
+
+Settings ? Sessions offers separate **Install Codex hook** and **Remove Codex hook** controls.
+Installation merges Maya's lifecycle handlers into `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`),
+backs up existing configuration, and preserves other hooks. Restart Codex, then use `/hooks`
+to review and trust Maya's hooks before they run. See the [Codex hook documentation](https://learn.chatgpt.com/docs/hooks).
+
+The hooks report prompts, tool calls, permission requests, completion, interruption, and session end.
+Maya combines these events with Codex transcripts; process and writer-lock discovery still identifies
+live sessions, so a new session can appear after its first message. Events are stored separately in
+`~/.claude/maya/codex-events.jsonl`. Windows uses Maya's bundled hook helper; macOS uses `jq`,
+as the Claude hook does. Removing hooks leaves other handlers and saved backups intact.

@@ -21,6 +21,7 @@ pub struct Store {
     /// The process lister, replaceable in tests.
     processes: Box<dyn Fn() -> Vec<(i32, String, Harness)> + Send>,
     events: EventLog,
+    codex_events: EventLog,
     pub config: Config,
     alive: Box<dyn Fn(i32) -> bool + Send>,
     tails: TailCache,
@@ -43,9 +44,10 @@ impl Store {
         let config = config::load(&claude_dir.join("maya/config.json"));
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         Self {
+            codex_events: EventLog::new(claude_dir.join("maya/codex-events.jsonl")),
             events: EventLog::new(claude_dir.join("maya/events.jsonl")),
             claude_dir,
-            codex_dir: home.join(".codex"),
+            codex_dir: crate::codex_hooks::dir(),
             agy_dir: home.join(".gemini/antigravity-cli"),
             grok_dir: home.join(".grok"),
             foreign: std::collections::HashMap::new(),
@@ -169,6 +171,8 @@ impl Store {
     pub fn compact_events(&mut self) {
         let keep: HashSet<String> = self.registry().into_iter().map(|s| s.session_id).collect();
         let _ = self.events.compact(&keep);
+        let keep = self.foreign.values().filter(|s| s.harness == Harness::Codex).map(|s| s.session_id.clone()).collect();
+        let _ = self.codex_events.compact(&keep);
     }
 
     /// Directories of live sessions whose PR lookup is missing or stale.
@@ -191,11 +195,12 @@ impl Store {
     }
 
     pub fn refresh(&mut self, now_ms: u64) -> Vec<Card> {
-        if self.events.file_len() > self.compact_threshold_bytes {
+        if self.events.file_len() > self.compact_threshold_bytes || self.codex_events.file_len() > self.compact_threshold_bytes {
             self.compact_events();
         }
         let default_1m = self.default_window_is_1m();
         let _ = self.events.read_new();
+        let _ = self.codex_events.read_new();
         self.refresh_foreign();
         let sessions = self.registry();
         let mut cards = Vec::with_capacity(sessions.len() + self.foreign.len());
@@ -218,7 +223,10 @@ impl Store {
         self.tails.retain(&paths);
         let timeout = self.config.completed_timeout_ms();
         for s in self.foreign.values() {
-            let tail = foreign::tail_for(s);
+            let mut tail = foreign::tail_for(s);
+            if s.harness == Harness::Codex {
+                crate::codex_hooks::apply(&mut tail, self.codex_events.events_for(&s.session_id));
+            }
             let mut card = foreign::derive(s, &tail, now_ms, timeout);
             card.pr = self.prs.get(&s.cwd);
             cards.push(card);
@@ -351,6 +359,14 @@ mod tests {
         assert!(store.foreign("aaa").is_some());
         assert_eq!(store.live_session_ids(), vec!["aaa".to_string()]);
         assert_eq!(store.card_for("aaa", 1_790_671_680_000).unwrap().session_id, "aaa");
+        crate::hook_install::append_record_named(&store.claude_dir.join("maya"), "codex-events.jsonl",
+            r#"{"session_id":"aaa","hook_event_name":"PermissionRequest","tool_input":{"command":"cargo test"}}"#, 1_800_000_000_000).unwrap();
+        let card = store.card_for("aaa", 1_800_000_000_001).unwrap();
+        assert_eq!(card.state, State::Awaiting);
+        assert_eq!(card.awaiting.unwrap().detail, "Approve: cargo test");
+        crate::hook_install::append_record_named(&store.claude_dir.join("maya"), "codex-events.jsonl",
+            r#"{"session_id":"aaa","hook_event_name":"Stop"}"#, 1_800_000_000_002).unwrap();
+        assert_eq!(store.card_for("aaa", 1_800_000_000_003).unwrap().state, State::Completed);
     }
 
     #[test]

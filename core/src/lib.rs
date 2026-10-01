@@ -3,6 +3,7 @@ pub mod answer;
 pub mod antigravity;
 pub mod attachments;
 pub mod codex;
+pub mod codex_hooks;
 pub mod config;
 pub mod context;
 pub mod events;

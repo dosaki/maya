@@ -31,6 +31,7 @@ describe("settings flow", () => {
       interpreterModel: "haiku",
     };
     invoke.mockImplementation((cmd: string, args?: { config?: Record<string, unknown> }) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "set_config") {
@@ -61,6 +62,7 @@ describe("settings flow", () => {
   it("repaints on a voice event only when listening changes, so typing survives", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: true, microphone: null, interpreterModel: "haiku" };
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
@@ -95,6 +97,7 @@ describe("settings flow", () => {
   it("applies voice-model progress events to the picker, scoped to the model in flight", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "builtin", whisperModel: "tiny.en" };
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
@@ -139,6 +142,7 @@ describe("settings flow", () => {
     };
     const networkStatus = { role: "assistant", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } };
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "network_status") return Promise.resolve({ ...networkStatus });
@@ -177,6 +181,7 @@ describe("settings flow", () => {
       network: { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [] },
     };
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "network_status") return Promise.resolve({ role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
@@ -219,6 +224,7 @@ describe("settings flow", () => {
       network: { role: "off", port: 0, mainHost: "desk.local", mainPort: 4127, name: "laptop", assistantId: "id1", token: "t", assistants: [] },
     };
     invoke.mockImplementation((cmd: string, args?: { config?: Record<string, unknown> }) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "set_config") {
@@ -261,6 +267,7 @@ describe("settings flow", () => {
       network: { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [] },
     };
     invoke.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "network_status") return Promise.resolve({ role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
@@ -317,6 +324,7 @@ describe("settings flow", () => {
       network: { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [] },
     };
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "network_status") return Promise.resolve({ role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
@@ -357,6 +365,7 @@ describe("settings flow", () => {
     };
     let finishPair: (v: unknown) => void = () => {};
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "network_status") return Promise.resolve({ role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
@@ -398,6 +407,7 @@ describe("settings flow", () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "system", whisperModel: "base.en-q5_1", network: { role: "main", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", token: "t" }] } };
     const before = { role: "main", code: null, assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", connected: false, lastSeen: null, note: null }], assistant: { connected: false, mainName: null, error: null }, mainError: null };
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "network_status") return Promise.resolve(before);
@@ -422,6 +432,7 @@ describe("settings flow", () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: "~/dev/maya", clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "system", whisperModel: "base.en-q5_1", network: { role: "main", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", token: "t" }] } };
     const before = { role: "main", code: null, assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", address: "192.168.55.70", connected: false, lastSeen: null, note: null }], assistant: { connected: false, mainName: null, error: null }, mainError: null };
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "network_status") return Promise.resolve(before);
@@ -451,6 +462,7 @@ describe("settings flow", () => {
   it("ignores a voice-model event for another id when nothing is downloading", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "builtin", whisperModel: "tiny.en" };
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
       if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));

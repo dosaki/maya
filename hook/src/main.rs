@@ -12,6 +12,11 @@ fn main() {
     }
     let Some(home) = dirs::home_dir() else { return };
     let maya_dir = home.join(".claude").join("maya");
+    if std::env::args().any(|a| a == "--codex") {
+        let now = maya_core::now_ms();
+        let _ = maya_core::hook_install::append_record_named(&maya_dir, "codex-events.jsonl", &payload, now);
+        return;
+    }
     let event = event_name(&payload).unwrap_or_default();
     let socket = std::env::var("CLAUDE_CODE_MESSAGING_SOCKET").ok();
     let token = std::env::var("CLAUDE_CODE_MESSAGING_TOKEN").ok();
