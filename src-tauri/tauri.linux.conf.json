@@ -5,7 +5,7 @@
     "externalBin": ["binaries/maya-ear", "binaries/maya-hook"],
     "linux": {
       "deb": {
-        "depends": ["tmux", "libnotify-bin", "speech-dispatcher"],
+        "depends": ["tmux", "libnotify-bin", "speech-dispatcher", "curl"],
         "recommends": ["gnome-terminal", "pulseaudio-utils", "lsof", "wmctrl", "libsecret-tools"]
       }
     }

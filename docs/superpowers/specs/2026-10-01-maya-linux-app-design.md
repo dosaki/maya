@@ -127,8 +127,9 @@ Decisions taken during design:
 - `src-tauri/tauri.linux.conf.json`: bundle targets `deb` and `appimage`,
   `externalBin` `binaries/maya-ear` and `binaries/maya-hook`, the `.deb`
   depending on `libwebkit2gtk-4.1-0`, `libgtk-3-0`, `tmux`,
-  `libnotify-bin`, `speech-dispatcher` (recommends: `gnome-terminal`,
-  `pulseaudio-utils`, `lsof`).
+  `libnotify-bin`, `speech-dispatcher`, `curl` (model downloads and
+  ElevenLabs shell out to it) (recommends: `gnome-terminal`,
+  `pulseaudio-utils`, `lsof`, `wmctrl`, `libsecret-tools`).
 - Assets per architecture: `Maya_<version>_amd64.deb`,
   `Maya_<version>_arm64.deb`, `Maya_<version>_amd64.AppImage`,
   `Maya_<version>_arm64.AppImage`, uploaded as `maya-linux-app-<arch>`
