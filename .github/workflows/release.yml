@@ -18,11 +18,21 @@ concurrency:
 jobs:
   # Runs first, on pushes and pull requests alike: the tests that keep
   # maya_core and the CLI portable. On a release push it also builds the
-  # Linux binaries and hands them to the macOS job, which publishes the
-  # release only once they exist, so no release ever lacks them.
+  # Linux binary for its architecture and hands it to the macOS job, which
+  # publishes the release only once both exist, so no release ever lacks them.
   linux:
-    name: Test core and CLI, build Linux binaries
-    runs-on: ubuntu-latest
+    name: Test core and CLI, build Linux binaries (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
     # A docs commit (conventional type `docs`, with or without a scope)
     # changes nothing that needs building or releasing.
     if: >-
@@ -31,9 +41,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
-      - name: Install tmux for the integration test
-        run: sudo apt-get update && sudo apt-get install -y tmux
+      # tmux for the integration test; musl-tools links the static binary.
+      - name: Install tmux and musl-tools
+        run: sudo apt-get update && sudo apt-get install -y tmux musl-tools
       - name: Test core and the CLI on Linux
         run: cargo test -p maya-core -p maya-cli
       - name: Read version
@@ -42,21 +55,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: sh scripts/release-version.sh >> "$GITHUB_OUTPUT"
-      - name: Build Linux binaries
+      # Each architecture builds on its own runner, so no cross-compilation
+      # container is involved (the cross-rs images lag the toolchain).
+      - name: Build the Linux binary
         if: steps.version.outputs.release == 'true'
         run: |
           set -euo pipefail
-          cargo install cross --version 0.2.5 --locked
-          cross build -p maya-cli --release --target x86_64-unknown-linux-musl
-          cross build -p maya-cli --release --target aarch64-unknown-linux-musl
+          cargo build -p maya-cli --release --target ${{ matrix.target }}
           mkdir -p dist-linux
-          cp target/x86_64-unknown-linux-musl/release/maya-cli dist-linux/maya-linux-x86_64
-          cp target/aarch64-unknown-linux-musl/release/maya-cli dist-linux/maya-linux-aarch64
-      - name: Hand the binaries to the macOS job
+          cp target/${{ matrix.target }}/release/maya-cli dist-linux/maya-linux-${{ matrix.arch }}
+          ./dist-linux/maya-linux-${{ matrix.arch }} --version
+      - name: Hand the binary to the macOS job
         if: steps.version.outputs.release == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: linux-binaries
+          name: linux-binaries-${{ matrix.arch }}
           path: dist-linux/*
           if-no-files-found: error
 
@@ -184,7 +197,8 @@ jobs:
         if: steps.version.outputs.release == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: linux-binaries
+          pattern: linux-binaries-*
+          merge-multiple: true
           path: dist-release
 
       - name: Release
