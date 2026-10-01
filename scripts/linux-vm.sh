@@ -24,8 +24,9 @@ case "${1:-}" in
   sync)
     # `multipass exec` truncates large stdin streams, so the tree is
     # staged to a local file and sent with `multipass transfer` instead
-    # of piping into a remote `tar -xf -`.
-    tmp="$(mktemp /tmp/maya-sync.XXXXXX.tar)"
+    # of piping into a remote `tar -xf -`. The Xs end the template: BSD
+    # mktemp (macOS) fills in only trailing Xs.
+    tmp="$(mktemp /tmp/maya-sync.XXXXXX)"
     trap 'rm -f "$tmp"' EXIT
     COPYFILE_DISABLE=1 tar --exclude=./target --exclude=./node_modules --exclude='./dist*' --exclude=./vendor --exclude=./.superpowers --exclude=./src-tauri/binaries -cf "$tmp" .
     multipass transfer "$tmp" "$VM":/tmp/maya-sync.tar
