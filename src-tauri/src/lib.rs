@@ -10,6 +10,8 @@ pub mod models;
 pub mod net_app;
 #[cfg(target_os = "macos")]
 pub mod terminal_app;
+#[cfg(target_os = "linux")]
+pub mod terminal_linux;
 #[cfg(windows)]
 pub mod terminal_win;
 pub mod voice;
@@ -20,11 +22,35 @@ pub mod wake;
 pub(crate) use terminal_app as term;
 #[cfg(windows)]
 pub(crate) use terminal_win as term;
+#[cfg(target_os = "linux")]
+pub(crate) use terminal_linux as term;
+
+/// This platform's one terminal, as the core's seam.
+#[cfg(not(target_os = "linux"))]
+fn terminal() -> &'static dyn terminal::Terminal {
+    &term::TERMINAL
+}
+#[cfg(target_os = "linux")]
+fn terminal() -> &'static dyn terminal::Terminal {
+    &*term::TERMINAL
+}
 
 /// Opens an http(s) URL in the default browser.
 #[cfg(target_os = "macos")]
 fn open_in_browser(url: &str) -> Result<(), String> {
     let ok = std::process::Command::new("open").arg(url).status().map_err(|e| format!("could not open the browser: {e}"))?;
+    if ok.success() {
+        Ok(())
+    } else {
+        Err("The browser refused to open the link.".into())
+    }
+}
+
+/// Opens an http(s) URL in the default browser. The URL is one argument to
+/// `xdg-open`; no shell reads it.
+#[cfg(target_os = "linux")]
+fn open_in_browser(url: &str) -> Result<(), String> {
+    let ok = std::process::Command::new("xdg-open").arg(url).stdin(std::process::Stdio::null()).status().map_err(|e| format!("could not open the browser: {e}"))?;
     if ok.success() {
         Ok(())
     } else {
@@ -360,11 +386,54 @@ fn eleven_settings(store: &Store) -> Option<(std::path::PathBuf, String, String)
     Some((store.claude_dir().join("maya"), key?, cfg.elevenlabs_voice_id.clone()?))
 }
 
+/// The local cards as the board shows them: on Linux each carries the name
+/// of the tmux session it runs in, so the page knows which ones a terminal
+/// window can attach to.
+pub(crate) fn local_cards(store: &mut store::Store) -> Vec<Card> {
+    #[allow(unused_mut)]
+    let mut cards = store.refresh(now_ms());
+    #[cfg(target_os = "linux")]
+    fill_terminal_names(store, &mut cards);
+    cards
+}
+
+/// Forgets the tty of every pid no longer on the board: a pid that is gone
+/// may come back as another process.
+#[cfg(any(test, target_os = "linux"))]
+fn prune_ttys(cache: &mut std::collections::HashMap<i32, String>, live_pids: &std::collections::HashSet<i32>) {
+    cache.retain(|pid, _| live_pids.contains(pid));
+}
+
+/// Sets each card's `terminal` to its tmux session's name, as the CLI's
+/// board does: the tty from the registry (or the foreign session), else
+/// from the pid, cached per pid; then one `tmux list-panes` for them all.
+#[cfg(target_os = "linux")]
+fn fill_terminal_names(store: &store::Store, cards: &mut [Card]) {
+    static TTYS: Mutex<Option<std::collections::HashMap<i32, String>>> = Mutex::new(None);
+    let mut cache = TTYS.lock().unwrap();
+    let cache = cache.get_or_insert_with(Default::default);
+    prune_ttys(cache, &cards.iter().map(|c| c.pid).collect());
+    let mut ttys = Vec::with_capacity(cards.len());
+    for c in cards.iter() {
+        let known = store.session(&c.session_id).and_then(|s| s.tty).or_else(|| store.foreign(&c.session_id).and_then(|f| f.tty));
+        let tty = known.or_else(|| cache.get(&c.pid).cloned()).or_else(|| tty::tty_for_pid(c.pid).ok());
+        if let Some(t) = &tty {
+            cache.insert(c.pid, t.clone());
+        }
+        ttys.push(tty);
+    }
+    let wanted: Vec<String> = ttys.iter().flatten().cloned().collect();
+    let names = terminal().names_for_ttys(&wanted);
+    for (c, tty) in cards.iter_mut().zip(ttys) {
+        c.terminal = tty.and_then(|t| names.get(&t).cloned());
+    }
+}
+
 fn refresh_and_emit(app: &AppHandle) {
     let (cards, wants_notify, speak, eleven, assistant) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
-        let cards = store.refresh(now_ms());
+        let cards = local_cards(&mut store);
         let eleven = if store.config.speak_notifications { eleven_settings(&store) } else { None };
         (cards, store.config.notify_on_awaiting, store.config.speak_notifications, eleven, store.config.network.role == config::NetworkRole::Assistant)
     };
@@ -414,7 +483,7 @@ fn refresh_and_emit(app: &AppHandle) {
 /// releasing it before `remote_boards` takes `network` (lock order: never
 /// hold `store` while taking `network`).
 pub(crate) fn merged_cards(state: &AppState) -> Vec<Card> {
-    let cards = state.store.lock().unwrap().refresh(now_ms());
+    let cards = local_cards(&mut state.store.lock().unwrap());
     merge::merged(cards, &remote_boards(state), now_ms())
 }
 
@@ -606,7 +675,7 @@ fn network_pair(app: AppHandle, state: TauriState<AppState>, host: String, port:
 
 /// This Maya's sessions over this platform's terminal, for the core's local actions.
 pub(crate) fn local(state: &AppState) -> actions::Local<'_> {
-    actions::Local { store: &state.store, terminal: &term::TERMINAL }
+    actions::Local { store: &state.store, terminal: terminal() }
 }
 
 /// Brings forward the terminal of the local session running as `pid`.
@@ -1072,6 +1141,13 @@ pub fn run() {
 #[cfg(test)]
 mod route_tests {
     use super::*;
+
+    #[test]
+    fn prune_ttys_forgets_pids_no_longer_on_the_board() {
+        let mut cache: std::collections::HashMap<i32, String> = [(1, "/dev/pts/1".to_string()), (2, "/dev/pts/2".to_string())].into();
+        prune_ttys(&mut cache, &[2, 3].into());
+        assert_eq!(cache, [(2, "/dev/pts/2".to_string())].into());
+    }
 
     #[test]
     fn remote_attachments_encodes_a_small_file() {

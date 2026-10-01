@@ -1,7 +1,8 @@
 //! ElevenLabs as an optional voice. The key lives in the macOS Keychain (the
-//! Windows Credential Manager on Windows), synthesised lines are cached under
-//! `<maya_dir>/voice/`, and playback uses the built-in `afplay` (MCI on
-//! Windows). Anything that fails falls back to the built-in voice.
+//! Windows Credential Manager on Windows, GNOME Keyring through `secret-tool`
+//! on Linux), synthesised lines are cached under `<maya_dir>/voice/`, and
+//! playback uses the built-in `afplay` (MCI on Windows, `paplay`, `aplay` or
+//! `ffplay` on Linux). Anything that fails falls back to the built-in voice.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -16,7 +17,9 @@ pub struct Voice {
     pub name: String,
 }
 
+#[cfg(any(target_os = "macos", windows))]
 const KEYCHAIN_SERVICE: &str = "maya-elevenlabs";
+#[cfg(any(target_os = "macos", windows))]
 const KEYCHAIN_ACCOUNT: &str = "api-key";
 pub const MODEL_ID: &str = "eleven_multilingual_v2";
 
@@ -108,6 +111,66 @@ pub fn load_key() -> Option<String> {
         .stderr(Stdio::null())
         .output()
         .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let key = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!key.is_empty()).then_some(key)
+}
+
+/// `secret-tool` arguments that store the key (read from stdin) in GNOME Keyring.
+#[cfg(any(test, target_os = "linux"))]
+pub fn secret_tool_store_args() -> Vec<String> {
+    ["store", "--label", "Maya ElevenLabs", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec()
+}
+
+/// `secret-tool` arguments that print the stored key.
+#[cfg(any(test, target_os = "linux"))]
+pub fn secret_tool_lookup_args() -> Vec<String> {
+    ["lookup", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec()
+}
+
+/// The first audio player on `path` and its arguments before the file:
+/// PulseAudio's (PipeWire answers it too), then ALSA's, then ffmpeg's.
+#[cfg(any(test, target_os = "linux"))]
+pub fn player_command(path: &str) -> Option<(&'static str, Vec<String>)> {
+    for (bin, args) in [("paplay", vec![]), ("aplay", vec![]), ("ffplay", vec!["-nodisp".to_string(), "-autoexit".to_string()])] {
+        if maya_core::launch::find_on_path(path, bin).is_some() {
+            return Some((bin, args));
+        }
+    }
+    None
+}
+
+/// Stores the API key in GNOME Keyring (replacing any previous one). The
+/// key goes through stdin, never the command line.
+#[cfg(target_os = "linux")]
+pub fn store_key(key: &str) -> Result<(), String> {
+    use std::io::Write;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("The key is empty.".into());
+    }
+    let mut child = maya_core::command("secret-tool")
+        .args(secret_tool_store_args())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not run secret-tool (install libsecret-tools): {e}"))?;
+    child.stdin.take().ok_or("no stdin for secret-tool")?.write_all(key.as_bytes()).map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("GNOME Keyring refused the key: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
+/// The stored API key, if any.
+#[cfg(target_os = "linux")]
+pub fn load_key() -> Option<String> {
+    let out = maya_core::command("secret-tool").args(secret_tool_lookup_args()).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -214,6 +277,18 @@ pub fn play(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Plays an audio file with the first player found, waiting for it to finish.
+#[cfg(target_os = "linux")]
+pub fn play(path: &Path) -> Result<(), String> {
+    let (bin, args) = player_command(&std::env::var("PATH").unwrap_or_default()).ok_or("No audio player found: install pulseaudio-utils.")?;
+    let ok = maya_core::command(bin).args(args).arg(path).stdin(Stdio::null()).status().map_err(|e| format!("could not run {bin}: {e}"))?;
+    if ok.success() {
+        Ok(())
+    } else {
+        Err(format!("{bin} failed"))
+    }
+}
+
 /// Speaks `text` with ElevenLabs, from the cache when possible.
 pub fn speak(maya_dir: &Path, key: &str, voice_id: &str, text: &str) -> Result<(), String> {
     let path = cache_path(maya_dir, voice_id, text);
@@ -275,6 +350,33 @@ mod tests {
         assert!(!use_elevenlabs(VoiceProvider::Elevenlabs, true, None));
         assert!(!use_elevenlabs(VoiceProvider::Elevenlabs, true, Some("  ")));
         assert!(use_elevenlabs(VoiceProvider::Elevenlabs, true, Some("v")));
+    }
+
+    #[test]
+    fn secret_tool_args_name_the_maya_service_and_account() {
+        assert_eq!(secret_tool_store_args(), ["store", "--label", "Maya ElevenLabs", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec());
+        assert_eq!(secret_tool_lookup_args(), ["lookup", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn player_is_paplay_then_aplay_then_ffplay() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().to_string_lossy().into_owned();
+        let exe = |name: &str| {
+            let p = d.path().join(name);
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        assert_eq!(player_command(""), None);
+        assert_eq!(player_command(&path), None);
+        exe("ffplay");
+        assert_eq!(player_command(&path), Some(("ffplay", vec!["-nodisp".to_string(), "-autoexit".to_string()])));
+        exe("aplay");
+        assert_eq!(player_command(&path).map(|c| c.0), Some("aplay"));
+        exe("paplay");
+        assert_eq!(player_command(&path).map(|c| c.0), Some("paplay"));
     }
 
     #[test]

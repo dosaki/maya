@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["deb", "appimage"],
+    "externalBin": ["binaries/maya-ear", "binaries/maya-hook"],
+    "linux": {
+      "deb": {
+        "depends": ["tmux", "libnotify-bin", "speech-dispatcher"],
+        "recommends": ["gnome-terminal", "pulseaudio-utils", "lsof", "wmctrl", "libsecret-tools"]
+      }
+    }
+  }
+}
