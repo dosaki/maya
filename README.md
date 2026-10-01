@@ -96,7 +96,7 @@ in. The Pull Requests tab needs the [GitHub CLI](https://cli.github.com/)
 
 ### First run
 
-1. Open Settings (the tab on the right) and press **Install hook**. The hook
+1. Open Settings (the tab on the right) and press **Install Claude hook**. The hook
    is what makes "Awaiting Decision" and "Completed" exact; without it a
    permission prompt shows as Working. It never blocks Claude Code and a
    backup of your `settings.json` is taken before every change.
@@ -305,7 +305,8 @@ Building from source, cutting a release and code signing are covered in
 
 ### Codex lifecycle hooks
 
-Settings ? Sessions offers separate **Install Codex hook** and **Remove Codex hook** controls.
+Settings › Sessions offers **Install Codex hook** and **Remove Codex hook**, beside the
+**Install Claude hook** and **Remove Claude hook** buttons for Claude Code.
 Installation merges Maya's lifecycle handlers into `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`),
 backs up existing configuration, and preserves other hooks. Restart Codex, then use `/hooks`
 to review and trust Maya's hooks before they run. See the [Codex hook documentation](https://learn.chatgpt.com/docs/hooks).

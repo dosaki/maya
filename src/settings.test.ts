@@ -60,6 +60,15 @@ const handlers = () => ({
 });
 
 describe("renderSettings", () => {
+  it("names which agent each hook button is for", () => {
+    const labels = (claude: boolean, codex: boolean) =>
+      [...renderSettings({ ...voiceBase, hookInstalled: claude, codexHookInstalled: codex }, handlers()).querySelectorAll("button")]
+        .map((b) => b.textContent)
+        .filter((t) => t?.includes("hook"));
+    expect(labels(false, false)).toEqual(["Install Claude hook", "Install Codex hook"]);
+    expect(labels(true, true)).toEqual(["Remove Claude hook", "Remove Codex hook"]);
+  });
+
   it("installs and removes Codex hooks independently of Claude", () => {
     const h = { ...handlers(), onCodexInstall: vi.fn(), onCodexRemove: vi.fn() };
     const missing = renderSettings({ ...voiceBase, codexHookInstalled: false }, h);

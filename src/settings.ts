@@ -282,7 +282,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   status.className = "settings__status";
   status.textContent =
     model.hookInstalled === null
-      ? "Checking hook…"
+      ? "Checking Claude Code hook…"
       : model.hookInstalled
         ? "Claude Code hook is installed. Awaiting Decision and Completed are precise."
         : "Claude Code hook is not installed. Permission prompts will show as Working.";
@@ -292,11 +292,11 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   btn.type = "button";
   if (model.hookInstalled) {
     btn.dataset.action = "remove";
-    btn.textContent = "Remove hook";
+    btn.textContent = "Remove Claude hook";
     btn.addEventListener("click", () => h.onRemove());
   } else {
     btn.dataset.action = "install";
-    btn.textContent = "Install hook";
+    btn.textContent = "Install Claude hook";
     btn.disabled = model.hookInstalled === null;
     btn.addEventListener("click", () => h.onInstall());
   }
@@ -305,7 +305,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   const codexStatus = document.createElement("div");
   codexStatus.className = "settings__status";
   codexStatus.textContent = model.codexHookInstalled == null
-    ? "Checking Codex hook?"
+    ? "Checking Codex hook…"
     : model.codexHookInstalled
       ? "Codex hook is installed. Restart Codex and use /hooks to review and trust it for session updates."
       : "Codex hook is not installed. Session state is inferred from transcripts.";

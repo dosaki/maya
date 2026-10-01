@@ -71,7 +71,7 @@ What is different on Windows, and where:
   with `<pid> <message>` sends one.
 - **Hook.** Claude Code runs hooks through Git Bash, which has no `jq`, so
   the hook is `hook/`'s `maya-hook.exe`, copied into `~/.claude/maya/` by
-  Install hook. It also hooks SessionStart, only to record the token.
+  Install Claude hook. It also hooks SessionStart, only to record the token.
 - **Notifications, voice, quiet.** `core/src/notify_win.rs`: toasts, SAPI,
   and Do not disturb. The ElevenLabs key is in Credential Manager
   (`src-tauri/src/voice.rs`).
