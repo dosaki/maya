@@ -87,6 +87,33 @@ What is different on Windows, and where:
 The `windows` job of the build workflow (see [CI](#ci)) runs these tests
 and builds the installers.
 
+## Linux
+
+The app crate (`src-tauri/`, `maya`) does not yet build on Linux (Ubuntu,
+GNOME, Wayland); only `maya-cli` and `maya_core` do (see
+[The CLI](#the-cli)). Porting the app needs a real Ubuntu build, and this
+is developed from a Mac, so `scripts/linux-vm.sh` drives an Ubuntu 24.04
+VM through [Multipass](https://multipass.run) to build, test and run it:
+
+    sh scripts/linux-vm.sh create    # once: launch the VM and install the toolchain (~15 min)
+    sh scripts/linux-vm.sh sync      # copy the working tree to ~/maya in the VM
+    sh scripts/linux-vm.sh run 'cargo test -p maya-core -p maya-cli'
+    sh scripts/linux-vm.sh shell     # an interactive shell in the VM
+    sh scripts/linux-vm.sh destroy   # tear the VM down
+
+`create` launches `maya-ubuntu` (4 CPUs, 8 GB, 40 GB) and installs the
+Rust and Node toolchains plus the GTK/WebKit/tmux packages the app and its
+tests need. `sync` copies the working tree to `~/maya` in the VM, leaving
+out `target/`, `node_modules/`, `dist*/`, `vendor/`, `.superpowers/` and
+`src-tauri/binaries/`, then runs `pnpm install` there; re-run it after
+local changes before `run`. `run '<command>'` runs a shell line in
+`~/maya` in the VM with `~/.cargo/bin` on `PATH`. `MAYA_VM` overrides the
+VM name if more than one is needed.
+
+CI's `linux-app` job is the authority on whether the app crate builds and
+runs on Ubuntu/GNOME/Wayland; the VM is for local iteration against it,
+not a replacement for it.
+
 ## The CLI
 
 `cli/` builds on its own, with no Node toolchain and no `pnpm ear:build`:
