@@ -372,6 +372,58 @@ pub fn focus_active() -> bool {
         .unwrap_or(false)
 }
 
+/// The fixed part of a line's speech deadline.
+#[cfg(any(test, target_os = "linux"))]
+const SPEECH_BASE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long a line may take to speak: 15 s plus 1 s per 12 characters.
+#[cfg(any(test, target_os = "linux"))]
+pub fn speech_deadline(line: &str) -> std::time::Duration {
+    speech_deadline_from(SPEECH_BASE, line)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn speech_deadline_from(base: std::time::Duration, line: &str) -> std::time::Duration {
+    base + std::time::Duration::from_secs((line.chars().count() / 12) as u64)
+}
+
+/// Runs the synthesiser `bin` on `line` and waits for it, up to `base` plus
+/// 1 s per 12 characters. With no audio sink `spd-say -w` and `espeak-ng`
+/// never return, which would block the speech queue (and leave the ear
+/// paused) for good, so past the deadline the process is killed, an
+/// `spd-say` is told to cancel what it queued, and the line is logged.
+/// True when the synthesiser finished in time.
+#[cfg(target_os = "linux")]
+pub(crate) fn speak_within(bin: &Path, args: &[String], line: &str, base: std::time::Duration) -> bool {
+    use std::time::{Duration, Instant};
+    let Ok(mut child) = Command::new(bin).args(args).arg("--").arg(line).stdin(Stdio::null()).spawn() else {
+        return false;
+    };
+    let limit = speech_deadline_from(base, line);
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            _ => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let name = bin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if name == "spd-say" {
+        // Reaped on a thread: a cancel stuck the same way must not block
+        // the queue either.
+        if let Ok(mut cancel) = Command::new(bin).arg("-C").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            std::thread::spawn(move || {
+                let _ = cancel.wait();
+            });
+        }
+    }
+    crate::log::line("speech", format!("{name} did not finish in {} s; stopped", limit.as_secs()));
+    false
+}
+
 /// Speaks with speech-dispatcher or eSpeak NG, whichever is installed;
 /// without either, logs once and stays silent.
 #[cfg(target_os = "linux")]
@@ -379,7 +431,7 @@ fn say_builtin(line: &str) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     match speech_command(&std::env::var("PATH").unwrap_or_default()) {
         Some((bin, args)) => {
-            let _ = Command::new(bin).args(&args).arg("--").arg(line).stdin(Stdio::null()).status();
+            speak_within(Path::new(bin), &args, line, SPEECH_BASE);
         }
         None => WARNED.call_once(|| crate::log::line("notify", "no speech synthesiser: install speech-dispatcher or espeak-ng")),
     }
@@ -615,5 +667,41 @@ mod tests {
         assert_eq!(speech_command(&d.path().to_string_lossy()).map(|c| c.0), Some("espeak-ng"));
         exe("spd-say");
         assert_eq!(speech_command(&d.path().to_string_lossy()), Some(("spd-say", vec!["-w".to_string()])));
+    }
+
+    #[test]
+    fn speech_gets_fifteen_seconds_plus_one_per_twelve_characters() {
+        assert_eq!(speech_deadline(""), std::time::Duration::from_secs(15));
+        assert_eq!(speech_deadline(&"a".repeat(120)), std::time::Duration::from_secs(25));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_synthesiser_that_never_returns_is_stopped_and_cancelled_at_the_deadline() {
+        let d = tempfile::tempdir().unwrap();
+        let marker = d.path().join("cancelled");
+        let fake = d.path().join("spd-say");
+        std::fs::write(&fake, format!("#!/bin/sh\nif [ \"$1\" = -C ]; then touch '{}'; exit 0; fi\nexec sleep 60\n", marker.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        assert!(!speak_within(&fake, &["-w".to_string()], "x", std::time::Duration::from_secs(1)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "took {:?}", started.elapsed());
+        let waited = std::time::Instant::now();
+        while !marker.exists() && waited.elapsed() < std::time::Duration::from_secs(2) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(marker.exists(), "spd-say -C was not run");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_synthesiser_that_returns_in_time_is_left_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let fake = d.path().join("espeak-ng");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(speak_within(&fake, &[], "hello", std::time::Duration::from_secs(5)));
     }
 }

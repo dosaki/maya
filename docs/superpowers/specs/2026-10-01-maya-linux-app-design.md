@@ -69,7 +69,11 @@ Decisions taken during design:
   unreadable) means not quiet.
 - **Built-in voice**: `spd-say -w <line>` (speech-dispatcher, installed
   with GNOME); when `spd-say` is missing, `espeak-ng <line>`; when both are
-  missing, speech is skipped and the Debug log says so once.
+  missing, speech is skipped and the Debug log says so once. With no
+  audio sink both wait forever, so each line has a deadline of 15 s plus
+  1 s per 12 characters: past it the synthesiser is killed, `spd-say -C`
+  cancels what it queued, and the Debug log says `<bin> did not finish in
+  <N> s; stopped`.
 - **ElevenLabs**: the key lives in GNOME Keyring through `secret-tool
   store --label "Maya ElevenLabs" service maya account elevenlabs` and
   `secret-tool lookup service maya account elevenlabs`; playback through
