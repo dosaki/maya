@@ -260,6 +260,14 @@ pub fn proc_info(pid: i32) -> ProcInfo {
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
+        .inspect_err(|_e| {
+            // macOS always has lsof; a Linux box may not.
+            #[cfg(target_os = "linux")]
+            {
+                static MISSING: std::sync::Once = std::sync::Once::new();
+                crate::log::missing_once(&MISSING, _e, "foreign", "lsof is not installed, so Codex and Antigravity sessions are not listed: install lsof");
+            }
+        })
         .map(|o| parse_lsof(&String::from_utf8_lossy(&o.stdout)))
         .unwrap_or_default()
 }

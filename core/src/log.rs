@@ -65,6 +65,15 @@ pub fn line(source: &str, text: impl Into<String>) {
     }
 }
 
+/// Logs `text` under `source` the first time `err` says a program was not
+/// found (`once` keeps it to one line per process); other errors are not
+/// logged.
+pub fn missing_once(once: &std::sync::Once, err: &std::io::Error, source: &str, text: &str) {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        once.call_once(|| line(source, text));
+    }
+}
+
 /// The lines kept in memory, oldest first.
 pub fn lines() -> Vec<Line> {
     LOG.lock().unwrap().as_ref().map(|l| l.lines.iter().cloned().collect()).unwrap_or_default()
@@ -164,6 +173,20 @@ mod tests {
         assert_eq!(ours.last().copied(), Some(last.as_str()));
         assert!(!ours.iter().any(|t| ["n0", "n1", "n2"].contains(t)), "the oldest are dropped");
         assert!(ours.len() > CAPACITY - 50, "only stray lines displace ours: {}", ours.len());
+    }
+
+    #[test]
+    fn a_missing_tool_is_logged_once_and_other_failures_not_at_all() {
+        let _s = SERIAL.lock().unwrap();
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        missing_once(&ONCE, &denied, "missing-test", "tool-x is not installed");
+        missing_once(&ONCE, &missing, "missing-test", "tool-x is not installed");
+        missing_once(&ONCE, &missing, "missing-test", "tool-x is not installed");
+        let ours: Vec<Line> = lines().into_iter().filter(|l| l.source == "missing-test").collect();
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0].text, "tool-x is not installed");
     }
 
     #[test]

@@ -441,8 +441,11 @@ fn say_builtin(line: &str) {
 /// sound unless the line is being spoken instead.
 #[cfg(target_os = "linux")]
 pub fn notify(card: &Card, sound: bool) {
+    static MISSING: std::sync::Once = std::sync::Once::new();
     let icon = app_icon_path();
-    let _ = Command::new("notify-send").args(notify_send_args(icon.as_deref(), &card.name, &subtitle_for(card), &body_for(card))).stdin(Stdio::null()).output();
+    if let Err(e) = Command::new("notify-send").args(notify_send_args(icon.as_deref(), &card.name, &subtitle_for(card), &body_for(card))).stdin(Stdio::null()).output() {
+        crate::log::missing_once(&MISSING, &e, "notify", "notify-send is not installed, so no banners: install libnotify-bin");
+    }
     if sound {
         // Reaped on a thread: the sound must not hold up the watcher.
         if let Ok(mut child) = Command::new("canberra-gtk-play").args(["-i", "message"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
