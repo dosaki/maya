@@ -223,13 +223,16 @@ built once (`pnpm tauri build --bundles appimage`):
   `GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown`). `notify()`
   swallows that error and does not panic. `focus_active` reads `false`
   (no GNOME schema in the VM). `speak_and_wait` picks `spd-say -w`
-  (installed) and does not panic either, but on this VM it never returns:
-  there is no PulseAudio server (`pactl info` refuses the connection) and
-  no ALSA playback device (`/dev/snd` has only `seq` and `timer`, no
-  card), so speech-dispatcher's output module has nothing to play to and
-  the wait for "done speaking" never arrives. This is a real gap the VM
-  cannot close, not a difference from the app: a developer with a sound
-  card should expect the same call to return once it has actually spoken.
+  (installed) and does not panic either. On this VM `spd-say -w` never
+  finishes: there is no PulseAudio server (`pactl info` refuses the
+  connection) and no ALSA playback device (`/dev/snd` has only `seq` and
+  `timer`, no card), so speech-dispatcher's output module has nothing to
+  play to. The line's deadline (15 s plus 1 s per 12 characters) stops it,
+  and `speak_and_wait` returns after about 15 s; the `spd-say -C` that
+  follows hangs the same way and is killed after 2 s by the app (the probe
+  exits sooner and leaves it behind; kill it by pid). That nothing is
+  heard is a gap the VM cannot close: a developer with a sound card should
+  expect the call to return once it has actually spoken.
 
 ## The CLI
 

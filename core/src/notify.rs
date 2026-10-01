@@ -412,10 +412,16 @@ pub(crate) fn speak_within(bin: &Path, args: &[String], line: &str, base: std::t
     let _ = child.wait();
     let name = bin.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if name == "spd-say" {
-        // Reaped on a thread: a cancel stuck the same way must not block
-        // the queue either.
+        // On a thread of its own and killed after 2 s: with no audio sink
+        // the cancel hangs too, and must neither block the queue nor
+        // linger.
         if let Ok(mut cancel) = Command::new(bin).arg("-C").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
             std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while matches!(cancel.try_wait(), Ok(None)) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let _ = cancel.kill();
                 let _ = cancel.wait();
             });
         }
@@ -689,17 +695,25 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let marker = d.path().join("cancelled");
         let fake = d.path().join("spd-say");
-        std::fs::write(&fake, format!("#!/bin/sh\nif [ \"$1\" = -C ]; then touch '{}'; exit 0; fi\nexec sleep 60\n", marker.display())).unwrap();
+        // The cancel hangs as well, as it does with no audio sink.
+        std::fs::write(&fake, format!("#!/bin/sh\nif [ \"$1\" = -C ]; then echo $$ > '{}'; exec sleep 60; fi\nexec sleep 60\n", marker.display())).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let started = std::time::Instant::now();
         assert!(!speak_within(&fake, &["-w".to_string()], "x", std::time::Duration::from_secs(1)));
         assert!(started.elapsed() < std::time::Duration::from_secs(3), "took {:?}", started.elapsed());
         let waited = std::time::Instant::now();
-        while !marker.exists() && waited.elapsed() < std::time::Duration::from_secs(2) {
+        let written = || std::fs::read_to_string(&marker).map(|s| s.ends_with('\n')).unwrap_or(false);
+        while !written() && waited.elapsed() < std::time::Duration::from_secs(2) {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert!(marker.exists(), "spd-say -C was not run");
+        assert!(written(), "spd-say -C was not run");
+        let cancel = std::path::PathBuf::from(format!("/proc/{}", std::fs::read_to_string(&marker).unwrap().trim()));
+        let waited = std::time::Instant::now();
+        while cancel.exists() && waited.elapsed() < std::time::Duration::from_secs(4) {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(!cancel.exists(), "a hung spd-say -C is stopped too");
     }
 
     #[cfg(target_os = "linux")]

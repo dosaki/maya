@@ -77,8 +77,9 @@ Decisions taken during design:
   missing, speech is skipped and the Debug log says so once. With no
   audio sink both wait forever, so each line has a deadline of 15 s plus
   1 s per 12 characters: past it the synthesiser is killed, `spd-say -C`
-  cancels what it queued, and the Debug log says `<bin> did not finish in
-  <N> s; stopped`.
+  cancels what it queued (and is itself killed after 2 s, since it hangs
+  the same way), and the Debug log says `<bin> did not finish in <N> s;
+  stopped`.
 - **ElevenLabs**: the key lives in GNOME Keyring through `secret-tool
   store --label "Maya ElevenLabs" service maya account elevenlabs` and
   `secret-tool lookup service maya account elevenlabs`; playback through
