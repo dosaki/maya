@@ -97,12 +97,13 @@ to the `macos` job as the `windows-installers` artifact.
 
 `maya-cli` depends only on `maya_core`, so unlike the rest of the workspace
 it also builds and tests on Linux. The release workflow's `linux` job runs
-first, on every pull request to `main` and every push to it: it runs
+first, on every pull request to `main` and every push to it, once per
+architecture (an x86_64 runner and an `ubuntu-24.04-arm` runner): it runs
 `cargo test -p maya-core -p maya-cli` on Ubuntu (with tmux installed) —
 the guard that keeps `maya_core` free of macOS-only code. On a release
-push it also cross-compiles `maya-cli` for `x86_64-unknown-linux-musl`
-and `aarch64-unknown-linux-musl` with `cross` 0.2.5 (needs Docker) and
-hands both binaries to the `macos` job as the `linux-binaries` artifact.
+push each leg also builds `maya-cli` natively for its musl target
+(`musl-tools`, no cross-compilation container) and hands the binary to
+the `macos` job as the `linux-binaries-<arch>` artifact.
 The `macos` job runs on pushes only and after `linux` succeeds; it tests
 the whole workspace, builds the app and the macOS binaries, and creates
 the release with every asset at once, so a failed Linux build publishes
