@@ -54,13 +54,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo build -p maya-cli --release --target ${{ matrix.target }}
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/maya-cli dist/maya-linux-${{ matrix.arch }}
-          ./dist/maya-linux-${{ matrix.arch }} --version
+          mkdir -p release
+          cp target/${{ matrix.target }}/release/maya-cli release/maya-linux-${{ matrix.arch }}
+          ./release/maya-linux-${{ matrix.arch }} --version
       - uses: actions/upload-artifact@v4
         with:
           name: maya-linux-${{ matrix.arch }}
-          path: dist/*
+          path: release/*
           if-no-files-found: error
 
   # The Windows port's tests, then the sidecars and the NSIS and MSI
@@ -99,14 +99,14 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           pnpm tauri build --bundles nsis,msi
-          mkdir -p dist
-          cp target/release/bundle/nsis/*-setup.exe "dist/Maya_${version}_x64-setup.exe"
-          cp target/release/bundle/msi/*.msi "dist/Maya_${version}_x64.msi"
-          ls -la dist
+          mkdir -p release
+          cp target/release/bundle/nsis/*-setup.exe "release/Maya_${version}_x64-setup.exe"
+          cp target/release/bundle/msi/*.msi "release/Maya_${version}_x64.msi"
+          ls -la release
       - uses: actions/upload-artifact@v4
         with:
           name: maya-windows
-          path: dist/*
+          path: release/*
           if-no-files-found: error
 
   # The whole workspace's tests, then both apps, their disk images and the
@@ -185,24 +185,24 @@ jobs:
         run: |
           set -euo pipefail
           version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          mkdir -p dist
+          mkdir -p release
           cargo build -p maya-cli --release --target aarch64-apple-darwin
           cargo build -p maya-cli --release --target x86_64-apple-darwin
           if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
             codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/aarch64-apple-darwin/release/maya-cli
             codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/x86_64-apple-darwin/release/maya-cli
           fi
-          cp target/aarch64-apple-darwin/release/maya-cli dist/maya-macos-arm64
-          cp target/x86_64-apple-darwin/release/maya-cli dist/maya-macos-x86_64
+          cp target/aarch64-apple-darwin/release/maya-cli release/maya-macos-arm64
+          cp target/x86_64-apple-darwin/release/maya-cli release/maya-macos-x86_64
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             arch="${target%%-*}"
             bundle="target/$target/release/bundle"
-            tar -C "$bundle/macos" -czf "dist/Maya_${version}_${arch}.app.tar.gz" Maya.app
-            cp "$bundle"/dmg/*.dmg "dist/Maya_${version}_${arch}.dmg"
+            tar -C "$bundle/macos" -czf "release/Maya_${version}_${arch}.app.tar.gz" Maya.app
+            cp "$bundle"/dmg/*.dmg "release/Maya_${version}_${arch}.dmg"
           done
-          ls -la dist
+          ls -la release
       - uses: actions/upload-artifact@v4
         with:
           name: maya-macos
-          path: dist/*
+          path: release/*
           if-no-files-found: error

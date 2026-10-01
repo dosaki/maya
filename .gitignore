@@ -31,3 +31,6 @@ vendor/
 
 # Cargo workspace build output
 /target/
+
+# Release files staged by CI (dist/ is the Vite build)
+/release/
