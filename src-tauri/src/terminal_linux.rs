@@ -46,7 +46,9 @@ impl LinuxTerminal {
 
     fn open_window(&self, label: &str) -> Result<(), String> {
         let (bin, args) = terminal_command(&std::env::var("PATH").unwrap_or_default(), label)?;
-        let mut child = Command::new(bin)
+        let mut cmd = Command::new(bin);
+        maya_core::launch::scrub_appimage_env(&mut cmd);
+        let mut child = cmd
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

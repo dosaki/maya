@@ -77,8 +77,12 @@ impl Tmux {
     fn list_panes(&self) -> Option<String> {
         self.run(&["list-panes".into(), "-a".into(), "-F".into(), LIST_PANES_FORMAT.into()]).ok()
     }
+    /// Runs one tmux command. The first one starts the tmux server, which
+    /// outlives Maya, so it starts without the AppImage's environment.
     fn run(&self, args: &[String]) -> Result<String, String> {
-        let out = Command::new(&self.binary).args(args).stdin(Stdio::null()).output().map_err(|e| {
+        let mut cmd = Command::new(&self.binary);
+        crate::launch::scrub_appimage_env(&mut cmd);
+        let out = cmd.args(args).stdin(Stdio::null()).output().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound { format!("tmux is not installed on {}", crate::net::local_hostname()) } else { format!("could not run tmux: {e}") }
         })?;
         if !out.status.success() { return Err(format!("tmux failed: {}", String::from_utf8_lossy(&out.stderr).trim())); }

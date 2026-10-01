@@ -171,6 +171,15 @@ Decisions taken during design:
   pure `secret_tool_args`.
 - **`src-tauri/src/lib.rs`**: `open_in_browser` with `xdg-open`; `term`
   alias to `terminal_linux` on Linux; no `dock`/`focus` on Linux.
+- **AppImage environment**: the AppImage's runtime (`APPDIR`, `APPIMAGE`,
+  `ARGV0`, `OWD`) and linuxdeploy's GTK hook (`GDK_BACKEND`, `GTK_THEME`,
+  `GTK_PATH`, `GTK_EXE_PREFIX`, `GTK_DATA_PREFIX`, `GIO_EXTRA_MODULES`,
+  `GSETTINGS_SCHEMA_DIR`, `GDK_PIXBUF_MODULE_FILE`, `GI_TYPELIB_PATH`, and
+  `$APPDIR/usr/share` first in `XDG_DATA_DIRS`) point into the mount.
+  `launch::scrub_appimage_env(&mut Command)` removes them (and the mount's
+  `XDG_DATA_DIRS` entries) when `APPIMAGE` is set, for the processes that
+  outlive Maya: every `tmux` command (the first starts the server), the
+  terminal window, and `xdg-open`.
 - **`core/src/hook_install.rs`**: the Windows `install_with` becomes
   `cfg(any(windows, target_os = "linux"))` with `HOOK_EXE` = `maya-hook`
   on Linux and the 0755 mode set; `install_to` on Linux finds the binary

@@ -47,10 +47,13 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 }
 
 /// Opens an http(s) URL in the default browser. The URL is one argument to
-/// `xdg-open`; no shell reads it.
+/// `xdg-open`; no shell reads it. A browser started here outlives Maya, so
+/// it starts without the AppImage's environment.
 #[cfg(target_os = "linux")]
 fn open_in_browser(url: &str) -> Result<(), String> {
-    let ok = std::process::Command::new("xdg-open").arg(url).stdin(std::process::Stdio::null()).status().map_err(|e| format!("could not open the browser: {e}"))?;
+    let mut cmd = std::process::Command::new("xdg-open");
+    maya_core::launch::scrub_appimage_env(&mut cmd);
+    let ok = cmd.arg(url).stdin(std::process::Stdio::null()).status().map_err(|e| format!("could not open the browser: {e}"))?;
     if ok.success() {
         Ok(())
     } else {
