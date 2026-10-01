@@ -178,6 +178,59 @@ screen is kept as the `smoke-<arch>` run artifact, to see that the board
 painted. The VM cannot prove sound, the microphone or GNOME's own banners;
 those are the hand checks the README lists.
 
+Beyond `cargo test --workspace`, four checks exercise the parts a click
+cannot reach headless. They need the sidecars rebuilt after every `sync`
+(`sh scripts/build-ear.sh aarch64-unknown-linux-gnu`) and the AppImage
+built once (`pnpm tauri build --bundles appimage`):
+
+- **A headless Wayland session.** `weston --backend=headless-backend.so
+  --socket=<name> --width=1280 --height=800 &`, with `XDG_RUNTIME_DIR` set
+  to a writable directory, then the AppImage with `WAYLAND_DISPLAY=<name>
+  GDK_BACKEND=wayland`. It painted and logged `started` after about 30 s,
+  the same as under X11. `weston-screenshooter` could not capture it on
+  this VM's weston 13.0.0 (`screenshot_create_shm_buffer: Assertion
+  'width > 0' failed`, aborting the client, even with `--width`/`--height`
+  set on the backend); the fallback is `GDK_BACKEND=x11` under
+  `xvfb-run -a` with `import -window root` — the `linux-app` smoke test's
+  own recipe — which does capture the board.
+- **A session round trip without clicking.** Clicking a card is not
+  scriptable headless, so the same code the buttons use is driven from the
+  CLI: `mkdir -p ~/proj/demo && cargo run -p maya-cli -- config
+  projects-dir ~/proj && cargo run -p maya-cli -- start --dir demo
+  --prompt "hello"` (the target directory must exist before `config
+  projects-dir`, which checks it) exercises `Tmux::open` and the label the
+  same way the app's Start button does. `tmux ls` lists `maya-<hex>`, and
+  `tmux capture-pane -p` shows the pane left open with `claude: not
+  found` (the VM has no `claude` binary) rather than closing — the
+  `exec $SHELL` fallback the tmux integration test covers; typing into the
+  pane is that test's job, not this one's.
+- **The hook install.** The Linux-gated test,
+  `cargo test -p maya-core hook_install::`, is the check for what a click
+  on Install Claude hook cannot run headless. Extracting the AppImage
+  (`--appimage-extract`) and listing `squashfs-root/usr/bin` shows `maya`,
+  `maya-hook` and `maya-ear` side by side, which is what `hook_source_in`
+  expects next to the running binary.
+- **Notifications, focus and speech.** `core/examples/linux_probe.rs`
+  builds one Awaiting card named "collector" and calls `notify::notify`,
+  `notify::focus_active` and `notify::speak_and_wait`, the way the Tauri
+  commands do, from a terminal: `cargo run -p maya-core --example
+  linux_probe`. Run under `dbus-run-session` with a `dbus-monitor` on the
+  session bus filtering `interface=org.freedesktop.Notifications`, no
+  `Notify` call appears: `notify-send` only gets as far as
+  `GetServerInformation` and gives up, because `dbus-run-session` starts a
+  bare session bus with no notification daemon on it
+  (`notify-send` by hand confirms the reason: it exits 1 with
+  `GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown`). `notify()`
+  swallows that error and does not panic. `focus_active` reads `false`
+  (no GNOME schema in the VM). `speak_and_wait` picks `spd-say -w`
+  (installed) and does not panic either, but on this VM it never returns:
+  there is no PulseAudio server (`pactl info` refuses the connection) and
+  no ALSA playback device (`/dev/snd` has only `seq` and `timer`, no
+  card), so speech-dispatcher's output module has nothing to play to and
+  the wait for "done speaking" never arrives. This is a real gap the VM
+  cannot close, not a difference from the app: a developer with a sound
+  card should expect the same call to return once it has actually spoken.
+
 ## The CLI
 
 `cli/` builds on its own, with no Node toolchain and no `pnpm ear:build`:
