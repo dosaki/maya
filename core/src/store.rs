@@ -34,6 +34,10 @@ pub struct Store {
     sent: std::collections::HashMap<String, std::collections::VecDeque<String>>,
     /// Codex and Antigravity names, re-read only when their files change.
     names: NameFiles,
+    /// Names chosen in the New session modal, waiting for their sessions.
+    pending: crate::pending_names::PendingNames,
+    /// Sessions to `/rename` now, accumulated until `take_due_renames` collects them.
+    due_renames: Vec<(String, String)>,
 }
 
 /// Text of the files names come from, read again only when they change.
@@ -87,6 +91,8 @@ impl Store {
             compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
             sent: Default::default(),
             names: NameFiles::default(),
+            pending: Default::default(),
+            due_renames: Default::default(),
         }
     }
 
@@ -310,7 +316,23 @@ impl Store {
             card.pr = self.prs.get(&s.cwd);
             cards.push(card);
         }
+        let due = self.pending.apply(&mut cards, now_ms);
+        self.due_renames.extend(due);
         cards
+    }
+
+    pub fn add_pending_name(&mut self, p: crate::pending_names::PendingName) {
+        self.pending.add(p);
+    }
+
+    pub fn forget_pending_name(&mut self, session_id: &str) {
+        self.pending.forget(session_id);
+        self.due_renames.retain(|(id, _)| id != session_id);
+    }
+
+    /// Sessions to `/rename` now, each returned once.
+    pub fn take_due_renames(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.due_renames)
     }
 }
 

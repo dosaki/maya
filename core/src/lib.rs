@@ -18,6 +18,7 @@ pub mod log;
 pub mod model;
 pub mod net;
 pub mod notify;
+pub mod pending_names;
 pub mod pr;
 pub mod registry;
 pub mod resume;
