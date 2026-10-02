@@ -28,9 +28,9 @@ permissions:
   contents: read
 
 jobs:
-  # The tests that keep maya_core and the CLI portable, then the CLI built
-  # natively for each architecture on its own runner (the cross-rs images
-  # lag the toolchain).
+  # The CLI built natively for each architecture on its own runner (the
+  # cross-rs images lag the toolchain). Its tests, and maya_core's, run in
+  # linux-app's `cargo test --workspace`.
   linux:
     name: Linux (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -50,12 +50,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
-      # tmux for the integration test; musl-tools links the static binary.
-      - name: Install tmux and musl-tools
-        run: sudo apt-get update && sudo apt-get install -y tmux musl-tools
-      - name: Test core and the CLI
-        if: inputs.test
-        run: cargo test -p maya-core -p maya-cli
+      # musl-tools links the static binary.
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build the CLI
         run: |
           set -euo pipefail

@@ -243,12 +243,12 @@ built once (`pnpm tauri build --bundles appimage`):
     cargo test -p maya-core -p maya-cli
 
 `maya-cli` depends only on `maya_core`, so it builds without GTK or
-WebKit, and statically for musl. The build workflow's `linux` job runs
-`cargo test -p maya-core -p maya-cli` on Ubuntu (with tmux installed) —
-the guard that keeps `maya_core` free of macOS-only code — and builds
+WebKit, and statically for musl. The build workflow's `linux` job builds
 `maya-cli` natively for its musl target (`musl-tools`, no
 cross-compilation container), once per architecture on an x86_64 runner
-and an `ubuntu-24.04-arm` runner.
+and an `ubuntu-24.04-arm` runner. Their tests run in the `linux-app`
+job's `cargo test --workspace` on Ubuntu (with tmux installed), the
+guard that keeps `maya_core` free of macOS-only code.
 
 ## CI
 
