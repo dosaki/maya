@@ -21,18 +21,28 @@ export function renderMuteButton(muted: boolean): HTMLButtonElement {
   return b;
 }
 
-/** Mounts the mute button and saves each toggle. */
+/** Mounts the mute button and saves each toggle, one at a time. */
 export async function initMute(): Promise<void> {
   const host = document.getElementById("mute-host");
   if (!host) return;
   let muted = (await invoke<{ muted?: boolean }>("get_config")).muted ?? false;
-  const paint = () => host.replaceChildren(renderMuteButton(muted));
+  let saving = false;
+  const paint = () => {
+    const b = renderMuteButton(muted);
+    b.disabled = saving;
+    host.replaceChildren(b);
+  };
   host.addEventListener("click", async () => {
+    // A second click before the first is saved would send the same state.
+    if (saving) return;
+    saving = true;
+    paint();
     try {
       muted = (await invoke<{ muted?: boolean }>("set_muted", { muted: !muted })).muted ?? !muted;
     } catch (e) {
       showToast(String(e));
     }
+    saving = false;
     paint();
   });
   paint();

@@ -47,6 +47,21 @@ describe("mute flow", () => {
     expect(button().getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("ignores clicks while a save is in flight", async () => {
+    let finish: (v: { muted: boolean }) => void = () => {};
+    invoke.mockImplementation((cmd: string) => (cmd === "get_config" ? Promise.resolve({ muted: false }) : new Promise((r) => { finish = r; })));
+    await initMute();
+    const button = () => document.querySelector<HTMLButtonElement>("#mute-host button")!;
+    button().click();
+    expect(button().disabled).toBe(true);
+    button().click();
+    expect(invoke.mock.calls.filter((c) => c[0] === "set_muted")).toHaveLength(1);
+    finish({ muted: true });
+    await flush();
+    expect(button().disabled).toBe(false);
+    expect(button().getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("keeps the old state when saving fails", async () => {
     invoke.mockImplementation((cmd: string) => (cmd === "get_config" ? Promise.resolve({ muted: false }) : Promise.reject(new Error("disk full"))));
     await initMute();

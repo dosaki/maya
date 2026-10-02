@@ -1029,6 +1029,9 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
         config.network.assistants = before.network.assistants.clone();
         config.network.assistant_id = before.network.assistant_id.clone();
         config.network.token = before.network.token.clone();
+        // Mute belongs to the top-bar button, which may have saved it after
+        // the page fetched this config.
+        config.muted = before.muted;
         config::save(&store.config_path(), &config)?;
         store.config = config.clone();
         before
