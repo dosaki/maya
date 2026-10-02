@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { historyRefetchDue, isSlashCommand, renderModal } from "./modal";
+import { PANEL_SIZE_KEY, draggedPanelSize, historyRefetchDue, isSlashCommand, parsePanelSize, renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -25,6 +25,36 @@ describe("historyRefetchDue", () => {
     const idle = { ...base, machine: "laptop" };
     expect(historyRefetchDue(idle, { ...idle }, 10_000, 60_000)).toBe(false);
     expect(historyRefetchDue(base, { ...base }, 10_000, 10_001)).toBe(true);
+  });
+});
+
+describe("panel size", () => {
+  it("keeps a stored size only when it is two numbers at least the minimum", () => {
+    expect(parsePanelSize(null)).toBeNull();
+    expect(parsePanelSize("nonsense")).toBeNull();
+    expect(parsePanelSize(JSON.stringify({ width: 900.4, height: 700.6 }))).toEqual({ width: 900, height: 701 });
+    expect(parsePanelSize(JSON.stringify({ width: 100, height: 700 }))).toBeNull();
+    expect(parsePanelSize(JSON.stringify({ width: "wide", height: 700 }))).toBeNull();
+    expect(parsePanelSize(JSON.stringify({ width: Infinity, height: 700 }))).toBeNull();
+  });
+
+  it("reads the dragged size from the panel's inline style, never the rendered one", () => {
+    const panel = document.createElement("section");
+    expect(draggedPanelSize(panel)).toBeNull();
+    panel.style.width = "812px";
+    panel.style.height = "640.5px";
+    expect(draggedPanelSize(panel)).toEqual({ width: 812, height: 641 });
+  });
+
+  it("opens at the size last dragged to, and at the stylesheet's size when none is stored", () => {
+    localStorage.removeItem(PANEL_SIZE_KEY);
+    const plain = renderModal({ card: base, turns: [], status: null, draft: "" }, handlers()).querySelector<HTMLElement>(".modal__panel")!;
+    expect(plain.style.width).toBe("");
+    localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify({ width: 1000, height: 800 }));
+    const sized = renderModal({ card: base, turns: [], status: null, draft: "" }, handlers()).querySelector<HTMLElement>(".modal__panel")!;
+    expect(sized.style.width).toBe("1000px");
+    expect(sized.style.height).toBe("800px");
+    localStorage.removeItem(PANEL_SIZE_KEY);
   });
 });
 

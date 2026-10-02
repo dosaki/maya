@@ -135,6 +135,81 @@ function renderTweaks(h: ModalHandlers): HTMLElement {
   return row;
 }
 
+/** Where the panel size the user dragged is kept, across opens and restarts. */
+export const PANEL_SIZE_KEY = "maya.modal.size";
+/** The smallest panel the grip allows (the stylesheet's min-width and min-height). */
+export const PANEL_MIN = { width: 480, height: 360 };
+
+export interface PanelSize {
+  width: number;
+  height: number;
+}
+
+/** A size worth keeping: two finite numbers, at least `PANEL_MIN`. */
+export function panelSize(width: unknown, height: unknown): PanelSize | null {
+  const w = Number(width);
+  const h = Number(height);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w < PANEL_MIN.width || h < PANEL_MIN.height) return null;
+  return { width: Math.round(w), height: Math.round(h) };
+}
+
+/** Parses a stored size; anything odd is ignored. */
+export function parsePanelSize(raw: string | null): PanelSize | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as { width?: unknown; height?: unknown } | null;
+    return panelSize(v?.width, v?.height);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The size the browser wrote inline on the panel while its grip was
+ * dragged. The rendered size is not used: the stylesheet clamps it to the
+ * window, and a smaller window must not overwrite the chosen size.
+ */
+export function draggedPanelSize(panel: HTMLElement): PanelSize | null {
+  return panelSize(parseFloat(panel.style.width), parseFloat(panel.style.height));
+}
+
+function loadPanelSize(): PanelSize | null {
+  try {
+    return parsePanelSize(localStorage.getItem(PANEL_SIZE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function savePanelSize(size: PanelSize): void {
+  try {
+    localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify(size));
+  } catch {
+    // Storage may be off; the size then lasts for this open only.
+  }
+}
+
+/** Gives the panel the size last dragged to, if any; the stylesheet clamps it to the window. */
+export function applyPanelSize(panel: HTMLElement, size: PanelSize | null): void {
+  if (!size) return;
+  panel.style.width = `${size.width}px`;
+  panel.style.height = `${size.height}px`;
+}
+
+let panelObserver: ResizeObserver | null = null;
+
+/** Remembers every size the grip is dragged to, for the panel on screen. */
+function watchPanelSize(panel: HTMLElement | null): void {
+  panelObserver?.disconnect();
+  panelObserver = null;
+  if (!panel || typeof ResizeObserver === "undefined") return;
+  panelObserver = new ResizeObserver(() => {
+    const size = draggedPanelSize(panel);
+    if (size) savePanelSize(size);
+  });
+  panelObserver.observe(panel);
+}
+
 /** True when the composer holds a slash command: its first non-blank character is `/`. */
 export function isSlashCommand(text: string): boolean {
   return text.trimStart().startsWith("/");
@@ -154,6 +229,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const panel = el("section", "modal__panel");
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-modal", "true");
+  applyPanelSize(panel, loadPanelSize());
 
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");
@@ -434,7 +510,10 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   const existing = host.querySelector<HTMLElement>(".modal");
   const composerUnchanged = !!existing && !!existing.querySelector("textarea") === (m.card.hasInbox || m.card.harness !== "claude-code");
   if (existing && composerUnchanged) patchModal(existing, fresh);
-  else host.replaceChildren(fresh);
+  else {
+    host.replaceChildren(fresh);
+    watchPanelSize(host.querySelector<HTMLElement>(".modal__panel"));
+  }
   const hist = host.querySelector(".modal__history");
   if (hist) hist.scrollTop = wasAtBottom ? hist.scrollHeight : oldScroll;
   if (opts.focusInput) host.querySelector<HTMLTextAreaElement>("textarea")?.focus();
@@ -569,6 +648,7 @@ export function closeModal(): void {
   if (enableTimer) clearTimeout(enableTimer);
   enableTimer = undefined;
   document.removeEventListener("keydown", current.keyHandler);
+  watchPanelSize(null);
   current = null;
   attachments.clear();
   document.getElementById("modal-host")?.replaceChildren();
