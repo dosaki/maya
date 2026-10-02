@@ -255,11 +255,13 @@ and an `ubuntu-24.04-arm` runner.
 Three workflows in `.github/workflows/`:
 
 - `build.yml` tests and builds on Linux (x86_64 and aarch64: the CLI in
-  `linux`, the app in `linux-app`), Windows and macOS, the jobs running in
-  parallel, and keeps what each built as run artifacts
-  (`maya-linux-<arch>`, `maya-linux-app-<arch>`, `maya-windows`,
-  `maya-macos`; and `smoke-<arch>`, the Linux smoke test's screenshot,
-  which is not released). It is only ever called by the other two.
+  `linux`, the app in `linux-app`), Windows and macOS (aarch64 and
+  x86_64, one `macos` job each, both on Apple Silicon runners; the
+  tests run in the aarch64 one), the jobs running in parallel, and keeps
+  what each built as run artifacts (`maya-linux-<arch>`,
+  `maya-linux-app-<arch>`, `maya-windows`, `maya-macos-<arch>`; and
+  `smoke-<arch>`, the Linux smoke test's screenshot, which is not
+  released). It is only ever called by the other two.
 - `ci.yml` ("CI") runs on every pull request to `main`: `build.yml`
   unsigned, and a check that the version files agree. Nothing is
   published, so a pull request shows everything building before the merge.

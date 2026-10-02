@@ -201,11 +201,23 @@ jobs:
           path: release/*
           if-no-files-found: error
 
-  # The whole workspace's tests, then both apps, their disk images and the
-  # macOS CLI binaries, for Apple Silicon and Intel.
+  # The app, its disk image and the macOS CLI binary, one job per
+  # architecture, both on Apple Silicon runners: the Intel build is
+  # cross-compiled. The whole workspace's tests run in the Apple Silicon
+  # job, natively.
   macos:
-    name: macOS
+    name: macOS (${{ matrix.arch }})
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-apple-darwin
+            cli: arm64
+          - arch: x86_64
+            target: x86_64-apple-darwin
+            cli: x86_64
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -217,17 +229,18 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: .
+          # One cache per architecture: the two jobs build different targets.
+          key: ${{ matrix.target }}
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build the listener (both architectures)
-        run: |
-          sh scripts/build-ear.sh aarch64-apple-darwin
-          sh scripts/build-ear.sh x86_64-apple-darwin
+      - name: Build the listener
+        run: sh scripts/build-ear.sh ${{ matrix.target }}
       - name: Test
+        if: matrix.arch == 'aarch64'
         run: |
           pnpm test
           sh scripts/test-ear.sh
@@ -269,32 +282,25 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
           echo "signing as $APPLE_SIGNING_IDENTITY"
 
-      - name: Build (Apple Silicon)
-        run: pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
-      - name: Build (Intel)
-        run: pnpm tauri build --target x86_64-apple-darwin --bundles app,dmg
+      - name: Build
+        run: pnpm tauri build --target ${{ matrix.target }} --bundles app,dmg
       - name: Package
         run: |
           set -euo pipefail
           version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          target="${{ matrix.target }}"
           mkdir -p release
-          cargo build -p maya-cli --release --target aarch64-apple-darwin
-          cargo build -p maya-cli --release --target x86_64-apple-darwin
+          cargo build -p maya-cli --release --target "$target"
           if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/aarch64-apple-darwin/release/maya-cli
-            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none target/x86_64-apple-darwin/release/maya-cli
+            codesign --force --sign "$APPLE_SIGNING_IDENTITY" --timestamp=none "target/$target/release/maya-cli"
           fi
-          cp target/aarch64-apple-darwin/release/maya-cli release/maya-macos-arm64
-          cp target/x86_64-apple-darwin/release/maya-cli release/maya-macos-x86_64
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            arch="${target%%-*}"
-            bundle="target/$target/release/bundle"
-            tar -C "$bundle/macos" -czf "release/Maya_${version}_${arch}.app.tar.gz" Maya.app
-            cp "$bundle"/dmg/*.dmg "release/Maya_${version}_${arch}.dmg"
-          done
+          cp "target/$target/release/maya-cli" "release/maya-macos-${{ matrix.cli }}"
+          bundle="target/$target/release/bundle"
+          tar -C "$bundle/macos" -czf "release/Maya_${version}_${{ matrix.arch }}.app.tar.gz" Maya.app
+          cp "$bundle"/dmg/*.dmg "release/Maya_${version}_${{ matrix.arch }}.dmg"
           ls -la release
       - uses: actions/upload-artifact@v4
         with:
-          name: maya-macos
+          name: maya-macos-${{ matrix.arch }}
           path: release/*
           if-no-files-found: error
