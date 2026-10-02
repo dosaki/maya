@@ -276,7 +276,13 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
         model::Harness::Antigravity => "Antigravity",
         model::Harness::Grok => "Grok Build",
     };
-    let info = agents().into_iter().find(|a| a.harness == options.agent).ok_or_else(|| format!("{} is not installed on this machine.", label_of(options.agent)))?;
+    // Claude Code's models are Maya's own fixed list. Listing the agents is
+    // only for the others, and can take seconds, so a Claude start skips it.
+    let info = if options.agent == model::Harness::ClaudeCode {
+        crate::agents::claude()
+    } else {
+        agents().into_iter().find(|a| a.harness == options.agent).ok_or_else(|| format!("{} is not installed on this machine.", label_of(options.agent)))?
+    };
     options.validate(&info.model_ids())?;
     let dirs = launch::list_project_dirs(&root);
     let picked = match dir {
@@ -488,6 +494,20 @@ mod tests {
         let opts = LaunchOptions { agent: Harness::Codex, model: Some("gpt-9".into()), ..Default::default() };
         assert!(start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap_err().contains("model"));
         assert!(fake.calls.lock().unwrap().is_empty());
+        drop(dir);
+    }
+
+    #[test]
+    fn a_claude_start_does_not_wait_for_the_agents_listing() {
+        // The listing lacks Claude Code entirely: a Claude start never consults it.
+        let (dir, store) = store_with_projects(&["proj"]);
+        let store = with_agents(store, vec![codex_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = LaunchOptions { model: Some("opus".into()), ..Default::default() };
+        start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap();
+        let Call::Open { command, .. } = fake.calls.lock().unwrap()[0].clone() else { panic!() };
+        assert!(command.contains("&& claude --model opus -- \"$p\""), "{command}");
         drop(dir);
     }
 
