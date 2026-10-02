@@ -41,9 +41,22 @@ pub enum Up {
     /// The answer to the main's challenge, and this assistant's own nonce
     /// for the main to answer in `welcome`.
     Auth { mac: String, nonce: String },
-    Board { cards: Vec<Card>, dirs: Vec<String>, #[serde(default, skip_serializing_if = "Option::is_none")] agents: Option<Vec<crate::agents::AgentInfo>> },
+    Board {
+        cards: Vec<Card>,
+        dirs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "known_agents")]
+        agents: Option<Vec<crate::agents::AgentInfo>>,
+    },
     Result { id: u64, ok: bool, #[serde(default)] error: Option<String>, #[serde(default)] data: Option<Value> },
     Ping,
+}
+
+/// A board's agents, without the ones this Maya cannot read. A newer Maya
+/// may list an agent this one has never heard of; failing on it would fail
+/// the whole board and freeze every card from that machine.
+fn known_agents<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<crate::agents::AgentInfo>>, D::Error> {
+    let raw: Option<Vec<Value>> = Option::deserialize(d)?;
+    Ok(raw.map(|list| list.into_iter().filter_map(|a| serde_json::from_value(a).ok()).collect()))
 }
 
 /// Main → assistant.
@@ -228,6 +241,19 @@ mod tests {
         assert_eq!(agents, None);
         let new = encode(&Up::Board { cards: vec![], dirs: vec![], agents: Some(vec![crate::agents::claude()]) });
         assert!(new.contains("\"agents\":[{\"harness\":\"claude-code\""), "{new}");
+    }
+
+    #[test]
+    fn a_board_listing_an_agent_this_maya_does_not_know_still_decodes() {
+        // A newer Maya with one more agent must not freeze every card from its machine.
+        let board = r#"{"type":"board","cards":[],"dirs":[],"agents":[{"harness":"future","models":[]},{"harness":"claude-code","models":[]}]}"#;
+        let Up::Board { agents, .. } = decode_up(board).unwrap() else { panic!() };
+        let claude = crate::agents::AgentInfo { harness: crate::model::Harness::ClaudeCode, models: vec![], efforts: vec![], modes: vec![] };
+        assert_eq!(agents, Some(vec![claude]), "the unknown one is dropped, the rest kept");
+        let Up::Board { agents, .. } = decode_up(r#"{"type":"board","cards":[],"dirs":[]}"#).unwrap() else { panic!() };
+        assert_eq!(agents, None, "an old board still has none");
+        let Up::Board { agents, .. } = decode_up(r#"{"type":"board","cards":[],"dirs":[],"agents":null}"#).unwrap() else { panic!() };
+        assert_eq!(agents, None);
     }
 
     #[test]

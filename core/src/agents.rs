@@ -27,8 +27,12 @@ pub struct ModelInfo {
 #[serde(rename_all = "camelCase")]
 pub struct AgentInfo {
     pub harness: Harness,
+    /// Defaulted so a board from a Maya that leaves a list out still reads.
+    #[serde(default)]
     pub models: Vec<ModelInfo>,
+    #[serde(default)]
     pub efforts: Vec<String>,
+    #[serde(default)]
     pub modes: Vec<String>,
 }
 
@@ -195,12 +199,24 @@ fn refresh_if_stale(c: &mut Cache) {
     }
     c.fetching = true;
     std::thread::spawn(|| {
+        // Runs however the listing ends, a panic included: left fetching, no
+        // listing would start again, and `current` would wait forever. A
+        // listing that never landed leaves Claude Code alone, and with no
+        // `at` the next call lists again.
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+                c.list.get_or_insert_with(|| vec![claude()]);
+                c.fetching = false;
+                READY.notify_all();
+            }
+        }
+        let _done = Done;
         let list = build(launch::agent_binary, |bin, args| run_listing(bin, args, LISTING_TIMEOUT));
         let mut c = CACHE.lock().unwrap();
         c.list = Some(list);
         c.at = Some(Instant::now());
-        c.fetching = false;
-        READY.notify_all();
     });
 }
 
