@@ -37,6 +37,21 @@ fn session_tty(store: &Store, session_id: &str, pid: i32) -> Result<String, Stri
     known.map_or_else(|| tty::tty_for_pid(pid), Ok)
 }
 
+/// How long Codex must see no keys before an Enter submits instead of adding a line.
+const CODEX_SUBMIT_DELAY: Duration = Duration::from_millis(300);
+
+/// Types `line` then Enter into the session's terminal. Codex reads keys that
+/// arrive in one burst as a paste, where the Enter typed with the line only
+/// adds a new line to its input; a lone Enter typed after a pause submits it.
+fn type_line_for(l: &Local, harness: model::Harness, tty: &str, line: &str) -> Result<(), String> {
+    l.terminal.type_line(tty, line)?;
+    if harness == model::Harness::Codex {
+        std::thread::sleep(CODEX_SUBMIT_DELAY);
+        l.terminal.type_line(tty, "")?;
+    }
+    Ok(())
+}
+
 /// Sends `text` to the session: through its inbox, or typed into the
 /// terminal of a harness that has none.
 pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
@@ -50,7 +65,7 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String>
             return Err("Message is empty.".into());
         }
         let tty = session_tty(&l.store.lock().unwrap(), session_id, f.pid)?;
-        return l.terminal.type_line(&tty, &line);
+        return type_line_for(l, f.harness, &tty, &line);
     }
     let (socket, pid) = {
         let store = l.store.lock().unwrap();
@@ -151,7 +166,7 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
 /// back through the agent's own files on the next refresh.
 pub fn rename_session(l: &Local, session_id: &str, name: &str) -> Result<(), String> {
     let line = answer::rename_command(name)?;
-    let tty = {
+    let (harness, tty) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
         if card.harness == model::Harness::ClaudeCode {
@@ -161,27 +176,27 @@ pub fn rename_session(l: &Local, session_id: &str, name: &str) -> Result<(), Str
         }
         // The user's own name wins over one still waiting from the start.
         store.forget_pending_name(session_id);
-        session_tty(&store, session_id, card.pid)?
+        (card.harness, session_tty(&store, session_id, card.pid)?)
     };
-    l.terminal.type_line(&tty, &line)
+    type_line_for(l, harness, &tty, &line)
 }
 
 /// Types `/rename` into the sessions whose pending name is due. Looked up
 /// under the store's lock, typed after it is released.
 pub fn run_due_renames(l: &Local) {
-    let due: Vec<(String, String)> = {
+    let due: Vec<(model::Harness, String, String)> = {
         let mut store = l.store.lock().unwrap();
         store
             .take_due_renames()
             .into_iter()
             .filter_map(|(id, name)| {
-                let pid = store.foreign(&id)?.pid;
-                Some((session_tty(&store, &id, pid).ok()?, answer::rename_command(&name).ok()?))
+                let f = store.foreign(&id)?;
+                Some((f.harness, session_tty(&store, &id, f.pid).ok()?, answer::rename_command(&name).ok()?))
             })
             .collect()
     };
-    for (tty, line) in due {
-        if let Err(e) = l.terminal.type_line(&tty, &line) {
+    for (harness, tty, line) in due {
+        if let Err(e) = type_line_for(l, harness, &tty, &line) {
             crate::log::line("rename", format!("could not rename the session on {tty}: {e}"));
         }
     }
@@ -531,8 +546,24 @@ mod tests {
         assert!(rename_session(&l, "c1", "Fix CI").unwrap_err().contains("free"));
         std::fs::write(&rollout, format!("{TURN_STARTED}\n{TURN_COMPLETE}\n")).unwrap();
         rename_session(&l, "c1", "Fix CI").unwrap();
-        assert_eq!(fake.calls.lock().unwrap().last().unwrap(), &Call::Type { tty: "ttys009".into(), text: "/rename Fix CI".into() });
+        let typed = fake.calls.lock().unwrap().clone();
+        assert_eq!(typed, vec![Call::Type { tty: "ttys009".into(), text: "/rename Fix CI".into() }, Call::Type { tty: "ttys009".into(), text: String::new() }]);
         drop(dir);
+    }
+
+    #[test]
+    fn a_line_for_codex_is_submitted_by_a_lone_enter_typed_apart() {
+        let fake = FakeTerminal::default();
+        let l = Local { store: &Mutex::new(Store::new(PathBuf::from("/nonexistent"))), terminal: &fake };
+        type_line_for(&l, Harness::Codex, "ttys009", "/rename x").unwrap();
+        let enter = Call::Type { tty: "ttys009".into(), text: String::new() };
+        assert_eq!(fake.calls.lock().unwrap().clone(), vec![Call::Type { tty: "ttys009".into(), text: "/rename x".into() }, enter]);
+        for harness in [Harness::Antigravity, Harness::Grok, Harness::ClaudeCode] {
+            let fake = FakeTerminal::default();
+            let l = Local { store: l.store, terminal: &fake };
+            type_line_for(&l, harness, "ttys010", "/rename x").unwrap();
+            assert_eq!(fake.calls.lock().unwrap().clone(), vec![Call::Type { tty: "ttys010".into(), text: "/rename x".into() }], "{harness:?}");
+        }
     }
 
     #[test]
@@ -545,7 +576,7 @@ mod tests {
         run_due_renames(&l);
         run_due_renames(&l);
         let typed: Vec<Call> = fake.calls.lock().unwrap().clone();
-        assert_eq!(typed, vec![Call::Type { tty: "ttys009".into(), text: "/rename it's \"$(rm -rf ~)\"".into() }], "typed once, literally");
+        assert_eq!(typed, vec![Call::Type { tty: "ttys009".into(), text: "/rename it's \"$(rm -rf ~)\"".into() }, Call::Type { tty: "ttys009".into(), text: String::new() }], "typed once, literally");
         drop(dir);
     }
 
