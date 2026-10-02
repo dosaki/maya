@@ -146,6 +146,10 @@ impl Executor for TauriExecutor {
     fn board_requested(&self) -> bool {
         self.board_due.swap(false, Ordering::SeqCst)
     }
+
+    fn agents(&self) -> Option<Vec<maya_core::agents::AgentInfo>> {
+        Some(maya_core::agents::snapshot())
+    }
 }
 
 fn to_data<T: serde::Serialize>(v: T) -> Result<Option<Value>, String> {

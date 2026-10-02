@@ -16,6 +16,9 @@ pub struct RemoteBoard {
     pub address: String,
     pub cards: Vec<Card>,
     pub dirs: Vec<String>,
+    /// The agents this machine can start, as it last reported them; `None`
+    /// for an older Maya, which starts Claude Code only.
+    pub agents: Option<Vec<crate::agents::AgentInfo>>,
     pub received_at: u64,
     pub connected: bool,
 }
@@ -99,6 +102,12 @@ pub fn dirs_of(remotes: &[RemoteBoard], machine: &str) -> Vec<String> {
     remotes.iter().find(|b| b.machine == machine).map(|b| b.dirs.clone()).unwrap_or_default()
 }
 
+/// The agents `machine` can start, as it last reported them; None for an
+/// older Maya, which starts Claude Code only.
+pub fn agents_of(remotes: &[RemoteBoard], machine: &str) -> Option<Vec<crate::agents::AgentInfo>> {
+    remotes.iter().find(|b| b.machine == machine).and_then(|b| b.agents.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,7 +118,7 @@ mod tests {
     }
 
     fn board(machine: &str, hostname: &str, ids: &[&str], received_at: u64, connected: bool) -> RemoteBoard {
-        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], received_at, connected }
+        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, received_at, connected }
     }
 
     #[test]
@@ -205,5 +214,16 @@ mod tests {
         assert_eq!(machine_of(&boards, "l1", 0), None);
         assert_eq!(dirs_of(&boards, "a"), vec!["proj".to_string()]);
         assert!(dirs_of(&boards, "zzz").is_empty());
+    }
+
+    #[test]
+    fn agents_of_names_a_machines_agents_or_none_for_an_older_maya() {
+        let mut a = board("a", "h", &[], 0, true);
+        a.agents = Some(vec![crate::agents::claude()]);
+        let b = board("b", "h", &[], 0, true);
+        let boards = vec![a, b];
+        assert_eq!(agents_of(&boards, "a").unwrap()[0].harness, crate::model::Harness::ClaudeCode);
+        assert_eq!(agents_of(&boards, "b"), None);
+        assert_eq!(agents_of(&boards, "zzz"), None);
     }
 }

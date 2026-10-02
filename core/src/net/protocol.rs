@@ -41,7 +41,7 @@ pub enum Up {
     /// The answer to the main's challenge, and this assistant's own nonce
     /// for the main to answer in `welcome`.
     Auth { mac: String, nonce: String },
-    Board { cards: Vec<Card>, dirs: Vec<String> },
+    Board { cards: Vec<Card>, dirs: Vec<String>, #[serde(default, skip_serializing_if = "Option::is_none")] agents: Option<Vec<crate::agents::AgentInfo>> },
     Result { id: u64, ok: bool, #[serde(default)] error: Option<String>, #[serde(default)] data: Option<Value> },
     Ping,
 }
@@ -219,6 +219,15 @@ mod tests {
         assert!(s.contains("\"type\":\"pair\"") && s.contains("\"code\":\"123456\"") && s.contains("\"nonce\":\"n2\""), "{s}");
         assert_eq!(decode_up(&s).unwrap(), pair);
         assert!(decode_up(r#"{"type":"auth","mac":"ab"}"#).is_err(), "an auth without the assistant's nonce is refused");
+    }
+
+    #[test]
+    fn a_board_from_an_older_maya_has_no_agents() {
+        let old = r#"{"type":"board","cards":[],"dirs":["proj"]}"#;
+        let Up::Board { agents, .. } = serde_json::from_str::<Up>(old).unwrap() else { panic!() };
+        assert_eq!(agents, None);
+        let new = encode(&Up::Board { cards: vec![], dirs: vec![], agents: Some(vec![crate::agents::claude()]) });
+        assert!(new.contains("\"agents\":[{\"harness\":\"claude-code\""), "{new}");
     }
 
     #[test]

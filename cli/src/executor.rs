@@ -98,6 +98,10 @@ impl Executor for CliExecutor {
     fn board_requested(&self) -> bool {
         self.board_due.swap(false, Ordering::SeqCst)
     }
+
+    fn agents(&self) -> Option<Vec<maya_core::agents::AgentInfo>> {
+        Some(maya_core::agents::snapshot())
+    }
 }
 
 #[cfg(test)]
