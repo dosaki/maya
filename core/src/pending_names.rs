@@ -116,7 +116,9 @@ impl PendingNames {
     pub fn apply(&mut self, cards: &mut [Card], now_ms: u64) -> Vec<(String, String)> {
         let mut claimed = self.claimed_ever.clone();
         claimed.extend(self.entries.iter().filter_map(|p| p.session_id.clone()));
-        for p in self.entries.iter_mut().filter(|p| p.session_id.is_none()) {
+        // An entry past its window matches nothing: a session appearing that
+        // late is not the one launched, and the pass below drops the entry.
+        for p in self.entries.iter_mut().filter(|p| p.session_id.is_none() && now_ms.saturating_sub(p.launched_ms) < MATCH_WINDOW_MS) {
             // The folder check goes last: it is the one that may touch the disk.
             let found = cards.iter().find(|c| c.harness == p.harness && !p.known.contains(&c.session_id) && !claimed.contains(&c.session_id) && is_target(&c.cwd, &p.cwd));
             if let Some(c) = found {
@@ -255,6 +257,17 @@ mod tests {
         assert!(!p.is_empty());
         p.apply(&mut [], 1_000 + MATCH_WINDOW_MS);
         assert!(p.is_empty(), "unmatched for ten minutes");
+    }
+
+    #[test]
+    fn a_session_appearing_once_the_window_is_over_is_not_named() {
+        let mut p = PendingNames::default();
+        p.add(pending("Late", &[]));
+        let mut cards = vec![card("s1", Harness::Codex, "/dev/a", State::Working, "")];
+        assert!(p.apply(&mut cards, 1_000 + MATCH_WINDOW_MS).is_empty());
+        assert_eq!(cards[0].name, "auto-s1");
+        assert!(p.is_empty());
+        assert_eq!(p.take_events(), vec!["dropped \"Late\": no new Codex session appeared in /dev/a within ten minutes".to_string()]);
     }
 
     #[test]

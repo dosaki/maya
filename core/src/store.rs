@@ -10,6 +10,10 @@ use crate::transcript::TailCache;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// What finds the sessions of `(pid, tty, harness)` processes, given the
+/// Codex and Antigravity folders.
+type Discover = dyn Fn(&[(i32, String, Harness)], &Path, &Path) -> Vec<ForeignSession> + Send;
+
 pub struct Store {
     claude_dir: PathBuf,
     codex_dir: PathBuf,
@@ -20,6 +24,9 @@ pub struct Store {
     foreign: std::collections::HashMap<i32, ForeignSession>,
     /// The process lister, replaceable in tests.
     processes: Box<dyn Fn() -> Vec<(i32, String, Harness)> + Send>,
+    /// Finds the sessions of processes not yet known, from the Codex and
+    /// Antigravity folders; replaceable in tests, where no `lsof` can.
+    discover: Box<Discover>,
     events: EventLog,
     codex_events: EventLog,
     pub config: Config,
@@ -61,6 +68,18 @@ impl NameFiles {
     }
 }
 
+/// The sessions of `procs`, found the way this platform can: through `lsof`
+/// on Unix, through the files each process holds or logs on Windows.
+#[cfg(unix)]
+fn discover_sessions(procs: &[(i32, String, Harness)], codex_dir: &Path, agy_dir: &Path) -> Vec<ForeignSession> {
+    foreign::discover(procs, foreign::proc_info, codex_dir, agy_dir)
+}
+
+#[cfg(windows)]
+fn discover_sessions(procs: &[(i32, String, Harness)], codex_dir: &Path, agy_dir: &Path) -> Vec<ForeignSession> {
+    foreign::discover_from_files(procs, crate::win_process::holders, codex_dir, agy_dir)
+}
+
 /// Replies remembered per session.
 const SENT_KEPT: usize = 50;
 
@@ -86,6 +105,7 @@ impl Store {
             grok_dir: home.join(".grok"),
             foreign: std::collections::HashMap::new(),
             processes: Box::new(foreign::list_tui_processes),
+            discover: Box::new(discover_sessions),
             config,
             alive: Box::new(registry::pid_alive),
             tails: TailCache::default(),
@@ -175,6 +195,18 @@ impl Store {
         self
     }
 
+    /// Processes running alongside the ones the store already knows, which
+    /// the next refresh discovers as `sessions`: a session started by hand
+    /// moments ago that no refresh has looked up yet.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_processes(mut self, sessions: Vec<ForeignSession>) -> Self {
+        let mut pids: Vec<(i32, String, Harness)> = self.foreign.values().map(|s| (s.pid, s.tty.clone().unwrap_or_default(), s.harness)).collect();
+        pids.extend(sessions.iter().map(|s| (s.pid, s.tty.clone().unwrap_or_default(), s.harness)));
+        self.processes = Box::new(move || pids.clone());
+        self.discover = Box::new(move |fresh, _, _| sessions.iter().filter(|s| fresh.iter().any(|p| p.0 == s.pid)).cloned().collect());
+        self
+    }
+
     /// Re-discovers foreign sessions: new pids are looked up, gone pids dropped.
     fn refresh_foreign(&mut self) {
         let procs = (self.processes)();
@@ -185,11 +217,7 @@ impl Store {
         let recheck = |h: Harness| cfg!(windows) && h == Harness::Antigravity;
         let fresh: Vec<_> = procs.into_iter().filter(|p| !self.foreign.contains_key(&p.0) || recheck(p.2)).collect();
         if !fresh.is_empty() {
-            #[cfg(unix)]
-            let found = foreign::discover(&fresh, foreign::proc_info, &self.codex_dir, &self.agy_dir);
-            #[cfg(windows)]
-            let found = foreign::discover_from_files(&fresh, crate::win_process::holders, &self.codex_dir, &self.agy_dir);
-            for s in found {
+            for s in (self.discover)(&fresh, &self.codex_dir, &self.agy_dir) {
                 self.foreign.insert(s.pid, s);
             }
         }

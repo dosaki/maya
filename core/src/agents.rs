@@ -111,7 +111,8 @@ fn listing_args(agent: Harness) -> &'static [&'static str] {
 }
 
 /// An agent's choices from its listing; with none (not run, failed, timed
-/// out) it offers no models, so only "Default".
+/// out) it offers no models, so only "Default", and Codex, whose efforts
+/// come from its listing, offers no efforts either.
 pub fn info_for(agent: Harness, listing: Option<&str>) -> AgentInfo {
     if agent == Harness::ClaudeCode {
         return claude();
@@ -123,8 +124,10 @@ pub fn info_for(agent: Harness, listing: Option<&str>) -> AgentInfo {
         _ => vec![],
     };
     // With "Default" chosen the model may be any of them: offer what all take.
+    // With none listed nothing is known about what Codex's default takes, so
+    // no effort is offered rather than every one.
     let efforts = if agent == Harness::Codex {
-        launch::efforts(agent).iter().filter(|e| models.iter().all(|m| m.efforts.iter().any(|x| x == *e))).map(|e| e.to_string()).collect()
+        launch::efforts(agent).iter().filter(|e| !models.is_empty() && models.iter().all(|m| m.efforts.iter().any(|x| x == *e))).map(|e| e.to_string()).collect()
     } else {
         strings(launch::efforts(agent))
     };
@@ -277,6 +280,13 @@ mod tests {
         let info = info_for(Harness::Codex, Some(&fixture("codex/models.json")));
         assert_eq!(info.efforts, vec!["low", "medium", "high", "xhigh"]);
         assert_eq!(info.modes, vec!["read-only", "workspace-write", "danger-full-access"]);
+    }
+
+    #[test]
+    fn codex_without_a_listing_offers_no_efforts() {
+        // Nothing listed means nothing known about what "Default" takes.
+        assert!(info_for(Harness::Codex, None).efforts.is_empty());
+        assert!(info_for(Harness::Codex, Some("not json")).efforts.is_empty());
     }
 
     #[test]

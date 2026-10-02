@@ -40,10 +40,19 @@ fn session_tty(store: &Store, session_id: &str, pid: i32) -> Result<String, Stri
 /// How long Codex must see no keys before an Enter submits instead of adding a line.
 const CODEX_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
+/// Held while a line is typed into any session. A due rename and a reply
+/// can be typed at once from different threads; inside the Codex pause the
+/// other line would land in the same input and both submit as one line.
+static TYPING: Mutex<()> = Mutex::new(());
+
 /// Types `line` then Enter into the session's terminal. Codex reads keys that
 /// arrive in one burst as a paste, where the Enter typed with the line only
 /// adds a new line to its input; a lone Enter typed after a pause submits it.
+/// One line at a time per process: see `TYPING`. The store's lock is never
+/// held here, so the board keeps refreshing through the pause.
 fn type_line_for(l: &Local, harness: model::Harness, tty: &str, line: &str) -> Result<(), String> {
+    // A thread that panicked while typing left nothing half-done worth refusing over.
+    let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
     l.terminal.type_line(tty, line)?;
     if harness == model::Harness::Codex {
         std::thread::sleep(CODEX_SUBMIT_DELAY);
@@ -301,6 +310,24 @@ pub fn list_resumable_sessions(l: &Local, dir: &str) -> Result<Vec<resume::Resum
     Ok(resume::list_sessions(&claude_dir, &path.to_string_lossy(), &running))
 }
 
+/// A Codex effort must be one the chosen model takes, or with "Default" one
+/// every model takes: Codex's efforts differ by model, and the modal is not
+/// the only caller (the CLI and the network pass options too). Other agents'
+/// efforts do not vary by model, and `validate_shape` has checked them.
+fn check_codex_effort(info: &crate::agents::AgentInfo, options: &launch::LaunchOptions) -> Result<(), String> {
+    let chosen = |v: &Option<String>| v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let Some(effort) = chosen(&options.effort).filter(|_| options.agent == model::Harness::Codex) else { return Ok(()) };
+    let (takes, model) = match chosen(&options.model) {
+        Some(m) => (info.models.iter().find(|x| x.id == m).map(|x| x.efforts.clone()).unwrap_or_default(), m),
+        None => (info.efforts.clone(), "the default model".to_string()),
+    };
+    if takes.contains(&effort) {
+        Ok(())
+    } else {
+        Err(format!("Unknown effort for {model}: {effort}"))
+    }
+}
+
 /// Opens a terminal in a project folder running the chosen agent on
 /// `prompt`. With no `dir`, Claude picks the folder from the prompt. A name
 /// for an agent that takes none on its command line waits in the store for
@@ -328,6 +355,7 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
         agents().into_iter().find(|a| a.harness == options.agent).ok_or_else(|| format!("{} is not installed on this machine.", label_of(options.agent)))?
     };
     options.validate(&info.model_ids())?;
+    check_codex_effort(&info, &options)?;
     let dirs = launch::list_project_dirs(&root);
     let picked = match dir {
         Some(_) => None,
@@ -339,8 +367,14 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
     let file = launch::write_prompt_file(&maya_dir, &prompt)?;
     let grok_id = (options.agent == model::Harness::Grok).then(launch::new_session_uuid);
-    // Sessions already running cannot be the new one.
-    let known = l.store.lock().unwrap().live_session_ids();
+    // Sessions already running cannot be the new one. They come from a fresh
+    // discovery: one started by hand seconds ago, not yet looked up by a
+    // refresh, would otherwise look new and take the name.
+    let known = {
+        let mut store = l.store.lock().unwrap();
+        store.refresh(now_ms());
+        store.live_session_ids()
+    };
     let terminal = l.terminal.open(&launch::session_command(&target, &file, &options, grok_id.as_deref()), &target, &tmux_label())?;
     if let (Some(name), false) = (options.chosen_name(), options.agent == model::Harness::ClaudeCode) {
         let target = target.to_string_lossy();
@@ -505,8 +539,66 @@ mod tests {
         (t, Mutex::new(store), path)
     }
 
+    /// Codex listing two models that take different efforts.
     fn codex_info() -> crate::agents::AgentInfo {
-        crate::agents::info_for(Harness::Codex, Some(r#"{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","visibility":"list","supported_reasoning_levels":[{"effort":"low"}]}]}"#))
+        crate::agents::info_for(
+            Harness::Codex,
+            Some(r#"{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"ultra"}]},{"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]}]}"#),
+        )
+    }
+
+    #[test]
+    fn a_codex_effort_must_be_one_the_chosen_model_takes() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let store = with_agents(store, vec![agents::claude(), codex_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = |model: Option<&str>, effort: &str| LaunchOptions { agent: Harness::Codex, model: model.map(String::from), effort: Some(effort.into()), ..Default::default() };
+        assert_eq!(start_session(&l, Some("proj".into()), "hello".into(), opts(Some("gpt-5.5"), "ultra")).unwrap_err(), "Unknown effort for gpt-5.5: ultra");
+        // With "Default" the model may be either: only what both take.
+        assert_eq!(start_session(&l, Some("proj".into()), "hello".into(), opts(None, "high")).unwrap_err(), "Unknown effort for the default model: high");
+        assert!(fake.calls.lock().unwrap().is_empty(), "nothing opened");
+        start_session(&l, Some("proj".into()), "hello".into(), opts(Some("gpt-5.5"), "high")).unwrap();
+        start_session(&l, Some("proj".into()), "hello".into(), opts(None, "low")).unwrap();
+        assert_eq!(fake.calls.lock().unwrap().len(), 2);
+        drop(dir);
+    }
+
+    #[test]
+    fn a_session_started_by_hand_but_not_yet_discovered_never_takes_a_new_name() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let proj_path = dir.path().join("projects").join("proj").to_string_lossy().into_owned();
+        // Running, but no refresh has looked it up yet.
+        let by_hand = ForeignSession { harness: Harness::Codex, pid: 88, tty: Some("ttys011".into()), session_id: "c-hand".into(), cwd: proj_path.clone(), name: "By hand".into(), transcript_path: dir.path().join("none.jsonl") };
+        let store = store.into_inner().unwrap().with_foreign(dir.path().join("codex"), dir.path().join("agy"), vec![]).with_processes(vec![by_hand]);
+        assert!(!store.live_session_ids().contains(&"c-hand".to_string()));
+        let store = with_agents(Mutex::new(store), vec![agents::claude(), codex_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = LaunchOptions { agent: Harness::Codex, name: Some("Fix CI".into()), ..Default::default() };
+        start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap();
+        let mut cards = vec![test_card("c-hand", Harness::Codex, &proj_path)];
+        store.lock().unwrap().pending_apply_for_test(&mut cards);
+        assert_eq!(cards[0].name, "auto-c-hand");
+        drop(dir);
+    }
+
+    #[test]
+    fn lines_typed_at_once_into_one_codex_session_never_interleave() {
+        let fake = FakeTerminal::default();
+        let store = Mutex::new(Store::new(PathBuf::from("/nonexistent")));
+        let l = Local { store: &store, terminal: &fake };
+        std::thread::scope(|s| {
+            s.spawn(|| type_line_for(&l, Harness::Codex, "ttys009", "/rename x").unwrap());
+            s.spawn(|| type_line_for(&l, Harness::Codex, "ttys009", "a reply").unwrap());
+        });
+        let typed: Vec<String> = fake.calls.lock().unwrap().iter().map(|c| match c {
+            Call::Type { text, .. } => text.clone(),
+            other => panic!("{other:?}"),
+        }).collect();
+        let (a, b) = ("/rename x".to_string(), "a reply".to_string());
+        let e = String::new();
+        assert!(typed == [a.clone(), e.clone(), b.clone(), e.clone()] || typed == [b, e.clone(), a, e], "{typed:?}");
     }
 
     #[test]
