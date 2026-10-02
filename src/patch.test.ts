@@ -3,7 +3,7 @@ import { patchModal, renderModal } from "./modal";
 import type { Card } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "working", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn() });
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCommand: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn() });
 
 describe("patchModal title", () => {
   it("updates the name after a rename but leaves an edit in progress alone", () => {

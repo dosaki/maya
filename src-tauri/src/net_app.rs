@@ -172,6 +172,7 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
         CommandKind::Rename { session, name } => done(actions::rename_session(&l, &session, &name)),
         CommandKind::SetOption { session, setting, value } => done(actions::set_session_option(&l, &session, &setting, &value)),
         CommandKind::CycleMode { session } => done(actions::cycle_session_mode(&l, &session)),
+        CommandKind::Slash { session, text } => done(actions::send_slash_command(&l, &session, &text)),
         CommandKind::Start { dir, prompt, options } => to_data(actions::start_session(&l, dir, prompt, options)?),
         CommandKind::Resume { dir, session } => done(actions::resume_session(&l, &dir, &session)),
         CommandKind::ListResumable { dir } => to_data(actions::list_resumable_sessions(&l, &dir)?),

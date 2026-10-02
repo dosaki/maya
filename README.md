@@ -22,7 +22,9 @@ on, if any.
 conversation as rendered markdown, reply (with files and images attached by
 drag-and-drop or paste), or answer the question it is asking with one click.
 Rename a session, change its model, effort or permission mode, and compact
-its context when the meter passes 75%.
+its context when the meter passes 75%. A message that starts with `/` is a
+slash command: it is typed into the session's terminal, so `/review` or
+`/clear` from the composer reach Claude Code itself.
 
 **Start and resume.** The "+" in the Idle column starts a new session in one
 of your project folders, or lets Claude pick the folder from your prompt.
@@ -31,8 +33,12 @@ up where it stopped.
 
 **Know when you are needed.** When a session starts waiting on a decision,
 or finishes, Maya tells you: a system notification, or her voice saying
-"hexgrid needs a decision". She stays quiet under a Focus mode. An
-ElevenLabs voice is optional.
+"hexgrid needs a decision". Her icon shows how many sessions are waiting
+(a badge in the Dock, a dot on the Windows taskbar button, a count on a
+Linux dock that follows the Unity launcher API, such as Ubuntu's with
+`libunity9` installed), and bounces once in the Dock when a new one
+starts waiting. She stays quiet under a Focus mode. An ElevenLabs voice
+is optional.
 
 **Review pull requests.** The Pull Requests tab lists the pull requests
 waiting for your review. One click opens the pull request; another starts a
@@ -319,7 +325,8 @@ write and drives them through their own interfaces.
   as the fallback (a turn that ends in a question is "Awaiting Decision").
 - **Replies** go through Claude Code's session inbox (a Unix socket on
   macOS and Linux, a named pipe on Windows), or are typed into the session's
-  terminal for the other agents. On Windows every inbox connection must
+  terminal for the other agents. Slash commands, answers, renames and the
+  model, effort and mode changes are typed into the terminal too. On Windows every inbox connection must
   open with the session's token, which Claude Code gives only to the
   session's hooks, so replies there need the hook installed: the hook keeps
   each session's token in `~/.claude/maya/inbox/`, and a session that was

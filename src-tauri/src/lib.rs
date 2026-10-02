@@ -1,5 +1,6 @@
 pub use maya_core::{actions, answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, launch, log, model, net, notify, pr, registry, resume, reviews, state, store, terminal, transcript, tty, watcher};
 
+pub mod badge;
 #[cfg(target_os = "macos")]
 pub mod dock;
 pub mod ear;
@@ -467,6 +468,12 @@ fn refresh_and_emit(app: &AppHandle) {
         log::line("app", "focus mode is on: announcements stay silent");
     }
     let speak = speak && !focus;
+    // The app icon shows how many sessions wait, and asks for a look (a
+    // Dock bounce) under the same rules as the banner.
+    badge::show(app, badge::awaiting_count(&cards));
+    if wants_notify && !assistant && !focus && !fresh.is_empty() {
+        badge::bounce(app);
+    }
     if wants_notify && !assistant {
         // The key is looked up only when there is something to say.
         let eleven = if speak && (!fresh.is_empty() || !finished.is_empty()) { eleven_settings(eleven_voice) } else { None };
@@ -818,6 +825,15 @@ fn compact_session(app: AppHandle, state: TauriState<AppState>, session_id: Stri
     actions::compact_session(&local(&state), &session_id)
 }
 
+/// Types a slash command from the composer into the session's terminal.
+#[tauri::command(async)]
+fn send_slash_command(app: AppHandle, state: TauriState<AppState>, session_id: String, text: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Slash { session: session_id, text });
+    }
+    actions::send_slash_command(&local(&state), &session_id, &text)
+}
+
 /// Sends Shift+Tab to the session's Terminal tab, cycling its permission mode.
 #[tauri::command(async)]
 fn cycle_session_mode(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<(), String> {
@@ -1050,6 +1066,7 @@ pub fn run() {
             answer_question,
             set_session_option,
             cycle_session_mode,
+            send_slash_command,
             rename_session,
             compact_session,
             save_attachment,

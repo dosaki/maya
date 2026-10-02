@@ -36,6 +36,8 @@ export interface ModalHandlers {
   onOpenPr(): void;
   /** Give the session a new name (typed as `/rename`). */
   onRename(name: string): void;
+  /** Type a slash command from the composer into the session's terminal. */
+  onCommand(text: string): void;
   /** Compact the session's context (typed as `/compact`). */
   onCompact(): void;
   /** Open an http(s) link from a rendered turn in the browser. */
@@ -133,6 +135,264 @@ function renderTweaks(h: ModalHandlers): HTMLElement {
   return row;
 }
 
+/** Where the panel size the user dragged is kept, across opens and restarts. */
+export const PANEL_SIZE_KEY = "maya.modal.size";
+/** The smallest panel resizing allows (the stylesheet's min-width and min-height). */
+export const PANEL_MIN = { width: 480, height: 360 };
+
+export interface PanelSize {
+  width: number;
+  height: number;
+}
+
+/** A size worth keeping: two finite numbers, at least `PANEL_MIN`. */
+export function panelSize(width: unknown, height: unknown): PanelSize | null {
+  const w = Number(width);
+  const h = Number(height);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w < PANEL_MIN.width || h < PANEL_MIN.height) return null;
+  return { width: Math.round(w), height: Math.round(h) };
+}
+
+/** Parses a stored size; anything odd is ignored. */
+export function parsePanelSize(raw: string | null): PanelSize | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as { width?: unknown; height?: unknown } | null;
+    return panelSize(v?.width, v?.height);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The size written inline on the panel while an edge was dragged. The
+ * rendered size is not used: the stylesheet clamps it to the window, and
+ * a smaller window must not overwrite the chosen size.
+ */
+export function draggedPanelSize(panel: HTMLElement): PanelSize | null {
+  return panelSize(parseFloat(panel.style.width), parseFloat(panel.style.height));
+}
+
+function loadPanelSize(): PanelSize | null {
+  try {
+    return parsePanelSize(localStorage.getItem(PANEL_SIZE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function savePanelSize(size: PanelSize): void {
+  try {
+    localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify(size));
+  } catch {
+    // Storage may be off; the size then lasts for this open only.
+  }
+}
+
+/** Gives the panel the size last dragged to, if any; the stylesheet clamps it to the window. */
+export function applyPanelSize(panel: HTMLElement, size: PanelSize | null): void {
+  if (!size) return;
+  panel.style.width = `${size.width}px`;
+  panel.style.height = `${size.height}px`;
+}
+
+/**
+ * Pins the panel where it is before an edge is dragged. Centred, a drag of
+ * an edge would move the panel's centre too, doubling the change and
+ * running the edge away from the pointer. Pinned, only the dragged edges
+ * move; the next open is centred again at the size kept.
+ */
+export function anchorPanel(root: HTMLElement, panel: HTMLElement): void {
+  if (root.classList.contains("modal--anchored")) return;
+  const r = panel.getBoundingClientRect();
+  const host = root.getBoundingClientRect();
+  root.classList.add("modal--anchored");
+  placePanel(panel, { left: Math.max(0, r.left - host.left), top: Math.max(0, r.top - host.top) });
+}
+
+export interface PanelBox {
+  left: number;
+  top: number;
+  width?: number;
+  height?: number;
+}
+
+/** Puts a pinned panel at `left`, `top` (and the size given), kept inside the window. */
+function placePanel(panel: HTMLElement, box: PanelBox): void {
+  panel.style.left = `${box.left}px`;
+  panel.style.top = `${box.top}px`;
+  if (box.width !== undefined) panel.style.width = `${box.width}px`;
+  if (box.height !== undefined) panel.style.height = `${box.height}px`;
+  // No edge can go past the window's.
+  panel.style.maxWidth = `calc(100vw - ${box.left + 8}px)`;
+  panel.style.maxHeight = `calc(100vh - ${box.top + 8}px)`;
+}
+
+/**
+ * Where a pinned panel of `width` by `height` at `left`, `top` moves so it
+ * fits a window of `viewport` again: the size itself is left alone, so the
+ * size kept is not overwritten by a window that shrank for a while.
+ */
+export function fitPosition(box: Required<PanelBox>, viewport: { width: number; height: number }): { left: number; top: number } {
+  return {
+    left: Math.max(0, Math.min(box.left, viewport.width - box.width - 8)),
+    top: Math.max(0, Math.min(box.top, viewport.height - box.height - 8)),
+  };
+}
+
+/** Moves a pinned panel back inside the window after the window changed size. */
+export function fitAnchoredPanel(panel: HTMLElement): void {
+  const root = panel.parentElement;
+  if (!root?.classList.contains("modal--anchored")) return;
+  const r = panel.getBoundingClientRect();
+  const box = {
+    left: parseFloat(panel.style.left) || 0,
+    top: parseFloat(panel.style.top) || 0,
+    width: parseFloat(panel.style.width) || r.width,
+    height: parseFloat(panel.style.height) || r.height,
+  };
+  placePanel(panel, fitPosition(box, { width: window.innerWidth, height: window.innerHeight }));
+}
+
+/** How far outside the panel's edge the resize band reaches, in pixels. */
+export const EDGE_OUT_PX = 6;
+/** How far inside the panel's edge the resize band reaches: the border and a little more. */
+export const EDGE_IN_PX = 4;
+
+/** Which of the panel's edges a pointer is on; a corner is two of them. */
+export interface Edges {
+  left: boolean;
+  right: boolean;
+  top: boolean;
+  bottom: boolean;
+}
+
+/**
+ * The edges under a pointer at (x, y), or null away from them. The band
+ * runs a little outside the panel (over the backdrop) and a little inside
+ * it (the border), like a window's invisible resize frame.
+ */
+export function edgesAt(rect: DOMRect, x: number, y: number): Edges | null {
+  const within = x >= rect.left - EDGE_OUT_PX && x <= rect.right + EDGE_OUT_PX && y >= rect.top - EDGE_OUT_PX && y <= rect.bottom + EDGE_OUT_PX;
+  if (!within) return null;
+  const e = {
+    left: x <= rect.left + EDGE_IN_PX,
+    right: x >= rect.right - EDGE_IN_PX,
+    top: y <= rect.top + EDGE_IN_PX,
+    bottom: y >= rect.bottom - EDGE_IN_PX,
+  };
+  return e.left || e.right || e.top || e.bottom ? e : null;
+}
+
+/** The resize cursor for `edges`: a diagonal at a corner, else across the edge. */
+export function cursorFor(e: Edges): string {
+  if ((e.left && e.top) || (e.right && e.bottom)) return "nwse-resize";
+  if ((e.right && e.top) || (e.left && e.bottom)) return "nesw-resize";
+  return e.left || e.right ? "ew-resize" : "ns-resize";
+}
+
+/**
+ * Where a drag of `edges` by (dx, dy) puts a pinned panel that started at
+ * `start`: the dragged edges follow the pointer, the others stay, and the
+ * panel stays at least `PANEL_MIN` and inside a window of `viewport`.
+ */
+export function edgeDrag(start: Required<PanelBox>, e: Edges, dx: number, dy: number, viewport: { width: number; height: number }): Required<PanelBox> {
+  let { left, top, width, height } = start;
+  const right = left + width;
+  const bottom = top + height;
+  if (e.left) {
+    left = Math.min(Math.max(0, start.left + dx), right - PANEL_MIN.width);
+    width = right - left;
+  } else if (e.right) {
+    width = Math.min(Math.max(PANEL_MIN.width, start.width + dx), viewport.width - left);
+  }
+  if (e.top) {
+    top = Math.min(Math.max(0, start.top + dy), bottom - PANEL_MIN.height);
+    height = bottom - top;
+  } else if (e.bottom) {
+    height = Math.min(Math.max(PANEL_MIN.height, start.height + dy), viewport.height - top);
+  }
+  return { left, top, width, height };
+}
+
+/** How long after a resize ends a click on the backdrop is still the drag's own release. */
+export const RESIZE_CLICK_GRACE_MS = 300;
+
+/**
+ * Lets any edge or corner of the panel be dragged, like a window's frame:
+ * the pointer shows the resize cursor over the band, the border lights up,
+ * and a press there pins the panel and moves only the dragged edges.
+ * Returns whether a backdrop click at `now` is the release of such a drag.
+ */
+function installEdgeResize(root: HTMLElement, panel: HTMLElement): (now: number) => boolean {
+  let dragging = false;
+  let endedAt = -Infinity;
+  const hover = (ev: PointerEvent) => {
+    if (dragging) return;
+    const edges = edgesAt(panel.getBoundingClientRect(), ev.clientX, ev.clientY);
+    root.style.cursor = edges ? cursorFor(edges) : "";
+    root.classList.toggle("modal--edge", edges !== null);
+  };
+  root.addEventListener("pointermove", hover);
+  root.addEventListener("pointerleave", () => {
+    if (!dragging) root.classList.remove("modal--edge");
+  });
+  root.addEventListener("pointerdown", (ev: PointerEvent) => {
+    if (ev.button !== 0) return;
+    const edges = edgesAt(panel.getBoundingClientRect(), ev.clientX, ev.clientY);
+    if (!edges) return;
+    ev.preventDefault();
+    anchorPanel(root, panel);
+    const r = panel.getBoundingClientRect();
+    const start = { left: parseFloat(panel.style.left) || 0, top: parseFloat(panel.style.top) || 0, width: r.width, height: r.height };
+    const origin = { x: ev.clientX, y: ev.clientY };
+    dragging = true;
+    if (ev.pointerId !== undefined) root.setPointerCapture?.(ev.pointerId);
+    const move = (e: PointerEvent) =>
+      placePanel(panel, edgeDrag(start, edges, e.clientX - origin.x, e.clientY - origin.y, { width: window.innerWidth, height: window.innerHeight }));
+    const end = () => {
+      root.removeEventListener("pointermove", move);
+      root.removeEventListener("pointerup", end);
+      root.removeEventListener("pointercancel", end);
+      dragging = false;
+      endedAt = Date.now();
+    };
+    root.addEventListener("pointermove", move);
+    root.addEventListener("pointerup", end);
+    root.addEventListener("pointercancel", end);
+  });
+  return (now) => dragging || now - endedAt < RESIZE_CLICK_GRACE_MS;
+}
+
+let panelObserver: ResizeObserver | null = null;
+let panelFitter: (() => void) | null = null;
+
+/**
+ * For the panel on screen: remembers every size it is dragged to, and
+ * keeps it inside the window when the window changes size. `null` stops
+ * watching the previous one.
+ */
+function watchPanelSize(panel: HTMLElement | null): void {
+  panelObserver?.disconnect();
+  panelObserver = null;
+  if (panelFitter) window.removeEventListener("resize", panelFitter);
+  panelFitter = null;
+  if (!panel) return;
+  panelFitter = () => fitAnchoredPanel(panel);
+  window.addEventListener("resize", panelFitter);
+  if (typeof ResizeObserver === "undefined") return;
+  panelObserver = new ResizeObserver(() => {
+    const size = draggedPanelSize(panel);
+    if (size) savePanelSize(size);
+  });
+  panelObserver.observe(panel);
+}
+
+/** True when the composer holds a slash command: its first non-blank character is `/`. */
+export function isSlashCommand(text: string): boolean {
+  return text.trimStart().startsWith("/");
+}
+
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const n = document.createElement(tag);
   n.className = className;
@@ -143,10 +403,15 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
 export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = el("div", "modal");
   const backdrop = el("div", "modal__backdrop");
-  backdrop.addEventListener("click", () => h.onClose());
   const panel = el("section", "modal__panel");
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-modal", "true");
+  applyPanelSize(panel, loadPanelSize());
+  const resizing = installEdgeResize(root, panel);
+  // A press just outside the panel starts a resize, not a dismissal.
+  backdrop.addEventListener("click", () => {
+    if (!resizing(Date.now())) h.onClose();
+  });
 
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");
@@ -245,11 +510,17 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const form = el("div", "modal__composer");
     const ta = el("textarea", "modal__input");
     ta.placeholder = claude
-      ? `Message this session… (${sendShortcut()} to send, paste or drop files to attach)`
+      ? `Message this session… (${sendShortcut()} to send, paste or drop files to attach; a /command is typed into its terminal)`
       : `Message this session… (${sendShortcut()} to send; typed into its terminal as one line)`;
     ta.value = m.draft;
     ta.rows = 3;
     const trySend = () => {
+      // A slash command is for Claude Code itself, not a message: it is
+      // typed into the terminal. Other harnesses type every line anyway.
+      if (claude && isSlashCommand(ta.value)) {
+        h.onCommand(ta.value.trim());
+        return;
+      }
       const text = composeMessage(ta.value, attachments);
       if (text) h.onSend(text);
     };
@@ -318,16 +589,19 @@ export function sameTurns(a: Turn[], b: Turn[]): boolean {
   return a.length === b.length && a.every((t, i) => t.kind === b[i].kind && t.text === b[i].text);
 }
 
-/** Wraps an async send so that calls made while one is in flight are dropped. */
-export function makeSendGuard(send: (text: string) => Promise<void>): (text: string) => Promise<void> {
-  let inFlight = false;
+/**
+ * Wraps an async send so that calls made while one is in flight are
+ * dropped. Guards given the same `lock` share it, so a reply and a slash
+ * command from one composer never run at once.
+ */
+export function makeSendGuard(send: (text: string) => Promise<void>, lock: { inFlight: boolean } = { inFlight: false }): (text: string) => Promise<void> {
   return async (text: string) => {
-    if (inFlight) return;
-    inFlight = true;
+    if (lock.inFlight) return;
+    lock.inFlight = true;
     try {
       await send(text);
     } finally {
-      inFlight = false;
+      lock.inFlight = false;
     }
   };
 }
@@ -405,6 +679,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     onCycleMode: () => void cycleMode(),
     onOpenPr: () => void invoke("open_pr", { sessionId: m.card.sessionId }).catch((e) => setStatus(false, String(e))),
     onRename: (name) => void rename(name),
+    onCommand: (text) => void guardedCommand(text),
     onCompact: () => void invoke("compact_session", { sessionId: m.card.sessionId }).then(() => setStatus(true, "Sent /compact to the terminal")).catch((e) => setStatus(false, String(e))),
     onOpenLink: (url) => void invoke("open_url", { url }).catch((e) => setStatus(false, String(e))),
     onRemoveAttachment: (path) => {
@@ -420,7 +695,10 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   const existing = host.querySelector<HTMLElement>(".modal");
   const composerUnchanged = !!existing && !!existing.querySelector("textarea") === (m.card.hasInbox || m.card.harness !== "claude-code");
   if (existing && composerUnchanged) patchModal(existing, fresh);
-  else host.replaceChildren(fresh);
+  else {
+    host.replaceChildren(fresh);
+    watchPanelSize(host.querySelector<HTMLElement>(".modal__panel"));
+  }
   const hist = host.querySelector(".modal__history");
   if (hist) hist.scrollTop = wasAtBottom ? hist.scrollHeight : oldScroll;
   if (opts.focusInput) host.querySelector<HTMLTextAreaElement>("textarea")?.focus();
@@ -480,6 +758,9 @@ function setStatus(ok: boolean, text: string): void {
   paint();
 }
 
+/** One lock for the composer: a reply and a command both clear it, so only one may be in flight. */
+const composerLock = { inFlight: false };
+
 const guardedSend = makeSendGuard(async (text: string) => {
   if (!current) return;
   const { card } = current.model;
@@ -494,7 +775,29 @@ const guardedSend = makeSendGuard(async (text: string) => {
   } catch (e) {
     setStatus(false, String(e));
   }
-});
+}, composerLock);
+
+/** Types a slash command into the terminal; attachments have nowhere to go with it. */
+const guardedCommand = makeSendGuard(async (text: string) => {
+  if (!current) return;
+  const me = current;
+  const { card } = me.model;
+  if (attachments.list().length > 0) {
+    setStatus(false, "Remove the attachments to send a command; they cannot go with it.");
+    return;
+  }
+  try {
+    await invoke("send_slash_command", { sessionId: card.sessionId, text });
+    if (current !== me) return;
+    const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea");
+    if (ta) ta.value = "";
+    me.model.draft = "";
+    me.model.status = { ok: true, text: `Sent ${text} to the terminal` };
+    await loadTurns({ force: true, focusInput: true });
+  } catch (e) {
+    if (current === me) setStatus(false, String(e));
+  }
+}, composerLock);
 
 /** Fetches history; repaints only when something visible changed (or `force`). */
 async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): Promise<void> {
@@ -533,6 +836,7 @@ export function closeModal(): void {
   if (enableTimer) clearTimeout(enableTimer);
   enableTimer = undefined;
   document.removeEventListener("keydown", current.keyHandler);
+  watchPanelSize(null);
   current = null;
   attachments.clear();
   document.getElementById("modal-host")?.replaceChildren();

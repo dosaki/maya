@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { historyRefetchDue, renderModal } from "./modal";
+import { PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isSlashCommand, parsePanelSize, renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
 const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn() });
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCommand: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn() });
 
 describe("historyRefetchDue", () => {
   it("always refetches a local card, and a remote one only when its state, state time or snippet moved", () => {
@@ -25,6 +25,123 @@ describe("historyRefetchDue", () => {
     const idle = { ...base, machine: "laptop" };
     expect(historyRefetchDue(idle, { ...idle }, 10_000, 60_000)).toBe(false);
     expect(historyRefetchDue(base, { ...base }, 10_000, 10_001)).toBe(true);
+  });
+});
+
+const rect = (left: number, top: number, width: number, height: number) => ({ left, top, right: left + width, bottom: top + height, width, height, x: left, y: top, toJSON: () => "" }) as DOMRect;
+
+describe("panel size", () => {
+  it("keeps a stored size only when it is two numbers at least the minimum", () => {
+    expect(parsePanelSize(null)).toBeNull();
+    expect(parsePanelSize("nonsense")).toBeNull();
+    expect(parsePanelSize(JSON.stringify({ width: 900.4, height: 700.6 }))).toEqual({ width: 900, height: 701 });
+    expect(parsePanelSize(JSON.stringify({ width: 100, height: 700 }))).toBeNull();
+    expect(parsePanelSize(JSON.stringify({ width: "wide", height: 700 }))).toBeNull();
+    expect(parsePanelSize(JSON.stringify({ width: Infinity, height: 700 }))).toBeNull();
+  });
+
+  it("reads the dragged size from the panel's inline style, never the rendered one", () => {
+    const panel = document.createElement("section");
+    expect(draggedPanelSize(panel)).toBeNull();
+    panel.style.width = "812px";
+    panel.style.height = "640.5px";
+    expect(draggedPanelSize(panel)).toEqual({ width: 812, height: 641 });
+  });
+
+  it("finds the edges under the pointer in a band just outside and just inside the panel", () => {
+    const r = rect(100, 50, 800, 600);
+    expect(edgesAt(r, 500, 300)).toBeNull();
+    expect(edgesAt(r, 500, 30)).toBeNull();
+    expect(edgesAt(r, 96, 300)).toEqual({ left: true, right: false, top: false, bottom: false });
+    expect(edgesAt(r, 103, 300)).toEqual({ left: true, right: false, top: false, bottom: false });
+    expect(edgesAt(r, 500, 652)).toEqual({ left: false, right: false, top: false, bottom: true });
+    expect(edgesAt(r, 903, 653)).toEqual({ left: false, right: true, top: false, bottom: true });
+    expect(edgesAt(r, 98, 48)).toEqual({ left: true, right: false, top: true, bottom: false });
+    expect(cursorFor({ left: true, right: false, top: false, bottom: false })).toBe("ew-resize");
+    expect(cursorFor({ left: false, right: false, top: true, bottom: false })).toBe("ns-resize");
+    expect(cursorFor({ left: true, right: false, top: true, bottom: false })).toBe("nwse-resize");
+    expect(cursorFor({ left: false, right: true, top: false, bottom: true })).toBe("nwse-resize");
+    expect(cursorFor({ left: false, right: true, top: true, bottom: false })).toBe("nesw-resize");
+  });
+
+  it("moves only the dragged edges, never below the minimum or past the window", () => {
+    const start = { left: 240, top: 110, width: 800, height: 600 };
+    const vp = { width: 1280, height: 820 };
+    const none = { left: false, right: false, top: false, bottom: false };
+    expect(edgeDrag(start, { ...none, left: true }, -40, 99, vp)).toEqual({ left: 200, top: 110, width: 840, height: 600 });
+    expect(edgeDrag(start, { ...none, right: true }, 30, 99, vp)).toEqual({ left: 240, top: 110, width: 830, height: 600 });
+    expect(edgeDrag(start, { ...none, top: true }, 99, -30, vp)).toEqual({ left: 240, top: 80, width: 800, height: 630 });
+    expect(edgeDrag(start, { ...none, bottom: true }, 99, 50, vp)).toEqual({ left: 240, top: 110, width: 800, height: 650 });
+    expect(edgeDrag(start, { ...none, left: true, top: true }, -500, -500, vp)).toEqual({ left: 0, top: 0, width: 1040, height: 710 });
+    expect(edgeDrag(start, { ...none, left: true, top: true }, 900, 900, vp)).toEqual({ left: 560, top: 350, width: 480, height: 360 });
+    expect(edgeDrag(start, { ...none, right: true, bottom: true }, 900, 900, vp)).toEqual({ left: 240, top: 110, width: 1040, height: 710 });
+    expect(edgeDrag(start, { ...none, right: true, bottom: true }, -900, -900, vp)).toEqual({ left: 240, top: 110, width: 480, height: 360 });
+  });
+
+  it("shows the resize cursor on an edge, drags it with the panel pinned, and does not close on the drag's release", () => {
+    const h = handlers();
+    const el = renderModal({ card: base, turns: [], status: null, draft: "" }, h);
+    const panel = el.querySelector<HTMLElement>(".modal__panel")!;
+    el.getBoundingClientRect = () => rect(0, 0, 1280, 820);
+    panel.getBoundingClientRect = () => rect(240, 110, 800, 600);
+    el.dispatchEvent(new MouseEvent("pointermove", { clientX: 500, clientY: 300, bubbles: true }));
+    expect([el.style.cursor, el.classList.contains("modal--edge")]).toEqual(["", false]);
+    el.dispatchEvent(new MouseEvent("pointermove", { clientX: 1043, clientY: 300, bubbles: true }));
+    expect([el.style.cursor, el.classList.contains("modal--edge")]).toEqual(["ew-resize", true]);
+    const now = vi.spyOn(Date, "now").mockReturnValue(10_000);
+    Object.assign(window, { innerWidth: 1280, innerHeight: 820 });
+    el.dispatchEvent(new MouseEvent("pointerdown", { clientX: 1043, clientY: 300, button: 0, bubbles: true }));
+    expect(el.classList.contains("modal--anchored")).toBe(true);
+    el.dispatchEvent(new MouseEvent("pointermove", { clientX: 1143, clientY: 350, bubbles: true }));
+    expect([panel.style.left, panel.style.top, panel.style.width, panel.style.height]).toEqual(["240px", "110px", "900px", "600px"]);
+    el.dispatchEvent(new MouseEvent("pointerup", { clientX: 1143, clientY: 350, bubbles: true }));
+    el.querySelector<HTMLElement>(".modal__backdrop")!.click();
+    expect(h.onClose).not.toHaveBeenCalled();
+    now.mockReturnValue(10_000 + RESIZE_CLICK_GRACE_MS);
+    el.querySelector<HTMLElement>(".modal__backdrop")!.click();
+    expect(h.onClose).toHaveBeenCalledTimes(1);
+    // The release ended the drag: a later move changes nothing.
+    el.dispatchEvent(new MouseEvent("pointermove", { clientX: 600, clientY: 400, bubbles: true }));
+    expect(panel.style.width).toBe("900px");
+    now.mockRestore();
+  });
+
+  it("moves a pinned panel back inside a window that shrank, without touching its size", () => {
+    expect(fitPosition({ left: 560, top: 300, width: 480, height: 360 }, { width: 800, height: 600 })).toEqual({ left: 312, top: 232 });
+    expect(fitPosition({ left: 100, top: 50, width: 480, height: 360 }, { width: 1280, height: 820 })).toEqual({ left: 100, top: 50 });
+    expect(fitPosition({ left: 100, top: 50, width: 900, height: 700 }, { width: 800, height: 600 })).toEqual({ left: 0, top: 0 });
+    const el = renderModal({ card: base, turns: [], status: null, draft: "" }, handlers());
+    const panel = el.querySelector<HTMLElement>(".modal__panel")!;
+    Object.assign(window, { innerWidth: 800, innerHeight: 600 });
+    Object.assign(panel.style, { left: "560px", top: "300px", width: "480px", height: "360px" });
+    fitAnchoredPanel(panel);
+    expect(panel.style.left).toBe("560px");
+    el.classList.add("modal--anchored");
+    fitAnchoredPanel(panel);
+    expect([panel.style.left, panel.style.top, panel.style.width, panel.style.height, panel.style.maxWidth]).toEqual(["312px", "232px", "480px", "360px", "calc(100vw - 320px)"]);
+  });
+
+  it("pins the panel where it is, keeping the first position", () => {
+    const el = renderModal({ card: base, turns: [], status: null, draft: "" }, handlers());
+    const panel = el.querySelector<HTMLElement>(".modal__panel")!;
+    el.getBoundingClientRect = () => rect(0, 0, 1280, 820);
+    panel.getBoundingClientRect = () => rect(240, 110, 800, 600);
+    anchorPanel(el, panel);
+    expect([panel.style.left, panel.style.top, panel.style.maxWidth]).toEqual(["240px", "110px", "calc(100vw - 248px)"]);
+    panel.getBoundingClientRect = () => rect(300, 200, 700, 500);
+    anchorPanel(el, panel);
+    expect(panel.style.left).toBe("240px");
+  });
+
+  it("opens at the size last dragged to, and at the stylesheet's size when none is stored", () => {
+    localStorage.removeItem(PANEL_SIZE_KEY);
+    const plain = renderModal({ card: base, turns: [], status: null, draft: "" }, handlers()).querySelector<HTMLElement>(".modal__panel")!;
+    expect(plain.style.width).toBe("");
+    localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify({ width: 1000, height: 800 }));
+    const sized = renderModal({ card: base, turns: [], status: null, draft: "" }, handlers()).querySelector<HTMLElement>(".modal__panel")!;
+    expect(sized.style.width).toBe("1000px");
+    expect(sized.style.height).toBe("800px");
+    localStorage.removeItem(PANEL_SIZE_KEY);
   });
 });
 
@@ -217,6 +334,27 @@ describe("renderModal", () => {
     ta.value = "  reply please  ";
     ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
     expect(h.onSend).toHaveBeenCalledWith("reply please");
+  });
+
+  it("types a /command into the terminal instead of sending it as a reply, for Claude Code only", () => {
+    expect(isSlashCommand("  /review")).toBe(true);
+    expect(isSlashCommand("review /x")).toBe(false);
+    expect(isSlashCommand("")).toBe(false);
+    const h = handlers();
+    const el = renderModal({ card: base, turns: [], status: null, draft: "", attachments: [{ name: "a.png", path: "/a.png" }] }, h);
+    expect(el.querySelector<HTMLTextAreaElement>("textarea")!.placeholder).toContain("/command");
+    const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
+    ta.value = " /review the diff ";
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    expect(h.onCommand).toHaveBeenCalledWith("/review the diff");
+    expect(h.onSend).not.toHaveBeenCalled();
+    // Codex types every line into its terminal already: a slash line is just a reply there.
+    const codex = renderModal({ card: { ...base, harness: "codex", hasInbox: false }, turns: [], status: null, draft: "" }, h);
+    const ta2 = codex.querySelector<HTMLTextAreaElement>("textarea")!;
+    ta2.value = "/status";
+    codex.querySelector<HTMLButtonElement>("button[data-action=send]")!.click();
+    expect(h.onSend).toHaveBeenCalledWith("/status");
+    expect(h.onCommand).toHaveBeenCalledTimes(1);
   });
 
   it("shows the awaiting banner with a terminal button, and a status line", () => {
