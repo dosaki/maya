@@ -120,18 +120,18 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           pnpm tauri build --bundles deb,appimage
-          mkdir -p dist
-          cp target/release/bundle/deb/*.deb "dist/Maya_${version}_${{ matrix.deb }}.deb"
-          cp target/release/bundle/appimage/*.AppImage "dist/Maya_${version}_${{ matrix.deb }}.AppImage"
-          chmod +x dist/*.AppImage
-          ls -la dist
+          mkdir -p release
+          cp target/release/bundle/deb/*.deb "release/Maya_${version}_${{ matrix.deb }}.deb"
+          cp target/release/bundle/appimage/*.AppImage "release/Maya_${version}_${{ matrix.deb }}.AppImage"
+          chmod +x release/*.AppImage
+          ls -la release
       # The AppImage, run from a path with a space in it and a fresh HOME,
       # must stay up and log "started"; the screenshot shows the board it
       # painted. Start-up under xvfb can take over 30 s, so the wait is 60 s.
       - name: Smoke test under a virtual display
         run: |
           set -euo pipefail
-          mkdir -p "/tmp/maya smoke" && cp dist/*.AppImage "/tmp/maya smoke/Maya.AppImage"
+          mkdir -p "/tmp/maya smoke" && cp release/*.AppImage "/tmp/maya smoke/Maya.AppImage"
           export HOME="$(mktemp -d)"
           xvfb-run -a sh -c '"/tmp/maya smoke/Maya.AppImage" --appimage-extract-and-run & pid=$!
             for i in $(seq 1 120); do grep -q "started" "$HOME/.claude/maya/maya.log" 2>/dev/null && break; sleep 0.5; done
@@ -142,7 +142,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: maya-linux-app-${{ matrix.arch }}
-          path: dist/*
+          path: release/*
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
