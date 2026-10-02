@@ -1,10 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderNewSession } from "./newsession";
+import { CLAUDE_AGENT, optionFields, renderNewSession, type AgentInfo, type NewSessionModel } from "./newsession";
 
-const handlers = () => ({ onStart: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn(), onMachine: vi.fn() });
-const base = { dirs: ["a", "sonarqube"], dir: null, prompt: "", status: null, busy: false, needsSetup: false, options: {}, machines: [{ name: "This Mac", value: "" }], machine: "" };
+const handlers = () => ({ onStart: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn(), onMachine: vi.fn(), onAgent: vi.fn(), onModel: vi.fn() });
+const base: NewSessionModel = {
+  dirs: ["a", "sonarqube"],
+  dir: null,
+  prompt: "",
+  status: null,
+  busy: false,
+  needsSetup: false,
+  options: {},
+  machines: [{ name: "This Mac", value: "" }],
+  machine: "",
+  agents: [CLAUDE_AGENT],
+  agent: "claude-code",
+  names: true,
+  name: "",
+};
 const twoMachines = [{ name: "This Mac", value: "" }, { name: "laptop", value: "laptop" }];
-const defaults = { model: "", effort: "", mode: "" };
+const defaults = { agent: "claude-code", name: "", model: "", effort: "", mode: "" };
 
 describe("renderNewSession", () => {
   it("lists Let Claude choose first, then the folders", () => {
@@ -45,7 +59,7 @@ describe("renderNewSession", () => {
     ta.value = "go";
     ta.dispatchEvent(new Event("input"));
     el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(h.onStart).toHaveBeenCalledWith("", null, "go", { model: "opus", effort: "high", mode: "plan" });
+    expect(h.onStart).toHaveBeenCalledWith("", null, "go", { agent: "claude-code", name: "", model: "opus", effort: "high", mode: "plan" });
   });
 
   it("preselects the remembered options", () => {
@@ -133,5 +147,62 @@ describe("renderNewSession", () => {
     const local = renderNewSession({ ...base, machines: twoMachines, machine: "" }, handlers());
     expect(local.querySelector<HTMLOptionElement>("select[name=dir] option[value='']")!.disabled).toBe(false);
     expect(local.querySelector(".newsession__hint")).toBeNull();
+  });
+});
+
+const CODEX: AgentInfo = {
+  harness: "codex",
+  models: [
+    { id: "gpt-6.1-sol", label: "GPT-6.1-Sol", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+    { id: "gpt-5.5", label: "GPT-5.5", efforts: ["low", "medium", "high", "xhigh"] },
+  ],
+  efforts: ["low", "medium", "high", "xhigh"],
+  modes: ["read-only", "workspace-write", "danger-full-access"],
+};
+const GROK: AgentInfo = { harness: "grok", models: [{ id: "grok-4.7", label: "grok-4.7", efforts: [] }], efforts: [], modes: ["default", "plan"] };
+
+describe("agents", () => {
+  it("hides the Agent field when Claude Code is the only agent", () => {
+    expect(renderNewSession(base, handlers()).querySelector("select[name=agent]")).toBeNull();
+  });
+
+  it("lists the installed agents and reports a change", () => {
+    const h = handlers();
+    const el = renderNewSession({ ...base, agents: [CLAUDE_AGENT, CODEX, GROK] }, h);
+    const sel = el.querySelector<HTMLSelectElement>("select[name=agent]")!;
+    expect([...sel.options].map((o) => o.textContent)).toEqual(["Claude Code", "Codex", "Grok Build"]);
+    sel.value = "codex";
+    sel.dispatchEvent(new Event("change"));
+    expect(h.onAgent).toHaveBeenCalledWith("codex");
+  });
+
+  it("shows only the fields the agent has", () => {
+    const el = renderNewSession({ ...base, agents: [CLAUDE_AGENT, GROK], agent: "grok" }, handlers());
+    expect(el.querySelector("select[name=effort]")).toBeNull();
+    expect([...el.querySelector<HTMLSelectElement>("select[name=mode]")!.options].map((o) => o.value)).toEqual(["", "default", "plan"]);
+  });
+
+  it("offers the chosen Codex model's efforts, and the common ones for Default", () => {
+    expect(optionFields(CODEX, "gpt-6.1-sol").find((f) => f.name === "effort")!.choices.map(([v]) => v)).toContain("ultra");
+    expect(optionFields(CODEX, "").find((f) => f.name === "effort")!.choices.map(([v]) => v)).toEqual(["low", "medium", "high", "xhigh"]);
+  });
+
+  it("a_remembered_model_no_longer_listed_falls_back_to_default", () => {
+    const el = renderNewSession({ ...base, agents: [CLAUDE_AGENT, CODEX], agent: "codex", options: { model: "gpt-4", effort: "", mode: "" } }, handlers());
+    expect(el.querySelector<HTMLSelectElement>("select[name=model]")!.value).toBe("");
+  });
+
+  it("starts with the agent and the name", () => {
+    const h = handlers();
+    const el = renderNewSession({ ...base, agents: [CLAUDE_AGENT, CODEX], agent: "codex", dir: "a", prompt: "go" }, h);
+    el.querySelector<HTMLInputElement>("input[name=name]")!.value = "  Fix CI ";
+    el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    expect(h.onStart).toHaveBeenCalledWith("", "a", "go", { agent: "codex", name: "Fix CI", model: "", effort: "", mode: "" });
+  });
+
+  it("an_older_remote_offers_claude_only_and_no_name", () => {
+    const el = renderNewSession({ ...base, machines: twoMachines, machine: "laptop", names: false }, handlers());
+    expect(el.querySelector("input[name=name]")).toBeNull();
+    expect(el.querySelector("select[name=agent]")).toBeNull();
   });
 });

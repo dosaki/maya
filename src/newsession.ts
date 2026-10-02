@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { showToast } from "./toast";
 import { sendShortcut, thisComputer } from "./platform";
+import { harnessLabel } from "./harness";
+import type { Harness } from "./types";
 
-/** Choices for a new `claude` session; "" means "use the defaults". */
+/** Choices for a new session; "" means "use the agent's default". */
 export interface SessionOptions {
   model: string;
   effort: string;
@@ -14,11 +16,46 @@ export const MODEL_CHOICES: [string, string][] = [["fable", "Fable"], ["opus", "
 export const EFFORT_CHOICES: [string, string][] = ["low", "medium", "high", "xhigh", "max"].map((v) => [v, v]);
 export const MODE_CHOICES: [string, string][] = ["manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"].map((v) => [v, v]);
 
-export const OPTION_FIELDS: { name: keyof SessionOptions; label: string; choices: [string, string][] }[] = [
-  { name: "model", label: "Model", choices: MODEL_CHOICES },
-  { name: "effort", label: "Effort", choices: EFFORT_CHOICES },
-  { name: "mode", label: "Mode", choices: MODE_CHOICES },
-];
+export interface ModelInfo {
+  id: string;
+  label: string;
+  /** The efforts this model takes; empty when they are the agent's. */
+  efforts: string[];
+}
+
+/** One agent a machine can start, as `list_agents` reports it. */
+export interface AgentInfo {
+  harness: Harness;
+  models: ModelInfo[];
+  /** With the Default model: the efforts every model takes. */
+  efforts: string[];
+  modes: string[];
+}
+
+/** What Start sends: the agent, the name ("" for none) and its options. */
+export type StartChoices = SessionOptions & { agent: Harness; name: string };
+
+/** Claude Code as Maya always knows it, before or without a listing. */
+export const CLAUDE_AGENT: AgentInfo = {
+  harness: "claude-code",
+  models: MODEL_CHOICES.map(([id, label]) => ({ id, label, efforts: [] })),
+  efforts: EFFORT_CHOICES.map(([v]) => v),
+  modes: MODE_CHOICES.map(([v]) => v),
+};
+
+type OptionField = { name: keyof SessionOptions; label: string; choices: [string, string][] };
+
+/** The option fields `agent` has, for the chosen `model`; fields without choices are left out. */
+export function optionFields(agent: AgentInfo, model: string): OptionField[] {
+  const chosen = agent.models.find((m) => m.id === model);
+  const efforts = chosen && chosen.efforts.length > 0 ? chosen.efforts : agent.efforts;
+  const fields: OptionField[] = [
+    { name: "model", label: "Model", choices: agent.models.map((m) => [m.id, m.label]) },
+    { name: "effort", label: "Effort", choices: efforts.map((v) => [v, v]) },
+    { name: "mode", label: "Mode", choices: agent.modes.map((v) => [v, v]) },
+  ];
+  return fields.filter((f) => f.choices.length > 0);
+}
 
 /** A labelled select with a "Default" (empty) entry first. */
 export function renderChoice(name: string, label: string, choices: [string, string][], value: string, first = "Default"): HTMLLabelElement {
@@ -61,13 +98,22 @@ export interface NewSessionModel {
   machines: MachineChoice[];
   /** The chosen machine's value; "" is this Mac. */
   machine: string;
+  /** The chosen machine's agents, Claude Code first. */
+  agents: AgentInfo[];
+  agent: Harness;
+  /** The machine's Maya takes names (an older one does not). */
+  names: boolean;
+  name: string;
 }
 
 export interface NewSessionHandlers {
-  onStart(machine: string, dir: string | null, prompt: string, options: SessionOptions): void;
+  onStart(machine: string, dir: string | null, prompt: string, choices: StartChoices): void;
   onClose(): void;
   onOpenSettings(): void;
   onMachine(machine: string): void;
+  onAgent(agent: Harness): void;
+  /** The model changed: Codex's efforts depend on it. */
+  onModel(model: string): void;
 }
 
 interface StartResult {
@@ -150,6 +196,25 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
     return root;
   }
 
+  const agent = m.agents.find((a) => a.harness === m.agent) ?? m.agents[0] ?? CLAUDE_AGENT;
+  // One agent is no choice: the field shows only when the machine has more.
+  let agentLabel: HTMLLabelElement | null = null;
+  if (m.agents.length > 1) {
+    agentLabel = el("label", "newsession__field");
+    agentLabel.append(el("span", "newsession__label", "Agent"));
+    const agentSelect = el("select", "newsession__select");
+    agentSelect.name = "agent";
+    for (const a of m.agents) {
+      const o = document.createElement("option");
+      o.value = a.harness;
+      o.textContent = harnessLabel(a.harness);
+      agentSelect.append(o);
+    }
+    agentSelect.value = agent.harness;
+    agentSelect.addEventListener("change", () => h.onAgent(agentSelect.value as Harness));
+    agentLabel.append(agentSelect);
+  }
+
   const remoteMachine = m.machine !== "";
   // Claude cannot choose on a remote machine: a folder is always picked there.
   if (remoteMachine && !m.dir && m.dirs.length > 0) m.dir = m.dirs[0];
@@ -172,6 +237,21 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   dirLabel.append(select);
   if (remoteMachine) dirLabel.append(el("p", "newsession__hint", "Claude can't choose for you on a remote machine; pick a folder."));
 
+  // An older Maya over there would ignore a name, so it is not offered.
+  let nameInput: HTMLInputElement | null = null;
+  let nameLabel: HTMLLabelElement | null = null;
+  if (m.names) {
+    nameLabel = el("label", "newsession__field");
+    nameLabel.append(el("span", "newsession__label", "Name"));
+    nameInput = el("input", "newsession__select");
+    nameInput.name = "name";
+    nameInput.type = "text";
+    nameInput.maxLength = 60;
+    nameInput.placeholder = "Optional; the agent names it otherwise";
+    nameInput.value = m.name;
+    nameLabel.append(nameInput);
+  }
+
   const promptLabel = el("label", "newsession__field");
   promptLabel.append(el("span", "newsession__label", "Prompt"));
   const ta = el("textarea", "modal__input");
@@ -183,13 +263,15 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
 
   const optionRow = el("div", "newsession__options");
   const optionSelects: [keyof SessionOptions, HTMLSelectElement][] = [];
-  for (const f of OPTION_FIELDS) {
+  for (const f of optionFields(agent, m.options.model ?? "")) {
     const field = renderChoice(f.name, f.label, f.choices, m.options[f.name] ?? "");
-    optionSelects.push([f.name, field.querySelector("select")!]);
+    const sel = field.querySelector("select")!;
+    if (f.name === "model") sel.addEventListener("change", () => h.onModel(sel.value));
+    optionSelects.push([f.name, sel]);
     optionRow.append(field);
   }
-  const readOptions = (): SessionOptions => {
-    const o: SessionOptions = { model: "", effort: "", mode: "" };
+  const readChoices = (): StartChoices => {
+    const o: StartChoices = { agent: agent.harness, name: nameInput?.value.trim() ?? "", model: "", effort: "", mode: "" };
     for (const [name, sel] of optionSelects) o[name] = sel.value;
     return o;
   };
@@ -204,7 +286,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
     if (start.disabled) return;
     const prompt = ta.value.trim();
     if (!prompt) return;
-    h.onStart(m.machine, select.value || null, prompt, readOptions());
+    h.onStart(m.machine, select.value || null, prompt, readChoices());
   };
   ta.addEventListener("input", sync);
   select.addEventListener("change", sync);
@@ -219,7 +301,8 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
 
   const actions = el("div", "newsession__actions");
   actions.append(start);
-  form.append(dirLabel, optionRow, promptLabel, actions);
+  const fields: (HTMLElement | null)[] = [agentLabel, dirLabel, optionRow, nameLabel, promptLabel, actions];
+  form.append(...fields.filter((n): n is HTMLElement => n !== null));
   panel.append(form);
   if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.ok ? "ok" : "error"}`, m.status.text));
 
@@ -229,16 +312,31 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
 
 let current: { model: NewSessionModel; keyHandler: (e: KeyboardEvent) => void } | null = null;
 let draft = "";
-/** The last chosen options; unlike the prompt they are kept after a start. */
-let lastOptions: SessionOptions = { model: "", effort: "", mode: "" };
+let draftName = "";
+/** The agent last chosen, offered again wherever the machine has it. */
+let lastAgent: Harness = "claude-code";
+/** The last options per agent; unlike the prompt they are kept after a start. */
+const lastOptions: Partial<Record<Harness, SessionOptions>> = {};
+const EMPTY: SessionOptions = { model: "", effort: "", mode: "" };
+const optionsFor = (a: Harness): SessionOptions => ({ ...EMPTY, ...lastOptions[a] });
 
+/**
+ * The options on screen, a field the agent lacks reading "" (Grok has no
+ * Effort); null when none are shown, as on the setup hint.
+ */
 function readOptionsFrom(host: ParentNode): SessionOptions | null {
   const sel = (name: string) => host.querySelector<HTMLSelectElement>(`select[name=${name}]`);
   const model = sel("model");
   const effort = sel("effort");
   const mode = sel("mode");
-  if (!model || !effort || !mode) return null;
-  return { model: model.value, effort: effort.value, mode: mode.value };
+  if (!model && !effort && !mode) return null;
+  return { model: model?.value ?? "", effort: effort?.value ?? "", mode: mode?.value ?? "" };
+}
+
+/** Keeps what the person typed or chose under the agent it was shown for. */
+function saveOptions(host: ParentNode, agent: Harness): void {
+  const opts = readOptionsFrom(host);
+  if (opts) lastOptions[agent] = opts;
 }
 
 function startedText(r: StartResult): string {
@@ -248,28 +346,50 @@ function startedText(r: StartResult): string {
   return `Started in ${name} (no clear match, Claude will work it out)`;
 }
 
-function paint(): void {
+/** Reads what is on screen back into the model, so a repaint keeps it. */
+function capture(): void {
   const host = document.getElementById("modal-host");
   if (!host || !current) return;
   const m = current.model;
   const ta = host.querySelector<HTMLTextAreaElement>("textarea[name=prompt]");
   if (ta && !m.done) m.prompt = ta.value;
+  const name = host.querySelector<HTMLInputElement>("input[name=name]");
+  if (name && !m.done) m.name = name.value;
   const sel = host.querySelector<HTMLSelectElement>("select[name=dir]");
   if (sel) m.dir = sel.value || null;
-  const opts = readOptionsFrom(host);
-  if (opts) m.options = lastOptions = opts;
+  saveOptions(host, m.agent);
+  m.options = optionsFor(m.agent);
+}
+
+function repaint(): void {
+  const host = document.getElementById("modal-host");
+  if (!host || !current) return;
   host.replaceChildren(
-    renderNewSession(m, {
-      onStart: (machine, dir, prompt, options) => void start(machine, dir, prompt, options),
+    renderNewSession(current.model, {
+      onStart: (machine, dir, prompt, choices) => void start(machine, dir, prompt, choices),
       onClose: closeNewSession,
       onOpenSettings: () => {
         closeNewSession();
         document.querySelector<HTMLElement>("[data-tab=settings]")?.click();
       },
       onMachine: (machine) => void chooseMachine(machine),
+      onAgent: (agent) => {
+        if (!current) return;
+        capture();
+        current.model.agent = lastAgent = agent;
+        current.model.options = optionsFor(agent);
+        // Not paint(): the selects on screen belong to the old agent.
+        repaint();
+      },
+      onModel: () => paint(),
     }),
   );
   host.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")?.focus();
+}
+
+function paint(): void {
+  capture();
+  repaint();
 }
 
 async function loadDirs(machine: string): Promise<void> {
@@ -290,29 +410,65 @@ async function loadDirs(machine: string): Promise<void> {
   paint();
 }
 
+/**
+ * Asks the machine which agents it can start. The modal is usable before the
+ * answer (locally the first one waits seconds for the agents' model lists),
+ * and a failure leaves it offering Claude Code alone.
+ */
+async function loadAgents(machine: string): Promise<void> {
+  const me = current;
+  if (!me) return;
+  let reply: { agents: AgentInfo[]; names: boolean };
+  try {
+    reply = await invoke<{ agents: AgentInfo[]; names: boolean }>("list_agents", { machine });
+  } catch {
+    reply = { agents: [CLAUDE_AGENT], names: machine === "" };
+  }
+  if (current !== me || me.model.machine !== machine) return;
+  capture();
+  me.model.agents = reply.agents.length > 0 ? reply.agents : [CLAUDE_AGENT];
+  me.model.names = reply.names;
+  const wanted = me.model.agents.some((a) => a.harness === lastAgent) ? lastAgent : "claude-code";
+  me.model.agent = wanted;
+  me.model.options = optionsFor(wanted);
+  repaint();
+}
+
 async function chooseMachine(machine: string): Promise<void> {
   if (!current) return;
-  current.model.machine = machine;
-  current.model.dir = null;
-  current.model.dirs = [];
+  // Keep what was on screen before the fields change under it.
+  capture();
+  const m = current.model;
+  m.machine = machine;
+  m.dir = null;
+  m.dirs = [];
   // Setup belongs to the machine that needed it; `loadDirs` decides again for this one.
-  current.model.needsSetup = false;
-  paint();
+  m.needsSetup = false;
+  // Claude Code only until the machine says what else it has; `loadAgents` brings back the last agent.
+  m.agents = [CLAUDE_AGENT];
+  m.agent = "claude-code";
+  m.names = machine === "";
+  m.options = optionsFor("claude-code");
+  repaint();
+  void loadAgents(machine);
   await loadDirs(machine);
 }
 
-async function start(machine: string, dir: string | null, prompt: string, options: SessionOptions): Promise<void> {
+async function start(machine: string, dir: string | null, prompt: string, choices: StartChoices): Promise<void> {
   if (!current || current.model.busy) return;
   const me = current;
   me.model.busy = true;
   me.model.dir = dir;
   me.model.prompt = prompt;
-  me.model.options = lastOptions = options;
+  me.model.name = choices.name;
+  const { model, effort, mode } = choices;
+  me.model.options = lastOptions[choices.agent] = { model, effort, mode };
   me.model.status = { ok: true, text: dir ? "Starting…" : "Choosing a repository…" };
   paint();
   try {
-    const r = await invoke<StartResult>("start_session", { dir, prompt, options, machine });
+    const r = await invoke<StartResult>("start_session", { dir, prompt, options: choices, machine });
     draft = "";
+    draftName = "";
     if (current !== me) {
       showToast(startedText(r));
       return;
@@ -321,6 +477,7 @@ async function start(machine: string, dir: string | null, prompt: string, option
     me.model.done = true;
     me.model.busy = true;
     me.model.prompt = "";
+    me.model.name = "";
     me.model.status = { ok: true, text: startedText(r) };
     paint();
     setTimeout(() => {
@@ -343,7 +500,22 @@ export async function openNewSession(): Promise<void> {
     if (e.key === "Escape") closeNewSession();
   };
   current = {
-    model: { dirs: [], dir: null, prompt: draft, options: { ...lastOptions }, status: null, busy: false, needsSetup: false, machines: [{ name: thisComputer(), value: "" }], machine: "" },
+    model: {
+      dirs: [],
+      dir: null,
+      prompt: draft,
+      options: optionsFor("claude-code"),
+      status: null,
+      busy: false,
+      needsSetup: false,
+      machines: [{ name: thisComputer(), value: "" }],
+      machine: "",
+      // Claude Code until this Mac's listing arrives; `loadAgents` brings back the last agent.
+      agents: [CLAUDE_AGENT],
+      agent: "claude-code",
+      names: true,
+      name: draftName,
+    },
     keyHandler,
   };
   document.addEventListener("keydown", keyHandler);
@@ -355,6 +527,7 @@ export async function openNewSession(): Promise<void> {
       paint();
     })
     .catch(() => undefined);
+  void loadAgents("");
   await loadDirs("");
 }
 
@@ -362,10 +535,11 @@ export function closeNewSession(): void {
   if (!current) return;
   const host = document.getElementById("modal-host");
   const ta = host?.querySelector<HTMLTextAreaElement>("textarea[name=prompt]");
-  // Keep the draft even mid-start; only a successful start spends it.
+  const name = host?.querySelector<HTMLInputElement>("input[name=name]");
+  // Keep the drafts even mid-start; only a successful start spends them.
   if (ta && !current.model.done) draft = ta.value;
-  const opts = host ? readOptionsFrom(host) : null;
-  if (opts) lastOptions = opts;
+  if (name && !current.model.done) draftName = name.value;
+  if (host) saveOptions(host, current.model.agent);
   document.removeEventListener("keydown", current.keyHandler);
   current = null;
   document.getElementById("modal-host")?.replaceChildren();
