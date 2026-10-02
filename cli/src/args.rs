@@ -27,7 +27,8 @@ pub enum ConfigOp {
     ProjectsDir(String),
 }
 
-pub const USAGE: &str = "usage: maya <pair|run|status|hooks|config|start|--version> …";
+pub const USAGE: &str = "usage: maya <pair|run|status|hooks|config|start|--version> …
+       maya start [--dir <dir>] [--prompt <prompt>] [--agent <claude-code|codex|antigravity|grok>] [--model <model>] [--effort <effort>] [--mode <mode>] [--name <name>]";
 
 /// The main Maya's default port when none is given after the host.
 const DEFAULT_PORT: u16 = 4127;
@@ -127,6 +128,11 @@ fn parse_start(rest: &[String]) -> Result<Cmd, String> {
             "--model" => options.model = Some(take_value(rest, &mut i, "--model")?),
             "--effort" => options.effort = Some(take_value(rest, &mut i, "--effort")?),
             "--mode" => options.mode = Some(take_value(rest, &mut i, "--mode")?),
+            "--agent" => {
+                let v = take_value(rest, &mut i, "--agent")?;
+                options.agent = serde_json::from_value(serde_json::Value::String(v.clone())).map_err(|_| format!("{USAGE}\nunknown agent: {v} (claude-code, codex, antigravity or grok)"))?;
+            }
+            "--name" => options.name = Some(take_value(rest, &mut i, "--name")?),
             s => return Err(format!("{USAGE}\nunknown flag: {s}")),
         }
     }
@@ -198,5 +204,13 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn start_takes_an_agent_and_a_name() {
+        let Cmd::Start { options, .. } = parse(&["start".into(), "--agent".into(), "codex".into(), "--name".into(), "Fix CI".into(), "--prompt".into(), "go".into()]).unwrap() else { panic!() };
+        assert_eq!(options.agent, maya_core::model::Harness::Codex);
+        assert_eq!(options.name.as_deref(), Some("Fix CI"));
+        assert!(parse(&a("start --agent gpt")).unwrap_err().contains("agent"));
     }
 }

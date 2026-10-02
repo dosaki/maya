@@ -83,7 +83,8 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 use base64::Engine;
 use config::Config;
 use listener::VoiceState;
-use model::Card;
+use maya_core::agents::{self, AgentInfo};
+use model::{Card, Harness};
 use net::merge;
 use net::protocol::{Attachment, CommandKind};
 use net::server::Notify;
@@ -462,6 +463,8 @@ fn refresh_and_emit(app: &AppHandle) {
         let eleven = if c.speak_notifications && !c.muted { eleven_wanted(c, store.claude_dir()) } else { None };
         (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant)
     };
+    // Due names are typed into the terminals with no lock held.
+    actions::run_due_renames(&local(&app.state::<AppState>()));
     // Remote cards join after the store lock is released (lock order), so
     // the notifier below announces remote decisions too.
     let cards = merge::merged(cards, &remote_boards(&app.state::<AppState>()), now_ms());
@@ -864,7 +867,7 @@ fn cycle_session_mode(app: AppHandle, state: TauriState<AppState>, session_id: S
 
 /// `None` or `""` means the machine argument was not given: this Mac.
 fn is_local(machine: &Option<String>) -> bool {
-    machine.as_deref().map_or(true, str::is_empty)
+    machine.as_deref().is_none_or(str::is_empty)
 }
 
 /// Past sessions of a project folder, newest first, with running ones marked.
@@ -896,6 +899,44 @@ fn list_project_dirs(state: TauriState<AppState>, machine: Option<String>) -> Re
     actions::list_project_dirs(&local(&state))
 }
 
+#[derive(serde::Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct AgentsReply {
+    agents: Vec<AgentInfo>,
+    /// The machine runs a Maya that names sessions; an older one ignores names.
+    names: bool,
+}
+
+/// A remote that reports no agents runs an older Maya: it starts only
+/// Claude Code and ignores a name.
+fn agents_reply(local: bool, remote: Option<Vec<AgentInfo>>, local_list: impl FnOnce() -> Vec<AgentInfo>) -> AgentsReply {
+    if local {
+        return AgentsReply { agents: local_list(), names: true };
+    }
+    match remote {
+        Some(agents) => AgentsReply { agents, names: true },
+        None => AgentsReply { agents: vec![agents::claude()], names: false },
+    }
+}
+
+/// The agents the chosen machine can start, with their models. Locally the
+/// first call waits for the listing (seconds); a remote's comes with its board.
+#[tauri::command(async)]
+fn list_agents(state: TauriState<AppState>, machine: Option<String>) -> AgentsReply {
+    let local = is_local(&machine);
+    let remote = if local { None } else { merge::agents_of(&remote_boards(&state), machine.as_deref().unwrap_or_default()) };
+    agents_reply(local, remote, agents::current)
+}
+
+/// An older Maya ignores the agent and starts Claude Code: refuse instead.
+fn check_remote_agent(agent: Harness, remote: &Option<Vec<AgentInfo>>, machine: &str) -> Result<(), String> {
+    match remote {
+        None if agent != Harness::ClaudeCode => Err(format!("{machine} runs an older Maya that can only start Claude Code.")),
+        Some(list) if !list.iter().any(|a| a.harness == agent) => Err(format!("That agent is not installed on {machine}.")),
+        _ => Ok(()),
+    }
+}
+
 #[tauri::command(async)]
 fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions, machine: Option<String>) -> Result<actions::StartResult, String> {
     if !is_local(&machine) {
@@ -904,6 +945,7 @@ fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String
         }
         options.validate_shape()?;
         let machine = machine.unwrap();
+        check_remote_agent(options.agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
         return route_data(&app, &machine, start_kind_for(dir, prompt, options));
     }
     actions::start_session(&local(&state), dir, prompt, options)
@@ -1140,6 +1182,7 @@ pub fn run() {
             list_resumable_sessions,
             resume_session,
             start_session,
+            list_agents,
             codex_hook_status,
             install_codex_hook,
             remove_codex_hook,
@@ -1185,6 +1228,8 @@ pub fn run() {
             listener::install_speech_hook(app.handle().clone());
             #[cfg(target_os = "macos")]
             dock::set_dock_icon();
+            // Starts the agents' first listing, so the start form finds it ready.
+            let _ = agents::snapshot();
             let handle = app.handle().clone();
             let sessions_dir = dir.join("sessions");
             let maya_dir = dir.join("maya");
@@ -1377,5 +1422,25 @@ mod route_tests {
             }
             other => panic!("expected a Start command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_older_remote_offers_claude_and_no_name() {
+        let r = agents_reply(false, None, || panic!("not local"));
+        assert_eq!(r.agents, vec![maya_core::agents::claude()]);
+        assert!(!r.names);
+        let r = agents_reply(false, Some(vec![maya_core::agents::claude(), maya_core::agents::info_for(Harness::Grok, None)]), || panic!("not local"));
+        assert_eq!(r.agents.len(), 2);
+        assert!(r.names);
+        assert!(agents_reply(true, None, || vec![maya_core::agents::claude()]).names);
+    }
+
+    #[test]
+    fn a_remote_start_needs_the_agent_on_that_machine() {
+        assert!(check_remote_agent(Harness::ClaudeCode, &None, "laptop").is_ok());
+        assert!(check_remote_agent(Harness::Codex, &None, "laptop").unwrap_err().contains("laptop"));
+        let grok_only = Some(vec![maya_core::agents::claude(), maya_core::agents::info_for(Harness::Grok, None)]);
+        assert!(check_remote_agent(Harness::Grok, &grok_only, "laptop").is_ok());
+        assert!(check_remote_agent(Harness::Codex, &grok_only, "laptop").unwrap_err().contains("not installed"));
     }
 }

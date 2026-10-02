@@ -17,7 +17,7 @@ use maya_core::config::{Config, NetworkConfig, NetworkRole};
 use maya_core::net::client::{self, ClientNotify};
 use maya_core::store::Store;
 use maya_core::terminal::Terminal;
-use maya_core::{hook_install, log, now_ms, watcher};
+use maya_core::{actions, hook_install, log, now_ms, watcher};
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -191,7 +191,7 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
     // Set by the watcher when the config on disk stops being an assistant's.
     let config_changed = Arc::new(AtomicBool::new(false));
     {
-        let (s, due) = (store.clone(), exec.board_due.clone());
+        let (s, due, term) = (store.clone(), exec.board_due.clone(), exec.terminal.clone());
         let (sessions_dir, md) = (claude_dir.join("sessions"), maya_dir.clone());
         let (path, changed, stop) = (config_path.clone(), config_changed.clone(), stop.clone());
         // The config as loaded at start counts as seen.
@@ -199,6 +199,8 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
         std::thread::spawn(move || {
             watcher::run(&sessions_dir, &md, Duration::from_secs(5), || {
                 s.lock().unwrap().refresh(now_ms());
+                // Typed into the panes once the refresh has released the store.
+                actions::run_due_renames(&actions::Local { store: &s, terminal: &*term });
                 due.store(true, Ordering::SeqCst);
                 if !config_still_assistant(&s, &path, &mut seen) && !changed.swap(true, Ordering::SeqCst) {
                     log::line("cli", "the config is no longer an assistant's; stopping");
