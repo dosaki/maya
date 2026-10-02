@@ -37,6 +37,30 @@ fn session_tty(store: &Store, session_id: &str, pid: i32) -> Result<String, Stri
     known.map_or_else(|| tty::tty_for_pid(pid), Ok)
 }
 
+/// How long Codex must see no keys before an Enter submits instead of adding a line.
+const CODEX_SUBMIT_DELAY: Duration = Duration::from_millis(300);
+
+/// Held while a line is typed into any session. A due rename and a reply
+/// can be typed at once from different threads; inside the Codex pause the
+/// other line would land in the same input and both submit as one line.
+static TYPING: Mutex<()> = Mutex::new(());
+
+/// Types `line` then Enter into the session's terminal. Codex reads keys that
+/// arrive in one burst as a paste, where the Enter typed with the line only
+/// adds a new line to its input; a lone Enter typed after a pause submits it.
+/// One line at a time per process: see `TYPING`. The store's lock is never
+/// held here, so the board keeps refreshing through the pause.
+fn type_line_for(l: &Local, harness: model::Harness, tty: &str, line: &str) -> Result<(), String> {
+    // A thread that panicked while typing left nothing half-done worth refusing over.
+    let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
+    l.terminal.type_line(tty, line)?;
+    if harness == model::Harness::Codex {
+        std::thread::sleep(CODEX_SUBMIT_DELAY);
+        l.terminal.type_line(tty, "")?;
+    }
+    Ok(())
+}
+
 /// Sends `text` to the session: through its inbox, or typed into the
 /// terminal of a harness that has none.
 pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
@@ -50,7 +74,7 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String>
             return Err("Message is empty.".into());
         }
         let tty = session_tty(&l.store.lock().unwrap(), session_id, f.pid)?;
-        return l.terminal.type_line(&tty, &line);
+        return type_line_for(l, f.harness, &tty, &line);
     }
     let (socket, pid) = {
         let store = l.store.lock().unwrap();
@@ -145,10 +169,75 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
     Err(format!("The session ended, but the terminal was not closed: {last}"))
 }
 
-/// Types `/rename <name>` into the session's terminal. The new name comes
-/// back through the session registry on the next refresh.
+/// Types `/rename <name>` into the session's terminal. Claude Code takes it
+/// whenever it is not asking a question; another agent only when free, since
+/// keys typed into its TUI elsewhere act as shortcuts. The new name comes
+/// back through the agent's own files on the next refresh.
 pub fn rename_session(l: &Local, session_id: &str, name: &str) -> Result<(), String> {
-    type_into_session(l, session_id, &answer::rename_command(name)?)
+    let line = answer::rename_command(name)?;
+    let (harness, tty) = {
+        let mut store = l.store.lock().unwrap();
+        let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
+        if card.harness == model::Harness::ClaudeCode {
+            answer::check_free(&card)?;
+        } else if !crate::pending_names::is_free(&card) {
+            return Err("Wait until the session is free to rename it.".into());
+        }
+        // The user's own name wins over one still waiting from the start.
+        store.forget_pending_name(session_id);
+        (card.harness, session_tty(&store, session_id, card.pid)?)
+    };
+    type_line_for(l, harness, &tty, &line)
+}
+
+/// Types `/rename` into the sessions whose pending name is due. Looked up
+/// under the store's lock, typed after it is released. A name was due when
+/// some refresh saw its session free, up to a tick ago; the session may have
+/// started a turn or opened a prompt since, where the keys would act as
+/// shortcuts, so each is checked against a fresh card and put back to wait
+/// when busy. Every other rename is logged, typed or not: it is taken once
+/// and never comes back.
+pub fn run_due_renames(l: &Local) {
+    let due: Vec<(String, model::Harness, String, String)> = {
+        let mut store = l.store.lock().unwrap();
+        let due = store.take_due_renames();
+        if due.is_empty() {
+            return;
+        }
+        // One refresh for all of them; any it makes due are left for the next tick.
+        let cards = store.refresh(now_ms());
+        due.into_iter()
+            .filter_map(|(id, name)| {
+                let card = cards.iter().find(|c| c.session_id == id);
+                if let Some(c) = card.filter(|c| !crate::pending_names::is_free(c)) {
+                    crate::log::line("rename", format!("not typing {name:?} into {id} yet: it is {:?} again; retrying once it is free", c.state));
+                    store.requeue_rename(&id);
+                    return None;
+                }
+                let found = (|| {
+                    card.ok_or("the session is gone")?;
+                    let f = store.foreign(&id).ok_or("the session is gone")?;
+                    Ok::<_, String>((f.harness, session_tty(&store, &id, f.pid)?, answer::rename_command(&name)?))
+                })();
+                match found {
+                    Ok((harness, tty, line)) => Some((id, harness, tty, line)),
+                    Err(e) => {
+                        crate::log::line("rename", format!("could not rename {id}: {e}"));
+                        None
+                    }
+                }
+            })
+            .collect()
+    };
+    for (id, harness, tty, line) in due {
+        crate::log::line(
+            "rename",
+            match type_line_for(l, harness, &tty, &line) {
+                Ok(()) => format!("typed {line:?} into {id} on {tty}"),
+                Err(e) => format!("could not rename {id} on {tty}: {e}"),
+            },
+        );
+    }
 }
 
 /// Types `/model x` or `/effort y` into the session's terminal.
@@ -221,17 +310,52 @@ pub fn list_resumable_sessions(l: &Local, dir: &str) -> Result<Vec<resume::Resum
     Ok(resume::list_sessions(&claude_dir, &path.to_string_lossy(), &running))
 }
 
-/// Opens a terminal in a project folder running `claude` on `prompt`. With no
-/// `dir`, Claude picks the folder from the prompt.
+/// A Codex effort must be one the chosen model takes, or with "Default" one
+/// every model takes: Codex's efforts differ by model, and the modal is not
+/// the only caller (the CLI and the network pass options too). Other agents'
+/// efforts do not vary by model, and `validate_shape` has checked them.
+fn check_codex_effort(info: &crate::agents::AgentInfo, options: &launch::LaunchOptions) -> Result<(), String> {
+    let chosen = |v: &Option<String>| v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let Some(effort) = chosen(&options.effort).filter(|_| options.agent == model::Harness::Codex) else { return Ok(()) };
+    let (takes, model) = match chosen(&options.model) {
+        Some(m) => (info.models.iter().find(|x| x.id == m).map(|x| x.efforts.clone()).unwrap_or_default(), m),
+        None => (info.efforts.clone(), "the default model".to_string()),
+    };
+    if takes.contains(&effort) {
+        Ok(())
+    } else {
+        Err(format!("Unknown effort for {model}: {effort}"))
+    }
+}
+
+/// Opens a terminal in a project folder running the chosen agent on
+/// `prompt`. With no `dir`, Claude picks the folder from the prompt. A name
+/// for an agent that takes none on its command line waits in the store for
+/// the new session, to be typed as `/rename` once it is free.
 pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: launch::LaunchOptions) -> Result<StartResult, String> {
     if prompt.trim().is_empty() {
         return Err("Type a prompt first.".into());
     }
-    options.validate()?;
-    let (root, maya_dir) = {
+    options.validate_shape()?;
+    let (root, maya_dir, agents) = {
         let store = l.store.lock().unwrap();
-        (projects_root(&store)?, store.claude_dir().join("maya"))
+        (projects_root(&store)?, store.claude_dir().join("maya"), store.agents_source())
     };
+    let label_of = |h: model::Harness| match h {
+        model::Harness::ClaudeCode => "Claude Code",
+        model::Harness::Codex => "Codex",
+        model::Harness::Antigravity => "Antigravity",
+        model::Harness::Grok => "Grok Build",
+    };
+    // Claude Code's models are Maya's own fixed list. Listing the agents is
+    // only for the others, and can take seconds, so a Claude start skips it.
+    let info = if options.agent == model::Harness::ClaudeCode {
+        crate::agents::claude()
+    } else {
+        agents().into_iter().find(|a| a.harness == options.agent).ok_or_else(|| format!("{} is not installed on this machine.", label_of(options.agent)))?
+    };
+    options.validate(&info.model_ids())?;
+    check_codex_effort(&info, &options)?;
     let dirs = launch::list_project_dirs(&root);
     let picked = match dir {
         Some(_) => None,
@@ -242,8 +366,20 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
     };
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
     let file = launch::write_prompt_file(&maya_dir, &prompt)?;
-    let label = tmux_label();
-    let terminal = l.terminal.open(&launch::session_command(&target, &file, &options), &target, &label)?;
+    let grok_id = (options.agent == model::Harness::Grok).then(launch::new_session_uuid);
+    // Sessions already running cannot be the new one. They come from a fresh
+    // discovery: one started by hand seconds ago, not yet looked up by a
+    // refresh, would otherwise look new and take the name.
+    let known = {
+        let mut store = l.store.lock().unwrap();
+        store.refresh(now_ms());
+        store.live_session_ids()
+    };
+    let terminal = l.terminal.open(&launch::session_command(&target, &file, &options, grok_id.as_deref()), &target, &tmux_label())?;
+    if let (Some(name), false) = (options.chosen_name(), options.agent == model::Harness::ClaudeCode) {
+        let target = target.to_string_lossy();
+        l.store.lock().unwrap().add_pending_name(crate::pending_names::PendingName::new(options.agent, &target, name, now_ms(), known, grok_id));
+    }
     Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string(), terminal })
 }
 
@@ -371,8 +507,240 @@ pub mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+    use crate::agents;
+    use crate::foreign::ForeignSession;
     use crate::launch::LaunchOptions;
+    use crate::model::{Card, Harness, State};
+    use crate::pending_names::PendingName;
     use crate::terminal::{Call, FakeTerminal};
+
+    /// `store` with `list` as the agents installed on this machine.
+    fn with_agents(store: Mutex<Store>, list: Vec<agents::AgentInfo>) -> Mutex<Store> {
+        Mutex::new(store.into_inner().unwrap().with_agents(list))
+    }
+
+    /// A working session's card, under the agent's own name.
+    fn test_card(id: &str, harness: Harness, cwd: &str) -> Card {
+        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state: State::Working, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false }
+    }
+
+    /// Codex rollout lines: a turn starting, and that turn finished with a reply.
+    const TURN_STARTED: &str = r#"{"timestamp":"2026-09-29T08:47:58.953Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}"#;
+    const TURN_COMPLETE: &str = r#"{"timestamp":"2026-09-29T08:48:01.517Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"Hello"}}"#;
+
+    /// A store holding one Codex session "c1" on "ttys009" whose rollout is
+    /// `rollout`, with the temp dir and the rollout's path.
+    fn store_with_codex(rollout: &str) -> (tempfile::TempDir, Mutex<Store>, PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("rollout.jsonl");
+        std::fs::write(&path, rollout).unwrap();
+        let s = ForeignSession { harness: Harness::Codex, pid: 77, tty: Some("ttys009".into()), session_id: "c1".into(), cwd: "/x".into(), name: "Say hi".into(), transcript_path: path.clone() };
+        let store = Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), t.path().join("agy"), vec![s]);
+        (t, Mutex::new(store), path)
+    }
+
+    /// Codex listing two models that take different efforts.
+    fn codex_info() -> crate::agents::AgentInfo {
+        crate::agents::info_for(
+            Harness::Codex,
+            Some(r#"{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"ultra"}]},{"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]}]}"#),
+        )
+    }
+
+    #[test]
+    fn a_codex_effort_must_be_one_the_chosen_model_takes() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let store = with_agents(store, vec![agents::claude(), codex_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = |model: Option<&str>, effort: &str| LaunchOptions { agent: Harness::Codex, model: model.map(String::from), effort: Some(effort.into()), ..Default::default() };
+        assert_eq!(start_session(&l, Some("proj".into()), "hello".into(), opts(Some("gpt-5.5"), "ultra")).unwrap_err(), "Unknown effort for gpt-5.5: ultra");
+        // With "Default" the model may be either: only what both take.
+        assert_eq!(start_session(&l, Some("proj".into()), "hello".into(), opts(None, "high")).unwrap_err(), "Unknown effort for the default model: high");
+        assert!(fake.calls.lock().unwrap().is_empty(), "nothing opened");
+        start_session(&l, Some("proj".into()), "hello".into(), opts(Some("gpt-5.5"), "high")).unwrap();
+        start_session(&l, Some("proj".into()), "hello".into(), opts(None, "low")).unwrap();
+        assert_eq!(fake.calls.lock().unwrap().len(), 2);
+        drop(dir);
+    }
+
+    #[test]
+    fn a_session_started_by_hand_but_not_yet_discovered_never_takes_a_new_name() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let proj_path = dir.path().join("projects").join("proj").to_string_lossy().into_owned();
+        // Running, but no refresh has looked it up yet.
+        let by_hand = ForeignSession { harness: Harness::Codex, pid: 88, tty: Some("ttys011".into()), session_id: "c-hand".into(), cwd: proj_path.clone(), name: "By hand".into(), transcript_path: dir.path().join("none.jsonl") };
+        let store = store.into_inner().unwrap().with_foreign(dir.path().join("codex"), dir.path().join("agy"), vec![]).with_processes(vec![by_hand]);
+        assert!(!store.live_session_ids().contains(&"c-hand".to_string()));
+        let store = with_agents(Mutex::new(store), vec![agents::claude(), codex_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = LaunchOptions { agent: Harness::Codex, name: Some("Fix CI".into()), ..Default::default() };
+        start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap();
+        let mut cards = vec![test_card("c-hand", Harness::Codex, &proj_path)];
+        store.lock().unwrap().pending_apply_for_test(&mut cards);
+        assert_eq!(cards[0].name, "auto-c-hand");
+        drop(dir);
+    }
+
+    #[test]
+    fn lines_typed_at_once_into_one_codex_session_never_interleave() {
+        let fake = FakeTerminal::default();
+        let store = Mutex::new(Store::new(PathBuf::from("/nonexistent")));
+        let l = Local { store: &store, terminal: &fake };
+        std::thread::scope(|s| {
+            s.spawn(|| type_line_for(&l, Harness::Codex, "ttys009", "/rename x").unwrap());
+            s.spawn(|| type_line_for(&l, Harness::Codex, "ttys009", "a reply").unwrap());
+        });
+        let typed: Vec<String> = fake.calls.lock().unwrap().iter().map(|c| match c {
+            Call::Type { text, .. } => text.clone(),
+            other => panic!("{other:?}"),
+        }).collect();
+        let (a, b) = ("/rename x".to_string(), "a reply".to_string());
+        let e = String::new();
+        assert!(typed == [a.clone(), e.clone(), b.clone(), e.clone()] || typed == [b, e.clone(), a, e], "{typed:?}");
+    }
+
+    #[test]
+    fn start_session_runs_the_chosen_agent_and_keeps_its_name_for_later() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let store = with_agents(store, vec![agents::claude(), codex_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let proj_path = dir.path().join("projects").join("proj").to_string_lossy().into_owned();
+        let opts = LaunchOptions { agent: Harness::Codex, model: Some("gpt-6.1-sol".into()), name: Some("Fix CI".into()), ..Default::default() };
+        start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap();
+        let Call::Open { command, .. } = fake.calls.lock().unwrap()[0].clone() else { panic!() };
+        assert!(command.ends_with("&& codex -m gpt-6.1-sol -- \"$p\""), "{command}");
+        // A Codex session in that folder, new since the launch, takes the name.
+        let mut cards = vec![test_card("c-new", Harness::Codex, &proj_path)];
+        store.lock().unwrap().pending_apply_for_test(&mut cards);
+        assert_eq!(cards[0].name, "Fix CI");
+        drop(dir);
+    }
+
+    #[test]
+    fn start_session_refuses_an_agent_that_is_not_installed_or_a_model_it_does_not_list() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let store = with_agents(store, vec![agents::claude(), codex_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = LaunchOptions { agent: Harness::Antigravity, ..Default::default() };
+        assert!(start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap_err().contains("not installed"));
+        let opts = LaunchOptions { agent: Harness::Codex, model: Some("gpt-9".into()), ..Default::default() };
+        assert!(start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap_err().contains("model"));
+        assert!(fake.calls.lock().unwrap().is_empty());
+        drop(dir);
+    }
+
+    #[test]
+    fn a_claude_start_does_not_wait_for_the_agents_listing() {
+        // The listing lacks Claude Code entirely: a Claude start never consults it.
+        let (dir, store) = store_with_projects(&["proj"]);
+        let store = with_agents(store, vec![codex_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = LaunchOptions { model: Some("opus".into()), ..Default::default() };
+        start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap();
+        let Call::Open { command, .. } = fake.calls.lock().unwrap()[0].clone() else { panic!() };
+        assert!(command.contains("&& claude --model opus -- \"$p\""), "{command}");
+        drop(dir);
+    }
+
+    #[test]
+    fn a_grok_start_passes_a_session_id() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let store = with_agents(store, vec![agents::claude(), agents::info_for(Harness::Grok, None)]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        start_session(&l, Some("proj".into()), "hello".into(), LaunchOptions { agent: Harness::Grok, name: Some("x".into()), ..Default::default() }).unwrap();
+        let Call::Open { command, .. } = fake.calls.lock().unwrap()[0].clone() else { panic!() };
+        assert!(command.contains("grok --session-id '") && command.ends_with("' -- \"$p\""), "{command}");
+        drop(dir);
+    }
+
+    #[test]
+    fn rename_reaches_other_agents_only_when_they_are_free() {
+        let (dir, store, rollout) = store_with_codex(&format!("{TURN_STARTED}\n"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert!(rename_session(&l, "c1", "Fix CI").unwrap_err().contains("free"));
+        std::fs::write(&rollout, format!("{TURN_STARTED}\n{TURN_COMPLETE}\n")).unwrap();
+        rename_session(&l, "c1", "Fix CI").unwrap();
+        let typed = fake.calls.lock().unwrap().clone();
+        assert_eq!(typed, vec![Call::Type { tty: "ttys009".into(), text: "/rename Fix CI".into() }, Call::Type { tty: "ttys009".into(), text: String::new() }]);
+        drop(dir);
+    }
+
+    #[test]
+    fn a_line_for_codex_is_submitted_by_a_lone_enter_typed_apart() {
+        let fake = FakeTerminal::default();
+        let l = Local { store: &Mutex::new(Store::new(PathBuf::from("/nonexistent"))), terminal: &fake };
+        type_line_for(&l, Harness::Codex, "ttys009", "/rename x").unwrap();
+        let enter = Call::Type { tty: "ttys009".into(), text: String::new() };
+        assert_eq!(fake.calls.lock().unwrap().clone(), vec![Call::Type { tty: "ttys009".into(), text: "/rename x".into() }, enter]);
+        for harness in [Harness::Antigravity, Harness::Grok, Harness::ClaudeCode] {
+            let fake = FakeTerminal::default();
+            let l = Local { store: l.store, terminal: &fake };
+            type_line_for(&l, harness, "ttys010", "/rename x").unwrap();
+            assert_eq!(fake.calls.lock().unwrap().clone(), vec![Call::Type { tty: "ttys010".into(), text: "/rename x".into() }], "{harness:?}");
+        }
+    }
+
+    #[test]
+    fn a_pending_name_is_typed_as_one_rename_line() {
+        let (dir, store, _) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().add_pending_name(PendingName::new(Harness::Codex, "/x", "it's \"$(rm -rf ~)\"", now_ms(), vec![], Some("c1".into())));
+        store.lock().unwrap().refresh(now_ms());
+        run_due_renames(&l);
+        run_due_renames(&l);
+        let typed: Vec<Call> = fake.calls.lock().unwrap().clone();
+        assert_eq!(typed, vec![Call::Type { tty: "ttys009".into(), text: "/rename it's \"$(rm -rf ~)\"".into() }, Call::Type { tty: "ttys009".into(), text: String::new() }], "typed once, literally");
+        drop(dir);
+    }
+
+    #[test]
+    fn a_due_rename_is_not_typed_into_a_session_that_got_busy_meanwhile() {
+        let (dir, store, rollout) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().add_pending_name(PendingName::new(Harness::Codex, "/x", "Fix CI", now_ms(), vec![], Some("c1".into())));
+        // The refresh that queues the rename sees it free...
+        store.lock().unwrap().refresh(now_ms());
+        // ...then the user starts a turn before the tick that would type it.
+        const TURN2_STARTED: &str = r#"{"timestamp":"2026-09-29T08:49:00.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}"#;
+        std::fs::write(&rollout, format!("{TURN_STARTED}\n{TURN_COMPLETE}\n{TURN2_STARTED}\n")).unwrap();
+        run_due_renames(&l);
+        assert!(fake.calls.lock().unwrap().is_empty(), "nothing typed into a busy session");
+        // Free again: the name is due once more and typed once.
+        const TURN2_COMPLETE: &str = r#"{"timestamp":"2026-09-29T08:49:05.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t2","last_agent_message":"Done"}}"#;
+        std::fs::write(&rollout, format!("{TURN_STARTED}\n{TURN_COMPLETE}\n{TURN2_STARTED}\n{TURN2_COMPLETE}\n")).unwrap();
+        store.lock().unwrap().refresh(now_ms());
+        run_due_renames(&l);
+        run_due_renames(&l);
+        let typed = fake.calls.lock().unwrap().clone();
+        assert_eq!(typed, vec![Call::Type { tty: "ttys009".into(), text: "/rename Fix CI".into() }, Call::Type { tty: "ttys009".into(), text: String::new() }], "typed once");
+        drop(dir);
+    }
+
+    #[test]
+    fn a_due_rename_that_cannot_be_typed_is_logged() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("rollout.jsonl");
+        std::fs::write(&path, format!("{TURN_STARTED}\n{TURN_COMPLETE}\n")).unwrap();
+        // No tty recorded, and no process to ask `ps` about.
+        let s = ForeignSession { harness: Harness::Codex, pid: 2_000_000_000, tty: None, session_id: "c-notty".into(), cwd: "/x".into(), name: "Say hi".into(), transcript_path: path };
+        let store = Mutex::new(Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), t.path().join("agy"), vec![s]));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().add_pending_name(PendingName::new(Harness::Codex, "/x", "Fix CI", now_ms(), vec![], Some("c-notty".into())));
+        store.lock().unwrap().refresh(now_ms());
+        run_due_renames(&l);
+        assert!(fake.calls.lock().unwrap().is_empty());
+        assert!(crate::log::lines().iter().any(|l| l.source == "rename" && l.text.starts_with("could not rename c-notty: ")), "{:?}", crate::log::lines());
+    }
 
     #[test]
     fn slash_commands_are_typed_into_the_sessions_tty_and_refused_off_tmux() {

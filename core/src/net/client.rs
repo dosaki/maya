@@ -65,6 +65,10 @@ pub trait Executor: Send + Sync {
     fn board_requested(&self) -> bool {
         false
     }
+    /// The agents this machine can start, for the main's New session modal.
+    fn agents(&self) -> Option<Vec<crate::agents::AgentInfo>> {
+        None
+    }
 }
 
 /// What the client tells the app.
@@ -399,7 +403,7 @@ fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, stop: &AtomicBool) -> Result<(), 
         if since.map_or(true, |d| d >= BOARD_GAP) && (board_wanted || refresh) {
             board_wanted = false;
             let (cards, dirs) = exec.board();
-            let frame = encode(&Up::Board { cards, dirs });
+            let frame = encode(&Up::Board { cards, dirs, agents: exec.agents() });
             if refresh || last_board.as_ref().map_or(true, |(_, f)| *f != frame) {
                 ws.send(Message::text(frame.clone())).map_err(|e| format!("Lost the connection to the main Maya: {e}"))?;
                 last_board = Some((Instant::now(), frame));

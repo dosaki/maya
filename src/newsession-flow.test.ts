@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-import { closeNewSession, openNewSession } from "./newsession";
+import { CLAUDE_AGENT, closeNewSession, openNewSession } from "./newsession";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -18,6 +18,7 @@ describe("new-session options", () => {
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true });
       if (cmd === "start_session") return Promise.resolve({ dir: "/x/dev/a", how: "chosen" });
       return Promise.reject(new Error("unexpected " + cmd));
     });
@@ -35,7 +36,7 @@ describe("new-session options", () => {
     ta.value = "fix ci";
     ta.dispatchEvent(new Event("input"));
     document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(invoke).toHaveBeenCalledWith("start_session", { dir: "a", prompt: "fix ci", options: { model: "opus", effort: "", mode: "plan" }, machine: "" });
+    expect(invoke).toHaveBeenCalledWith("start_session", { dir: "a", prompt: "fix ci", options: { agent: "claude-code", name: "", model: "opus", effort: "", mode: "plan" }, machine: "" });
     await flush();
     await flush();
     closeNewSession();
@@ -45,6 +46,82 @@ describe("new-session options", () => {
     expect(document.querySelector<HTMLSelectElement>("select[name=mode]")!.value).toBe("plan");
     // Remembered options are module state: put them back to Default for the other tests.
     for (const sel of document.querySelectorAll<HTMLSelectElement>("select")) sel.value = "";
+  });
+
+  it("remembers the agent and each agent's options", async () => {
+    const codex = { harness: "codex", models: [{ id: "gpt-5.5", label: "GPT-5.5", efforts: ["low"] }], efforts: ["low"], modes: ["read-only"] };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT, codex], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    const agent = document.querySelector<HTMLSelectElement>("select[name=agent]")!;
+    agent.value = "codex";
+    agent.dispatchEvent(new Event("change"));
+    document.querySelector<HTMLSelectElement>("select[name=model]")!.value = "gpt-5.5";
+    closeNewSession();
+    await openNewSession();
+    await flush();
+    expect(document.querySelector<HTMLSelectElement>("select[name=agent]")!.value).toBe("codex");
+    expect(document.querySelector<HTMLSelectElement>("select[name=model]")!.value).toBe("gpt-5.5");
+    // Back to Claude Code with Default options for the other tests.
+    const back = document.querySelector<HTMLSelectElement>("select[name=agent]")!;
+    back.value = "claude-code";
+    back.dispatchEvent(new Event("change"));
+    for (const sel of document.querySelectorAll<HTMLSelectElement>("select[name=model], select[name=effort], select[name=mode]")) sel.value = "";
+  });
+
+  it("a list_agents failure leaves Claude Code alone", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      return Promise.reject(new Error("no"));
+    });
+    await openNewSession();
+    await flush();
+    expect(document.querySelector("select[name=agent]")).toBeNull();
+    expect(document.querySelector("select[name=model]")).not.toBeNull();
+    // This Mac's Maya takes names whatever the listing did.
+    expect(document.querySelector("input[name=name]")).not.toBeNull();
+  });
+
+  it("keeps the focus and the typed name when the agents arrive", async () => {
+    let resolveAgents: (v: unknown) => void = () => {};
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") return new Promise((r) => { resolveAgents = r; });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    const name = document.querySelector<HTMLInputElement>("input[name=name]")!;
+    name.focus();
+    name.value = "Fix CI";
+    name.dispatchEvent(new Event("input"));
+    resolveAgents({ agents: [CLAUDE_AGENT], names: true });
+    await flush();
+    const after = document.querySelector<HTMLInputElement>("input[name=name]")!;
+    const focused = document.activeElement;
+    const typed = after.value;
+    // The name is a draft like the prompt: clear it for the other tests, even if this one fails.
+    after.value = "";
+    expect(after).not.toBe(name);
+    expect(focused).toBe(after);
+    expect(typed).toBe("Fix CI");
+    // Changing the model repaints too, and the Model select keeps the focus.
+    const model = document.querySelector<HTMLSelectElement>("select[name=model]")!;
+    model.focus();
+    model.value = "opus";
+    model.dispatchEvent(new Event("change"));
+    const modelAfter = document.querySelector<HTMLSelectElement>("select[name=model]")!;
+    const focusedAfter = document.activeElement;
+    modelAfter.value = "";
+    expect(modelAfter).not.toBe(model);
+    expect(focusedAfter).toBe(modelAfter);
   });
 });
 
@@ -59,11 +136,31 @@ describe("new-session flow", () => {
     vi.useRealTimers();
   });
 
+  it("says a session with no clear folder starts in the projects directory, naming no agent", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true });
+      if (cmd === "start_session") return Promise.resolve({ dir: "/x/dev", how: "fallback" });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    const ta = document.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")!;
+    ta.value = "fix ci";
+    ta.dispatchEvent(new Event("input"));
+    document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    await flush();
+    await flush();
+    expect(document.querySelector(".modal__status")?.textContent).toBe("Started in dev (no clear match, so the projects directory itself)");
+  });
+
   it("clears the prompt after a successful start, keeps Start disabled, ignores a second click and closes", async () => {
     let resolveStart: (v: unknown) => void = () => {};
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true });
       if (cmd === "start_session") return new Promise((r) => { resolveStart = r; });
       return Promise.reject(new Error("unexpected " + cmd));
     });
@@ -73,7 +170,7 @@ describe("new-session flow", () => {
     ta.value = "fix ci";
     ta.dispatchEvent(new Event("input"));
     document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(invoke).toHaveBeenCalledWith("start_session", { dir: null, prompt: "fix ci", options: { model: "", effort: "", mode: "" }, machine: "" });
+    expect(invoke).toHaveBeenCalledWith("start_session", { dir: null, prompt: "fix ci", options: { agent: "claude-code", name: "", model: "", effort: "", mode: "" }, machine: "" });
     resolveStart({ dir: "/x/dev/a", how: "classifier" });
     await flush();
     await flush();
@@ -95,6 +192,7 @@ describe("new-session flow", () => {
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true });
       if (cmd === "start_session") return new Promise((_, rej) => { rejectStart = rej; });
       return Promise.reject(new Error("unexpected " + cmd));
     });
@@ -127,6 +225,7 @@ describe("new-session machine picker", () => {
     invoke.mockImplementation((cmd: string, args: { machine?: string }) => {
       if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
       if (cmd === "list_project_dirs") return args.machine ? Promise.resolve(["remote-proj"]) : Promise.reject("Set a projects directory in Settings first.");
+      if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true });
       return Promise.reject(new Error("unexpected " + cmd));
     });
     await openNewSession();
@@ -153,6 +252,7 @@ describe("new-session machine picker", () => {
     invoke.mockImplementation((cmd: string, args: { machine?: string }) => {
       if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
       if (cmd === "list_project_dirs") return Promise.resolve(args.machine ? [] : ["a"]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true });
       return Promise.reject(new Error("unexpected " + cmd));
     });
     await openNewSession();

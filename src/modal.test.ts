@@ -166,8 +166,6 @@ describe("renderModal", () => {
     expect(el.querySelector(".modal__tweaks")).toBeNull();
     expect(el.querySelector("button[data-action=compact]")).toBeNull();
     expect(el.querySelector(".modal__context")?.textContent).toBe("ctx 80%");
-    el.querySelector<HTMLElement>(".modal__title")!.click();
-    expect(el.querySelector("input.modal__title-input")).toBeNull();
     const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
     expect(ta.placeholder).toContain("typed into its terminal");
     expect(el.querySelector(".modal__noinbox")).toBeNull();
@@ -196,6 +194,22 @@ describe("renderModal", () => {
     again.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(h.onRename).toHaveBeenCalledWith("board work");
     expect(el.querySelector("input.modal__title-input")).toBeNull();
+  });
+
+  it("offers the rename from the title on Codex, Antigravity and Grok sessions too", () => {
+    for (const harness of ["codex", "antigravity", "grok"] as const) {
+      const h = handlers();
+      const el = renderModal({ card: { ...base, harness, hasInbox: false }, turns: [], status: null, draft: "" }, h);
+      document.body.replaceChildren(el);
+      const title = el.querySelector<HTMLElement>(".modal__title")!;
+      expect(title.title).toContain("rename");
+      expect(title.tabIndex).toBe(0);
+      title.click();
+      const input = el.querySelector<HTMLInputElement>("input.modal__title-input")!;
+      input.value = "board work";
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      expect(h.onRename).toHaveBeenCalledWith("board work");
+    }
   });
 
   it("cancels the rename on Escape without closing the modal", () => {

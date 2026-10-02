@@ -149,6 +149,12 @@ pub fn start(claude_dir: &Path, dir: Option<String>, prompt: Option<String>, opt
 }
 
 pub fn start_with(claude_dir: &Path, dir: Option<String>, prompt: Option<String>, options: LaunchOptions, terminal: Arc<dyn Terminal>) -> Result<String, String> {
+    // Only Claude Code takes a name on its command line. The others get
+    // theirs typed as `/rename` later, from a store that would die with
+    // this process: refuse rather than drop the name without a word.
+    if options.chosen_name().is_some() && options.agent != maya_core::model::Harness::ClaudeCode {
+        return Err("--name only works for Claude Code from the command line; name Codex, Antigravity and Grok sessions from the Maya app, or rename them once they are free.".into());
+    }
     let store = Mutex::new(Store::new(claude_dir.to_path_buf()));
     let l = actions::Local { store: &store, terminal: &*terminal };
     let r = actions::start_session(&l, dir, prompt.unwrap_or_default(), options)?;
@@ -162,6 +168,7 @@ mod tests {
     use crate::status_file::RunStatus;
     use maya_core::actions::test_support::store_with_projects;
     use maya_core::config::Config;
+    use maya_core::model::Harness;
     use maya_core::terminal::FakeTerminal;
 
     fn claude_dir_with(role: NetworkRole) -> tempfile::TempDir {
@@ -292,5 +299,20 @@ mod tests {
         let out = start_with(dir.path(), Some("proj".into()), Some("hello".into()), LaunchOptions::default(), fake.clone()).unwrap();
         assert!(out.starts_with("started in proj: tmux attach -t maya-"), "{out}");
         assert_eq!(start_with(dir.path(), Some("proj".into()), None, LaunchOptions::default(), fake).unwrap_err(), "Type a prompt first.");
+    }
+
+    #[test]
+    fn start_refuses_a_name_it_could_not_type_later() {
+        // A pending name lives in the store, which dies with this process.
+        let (dir, _store) = store_with_projects(&["proj"]);
+        let fake = Arc::new(FakeTerminal::default());
+        for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok] {
+            let opts = LaunchOptions { agent, name: Some("Fix CI".into()), ..Default::default() };
+            let err = start_with(dir.path(), Some("proj".into()), Some("hello".into()), opts, fake.clone()).unwrap_err();
+            assert_eq!(err, "--name only works for Claude Code from the command line; name Codex, Antigravity and Grok sessions from the Maya app, or rename them once they are free.", "{agent:?}");
+        }
+        assert!(fake.calls.lock().unwrap().is_empty(), "nothing started");
+        let opts = LaunchOptions { name: Some("Fix CI".into()), ..Default::default() };
+        start_with(dir.path(), Some("proj".into()), Some("hello".into()), opts, fake).unwrap();
     }
 }

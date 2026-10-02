@@ -53,12 +53,8 @@ export interface ModalHandlers {
  * commits a changed, non-blank name; Escape, or leaving the field, cancels.
  * Escape is stopped here so the modal's own Escape handler does not close it.
  */
-function renderTitle(name: string, h: ModalHandlers, renamable: boolean): HTMLElement {
+function renderTitle(name: string, h: ModalHandlers): HTMLElement {
   const title = el("h2", "modal__title", name);
-  if (!renamable) {
-    title.classList.add("modal__title--fixed");
-    return title;
-  }
   title.title = "Click to rename this session";
   title.tabIndex = 0;
   const edit = () => {
@@ -416,7 +412,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");
   const claude = m.card.harness === "claude-code";
-  titles.append(renderTitle(m.card.name, h, claude));
+  titles.append(renderTitle(m.card.name, h));
   if (m.card.machine) {
     const remote = el("span", "card__remote");
     remote.title = remoteTitle(m.card.machine, m.card.machineAddress, m.card.machinePlatform, m.card.terminal);

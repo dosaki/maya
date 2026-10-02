@@ -4,19 +4,62 @@ use std::time::{Duration, Instant};
 
 pub const CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(90);
 
+use crate::model::Harness;
+
 /// Model aliases `claude --model` accepts. Fixed lists keep the launch command
 /// free of anything the user typed.
 pub const MODELS: &[&str] = &["fable", "opus", "sonnet", "haiku"];
 pub const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 pub const MODES: &[&str] = &["manual", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions"];
 
-/// Per-session choices for `claude`. None or "" means "use the defaults".
+/// The command each agent runs as.
+pub fn binary_name(agent: Harness) -> &'static str {
+    match agent {
+        Harness::ClaudeCode => "claude",
+        Harness::Codex => "codex",
+        Harness::Antigravity => "agy",
+        Harness::Grok => "grok",
+    }
+}
+
+/// The efforts an agent takes, from its `--help`. Each Codex model takes a
+/// subset of these; Grok lists none.
+pub fn efforts(agent: Harness) -> &'static [&'static str] {
+    match agent {
+        Harness::ClaudeCode => EFFORTS,
+        Harness::Codex => &["low", "medium", "high", "xhigh", "max", "ultra"],
+        Harness::Antigravity => &["low", "medium", "high", "max"],
+        Harness::Grok => &[],
+    }
+}
+
+/// The modes an agent takes: Claude's and Grok's permission modes, Codex's
+/// sandbox policies, Antigravity's execution modes.
+pub fn modes(agent: Harness) -> &'static [&'static str] {
+    match agent {
+        Harness::ClaudeCode => MODES,
+        Harness::Codex => &["read-only", "workspace-write", "danger-full-access"],
+        Harness::Antigravity => &["accept-edits", "plan"],
+        Harness::Grok => &["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"],
+    }
+}
+
+/// A model id is put in a shell line only when it is plain: letters,
+/// digits, `.`, `_` and `-`.
+pub fn plain_model_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 100 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+}
+
+/// Per-session choices for a new session. None or "" means "use the defaults".
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct LaunchOptions {
+    pub agent: Harness,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub mode: Option<String>,
+    /// The session's name; only Claude Code takes it as a flag.
+    pub name: Option<String>,
 }
 
 fn chosen(v: &Option<String>) -> Option<&str> {
@@ -33,31 +76,59 @@ pub fn check_choice(what: &str, value: &str, allowed: &[&str]) -> Result<(), Str
 }
 
 impl LaunchOptions {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn chosen_name(&self) -> Option<&str> {
+        chosen(&self.name)
+    }
+
+    /// Checks everything that can be checked without the agent's model list.
+    pub fn validate_shape(&self) -> Result<(), String> {
         if let Some(m) = chosen(&self.model) {
-            check_choice("model", m, MODELS)?;
+            if !plain_model_id(m) {
+                return Err(format!("Unknown model: {m}"));
+            }
         }
         if let Some(e) = chosen(&self.effort) {
-            check_choice("effort", e, EFFORTS)?;
+            check_choice("effort", e, efforts(self.agent))?;
         }
         if let Some(m) = chosen(&self.mode) {
-            check_choice("mode", m, MODES)?;
+            check_choice("mode", m, modes(self.agent))?;
+        }
+        if let Some(n) = self.chosen_name() {
+            crate::answer::rename_command(n)?;
         }
         Ok(())
     }
 
-    /// The `claude` flags for the chosen options, each preceded by a space.
+    /// `validate_shape`, and a chosen model must be in `models`, the agent's own list.
+    pub fn validate(&self, models: &[String]) -> Result<(), String> {
+        self.validate_shape()?;
+        match chosen(&self.model) {
+            Some(m) if !models.iter().any(|x| x == m) => Err(format!("Unknown model: {m}")),
+            _ => Ok(()),
+        }
+    }
+
+    /// The agent's flags for the chosen options, each preceded by a space.
     /// Only valid values are rendered; call `validate` first.
     pub fn flags(&self) -> String {
+        let (model, effort, mode) = (chosen(&self.model), chosen(&self.effort), chosen(&self.mode));
+        let (m_flag, e_flag, mode_flag) = match self.agent {
+            Harness::ClaudeCode => ("--model", Some("--effort"), "--permission-mode"),
+            Harness::Codex => ("-m", Some("-c model_reasoning_effort="), "-s"),
+            Harness::Antigravity => ("--model", Some("--effort"), "--mode"),
+            Harness::Grok => ("-m", None, "--permission-mode"),
+        };
         let mut out = String::new();
-        if let Some(m) = chosen(&self.model) {
-            out.push_str(&format!(" --model {m}"));
+        if let Some(m) = model {
+            out.push_str(&format!(" {m_flag} {m}"));
         }
-        if let Some(e) = chosen(&self.effort) {
-            out.push_str(&format!(" --effort {e}"));
+        match (e_flag, effort) {
+            (Some(f), Some(e)) if f.ends_with('=') => out.push_str(&format!(" {f}{e}")),
+            (Some(f), Some(e)) => out.push_str(&format!(" {f} {e}")),
+            _ => {}
         }
-        if let Some(m) = chosen(&self.mode) {
-            out.push_str(&format!(" --permission-mode {m}"));
+        if let Some(m) = mode {
+            out.push_str(&format!(" {mode_flag} {m}"));
         }
         out
     }
@@ -223,37 +294,43 @@ pub fn git_bash() -> Option<PathBuf> {
     Some(git.parent()?.parent()?.join("bin").join("bash.exe")).filter(|p| p.is_file())
 }
 
-/// The native `claude.exe`: from this process's PATH, then where the
-/// installer puts it. npm's `claude.cmd` is passed over: Windows cannot hand
-/// a batch file the multi-line prompts Maya sends.
+/// The native `<name>.exe`: from this process's PATH, then where the
+/// installer puts it. npm's `.cmd` wrappers are passed over: Windows cannot
+/// hand a batch file the multi-line prompts Maya sends.
 #[cfg(windows)]
-pub fn claude_binary() -> Option<PathBuf> {
-    if let Some(p) = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, "claude.exe")) {
+pub fn agent_binary(name: &str) -> Option<PathBuf> {
+    let exe = format!("{name}.exe");
+    if let Some(p) = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, &exe)) {
         return Some(p);
     }
     let home = dirs::home_dir()?;
-    Some(home.join(".local").join("bin").join("claude.exe")).filter(|p| p.is_file())
+    Some(home.join(".local").join("bin").join(&exe)).filter(|p| p.is_file())
 }
 
-/// The `claude` binary: from this process's PATH, then the usual install
+/// The `name` binary: from this process's PATH, then the usual install
 /// locations, then the login shell's PATH.
 #[cfg(unix)]
-pub fn claude_binary() -> Option<PathBuf> {
-    if let Some(p) = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, "claude")) {
+pub fn agent_binary(name: &str) -> Option<PathBuf> {
+    if let Some(p) = std::env::var("PATH").ok().and_then(|path| find_on_path(&path, name)) {
         return Some(p);
     }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let candidates = [home.join(".local/bin/claude"), PathBuf::from("/opt/homebrew/bin/claude"), PathBuf::from("/usr/local/bin/claude")];
+    let candidates = [home.join(".local/bin").join(name), PathBuf::from("/opt/homebrew/bin").join(name), PathBuf::from("/usr/local/bin").join(name)];
     if let Some(p) = candidates.iter().find(|p| p.is_file()) {
         return Some(p.clone());
     }
-    let out = crate::command(LOGIN_SHELL).args(["-lc", "command -v claude"]).output().ok()?;
+    let out = crate::command(LOGIN_SHELL).args(["-lc", &format!("command -v {name}")]).output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if out.status.success() && !s.is_empty() {
         Some(PathBuf::from(s))
     } else {
         None
     }
+}
+
+/// The `claude` binary, for the folder classifier.
+pub fn claude_binary() -> Option<PathBuf> {
+    agent_binary("claude")
 }
 
 /// Runs the headless picker; None on NONE, no match, timeout or any error.
@@ -338,19 +415,42 @@ pub fn applescript_run(cmd: &str) -> String {
 }
 
 /// The shell line that starts a session: it reads the prompt file into a
-/// variable, deletes the file, and passes the prompt after `--` so a prompt
-/// starting with `-` is not an option.
-pub fn session_command(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> String {
+/// variable, deletes the file, and runs the agent with the prompt as one
+/// argument that is never read as an option: after `--`, or for
+/// Antigravity, whose Go flag parser has no `--`, as `--prompt-interactive="$p"`.
+/// `session_id` is Grok's `--session-id`, so Maya knows the new session's id.
+pub fn session_command(target: &Path, prompt_file: &Path, opts: &LaunchOptions, session_id: Option<&str>) -> String {
     let file = shell_single_quote(&prompt_file.to_string_lossy());
+    let mut args = opts.flags();
+    if opts.agent == Harness::ClaudeCode {
+        if let Some(n) = opts.chosen_name() {
+            args.push_str(&format!(" -n {}", shell_single_quote(n)));
+        }
+    }
+    if let Some(id) = session_id {
+        args.push_str(&format!(" --session-id {}", shell_single_quote(id)));
+    }
+    let prompt = if opts.agent == Harness::Antigravity { " --prompt-interactive=\"$p\"" } else { " -- \"$p\"" };
     format!(
-        "cd {} && p=\"$(cat {file})\" && rm -f {file} && claude{} -- \"$p\"",
+        "cd {} && p=\"$(cat {file})\" && rm -f {file} && {}{args}{prompt}",
         shell_single_quote(&target.to_string_lossy()),
-        opts.flags()
+        binary_name(opts.agent)
     )
 }
 
 pub fn applescript_launch(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> String {
-    applescript_run(&session_command(target, prompt_file, opts))
+    applescript_run(&session_command(target, prompt_file, opts, None))
+}
+
+/// A random version-4 UUID, for Grok's `--session-id`.
+pub fn new_session_uuid() -> String {
+    use rand::Rng;
+    let mut b = [0u8; 16];
+    rand::rng().fill_bytes(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
 }
 
 /// Where the session starts and why: the user's choice, the classifier's pick,
@@ -521,28 +621,119 @@ mod tests {
 
     #[test]
     fn launch_options_accept_only_known_values() {
-        assert!(LaunchOptions::default().validate().is_ok());
-        let ok = LaunchOptions { model: Some("opus".into()), effort: Some("xhigh".into()), mode: Some("acceptEdits".into()) };
-        assert!(ok.validate().is_ok());
+        let models: Vec<String> = MODELS.iter().map(|s| s.to_string()).collect();
+        assert!(LaunchOptions::default().validate(&models).is_ok());
+        let ok = LaunchOptions { model: Some("opus".into()), effort: Some("xhigh".into()), mode: Some("acceptEdits".into()), ..Default::default() };
+        assert!(ok.validate(&models).is_ok());
         let bad_model = LaunchOptions { model: Some("gpt; rm -rf /".into()), ..Default::default() };
-        assert!(bad_model.validate().unwrap_err().contains("model"));
+        assert!(bad_model.validate(&models).unwrap_err().contains("model"));
         let bad_effort = LaunchOptions { effort: Some("turbo".into()), ..Default::default() };
-        assert!(bad_effort.validate().unwrap_err().contains("effort"));
+        assert!(bad_effort.validate(&models).unwrap_err().contains("effort"));
         let bad_mode = LaunchOptions { mode: Some("yolo".into()), ..Default::default() };
-        assert!(bad_mode.validate().unwrap_err().contains("mode"));
+        assert!(bad_mode.validate(&models).unwrap_err().contains("mode"));
         // Empty strings mean "default": no flag.
-        let empty = LaunchOptions { model: Some("".into()), effort: Some("".into()), mode: Some("".into()) };
-        assert!(empty.validate().is_ok());
+        let empty = LaunchOptions { model: Some("".into()), effort: Some("".into()), mode: Some("".into()), ..Default::default() };
+        assert!(empty.validate(&models).is_ok());
         assert_eq!(empty.flags(), "");
     }
 
     #[test]
     fn launch_options_render_as_claude_flags() {
         assert_eq!(LaunchOptions::default().flags(), "");
-        let all = LaunchOptions { model: Some("sonnet".into()), effort: Some("low".into()), mode: Some("plan".into()) };
+        let all = LaunchOptions { model: Some("sonnet".into()), effort: Some("low".into()), mode: Some("plan".into()), ..Default::default() };
         assert_eq!(all.flags(), " --model sonnet --effort low --permission-mode plan");
         let one = LaunchOptions { effort: Some("max".into()), ..Default::default() };
         assert_eq!(one.flags(), " --effort max");
+    }
+
+    fn opts(agent: Harness) -> LaunchOptions {
+        LaunchOptions { agent, ..Default::default() }
+    }
+
+    #[test]
+    fn the_agent_defaults_to_claude_code_when_a_caller_leaves_it_out() {
+        let o: LaunchOptions = serde_json::from_str(r#"{"model":"opus"}"#).unwrap();
+        assert_eq!(o.agent, Harness::ClaudeCode);
+        assert_eq!(o.name, None);
+    }
+
+    #[test]
+    fn each_agent_renders_its_own_flags() {
+        let all = |agent| LaunchOptions { agent, model: Some("m-1".into()), effort: Some("high".into()), mode: Some(modes(agent)[0].into()), ..Default::default() };
+        assert_eq!(all(Harness::ClaudeCode).flags(), " --model m-1 --effort high --permission-mode manual");
+        assert_eq!(all(Harness::Codex).flags(), " -m m-1 -c model_reasoning_effort=high -s read-only");
+        assert_eq!(all(Harness::Antigravity).flags(), " --model m-1 --effort high --mode accept-edits");
+        // Grok lists no effort values, so none is passed.
+        assert_eq!(all(Harness::Grok).flags(), " -m m-1 --permission-mode default");
+    }
+
+    #[test]
+    fn effort_and_mode_must_be_the_agents_own() {
+        let o = |agent, effort: &str, mode: &str| LaunchOptions { agent, effort: Some(effort.into()), mode: Some(mode.into()), ..Default::default() };
+        assert!(o(Harness::Codex, "ultra", "workspace-write").validate_shape().is_ok());
+        assert!(o(Harness::Codex, "high", "plan").validate_shape().unwrap_err().contains("mode"));
+        assert!(o(Harness::Antigravity, "xhigh", "plan").validate_shape().unwrap_err().contains("effort"));
+        assert!(o(Harness::Grok, "high", "plan").validate_shape().unwrap_err().contains("effort"));
+    }
+
+    #[test]
+    fn a_model_must_be_plain_and_in_the_agents_list() {
+        let m = |model: &str| LaunchOptions { agent: Harness::Codex, model: Some(model.into()), ..Default::default() };
+        let listed = vec!["gpt-6.1-sol".to_string()];
+        assert!(m("gpt-6.1-sol").validate(&listed).is_ok());
+        assert!(m("gpt-9").validate(&listed).unwrap_err().contains("model"));
+        assert!(m("gpt; rm -rf /").validate_shape().unwrap_err().contains("model"));
+        assert!(plain_model_id("claude-opus-4-6-thinking") && plain_model_id("grok-4.7"));
+        assert!(!plain_model_id("") && !plain_model_id("a b") && !plain_model_id("$(x)"));
+    }
+
+    #[test]
+    fn a_name_follows_the_rename_rules() {
+        let n = |name: &str| LaunchOptions { name: Some(name.into()), ..Default::default() };
+        assert!(n("Fix the CI").validate_shape().is_ok());
+        assert!(n("   ").validate_shape().is_ok(), "blank means no name");
+        assert_eq!(n("   ").chosen_name(), None);
+        assert!(n("two\nlines").validate_shape().unwrap_err().contains("one line"));
+        assert!(n(&"x".repeat(61)).validate_shape().unwrap_err().contains("too long"));
+    }
+
+    #[test]
+    fn each_agent_runs_its_binary_with_the_prompt() {
+        let line = |o: &LaunchOptions, id| session_command(Path::new("/r/a"), Path::new("/p/1.txt"), o, id);
+        assert!(line(&opts(Harness::ClaudeCode), None).ends_with("&& claude -- \"$p\""));
+        assert!(line(&opts(Harness::Codex), None).ends_with("&& codex -- \"$p\""));
+        assert!(line(&opts(Harness::Antigravity), None).ends_with("&& agy --prompt-interactive=\"$p\""));
+        assert!(line(&opts(Harness::Grok), Some("0b9c-id")).ends_with("&& grok --session-id '0b9c-id' -- \"$p\""));
+    }
+
+    #[test]
+    fn each_agent_takes_a_dash_prompt_as_the_prompt() {
+        // The prompt is never in the line itself: it is read from the file into
+        // $p, and given after `--`, or as `--flag="$p"` for Go's flag parser.
+        for agent in [Harness::ClaudeCode, Harness::Codex, Harness::Antigravity, Harness::Grok] {
+            let s = session_command(Path::new("/r"), Path::new("/p/1.txt"), &opts(agent), None);
+            assert!(s.ends_with(" -- \"$p\"") || s.ends_with("--prompt-interactive=\"$p\""), "{s}");
+        }
+    }
+
+    #[test]
+    fn a_claude_name_is_single_quoted() {
+        let o = LaunchOptions { name: Some("it's \"$(rm -rf ~)\"".into()), ..Default::default() };
+        let s = session_command(Path::new("/r"), Path::new("/p/1.txt"), &o, None);
+        assert!(s.ends_with(r#"&& claude -n 'it'\''s "$(rm -rf ~)"' -- "$p""#), "{s}");
+        // The other agents take no name flag: Maya renames them later.
+        let codex = LaunchOptions { agent: Harness::Codex, name: Some("x".into()), ..Default::default() };
+        assert!(!session_command(Path::new("/r"), Path::new("/p/1.txt"), &codex, None).contains(" -n "));
+    }
+
+    #[test]
+    fn session_uuids_are_version_4() {
+        let id = new_session_uuid();
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.iter().map(|p| p.len()).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12]);
+        assert!(parts[2].starts_with('4'));
+        assert!("89ab".contains(&parts[3][..1]));
+        assert_ne!(id, new_session_uuid());
     }
 
     #[test]
