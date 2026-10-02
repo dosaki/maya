@@ -137,7 +137,7 @@ function renderTweaks(h: ModalHandlers): HTMLElement {
 
 /** Where the panel size the user dragged is kept, across opens and restarts. */
 export const PANEL_SIZE_KEY = "maya.modal.size";
-/** The smallest panel the grip allows (the stylesheet's min-width and min-height). */
+/** The smallest panel resizing allows (the stylesheet's min-width and min-height). */
 export const PANEL_MIN = { width: 480, height: 360 };
 
 export interface PanelSize {
@@ -165,9 +165,9 @@ export function parsePanelSize(raw: string | null): PanelSize | null {
 }
 
 /**
- * The size the browser wrote inline on the panel while its grip was
- * dragged. The rendered size is not used: the stylesheet clamps it to the
- * window, and a smaller window must not overwrite the chosen size.
+ * The size written inline on the panel while an edge was dragged. The
+ * rendered size is not used: the stylesheet clamps it to the window, and
+ * a smaller window must not overwrite the chosen size.
  */
 export function draggedPanelSize(panel: HTMLElement): PanelSize | null {
   return panelSize(parseFloat(panel.style.width), parseFloat(panel.style.height));
@@ -196,19 +196,11 @@ export function applyPanelSize(panel: HTMLElement, size: PanelSize | null): void
   panel.style.height = `${size.height}px`;
 }
 
-/** The grip's reach from the panel's bottom-right corner, in pixels. */
-export const GRIP_PX = 20;
-
-/** True when a pointer at (x, y) is on the panel's resize grip. */
-export function onGrip(rect: DOMRect, x: number, y: number): boolean {
-  return x >= rect.right - GRIP_PX && y >= rect.bottom - GRIP_PX && x <= rect.right && y <= rect.bottom;
-}
-
 /**
- * Pins the panel where it is as the pointer reaches its grip. Centred, a drag of
- * the corner would move the panel's centre too, doubling the change and
- * running the grip away from the pointer. Pinned, only the dragged corner
- * moves; the next open is centred again at the size kept.
+ * Pins the panel where it is before an edge is dragged. Centred, a drag of
+ * an edge would move the panel's centre too, doubling the change and
+ * running the edge away from the pointer. Pinned, only the dragged edges
+ * move; the next open is centred again at the size kept.
  */
 export function anchorPanel(root: HTMLElement, panel: HTMLElement): void {
   if (root.classList.contains("modal--anchored")) return;
@@ -231,52 +223,124 @@ function placePanel(panel: HTMLElement, box: PanelBox): void {
   panel.style.top = `${box.top}px`;
   if (box.width !== undefined) panel.style.width = `${box.width}px`;
   if (box.height !== undefined) panel.style.height = `${box.height}px`;
-  // Neither grip can go past the window's edges.
+  // No edge can go past the window's.
   panel.style.maxWidth = `calc(100vw - ${box.left + 8}px)`;
   panel.style.maxHeight = `calc(100vh - ${box.top + 8}px)`;
 }
 
-/**
- * Where a drag of the top-left corner by (dx, dy) puts a pinned panel: the
- * bottom-right corner stays, the corner follows the pointer, and the panel
- * stays at least `PANEL_MIN` and inside the window.
- */
-export function cornerDrag(start: Required<PanelBox>, dx: number, dy: number): Required<PanelBox> {
-  const right = start.left + start.width;
-  const bottom = start.top + start.height;
-  const left = Math.min(Math.max(0, start.left + dx), right - PANEL_MIN.width);
-  const top = Math.min(Math.max(0, start.top + dy), bottom - PANEL_MIN.height);
-  return { left, top, width: right - left, height: bottom - top };
+/** How far outside the panel's edge the resize band reaches, in pixels. */
+export const EDGE_OUT_PX = 6;
+/** How far inside the panel's edge the resize band reaches: the border and a little more. */
+export const EDGE_IN_PX = 4;
+
+/** Which of the panel's edges a pointer is on; a corner is two of them. */
+export interface Edges {
+  left: boolean;
+  right: boolean;
+  top: boolean;
+  bottom: boolean;
 }
 
-/** The top-left handle: dragging it moves that corner; CSS gives the bottom-right one. */
-function renderCornerHandle(root: HTMLElement, panel: HTMLElement): HTMLElement {
-  const handle = el("div", "modal__grip");
-  handle.title = "Drag to resize";
-  handle.addEventListener("pointerdown", (ev: PointerEvent) => {
+/**
+ * The edges under a pointer at (x, y), or null away from them. The band
+ * runs a little outside the panel (over the backdrop) and a little inside
+ * it (the border), like a window's invisible resize frame.
+ */
+export function edgesAt(rect: DOMRect, x: number, y: number): Edges | null {
+  const within = x >= rect.left - EDGE_OUT_PX && x <= rect.right + EDGE_OUT_PX && y >= rect.top - EDGE_OUT_PX && y <= rect.bottom + EDGE_OUT_PX;
+  if (!within) return null;
+  const e = {
+    left: x <= rect.left + EDGE_IN_PX,
+    right: x >= rect.right - EDGE_IN_PX,
+    top: y <= rect.top + EDGE_IN_PX,
+    bottom: y >= rect.bottom - EDGE_IN_PX,
+  };
+  return e.left || e.right || e.top || e.bottom ? e : null;
+}
+
+/** The resize cursor for `edges`: a diagonal at a corner, else across the edge. */
+export function cursorFor(e: Edges): string {
+  if ((e.left && e.top) || (e.right && e.bottom)) return "nwse-resize";
+  if ((e.right && e.top) || (e.left && e.bottom)) return "nesw-resize";
+  return e.left || e.right ? "ew-resize" : "ns-resize";
+}
+
+/**
+ * Where a drag of `edges` by (dx, dy) puts a pinned panel that started at
+ * `start`: the dragged edges follow the pointer, the others stay, and the
+ * panel stays at least `PANEL_MIN` and inside a window of `viewport`.
+ */
+export function edgeDrag(start: Required<PanelBox>, e: Edges, dx: number, dy: number, viewport: { width: number; height: number }): Required<PanelBox> {
+  let { left, top, width, height } = start;
+  const right = left + width;
+  const bottom = top + height;
+  if (e.left) {
+    left = Math.min(Math.max(0, start.left + dx), right - PANEL_MIN.width);
+    width = right - left;
+  } else if (e.right) {
+    width = Math.min(Math.max(PANEL_MIN.width, start.width + dx), viewport.width - left);
+  }
+  if (e.top) {
+    top = Math.min(Math.max(0, start.top + dy), bottom - PANEL_MIN.height);
+    height = bottom - top;
+  } else if (e.bottom) {
+    height = Math.min(Math.max(PANEL_MIN.height, start.height + dy), viewport.height - top);
+  }
+  return { left, top, width, height };
+}
+
+/** How long after a resize ends a click on the backdrop is still the drag's own release. */
+export const RESIZE_CLICK_GRACE_MS = 300;
+
+/**
+ * Lets any edge or corner of the panel be dragged, like a window's frame:
+ * the pointer shows the resize cursor over the band, the border lights up,
+ * and a press there pins the panel and moves only the dragged edges.
+ * Returns whether a backdrop click at `now` is the release of such a drag.
+ */
+function installEdgeResize(root: HTMLElement, panel: HTMLElement): (now: number) => boolean {
+  let dragging = false;
+  let endedAt = -Infinity;
+  const hover = (ev: PointerEvent) => {
+    if (dragging) return;
+    const edges = edgesAt(panel.getBoundingClientRect(), ev.clientX, ev.clientY);
+    root.style.cursor = edges ? cursorFor(edges) : "";
+    root.classList.toggle("modal--edge", edges !== null);
+  };
+  root.addEventListener("pointermove", hover);
+  root.addEventListener("pointerleave", () => {
+    if (!dragging) root.classList.remove("modal--edge");
+  });
+  root.addEventListener("pointerdown", (ev: PointerEvent) => {
     if (ev.button !== 0) return;
+    const edges = edgesAt(panel.getBoundingClientRect(), ev.clientX, ev.clientY);
+    if (!edges) return;
     ev.preventDefault();
     anchorPanel(root, panel);
     const r = panel.getBoundingClientRect();
     const start = { left: parseFloat(panel.style.left) || 0, top: parseFloat(panel.style.top) || 0, width: r.width, height: r.height };
     const origin = { x: ev.clientX, y: ev.clientY };
-    if (ev.pointerId !== undefined) handle.setPointerCapture?.(ev.pointerId);
-    const move = (e: PointerEvent) => placePanel(panel, cornerDrag(start, e.clientX - origin.x, e.clientY - origin.y));
+    dragging = true;
+    if (ev.pointerId !== undefined) root.setPointerCapture?.(ev.pointerId);
+    const move = (e: PointerEvent) =>
+      placePanel(panel, edgeDrag(start, edges, e.clientX - origin.x, e.clientY - origin.y, { width: window.innerWidth, height: window.innerHeight }));
     const end = () => {
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", end);
-      handle.removeEventListener("pointercancel", end);
+      root.removeEventListener("pointermove", move);
+      root.removeEventListener("pointerup", end);
+      root.removeEventListener("pointercancel", end);
+      dragging = false;
+      endedAt = Date.now();
     };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", end);
-    handle.addEventListener("pointercancel", end);
+    root.addEventListener("pointermove", move);
+    root.addEventListener("pointerup", end);
+    root.addEventListener("pointercancel", end);
   });
-  return handle;
+  return (now) => dragging || now - endedAt < RESIZE_CLICK_GRACE_MS;
 }
 
 let panelObserver: ResizeObserver | null = null;
 
-/** Remembers every size the grip is dragged to, for the panel on screen. */
+/** Remembers every size the panel is dragged to, for the panel on screen. */
 function watchPanelSize(panel: HTMLElement | null): void {
   panelObserver?.disconnect();
   panelObserver = null;
@@ -303,17 +367,15 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
 export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = el("div", "modal");
   const backdrop = el("div", "modal__backdrop");
-  backdrop.addEventListener("click", () => h.onClose());
   const panel = el("section", "modal__panel");
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-modal", "true");
   applyPanelSize(panel, loadPanelSize());
-  // Pinned as the pointer reaches the grip, before the press: a change of
-  // position during the press itself cancels WebKit's native resize.
-  panel.addEventListener("pointermove", (ev) => {
-    if (onGrip(panel.getBoundingClientRect(), ev.clientX, ev.clientY)) anchorPanel(root, panel);
+  const resizing = installEdgeResize(root, panel);
+  // A press just outside the panel starts a resize, not a dismissal.
+  backdrop.addEventListener("click", () => {
+    if (!resizing(Date.now())) h.onClose();
   });
-  panel.append(renderCornerHandle(root, panel));
 
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");

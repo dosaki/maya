@@ -74,11 +74,9 @@ body { margin: 0; background: var(--bg); }
 .modal { position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center; }
 .modal--anchored { display: block; }
 .modal--anchored .modal__panel { position: absolute; }
-.modal__grip { position: absolute; left: 0; top: 0; width: 18px; height: 18px; cursor: nwse-resize; z-index: 1; }
-.modal__grip::before { content: ""; position: absolute; left: 4px; top: 4px; width: 7px; height: 7px; border-top: 2px solid var(--muted); border-left: 2px solid var(--muted); opacity: .55; }
-.modal__grip:hover::before { opacity: 1; }
+.modal--edge .modal__panel { border-color: var(--gold-deep); }
 .modal__backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.45); }
-.modal__panel { position: relative; width: min(1400px, 88vw); height: min(1100px, 88vh); min-width: 480px; min-height: 360px; max-width: 96vw; max-height: 94vh; resize: both; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.35); display: flex; flex-direction: column; overflow: hidden; }
+.modal__panel { position: relative; width: min(1400px, 88vw); height: min(1100px, 88vh); min-width: 480px; min-height: 360px; max-width: 96vw; max-height: 94vh; background: var(--panel); border: 3px solid var(--border); border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.35); display: flex; flex-direction: column; overflow: hidden; }
 .modal__head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
 .modal__titles { flex: 1; display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .modal__title { margin: 0; font-size: 15px; cursor: text; border-bottom: 1px dashed transparent; }
@@ -152,7 +150,7 @@ body { margin: 0; background: var(--bg); }
 .resume__title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .resume__chip { padding: 1px 6px; border: 1px solid var(--working); border-radius: 999px; font-size: 10px; color: var(--working); white-space: nowrap; }
 .resume__age { font-size: 12px; color: var(--muted); }
-.modal__panel--compact { width: min(760px, 92vw); height: auto; min-height: 0; max-height: 80vh; resize: none; }
+.modal__panel--compact { width: min(760px, 92vw); height: auto; min-height: 0; max-height: 80vh; border-width: 1px; }
 .newsession { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; }
 .newsession__field { display: flex; flex-direction: column; gap: 4px; }
 .newsession__label { font-size: 12px; color: var(--muted); }
