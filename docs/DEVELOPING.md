@@ -243,12 +243,12 @@ built once (`pnpm tauri build --bundles appimage`):
     cargo test -p maya-core -p maya-cli
 
 `maya-cli` depends only on `maya_core`, so it builds without GTK or
-WebKit, and statically for musl. The build workflow's `linux` job runs
-`cargo test -p maya-core -p maya-cli` on Ubuntu (with tmux installed) —
-the guard that keeps `maya_core` free of macOS-only code — and builds
+WebKit, and statically for musl. The build workflow's `linux` job builds
 `maya-cli` natively for its musl target (`musl-tools`, no
 cross-compilation container), once per architecture on an x86_64 runner
-and an `ubuntu-24.04-arm` runner.
+and an `ubuntu-24.04-arm` runner. Their tests run in the `linux-app`
+job's `cargo test --workspace` on Ubuntu (with tmux installed), the
+guard that keeps `maya_core` free of macOS-only code.
 
 ## CI
 
@@ -266,9 +266,10 @@ Three workflows in `.github/workflows/`:
   unsigned, and a check that the version files agree. Nothing is
   published, so a pull request shows everything building before the merge.
 - `release.yml` ("Release") runs on every push to `main`: `build.yml`
-  again, signing the macOS apps when this push releases, and then, only
-  once every platform has built, a `release` job that publishes
-  `v<version>` with all the artifacts. It releases when
+  again without the tests (the pull request ran them; the Linux smoke
+  test still runs), signing the macOS apps when this push releases, and
+  then, only once every platform has built, a `release` job that
+  publishes `v<version>` with all the artifacts. It releases when
   `scripts/release-version.sh` finds no release for the version yet; a
   push whose version is released only builds, and a `docs` commit skips
   the run.
