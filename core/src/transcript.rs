@@ -136,9 +136,41 @@ fn keep_last_messages(mut turns: Vec<Turn>, max_messages: usize) -> Vec<Turn> {
     kept
 }
 
+/// Whether a user line's text was put there by the harness rather than
+/// typed: a task notification, a slash-command echo, the input or output of
+/// a `!` shell line, a caveat. They all open with a hyphenated
+/// `<lowercase-tag`, which plain HTML in a prompt does not.
+fn is_harness_tag(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix('<') else { return false };
+    let name_len = rest.bytes().take_while(|b| b.is_ascii_lowercase() || *b == b'-').count();
+    rest[..name_len].contains('-') && rest[name_len..].starts_with(['>', ' ', '\n'])
+}
+
+/// Only the last text of each assistant run (the texts between two
+/// user or peer turns) is an answer; the ones before it narrate progress.
+fn drop_narration(turns: Vec<Turn>) -> Vec<Turn> {
+    let mut kept = Vec::with_capacity(turns.len());
+    let mut last_text_in_run: Option<usize> = None;
+    for t in turns {
+        match t.kind {
+            TurnKind::Assistant => {
+                if let Some(i) = last_text_in_run {
+                    kept.remove(i);
+                }
+                last_text_in_run = Some(kept.len());
+            }
+            TurnKind::User | TurnKind::Peer => last_text_in_run = None,
+            TurnKind::Tool => {}
+        }
+        kept.push(t);
+    }
+    kept
+}
+
 /// Conversation turns (user prompts, assistant text, tool calls) in order,
 /// keeping the last `max_turns` messages and the tool calls among them.
-/// Subagent sidechain lines are skipped.
+/// Subagent sidechain lines, harness-injected user lines (skill bodies,
+/// notifications, subagent hand-backs) and progress narration are skipped.
 pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
     let mut turns = Vec::new();
     for line in text.lines() {
@@ -152,8 +184,13 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
                 let t = text_blocks(content);
                 if !t.is_empty() {
                     let text = t.join("\n\n");
+                    let meta = v["isMeta"].as_bool() == Some(true);
                     match unwrap_peer_message(&text) {
+                        // A subagent's final report comes back framed as a peer message.
+                        Some(inner) if inner.starts_with("<agent-message") => {}
                         Some(inner) => turns.push(Turn { kind: TurnKind::Peer, text: inner }),
+                        // Other meta lines are skill bodies, reminders and caveats.
+                        None if meta || is_harness_tag(&text) => {}
                         None => turns.push(Turn { kind: TurnKind::User, text }),
                     }
                 }
@@ -173,7 +210,7 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
             _ => {}
         }
     }
-    keep_last_messages(turns, max_turns)
+    keep_last_messages(drop_narration(turns), max_turns)
 }
 
 /// Last `max_turns` turns from the last 1 MB of the transcript.
@@ -375,7 +412,6 @@ mod tests {
         let got: Vec<(TurnKind, &str)> = turns.iter().map(|t| (t.kind, t.text.as_str())).collect();
         assert_eq!(got, vec![
             (TurnKind::User, "build me a board"),
-            (TurnKind::Assistant, "Sure."),
             (TurnKind::Tool, "Bash: pnpm test"),
             (TurnKind::Tool, "ListAgents"),
             (TurnKind::Assistant, "Tests pass.\n\nAnything else?"),
@@ -446,5 +482,66 @@ mod tests {
         std::fs::write(&p, &text).unwrap();
         let t = read_tail(&p, 2000);
         assert!(t.open_question.is_some());
+    }
+
+    fn user_line(text: &str, meta: bool) -> String {
+        let mut v = serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":text}]}});
+        if meta {
+            v["isMeta"] = serde_json::Value::Bool(true);
+        }
+        v.to_string()
+    }
+
+    fn assistant_line(text: &str, tool: Option<&str>) -> String {
+        let mut content = vec![serde_json::json!({"type":"text","text":text})];
+        if let Some(name) = tool {
+            content.push(serde_json::json!({"type":"tool_use","id":"t","name":name,"input":{}}));
+        }
+        serde_json::json!({"type":"assistant","message":{"role":"assistant","content":content}}).to_string()
+    }
+
+    #[test]
+    fn harness_lines_are_not_turns() {
+        let peer = |body: &str| format!("Another Claude session sent a message:\n{body}\n\nThis came from another Claude session — not typed by your user.");
+        let text = [
+            user_line("Base directory for this skill: /x\n\n# Brainstorming", true),
+            user_line("<task-notification>\n<task-id>b2</task-id>\n</task-notification>", false),
+            user_line("<command-name>/clear</command-name>", false),
+            user_line("<bash-stdout>ok</bash-stdout>", false),
+            user_line("<local-command-caveat>Caveat</local-command-caveat>", true),
+            user_line(&peer("<agent-message from=\"a7ef\">\n[Subagent hand-back] Status: DONE\n</agent-message>"), true),
+            user_line(&peer("Looks good. Commit this"), true),
+            user_line("<b>bold</b> is how I start my prompts", false),
+        ]
+        .join("\n");
+        let turns = parse_turns(&text, 30);
+        assert_eq!(turns, vec![
+            Turn { kind: TurnKind::Peer, text: "Looks good. Commit this".into() },
+            Turn { kind: TurnKind::User, text: "<b>bold</b> is how I start my prompts".into() },
+        ]);
+    }
+
+    #[test]
+    fn only_the_last_text_of_an_assistant_run_is_kept() {
+        let text = [
+            user_line("do it", false),
+            assistant_line("Looking at the code.", Some("Read")),
+            assistant_line("Still looking.", Some("Grep")),
+            assistant_line("Done: it was the cache.", None),
+            user_line("thanks", false),
+            assistant_line("Working on the next bit.", Some("Bash")),
+        ]
+        .join("\n");
+        let turns = parse_turns(&text, 30);
+        let got: Vec<(TurnKind, &str)> = turns.iter().map(|t| (t.kind, t.text.as_str())).collect();
+        assert_eq!(got, vec![
+            (TurnKind::User, "do it"),
+            (TurnKind::Tool, "Read"),
+            (TurnKind::Tool, "Grep"),
+            (TurnKind::Assistant, "Done: it was the cache."),
+            (TurnKind::User, "thanks"),
+            (TurnKind::Assistant, "Working on the next bit."),
+            (TurnKind::Tool, "Bash"),
+        ]);
     }
 }
