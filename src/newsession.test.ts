@@ -200,6 +200,15 @@ describe("agents", () => {
     expect(h.onStart).toHaveBeenCalledWith("", "a", "go", { agent: "codex", name: "Fix CI", model: "", effort: "", mode: "" });
   });
 
+  it("starts from the Name field with the send shortcut", () => {
+    const h = handlers();
+    const el = renderNewSession({ ...base, dir: "a", prompt: "go" }, h);
+    const name = el.querySelector<HTMLInputElement>("input[name=name]")!;
+    name.value = "Fix CI";
+    name.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    expect(h.onStart).toHaveBeenCalledWith("", "a", "go", { ...defaults, name: "Fix CI" });
+  });
+
   it("an_older_remote_offers_claude_only_and_no_name", () => {
     const el = renderNewSession({ ...base, machines: twoMachines, machine: "laptop", names: false }, handlers());
     expect(el.querySelector("input[name=name]")).toBeNull();

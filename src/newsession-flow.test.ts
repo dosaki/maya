@@ -84,6 +84,44 @@ describe("new-session options", () => {
     await flush();
     expect(document.querySelector("select[name=agent]")).toBeNull();
     expect(document.querySelector("select[name=model]")).not.toBeNull();
+    // This Mac's Maya takes names whatever the listing did.
+    expect(document.querySelector("input[name=name]")).not.toBeNull();
+  });
+
+  it("keeps the focus and the typed name when the agents arrive", async () => {
+    let resolveAgents: (v: unknown) => void = () => {};
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") return new Promise((r) => { resolveAgents = r; });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    const name = document.querySelector<HTMLInputElement>("input[name=name]")!;
+    name.focus();
+    name.value = "Fix CI";
+    name.dispatchEvent(new Event("input"));
+    resolveAgents({ agents: [CLAUDE_AGENT], names: true });
+    await flush();
+    const after = document.querySelector<HTMLInputElement>("input[name=name]")!;
+    const focused = document.activeElement;
+    const typed = after.value;
+    // The name is a draft like the prompt: clear it for the other tests, even if this one fails.
+    after.value = "";
+    expect(after).not.toBe(name);
+    expect(focused).toBe(after);
+    expect(typed).toBe("Fix CI");
+    // Changing the model repaints too, and the Model select keeps the focus.
+    const model = document.querySelector<HTMLSelectElement>("select[name=model]")!;
+    model.focus();
+    model.value = "opus";
+    model.dispatchEvent(new Event("change"));
+    const modelAfter = document.querySelector<HTMLSelectElement>("select[name=model]")!;
+    const focusedAfter = document.activeElement;
+    modelAfter.value = "";
+    expect(modelAfter).not.toBe(model);
+    expect(focusedAfter).toBe(modelAfter);
   });
 });
 

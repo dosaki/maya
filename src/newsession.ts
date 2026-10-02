@@ -290,12 +290,14 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   };
   ta.addEventListener("input", sync);
   select.addEventListener("change", sync);
-  ta.addEventListener("keydown", (ev) => {
+  const startOnShortcut = (ev: KeyboardEvent) => {
     if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
       ev.preventDefault();
       tryStart();
     }
-  });
+  };
+  ta.addEventListener("keydown", startOnShortcut);
+  nameInput?.addEventListener("keydown", startOnShortcut);
   start.addEventListener("click", tryStart);
   sync();
 
@@ -364,6 +366,11 @@ function capture(): void {
 function repaint(): void {
   const host = document.getElementById("modal-host");
   if (!host || !current) return;
+  // A repaint replaces every field; the one being used must keep the focus
+  // (and the caret), or a late reply sends the next keystrokes to the Prompt.
+  const active = document.activeElement;
+  const focused = active instanceof HTMLElement && host.contains(active) ? active.getAttribute("name") : null;
+  const caret = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? [active.selectionStart, active.selectionEnd] : null;
   host.replaceChildren(
     renderNewSession(current.model, {
       onStart: (machine, dir, prompt, choices) => void start(machine, dir, prompt, choices),
@@ -384,7 +391,13 @@ function repaint(): void {
       onModel: () => paint(),
     }),
   );
-  host.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")?.focus();
+  const again = focused ? host.querySelector<HTMLElement>(`[name="${focused}"]`) : null;
+  if (!again) {
+    host.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")?.focus();
+    return;
+  }
+  again.focus();
+  if (caret && (again instanceof HTMLInputElement || again instanceof HTMLTextAreaElement)) again.setSelectionRange(caret[0], caret[1]);
 }
 
 function paint(): void {
