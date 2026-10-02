@@ -29,9 +29,18 @@ pub struct PendingName {
 impl PendingName {
     /// `harness` is never `Harness::ClaudeCode` in practice: that agent takes
     /// a name on the command line and so never needs a pending entry.
+    /// `cwd` is kept as its physical path: the agent reports the folder it
+    /// runs in with symlinks resolved, so a projects folder reached through
+    /// one (macOS's /tmp, a linked ~/dev) would otherwise never match.
     pub fn new(harness: Harness, cwd: &str, name: &str, launched_ms: u64, known: Vec<String>, session_id: Option<String>) -> Self {
-        Self { harness, cwd: cwd.to_string(), name: name.to_string(), launched_ms, known: known.into_iter().collect(), session_id, seen: false, seen_working: false, renamed: false }
+        let cwd = physical(cwd).unwrap_or_else(|| cwd.to_string());
+        Self { harness, cwd, name: name.to_string(), launched_ms, known: known.into_iter().collect(), session_id, seen: false, seen_working: false, renamed: false }
     }
+}
+
+/// `dir` with symlinks resolved, or None when it does not exist.
+fn physical(dir: &str) -> Option<String> {
+    std::fs::canonicalize(dir).ok().map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Ready for typed input: not running a turn and not asking anything.
@@ -43,6 +52,14 @@ fn same_dir(a: &str, b: &str) -> bool {
     a.trim_end_matches(['/', '\\']) == b.trim_end_matches(['/', '\\'])
 }
 
+/// True when a card's folder is the pending name's (already physical)
+/// target. The card's folder is resolved only when the plain comparison
+/// fails, and this runs only while a name is unmatched, so quiet refreshes
+/// cost no file-system calls.
+fn is_target(card_cwd: &str, target: &str) -> bool {
+    same_dir(card_cwd, target) || physical(card_cwd).is_some_and(|p| same_dir(&p, target))
+}
+
 #[derive(Debug, Default)]
 pub struct PendingNames {
     entries: Vec<PendingName>,
@@ -52,6 +69,9 @@ pub struct PendingNames {
     /// the wrong name on it and typing `/rename` into the wrong session.
     /// Cleared once no unmatched entry remains to contend for anything.
     claimed_ever: HashSet<String>,
+    /// What happened to each name, for Maya's log: a name that never got
+    /// typed must say why. Collected here so `apply` stays free of the log.
+    events: Vec<String>,
 }
 
 impl PendingNames {
@@ -65,7 +85,28 @@ impl PendingNames {
 
     /// Drops the name waiting for `session_id`: the user renamed it themselves.
     pub fn forget(&mut self, session_id: &str) {
-        self.entries.retain(|p| p.session_id.as_deref() != Some(session_id));
+        let events = &mut self.events;
+        self.entries.retain(|p| {
+            let mine = p.session_id.as_deref() == Some(session_id);
+            if mine {
+                events.push(format!("dropped {:?}: the user renamed {session_id}", p.name));
+            }
+            !mine
+        });
+    }
+
+    /// Makes the name for `session_id` due again the next time its session
+    /// is free: it was due, but the session got busy before `/rename` could
+    /// be typed, and keys typed into a busy TUI act as shortcuts.
+    pub fn requeue(&mut self, session_id: &str) {
+        for p in self.entries.iter_mut().filter(|p| p.session_id.as_deref() == Some(session_id)) {
+            p.renamed = false;
+        }
+    }
+
+    /// What happened to the names since the last call, oldest first.
+    pub fn take_events(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.events)
     }
 
     /// Matches names to new sessions, shows them on `cards`, and returns
@@ -76,25 +117,40 @@ impl PendingNames {
         let mut claimed = self.claimed_ever.clone();
         claimed.extend(self.entries.iter().filter_map(|p| p.session_id.clone()));
         for p in self.entries.iter_mut().filter(|p| p.session_id.is_none()) {
-            let found = cards.iter().find(|c| c.harness == p.harness && same_dir(&c.cwd, &p.cwd) && !p.known.contains(&c.session_id) && !claimed.contains(&c.session_id));
+            // The folder check goes last: it is the one that may touch the disk.
+            let found = cards.iter().find(|c| c.harness == p.harness && !p.known.contains(&c.session_id) && !claimed.contains(&c.session_id) && is_target(&c.cwd, &p.cwd));
             if let Some(c) = found {
                 claimed.insert(c.session_id.clone());
                 self.claimed_ever.insert(c.session_id.clone());
                 p.session_id = Some(c.session_id.clone());
+                self.events.push(format!("matched {:?} to {}", p.name, c.session_id));
             }
         }
         let mut due = Vec::new();
+        let events = &mut self.events;
         self.entries.retain_mut(|p| {
             let waiting = now_ms.saturating_sub(p.launched_ms) < MATCH_WINDOW_MS;
-            let Some(id) = p.session_id.clone() else { return waiting };
+            let Some(id) = p.session_id.clone() else {
+                if !waiting {
+                    events.push(format!("dropped {:?}: no new {:?} session appeared in {} within ten minutes", p.name, p.harness, p.cwd));
+                }
+                return waiting;
+            };
             let Some(card) = cards.iter_mut().find(|c| c.session_id == id) else {
                 // Gone after it was seen: ended. Never seen (Grok's id): still coming.
+                if p.seen {
+                    let why = if p.renamed { "ended before the agent showed the new name" } else { "ended before it was free to rename" };
+                    events.push(format!("dropped {:?}: {id} {why}", p.name));
+                } else if !waiting {
+                    events.push(format!("dropped {:?}: its session {id} never appeared within ten minutes", p.name));
+                }
                 return !p.seen && waiting;
             };
             p.seen = true;
             // Once renamed, the only thing left to wait for is the agent's
             // own name catching up; once it has, there is nothing more to do.
             if p.renamed && card.name == p.name {
+                events.push(format!("{:?} is now {id}'s own name", p.name));
                 return false;
             }
             card.name = p.name.clone();
@@ -102,6 +158,7 @@ impl PendingNames {
             // A turn must have run: before that the first prompt may still be arriving.
             if !p.renamed && is_free(card) && (p.seen_working || !card.snippet.is_empty()) {
                 p.renamed = true;
+                events.push(format!("{:?} is due for {id}: it is free", p.name));
                 due.push((id, p.name.clone()));
             }
             true
@@ -256,6 +313,83 @@ mod tests {
         cards[0].name = "Fix CI".into();
         p.apply(&mut cards, 5_000);
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn every_match_due_name_and_drop_is_told_with_its_reason() {
+        let mut p = PendingNames::default();
+        p.add(pending("Ends early", &[]));
+        let mut cards = vec![card("s1", Harness::Codex, "/dev/a", State::Working, "")];
+        p.apply(&mut cards, 2_000);
+        assert_eq!(p.take_events(), vec!["matched \"Ends early\" to s1".to_string()]);
+        p.apply(&mut [], 3_000);
+        assert_eq!(p.take_events(), vec!["dropped \"Ends early\": s1 ended before it was free to rename".to_string()]);
+
+        p.add(pending("Lands", &[]));
+        let mut cards = vec![card("s2", Harness::Codex, "/dev/a", State::Completed, "Hi")];
+        p.apply(&mut cards, 4_000);
+        assert_eq!(p.take_events(), vec!["matched \"Lands\" to s2".to_string(), "\"Lands\" is due for s2: it is free".to_string()]);
+        cards[0].name = "Lands".into();
+        p.apply(&mut cards, 5_000);
+        assert_eq!(p.take_events(), vec!["\"Lands\" is now s2's own name".to_string()]);
+
+        p.add(pending("Never", &[]));
+        p.apply(&mut [], 1_000 + MATCH_WINDOW_MS);
+        assert_eq!(p.take_events(), vec!["dropped \"Never\": no new Codex session appeared in /dev/a within ten minutes".to_string()]);
+
+        p.add(PendingName::new(Harness::Grok, "/dev/a", "Grok", 1_000, vec![], Some("g-1".into())));
+        p.apply(&mut [], 1_000 + MATCH_WINDOW_MS);
+        assert_eq!(p.take_events(), vec!["dropped \"Grok\": its session g-1 never appeared within ten minutes".to_string()]);
+
+        p.add(pending("Mine", &[]));
+        let mut cards = vec![card("s3", Harness::Codex, "/dev/a", State::Working, "")];
+        p.apply(&mut cards, 6_000);
+        p.take_events();
+        p.forget("s3");
+        assert_eq!(p.take_events(), vec!["dropped \"Mine\": the user renamed s3".to_string()]);
+        assert!(p.take_events().is_empty(), "each event is taken once");
+    }
+
+    #[test]
+    fn a_requeued_name_is_due_again_once_its_session_is_free() {
+        let mut p = PendingNames::default();
+        p.add(pending("Fix CI", &[]));
+        let mut cards = vec![card("new", Harness::Codex, "/dev/a", State::Completed, "Hi")];
+        assert_eq!(p.apply(&mut cards, 2_000).len(), 1);
+        // It went busy before `/rename` could be typed: put it back.
+        p.requeue("new");
+        cards[0].state = State::Awaiting;
+        assert!(p.apply(&mut cards, 3_000).is_empty(), "not while it asks something");
+        assert_eq!(cards[0].name, "Fix CI", "still shown meanwhile");
+        cards[0].state = State::Completed;
+        assert_eq!(p.apply(&mut cards, 4_000), vec![("new".to_string(), "Fix CI".to_string())]);
+        assert!(p.apply(&mut cards, 5_000).is_empty(), "once again");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_reached_through_a_symlink_still_matches() {
+        // A projects folder behind a symlink (macOS's /tmp, a linked ~/dev):
+        // the agent reports its physical folder, Maya may hold the linked one.
+        let t = tempfile::tempdir().unwrap();
+        let real = t.path().join("real");
+        std::fs::create_dir_all(real.join("proj")).unwrap();
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let physical = std::fs::canonicalize(real.join("proj")).unwrap().to_string_lossy().into_owned();
+        let linked = link.join("proj").to_string_lossy().into_owned();
+
+        let mut p = PendingNames::default();
+        p.add(PendingName::new(Harness::Codex, &linked, "Linked target", 1_000, vec![], None));
+        let mut cards = vec![card("a", Harness::Codex, &format!("{physical}/"), State::Working, "")];
+        p.apply(&mut cards, 2_000);
+        assert_eq!(cards[0].name, "Linked target", "Maya's target goes through the link");
+
+        let mut p = PendingNames::default();
+        p.add(PendingName::new(Harness::Codex, &physical, "Linked card", 1_000, vec![], None));
+        let mut cards = vec![card("b", Harness::Codex, &linked, State::Working, "")];
+        p.apply(&mut cards, 2_000);
+        assert_eq!(cards[0].name, "Linked card", "the card's folder goes through the link");
     }
 
     #[test]

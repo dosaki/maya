@@ -182,16 +182,31 @@ pub fn rename_session(l: &Local, session_id: &str, name: &str) -> Result<(), Str
 }
 
 /// Types `/rename` into the sessions whose pending name is due. Looked up
-/// under the store's lock, typed after it is released. Every rename is
-/// logged, typed or not: a due name is taken once and never comes back.
+/// under the store's lock, typed after it is released. A name was due when
+/// some refresh saw its session free, up to a tick ago; the session may have
+/// started a turn or opened a prompt since, where the keys would act as
+/// shortcuts, so each is checked against a fresh card and put back to wait
+/// when busy. Every other rename is logged, typed or not: it is taken once
+/// and never comes back.
 pub fn run_due_renames(l: &Local) {
     let due: Vec<(String, model::Harness, String, String)> = {
         let mut store = l.store.lock().unwrap();
-        store
-            .take_due_renames()
-            .into_iter()
+        let due = store.take_due_renames();
+        if due.is_empty() {
+            return;
+        }
+        // One refresh for all of them; any it makes due are left for the next tick.
+        let cards = store.refresh(now_ms());
+        due.into_iter()
             .filter_map(|(id, name)| {
+                let card = cards.iter().find(|c| c.session_id == id);
+                if let Some(c) = card.filter(|c| !crate::pending_names::is_free(c)) {
+                    crate::log::line("rename", format!("not typing {name:?} into {id} yet: it is {:?} again; retrying once it is free", c.state));
+                    store.requeue_rename(&id);
+                    return None;
+                }
                 let found = (|| {
+                    card.ok_or("the session is gone")?;
                     let f = store.foreign(&id).ok_or("the session is gone")?;
                     Ok::<_, String>((f.harness, session_tty(&store, &id, f.pid)?, answer::rename_command(&name)?))
                 })();
@@ -591,6 +606,30 @@ mod tests {
         run_due_renames(&l);
         let typed: Vec<Call> = fake.calls.lock().unwrap().clone();
         assert_eq!(typed, vec![Call::Type { tty: "ttys009".into(), text: "/rename it's \"$(rm -rf ~)\"".into() }, Call::Type { tty: "ttys009".into(), text: String::new() }], "typed once, literally");
+        drop(dir);
+    }
+
+    #[test]
+    fn a_due_rename_is_not_typed_into_a_session_that_got_busy_meanwhile() {
+        let (dir, store, rollout) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().add_pending_name(PendingName::new(Harness::Codex, "/x", "Fix CI", now_ms(), vec![], Some("c1".into())));
+        // The refresh that queues the rename sees it free...
+        store.lock().unwrap().refresh(now_ms());
+        // ...then the user starts a turn before the tick that would type it.
+        const TURN2_STARTED: &str = r#"{"timestamp":"2026-09-29T08:49:00.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t2"}}"#;
+        std::fs::write(&rollout, format!("{TURN_STARTED}\n{TURN_COMPLETE}\n{TURN2_STARTED}\n")).unwrap();
+        run_due_renames(&l);
+        assert!(fake.calls.lock().unwrap().is_empty(), "nothing typed into a busy session");
+        // Free again: the name is due once more and typed once.
+        const TURN2_COMPLETE: &str = r#"{"timestamp":"2026-09-29T08:49:05.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t2","last_agent_message":"Done"}}"#;
+        std::fs::write(&rollout, format!("{TURN_STARTED}\n{TURN_COMPLETE}\n{TURN2_STARTED}\n{TURN2_COMPLETE}\n")).unwrap();
+        store.lock().unwrap().refresh(now_ms());
+        run_due_renames(&l);
+        run_due_renames(&l);
+        let typed = fake.calls.lock().unwrap().clone();
+        assert_eq!(typed, vec![Call::Type { tty: "ttys009".into(), text: "/rename Fix CI".into() }, Call::Type { tty: "ttys009".into(), text: String::new() }], "typed once");
         drop(dir);
     }
 

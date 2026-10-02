@@ -340,7 +340,16 @@ impl Store {
         }
         let due = self.pending.apply(&mut cards, now_ms);
         self.due_renames.extend(due);
+        self.log_pending_events();
         cards
+    }
+
+    /// Writes what happened to the pending names to Maya's log, so a name
+    /// that was never typed says why.
+    fn log_pending_events(&mut self) {
+        for e in self.pending.take_events() {
+            crate::log::line("rename", e);
+        }
     }
 
     pub fn add_pending_name(&mut self, p: crate::pending_names::PendingName) {
@@ -350,6 +359,13 @@ impl Store {
     pub fn forget_pending_name(&mut self, session_id: &str) {
         self.pending.forget(session_id);
         self.due_renames.retain(|(id, _)| id != session_id);
+        self.log_pending_events();
+    }
+
+    /// Puts a due name back to wait: its session got busy before `/rename`
+    /// was typed. It is due again once a refresh sees the session free.
+    pub fn requeue_rename(&mut self, session_id: &str) {
+        self.pending.requeue(session_id);
     }
 
     /// Sessions to `/rename` now, each returned once.
