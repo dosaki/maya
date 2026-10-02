@@ -1,7 +1,7 @@
 # Choose the agent and name a new session — design
 
 Date: 2026-10-02
-Status: approved design, not yet implemented
+Status: implemented
 Builds on: `2026-09-30-maya-remote-assistants-design.md` (the machine
 picker and the start command over the network).
 
@@ -60,6 +60,9 @@ lists falls back to "Default".
 
 While the models load, the Model field shows "Loading…" and only
 "Default" can be chosen. If the listing fails, only "Default" is offered.
+
+As built: the models arrive with the agent list, so the Agent field
+appears once the listing is in, instead of a "Loading…" Model field.
 
 ### Starting the session
 
