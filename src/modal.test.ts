@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PANEL_SIZE_KEY, draggedPanelSize, historyRefetchDue, isSlashCommand, parsePanelSize, renderModal } from "./modal";
+import { PANEL_SIZE_KEY, anchorPanel, draggedPanelSize, historyRefetchDue, isSlashCommand, onGrip, parsePanelSize, renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -44,6 +44,27 @@ describe("panel size", () => {
     panel.style.width = "812px";
     panel.style.height = "640.5px";
     expect(draggedPanelSize(panel)).toEqual({ width: 812, height: 641 });
+  });
+
+  it("pins the panel where it is as the pointer reaches its grip, so only that corner moves", () => {
+    const rect = (left: number, top: number, width: number, height: number) => ({ left, top, right: left + width, bottom: top + height, width, height, x: left, y: top, toJSON: () => "" }) as DOMRect;
+    expect(onGrip(rect(100, 50, 800, 600), 895, 645)).toBe(true);
+    expect(onGrip(rect(100, 50, 800, 600), 870, 645)).toBe(false);
+    expect(onGrip(rect(100, 50, 800, 600), 895, 620)).toBe(false);
+    const el = renderModal({ card: base, turns: [], status: null, draft: "" }, handlers());
+    const panel = el.querySelector<HTMLElement>(".modal__panel")!;
+    el.getBoundingClientRect = () => rect(0, 0, 1280, 820);
+    panel.getBoundingClientRect = () => rect(240, 110, 800, 600);
+    panel.dispatchEvent(new MouseEvent("pointermove", { clientX: 500, clientY: 300, bubbles: true }));
+    expect(el.classList.contains("modal--anchored")).toBe(false);
+    panel.dispatchEvent(new MouseEvent("pointermove", { clientX: 1035, clientY: 705, bubbles: true }));
+    expect(el.classList.contains("modal--anchored")).toBe(true);
+    expect([panel.style.left, panel.style.top]).toEqual(["240px", "110px"]);
+    expect(panel.style.maxWidth).toBe("calc(100vw - 248px)");
+    // Pinning twice keeps the first position.
+    panel.getBoundingClientRect = () => rect(300, 200, 700, 500);
+    anchorPanel(el, panel);
+    expect(panel.style.left).toBe("240px");
   });
 
   it("opens at the size last dragged to, and at the stylesheet's size when none is stored", () => {

@@ -196,6 +196,34 @@ export function applyPanelSize(panel: HTMLElement, size: PanelSize | null): void
   panel.style.height = `${size.height}px`;
 }
 
+/** The grip's reach from the panel's bottom-right corner, in pixels. */
+export const GRIP_PX = 20;
+
+/** True when a pointer at (x, y) is on the panel's resize grip. */
+export function onGrip(rect: DOMRect, x: number, y: number): boolean {
+  return x >= rect.right - GRIP_PX && y >= rect.bottom - GRIP_PX && x <= rect.right && y <= rect.bottom;
+}
+
+/**
+ * Pins the panel where it is as the pointer reaches its grip. Centred, a drag of
+ * the corner would move the panel's centre too, doubling the change and
+ * running the grip away from the pointer. Pinned, only the dragged corner
+ * moves; the next open is centred again at the size kept.
+ */
+export function anchorPanel(root: HTMLElement, panel: HTMLElement): void {
+  if (root.classList.contains("modal--anchored")) return;
+  const r = panel.getBoundingClientRect();
+  const host = root.getBoundingClientRect();
+  const left = Math.max(0, r.left - host.left);
+  const top = Math.max(0, r.top - host.top);
+  root.classList.add("modal--anchored");
+  panel.style.left = `${left}px`;
+  panel.style.top = `${top}px`;
+  // The grip cannot go past the window's edges.
+  panel.style.maxWidth = `calc(100vw - ${left + 8}px)`;
+  panel.style.maxHeight = `calc(100vh - ${top + 8}px)`;
+}
+
 let panelObserver: ResizeObserver | null = null;
 
 /** Remembers every size the grip is dragged to, for the panel on screen. */
@@ -230,6 +258,11 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-modal", "true");
   applyPanelSize(panel, loadPanelSize());
+  // Pinned as the pointer reaches the grip, before the press: a change of
+  // position during the press itself cancels WebKit's native resize.
+  panel.addEventListener("pointermove", (ev) => {
+    if (onGrip(panel.getBoundingClientRect(), ev.clientX, ev.clientY)) anchorPanel(root, panel);
+  });
 
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");
