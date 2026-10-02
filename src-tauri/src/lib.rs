@@ -1,6 +1,7 @@
 pub use maya_core::{actions, answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, launch, log, model, net, notify, pr, registry, resume, reviews, state, store, terminal, transcript, tty, watcher};
 
 #[cfg(target_os = "macos")]
+pub mod badge;
 pub mod dock;
 pub mod ear;
 #[cfg(target_os = "macos")]
@@ -467,6 +468,12 @@ fn refresh_and_emit(app: &AppHandle) {
         log::line("app", "focus mode is on: announcements stay silent");
     }
     let speak = speak && !focus;
+    // The app icon shows how many sessions wait, and asks for a look (a
+    // Dock bounce) under the same rules as the banner.
+    badge::show(app, badge::awaiting_count(&cards));
+    if wants_notify && !assistant && !focus && !fresh.is_empty() {
+        badge::bounce(app);
+    }
     if wants_notify && !assistant {
         // The key is looked up only when there is something to say.
         let eleven = if speak && (!fresh.is_empty() || !finished.is_empty()) { eleven_settings(eleven_voice) } else { None };

@@ -33,8 +33,12 @@ up where it stopped.
 
 **Know when you are needed.** When a session starts waiting on a decision,
 or finishes, Maya tells you: a system notification, or her voice saying
-"hexgrid needs a decision". She stays quiet under a Focus mode. An
-ElevenLabs voice is optional.
+"hexgrid needs a decision". Her icon shows how many sessions are waiting
+(a badge in the Dock, a dot on the Windows taskbar button, a count on a
+Linux dock that follows the Unity launcher API, such as Ubuntu's with
+`libunity9` installed), and bounces once in the Dock when a new one
+starts waiting. She stays quiet under a Focus mode. An ElevenLabs voice
+is optional.
 
 **Review pull requests.** The Pull Requests tab lists the pull requests
 waiting for your review. One click opens the pull request; another starts a
