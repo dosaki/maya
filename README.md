@@ -1,122 +1,133 @@
 <p align="center">
-  <img src="src/assets/maya.png" width="200" alt="Maya">
+  <img src="src/assets/maya.png" width="200" alt="Maya logo">
 </p>
 
-# Maya
+<h1 align="center">Maya</h1>
 
-**Manage All Your Agents.** Maya is a macOS, Windows and Linux app that puts every
-coding-agent session running on your computer on one board, tells you when
-one needs you, and lets you answer without hunting for the right terminal.
-Say her name and she does it by voice.
+<p align="center">Manage All Your Agents</p>
 
-## What Maya does
+Your coding agents, on one board. Maya tells you when a session needs you
+and lets you answer it from the board, or by voice. You do not have to find
+the right terminal first.
 
-**One board for all your sessions.** Every running Claude Code session is a
-card in one of four columns: Idle, Working, Awaiting Decision, Completed.
-Codex, Antigravity and Grok Build sessions appear on the same board with
-their own logos. Each card shows the session's name, project, what it said
-last, how full its context window is, and the pull request it is working
-on, if any.
+![](./docs/kanban.png)
 
-**Act from the card.** Jump to the session's terminal, read the whole
-conversation as rendered markdown, reply (with files and images attached by
-drag-and-drop or paste), or answer the question it is asking with one click.
-Rename a session, change its model, effort or permission mode, and compact
-its context when the meter passes 75%. A message that starts with `/` is a
-slash command: it is typed into the session's terminal, so `/review` or
-`/clear` from the composer reach Claude Code itself.
+## What it does
 
-**Start and resume.** The "+" in the Idle column starts a new session in one
-of your project folders, or lets Claude pick the folder from your prompt.
-The resume button lists the earlier sessions of a folder so you can pick one
-up where it stopped.
-
-**Know when you are needed.** When a session starts waiting on a decision,
-or finishes, Maya tells you: a system notification, or her voice saying
-"hexgrid needs a decision". Her icon shows how many sessions are waiting
-(a badge in the Dock, a dot on the Windows taskbar button, a count on a
-Linux dock that follows the Unity launcher API, such as Ubuntu's with
-`libunity9` installed), and bounces once in the Dock when a new one
-starts waiting. She stays quiet under a Focus mode. An ElevenLabs voice
-is optional.
-
-**Review pull requests.** The Pull Requests tab lists the pull requests
-waiting for your review. One click opens the pull request; another starts a
-review session in the right checkout, cloning the repository first if you
-do not have one, and asks Claude whether it should be approved.
-
-**Talk to her.** With voice on, "Maya, what's waiting on me?" gets a spoken
-summary, "Maya, tell hexgrid to go ahead" sends the reply after a read-back
-and your "yes", and "Maya, review collector 14" starts a review. When she
-asks you something back, just answer. See [Voice](#voice).
-
-**Several machines.** Run Maya on your laptop, desktop and Mac mini, Macs,
-PCs and Linux machines alike. One is the main, the others are assistants. The main shows every session from every
-machine on one board, tells you what needs you, and drives them all by
-voice. Assistants stay quiet: they show their own sessions and run what
-the main asks, but do not notify, speak or listen for "Maya". Set it up
-in Settings › Network.
+- Shows Claude Code, Codex, Antigravity and Grok Build sessions on one board as cards in a Kanban-like board
+  - Each session card lands in a column: Idle, Working, Awaiting Decision or Completed
+- Lets you reply, answer questions and run slash commands from the card
+- Starts new sessions and resumes old ones
+- Tells you when a session needs you
+  - Using built-in notifications, and/or a voice and/or a Dock badge
+- Lists the pull requests that wait for your review, and reviews them in one click
+- Does what you tell it by voice: "Maya, tell <session> to do <thing>"
+- Shows the sessions of all your machines on one board.
+- Runs headless over SSH with the `maya` command.
 
 ## Install
 
+Run the commands below, or download Maya manually from the
+[latest release](https://github.com/dosaki/maya/releases/latest).
+
+Requirements:
+
+- [Claude Code](https://claude.com/claude-code), installed and signed in.
+- The [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`,
+  for the Pull Requests tab.
+- macOS on Apple Silicon or Intel (macOS 14 or later for voice).
+- Windows 10 or 11, 64-bit, with [Git for Windows](https://git-scm.com/download/win).
+- Ubuntu 24.04 or later with GNOME, x86_64 or arm64. Other distributions
+  with glibc 2.39 or later can run the AppImage.
+
 ### macOS
 
-Apple Silicon and Intel. One command:
+Dependencies (with [Homebrew](https://brew.sh)):
 
-    curl -fsSL https://raw.githubusercontent.com/dosaki/maya/main/install.sh | sh
+```sh
+brew install jq gh && curl -fsSL https://claude.ai/install.sh | bash
+```
 
-It downloads the latest release, puts `Maya.app` in `/Applications` (or
-`~/Applications` when that is not writable) and clears the quarantine flag,
-since the builds are not notarised. Then `open -a Maya`. Run the same
-command again to update; set `MAYA_INSTALL_DIR` to install somewhere else.
+Maya:
 
-Prefer a manual install? Take the `.dmg` for your architecture from the
-[latest release](https://github.com/dosaki/maya/releases/latest), drag Maya
-to Applications, and the first time right-click it and choose Open.
+```sh
+curl -fsSL https://raw.githubusercontent.com/dosaki/maya/main/install.sh | sh
+```
+
+### Linux
+
+Dependencies:
+
+```sh
+sudo apt install tmux libnotify-bin speech-dispatcher gh && curl -fsSL https://claude.ai/install.sh | bash
+```
+
+Maya:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dosaki/maya/main/install.sh | sh
+```
 
 ### Windows
 
-Windows 10 or 11, 64-bit. One command, in PowerShell:
+Dependencies, in PowerShell:
 
-    irm https://raw.githubusercontent.com/dosaki/maya/main/install.ps1 | iex
+```powershell
+winget install -e --id Git.Git; winget install -e --id GitHub.cli; irm https://claude.ai/install.ps1 | iex
+```
 
-It installs the latest release for your user (no administrator rights) and
-puts Maya in the Start menu. Run it again to update. Prefer the installer?
-Take `Maya_<version>_x64-setup.exe` (or the `.msi`) from the
-[latest release](https://github.com/dosaki/maya/releases/latest). The builds
-are not signed, so SmartScreen asks the first time: choose More info, then
-Run anyway.
+Maya, in PowerShell:
 
-On Windows Maya also needs [Git for Windows](https://git-scm.com/download/win),
-which Claude Code needs there anyway: sessions Maya starts run in its Git
-Bash, in a [Windows Terminal](https://aka.ms/terminal) window when it is
-installed. Install Claude Code with its native installer, so that
+```powershell
+irm https://raw.githubusercontent.com/dosaki/maya/main/install.ps1 | iex
+```
+
+Run the same command again to update Maya.
+
+## First run
+
+1. Open Settings (the tab on the right) and press **Install Claude hook**. The hook
+   is what makes "Awaiting Decision" and "Completed" exact; without it a
+   permission prompt shows as Working. It never blocks Claude Code and a
+   backup of your `settings.json` is taken before every change.
+2. Set your **projects directory** (for example `~/dev`) so the "+" can list
+   your folders, and a **clones directory** for pull-request reviews.
+3. Optionally turn on **Listen for "Maya"** and pick a speech recogniser
+   (see Voice).
+
+## Platform notes
+
+### macOS
+
+The installer puts `Maya.app` in `/Applications` (or `~/Applications` when
+that is not writable) and clears the quarantine flag, since the builds are
+not notarised. Set `MAYA_INSTALL_DIR` to install somewhere else. From the
+`.dmg` instead, drag Maya to Applications, and the first time right-click
+it and choose Open.
+
+### Windows
+
+The installer installs Maya for your user (no administrator rights) and
+puts it in the Start menu. The builds are not signed, so the `.exe` or
+`.msi` from the release makes SmartScreen ask the first time: choose More
+info, then Run anyway.
+
+Sessions Maya starts run in Git Bash, in a
+[Windows Terminal](https://aka.ms/terminal) window when it is installed.
+Install Claude Code with its native installer (the command above), so that
 `claude.exe` is on the PATH; npm's `claude.cmd` cannot take the multi-line
 prompts Maya sends.
 
 ### Linux
 
-Ubuntu 24.04 or later with GNOME, on Wayland or X11; x86_64 and arm64.
-Other distributions with glibc 2.39 or newer (Ubuntu 24.04, Debian 13,
-Fedora 40 and later) can run the AppImage. One command:
+The installer puts the AppImage in `~/.local/bin/maya-app` (set
+`MAYA_INSTALL_DIR` to put it elsewhere) and adds Maya to the app grid. The
+`.deb` from the release (`sudo apt install ./Maya_<version>_amd64.deb`)
+pulls in the dependencies itself.
 
-    curl -fsSL https://raw.githubusercontent.com/dosaki/maya/main/install.sh | sh
-
-It downloads the latest release's AppImage to `~/.local/bin/maya-app` (set
-`MAYA_INSTALL_DIR` to put it elsewhere) and adds Maya to the app grid. Run
-it again to update. Prefer `apt`? Take `Maya_<version>_amd64.deb` (or
-`_arm64.deb`) from the
-[latest release](https://github.com/dosaki/maya/releases/latest) and
-`sudo apt install ./Maya_<version>_amd64.deb`; it pulls in what Maya needs.
-
-With the AppImage, install what Maya runs:
-
-    sudo apt install tmux libnotify-bin speech-dispatcher
-
-and, for the ElevenLabs voice, `pulseaudio-utils` (for `paplay`; `ffplay`
-works too) and `libsecret-tools`. Sessions open in GNOME Terminal,
-Ptyxis or any `x-terminal-emulator`; the `.deb` recommends
-`gnome-terminal`.
+For the ElevenLabs voice, also install `pulseaudio-utils` (for `paplay`;
+`ffplay` works too) and `libsecret-tools`. Sessions open in GNOME Terminal,
+Ptyxis or any `x-terminal-emulator`.
 
 What is different on Linux:
 
@@ -142,24 +153,6 @@ The Linux build is tested in CI under a virtual display, not yet on real
 hardware. On a real Ubuntu machine, check what a virtual display cannot:
 that you hear a notification and the voice, that "Maya, what's waiting on
 me?" gets an answer, and that Terminal on a card brings up its session.
-
-### All platforms
-
-You need [Claude Code](https://claude.com/claude-code) installed and signed
-in. The Pull Requests tab needs the [GitHub CLI](https://cli.github.com/)
-(`gh auth login`). Voice needs macOS 14 or later, Windows 10 or later, or
-Ubuntu 24.04 or later.
-
-### First run
-
-1. Open Settings (the tab on the right) and press **Install Claude hook**. The hook
-   is what makes "Awaiting Decision" and "Completed" exact; without it a
-   permission prompt shows as Working. It never blocks Claude Code and a
-   backup of your `settings.json` is taken before every change.
-2. Set your **projects directory** (for example `~/dev`) so the "+" can list
-   your folders, and a **clones directory** for pull-request reviews.
-3. Optionally turn on **Listen for "Maya"** and pick a speech recogniser
-   (see Voice).
 
 ## Voice
 
