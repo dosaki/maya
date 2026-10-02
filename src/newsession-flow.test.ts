@@ -136,6 +136,25 @@ describe("new-session flow", () => {
     vi.useRealTimers();
   });
 
+  it("says a session with no clear folder starts in the projects directory, naming no agent", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true });
+      if (cmd === "start_session") return Promise.resolve({ dir: "/x/dev", how: "fallback" });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    const ta = document.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")!;
+    ta.value = "fix ci";
+    ta.dispatchEvent(new Event("input"));
+    document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    await flush();
+    await flush();
+    expect(document.querySelector(".modal__status")?.textContent).toBe("Started in dev (no clear match, so the projects directory itself)");
+  });
+
   it("clears the prompt after a successful start, keeps Start disabled, ignores a second click and closes", async () => {
     let resolveStart: (v: unknown) => void = () => {};
     invoke.mockImplementation((cmd: string) => {

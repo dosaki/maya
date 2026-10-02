@@ -196,13 +196,14 @@ describe("renderModal", () => {
     expect(el.querySelector("input.modal__title-input")).toBeNull();
   });
 
-  it("offers the rename on every agent's session; the backend says when it is not free", () => {
+  it("offers the rename from the title on Codex, Antigravity and Grok sessions too", () => {
     for (const harness of ["codex", "antigravity", "grok"] as const) {
       const h = handlers();
       const el = renderModal({ card: { ...base, harness, hasInbox: false }, turns: [], status: null, draft: "" }, h);
       document.body.replaceChildren(el);
       const title = el.querySelector<HTMLElement>(".modal__title")!;
-      expect(title.classList.contains("modal__title--fixed")).toBe(false);
+      expect(title.title).toContain("rename");
+      expect(title.tabIndex).toBe(0);
       title.click();
       const input = el.querySelector<HTMLInputElement>("input.modal__title-input")!;
       input.value = "board work";

@@ -345,7 +345,7 @@ function startedText(r: StartResult): string {
   const name = r.dir.split("/").filter(Boolean).pop() ?? r.dir;
   if (r.how === "chosen") return `Started in ${name}`;
   if (r.how === "classifier") return `Started in ${name} (chosen by Claude)`;
-  return `Started in ${name} (no clear match, Claude will work it out)`;
+  return `Started in ${name} (no clear match, so the projects directory itself)`;
 }
 
 /** Reads what is on screen back into the model, so a repaint keeps it. */
