@@ -228,6 +228,32 @@ function placePanel(panel: HTMLElement, box: PanelBox): void {
   panel.style.maxHeight = `calc(100vh - ${box.top + 8}px)`;
 }
 
+/**
+ * Where a pinned panel of `width` by `height` at `left`, `top` moves so it
+ * fits a window of `viewport` again: the size itself is left alone, so the
+ * size kept is not overwritten by a window that shrank for a while.
+ */
+export function fitPosition(box: Required<PanelBox>, viewport: { width: number; height: number }): { left: number; top: number } {
+  return {
+    left: Math.max(0, Math.min(box.left, viewport.width - box.width - 8)),
+    top: Math.max(0, Math.min(box.top, viewport.height - box.height - 8)),
+  };
+}
+
+/** Moves a pinned panel back inside the window after the window changed size. */
+export function fitAnchoredPanel(panel: HTMLElement): void {
+  const root = panel.parentElement;
+  if (!root?.classList.contains("modal--anchored")) return;
+  const r = panel.getBoundingClientRect();
+  const box = {
+    left: parseFloat(panel.style.left) || 0,
+    top: parseFloat(panel.style.top) || 0,
+    width: parseFloat(panel.style.width) || r.width,
+    height: parseFloat(panel.style.height) || r.height,
+  };
+  placePanel(panel, fitPosition(box, { width: window.innerWidth, height: window.innerHeight }));
+}
+
 /** How far outside the panel's edge the resize band reaches, in pixels. */
 export const EDGE_OUT_PX = 6;
 /** How far inside the panel's edge the resize band reaches: the border and a little more. */
@@ -339,12 +365,22 @@ function installEdgeResize(root: HTMLElement, panel: HTMLElement): (now: number)
 }
 
 let panelObserver: ResizeObserver | null = null;
+let panelFitter: (() => void) | null = null;
 
-/** Remembers every size the panel is dragged to, for the panel on screen. */
+/**
+ * For the panel on screen: remembers every size it is dragged to, and
+ * keeps it inside the window when the window changes size. `null` stops
+ * watching the previous one.
+ */
 function watchPanelSize(panel: HTMLElement | null): void {
   panelObserver?.disconnect();
   panelObserver = null;
-  if (!panel || typeof ResizeObserver === "undefined") return;
+  if (panelFitter) window.removeEventListener("resize", panelFitter);
+  panelFitter = null;
+  if (!panel) return;
+  panelFitter = () => fitAnchoredPanel(panel);
+  window.addEventListener("resize", panelFitter);
+  if (typeof ResizeObserver === "undefined") return;
   panelObserver = new ResizeObserver(() => {
     const size = draggedPanelSize(panel);
     if (size) savePanelSize(size);
@@ -553,16 +589,19 @@ export function sameTurns(a: Turn[], b: Turn[]): boolean {
   return a.length === b.length && a.every((t, i) => t.kind === b[i].kind && t.text === b[i].text);
 }
 
-/** Wraps an async send so that calls made while one is in flight are dropped. */
-export function makeSendGuard(send: (text: string) => Promise<void>): (text: string) => Promise<void> {
-  let inFlight = false;
+/**
+ * Wraps an async send so that calls made while one is in flight are
+ * dropped. Guards given the same `lock` share it, so a reply and a slash
+ * command from one composer never run at once.
+ */
+export function makeSendGuard(send: (text: string) => Promise<void>, lock: { inFlight: boolean } = { inFlight: false }): (text: string) => Promise<void> {
   return async (text: string) => {
-    if (inFlight) return;
-    inFlight = true;
+    if (lock.inFlight) return;
+    lock.inFlight = true;
     try {
       await send(text);
     } finally {
-      inFlight = false;
+      lock.inFlight = false;
     }
   };
 }
@@ -719,6 +758,9 @@ function setStatus(ok: boolean, text: string): void {
   paint();
 }
 
+/** One lock for the composer: a reply and a command both clear it, so only one may be in flight. */
+const composerLock = { inFlight: false };
+
 const guardedSend = makeSendGuard(async (text: string) => {
   if (!current) return;
   const { card } = current.model;
@@ -733,7 +775,7 @@ const guardedSend = makeSendGuard(async (text: string) => {
   } catch (e) {
     setStatus(false, String(e));
   }
-});
+}, composerLock);
 
 /** Types a slash command into the terminal; attachments have nowhere to go with it. */
 const guardedCommand = makeSendGuard(async (text: string) => {
@@ -755,7 +797,7 @@ const guardedCommand = makeSendGuard(async (text: string) => {
   } catch (e) {
     if (current === me) setStatus(false, String(e));
   }
-});
+}, composerLock);
 
 /** Fetches history; repaints only when something visible changed (or `force`). */
 async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): Promise<void> {

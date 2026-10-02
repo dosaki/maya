@@ -150,7 +150,7 @@ body { margin: 0; background: var(--bg); }
 .resume__title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .resume__chip { padding: 1px 6px; border: 1px solid var(--working); border-radius: 999px; font-size: 10px; color: var(--working); white-space: nowrap; }
 .resume__age { font-size: 12px; color: var(--muted); }
-.modal__panel--compact { width: min(760px, 92vw); height: auto; min-height: 0; max-height: 80vh; border-width: 1px; }
+.modal__panel--compact { width: min(760px, 92vw); height: auto; min-width: 0; min-height: 0; max-height: 80vh; border-width: 1px; }
 .newsession { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px; }
 .newsession__field { display: flex; flex-direction: column; gap: 4px; }
 .newsession__label { font-size: 12px; color: var(--muted); }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, cursorFor, draggedPanelSize, edgeDrag, edgesAt, historyRefetchDue, isSlashCommand, parsePanelSize, renderModal } from "./modal";
+import { PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isSlashCommand, parsePanelSize, renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -104,6 +104,21 @@ describe("panel size", () => {
     el.dispatchEvent(new MouseEvent("pointermove", { clientX: 600, clientY: 400, bubbles: true }));
     expect(panel.style.width).toBe("900px");
     now.mockRestore();
+  });
+
+  it("moves a pinned panel back inside a window that shrank, without touching its size", () => {
+    expect(fitPosition({ left: 560, top: 300, width: 480, height: 360 }, { width: 800, height: 600 })).toEqual({ left: 312, top: 232 });
+    expect(fitPosition({ left: 100, top: 50, width: 480, height: 360 }, { width: 1280, height: 820 })).toEqual({ left: 100, top: 50 });
+    expect(fitPosition({ left: 100, top: 50, width: 900, height: 700 }, { width: 800, height: 600 })).toEqual({ left: 0, top: 0 });
+    const el = renderModal({ card: base, turns: [], status: null, draft: "" }, handlers());
+    const panel = el.querySelector<HTMLElement>(".modal__panel")!;
+    Object.assign(window, { innerWidth: 800, innerHeight: 600 });
+    Object.assign(panel.style, { left: "560px", top: "300px", width: "480px", height: "360px" });
+    fitAnchoredPanel(panel);
+    expect(panel.style.left).toBe("560px");
+    el.classList.add("modal--anchored");
+    fitAnchoredPanel(panel);
+    expect([panel.style.left, panel.style.top, panel.style.width, panel.style.height, panel.style.maxWidth]).toEqual(["312px", "232px", "480px", "360px", "calc(100vw - 320px)"]);
   });
 
   it("pins the panel where it is, keeping the first position", () => {

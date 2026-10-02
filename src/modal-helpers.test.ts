@@ -27,4 +27,25 @@ describe("makeSendGuard", () => {
     void guarded("three");
     expect(calls).toEqual(["one", "three"]);
   });
+
+  it("guards sharing one lock block each other, so a reply and a command never run at once", async () => {
+    const calls: string[] = [];
+    let release: () => void = () => {};
+    const lock = { inFlight: false };
+    const wait = async (t: string) => {
+      calls.push(t);
+      await new Promise<void>((r) => {
+        release = r;
+      });
+    };
+    const reply = makeSendGuard(wait, lock);
+    const command = makeSendGuard(wait, lock);
+    void reply("hello");
+    void command("/review");
+    expect(calls).toEqual(["hello"]);
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+    void command("/review");
+    expect(calls).toEqual(["hello", "/review"]);
+  });
 });
