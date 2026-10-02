@@ -18,6 +18,14 @@ pub trait Terminal: Send + Sync {
     fn names_for_ttys(&self, ttys: &[String]) -> HashMap<String, String> {
         ttys.iter().filter_map(|t| Some((t.clone(), self.name_for_tty(t)?))).collect()
     }
+    /// Keys that will still reach the terminal hosting `tty` once the
+    /// process it was found through has exited, to try in order. A device
+    /// path outlives its process, so by default that is `tty` itself; a
+    /// Windows console is reached through a process, so it lists the
+    /// console's other processes.
+    fn reach_after_exit(&self, tty: &str) -> Vec<String> {
+        vec![tty.to_string()]
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -41,6 +49,10 @@ pub mod test_support {
         pub calls: Mutex<Vec<Call>>,
         pub names: Mutex<HashMap<String, String>>,
         pub fail_type: Option<String>,
+        /// What `reach_after_exit` answers for a tty; absent means the tty itself.
+        pub peers: Mutex<HashMap<String, Vec<String>>>,
+        /// Ttys that refuse typing, as a console whose process has exited does.
+        pub dead: Mutex<std::collections::HashSet<String>>,
     }
 
     impl Terminal for FakeTerminal {
@@ -52,6 +64,9 @@ pub mod test_support {
             if let Some(e) = &self.fail_type {
                 return Err(e.clone());
             }
+            if self.dead.lock().unwrap().contains(tty) {
+                return Err(format!("{tty} is gone"));
+            }
             self.calls.lock().unwrap().push(Call::Type { tty: tty.into(), text: text.into() });
             Ok(())
         }
@@ -61,6 +76,9 @@ pub mod test_support {
         }
         fn name_for_tty(&self, tty: &str) -> Option<String> {
             self.names.lock().unwrap().get(tty).cloned()
+        }
+        fn reach_after_exit(&self, tty: &str) -> Vec<String> {
+            self.peers.lock().unwrap().get(tty).cloned().unwrap_or_else(|| vec![tty.to_string()])
         }
     }
 }

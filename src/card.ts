@@ -12,6 +12,17 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return node;
 }
 
+/**
+ * Close types into the session's terminal, so it needs an idle or completed
+ * Claude Code session whose terminal takes keys: on Linux, only one in tmux;
+ * remote, only while its machine is connected.
+ */
+function canClose(card: Card): boolean {
+  if (card.harness !== "claude-code" || (card.state !== "idle" && card.state !== "completed") || card.stale) return false;
+  const linux = card.machine ? card.machinePlatform === "linux" : isLinux();
+  return !linux || Boolean(card.terminal);
+}
+
 export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   const root = el("article", `card card--${card.state}${card.stale ? " card--stale" : ""}`);
   root.dataset.sessionId = card.sessionId;
@@ -29,6 +40,15 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
     head.append(remote);
   }
   head.append(el("span", "card__age", formatAge(card.stateSince, nowMs)));
+  if (canClose(card)) {
+    const close = el("button", "card__close");
+    close.type = "button";
+    close.dataset.action = "close";
+    close.title = "Close: types /exit, then exit to close the terminal";
+    close.setAttribute("aria-label", "Close");
+    close.append(iconElement("close", 10));
+    head.append(close);
+  }
   const meta = el("div", "card__meta");
   const project = card.machine ? `${projectName(card.cwd)} on ${card.machine}` : projectName(card.cwd);
   meta.append(el("div", "card__project", project), harnessBadge(card.harness, "card__harness"));

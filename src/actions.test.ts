@@ -27,6 +27,12 @@ describe("cardActionFor", () => {
     expect(cardActionFor(el.querySelector("button[data-action=compact]")!)).toEqual({ kind: "compact", sessionId: "s1" });
   });
 
+  it("routes the Close button to a close action", () => {
+    const el = renderCard(card, 0);
+    document.body.replaceChildren(el);
+    expect(cardActionFor(el.querySelector("button[data-action=close]")!)).toEqual({ kind: "close", sessionId: "s1" });
+  });
+
   it("routes option buttons to an answer action with indices", () => {
     const el = document.createElement("article");
     el.className = "card";

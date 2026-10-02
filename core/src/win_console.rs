@@ -9,7 +9,7 @@
 use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HWND, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
-use windows_sys::Win32::System::Console::{AttachConsole, FreeConsole, GetConsoleWindow, WriteConsoleInputW, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, ENHANCED_KEY, SHIFT_PRESSED};
+use windows_sys::Win32::System::Console::{AttachConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow, WriteConsoleInputW, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, ENHANCED_KEY, SHIFT_PRESSED};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, MAPVK_VK_TO_VSC, VK_DOWN, VK_PACKET, VK_RETURN, VK_TAB};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOTOWNER};
 
@@ -126,6 +126,32 @@ pub fn type_line(pid: u32, text: &str) -> Result<(), String> {
     })
 }
 
+/// The processes attached to `pid`'s console other than `pid` and Maya,
+/// which attaches to read the list: what still reaches the console once
+/// `pid` has exited.
+pub fn other_console_pids(pid: u32) -> Result<Vec<u32>, String> {
+    let all = attached(pid, || {
+        let mut list = vec![0u32; 64];
+        loop {
+            // SAFETY: the buffer holds `list.len()` pids.
+            let n = unsafe { GetConsoleProcessList(list.as_mut_ptr(), list.len() as u32) } as usize;
+            if n == 0 {
+                return Err(format!("Could not list the console's processes: {}.", std::io::Error::last_os_error()));
+            }
+            if n <= list.len() {
+                list.truncate(n);
+                return Ok(list);
+            }
+            list.resize(n, 0);
+        }
+    })?;
+    Ok(others(&all, pid, std::process::id()))
+}
+
+fn others(all: &[u32], pid: u32, me: u32) -> Vec<u32> {
+    all.iter().copied().filter(|&p| p != pid && p != me).collect()
+}
+
 /// The top-level window showing `pid`'s console: under Windows Terminal the
 /// console window is a hidden pseudo window owned by the terminal's window.
 pub fn console_window(pid: u32) -> Result<HWND, String> {
@@ -150,6 +176,12 @@ mod tests {
         assert_eq!(console_pid("console:42"), Some(42));
         assert_eq!(console_pid("console:0"), None);
         assert_eq!(console_pid("/dev/ttys001"), None);
+    }
+
+    #[test]
+    fn the_console_is_reached_through_its_other_processes_but_not_the_session_or_maya() {
+        assert_eq!(others(&[30, 7, 12, 99], 7, 30), [12, 99]);
+        assert_eq!(others(&[7, 30], 7, 30), Vec::<u32>::new());
     }
 
     #[test]
