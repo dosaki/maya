@@ -10,7 +10,7 @@ Your coding agents, on one board. Maya tells you when a session needs you
 and lets you answer it from the board, or by voice. You do not have to find
 the right terminal first.
 
-![](./docs/kanban.png)
+![The Maya board: sessions in Idle, Working, Awaiting Decision and Completed columns](./docs/kanban.png)
 
 ## What it does
 
@@ -59,7 +59,7 @@ curl -fsSL https://raw.githubusercontent.com/dosaki/maya/main/install.sh | sh
 Dependencies:
 
 ```sh
-sudo apt install tmux libnotify-bin speech-dispatcher gh && curl -fsSL https://claude.ai/install.sh | bash
+sudo apt install curl tmux libnotify-bin speech-dispatcher gh && curl -fsSL https://claude.ai/install.sh | bash
 ```
 
 Maya:
@@ -122,7 +122,7 @@ prompts Maya sends.
 
 The installer puts the AppImage in `~/.local/bin/maya-app` (set
 `MAYA_INSTALL_DIR` to put it elsewhere) and adds Maya to the app grid. The
-`.deb` from the release (`sudo apt install ./Maya_<version>_amd64.deb`)
+`.deb` from the release (`sudo apt install ./Maya_<version>_amd64.deb`, or `_arm64.deb`)
 pulls in the dependencies itself.
 
 For the ElevenLabs voice, also install `pulseaudio-utils` (for `paplay`;
