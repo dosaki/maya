@@ -105,6 +105,13 @@ describe("renderCard: the Close button", () => {
     expect(close({ ...base, harness: "codex" })).toBeNull();
   });
 
+  it("sits in the header's top-right corner, after the age", () => {
+    const head = renderCard(base, 0).querySelector(".card__head")!;
+    expect(head.lastElementChild?.matches("button.card__close[data-action=close]")).toBe(true);
+    expect(head.lastElementChild?.previousElementSibling?.classList.contains("card__age")).toBe(true);
+    expect(renderCard(base, 0).querySelector(".card__actions [data-action=close]")).toBeNull();
+  });
+
   it("shows on Linux only when the session is in tmux, here or on the assistant", () => {
     Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (X11; Linux x86_64)", configurable: true });
     expect(close(base)).toBeNull();

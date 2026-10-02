@@ -39,6 +39,15 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
     head.append(remote);
   }
   head.append(el("span", "card__age", formatAge(card.stateSince, nowMs)));
+  if (canClose(card)) {
+    const close = el("button", "card__close");
+    close.type = "button";
+    close.dataset.action = "close";
+    close.title = "Close: types /exit, then exit to close the terminal";
+    close.setAttribute("aria-label", "Close");
+    close.append(iconElement("close", 10));
+    head.append(close);
+  }
   const meta = el("div", "card__meta");
   const project = card.machine ? `${projectName(card.cwd)} on ${card.machine}` : projectName(card.cwd);
   meta.append(el("div", "card__project", project), harnessBadge(card.harness, "card__harness"));
@@ -64,11 +73,6 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   }
   if (card.pr) actions.append(prButton(card.pr));
   if (card.harness === "claude-code" && card.context && card.context.percent >= COMPACT_AT) actions.append(compactButton());
-  if (canClose(card)) {
-    const close = iconButton("close", "Close: types /exit, then exit to close the terminal");
-    close.dataset.action = "close";
-    actions.append(close);
-  }
   actions.append(reply);
   root.append(actions);
   return root;
