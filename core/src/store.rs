@@ -38,6 +38,8 @@ pub struct Store {
     pending: crate::pending_names::PendingNames,
     /// Sessions to `/rename` now, accumulated until `take_due_renames` collects them.
     due_renames: Vec<(String, String)>,
+    /// The agents installed on this machine, replaceable in tests.
+    agents: std::sync::Arc<dyn Fn() -> Vec<crate::agents::AgentInfo> + Send + Sync>,
 }
 
 /// Text of the files names come from, read again only when they change.
@@ -93,6 +95,7 @@ impl Store {
             names: NameFiles::default(),
             pending: Default::default(),
             due_renames: Default::default(),
+            agents: std::sync::Arc::new(crate::agents::current),
         }
     }
 
@@ -139,7 +142,26 @@ impl Store {
         // Tests never see the machine's real codex/agy/grok sessions.
         self.processes = Box::new(Vec::new);
         self.grok_dir = PathBuf::from("/nonexistent/grok");
+        // Nor do they list the machine's agents, which runs each one.
+        self.agents = std::sync::Arc::new(|| vec![crate::agents::claude()]);
         self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_agents(mut self, list: Vec<crate::agents::AgentInfo>) -> Self {
+        self.agents = std::sync::Arc::new(move || list.clone());
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pending_apply_for_test(&mut self, cards: &mut [Card]) {
+        self.pending.apply(cards, now_ms());
+    }
+
+    /// Where the installed agents come from; called without the store's lock
+    /// held, since the first listing can take seconds.
+    pub fn agents_source(&self) -> std::sync::Arc<dyn Fn() -> Vec<crate::agents::AgentInfo> + Send + Sync> {
+        self.agents.clone()
     }
 
     #[cfg(any(test, feature = "test-support"))]
