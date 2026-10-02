@@ -997,6 +997,7 @@ pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::Rename { .. } => "rename",
         CommandKind::SetOption { .. } => "set_option",
         CommandKind::CycleMode { .. } => "cycle_mode",
+        CommandKind::Slash { .. } => "slash",
         CommandKind::Start { .. } => "start",
         CommandKind::Resume { .. } => "resume",
         CommandKind::ListResumable { .. } => "list_resumable",

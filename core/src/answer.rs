@@ -38,6 +38,29 @@ pub fn rename_command(name: &str) -> Result<String, String> {
     Ok(format!("/rename {name}"))
 }
 
+/// The longest slash command line the board will type.
+pub const MAX_COMMAND_CHARS: usize = 2000;
+
+/// Checks a slash command typed in the composer: one non-blank line that
+/// starts with `/`, with a name after the slash, of at most
+/// `MAX_COMMAND_CHARS` characters. It is typed into the terminal as is.
+pub fn check_slash_command(text: &str) -> Result<String, String> {
+    let line = text.trim();
+    if !line.starts_with('/') {
+        return Err("A command starts with a slash.".into());
+    }
+    if line.chars().any(|c| c.is_control()) {
+        return Err("A command must be one line.".into());
+    }
+    if line.len() == 1 || line[1..].starts_with(char::is_whitespace) {
+        return Err("The command has no name after the slash.".into());
+    }
+    if line.chars().count() > MAX_COMMAND_CHARS {
+        return Err(format!("The command is too long (over {MAX_COMMAND_CHARS} characters)."));
+    }
+    Ok(line.to_string())
+}
+
 /// Typing into a session that is waiting on a prompt would answer it (the
 /// Enter after the text lands on the picker), so refuse until it moves on.
 pub fn check_free(card: &Card) -> Result<(), String> {
@@ -141,6 +164,19 @@ mod tests {
         assert!(rename_command("tab\there").unwrap_err().contains("one line"));
         assert!(rename_command(&"x".repeat(61)).unwrap_err().contains("60"));
         assert!(rename_command(&"x".repeat(60)).is_ok());
+    }
+
+    #[test]
+    fn slash_commands_from_the_composer_are_one_named_line() {
+        assert_eq!(check_slash_command("  /compact  "), Ok("/compact".to_string()));
+        assert_eq!(check_slash_command("/review  the diff"), Ok("/review  the diff".to_string()));
+        assert!(check_slash_command("hello").unwrap_err().contains("slash"));
+        assert!(check_slash_command("/").unwrap_err().contains("no name"));
+        assert!(check_slash_command("/ compact").unwrap_err().contains("no name"));
+        assert!(check_slash_command("/compact\nmore").unwrap_err().contains("one line"));
+        assert!(check_slash_command("/x\x1b[B").unwrap_err().contains("one line"));
+        let long = format!("/{}", "a".repeat(MAX_COMMAND_CHARS));
+        assert!(check_slash_command(&long).unwrap_err().contains("too long"));
     }
 
     #[test]

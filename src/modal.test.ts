@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { historyRefetchDue, renderModal } from "./modal";
+import { historyRefetchDue, isSlashCommand, renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
 const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn() });
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCommand: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn() });
 
 describe("historyRefetchDue", () => {
   it("always refetches a local card, and a remote one only when its state, state time or snippet moved", () => {
@@ -217,6 +217,27 @@ describe("renderModal", () => {
     ta.value = "  reply please  ";
     ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
     expect(h.onSend).toHaveBeenCalledWith("reply please");
+  });
+
+  it("types a /command into the terminal instead of sending it as a reply, for Claude Code only", () => {
+    expect(isSlashCommand("  /review")).toBe(true);
+    expect(isSlashCommand("review /x")).toBe(false);
+    expect(isSlashCommand("")).toBe(false);
+    const h = handlers();
+    const el = renderModal({ card: base, turns: [], status: null, draft: "", attachments: [{ name: "a.png", path: "/a.png" }] }, h);
+    expect(el.querySelector<HTMLTextAreaElement>("textarea")!.placeholder).toContain("/command");
+    const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
+    ta.value = " /review the diff ";
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    expect(h.onCommand).toHaveBeenCalledWith("/review the diff");
+    expect(h.onSend).not.toHaveBeenCalled();
+    // Codex types every line into its terminal already: a slash line is just a reply there.
+    const codex = renderModal({ card: { ...base, harness: "codex", hasInbox: false }, turns: [], status: null, draft: "" }, h);
+    const ta2 = codex.querySelector<HTMLTextAreaElement>("textarea")!;
+    ta2.value = "/status";
+    codex.querySelector<HTMLButtonElement>("button[data-action=send]")!.click();
+    expect(h.onSend).toHaveBeenCalledWith("/status");
+    expect(h.onCommand).toHaveBeenCalledTimes(1);
   });
 
   it("shows the awaiting banner with a terminal button, and a status line", () => {

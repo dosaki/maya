@@ -70,6 +70,7 @@ pub enum CommandKind {
     Rename { session: String, name: String },
     SetOption { session: String, setting: String, value: String },
     CycleMode { session: String },
+    Slash { session: String, text: String },
     Start { dir: Option<String>, prompt: String, options: LaunchOptions },
     Resume { dir: String, session: String },
     ListResumable { dir: String },
@@ -199,6 +200,10 @@ mod tests {
         assert_eq!(decode_down(&s).unwrap(), down);
         let result = Up::Result { id: 7, ok: false, error: Some("no".into()), data: None };
         assert_eq!(decode_up(&encode(&result)).unwrap(), result);
+        let slash = Down::Command { id: 8, kind: CommandKind::Slash { session: "s1".into(), text: "/review".into() } };
+        let s = encode(&slash);
+        assert!(s.contains("\"kind\":\"slash\"") && s.contains("\"text\":\"/review\""), "{s}");
+        assert_eq!(decode_down(&s).unwrap(), slash);
         // The handshake is mutual: `auth` carries the assistant's nonce and `welcome` the main's proof.
         let auth = Up::Auth { mac: "ab".into(), nonce: "n1".into() };
         let s = encode(&auth);

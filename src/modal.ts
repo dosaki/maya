@@ -36,6 +36,8 @@ export interface ModalHandlers {
   onOpenPr(): void;
   /** Give the session a new name (typed as `/rename`). */
   onRename(name: string): void;
+  /** Type a slash command from the composer into the session's terminal. */
+  onCommand(text: string): void;
   /** Compact the session's context (typed as `/compact`). */
   onCompact(): void;
   /** Open an http(s) link from a rendered turn in the browser. */
@@ -131,6 +133,11 @@ function renderTweaks(h: ModalHandlers): HTMLElement {
   cycle.addEventListener("click", () => h.onCycleMode());
   row.append(model, effort, apply, cycle);
   return row;
+}
+
+/** True when the composer holds a slash command: its first non-blank character is `/`. */
+export function isSlashCommand(text: string): boolean {
+  return text.trimStart().startsWith("/");
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -245,11 +252,17 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const form = el("div", "modal__composer");
     const ta = el("textarea", "modal__input");
     ta.placeholder = claude
-      ? `Message this session… (${sendShortcut()} to send, paste or drop files to attach)`
+      ? `Message this session… (${sendShortcut()} to send, paste or drop files to attach; a /command is typed into its terminal)`
       : `Message this session… (${sendShortcut()} to send; typed into its terminal as one line)`;
     ta.value = m.draft;
     ta.rows = 3;
     const trySend = () => {
+      // A slash command is for Claude Code itself, not a message: it is
+      // typed into the terminal. Other harnesses type every line anyway.
+      if (claude && isSlashCommand(ta.value)) {
+        h.onCommand(ta.value.trim());
+        return;
+      }
       const text = composeMessage(ta.value, attachments);
       if (text) h.onSend(text);
     };
@@ -405,6 +418,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     onCycleMode: () => void cycleMode(),
     onOpenPr: () => void invoke("open_pr", { sessionId: m.card.sessionId }).catch((e) => setStatus(false, String(e))),
     onRename: (name) => void rename(name),
+    onCommand: (text) => void guardedCommand(text),
     onCompact: () => void invoke("compact_session", { sessionId: m.card.sessionId }).then(() => setStatus(true, "Sent /compact to the terminal")).catch((e) => setStatus(false, String(e))),
     onOpenLink: (url) => void invoke("open_url", { url }).catch((e) => setStatus(false, String(e))),
     onRemoveAttachment: (path) => {
@@ -493,6 +507,28 @@ const guardedSend = makeSendGuard(async (text: string) => {
     await loadTurns({ force: true, focusInput: true });
   } catch (e) {
     setStatus(false, String(e));
+  }
+});
+
+/** Types a slash command into the terminal; attachments have nowhere to go with it. */
+const guardedCommand = makeSendGuard(async (text: string) => {
+  if (!current) return;
+  const me = current;
+  const { card } = me.model;
+  if (attachments.list().length > 0) {
+    setStatus(false, "Remove the attachments to send a command; they cannot go with it.");
+    return;
+  }
+  try {
+    await invoke("send_slash_command", { sessionId: card.sessionId, text });
+    if (current !== me) return;
+    const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea");
+    if (ta) ta.value = "";
+    me.model.draft = "";
+    me.model.status = { ok: true, text: `Sent ${text} to the terminal` };
+    await loadTurns({ force: true, focusInput: true });
+  } catch (e) {
+    if (current === me) setStatus(false, String(e));
   }
 });
 

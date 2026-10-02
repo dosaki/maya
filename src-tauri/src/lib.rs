@@ -818,6 +818,15 @@ fn compact_session(app: AppHandle, state: TauriState<AppState>, session_id: Stri
     actions::compact_session(&local(&state), &session_id)
 }
 
+/// Types a slash command from the composer into the session's terminal.
+#[tauri::command(async)]
+fn send_slash_command(app: AppHandle, state: TauriState<AppState>, session_id: String, text: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Slash { session: session_id, text });
+    }
+    actions::send_slash_command(&local(&state), &session_id, &text)
+}
+
 /// Sends Shift+Tab to the session's Terminal tab, cycling its permission mode.
 #[tauri::command(async)]
 fn cycle_session_mode(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<(), String> {
@@ -1050,6 +1059,7 @@ pub fn run() {
             answer_question,
             set_session_option,
             cycle_session_mode,
+            send_slash_command,
             rename_session,
             compact_session,
             save_attachment,

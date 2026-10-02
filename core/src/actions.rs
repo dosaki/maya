@@ -106,6 +106,12 @@ pub fn set_session_option(l: &Local, session_id: &str, setting: &str, value: &st
     type_into_session(l, session_id, &answer::slash_command(setting, value)?)
 }
 
+/// Types a slash command from the composer into the session's terminal,
+/// after `answer::check_slash_command`.
+pub fn send_slash_command(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
+    type_into_session(l, session_id, &answer::check_slash_command(text)?)
+}
+
 /// Sends Shift+Tab to the session's terminal, cycling its permission mode.
 pub fn cycle_session_mode(l: &Local, session_id: &str) -> Result<(), String> {
     type_into_session(l, session_id, answer::SHIFT_TAB)
