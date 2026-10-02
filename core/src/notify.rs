@@ -154,16 +154,55 @@ pub fn focus_active() -> bool {
     crate::notify_win::quiet_now()
 }
 
-/// Whether a Focus mode is on right now. Unreadable state counts as off.
+/// Whether the Focus assertion store at `path` says a Focus mode is on:
+/// None when it cannot be read (macOS keeps it from apps without Full Disk
+/// Access), off when there is none yet. The store is JSON on current macOS;
+/// anything else goes through `plutil`.
+#[cfg(any(test, target_os = "macos"))]
+pub fn focus_status_at(path: &std::path::Path) -> Option<bool> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+        Err(_) => return Some(false),
+    };
+    if let Ok(text) = std::str::from_utf8(&bytes) {
+        if serde_json::from_str::<serde_json::Value>(text).is_ok() {
+            return Some(focus_active_in(text));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("plutil").args(["-convert", "json", "-o", "-"]).arg(path).stdin(Stdio::null()).stderr(Stdio::null()).output();
+        if let Some(o) = out.ok().filter(|o| o.status.success()) {
+            return Some(focus_active_in(&String::from_utf8_lossy(&o.stdout)));
+        }
+    }
+    Some(false)
+}
+
+/// Whether a Focus mode is on right now: None when Maya cannot tell, which
+/// on macOS means she has no Full Disk Access.
+#[cfg(target_os = "macos")]
+pub fn focus_status() -> Option<bool> {
+    let home = dirs::home_dir()?;
+    focus_status_at(&home.join("Library/DoNotDisturb/DB/Assertions.json"))
+}
+
+/// Whether a Focus mode is on right now. When Maya cannot tell, that is
+/// logged once and counts as off.
 #[cfg(target_os = "macos")]
 pub fn focus_active() -> bool {
-    let Some(home) = dirs::home_dir() else { return false };
-    let path = home.join("Library/DoNotDisturb/DB/Assertions.json");
-    let out = Command::new("plutil").args(["-convert", "json", "-o", "-"]).arg(&path).stdin(Stdio::null()).stderr(Stdio::null()).output();
-    match out {
-        Ok(o) if o.status.success() => focus_active_in(&String::from_utf8_lossy(&o.stdout)),
-        _ => std::fs::read_to_string(&path).map(|t| focus_active_in(&t)).unwrap_or(false),
-    }
+    static UNSEEN: std::sync::Once = std::sync::Once::new();
+    focus_status().unwrap_or_else(|| {
+        UNSEEN.call_once(|| crate::log::line("notify", "cannot read the Focus state (no Full Disk Access): Focus modes will not keep Maya quiet"));
+        false
+    })
+}
+
+/// Whether a Focus mode is on right now; Windows and GNOME always let Maya tell.
+#[cfg(not(target_os = "macos"))]
+pub fn focus_status() -> Option<bool> {
+    Some(focus_active())
 }
 
 static SPEECH: OnceLock<Mutex<mpsc::Sender<Utterance>>> = OnceLock::new();
@@ -588,6 +627,24 @@ mod tests {
         assert_eq!(pick_voice(list).as_deref(), Some("Samantha"));
         assert_eq!(pick_voice("Daniel en_GB # x\nTessa en_ZA # y\n").as_deref(), Some("Tessa"));
         assert_eq!(pick_voice("Daniel en_GB # x\n"), None);
+    }
+
+    #[test]
+    fn focus_is_unknown_only_when_macos_will_not_let_maya_read_the_store() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("Assertions.json");
+        assert_eq!(focus_status_at(&p), Some(false), "no store yet: no Focus has ever been on");
+        std::fs::write(&p, r#"{"data":[{"storeAssertionRecords":[{"assertionUUID":"x"}]}]}"#).unwrap();
+        assert_eq!(focus_status_at(&p), Some(true));
+        std::fs::write(&p, r#"{"data":[{"storeAssertionRecords":[]}]}"#).unwrap();
+        assert_eq!(focus_status_at(&p), Some(false));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Without Full Disk Access macOS refuses the read the same way.
+            assert_eq!(focus_status_at(&p), None);
+        }
     }
 
     #[test]

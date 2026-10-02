@@ -14,6 +14,7 @@ import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
 import { remoteTerminalToast, type Card, type ReviewState } from "./types";
+import { initMute } from "./mute";
 import { initVoice } from "./voice";
 import { initDebug } from "./debug";
 
@@ -138,6 +139,7 @@ async function answer(card: Card, questionIndex: number, optionIndex: number, bu
 
 async function start(): Promise<void> {
   void initSettings();
+  void initMute();
   void initVoice();
   void initDebug();
   tabs = makeTabs();

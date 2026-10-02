@@ -20,6 +20,7 @@ the right terminal first.
 - Starts new sessions and resumes old ones
 - Tells you when a session needs you
   - Using built-in notifications, and/or a voice and/or a Dock badge
+  - Keeps quiet under a Focus mode, or when you mute her from the top bar
 - Lists the pull requests that wait for your review, and reviews them in one click
 - Does what you tell it by voice: "Maya, tell <session> to do <thing>"
 - Shows the sessions of all your machines on one board.
@@ -105,6 +106,12 @@ not notarised. Set `MAYA_INSTALL_DIR` to install somewhere else. From the
 `.dmg` instead, drag Maya to Applications, and the first time right-click
 it and choose Open.
 
+macOS shows the Focus state only to apps with Full Disk Access. Without it
+Maya cannot tell that a Focus mode such as Do Not Disturb is on, and keeps
+speaking; Settings says so and opens System Settings › Privacy & Security ›
+Full Disk Access for you. Turn Maya on there, and let macOS quit and reopen
+her.
+
 ### Windows
 
 The installer installs Maya for your user (no administrator rights) and
@@ -161,6 +168,10 @@ from a card she can do by voice: report what is waiting, reply to a
 session, answer its question, bring its terminal forward, compact it,
 resume or start a session, open or review a pull request.
 
+- **Mute.** The speaker button in the top bar mutes Maya: she says nothing,
+  not even her replies (they show in the voice panel), and banners come
+  without a sound. Notifications, the badge and the Dock bounce stay.
+  Click it again to unmute; Maya remembers it across restarts.
 - **Off by default.** Turn on "Listen for 'Maya'" in Settings. A microphone
   appears in the top bar; clicking it opens the voice panel with the
   conversation and a Yes / No for the current read-back. macOS asks for

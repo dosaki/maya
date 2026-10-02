@@ -60,6 +60,17 @@ const handlers = () => ({
 });
 
 describe("renderSettings", () => {
+  it("asks for Full Disk Access only when Maya cannot see the Focus state", () => {
+    const h = { ...handlers(), onFullDiskAccess: vi.fn() };
+    expect(renderSettings(voiceBase, h).querySelector("[data-for=focus]")).toBeNull();
+    const el = renderSettings({ ...voiceBase, focusVisible: false }, h);
+    const hint = el.querySelector("[data-for=focus]");
+    expect(hint?.textContent).toContain("Full Disk Access");
+    expect(hint?.textContent).toContain("Focus");
+    el.querySelector<HTMLButtonElement>("button[data-action=full-disk-access]")!.click();
+    expect(h.onFullDiskAccess).toHaveBeenCalled();
+  });
+
   it("names which agent each hook button is for", () => {
     const labels = (claude: boolean, codex: boolean) =>
       [...renderSettings({ ...voiceBase, hookInstalled: claude, codexHookInstalled: codex }, handlers()).querySelectorAll("button")]
