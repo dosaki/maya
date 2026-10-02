@@ -12,6 +12,16 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return node;
 }
 
+/**
+ * Close types into the session's terminal, so it needs an idle or completed
+ * Claude Code session whose terminal takes keys: on Linux, only one in tmux.
+ */
+function canClose(card: Card): boolean {
+  if (card.harness !== "claude-code" || (card.state !== "idle" && card.state !== "completed")) return false;
+  const linux = card.machine ? card.machinePlatform === "linux" : isLinux();
+  return !linux || Boolean(card.terminal);
+}
+
 export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   const root = el("article", `card card--${card.state}${card.stale ? " card--stale" : ""}`);
   root.dataset.sessionId = card.sessionId;
@@ -54,6 +64,11 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   }
   if (card.pr) actions.append(prButton(card.pr));
   if (card.harness === "claude-code" && card.context && card.context.percent >= COMPACT_AT) actions.append(compactButton());
+  if (canClose(card)) {
+    const close = iconButton("close", "Close: types /exit, then exit to close the terminal");
+    close.dataset.action = "close";
+    actions.append(close);
+  }
   actions.append(reply);
   root.append(actions);
   return root;

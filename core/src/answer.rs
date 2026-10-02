@@ -3,6 +3,8 @@ use crate::model::{AwaitKind, Card, State};
 
 /// The slash command that compacts a running session's context.
 pub const COMPACT: &str = "/compact";
+/// The slash command that ends a Claude Code session.
+pub const EXIT: &str = "/exit";
 
 /// Shift+Tab, which cycles the permission mode in a running session.
 pub const SHIFT_TAB: &str = "\x1b[Z";

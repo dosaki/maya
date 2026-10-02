@@ -3,7 +3,7 @@ import { iconButton, iconElement } from "./icons";
 
 describe("icons", () => {
   it("inlines each SVG file with the icon classes, a fixed size and no XML prolog", () => {
-    for (const name of ["terminal", "reply", "compact", "resume"] as const) {
+    for (const name of ["terminal", "reply", "compact", "resume", "close"] as const) {
       const svg = iconElement(name);
       expect(svg.tagName.toLowerCase()).toBe("svg");
       expect(svg.classList.contains("icon")).toBe(true);

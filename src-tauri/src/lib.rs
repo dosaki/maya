@@ -835,6 +835,15 @@ fn compact_session(app: AppHandle, state: TauriState<AppState>, session_id: Stri
     actions::compact_session(&local(&state), &session_id)
 }
 
+/// Ends an idle or completed session and closes its terminal.
+#[tauri::command(async)]
+fn close_session(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Close { session: session_id });
+    }
+    actions::close_session(&local(&state), &session_id)
+}
+
 /// Types a slash command from the composer into the session's terminal.
 #[tauri::command(async)]
 fn send_slash_command(app: AppHandle, state: TauriState<AppState>, session_id: String, text: String) -> Result<(), String> {
@@ -1119,6 +1128,7 @@ pub fn run() {
             send_slash_command,
             rename_session,
             compact_session,
+            close_session,
             save_attachment,
             open_url,
             open_pr,

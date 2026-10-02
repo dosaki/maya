@@ -95,6 +95,44 @@ pub fn compact_session(l: &Local, session_id: &str) -> Result<(), String> {
     type_into_session(l, session_id, answer::COMPACT)
 }
 
+/// How long Close waits for Claude to exit before it leaves the shell alone.
+const EXIT_WAIT: Duration = Duration::from_secs(5);
+
+/// Ends an idle or completed Claude Code session and closes its terminal:
+/// types `/exit`, waits for Claude's process to end, then types `exit` into
+/// the shell left behind.
+pub fn close_session(l: &Local, session_id: &str) -> Result<(), String> {
+    close_session_with(l, session_id, |pid| {
+        let deadline = std::time::Instant::now() + EXIT_WAIT;
+        while crate::registry::pid_alive(pid) {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        true
+    })
+}
+
+/// `close_session` with `exited(pid)`, which says whether the process ended in time.
+fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool) -> Result<(), String> {
+    // The tty is looked up first: once Claude exits, its registry entry goes.
+    let (pid, tty) = {
+        let mut store = l.store.lock().unwrap();
+        let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
+        if !matches!(card.state, model::State::Idle | model::State::Completed) {
+            return Err("Only an idle or completed session can be closed.".into());
+        }
+        (card.pid, session_tty(&store, session_id, card.pid)?)
+    };
+    type_into_session(l, session_id, answer::EXIT)?;
+    // Typed while Claude still runs, `exit` would land in its prompt as a message.
+    if !exited(pid) {
+        return Err("Claude did not exit; the terminal was left open.".into());
+    }
+    l.terminal.type_line(&tty, "exit").map_err(|e| format!("The session ended, but the terminal was not closed: {e}"))
+}
+
 /// Types `/rename <name>` into the session's terminal. The new name comes
 /// back through the session registry on the next refresh.
 pub fn rename_session(l: &Local, session_id: &str, name: &str) -> Result<(), String> {
@@ -334,6 +372,45 @@ mod tests {
         let refusing = FakeTerminal { fail_type: Some("This session is not in tmux; only replies reach it.".into()), ..Default::default() };
         let l2 = Local { store: &store, terminal: &refusing };
         assert_eq!(cycle_session_mode(&l2, "s1"), Err("This session is not in tmux; only replies reach it.".into()));
+        drop(dir);
+    }
+
+    #[test]
+    fn close_types_exit_into_claude_then_exit_into_the_shell_once_claude_has_gone() {
+        let (dir, store) = store_with_session("s1", 4242);
+        let t = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &t };
+        let waited = Mutex::new(None);
+        close_session_with(&l, "s1", |pid| {
+            *waited.lock().unwrap() = Some(pid);
+            true
+        })
+        .unwrap();
+        assert_eq!(*waited.lock().unwrap(), Some(4242));
+        let texts: Vec<_> = t.calls.lock().unwrap().iter().map(|c| match c { Call::Type { text, .. } => text.clone(), other => panic!("{other:?}") }).collect();
+        assert_eq!(texts, ["/exit", "exit"]);
+        drop(dir);
+    }
+
+    #[test]
+    fn close_leaves_the_shell_alone_when_claude_does_not_exit() {
+        let (dir, store) = store_with_session("s1", 4242);
+        let t = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &t };
+        assert_eq!(close_session_with(&l, "s1", |_| false), Err("Claude did not exit; the terminal was left open.".into()));
+        assert_eq!(t.calls.lock().unwrap().len(), 1);
+        drop(dir);
+    }
+
+    #[test]
+    fn close_refuses_a_working_session() {
+        let (dir, store) = store_with_session("s1", 4242);
+        let entry = serde_json::json!({"pid": 4242, "sessionId": "s1", "cwd": "/Users/x/dev/eye", "name": "s1", "status": "busy", "tty": "/dev/pts/3"});
+        std::fs::write(dir.path().join("sessions/4242.json"), entry.to_string()).unwrap();
+        let t = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &t };
+        assert_eq!(close_session_with(&l, "s1", |_| true), Err("Only an idle or completed session can be closed.".into()));
+        assert!(t.calls.lock().unwrap().is_empty());
         drop(dir);
     }
 

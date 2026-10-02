@@ -994,6 +994,7 @@ pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::Reply { .. } => "reply",
         CommandKind::Answer { .. } => "answer",
         CommandKind::Compact { .. } => "compact",
+        CommandKind::Close { .. } => "close",
         CommandKind::Rename { .. } => "rename",
         CommandKind::SetOption { .. } => "set_option",
         CommandKind::CycleMode { .. } => "cycle_mode",

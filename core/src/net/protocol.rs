@@ -67,6 +67,7 @@ pub enum CommandKind {
     Reply { session: String, text: String, #[serde(default)] attachments: Vec<Attachment> },
     Answer { session: String, ask_id: u64, question: usize, option: usize },
     Compact { session: String },
+    Close { session: String },
     Rename { session: String, name: String },
     SetOption { session: String, setting: String, value: String },
     CycleMode { session: String },

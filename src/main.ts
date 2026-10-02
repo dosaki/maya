@@ -101,6 +101,15 @@ async function compact(sessionId: string): Promise<void> {
   }
 }
 
+async function closeSession(card: Card): Promise<void> {
+  try {
+    await invoke("close_session", { sessionId: card.sessionId });
+    showToast(`Closed ${card.name}`);
+  } catch (e) {
+    showToast(String(e));
+  }
+}
+
 async function openPr(sessionId: string): Promise<void> {
   try {
     await invoke("open_pr", { sessionId });
@@ -119,6 +128,7 @@ function act(target: Element): void {
     else void focus(card.pid);
   } else if (action.kind === "pr") void openPr(card.sessionId);
   else if (action.kind === "compact") void compact(card.sessionId);
+  else if (action.kind === "close") void closeSession(card);
   else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex, target);
   else {
     closeNewSession();

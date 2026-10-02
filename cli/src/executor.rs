@@ -63,6 +63,7 @@ impl Executor for CliExecutor {
             }
             CommandKind::Answer { session, ask_id, question, option } => done(actions::answer_question(&l, &session, ask_id, question, option)),
             CommandKind::Compact { session } => done(actions::compact_session(&l, &session)),
+            CommandKind::Close { session } => done(actions::close_session(&l, &session)),
             CommandKind::Rename { session, name } => done(actions::rename_session(&l, &session, &name)),
             CommandKind::SetOption { session, setting, value } => done(actions::set_session_option(&l, &session, &setting, &value)),
             CommandKind::CycleMode { session } => done(actions::cycle_session_mode(&l, &session)),
