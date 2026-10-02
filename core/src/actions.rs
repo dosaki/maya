@@ -182,23 +182,37 @@ pub fn rename_session(l: &Local, session_id: &str, name: &str) -> Result<(), Str
 }
 
 /// Types `/rename` into the sessions whose pending name is due. Looked up
-/// under the store's lock, typed after it is released.
+/// under the store's lock, typed after it is released. Every rename is
+/// logged, typed or not: a due name is taken once and never comes back.
 pub fn run_due_renames(l: &Local) {
-    let due: Vec<(model::Harness, String, String)> = {
+    let due: Vec<(String, model::Harness, String, String)> = {
         let mut store = l.store.lock().unwrap();
         store
             .take_due_renames()
             .into_iter()
             .filter_map(|(id, name)| {
-                let f = store.foreign(&id)?;
-                Some((f.harness, session_tty(&store, &id, f.pid).ok()?, answer::rename_command(&name).ok()?))
+                let found = (|| {
+                    let f = store.foreign(&id).ok_or("the session is gone")?;
+                    Ok::<_, String>((f.harness, session_tty(&store, &id, f.pid)?, answer::rename_command(&name)?))
+                })();
+                match found {
+                    Ok((harness, tty, line)) => Some((id, harness, tty, line)),
+                    Err(e) => {
+                        crate::log::line("rename", format!("could not rename {id}: {e}"));
+                        None
+                    }
+                }
             })
             .collect()
     };
-    for (harness, tty, line) in due {
-        if let Err(e) = type_line_for(l, harness, &tty, &line) {
-            crate::log::line("rename", format!("could not rename the session on {tty}: {e}"));
-        }
+    for (id, harness, tty, line) in due {
+        crate::log::line(
+            "rename",
+            match type_line_for(l, harness, &tty, &line) {
+                Ok(()) => format!("typed {line:?} into {id} on {tty}"),
+                Err(e) => format!("could not rename {id} on {tty}: {e}"),
+            },
+        );
     }
 }
 
@@ -578,6 +592,23 @@ mod tests {
         let typed: Vec<Call> = fake.calls.lock().unwrap().clone();
         assert_eq!(typed, vec![Call::Type { tty: "ttys009".into(), text: "/rename it's \"$(rm -rf ~)\"".into() }, Call::Type { tty: "ttys009".into(), text: String::new() }], "typed once, literally");
         drop(dir);
+    }
+
+    #[test]
+    fn a_due_rename_that_cannot_be_typed_is_logged() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("rollout.jsonl");
+        std::fs::write(&path, format!("{TURN_STARTED}\n{TURN_COMPLETE}\n")).unwrap();
+        // No tty recorded, and no process to ask `ps` about.
+        let s = ForeignSession { harness: Harness::Codex, pid: 2_000_000_000, tty: None, session_id: "c-notty".into(), cwd: "/x".into(), name: "Say hi".into(), transcript_path: path };
+        let store = Mutex::new(Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), t.path().join("agy"), vec![s]));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().add_pending_name(PendingName::new(Harness::Codex, "/x", "Fix CI", now_ms(), vec![], Some("c-notty".into())));
+        store.lock().unwrap().refresh(now_ms());
+        run_due_renames(&l);
+        assert!(fake.calls.lock().unwrap().is_empty());
+        assert!(crate::log::lines().iter().any(|l| l.source == "rename" && l.text.starts_with("could not rename c-notty: ")), "{:?}", crate::log::lines());
     }
 
     #[test]
