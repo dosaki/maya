@@ -32,6 +32,27 @@ pub struct Store {
     /// records them as messages from another session, and the history
     /// shows them as the user's own.
     sent: std::collections::HashMap<String, std::collections::VecDeque<String>>,
+    /// Codex and Antigravity names, re-read only when their files change.
+    names: NameFiles,
+}
+
+/// Text of the files names come from, read again only when they change.
+#[derive(Default)]
+struct NameFiles(std::collections::HashMap<PathBuf, (Option<std::time::SystemTime>, u64, std::sync::Arc<str>)>);
+
+impl NameFiles {
+    fn read(&mut self, path: &Path) -> std::sync::Arc<str> {
+        let meta = std::fs::metadata(path).ok();
+        let stamp = (meta.as_ref().and_then(|m| m.modified().ok()), meta.as_ref().map_or(0, |m| m.len()));
+        if let Some((m, len, text)) = self.0.get(path) {
+            if (*m, *len) == stamp {
+                return text.clone();
+            }
+        }
+        let text: std::sync::Arc<str> = std::fs::read_to_string(path).unwrap_or_default().into();
+        self.0.insert(path.to_path_buf(), (stamp.0, stamp.1, text.clone()));
+        text
+    }
 }
 
 /// Replies remembered per session.
@@ -65,6 +86,7 @@ impl Store {
             prs: PrCache::default(),
             compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
             sent: Default::default(),
+            names: NameFiles::default(),
         }
     }
 
@@ -148,7 +170,30 @@ impl Store {
         let grok_pids: std::collections::HashSet<i32> = grok.iter().map(|s| s.pid).collect();
         self.foreign.retain(|pid, s| s.harness != Harness::Grok || grok_pids.contains(pid));
         for s in grok {
-            self.foreign.entry(s.pid).or_insert(s);
+            // Grok's title changes with `/rename`: keep the newest.
+            self.foreign.entry(s.pid).and_modify(|e| e.name = s.name.clone()).or_insert(s);
+        }
+        self.refresh_names();
+    }
+
+    /// Re-reads Codex and Antigravity names, which change with `/rename`.
+    fn refresh_names(&mut self) {
+        let has = |foreign: &std::collections::HashMap<i32, ForeignSession>, h: Harness| foreign.values().any(|s| s.harness == h);
+        if has(&self.foreign, Harness::Codex) {
+            let index = self.names.read(&self.codex_dir.join("session_index.jsonl"));
+            for s in self.foreign.values_mut().filter(|s| s.harness == Harness::Codex) {
+                if let Some(n) = crate::codex::thread_name(&index, &s.session_id) {
+                    s.name = n;
+                }
+            }
+        }
+        if has(&self.foreign, Harness::Antigravity) {
+            let history = self.names.read(&self.agy_dir.join("history.jsonl"));
+            for s in self.foreign.values_mut().filter(|s| s.harness == Harness::Antigravity) {
+                if let Some(n) = crate::antigravity::conversation_name(&history, &s.session_id) {
+                    s.name = n;
+                }
+            }
         }
     }
 
@@ -474,6 +519,34 @@ mod tests {
 
         let log = std::fs::read_to_string(claude.join("maya/events.jsonl")).unwrap();
         assert!(!log.contains("gone"));
+    }
+
+    use crate::foreign::ForeignSession;
+
+    #[test]
+    fn a_codex_rename_reaches_the_card_on_the_next_refresh() {
+        let t = tempfile::tempdir().unwrap();
+        let codex = t.path().join("codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let rollout = codex.join("rollout.jsonl");
+        std::fs::write(&rollout, "").unwrap();
+        std::fs::write(codex.join("session_index.jsonl"), "{\"id\":\"c1\",\"thread_name\":\"Say hi\"}\n").unwrap();
+        let s = ForeignSession { harness: Harness::Codex, pid: 42, tty: Some("ttys001".into()), session_id: "c1".into(), cwd: "/x".into(), name: "Say hi".into(), transcript_path: rollout };
+        let mut store = Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(codex.clone(), t.path().join("agy"), vec![s]);
+        assert_eq!(store.refresh(1).iter().find(|c| c.session_id == "c1").unwrap().name, "Say hi");
+        std::fs::write(codex.join("session_index.jsonl"), "{\"id\":\"c1\",\"thread_name\":\"Say hi\"}\n{\"id\":\"c1\",\"thread_name\":\"Fix CI\"}\n").unwrap();
+        assert_eq!(store.refresh(2).iter().find(|c| c.session_id == "c1").unwrap().name, "Fix CI");
+    }
+
+    #[test]
+    fn an_antigravity_rename_reaches_the_card_on_the_next_refresh() {
+        let t = tempfile::tempdir().unwrap();
+        let agy = t.path().join("agy");
+        std::fs::create_dir_all(&agy).unwrap();
+        let s = ForeignSession { harness: Harness::Antigravity, pid: 43, tty: Some("ttys002".into()), session_id: "a1".into(), cwd: "/x".into(), name: "agy-43".into(), transcript_path: agy.join("t.jsonl") };
+        let mut store = Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), agy.clone(), vec![s]);
+        std::fs::write(agy.join("history.jsonl"), "{\"display\":\"/rename Fix CI\",\"timestamp\":3,\"workspace\":\"/x\",\"conversationId\":\"a1\",\"type\":\"slash_command\"}\n").unwrap();
+        assert_eq!(store.refresh(1).iter().find(|c| c.session_id == "a1").unwrap().name, "Fix CI");
     }
 }
 
