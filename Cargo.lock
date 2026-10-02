@@ -2097,7 +2097,7 @@ dependencies = [
 
 [[package]]
 name = "maya"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.23.1",
  "dirs 6.0.0",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "maya-cli"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "libc",
  "maya-core",
@@ -2132,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "maya-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.23.1",
  "dirs 6.0.0",
@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "maya-ear"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "cpal",
  "serde_json",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "maya-hook"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "dirs 6.0.0",
  "maya-core",
