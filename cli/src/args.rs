@@ -211,6 +211,6 @@ mod tests {
         let Cmd::Start { options, .. } = parse(&["start".into(), "--agent".into(), "codex".into(), "--name".into(), "Fix CI".into(), "--prompt".into(), "go".into()]).unwrap() else { panic!() };
         assert_eq!(options.agent, maya_core::model::Harness::Codex);
         assert_eq!(options.name.as_deref(), Some("Fix CI"));
-        assert!(parse(&a("start --agent gpt")).unwrap_err().contains("agent"));
+        assert!(parse(&a("start --agent gpt")).unwrap_err().contains("unknown agent: gpt"));
     }
 }
