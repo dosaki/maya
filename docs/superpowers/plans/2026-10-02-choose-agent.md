@@ -1925,3 +1925,24 @@ git commit -m "chore(release): 0.8.0"
 Set `Status: implemented` in `docs/superpowers/specs/2026-10-02-maya-choose-agent-design.md`; commit `docs: the choose-agent design is implemented`. (Note in the spec: models arrive with the agent list, so the Agent field appears once the listing is in, instead of a "Loading…" Model field.)
 
 - [ ] **Step 5: Ask the user, then push and open the PR** with the conventional-pull-request skill. Never push before the user says yes.
+
+---
+
+### Task 10: What the live check found
+
+Added after Task 9's live check on 2026-10-02 (report: the probe sessions for Claude Code and Grok Build worked end to end; Codex and Antigravity did not get their name; the session modal could not rename them).
+
+**Files:**
+- Modify: `src/modal.ts:418` (the rename gate), `src/modal.test.ts`
+- Modify: `src-tauri/src/terminal_app.rs` (how a line reaches a Codex TUI), `core/src/actions.rs` (`run_due_renames` logging), and whatever the Antigravity investigation names
+- Test: the files above
+
+**Interfaces:** none new. `Terminal::type_line(tty, text)` keeps its signature.
+
+- [ ] **Step 1: The session modal offers rename for every agent.** `renderTitle(m.card.name, h, claude)` enables the rename click only for Claude Code. Enable it for every harness; the backend refuses a non-free session with "Wait until the session is free to rename it.", which the modal already shows as an error. Write the failing test in `src/modal.test.ts` first (a Codex card's title is clickable and `onRename` is called), then make it pass. Commit: `fix: offer rename for every agent's session`.
+
+- [ ] **Step 2: Codex — find why the typed line is not submitted.** Use superpowers:systematic-debugging. Facts from the live check: Maya typed `/rename Maya probe Codex` into the Codex TUI (tty `ttys012`, still open) through `terminal_app.rs`'s AppleScript `do script "<text>" in t`; the text appeared in Codex's input and the trailing newline became a new line inside the input instead of submitting. Codex 0.160.0 (updated 2026-10-02) enables the kitty keyboard protocol on start (`CSI > 7 u` was seen in a pty probe), under which a terminal reports Enter as `ESC [ 13 u`, so a bare `\n`/`\r` from `do script` may read as a newline, not Enter. Form the hypothesis, test it on the open Codex session (e.g. `do script` the text without a trailing newline is impossible; try sending the Enter as a separate key: `osascript -e 'tell application "System Events" to key code 36'` with Terminal frontmost, or writing `\x1b[13u` to the tty), and pick the smallest fix that keeps Claude Code, Antigravity and Grok working (Claude Code replies and renames must keep submitting). Pin it with a unit test on the AppleScript/line builder if the fix changes it. Commit: `fix: submit the typed line to a Codex session`.
+
+- [ ] **Step 3: Antigravity — find why the rename never fired.** Facts: the agy probe (tty `ttys013`, still open) started with the prompt and its card showed the pending name, but no `/rename` reached it: nothing in `~/.gemini/antigravity-cli/history.jsonl`, nothing in `~/.claude/maya/maya.log`. Candidates, in order: (1) the pending name never became due — `pending_names::apply` needs the card free AND (seen Working or a non-empty snippet); check what `foreign::derive` gives an agy card after one short turn (`core/src/antigravity.rs::parse_tail`: `last_agent_text`, `working`); (2) `run_due_renames` dropped it silently — `session_tty` or `rename_command` returned Err inside the `filter_map` (Task 5's deferred finding); (3) the card's `cwd` did not match the launch folder. Add the log line on every drop in `run_due_renames` first (it is cheap and was already deferred), then reproduce with the debug app and a fresh agy probe in the `maya` folder (the user approved live probes), read the log, and fix the real cause with a test. Commit: `fix: rename an Antigravity session once its first turn ends` (or the title the cause deserves).
+
+- [ ] **Step 4: Verify in the real app** — one fresh Codex probe and one fresh Antigravity probe with a name; both must show the name in the agent's own files; rename each from the session modal. Then `cargo test --workspace && pnpm test`.
