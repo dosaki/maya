@@ -902,7 +902,7 @@ fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String
         if prompt.trim().is_empty() {
             return Err("Type a prompt first.".into());
         }
-        options.validate()?;
+        options.validate_shape()?;
         let machine = machine.unwrap();
         return route_data(&app, &machine, start_kind_for(dir, prompt, options));
     }

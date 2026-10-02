@@ -61,6 +61,13 @@ pub enum Harness {
     Grok,
 }
 
+/// A new session runs Claude Code unless the caller picks another agent.
+impl Default for Harness {
+    fn default() -> Self {
+        Harness::ClaudeCode
+    }
+}
+
 /// The pull request for a session directory's current branch.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

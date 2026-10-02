@@ -227,7 +227,7 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
     if prompt.trim().is_empty() {
         return Err("Type a prompt first.".into());
     }
-    options.validate()?;
+    options.validate_shape()?;
     let (root, maya_dir) = {
         let store = l.store.lock().unwrap();
         (projects_root(&store)?, store.claude_dir().join("maya"))
@@ -243,7 +243,7 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
     let file = launch::write_prompt_file(&maya_dir, &prompt)?;
     let label = tmux_label();
-    let terminal = l.terminal.open(&launch::session_command(&target, &file, &options), &target, &label)?;
+    let terminal = l.terminal.open(&launch::session_command(&target, &file, &options, None), &target, &label)?;
     Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string(), terminal })
 }
 
