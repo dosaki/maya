@@ -2,8 +2,9 @@ name: Build
 
 # Tests and builds Maya on Linux, Windows and macOS, the three in parallel,
 # and keeps what each built as run artifacts. Called by ci.yml for every
-# pull request and by release.yml for every push to main; it never
-# publishes anything itself.
+# pull request and by release.yml for every push to main, which builds
+# without the tests (the pull request ran them); it never publishes
+# anything itself.
 on:
   workflow_call:
     inputs:
@@ -11,6 +12,10 @@ on:
         description: Sign the macOS apps when the APPLE_* secrets are set (releases only).
         type: boolean
         default: false
+      test:
+        description: Run the tests before building. A release skips them; its pull request ran them.
+        type: boolean
+        default: true
     secrets:
       APPLE_CERTIFICATE:
         required: false
@@ -49,6 +54,7 @@ jobs:
       - name: Install tmux and musl-tools
         run: sudo apt-get update && sudo apt-get install -y tmux musl-tools
       - name: Test core and the CLI
+        if: inputs.test
         run: cargo test -p maya-core -p maya-cli
       - name: Build the CLI
         run: |
@@ -111,6 +117,7 @@ jobs:
       - name: Build the sidecars
         run: sh scripts/build-ear.sh ${{ matrix.target }}
       - name: Test
+        if: inputs.test
         run: |
           pnpm test
           sh scripts/test-ear.sh
@@ -183,6 +190,7 @@ jobs:
       - name: Build the sidecars
         run: sh scripts/build-ear.sh x86_64-pc-windows-msvc
       - name: Test
+        if: inputs.test
         run: |
           pnpm test
           cargo test -p maya-core -p maya-hook -p maya-ear -p maya
@@ -240,7 +248,7 @@ jobs:
       - name: Build the listener
         run: sh scripts/build-ear.sh ${{ matrix.target }}
       - name: Test
-        if: matrix.arch == 'aarch64'
+        if: inputs.test && matrix.arch == 'aarch64'
         run: |
           pnpm test
           sh scripts/test-ear.sh

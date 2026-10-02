@@ -266,9 +266,10 @@ Three workflows in `.github/workflows/`:
   unsigned, and a check that the version files agree. Nothing is
   published, so a pull request shows everything building before the merge.
 - `release.yml` ("Release") runs on every push to `main`: `build.yml`
-  again, signing the macOS apps when this push releases, and then, only
-  once every platform has built, a `release` job that publishes
-  `v<version>` with all the artifacts. It releases when
+  again without the tests (the pull request ran them; the Linux smoke
+  test still runs), signing the macOS apps when this push releases, and
+  then, only once every platform has built, a `release` job that
+  publishes `v<version>` with all the artifacts. It releases when
   `scripts/release-version.sh` finds no release for the version yet; a
   push whose version is released only builds, and a `docs` commit skips
   the run.

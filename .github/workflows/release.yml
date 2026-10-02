@@ -1,8 +1,9 @@
 name: Release
 
-# Every push to main builds Linux, Windows and macOS again, in parallel, and
-# then, when the version in src-tauri/tauri.conf.json has no release yet,
-# publishes v<version> with everything they built. A push whose version is
+# Every push to main builds Linux, Windows and macOS again, in parallel
+# and without the tests (the pull request ran them), and then, when the
+# version in src-tauri/tauri.conf.json has no release yet, publishes
+# v<version> with everything they built. A push whose version is
 # already released only builds (`sh scripts/set-version.sh 0.3.0` sets the
 # version everywhere; see CLAUDE.md for when to bump it).
 on:
@@ -43,6 +44,8 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       sign: ${{ needs.version.outputs.release == 'true' }}
+      # The pull request ran them before the merge.
+      test: false
     secrets: inherit
 
   # Only once every platform has built, so no release ever lacks an asset.
