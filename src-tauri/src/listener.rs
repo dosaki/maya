@@ -125,8 +125,8 @@ pub(crate) fn install_speech_hook(app: AppHandle) {
 
 /// Speaks a reply to the user (blocking until spoken) through the shared
 /// speech queue, which pauses listening around it and is not held back by a
-/// Focus mode. Blank text says nothing. False when run `generation` is no
-/// longer current, before or after speaking.
+/// Focus mode. Blank text, or a muted Maya, says nothing. False when run
+/// `generation` is no longer current, before or after speaking.
 fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
     if text.trim().is_empty() {
         return is_current(app, generation);
@@ -142,11 +142,15 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
     // History first, so a page that refetches it on this event sees the line.
     remember(app, "maya", text);
     emit_voice(app);
-    let eleven = {
+    let (muted, eleven) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
-        eleven_wanted(&store.config, store.claude_dir())
+        (store.config.muted, eleven_wanted(&store.config, store.claude_dir()))
     };
+    // Muted, the reply is only shown in the voice panel.
+    if muted {
+        return is_current(app, generation);
+    }
     let eleven = eleven_settings(eleven);
     // No lock is held here: the speech hook takes the voice lock.
     let _ = notify::speak_and_wait(notify::Utterance::new(text.to_string(), eleven));

@@ -61,6 +61,10 @@ pub struct Config {
     /// voice instead of playing the notification sound.
     #[serde(default = "default_true")]
     pub speak_notifications: bool,
+    /// Make no sound at all: no spoken lines and silent banners. Banners,
+    /// the badge and the Dock bounce still come.
+    #[serde(default)]
+    pub muted: bool,
     /// Which voice speaks: the built-in one or ElevenLabs.
     #[serde(default)]
     pub voice_provider: VoiceProvider,
@@ -131,6 +135,7 @@ impl Default for Config {
             projects_dir: None,
             notify_on_awaiting: true,
             speak_notifications: true,
+            muted: false,
             voice_provider: Default::default(),
             elevenlabs_voice_id: None,
             clones_dir: None,
@@ -290,6 +295,16 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "speakNotifications": false}"#).unwrap();
         assert!(!c.speak_notifications);
         assert!(serde_json::to_string(&c).unwrap().contains("\"speakNotifications\":false"));
+    }
+
+    #[test]
+    fn muting_defaults_off_and_round_trips() {
+        assert!(!Config::default().muted);
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5}"#).unwrap();
+        assert!(!c.muted, "older config files without the field are not muted");
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "muted": true}"#).unwrap();
+        assert!(c.muted);
+        assert!(serde_json::to_string(&c).unwrap().contains("\"muted\":true"));
     }
 
     #[test]

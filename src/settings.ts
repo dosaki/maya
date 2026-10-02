@@ -53,6 +53,8 @@ export interface SettingsModel {
   clonesDir: string;
   notifyOnAwaiting: boolean;
   speakNotifications: boolean;
+  /** False when Maya cannot tell whether a Focus mode is on (macOS without Full Disk Access). */
+  focusVisible?: boolean;
   voiceProvider: VoiceProvider;
   elevenKeySet: boolean;
   elevenVoices: ElevenVoice[];
@@ -116,6 +118,7 @@ export interface SettingsHandlers {
   onNotify(enabled: boolean): void;
   onClonesDir(path: string): void;
   onSpeak(enabled: boolean): void;
+  onFullDiskAccess?(): void;
   onVoiceProvider(provider: VoiceProvider): void;
   onElevenKey(key: string): void;
   onElevenVoice(voiceId: string): void;
@@ -372,6 +375,22 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   speakBox.addEventListener("change", () => h.onSpeak(speakBox.checked));
   speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
   notifications.append(speakLabel);
+
+  if (model.focusVisible === false) {
+    // macOS keeps the Focus state from apps without Full Disk Access, so
+    // Maya would speak through Do Not Disturb.
+    const focusHint = document.createElement("div");
+    focusHint.className = "settings__hint";
+    focusHint.dataset.for = "focus";
+    focusHint.textContent = "Maya cannot tell when a Focus mode such as Do Not Disturb is on, so she keeps speaking. Give her Full Disk Access to let a Focus mode keep her quiet; macOS then asks to quit and reopen her. ";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.dataset.action = "full-disk-access";
+    open.textContent = "Open Full Disk Access";
+    open.addEventListener("click", () => h.onFullDiskAccess?.());
+    focusHint.append(open);
+    notifications.append(focusHint);
+  }
 
   // The live role, not the select: previewing Assistant before a Pair
   // succeeds must not untick listening on a machine that is not one yet.
@@ -905,6 +924,7 @@ export async function initSettings(): Promise<void> {
     onNotify: (enabled) => void run(() => saveConfig({ notifyOnAwaiting: enabled })),
     onClonesDir: (path) => void run(() => saveConfig({ clonesDir: path || null })),
     onSpeak: (enabled) => void run(() => saveConfig({ speakNotifications: enabled })),
+    onFullDiskAccess: () => void run(() => invoke<void>("open_full_disk_access")),
     onVoiceProvider: (provider) => void run(async () => { await saveConfig({ voiceProvider: provider }); await loadVoices(); }),
     onElevenKey: (key) => void run(async () => { await invoke("set_elevenlabs_key", { key }); await loadVoices(); }),
     onElevenVoice: (voiceId) => void run(() => saveConfig({ elevenlabsVoiceId: voiceId || null })),
@@ -1037,7 +1057,9 @@ export async function initSettings(): Promise<void> {
     // from loading: the Codex hook then shows as not installed, and
     // installing it reports what is wrong with the file.
     const codexStatus = invoke<boolean>("codex_hook_status").catch(() => false);
+    const focusVisible = invoke<boolean>("focus_visible").catch(() => true);
     const [installed, config, codexInstalled] = await Promise.all([invoke<boolean>("hook_status"), invoke<ConfigJson>("get_config"), codexStatus]);
+    model.focusVisible = await focusVisible;
     model.hookInstalled = installed;
     model.codexHookInstalled = codexInstalled;
     model.completedTimeoutMinutes = config.completedTimeoutMinutes;

@@ -443,13 +443,24 @@ fn fill_terminal_names(store: &store::Store, cards: &mut [Card]) {
     }
 }
 
+/// How an announcement is made: whether it is spoken, and whether its
+/// banner plays a sound. A Focus mode or mute keeps Maya from speaking.
+/// The voice replaces the banner's sound rather than doubling it; under a
+/// Focus mode the sound is left to macOS, which filters banners by the
+/// Focus's own rules; muted, there is none.
+fn announcement(speak_notifications: bool, muted: bool, focus: bool) -> (bool, bool) {
+    let spoken = speak_notifications && !muted && !focus;
+    (spoken, !spoken && !muted)
+}
+
 fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify, speak, eleven_voice, assistant) = {
+    let (cards, wants_notify, speak, muted, eleven_voice, assistant) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
         let cards = local_cards(&mut store);
-        let eleven = if store.config.speak_notifications { eleven_wanted(&store.config, store.claude_dir()) } else { None };
-        (cards, store.config.notify_on_awaiting, store.config.speak_notifications, eleven, store.config.network.role == config::NetworkRole::Assistant)
+        let c = &store.config;
+        let eleven = if c.speak_notifications && !c.muted { eleven_wanted(c, store.claude_dir()) } else { None };
+        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant)
     };
     // Remote cards join after the store lock is released (lock order), so
     // the notifier below announces remote decisions too.
@@ -467,7 +478,7 @@ fn refresh_and_emit(app: &AppHandle) {
     if focus {
         log::line("app", "focus mode is on: announcements stay silent");
     }
-    let speak = speak && !focus;
+    let (speak, banner_sound) = announcement(speak, muted, focus);
     // The app icon shows how many sessions wait, and asks for a look (a
     // Dock bounce) under the same rules as the banner.
     badge::show(app, badge::awaiting_count(&cards));
@@ -478,8 +489,7 @@ fn refresh_and_emit(app: &AppHandle) {
         // The key is looked up only when there is something to say.
         let eleven = if speak && (!fresh.is_empty() || !finished.is_empty()) { eleven_settings(eleven_voice) } else { None };
         for c in &fresh {
-            // With a voice the banner stays silent; the sound is replaced, not doubled.
-            notify::notify(c, !speak);
+            notify::notify(c, banner_sound);
             if speak {
                 if let Some(line) = notify::spoken_line(c) {
                     notify::speak(notify::Utterance::new(line, eleven.clone()));
@@ -957,6 +967,40 @@ fn try_voice(state: TauriState<AppState>) -> Result<(), String> {
     notify::speak_and_wait(notify::Utterance { fallback: false, ..notify::Utterance::new(line, eleven) })
 }
 
+/// Mutes or unmutes Maya: muted, she makes no sound but still notifies.
+#[tauri::command(async)]
+fn set_muted(app: AppHandle, muted: bool) -> Result<Config, String> {
+    log::line("app", if muted { "muted" } else { "unmuted" });
+    update_config(&app, |c| c.muted = muted)
+}
+
+/// False when Maya cannot tell whether a Focus mode is on: on macOS, when
+/// she has no Full Disk Access to read the Focus state.
+#[tauri::command(async)]
+fn focus_visible() -> bool {
+    notify::focus_status().is_some()
+}
+
+/// Opens System Settings › Privacy & Security › Full Disk Access, where
+/// Maya can be let read the Focus state.
+#[tauri::command(async)]
+fn open_full_disk_access() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let ok = std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+            .status()
+            .map_err(|e| format!("could not open System Settings: {e}"))?;
+        if ok.success() {
+            Ok(())
+        } else {
+            Err("System Settings did not open.".into())
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    Err("Full Disk Access is a macOS setting.".into())
+}
+
 #[tauri::command]
 fn get_config(state: TauriState<AppState>) -> Config {
     state.store.lock().unwrap().config.clone()
@@ -1059,6 +1103,9 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()) })
         .invoke_handler(tauri::generate_handler![
+            set_muted,
+            focus_visible,
+            open_full_disk_access,
             list_sessions,
             focus_session,
             session_history,
@@ -1184,6 +1231,17 @@ mod route_tests {
         assert_eq!(eleven_wanted(&cfg(voice::VoiceProvider::Elevenlabs, Some("  ")), dir), None);
         assert_eq!(eleven_wanted(&cfg(voice::VoiceProvider::Elevenlabs, Some("v")), dir), Some((dir.join("maya"), "v".to_string())));
         assert_eq!(eleven_settings(None), None, "no key lookup when the voice is not wanted");
+    }
+
+    #[test]
+    fn mute_silences_the_voice_and_the_banner_and_focus_only_the_voice() {
+        // (speak setting, muted, focus) -> (spoken, banner sound)
+        assert_eq!(announcement(true, false, false), (true, false), "the voice replaces the banner's sound");
+        assert_eq!(announcement(false, false, false), (false, true));
+        assert_eq!(announcement(true, false, true), (false, true), "a Focus mode leaves banner sounds to macOS");
+        assert_eq!(announcement(true, true, false), (false, false));
+        assert_eq!(announcement(false, true, false), (false, false));
+        assert_eq!(announcement(true, true, true), (false, false));
     }
 
     #[test]
