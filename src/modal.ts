@@ -214,14 +214,64 @@ export function anchorPanel(root: HTMLElement, panel: HTMLElement): void {
   if (root.classList.contains("modal--anchored")) return;
   const r = panel.getBoundingClientRect();
   const host = root.getBoundingClientRect();
-  const left = Math.max(0, r.left - host.left);
-  const top = Math.max(0, r.top - host.top);
   root.classList.add("modal--anchored");
-  panel.style.left = `${left}px`;
-  panel.style.top = `${top}px`;
-  // The grip cannot go past the window's edges.
-  panel.style.maxWidth = `calc(100vw - ${left + 8}px)`;
-  panel.style.maxHeight = `calc(100vh - ${top + 8}px)`;
+  placePanel(panel, { left: Math.max(0, r.left - host.left), top: Math.max(0, r.top - host.top) });
+}
+
+export interface PanelBox {
+  left: number;
+  top: number;
+  width?: number;
+  height?: number;
+}
+
+/** Puts a pinned panel at `left`, `top` (and the size given), kept inside the window. */
+function placePanel(panel: HTMLElement, box: PanelBox): void {
+  panel.style.left = `${box.left}px`;
+  panel.style.top = `${box.top}px`;
+  if (box.width !== undefined) panel.style.width = `${box.width}px`;
+  if (box.height !== undefined) panel.style.height = `${box.height}px`;
+  // Neither grip can go past the window's edges.
+  panel.style.maxWidth = `calc(100vw - ${box.left + 8}px)`;
+  panel.style.maxHeight = `calc(100vh - ${box.top + 8}px)`;
+}
+
+/**
+ * Where a drag of the top-left corner by (dx, dy) puts a pinned panel: the
+ * bottom-right corner stays, the corner follows the pointer, and the panel
+ * stays at least `PANEL_MIN` and inside the window.
+ */
+export function cornerDrag(start: Required<PanelBox>, dx: number, dy: number): Required<PanelBox> {
+  const right = start.left + start.width;
+  const bottom = start.top + start.height;
+  const left = Math.min(Math.max(0, start.left + dx), right - PANEL_MIN.width);
+  const top = Math.min(Math.max(0, start.top + dy), bottom - PANEL_MIN.height);
+  return { left, top, width: right - left, height: bottom - top };
+}
+
+/** The top-left handle: dragging it moves that corner; CSS gives the bottom-right one. */
+function renderCornerHandle(root: HTMLElement, panel: HTMLElement): HTMLElement {
+  const handle = el("div", "modal__grip");
+  handle.title = "Drag to resize";
+  handle.addEventListener("pointerdown", (ev: PointerEvent) => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    anchorPanel(root, panel);
+    const r = panel.getBoundingClientRect();
+    const start = { left: parseFloat(panel.style.left) || 0, top: parseFloat(panel.style.top) || 0, width: r.width, height: r.height };
+    const origin = { x: ev.clientX, y: ev.clientY };
+    if (ev.pointerId !== undefined) handle.setPointerCapture?.(ev.pointerId);
+    const move = (e: PointerEvent) => placePanel(panel, cornerDrag(start, e.clientX - origin.x, e.clientY - origin.y));
+    const end = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", end);
+      handle.removeEventListener("pointercancel", end);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+  });
+  return handle;
 }
 
 let panelObserver: ResizeObserver | null = null;
@@ -263,6 +313,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   panel.addEventListener("pointermove", (ev) => {
     if (onGrip(panel.getBoundingClientRect(), ev.clientX, ev.clientY)) anchorPanel(root, panel);
   });
+  panel.append(renderCornerHandle(root, panel));
 
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");

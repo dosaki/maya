@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PANEL_SIZE_KEY, anchorPanel, draggedPanelSize, historyRefetchDue, isSlashCommand, onGrip, parsePanelSize, renderModal } from "./modal";
+import { PANEL_SIZE_KEY, anchorPanel, cornerDrag, draggedPanelSize, historyRefetchDue, isSlashCommand, onGrip, parsePanelSize, renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -65,6 +65,28 @@ describe("panel size", () => {
     panel.getBoundingClientRect = () => rect(300, 200, 700, 500);
     anchorPanel(el, panel);
     expect(panel.style.left).toBe("240px");
+  });
+
+  it("drags the top-left corner with the bottom-right one fixed, never below the minimum or past the window's edge", () => {
+    const start = { left: 240, top: 110, width: 800, height: 600 };
+    expect(cornerDrag(start, -40, -30)).toEqual({ left: 200, top: 80, width: 840, height: 630 });
+    expect(cornerDrag(start, 100, 50)).toEqual({ left: 340, top: 160, width: 700, height: 550 });
+    expect(cornerDrag(start, -500, -500)).toEqual({ left: 0, top: 0, width: 1040, height: 710 });
+    expect(cornerDrag(start, 900, 900)).toEqual({ left: 560, top: 350, width: 480, height: 360 });
+    const el = renderModal({ card: base, turns: [], status: null, draft: "" }, handlers());
+    const panel = el.querySelector<HTMLElement>(".modal__panel")!;
+    const rect = (left: number, top: number, width: number, height: number) => ({ left, top, right: left + width, bottom: top + height, width, height, x: left, y: top, toJSON: () => "" }) as DOMRect;
+    el.getBoundingClientRect = () => rect(0, 0, 1280, 820);
+    panel.getBoundingClientRect = () => rect(240, 110, 800, 600);
+    const grip = el.querySelector<HTMLElement>(".modal__grip")!;
+    grip.dispatchEvent(new MouseEvent("pointerdown", { clientX: 245, clientY: 115, button: 0, bubbles: true }));
+    expect(el.classList.contains("modal--anchored")).toBe(true);
+    grip.dispatchEvent(new MouseEvent("pointermove", { clientX: 205, clientY: 85, bubbles: true }));
+    expect([panel.style.left, panel.style.top, panel.style.width, panel.style.height]).toEqual(["200px", "80px", "840px", "630px"]);
+    expect(panel.style.maxWidth).toBe("calc(100vw - 208px)");
+    grip.dispatchEvent(new MouseEvent("pointerup", { clientX: 205, clientY: 85, bubbles: true }));
+    grip.dispatchEvent(new MouseEvent("pointermove", { clientX: 100, clientY: 50, bubbles: true }));
+    expect(panel.style.left).toBe("200px");
   });
 
   it("opens at the size last dragged to, and at the stylesheet's size when none is stored", () => {
