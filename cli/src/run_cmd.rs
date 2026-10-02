@@ -259,7 +259,8 @@ mod tests {
         assert_eq!(preflight(&c, &lock, Some(&twin)).err(), Some((2, "maya run is already running (pid 99)".into())));
         assert_eq!(preflight(&c, &lock, None).err(), Some((2, "maya run is already running".into())));
         drop(held);
-        assert!(preflight(&c, &lock, None).is_ok(), "free once the first run's lock is dropped");
+        drop(run_lock::take_once_free(&lock).expect("free once the first run's lock is dropped"));
+        assert!(preflight(&c, &lock, None).is_ok());
     }
 
     #[test]

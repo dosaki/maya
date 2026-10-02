@@ -48,6 +48,22 @@ impl RunLock {
     }
 }
 
+/// Takes the lock at `path` once it is free, waiting up to a second: a
+/// child that another thread is spawning holds a copy of every open file
+/// until its close-on-exec ones are shut, so a lock just dropped can stay
+/// taken for a moment while tests run in parallel.
+#[cfg(test)]
+pub fn take_once_free(path: &Path) -> Option<RunLock> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        match RunLock::try_take(path).unwrap() {
+            Some(lock) => return Some(lock),
+            None if std::time::Instant::now() >= deadline => return None,
+            None => std::thread::sleep(std::time::Duration::from_millis(5)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,7 +77,7 @@ mod tests {
         // flock belongs to the open file description, not the process.
         assert!(RunLock::try_take(&p).unwrap().is_none());
         drop(first);
-        assert!(RunLock::try_take(&p).unwrap().is_some(), "free once the first is dropped");
+        assert!(take_once_free(&p).is_some(), "free once the first is dropped");
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
     }

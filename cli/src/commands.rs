@@ -179,9 +179,11 @@ mod tests {
 
     #[test]
     fn a_code_that_is_not_six_digits_is_refused_without_contacting_the_main() {
-        let dir = claude_dir_with(NetworkRole::Off);
         // Port 1 has no main: reaching the network would say "Could not reach".
+        // A directory per code: each pair takes and drops the run lock, and
+        // a child another test is spawning can hold a just-dropped lock.
         for code in ["12345", "1234567", "12a456", "", "１２３４５６"] {
+            let dir = claude_dir_with(NetworkRole::Off);
             assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), code), Err((1, WRONG_CODE.to_string())), "{code:?}");
         }
     }
