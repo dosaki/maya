@@ -120,5 +120,6 @@ describe("renderCard: the Close button", () => {
     expect(close({ ...base, machine: "box", machinePlatform: "linux" })).toBeNull();
     expect(close({ ...base, machine: "box", machinePlatform: "linux", terminal: "maya-1a2b3c4d" })).not.toBeNull();
     expect(close({ ...base, machine: "laptop", machinePlatform: "macos" })).not.toBeNull();
+    expect(close({ ...base, machine: "laptop", machinePlatform: "macos", stale: true })).toBeNull();
   });
 });

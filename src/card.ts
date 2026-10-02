@@ -14,10 +14,11 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
 
 /**
  * Close types into the session's terminal, so it needs an idle or completed
- * Claude Code session whose terminal takes keys: on Linux, only one in tmux.
+ * Claude Code session whose terminal takes keys: on Linux, only one in tmux;
+ * remote, only while its machine is connected.
  */
 function canClose(card: Card): boolean {
-  if (card.harness !== "claude-code" || (card.state !== "idle" && card.state !== "completed")) return false;
+  if (card.harness !== "claude-code" || (card.state !== "idle" && card.state !== "completed") || card.stale) return false;
   const linux = card.machine ? card.machinePlatform === "linux" : isLinux();
   return !linux || Boolean(card.terminal);
 }

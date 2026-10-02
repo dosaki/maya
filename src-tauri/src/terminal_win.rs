@@ -135,6 +135,10 @@ impl Terminal for WindowsTerminal {
     fn name_for_tty(&self, _tty: &str) -> Option<String> {
         None
     }
+    fn reach_after_exit(&self, tty: &str) -> Vec<String> {
+        let others = pid_of(tty).and_then(win_console::other_console_pids).unwrap_or_default();
+        others.into_iter().map(|p| win_console::console_key(p as i32)).collect()
+    }
 }
 
 #[cfg(test)]

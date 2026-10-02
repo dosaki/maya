@@ -116,21 +116,33 @@ pub fn close_session(l: &Local, session_id: &str) -> Result<(), String> {
 
 /// `close_session` with `exited(pid)`, which says whether the process ended in time.
 fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool) -> Result<(), String> {
-    // The tty is looked up first: once Claude exits, its registry entry goes.
+    // Everything is looked up before `/exit`: once Claude exits, its registry
+    // entry goes, and on Windows so does the console key found through it.
     let (pid, tty) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
+        if card.harness != model::Harness::ClaudeCode {
+            return Err("That command is only available for Claude Code sessions.".into());
+        }
         if !matches!(card.state, model::State::Idle | model::State::Completed) {
             return Err("Only an idle or completed session can be closed.".into());
         }
         (card.pid, session_tty(&store, session_id, card.pid)?)
     };
-    type_into_session(l, session_id, answer::EXIT)?;
+    let after = l.terminal.reach_after_exit(&tty);
+    l.terminal.type_line(&tty, answer::EXIT)?;
     // Typed while Claude still runs, `exit` would land in its prompt as a message.
     if !exited(pid) {
         return Err("Claude did not exit; the terminal was left open.".into());
     }
-    l.terminal.type_line(&tty, "exit").map_err(|e| format!("The session ended, but the terminal was not closed: {e}"))
+    let mut last = "nothing else is attached to its terminal".to_string();
+    for key in &after {
+        match l.terminal.type_line(key, "exit") {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e,
+        }
+    }
+    Err(format!("The session ended, but the terminal was not closed: {last}"))
 }
 
 /// Types `/rename <name>` into the session's terminal. The new name comes
@@ -389,6 +401,20 @@ mod tests {
         assert_eq!(*waited.lock().unwrap(), Some(4242));
         let texts: Vec<_> = t.calls.lock().unwrap().iter().map(|c| match c { Call::Type { text, .. } => text.clone(), other => panic!("{other:?}") }).collect();
         assert_eq!(texts, ["/exit", "exit"]);
+        drop(dir);
+    }
+
+    #[test]
+    fn close_types_exit_through_a_key_that_still_reaches_the_terminal_once_claude_has_gone() {
+        let (dir, store) = store_with_session("s1", 4242);
+        let t = FakeTerminal::default();
+        t.peers.lock().unwrap().insert("/dev/pts/3".into(), vec!["console:2".into(), "console:3".into()]);
+        t.dead.lock().unwrap().insert("console:2".into());
+        close_session_with(&Local { store: &store, terminal: &t }, "s1", |_| true).unwrap();
+        assert_eq!(
+            *t.calls.lock().unwrap(),
+            [Call::Type { tty: "/dev/pts/3".into(), text: "/exit".into() }, Call::Type { tty: "console:3".into(), text: "exit".into() }]
+        );
         drop(dir);
     }
 
