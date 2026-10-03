@@ -16,8 +16,8 @@ export interface Question {
   multiSelect: boolean;
 }
 
-/** The agent runner behind a session. Only Claude Code has a source today. */
-export type Harness = "claude-code" | "codex" | "antigravity" | "grok";
+/** The agent runner behind a session; "other" is one this build does not know. */
+export type Harness = "claude-code" | "codex" | "antigravity" | "grok" | "kiro" | "other";
 
 export interface PullRequest {
   number: number;
