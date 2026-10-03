@@ -370,7 +370,7 @@ mod tests {
         let c = Config::default();
         assert!(!c.listen);
         assert!(c.microphone.is_none());
-        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "listen": true, "microphone": "USB Mic", "interpreterModel": "sonnet"}"#).unwrap();
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "listen": true, "microphone": "USB Mic"}"#).unwrap();
         assert!(c.listen);
         assert_eq!(c.microphone.as_deref(), Some("USB Mic"));
     }

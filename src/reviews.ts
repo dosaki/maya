@@ -68,7 +68,7 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
   const review = el("button", "card__btn card__btn--primary", "Review");
   review.type = "button";
   review.dataset.action = "review";
-  review.title = "Open a terminal in the checkout (or a fresh clone) and run /should-i-approve";
+  review.title = "Open a terminal in the checkout (or a fresh clone) and review it with Maya's agent on the review prompt from Settings";
   actions.append(open, review);
   root.append(actions);
   return root;

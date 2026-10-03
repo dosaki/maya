@@ -64,9 +64,9 @@ Session controls, from each agent's docs and binary:
 | Agent | /compact | /model, /effort | Mode cycle | `/` lines | `!` lines |
 |---|---|---|---|---|---|
 | Claude Code | yes | yes | Shift+Tab | yes | yes |
-| Codex | yes | `/model` only | no | yes | no |
+| Codex | yes | no | no | yes | no |
 | Antigravity | yes | no | Shift+Tab (default, accept-edits, plan) | yes | no |
-| Grok Build | yes | yes | Shift+Tab (Normal, Plan, Always-approve) | yes | no |
+| Grok Build | yes | `/model` only | Shift+Tab (Normal, Plan, Always-approve) | yes | no |
 
 The Codex, Antigravity and Grok Build cells that the probe would have
 settled are at their safe defaults until it runs.

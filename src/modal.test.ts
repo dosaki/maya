@@ -179,7 +179,8 @@ describe("renderModal", () => {
     expect(el.querySelector("button[data-action=compact]")).not.toBeNull();
     expect(el.querySelector(".modal__context")?.textContent).toBe("ctx 80%");
     const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
-    expect(ta.placeholder).toContain("typed into its terminal");
+    expect(ta.placeholder).toContain("typed into its terminal as one line, so /commands run there)");
+    expect(ta.placeholder).not.toContain("!shell");
     expect(el.querySelector(".modal__noinbox")).toBeNull();
     ta.value = "carry on";
     el.querySelector<HTMLButtonElement>("button[data-action=send]")!.click();

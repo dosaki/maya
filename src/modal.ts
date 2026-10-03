@@ -521,9 +521,11 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     panel.append(renderChips(attachments, (path) => h.onRemoveAttachment?.(path)));
     const form = el("div", "modal__composer");
     const ta = el("textarea", "modal__input");
+    // Promise only the terminal lines this agent takes (see `caps`).
+    const runs = [caps.slashLines && "/commands", caps.shellLines && "!shell lines"].filter(Boolean).join(" and ");
     ta.placeholder = claude
       ? `Message this session… (${sendShortcut()} to send, paste or drop files to attach; a /command or !shell line is typed into its terminal)`
-      : `Message this session… (${sendShortcut()} to send; typed into its terminal as one line, so /commands and !shell lines run there)`;
+      : `Message this session… (${sendShortcut()} to send; typed into its terminal as one line${runs ? `, so ${runs} run there` : ""})`;
     ta.value = m.draft;
     ta.rows = 3;
     const trySend = () => {

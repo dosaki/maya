@@ -86,7 +86,17 @@ describe("renderSettings", () => {
     expect(h.onAgent).toHaveBeenCalledWith("claude-code");
     model.value = "";
     model.dispatchEvent(new Event("change"));
-    expect(h.onAgentModel).toHaveBeenCalledWith("");
+    // The model is saved with the agent the Agent select shows, never alone.
+    expect(h.onAgentModel).toHaveBeenCalledWith("claude-code", "");
+  });
+
+  it("keeps a chosen agent that is not installed selected, with only the Default model", () => {
+    const el = renderSettings({ ...voiceBase, agents, agent: "codex", agentModel: "gpt-5" }, handlers());
+    const agent = el.querySelector<HTMLSelectElement>("select[name=agent]")!;
+    expect([...agent.options].map((o) => o.textContent)).toEqual(["Claude Code", "Grok Build", "Codex (not installed)"]);
+    expect(agent.value).toBe("codex");
+    const model = el.querySelector<HTMLSelectElement>("select[name=agentModel]")!;
+    expect([...model.options].map((o) => o.value)).toEqual([""]);
   });
 
   it("falls back to Default for a model the agent no longer lists, and to Claude Code before the listing", () => {

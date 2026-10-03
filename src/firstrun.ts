@@ -14,6 +14,8 @@ export interface FirstRunModel {
 export interface FirstRunHandlers {
   onChoose(agent: Harness): void;
   onContinue(): void;
+  /** Closes without saving, after a refused save; Maya asks again next start. */
+  onSkip(): void;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -28,7 +30,11 @@ export function needsFirstRun(config: { agent?: Harness | null }): boolean {
   return config.agent == null;
 }
 
-/** The first-start question. It has no close button: Continue is the only way out. */
+/**
+ * The first-start question. It has no close button: Continue is the way out,
+ * and Skip for now once a save is refused, so a config `set_config` will not
+ * take (a missing projects folder, say) cannot trap the user.
+ */
 export function renderFirstRun(m: FirstRunModel, h: FirstRunHandlers): HTMLElement {
   const root = el("div", "modal");
   root.append(el("div", "modal__backdrop"));
@@ -79,6 +85,14 @@ export function renderFirstRun(m: FirstRunModel, h: FirstRunHandlers): HTMLEleme
     go.addEventListener("click", () => h.onContinue());
     body.append(go);
   }
+  if (m.error) {
+    const skip = el("button", "card__btn", "Skip for now");
+    skip.type = "button";
+    skip.dataset.action = "skip";
+    skip.disabled = m.saving;
+    skip.addEventListener("click", () => h.onSkip());
+    body.append(skip);
+  }
   panel.append(body);
   if (m.error) panel.append(el("div", "modal__status modal__status--error", m.error));
   root.append(panel);
@@ -126,6 +140,10 @@ export async function maybeShowFirstRun(): Promise<void> {
             paint();
           }
         })();
+      },
+      onSkip: () => {
+        host.replaceChildren();
+        resolve();
       },
     };
     paint();

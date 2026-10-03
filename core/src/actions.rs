@@ -452,8 +452,12 @@ pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, 
         store.refresh(now_ms());
         store.live_session_ids()
     };
-    // A clone's folder does not exist yet: the terminal opens in its parent.
+    // A clone's folder does not exist yet: the terminal opens in its parent,
+    // the clones root, made first (a terminal cannot start in a missing folder).
     let cwd = if target.clone { target.dir.parent().map(Path::to_path_buf).unwrap_or_else(|| target.dir.clone()) } else { target.dir.clone() };
+    if target.clone {
+        std::fs::create_dir_all(&cwd).map_err(|e| format!("Could not create the clones folder {}: {e}.", cwd.display()))?;
+    }
     l.terminal.open(&crate::reviews::shell_command(agent, &target, &pr.repo, pr.number, &file, grok_id.as_deref()), &cwd, &tmux_label())?;
     if agent != model::Harness::ClaudeCode {
         let name = crate::reviews::session_name(&pr.repo, pr.number);
@@ -751,8 +755,11 @@ mod tests {
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
         let pr = crate::reviews::ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![] };
+        assert!(!dir.path().join("clones").exists());
         let folder = start_review(&l, &pr).unwrap();
         assert!(folder.ends_with("clones/bedrock-451"), "{folder}");
+        // The terminal opens in the clones root, so it must exist by then.
+        assert!(dir.path().join("clones").is_dir());
         let calls = fake.calls.lock().unwrap();
         let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
         assert!(command.contains("gh repo clone 'Org/bedrock'") && command.ends_with("&& codex -- \"$p\""), "{command}");

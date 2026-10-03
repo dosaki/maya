@@ -8,7 +8,7 @@ import { maybeShowFirstRun, needsFirstRun, renderFirstRun } from "./firstrun";
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const claude = { harness: "claude-code" as const, models: [], efforts: [], modes: [] };
 const codex = { harness: "codex" as const, models: [], efforts: [], modes: [] };
-const handlers = () => ({ onChoose: vi.fn(), onContinue: vi.fn() });
+const handlers = () => ({ onChoose: vi.fn(), onContinue: vi.fn(), onSkip: vi.fn() });
 
 describe("renderFirstRun", () => {
   it("lists the installed agents with the first preselected, and continues", () => {
@@ -24,6 +24,7 @@ describe("renderFirstRun", () => {
     expect(h.onContinue).toHaveBeenCalled();
     expect(el.querySelector(".modal__backdrop")).not.toBeNull();
     expect(el.querySelector("button[data-action=close]")).toBeNull();
+    expect(el.querySelector("button[data-action=skip]")).toBeNull();
   });
 
   it("says when nothing is installed and falls back to Claude Code", () => {
@@ -70,5 +71,32 @@ describe("maybeShowFirstRun", () => {
     await shown;
     expect(invoke).toHaveBeenCalledWith("set_config", { config: expect.objectContaining({ agent: "codex", agentModel: "" }) });
     expect(document.querySelector(".modal")).toBeNull();
+  });
+
+  it("offers Skip for now when the save is refused, which closes without saving", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_config") return Promise.resolve({ completedTimeoutMinutes: 30, projectsDir: "/gone" });
+      if (cmd === "list_agents") return Promise.resolve({ agents: [claude, codex], names: true });
+      if (cmd === "set_config") return Promise.reject("projects folder does not exist: /gone");
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    let done = false;
+    const shown = maybeShowFirstRun().then(() => {
+      done = true;
+    });
+    await flush();
+    await flush();
+    expect(document.querySelector("button[data-action=skip]")).toBeNull();
+    document.querySelector<HTMLButtonElement>("button[data-action=continue]")!.click();
+    await flush();
+    await flush();
+    expect(document.querySelector(".modal__status--error")?.textContent).toContain("projects folder does not exist");
+    const skip = document.querySelector<HTMLButtonElement>("button[data-action=skip]")!;
+    expect(skip.textContent).toBe("Skip for now");
+    expect(done).toBe(false);
+    skip.click();
+    await shown;
+    expect(document.querySelector(".modal")).toBeNull();
+    expect(invoke.mock.calls.filter((c) => c[0] === "set_config")).toHaveLength(1);
   });
 });

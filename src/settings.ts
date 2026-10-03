@@ -137,7 +137,8 @@ export interface SettingsHandlers {
   onListen(on: boolean): void;
   onMicrophone(name: string): void;
   onAgent(agent: Harness): void;
-  onAgentModel(id: string): void;
+  /** Saves the model paired with the agent the Agent select shows. */
+  onAgentModel(agent: Harness, id: string): void;
   onReviewPrompt(text: string): void;
   onRecognizer(r: Recognizer): void;
   onWhisperModel(id: string): void;
@@ -290,7 +291,10 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   root.append(maya, sessions, notifications, assistant, network);
 
   const agents = model.agents.length > 0 ? model.agents : [CLAUDE_AGENT];
-  const chosenAgent = agents.find((a) => a.harness === model.agent) ?? agents[0];
+  // An agent that is chosen but not listed (uninstalled, or the listing has
+  // not landed yet) stays selected, with only its Default model, rather than
+  // the select silently showing another agent.
+  const chosenAgent: AgentInfo = agents.find((a) => a.harness === model.agent) ?? (model.agent ? { harness: model.agent, models: [], efforts: [], modes: [] } : agents[0]);
   const agentLabel = document.createElement("label");
   agentLabel.textContent = "Agent";
   const agentSel = document.createElement("select");
@@ -299,6 +303,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const o = document.createElement("option");
     o.value = a.harness;
     o.textContent = harnessLabel(a.harness);
+    agentSel.append(o);
+  }
+  if (!agents.includes(chosenAgent)) {
+    const o = document.createElement("option");
+    o.value = chosenAgent.harness;
+    o.textContent = harnessLabel(chosenAgent.harness) + (model.agents.length > 0 ? " (not installed)" : "");
     agentSel.append(o);
   }
   agentSel.value = chosenAgent.harness;
@@ -326,7 +336,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     agentModelSel.append(o);
   }
   agentModelSel.value = chosenAgent.models.some((m) => m.id === model.agentModel) ? model.agentModel : "";
-  agentModelSel.addEventListener("change", () => h.onAgentModel(agentModelSel.value));
+  agentModelSel.addEventListener("change", () => h.onAgentModel(agentSel.value as Harness, agentModelSel.value));
   agentModelLabel.append(agentModelSel);
   maya.append(agentModelLabel);
 
@@ -925,14 +935,7 @@ export async function initSettings(): Promise<void> {
     }
   };
 
-  const saveConfig = async (patch: Partial<ConfigJson>) => {
-    // The local model can be stale for fields it doesn't own (e.g. `listen`,
-    // which the voice panel can flip independently), so fetch the freshest
-    // config and merge the patch onto that rather than onto `model`.
-    const fresh = await invoke<ConfigJson>("get_config");
-    const c = await invoke<ConfigJson>("set_config", {
-      config: { ...fresh, ...patch },
-    });
+  const applyConfig = (c: ConfigJson) => {
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
     model.clonesDir = c.clonesDir ?? "";
@@ -948,6 +951,17 @@ export async function initSettings(): Promise<void> {
     model.recognizer = c.recognizer;
     model.whisperModel = c.whisperModel;
     applyNetworkConfig(c);
+  };
+
+  const saveConfig = async (patch: Partial<ConfigJson>) => {
+    // The local model can be stale for fields it doesn't own (e.g. `listen`,
+    // which the voice panel can flip independently), so fetch the freshest
+    // config and merge the patch onto that rather than onto `model`.
+    const fresh = await invoke<ConfigJson>("get_config");
+    const c = await invoke<ConfigJson>("set_config", {
+      config: { ...fresh, ...patch },
+    });
+    applyConfig(c);
   };
 
   const saveNetwork = (patch: Partial<NetworkConfigJson>) =>
@@ -995,7 +1009,7 @@ export async function initSettings(): Promise<void> {
     onListen: (on) => void run(async () => { await invoke("voice_listen", { on }); model.listen = on; }),
     onMicrophone: (name) => void run(() => saveConfig({ microphone: name || null })),
     onAgent: (agent) => void run(() => saveConfig({ agent, agentModel: "" })),
-    onAgentModel: (id) => void run(() => saveConfig({ agentModel: id })),
+    onAgentModel: (agent, id) => void run(() => saveConfig({ agent, agentModel: id })),
     onReviewPrompt: (text) => void run(() => saveConfig({ reviewPrompt: text })),
     onRecognizer: (r) => void run(() => saveConfig({ recognizer: r })),
     onWhisperModel: (id) => void run(() => saveConfig({ whisperModel: id })),
@@ -1093,12 +1107,23 @@ export async function initSettings(): Promise<void> {
   });
 
   // Events that arrive while the tab is hidden update the model only; a
-  // repaint when the tab is shown brings the pane up to date.
+  // repaint when the tab is shown brings the pane up to date. The config is
+  // read again first: others write it too (the first-start modal saves the
+  // agent), and a stale agent here would pair a model with the wrong agent.
   new MutationObserver(() => {
-    if (!panel.hidden && stale) {
-      stale = false;
-      paint();
-    }
+    if (panel.hidden) return;
+    void invoke<ConfigJson>("get_config")
+      .then((c) => {
+        applyConfig(c);
+        stale = true;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!panel.hidden && stale) {
+          stale = false;
+          paint();
+        }
+      });
   }).observe(panel, { attributes: true, attributeFilter: ["hidden"] });
 
   // The pairing code's countdown, and its end. Updated in place: a full
@@ -1127,21 +1152,7 @@ export async function initSettings(): Promise<void> {
     model.focusVisible = await focusVisible;
     model.hookInstalled = installed;
     model.codexHookInstalled = codexInstalled;
-    model.completedTimeoutMinutes = config.completedTimeoutMinutes;
-    model.projectsDir = config.projectsDir ?? "";
-    model.clonesDir = config.clonesDir ?? "";
-    model.notifyOnAwaiting = config.notifyOnAwaiting;
-    model.speakNotifications = config.speakNotifications;
-    model.voiceProvider = config.voiceProvider;
-    model.elevenVoiceId = config.elevenlabsVoiceId ?? "";
-    model.listen = config.listen;
-    model.microphone = config.microphone ?? "";
-    model.agent = config.agent ?? null;
-    model.agentModel = config.agentModel ?? "";
-    model.reviewPrompt = config.reviewPrompt ?? "";
-    model.recognizer = config.recognizer;
-    model.whisperModel = config.whisperModel;
-    applyNetworkConfig(config);
+    applyConfig(config);
     await loadVoices();
     await loadModels();
     try {

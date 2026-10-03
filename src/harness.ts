@@ -59,6 +59,9 @@ export const CAPABILITIES: Record<Harness, Capabilities> = {
   grok: { compact: true, modelSwitch: true, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false },
 };
 
+const NO_CAPABILITIES: Capabilities = { compact: false, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: false, shellLines: false };
+
+/** An agent this build does not know offers no controls, rather than Claude Code's. */
 export function capabilitiesOf(h: Harness): Capabilities {
-  return CAPABILITIES[h] ?? CAPABILITIES["claude-code"];
+  return CAPABILITIES[h] ?? NO_CAPABILITIES;
 }

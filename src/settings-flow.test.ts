@@ -113,6 +113,55 @@ describe("settings flow", () => {
     expect(invoke).toHaveBeenCalledWith("set_config", { config: expect.objectContaining({ agent: "grok", agentModel: "" }) });
   });
 
+  it("picks up the agent the first-start modal saved once Settings is shown, and saves models with it", async () => {
+    let config: Record<string, unknown> = {
+      completedTimeoutMinutes: 30,
+      projectsDir: null,
+      clonesDir: null,
+      notifyOnAwaiting: true,
+      speakNotifications: true,
+      voiceProvider: "builtin",
+      elevenlabsVoiceId: null,
+      listen: false,
+      microphone: null,
+      agent: null,
+      agentModel: "",
+      reviewPrompt: "",
+    };
+    const agents = [
+      { harness: "claude-code" as const, models: [{ id: "opus", label: "Opus", efforts: [] }], efforts: [], modes: [] },
+      { harness: "codex" as const, models: [{ id: "gpt-5.5", label: "gpt-5.5", efforts: [] }], efforts: [], modes: [] },
+    ];
+    invoke.mockImplementation((cmd: string, args?: { config?: Record<string, unknown> }) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "set_config") {
+        config = { ...args!.config };
+        return Promise.resolve({ ...config });
+      }
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents, names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+
+    await initSettings();
+    await flush();
+    // The first-start modal saves the agent through its own set_config.
+    config = { ...config, agent: "codex" };
+    document.getElementById("settings")!.hidden = false;
+    await flush();
+    const agent = document.querySelector<HTMLSelectElement>("select[name=agent]")!;
+    expect(agent.value).toBe("codex");
+    const model = document.querySelector<HTMLSelectElement>("select[name=agentModel]")!;
+    model.value = "gpt-5.5";
+    model.dispatchEvent(new Event("change"));
+    await flush();
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("set_config", { config: expect.objectContaining({ agent: "codex", agentModel: "gpt-5.5" }) });
+  });
+
   it("loads the rest of Settings when the Codex hook status cannot be read", async () => {
     const config = { completedTimeoutMinutes: 42, projectsDir: "/p", clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku" };
     invoke.mockImplementation((cmd: string) => {

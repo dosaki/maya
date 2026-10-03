@@ -107,14 +107,18 @@ fn json_in(text: &str) -> Option<Value> {
 pub fn parse_reply(agent: crate::model::Harness, stdout: &str) -> Result<Reply, String> {
     let text = crate::launch::final_text(agent, stdout)?;
     let r = json_in(&text).ok_or_else(|| format!("no JSON reply in: {}", text.chars().take(120).collect::<String>()))?;
-    Ok(Reply {
+    let reply = Reply {
         say: r["say"].as_str().unwrap_or("").trim().to_string(),
         action: match &r["action"] {
             Value::Null => None,
             a => Some(a.clone()),
         },
         confirm: r["confirm"].as_bool().unwrap_or(false),
-    })
+    };
+    if reply.say.is_empty() && reply.action.is_none() {
+        return Err("reply has no say and no action".into());
+    }
+    Ok(reply)
 }
 
 fn loose(s: &str) -> String {
@@ -517,6 +521,7 @@ mod tests {
     fn garbage_and_failures_are_errors_not_replies() {
         assert!(parse_reply(crate::model::Harness::Grok, "hello").unwrap_err().contains("not JSON"));
         assert!(parse_reply(crate::model::Harness::Grok, r#"{"text":"no json here"}"#).unwrap_err().contains("no JSON reply"));
+        assert_eq!(parse_reply(crate::model::Harness::Grok, r#"{"text":"{}"}"#).unwrap_err(), "reply has no say and no action");
         assert!(parse_reply(crate::model::Harness::ClaudeCode, r#"{"type":"result","is_error":true,"result":"Not logged in"}"#).unwrap_err().contains("Not logged in"));
     }
 
