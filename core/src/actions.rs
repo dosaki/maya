@@ -330,13 +330,13 @@ pub fn list_project_dirs(l: &Local) -> Result<Vec<String>, String> {
     Ok(launch::list_project_dirs(&root))
 }
 
-/// Past sessions of a project folder, newest first, with running ones marked.
-pub fn list_resumable_sessions(l: &Local, dir: &str) -> Result<Vec<resume::ResumableSession>, String> {
-    let (path, claude_dir, running) = {
+/// The agent's past sessions of a project folder, newest first, running ones marked.
+pub fn list_resumable_sessions(l: &Local, agent: model::Harness, dir: &str) -> Result<Vec<resume::ResumableSession>, String> {
+    let (path, dirs, running) = {
         let store = l.store.lock().unwrap();
-        (project_path(&store, dir)?, store.claude_dir().to_path_buf(), store.live_session_ids())
+        (project_path(&store, dir)?, store.agent_dirs(), store.live_session_ids())
     };
-    Ok(resume::list_sessions(&claude_dir, &path.to_string_lossy(), &running))
+    Ok(resume::list_sessions(agent, &dirs, &path.to_string_lossy(), &running))
 }
 
 /// A Codex effort must be one the chosen model takes, or with "Default" one
@@ -410,19 +410,25 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
     Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string(), terminal })
 }
 
-/// Opens a terminal in the folder running `claude --resume <id>`.
-pub fn resume_session(l: &Local, dir: &str, session_id: &str) -> Result<(), String> {
-    let (path, claude_dir, running) = {
+/// Opens a terminal in the folder resuming `session_id` with `agent`. The id
+/// must be one the agent recorded for that folder, so nothing typed or
+/// relayed reaches the shell line unchecked.
+pub fn resume_session(l: &Local, agent: model::Harness, dir: &str, session_id: &str) -> Result<(), String> {
+    if !resume::plain_session_id(session_id) {
+        return Err("No such session in that folder.".into());
+    }
+    let (path, dirs, running) = {
         let store = l.store.lock().unwrap();
-        (project_path(&store, dir)?, store.claude_dir().to_path_buf(), store.live_session_ids())
+        (project_path(&store, dir)?, store.agent_dirs(), store.live_session_ids())
     };
     if running.iter().any(|id| id == session_id) {
         return Err("That session is already running.".into());
     }
-    if !resume::transcript_exists(&claude_dir, &path.to_string_lossy(), session_id) {
+    let known = resume::list_sessions(agent, &dirs, &path.to_string_lossy(), &running);
+    if !known.iter().any(|s| s.id == session_id) {
         return Err("No such session in that folder.".into());
     }
-    l.terminal.open(&resume::resume_command(&path, session_id), &path, &tmux_label()).map(|_| ())
+    l.terminal.open(&resume::resume_command(agent, &path, session_id), &path, &tmux_label()).map(|_| ())
 }
 
 /// Brings the terminal hosting the session forward.
@@ -895,10 +901,29 @@ mod tests {
         let (dir, store) = store_with_projects_and_running(&["proj"], "s1");
         let t = FakeTerminal::default();
         let l = Local { store: &store, terminal: &t };
-        assert_eq!(resume_session(&l, "proj", "s1"), Err("That session is already running.".into()));
-        assert_eq!(resume_session(&l, "proj", "nope"), Err("No such session in that folder.".into()));
+        assert_eq!(resume_session(&l, Harness::ClaudeCode, "proj", "s1"), Err("That session is already running.".into()));
+        assert_eq!(resume_session(&l, Harness::ClaudeCode, "proj", "nope"), Err("No such session in that folder.".into()));
         assert!(t.calls.lock().unwrap().is_empty());
         drop(dir);
+    }
+
+    #[test]
+    fn resume_refuses_ids_the_agent_did_not_record_and_resumes_known_ones() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let grok_dir = dir.path().join("grok");
+        let proj = dir.path().join("projects").join("proj");
+        let folder = grok_dir.join("sessions").join(crate::grok::encode_cwd(&proj.to_string_lossy())).join("g-1");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("summary.json"), r#"{"session_summary":"Probe","updated_at":"2026-10-02T20:24:44.754218Z"}"#).unwrap();
+        let store = Mutex::new(store.into_inner().unwrap().with_agent_dirs(dir.path().join("codex"), dir.path().join("agy"), grok_dir));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(resume_session(&l, Harness::Grok, "proj", "../g-1").unwrap_err(), "No such session in that folder.");
+        assert_eq!(resume_session(&l, Harness::Grok, "proj", "g-9").unwrap_err(), "No such session in that folder.");
+        assert_eq!(resume_session(&l, Harness::Codex, "proj", "g-1").unwrap_err(), "No such session in that folder.", "another agent's id");
+        resume_session(&l, Harness::Grok, "proj", "g-1").unwrap();
+        let calls = fake.calls.lock().unwrap();
+        assert!(matches!(&calls[0], Call::Open { command, .. } if command.ends_with("&& grok -r 'g-1'")), "{calls:?}");
     }
 
     #[test]

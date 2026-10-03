@@ -195,6 +195,14 @@ impl Store {
         self
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_agent_dirs(mut self, codex: PathBuf, agy: PathBuf, grok: PathBuf) -> Self {
+        self.codex_dir = codex;
+        self.agy_dir = agy;
+        self.grok_dir = grok;
+        self
+    }
+
     /// Processes running alongside the ones the store already knows, which
     /// the next refresh discovers as `sessions`: a session started by hand
     /// moments ago that no refresh has looked up yet.
@@ -264,6 +272,11 @@ impl Store {
 
     pub fn claude_dir(&self) -> &Path {
         &self.claude_dir
+    }
+
+    /// Where each agent keeps its sessions.
+    pub fn agent_dirs(&self) -> crate::resume::AgentDirs {
+        crate::resume::AgentDirs { claude: self.claude_dir.clone(), codex: self.codex_dir.clone(), agy: self.agy_dir.clone(), grok: self.grok_dir.clone() }
     }
 
     fn registry(&self) -> Vec<RegistrySession> {

@@ -133,7 +133,8 @@ pub fn thread_name(index: &str, id: &str) -> Option<String> {
         .filter(|n| !n.trim().is_empty())
 }
 
-fn rollout_files(codex_dir: &Path) -> Vec<PathBuf> {
+/// Every rollout file under `sessions/`.
+pub fn rollouts(codex_dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -159,14 +160,24 @@ fn first_line(path: &Path) -> Option<String> {
     Some(line)
 }
 
+/// The thread id and working directory a rollout's `session_meta` records.
+pub fn rollout_meta(path: &Path) -> Option<(String, String)> {
+    let first = first_line(path)?;
+    let v: Value = serde_json::from_str(first.trim()).ok()?;
+    if v["type"].as_str() != Some("session_meta") {
+        return None;
+    }
+    let id = v["payload"]["id"].as_str().or_else(|| v["payload"]["session_id"].as_str())?.to_string();
+    Some((id, v["payload"]["cwd"].as_str()?.to_string()))
+}
+
 /// The rollout of thread `id` and the working directory it records.
 pub fn rollout_for_id(codex_dir: &Path, id: &str) -> Option<(PathBuf, String)> {
     let suffix = format!("-{id}.jsonl");
-    let path = rollout_files(codex_dir).into_iter().find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&suffix)))?;
-    let first = first_line(&path)?;
-    let v: Value = serde_json::from_str(first.trim()).ok()?;
-    let cwd = v["payload"]["cwd"].as_str()?.to_string();
-    Some((path, cwd))
+    rollouts(codex_dir)
+        .into_iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&suffix)))
+        .and_then(|p| rollout_meta(&p).map(|(_, cwd)| (p, cwd)))
 }
 
 /// The thread ids with a writer lock: the live threads.
@@ -183,7 +194,7 @@ pub fn locked_threads(codex_dir: &Path) -> Vec<(String, PathBuf)> {
 /// working directory is `cwd`. Live means a writer lock exists for it.
 pub fn live_rollout_for(codex_dir: &Path, cwd: &str) -> Option<(String, PathBuf)> {
     let locks = codex_dir.join("thread-writer-locks");
-    let mut files = rollout_files(codex_dir);
+    let mut files = rollouts(codex_dir);
     files.sort();
     files.reverse();
     for path in files {

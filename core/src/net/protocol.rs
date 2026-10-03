@@ -86,8 +86,8 @@ pub enum CommandKind {
     CycleMode { session: String },
     Slash { session: String, text: String },
     Start { dir: Option<String>, prompt: String, options: LaunchOptions },
-    Resume { dir: String, session: String },
-    ListResumable { dir: String },
+    Resume { dir: String, session: String, #[serde(default)] agent: crate::model::Harness },
+    ListResumable { dir: String, #[serde(default)] agent: crate::model::Harness },
     History { session: String },
 }
 
@@ -201,6 +201,14 @@ impl Attempts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_without_an_agent_means_claude_code() {
+        let k: CommandKind = serde_json::from_str(r#"{"kind":"resume","dir":"maya","session":"abc"}"#).unwrap();
+        assert_eq!(k, CommandKind::Resume { dir: "maya".into(), session: "abc".into(), agent: crate::model::Harness::ClaudeCode });
+        let k: CommandKind = serde_json::from_str(r#"{"kind":"list_resumable","dir":"maya","agent":"grok"}"#).unwrap();
+        assert_eq!(k, CommandKind::ListResumable { dir: "maya".into(), agent: crate::model::Harness::Grok });
+    }
 
     #[test]
     fn messages_round_trip_with_a_type_tag() {

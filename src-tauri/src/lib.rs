@@ -870,24 +870,28 @@ fn is_local(machine: &Option<String>) -> bool {
     machine.as_deref().is_none_or(str::is_empty)
 }
 
-/// Past sessions of a project folder, newest first, with running ones marked.
+/// Past sessions of a project folder for `agent`, newest first, with running ones marked.
 #[tauri::command(async)]
-fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: String, machine: Option<String>) -> Result<Vec<resume::ResumableSession>, String> {
+fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: String, machine: Option<String>, agent: Option<Harness>) -> Result<Vec<resume::ResumableSession>, String> {
+    let agent = agent.unwrap_or_default();
     if !is_local(&machine) {
         let machine = machine.unwrap();
-        return route_data(&app, &machine, CommandKind::ListResumable { dir });
+        check_remote_agent(agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
+        return route_data(&app, &machine, CommandKind::ListResumable { dir, agent });
     }
-    actions::list_resumable_sessions(&local(&state), &dir)
+    actions::list_resumable_sessions(&local(&state), agent, &dir)
 }
 
-/// Opens a Terminal in the folder running `claude --resume <id>`.
+/// Opens a terminal in the folder resuming the session with `agent`.
 #[tauri::command(async)]
-fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>) -> Result<(), String> {
+fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<(), String> {
+    let agent = agent.unwrap_or_default();
     if !is_local(&machine) {
         let machine = machine.unwrap();
-        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id });
+        check_remote_agent(agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
+        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent });
     }
-    actions::resume_session(&local(&state), &dir, &session_id)
+    actions::resume_session(&local(&state), agent, &dir, &session_id)
 }
 
 #[tauri::command(async)]

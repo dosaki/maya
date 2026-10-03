@@ -203,9 +203,10 @@ fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String,
         }
         "resume" => {
             let dir = action["dir"].as_str().unwrap_or("").to_string();
-            let sessions = list_resumable_sessions(app.clone(), state.clone(), dir.clone(), machine.clone())?;
+            let brain = state.store.lock().unwrap().config.brain();
+            let sessions = list_resumable_sessions(app.clone(), state.clone(), dir.clone(), machine.clone(), Some(brain))?;
             let latest = sessions.into_iter().find(|s| !s.running).ok_or("Nothing to resume there.")?;
-            resume_session(app.clone(), state.clone(), dir, latest.id, machine)?;
+            resume_session(app.clone(), state.clone(), dir, latest.id, machine, Some(brain))?;
             Ok("Resuming.".into())
         }
         "start" => {
