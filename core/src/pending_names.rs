@@ -83,6 +83,11 @@ impl PendingNames {
         self.entries.is_empty()
     }
 
+    /// The names waiting, in no particular order.
+    pub fn names(&self) -> Vec<String> {
+        self.entries.iter().map(|p| p.name.clone()).collect()
+    }
+
     /// Drops the name waiting for `session_id`: the user renamed it themselves.
     pub fn forget(&mut self, session_id: &str) {
         let events = &mut self.events;

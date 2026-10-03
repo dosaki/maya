@@ -360,20 +360,13 @@ fn open_review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Res
     open_in_browser(&pr.url)
 }
 
-/// Opens a Terminal that reviews a listed PR with /should-i-approve, in the
-/// project checkout when it is free, else in a clone under the clones dir.
+/// Opens a terminal that reviews a listed PR with Maya's agent and the
+/// review prompt from Settings, in the project checkout when it is free,
+/// else in a clone under the clones dir.
 #[tauri::command(async)]
 fn review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<String, String> {
     let pr = review_pr_for(&state, &repo, number)?;
-    let (projects, clones, live) = {
-        let store = state.store.lock().unwrap();
-        let live: Vec<String> = store.live_cwds();
-        (store.config.projects_dir_path(), store.config.clones_dir_path(), live)
-    };
-    let projects = projects.ok_or("Set a projects directory in Settings first.")?;
-    let target = reviews::resolve_target(&projects, &clones, &pr.repo, pr.number, &live);
-    term::open_terminal_with(&reviews::shell_command(&target, &pr.repo, pr.number))?;
-    Ok(target.dir.to_string_lossy().into_owned())
+    actions::start_review(&local(&state), &pr)
 }
 
 fn claude_dir() -> std::path::PathBuf {

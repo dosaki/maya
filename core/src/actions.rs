@@ -431,6 +431,37 @@ pub fn resume_session(l: &Local, agent: model::Harness, dir: &str, session_id: &
     l.terminal.open(&resume::resume_command(agent, &path, session_id), &path, &tmux_label()).map(|_| ())
 }
 
+/// Opens a terminal reviewing `pr` with Maya's agent: in the project
+/// checkout when it is free, else in a clone under the clones directory.
+/// Returns the folder. For an agent that takes no name on its command line
+/// the review name waits in the store, as `start_session`'s does.
+pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, String> {
+    let (agent, projects, clones, live, maya_dir, template, agents) = {
+        let store = l.store.lock().unwrap();
+        (store.config.brain(), store.config.projects_dir_path(), store.config.clones_dir_path(), store.live_cwds(), store.claude_dir().join("maya"), store.config.review_prompt.clone(), store.agents_source())
+    };
+    let projects = projects.ok_or("Set a projects directory in Settings first.")?;
+    if agent != model::Harness::ClaudeCode && !agents().iter().any(|a| a.harness == agent) {
+        return Err(format!("{} is not installed on this machine.", launch::label(agent)));
+    }
+    let target = crate::reviews::resolve_target(&projects, &clones, &pr.repo, pr.number, &live);
+    let file = launch::write_prompt_file(&maya_dir, &crate::reviews::render_prompt(&template, pr))?;
+    let grok_id = (agent == model::Harness::Grok).then(launch::new_session_uuid);
+    let known = {
+        let mut store = l.store.lock().unwrap();
+        store.refresh(now_ms());
+        store.live_session_ids()
+    };
+    // A clone's folder does not exist yet: the terminal opens in its parent.
+    let cwd = if target.clone { target.dir.parent().map(Path::to_path_buf).unwrap_or_else(|| target.dir.clone()) } else { target.dir.clone() };
+    l.terminal.open(&crate::reviews::shell_command(agent, &target, &pr.repo, pr.number, &file, grok_id.as_deref()), &cwd, &tmux_label())?;
+    if agent != model::Harness::ClaudeCode {
+        let name = crate::reviews::session_name(&pr.repo, pr.number);
+        l.store.lock().unwrap().add_pending_name(crate::pending_names::PendingName::new(agent, &target.dir.to_string_lossy(), &name, now_ms(), known, grok_id));
+    }
+    Ok(target.dir.to_string_lossy().into_owned())
+}
+
 /// Brings the terminal hosting the session forward.
 pub fn focus_session(l: &Local, session_id: &str) -> Result<(), String> {
     let tty = {
@@ -705,6 +736,42 @@ mod tests {
         assert!(start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap_err().contains("model"));
         assert!(fake.calls.lock().unwrap().is_empty());
         drop(dir);
+    }
+
+    #[test]
+    fn start_review_runs_maya_agent_and_queues_the_review_name() {
+        let (dir, store) = store_with_projects(&["elsewhere"]);
+        {
+            let mut s = store.lock().unwrap();
+            s.config.agent = Some(Harness::Codex);
+            s.config.clones_dir = Some(dir.path().join("clones").to_string_lossy().into_owned());
+            s.config.review_prompt = "/should-i-approve".into();
+        }
+        let store = with_agents(store, vec![agents::claude(), crate::agents::info_for(Harness::Codex, None)]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let pr = crate::reviews::ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![] };
+        let folder = start_review(&l, &pr).unwrap();
+        assert!(folder.ends_with("clones/bedrock-451"), "{folder}");
+        let calls = fake.calls.lock().unwrap();
+        let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
+        assert!(command.contains("gh repo clone 'Org/bedrock'") && command.ends_with("&& codex -- \"$p\""), "{command}");
+        let file = command.split("cat '").nth(1).unwrap().split('\'').next().unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
+        drop(calls);
+        assert!(store.lock().unwrap().has_pending_name_for_test("review bedrock #451"), "the name waits for the Codex session");
+    }
+
+    #[test]
+    fn start_review_refuses_an_agent_that_is_not_installed() {
+        let (_dir, store) = store_with_projects(&["elsewhere"]);
+        store.lock().unwrap().config.agent = Some(Harness::Grok);
+        let store = with_agents(store, vec![agents::claude()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let pr = crate::reviews::ReviewPr { number: 1, repo: "o/r".into(), title: String::new(), author: String::new(), url: "https://github.com/o/r/pull/1".into(), is_draft: false, updated_at: String::new(), reasons: vec![] };
+        assert_eq!(start_review(&l, &pr).unwrap_err(), "Grok Build is not installed on this machine.");
+        assert!(fake.calls.lock().unwrap().is_empty());
     }
 
     #[test]

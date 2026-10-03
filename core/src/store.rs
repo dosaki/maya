@@ -178,6 +178,11 @@ impl Store {
         self.pending.apply(cards, now_ms());
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_pending_name_for_test(&self, name: &str) -> bool {
+        self.pending.names().iter().any(|n| n == name)
+    }
+
     /// Where the installed agents come from; called without the store's lock
     /// held, since the first listing can take seconds.
     pub fn agents_source(&self) -> std::sync::Arc<dyn Fn() -> Vec<crate::agents::AgentInfo> + Send + Sync> {
