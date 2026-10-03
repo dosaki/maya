@@ -43,7 +43,9 @@ impl PendingName {
 /// itself does not exist yet (a review's clone folder, named before `gh
 /// repo clone` creates it), the nearest existing ancestor is canonicalized
 /// and the remaining, not-yet-existing components are rejoined onto it
-/// untouched. None only when no ancestor at all can be canonicalized.
+/// untouched. None when no ancestor below the filesystem root exists: the
+/// root always canonicalizes (on Windows to the current drive, as
+/// `\\?\C:\`), which would rewrite a folder that is simply not there.
 fn physical(dir: &str) -> Option<String> {
     let path = Path::new(dir);
     if let Ok(p) = std::fs::canonicalize(path) {
@@ -53,6 +55,9 @@ fn physical(dir: &str) -> Option<String> {
     let mut cur = path;
     while let Some(parent) = cur.parent() {
         suffix.push(cur.file_name()?.to_os_string());
+        if parent.parent().is_none() {
+            return None;
+        }
         if let Ok(base) = std::fs::canonicalize(parent) {
             let mut out = base;
             for comp in suffix.iter().rev() {
@@ -439,6 +444,16 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_path_whose_only_existing_ancestor_is_the_root_is_left_alone() {
+        // On Windows "/" canonicalizes to the current drive, so resolving
+        // through the root would turn a folder like "/dev/a" into
+        // "\\?\D:\dev\a". A path with no real ancestor is kept as given.
+        assert_eq!(physical("/maya-no-such-dir-xyz/a"), None);
+        let p = PendingName::new(Harness::Codex, "/maya-no-such-dir-xyz/a", "x", 1_000, vec![], None);
+        assert_eq!(p.cwd, "/maya-no-such-dir-xyz/a");
+    }
+
     #[test]
     fn a_not_yet_cloned_folder_behind_a_symlink_is_still_resolved() {
         // A review clone is named before `gh repo clone` creates its folder:

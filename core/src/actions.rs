@@ -757,7 +757,7 @@ mod tests {
         let pr = crate::reviews::ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![] };
         assert!(!dir.path().join("clones").exists());
         let folder = start_review(&l, &pr).unwrap();
-        assert!(folder.ends_with("clones/bedrock-451"), "{folder}");
+        assert!(Path::new(&folder).ends_with(Path::new("clones").join("bedrock-451")), "{folder}");
         // The terminal opens in the clones root, so it must exist by then.
         assert!(dir.path().join("clones").is_dir());
         let calls = fake.calls.lock().unwrap();
@@ -770,7 +770,7 @@ mod tests {
         // The clone folder does not exist yet: its pending cwd must still be
         // resolved physically, through whatever symlink its existing
         // ancestor sits behind (macOS's /tmp, a linked clones directory).
-        let canonical_clone = std::fs::canonicalize(dir.path()).unwrap().join("clones/bedrock-451");
+        let canonical_clone = std::fs::canonicalize(dir.path()).unwrap().join("clones").join("bedrock-451");
         assert_eq!(store.lock().unwrap().pending_cwds_for_test(), vec![canonical_clone.to_string_lossy().into_owned()]);
     }
 
