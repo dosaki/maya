@@ -1,5 +1,6 @@
 //! The agents installed on this machine, and the models each offers, from the
-//! agents' own listings (`codex debug models`, `agy models`, `grok models`).
+//! agents' own listings (`codex debug models`, `agy models`, `grok models`,
+//! `kiro-cli chat --list-models -f json`).
 //! A listing can take seconds (`agy models` asks a server), so the list is
 //! cached for ten minutes and refreshed in the background.
 
@@ -101,6 +102,21 @@ pub fn parse_grok(text: &str) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// Models from `kiro-cli chat --list-models -f json`: `models[].model_id`
+/// with `model_name` as the label.
+pub fn parse_kiro(json: &str) -> Vec<ModelInfo> {
+    let v: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+    v["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let id = m["model_id"].as_str().filter(|id| launch::plain_model_id(id))?;
+            Some(ModelInfo { id: id.to_string(), label: m["model_name"].as_str().unwrap_or(id).to_string(), efforts: vec![] })
+        })
+        .collect()
+}
+
 /// The arguments that make an agent print its models.
 fn listing_args(agent: Harness) -> &'static [&'static str] {
     match agent {
@@ -122,6 +138,7 @@ pub fn info_for(agent: Harness, listing: Option<&str>) -> AgentInfo {
         (Harness::Codex, Some(t)) => parse_codex(t),
         (Harness::Antigravity, Some(t)) => parse_agy(t),
         (Harness::Grok, Some(t)) => parse_grok(t),
+        (Harness::Kiro, Some(t)) => parse_kiro(t),
         _ => vec![],
     };
     // With "Default" chosen the model may be any of them: offer what all take.
@@ -141,7 +158,7 @@ pub fn build(find: impl Fn(&str) -> Option<PathBuf>, run: impl Fn(&Path, &[&str]
     if find("claude").is_some() {
         out.push(claude());
     }
-    for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok] {
+    for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok, Harness::Kiro] {
         let Some(bin) = find(launch::binary_name(agent)) else { continue };
         let listing = run(&bin, listing_args(agent));
         out.push(info_for(agent, listing.as_deref()));
@@ -280,6 +297,25 @@ mod tests {
     }
 
     #[test]
+    fn kiro_models_are_the_listed_ids_with_their_names() {
+        let m = parse_kiro(&fixture("kiro/models.json"));
+        assert_eq!(m.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["auto", "claude-sonnet-4.5", "claude-sonnet-4", "claude-haiku-4.5", "deepseek-3.2", "minimax-m2.5", "minimax-m2.1", "glm-5", "qwen3-coder-next"]);
+        assert_eq!(m[1].label, "claude-sonnet-4.5");
+        assert!(m.iter().all(|m| m.efforts.is_empty()), "Kiro's efforts are one list for every model");
+        assert!(parse_kiro("not json").is_empty());
+        assert!(parse_kiro(r#"{"models":[{"model_id":"a b","model_name":"x"}]}"#).is_empty(), "an id with a space never reaches a shell line");
+    }
+
+    #[test]
+    fn kiro_offers_its_efforts_and_modes_with_or_without_a_listing() {
+        let info = info_for(Harness::Kiro, Some(&fixture("kiro/models.json")));
+        assert_eq!(info.models.len(), 9);
+        assert_eq!(info.efforts, vec!["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(info.modes, vec!["default", "trust-all"]);
+        assert!(info_for(Harness::Kiro, None).models.is_empty());
+    }
+
+    #[test]
     fn codex_default_model_offers_the_efforts_every_model_takes() {
         let info = info_for(Harness::Codex, Some(&fixture("codex/models.json")));
         assert_eq!(info.efforts, vec!["low", "medium", "high", "xhigh"]);
@@ -295,7 +331,7 @@ mod tests {
 
     #[test]
     fn info_without_a_listing_offers_default_only() {
-        for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok] {
+        for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok, Harness::Kiro] {
             let info = info_for(agent, None);
             assert!(info.models.is_empty(), "{agent:?}");
             assert_eq!(info.modes, launch::modes(agent).iter().map(|s| s.to_string()).collect::<Vec<_>>());
@@ -314,19 +350,21 @@ mod tests {
 
     #[test]
     fn build_lists_claude_then_each_agent_it_finds() {
-        let found = |name: &str| matches!(name, "claude" | "codex" | "grok").then(|| PathBuf::from(format!("/bin/{name}")));
+        let found = |name: &str| matches!(name, "claude" | "codex" | "grok" | "kiro-cli").then(|| PathBuf::from(format!("/bin/{name}")));
         let run = |bin: &Path, args: &[&str]| -> Option<String> {
             match (bin.to_str().unwrap(), args) {
                 ("/bin/codex", ["debug", "models"]) => Some(fixture("codex/models.json")),
                 ("/bin/grok", ["models"]) => None,
+                ("/bin/kiro-cli", ["chat", "--list-models", "-f", "json"]) => Some(fixture("kiro/models.json")),
                 other => panic!("unexpected {other:?}"),
             }
         };
         let list = build(found, run);
-        assert_eq!(list.iter().map(|a| a.harness).collect::<Vec<_>>(), vec![Harness::ClaudeCode, Harness::Codex, Harness::Grok]);
+        assert_eq!(list.iter().map(|a| a.harness).collect::<Vec<_>>(), vec![Harness::ClaudeCode, Harness::Codex, Harness::Grok, Harness::Kiro]);
         assert_eq!(list[0], claude());
         assert_eq!(list[1].models.len(), 3);
         assert!(list[2].models.is_empty(), "a failed listing still lists the agent");
+        assert_eq!(list[3].models.len(), 9);
     }
 
     #[test]
