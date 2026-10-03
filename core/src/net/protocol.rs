@@ -56,7 +56,7 @@ pub enum Up {
 /// the whole board and freeze every card from that machine.
 fn known_agents<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<crate::agents::AgentInfo>>, D::Error> {
     let raw: Option<Vec<Value>> = Option::deserialize(d)?;
-    Ok(raw.map(|list| list.into_iter().filter_map(|a| serde_json::from_value(a).ok()).collect()))
+    Ok(raw.map(|list| list.into_iter().filter_map(|a| serde_json::from_value::<crate::agents::AgentInfo>(a).ok()).filter(|a| a.harness != crate::model::Harness::Other).collect()))
 }
 
 /// Main → assistant.

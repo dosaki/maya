@@ -853,7 +853,8 @@ mod tests {
         assert_eq!(all(Harness::Kiro).flags(), " --model m-1 --effort high", "the default mode passes nothing");
         let trust = LaunchOptions { agent: Harness::Kiro, mode: Some("trust-all".into()), ..Default::default() };
         assert_eq!(trust.flags(), " --trust-all-tools");
-        assert_eq!(all(Harness::Other).flags(), "", "an unknown agent gets no flags");
+        let other = LaunchOptions { agent: Harness::Other, model: Some("m-1".into()), effort: Some("high".into()), ..Default::default() };
+        assert_eq!(other.flags(), "", "an unknown agent gets no flags");
     }
 
     #[test]
