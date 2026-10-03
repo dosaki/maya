@@ -28,7 +28,9 @@ describe("settings flow", () => {
       elevenlabsVoiceId: null,
       listen: true,
       microphone: null,
-      agentModel: "haiku",
+      agent: "claude-code",
+      agentModel: "",
+      reviewPrompt: "",
     };
     invoke.mockImplementation((cmd: string, args?: { config?: Record<string, unknown> }) => {
       if (cmd === "codex_hook_status") return Promise.resolve(false);
@@ -40,6 +42,7 @@ describe("settings flow", () => {
       }
       if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
       if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
       return Promise.reject(new Error("unexpected " + cmd));
     });
 
@@ -57,6 +60,51 @@ describe("settings flow", () => {
 
     expect(invoke).toHaveBeenCalledWith("set_config", { config: expect.objectContaining({ completedTimeoutMinutes: 45, listen: false }) });
     expect(document.querySelector<HTMLInputElement>("input[name=timeout]")!.value).toBe("45");
+  });
+
+  it("changing the agent clears its model and saves both", async () => {
+    let config: Record<string, unknown> = {
+      completedTimeoutMinutes: 30,
+      projectsDir: null,
+      clonesDir: null,
+      notifyOnAwaiting: true,
+      speakNotifications: true,
+      voiceProvider: "builtin",
+      elevenlabsVoiceId: null,
+      listen: true,
+      microphone: null,
+      agent: "claude-code",
+      agentModel: "",
+      reviewPrompt: "",
+    };
+    const agents = [
+      { harness: "claude-code" as const, models: [{ id: "opus", label: "Opus", efforts: [] }], efforts: [], modes: [] },
+      { harness: "grok" as const, models: [{ id: "grok-4.7", label: "grok-4.7", efforts: [] }], efforts: [], modes: [] },
+    ];
+    invoke.mockImplementation((cmd: string, args?: { config?: Record<string, unknown> }) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "set_config") {
+        config = { ...args!.config };
+        return Promise.resolve({ ...config });
+      }
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents, names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+
+    document.getElementById("settings")!.hidden = false;
+    await initSettings();
+    await flush();
+    await flush();
+    const agent = document.querySelector<HTMLSelectElement>("select[name=agent]")!;
+    agent.value = "grok";
+    agent.dispatchEvent(new Event("change"));
+    await flush();
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("set_config", { config: expect.objectContaining({ agent: "grok", agentModel: "" }) });
   });
 
   it("loads the rest of Settings when the Codex hook status cannot be read", async () => {

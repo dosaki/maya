@@ -4,6 +4,9 @@ import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, recognizerOptions, secretStore, thisComputerLower } from "./platform";
 import type { Harness } from "./types";
+import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
+import { harnessLabel } from "./harness";
+import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -64,7 +67,14 @@ export interface SettingsModel {
   listen: boolean;
   microphone: string;
   microphones: string[];
-  interpreterModel: string;
+  /** The agent that powers Maya; null until chosen (the first-start modal asks). */
+  agent: Harness | null;
+  /** That agent's model id; "" is the agent's default. */
+  agentModel: string;
+  /** The agents installed on this machine, with their models; empty until listed. */
+  agents: AgentInfo[];
+  /** The review prompt; "" means the built-in one. */
+  reviewPrompt: string;
   /** Why the listener stopped (Dictation off, no microphone…), shown under the toggle. */
   listenError: string | null;
   recognizer: Recognizer;
@@ -126,7 +136,9 @@ export interface SettingsHandlers {
   onTryVoice(): void;
   onListen(on: boolean): void;
   onMicrophone(name: string): void;
-  onInterpreter(model: string): void;
+  onAgent(agent: Harness): void;
+  onAgentModel(id: string): void;
+  onReviewPrompt(text: string): void;
   onRecognizer(r: Recognizer): void;
   onWhisperModel(id: string): void;
   onDownloadModel(id: string): void;
@@ -270,11 +282,53 @@ export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = document.createElement("div");
   root.className = "settings__body";
+  const maya = section("Maya");
   const sessions = section("Sessions");
   const notifications = section("Notifications");
   const assistant = section("Voice assistant");
   const network = section("Network");
-  root.append(sessions, notifications, assistant, network);
+  root.append(maya, sessions, notifications, assistant, network);
+
+  const agents = model.agents.length > 0 ? model.agents : [CLAUDE_AGENT];
+  const chosenAgent = agents.find((a) => a.harness === model.agent) ?? agents[0];
+  const agentLabel = document.createElement("label");
+  agentLabel.textContent = "Agent";
+  const agentSel = document.createElement("select");
+  agentSel.name = "agent";
+  for (const a of agents) {
+    const o = document.createElement("option");
+    o.value = a.harness;
+    o.textContent = harnessLabel(a.harness);
+    agentSel.append(o);
+  }
+  agentSel.value = chosenAgent.harness;
+  agentSel.addEventListener("change", () => h.onAgent(agentSel.value as Harness));
+  agentLabel.append(agentSel);
+  maya.append(agentLabel);
+  const agentHint = document.createElement("div");
+  agentHint.className = "settings__hint";
+  agentHint.dataset.for = "agent";
+  agentHint.textContent = "Interprets your voice commands, picks folders for 'Let Maya choose', and is the default for new and resumed sessions and reviews.";
+  maya.append(agentHint);
+
+  const agentModelLabel = document.createElement("label");
+  agentModelLabel.textContent = "Model";
+  const agentModelSel = document.createElement("select");
+  agentModelSel.name = "agentModel";
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = "Default";
+  agentModelSel.append(def);
+  for (const m of chosenAgent.models) {
+    const o = document.createElement("option");
+    o.value = m.id;
+    o.textContent = m.label;
+    agentModelSel.append(o);
+  }
+  agentModelSel.value = chosenAgent.models.some((m) => m.id === model.agentModel) ? model.agentModel : "";
+  agentModelSel.addEventListener("change", () => h.onAgentModel(agentModelSel.value));
+  agentModelLabel.append(agentModelSel);
+  maya.append(agentModelLabel);
 
   const net = model.network ?? DEFAULT_NETWORK_STATUS;
   const netRole = model.networkRole ?? net.role;
@@ -358,6 +412,22 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   clonesInput.addEventListener("change", () => h.onClonesDir(clonesInput.value.trim()));
   clonesLabel.append(clonesInput);
   sessions.append(clonesLabel);
+
+  const reviewLabel = document.createElement("label");
+  reviewLabel.textContent = "Review prompt (for the Review button)";
+  const reviewInput = document.createElement("textarea");
+  reviewInput.name = "reviewPrompt";
+  reviewInput.rows = 4;
+  reviewInput.placeholder = DEFAULT_REVIEW_PROMPT;
+  reviewInput.value = model.reviewPrompt;
+  reviewInput.addEventListener("change", () => h.onReviewPrompt(reviewInput.value.trim()));
+  reviewLabel.append(reviewInput);
+  sessions.append(reviewLabel);
+  const reviewHint = document.createElement("div");
+  reviewHint.className = "settings__hint";
+  reviewHint.dataset.for = "reviewPrompt";
+  reviewHint.textContent = "Blank uses the built-in prompt. {number}, {repo} and {url} are filled in; a prompt that uses none gets \" PR #<number> (<url>)\" appended.";
+  sessions.append(reviewHint);
 
   const notifyLabel = document.createElement("label");
   notifyLabel.className = "settings__check";
@@ -535,21 +605,6 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   mic.addEventListener("change", () => h.onMicrophone(mic.value));
   micLabel.append(mic);
   assistant.append(micLabel);
-
-  const modelLabel = document.createElement("label");
-  modelLabel.textContent = "Voice interpreter";
-  const modelSel = document.createElement("select");
-  modelSel.name = "interpreterModel";
-  for (const [v, text] of [["haiku", "Haiku (fast)"], ["sonnet", "Sonnet"], ["opus", "Opus"]] as const) {
-    const o = document.createElement("option");
-    o.value = v;
-    o.textContent = text;
-    modelSel.append(o);
-  }
-  modelSel.value = model.interpreterModel;
-  modelSel.addEventListener("change", () => h.onInterpreter(modelSel.value));
-  modelLabel.append(modelSel);
-  assistant.append(modelLabel);
 
   const providerLabel = document.createElement("label");
   providerLabel.textContent = "Voice";
@@ -830,7 +885,10 @@ export async function initSettings(): Promise<void> {
     listen: false,
     microphone: "",
     microphones: [],
-    interpreterModel: "haiku",
+    agent: null,
+    agentModel: "",
+    agents: [],
+    reviewPrompt: "",
     listenError: null,
     recognizer: "system",
     whisperModel: "base.en-q5_1",
@@ -884,7 +942,9 @@ export async function initSettings(): Promise<void> {
     model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
     model.listen = c.listen;
     model.microphone = c.microphone ?? "";
-    model.interpreterModel = c.agentModel ?? "";
+    model.agent = c.agent ?? null;
+    model.agentModel = c.agentModel ?? "";
+    model.reviewPrompt = c.reviewPrompt ?? "";
     model.recognizer = c.recognizer;
     model.whisperModel = c.whisperModel;
     applyNetworkConfig(c);
@@ -934,7 +994,9 @@ export async function initSettings(): Promise<void> {
     onTryVoice: () => void run(() => invoke("try_voice")),
     onListen: (on) => void run(async () => { await invoke("voice_listen", { on }); model.listen = on; }),
     onMicrophone: (name) => void run(() => saveConfig({ microphone: name || null })),
-    onInterpreter: (m) => void run(() => saveConfig({ agentModel: m })),
+    onAgent: (agent) => void run(() => saveConfig({ agent, agentModel: "" })),
+    onAgentModel: (id) => void run(() => saveConfig({ agentModel: id })),
+    onReviewPrompt: (text) => void run(() => saveConfig({ reviewPrompt: text })),
     onRecognizer: (r) => void run(() => saveConfig({ recognizer: r })),
     onWhisperModel: (id) => void run(() => saveConfig({ whisperModel: id })),
     onDownloadModel: (id) => {
@@ -1074,7 +1136,9 @@ export async function initSettings(): Promise<void> {
     model.elevenVoiceId = config.elevenlabsVoiceId ?? "";
     model.listen = config.listen;
     model.microphone = config.microphone ?? "";
-    model.interpreterModel = config.agentModel ?? "";
+    model.agent = config.agent ?? null;
+    model.agentModel = config.agentModel ?? "";
+    model.reviewPrompt = config.reviewPrompt ?? "";
     model.recognizer = config.recognizer;
     model.whisperModel = config.whisperModel;
     applyNetworkConfig(config);
@@ -1094,4 +1158,14 @@ export async function initSettings(): Promise<void> {
       // ignore: an older backend or a stray failure just leaves Network off
     }
   });
+
+  // Listing installed agents can take seconds (it probes each harness), so
+  // it runs after the rest of Settings is already usable rather than inside
+  // the `run` above, which would otherwise block the whole panel on it.
+  void invoke<{ agents: AgentInfo[] }>("list_agents", { machine: "" })
+    .then((r) => {
+      model.agents = r.agents;
+      if (!panel.hidden) paint();
+    })
+    .catch(() => undefined);
 }

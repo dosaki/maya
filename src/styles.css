@@ -59,6 +59,7 @@ body { margin: 0; background: var(--bg); }
 .settings__body { display: flex; flex-direction: column; gap: 10px; }
 .settings label { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .settings input { width: 70px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+.settings textarea { font: inherit; width: 100%; max-width: 640px; resize: vertical; }
 .settings__status { color: var(--muted); font-size: 12.5px; }
 .settings__error { color: #dc2626; font-size: 12.5px; }
 .settings__row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
