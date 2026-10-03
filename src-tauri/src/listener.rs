@@ -211,7 +211,8 @@ fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String,
         "start" => {
             let dir = action["dir"].as_str().unwrap_or("").to_string();
             let prompt = action["prompt"].as_str().unwrap_or("").to_string();
-            start_session(app.clone(), state.clone(), Some(dir), prompt, launch::LaunchOptions::default(), machine)?;
+            let brain = state.store.lock().unwrap().config.brain();
+            start_session(app.clone(), state.clone(), Some(dir), prompt, launch::LaunchOptions { agent: brain, ..Default::default() }, machine)?;
             Ok("Started.".into())
         }
         "review" => {
@@ -303,11 +304,11 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     if !started {
         return;
     }
-    let (dirs_local, model, maya_dir) = {
+    let (dirs_local, brain, model, maya_dir) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
         let dirs_local = store.config.projects_dir_path().map(|r| launch::list_project_dirs(&r)).unwrap_or_default();
-        (dirs_local, store.config.agent_model.clone(), store.claude_dir().join("maya"))
+        (dirs_local, store.config.brain(), store.config.brain_model().map(String::from), store.claude_dir().join("maya"))
     };
     // Cards and remote dirs come from the same merged board `list_sessions`
     // shows, taken after `store` is released (lock order: `store` then `network`).
@@ -323,11 +324,14 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     }
     let prs = app.state::<AppState>().reviews.lock().unwrap().prs.clone();
     let history = recent_exchanges(app);
-    let Some(binary) = launch::claude_binary() else {
-        reply_then_idle(app, generation, "I can't find the claude command.", inbox);
-        return;
+    let binary = match launch::find_binary(brain) {
+        Ok(b) => b,
+        Err(_) => {
+            reply_then_idle(app, generation, &format!("I can't find the {} command.", launch::binary_name(brain)), inbox);
+            return;
+        }
     };
-    let reply = match interpreter::run(&binary, &model, cmd, &cards, &prs, &history, &maya_dir, interpreter::TIMEOUT) {
+    let reply = match interpreter::run(brain, &binary, model.as_deref(), cmd, &cards, &prs, &history, &maya_dir, interpreter::TIMEOUT) {
         Ok(r) => r,
         Err(interpreter::RunError::TimedOut) => {
             reply_then_idle(app, generation, "Sorry, that took too long.", inbox);

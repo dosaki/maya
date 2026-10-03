@@ -329,9 +329,9 @@ fn check_codex_effort(info: &crate::agents::AgentInfo, options: &launch::LaunchO
 }
 
 /// Opens a terminal in a project folder running the chosen agent on
-/// `prompt`. With no `dir`, Claude picks the folder from the prompt. A name
-/// for an agent that takes none on its command line waits in the store for
-/// the new session, to be typed as `/rename` once it is free.
+/// `prompt`. With no `dir`, Maya's agent picks the folder from the prompt. A
+/// name for an agent that takes none on its command line waits in the store
+/// for the new session, to be typed as `/rename` once it is free.
 pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: launch::LaunchOptions) -> Result<StartResult, String> {
     if prompt.trim().is_empty() {
         return Err("Type a prompt first.".into());
@@ -341,18 +341,12 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
         let store = l.store.lock().unwrap();
         (projects_root(&store)?, store.claude_dir().join("maya"), store.agents_source())
     };
-    let label_of = |h: model::Harness| match h {
-        model::Harness::ClaudeCode => "Claude Code",
-        model::Harness::Codex => "Codex",
-        model::Harness::Antigravity => "Antigravity",
-        model::Harness::Grok => "Grok Build",
-    };
     // Claude Code's models are Maya's own fixed list. Listing the agents is
     // only for the others, and can take seconds, so a Claude start skips it.
     let info = if options.agent == model::Harness::ClaudeCode {
         crate::agents::claude()
     } else {
-        agents().into_iter().find(|a| a.harness == options.agent).ok_or_else(|| format!("{} is not installed on this machine.", label_of(options.agent)))?
+        agents().into_iter().find(|a| a.harness == options.agent).ok_or_else(|| format!("{} is not installed on this machine.", launch::label(options.agent)))?
     };
     options.validate(&info.model_ids())?;
     check_codex_effort(&info, &options)?;
@@ -360,8 +354,12 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
     let picked = match dir {
         Some(_) => None,
         None => {
-            let binary = launch::claude_binary().ok_or("Could not find the claude command.")?;
-            launch::classify(&binary, &root, &prompt, &dirs, launch::CLASSIFIER_TIMEOUT)
+            let (brain, model) = {
+                let store = l.store.lock().unwrap();
+                (store.config.brain(), store.config.brain_model().map(String::from))
+            };
+            let binary = launch::find_binary(brain)?;
+            launch::classify(brain, &binary, model.as_deref(), &root, &prompt, &dirs, launch::CLASSIFIER_TIMEOUT)
         }
     };
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
