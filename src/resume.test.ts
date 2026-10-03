@@ -6,8 +6,19 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(
 import { closeResume, openResume, renderResume } from "./resume";
 
 const NOW = Date.parse("2026-09-29T11:00:00Z");
-const handlers = () => ({ onDir: vi.fn(), onResume: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn(), onMachine: vi.fn() });
-const base = { dirs: ["eye", "maya"], dir: null, sessions: [], loading: false, status: null, needsSetup: false, machines: [{ name: "This Mac", value: "" }], machine: "" };
+const handlers = () => ({ onDir: vi.fn(), onResume: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn(), onMachine: vi.fn(), onAgent: vi.fn() });
+const base = {
+  dirs: ["eye", "maya"],
+  dir: null,
+  sessions: [],
+  loading: false,
+  status: null,
+  needsSetup: false,
+  machines: [{ name: "This Mac", value: "" }],
+  machine: "",
+  agents: [{ harness: "claude-code" as const, models: [], efforts: [], modes: [] }],
+  agent: "claude-code" as const,
+};
 const twoMachines = [{ name: "This Mac", value: "" }, { name: "laptop", value: "laptop" }];
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -76,6 +87,19 @@ describe("renderResume", () => {
     el.querySelector<HTMLButtonElement>("button[data-action=resume]")!.click();
     expect(h.onResume).toHaveBeenCalledWith("maya", "a1");
   });
+
+  it("offers an Agent field when the machine has more than one, defaulting to the given agent", () => {
+    const h = handlers();
+    const agents = [{ harness: "claude-code" as const, models: [], efforts: [], modes: [] }, { harness: "codex" as const, models: [], efforts: [], modes: [] }];
+    expect(renderResume(base, h, NOW).querySelector("select[name=agent]")).toBeNull();
+    const el = renderResume({ ...base, agents, agent: "codex" }, h, NOW);
+    const select = el.querySelector<HTMLSelectElement>("select[name=agent]")!;
+    expect([...select.options].map((o) => o.textContent)).toEqual(["Claude Code", "Codex"]);
+    expect(select.value).toBe("codex");
+    select.value = "claude-code";
+    select.dispatchEvent(new Event("change"));
+    expect(h.onAgent).toHaveBeenCalledWith("claude-code");
+  });
 });
 
 describe("resume flow", () => {
@@ -89,6 +113,8 @@ describe("resume flow", () => {
   it("loads directories, then sessions for the chosen one, resumes on click and remembers the directory", async () => {
     invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
       if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "get_config") return Promise.resolve({ agent: null });
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
       if (cmd === "list_project_dirs") return Promise.resolve(["eye", "maya"]);
       if (cmd === "list_resumable_sessions") return Promise.resolve(args.dir === "maya" ? [{ id: "a1", title: "T", lastActiveMs: 1, running: false }] : []);
       if (cmd === "resume_session") return Promise.resolve();
@@ -101,21 +127,23 @@ describe("resume flow", () => {
     select.value = "maya";
     select.dispatchEvent(new Event("change"));
     await flush();
-    expect(invoke).toHaveBeenCalledWith("list_resumable_sessions", { dir: "maya", machine: "" });
+    expect(invoke).toHaveBeenCalledWith("list_resumable_sessions", { dir: "maya", machine: "", agent: "claude-code" });
     const row = document.querySelector<HTMLButtonElement>("button[data-action=resume]")!;
     row.click();
     await flush();
-    expect(invoke).toHaveBeenCalledWith("resume_session", { dir: "maya", sessionId: "a1", machine: "" });
+    expect(invoke).toHaveBeenCalledWith("resume_session", { dir: "maya", sessionId: "a1", machine: "", agent: "claude-code" });
     expect(document.querySelector(".modal")).toBeNull();
     await openResume();
     await flush();
     expect(document.querySelector<HTMLSelectElement>("select[name=dir]")!.value).toBe("maya");
-    expect(invoke).toHaveBeenLastCalledWith("list_resumable_sessions", { dir: "maya", machine: "" });
+    expect(invoke).toHaveBeenLastCalledWith("list_resumable_sessions", { dir: "maya", machine: "", agent: "claude-code" });
   });
 
   it("shows the setup hint when no projects directory is set", async () => {
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "get_config") return Promise.resolve({ agent: null });
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
       return cmd === "list_project_dirs" ? Promise.reject("Set a projects directory in Settings first.") : Promise.reject("x");
     });
     await openResume();
@@ -126,6 +154,8 @@ describe("resume flow", () => {
   it("offers a Machine picker once list_machines reports a connected assistant, and reloads dirs for it", async () => {
     invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
       if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "get_config") return Promise.resolve({ agent: null });
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
       if (cmd === "list_project_dirs") return Promise.resolve(args.machine ? ["remote-proj"] : ["eye", "maya"]);
       if (cmd === "list_resumable_sessions") return Promise.resolve([]);
       return Promise.reject(new Error("unexpected " + cmd));
@@ -137,13 +167,15 @@ describe("resume flow", () => {
     machineSel.value = "laptop";
     machineSel.dispatchEvent(new Event("change"));
     await flush();
-    expect(invoke).toHaveBeenLastCalledWith("list_project_dirs", { machine: "laptop" });
+    expect(invoke).toHaveBeenCalledWith("list_project_dirs", { machine: "laptop" });
     expect([...document.querySelectorAll<HTMLOptionElement>("select[name=dir] option")].map((o) => o.textContent)).toEqual(["Choose a directory…", "remote-proj"]);
   });
 
   it("keeps the Machine picker when this Mac has no projects directory, and lists a chosen assistant's folders", async () => {
     invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
       if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "get_config") return Promise.resolve({ agent: null });
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
       if (cmd === "list_project_dirs") return args.machine ? Promise.resolve(["remote-proj"]) : Promise.reject("Set a projects directory in Settings first.");
       return Promise.reject(new Error("unexpected " + cmd));
     });
@@ -168,6 +200,8 @@ describe("resume flow", () => {
   it("says to set the projects directory on the assistant when a remote machine lists no folders", async () => {
     invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
       if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "get_config") return Promise.resolve({ agent: null });
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
       if (cmd === "list_project_dirs") return Promise.resolve(args.machine ? [] : ["eye"]);
       return Promise.reject(new Error("unexpected " + cmd));
     });
@@ -187,6 +221,8 @@ describe("resume flow", () => {
     let answerLocal: (v: unknown) => void = () => {};
     invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
       if (cmd === "list_machines") return Promise.resolve([{ name: "laptop", hostname: "laptop.local", platform: "macos", connected: true }]);
+      if (cmd === "get_config") return Promise.resolve({ agent: null });
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
       if (cmd === "list_project_dirs") return Promise.resolve(["maya"]);
       if (cmd === "list_resumable_sessions") {
         if (args.machine) return Promise.resolve([{ id: "remote-1", title: "On laptop", lastActiveMs: 1, running: false }]);

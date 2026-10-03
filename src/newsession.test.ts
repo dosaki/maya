@@ -21,10 +21,10 @@ const twoMachines = [{ name: "This Mac", value: "" }, { name: "laptop", value: "
 const defaults = { agent: "claude-code", name: "", model: "", effort: "", mode: "" };
 
 describe("renderNewSession", () => {
-  it("lists Let Claude choose first, then the folders", () => {
+  it("lists Let Maya choose first, then the folders", () => {
     const el = renderNewSession(base, handlers());
     const opts = [...el.querySelectorAll<HTMLOptionElement>("select[name=dir] option")];
-    expect(opts.map((o) => o.textContent)).toEqual(["Let Claude choose", "a", "sonarqube"]);
+    expect(opts.map((o) => o.textContent)).toEqual(["Let Maya choose", "a", "sonarqube"]);
     expect(opts[0].value).toBe("");
   });
 
@@ -139,7 +139,7 @@ describe("renderNewSession", () => {
     expect(h.onStart).not.toHaveBeenCalled();
   });
 
-  it("disables Let Claude choose with a hint when a remote machine is selected", () => {
+  it("disables Let Maya choose with a hint when a remote machine is selected", () => {
     const el = renderNewSession({ ...base, machines: twoMachines, machine: "laptop" }, handlers());
     const auto = el.querySelector<HTMLOptionElement>("select[name=dir] option[value='']")!;
     expect(auto.disabled).toBe(true);
