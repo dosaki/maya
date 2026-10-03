@@ -14,7 +14,7 @@ the right terminal first.
 
 ## What it does
 
-- Shows Claude Code, Codex, Antigravity and Grok Build sessions on one board as cards in a Kanban-like board
+- Shows Claude Code, Codex, Antigravity, Grok Build and Kiro CLI sessions on one board as cards in a Kanban-like board
   - Each session card lands in a column: Idle, Working, Awaiting Decision or Completed
 - Lets you reply, answer questions, and run slash commands and `!` shell lines from the card
 - Starts new sessions and resumes old ones
@@ -34,7 +34,7 @@ Run the commands below, or download Maya manually from the
 
 Requirements:
 
-- One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity or Grok Build, installed and signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
+- One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity, Grok Build or [Kiro CLI](https://kiro.dev/cli), installed and signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
 - The [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`,
   for the Pull Requests tab.
 - macOS on Apple Silicon or Intel (macOS 14 or later for voice).
@@ -235,6 +235,11 @@ quiet.
   trust. (A password-authenticated key exchange would close this gap; this
   version does not have one.) After pairing, each side proves it holds the
   token on every connection; an assistant never obeys a main that cannot.
+- **Versions.** Both machines need 0.11.0 or later to show Kiro sessions:
+  a main on an older release cannot read a card from an agent it does not
+  know, and keeps that machine's last board with an unreadable-board note.
+  From 0.11.0 on, a card from an agent Maya does not know shows as
+  "Unknown agent" instead.
 - **Names and addresses.** The main tells machines apart by their IP
   address; names are only labels, on cards and in what Maya says. Two
   assistants with the same name show as "laptop (192.168.1.20)". A machine
@@ -268,7 +273,7 @@ too, with no desktop and no app: the `maya` command line tool.
 
 - **Requirements.** `claude`, `tmux` and `jq` on the PATH (the hook needs
   `jq`; `maya run` and `maya hooks` warn when it is missing), plus `lsof`
-  and `ps` to find Codex and Antigravity sessions.
+  and `ps` to find Codex, Antigravity and Kiro sessions.
 
 - **Download.** Get the binary for the machine from the
   [latest release](https://github.com/dosaki/maya/releases/latest) and save
@@ -323,8 +328,10 @@ write and drives them through their own interfaces.
 
 - **Sessions** come from the registry Claude Code keeps in
   `~/.claude/sessions/` and the tail of each session transcript. Codex,
-  Antigravity and Grok Build sessions are found through their running
-  processes and their own session files.
+  Antigravity, Grok Build and Kiro CLI sessions are found through their
+  running processes and their own session files. A Kiro session waiting
+  for a tool approval shows as Working with the command it is waiting on:
+  Kiro writes nothing to disk that tells the two apart.
 - **States** come from the hook events in `~/.claude/maya/events.jsonl`
   when the hook is installed, with a rule-based reading of the transcript
   as the fallback (a turn that ends in a question is "Awaiting Decision").
@@ -358,7 +365,9 @@ speech models under `models/`.
 - Without `ps` and `lsof`, Maya finds Antigravity sessions in each `agy`
   process's own log (its pid, workspace and conversation), and Codex
   sessions by which `codex` process holds a thread's writer lock. A new
-  `agy` shows once its first prompt starts a conversation.
+  `agy` shows once its first prompt starts a conversation. Kiro sessions
+  are found as on macOS: each session's lock file names its agent
+  process, and the console is the TUI's.
 - Focus raises the Windows Terminal window hosting a session; when several
   sessions are tabs of one window, pick the tab yourself.
 - The `maya` command line tool drives sessions through tmux, so on Windows
