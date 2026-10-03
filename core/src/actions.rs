@@ -635,7 +635,7 @@ mod tests {
         // A finished turn, no marker: the card is Completed, so free.
         let finished: String = std::fs::read_to_string(fixtures.join("events.jsonl")).unwrap().lines().take(4).map(|l| format!("{l}\n")).collect();
         std::fs::write(sessions.join(format!("{id}.jsonl")), finished).unwrap();
-        let procs = crate::foreign::parse_ps_tree("95245 93903 ttys010\n95295 95245 ttys010\n95441 95295 ttys010\n95508 95441 ??\n");
+        let procs = crate::foreign::parse_ps_tree("95245 93903 ttys010 kiro-cli chat\n95295 95245 ttys010 kiro-cli-chat chat\n95441 95295 ttys010 bun tui.js chat\n95508 95441 ?? kiro-cli-chat acp\n");
         let store = Mutex::new(store.into_inner().unwrap().with_kiro(sessions, t.path().join("no-run"), procs));
         let info = crate::agents::AgentInfo { harness: Harness::Kiro, models: vec![crate::agents::ModelInfo { id: "auto".into(), label: "auto".into(), efforts: vec![] }], efforts: vec!["low".into(), "high".into()], modes: vec![] };
         let store = with_agents(store, vec![agents::claude(), info]);

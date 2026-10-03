@@ -128,12 +128,27 @@ pub fn list_tui_processes() -> Vec<(i32, String, Harness)> {
         .unwrap_or_default()
 }
 
-/// A process with its parent and terminal, from `ps -axo pid=,ppid=,tty=`.
+/// A process with its parent, terminal and program, from
+/// `ps -axo pid=,ppid=,tty=,comm=`. `command` is the program's base name:
+/// `comm` is the executable's path (macOS) or name (Linux) with no
+/// arguments, so a path with spaces in it still ends in the program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proc {
     pub pid: i32,
     pub ppid: i32,
     pub tty: Option<String>,
+    pub command: String,
+}
+
+/// The text after the first `n` whitespace-separated tokens, trimmed.
+fn after_tokens(line: &str, n: usize) -> &str {
+    let mut rest = line;
+    for _ in 0..n {
+        rest = rest.trim_start();
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        rest = &rest[end..];
+    }
+    rest.trim()
 }
 
 pub fn parse_ps_tree(ps: &str) -> Vec<Proc> {
@@ -141,7 +156,11 @@ pub fn parse_ps_tree(ps: &str) -> Vec<Proc> {
         .filter_map(|line| {
             let mut parts = line.split_whitespace();
             let (pid, ppid, tty) = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?, parts.next()?);
-            Some(Proc { pid, ppid, tty: crate::tty::tty_from_ps(tty) })
+            // The program: after the last `/` of its path, up to any argument.
+            let program = after_tokens(line, 3);
+            let base = program.rsplit('/').next().unwrap_or(program);
+            let command = base.split_whitespace().next().unwrap_or("").to_string();
+            Some(Proc { pid, ppid, tty: crate::tty::tty_from_ps(tty), command })
         })
         .collect()
 }
@@ -149,7 +168,7 @@ pub fn parse_ps_tree(ps: &str) -> Vec<Proc> {
 #[cfg(unix)]
 pub fn list_process_tree() -> Vec<Proc> {
     crate::command("ps")
-        .args(["-axo", "pid=,ppid=,tty="])
+        .args(["-axo", "pid=,ppid=,tty=,comm="])
         .stdin(Stdio::null())
         .output()
         .map(|o| parse_ps_tree(&String::from_utf8_lossy(&o.stdout)))
@@ -159,7 +178,11 @@ pub fn list_process_tree() -> Vec<Proc> {
 /// On Windows every process reaches its console by pid, so each one "has a tty".
 #[cfg(windows)]
 pub fn list_process_tree() -> Vec<Proc> {
-    crate::win_process::tree().into_iter().map(|(pid, ppid)| Proc { pid: pid as i32, ppid: ppid as i32, tty: Some(crate::win_console::console_key(pid as i32)) }).collect()
+    let names: std::collections::HashMap<u32, String> = crate::win_process::list().into_iter().collect();
+    crate::win_process::tree()
+        .into_iter()
+        .map(|(pid, ppid)| Proc { pid: pid as i32, ppid: ppid as i32, tty: Some(crate::win_console::console_key(pid as i32)), command: names.get(&pid).cloned().unwrap_or_default() })
+        .collect()
 }
 
 /// The tty of `pid` or of the nearest ancestor that has one, up to six levels.
@@ -175,15 +198,34 @@ pub fn tty_above(procs: &[Proc], pid: i32) -> Option<String> {
     None
 }
 
+/// Whether `pid` or one of its ancestors (up to six levels) is `ancestor`.
+pub fn descends_from(procs: &[Proc], pid: i32, ancestor: i32) -> bool {
+    let mut cur = pid;
+    for _ in 0..6 {
+        if cur == ancestor {
+            return true;
+        }
+        let Some(p) = procs.iter().find(|p| p.pid == cur) else { return false };
+        cur = p.ppid;
+    }
+    false
+}
+
 /// Live Kiro sessions: each lock names its agent process; the session's TUI
 /// is that process's parent, and the terminal is the first one above it.
-/// A lock with no live pid, or none with a terminal above it (a headless
-/// run), is not a session.
-pub fn kiro_sessions(sessions_dir: &std::path::Path, procs: &[Proc]) -> Vec<ForeignSession> {
+/// Not a session: a lock whose pid is gone or now belongs to another program
+/// (Kiro leaves the lock behind after a crash, and pids are reused), one
+/// with no terminal above it (a headless run), and one under `self_pid`
+/// (Maya's own one-shot runs, which inherit Maya's terminal when it has one).
+pub fn kiro_sessions(sessions_dir: &std::path::Path, procs: &[Proc], self_pid: i32) -> Vec<ForeignSession> {
     crate::kiro::locks(sessions_dir)
         .into_iter()
         .filter_map(|lock| {
             let agent = procs.iter().find(|p| p.pid == lock.pid)?;
+            let is_kiro = agent.command.to_ascii_lowercase().starts_with("kiro-cli");
+            if !is_kiro || descends_from(procs, lock.pid, self_pid) {
+                return None;
+            }
             let tui = agent.ppid;
             let tty = tty_above(procs, tui)?;
             let meta = crate::kiro::session_meta(&std::fs::read_to_string(sessions_dir.join(format!("{}.json", lock.session_id))).ok()?)?;
@@ -454,10 +496,12 @@ mod tests {
 
     #[test]
     fn a_process_tree_gives_the_first_tty_above_a_pid() {
-        let ps = "95245 93903 ttys010\n95295 95245 ttys010\n95441 95295 ttys010\n95508 95441 ??\n  777     1 ?\n";
+        let ps = "95245 93903 ttys010 kiro-cli chat\n95295 95245 ttys010 /Users/x/.local/bin/kiro-cli-chat chat\n95441 95295 ttys010 /Users/x/Library/Application Support/kiro-cli/bun --no-env-file tui.js chat\n95508 95441 ?? /Users/x/.local/bin/kiro-cli-chat acp\n  777     1 ? zsh\n";
         let procs = parse_ps_tree(ps);
         assert_eq!(procs.len(), 5);
-        assert_eq!(procs[3], Proc { pid: 95508, ppid: 95441, tty: None });
+        assert_eq!(procs[3], Proc { pid: 95508, ppid: 95441, tty: None, command: "kiro-cli-chat".into() });
+        assert_eq!(procs[2].command, "bun", "the command is the program's base name");
+        assert_eq!(parse_ps_tree("1 0 ??\n")[0].command, "", "no command column is fine");
         assert_eq!(tty_above(&procs, 95508).as_deref(), Some("/dev/ttys010"), "the agent has no tty; its TUI has");
         assert_eq!(tty_above(&procs, 95441).as_deref(), Some("/dev/ttys010"));
         assert_eq!(tty_above(&procs, 777), None);
@@ -477,8 +521,8 @@ mod tests {
         std::fs::write(t.path().join("headless.json"), r#"{"session_id":"headless","cwd":"/p","updated_at":"2026-10-03T12:00:00Z","title":null}"#).unwrap();
         // A lock whose pid is gone.
         std::fs::write(t.path().join("dead.lock"), r#"{"pid":700}"#).unwrap();
-        let procs = parse_ps_tree("95245 93903 ttys010\n95295 95245 ttys010\n95441 95295 ttys010\n95508 95441 ??\n600 599 ??\n599 1 ??\n");
-        let found = kiro_sessions(t.path(), &procs);
+        let procs = parse_ps_tree("95245 93903 ttys010 kiro-cli chat\n95295 95245 ttys010 kiro-cli-chat chat\n95441 95295 ttys010 bun tui.js chat\n95508 95441 ?? kiro-cli-chat acp\n600 599 ?? kiro-cli-chat acp\n599 1 ?? kiro-cli chat\n");
+        let found = kiro_sessions(t.path(), &procs, 0);
         assert_eq!(found.len(), 1, "{found:?}");
         let s = &found[0];
         assert_eq!((s.harness, s.pid, s.tty.as_deref(), s.session_id.as_str(), s.cwd.as_str(), s.name.as_str()), (Harness::Kiro, 95441, Some("/dev/ttys010"), id, "/Users/tiagocorreia", "run ls"));
@@ -493,10 +537,33 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         std::fs::write(t.path().join("n1.lock"), r#"{"pid":50}"#).unwrap();
         std::fs::write(t.path().join("n1.json"), r#"{"session_id":"n1","cwd":"/p","updated_at":"2026-10-03T12:00:00Z","title":null}"#).unwrap();
-        let procs = parse_ps_tree("40 1 ttys001\n50 40 ??\n");
-        let found = kiro_sessions(t.path(), &procs);
+        let procs = parse_ps_tree("40 1 ttys001 bun tui.js chat\n50 40 ?? kiro-cli-chat acp\n");
+        let found = kiro_sessions(t.path(), &procs, 0);
         assert_eq!(found[0].name, "kiro-40");
         assert_eq!(found[0].pid, 40);
+    }
+
+    #[test]
+    fn a_stale_lock_whose_pid_now_belongs_to_another_program_is_not_a_session() {
+        // Kiro leaves its lock behind after a crash; the pid is reused within a day.
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join("s1.lock"), r#"{"pid":50}"#).unwrap();
+        std::fs::write(t.path().join("s1.json"), r#"{"session_id":"s1","cwd":"/p","updated_at":"2026-10-03T12:00:00Z","title":"old"}"#).unwrap();
+        let procs = parse_ps_tree("40 1 ttys001 zsh\n50 40 ?? sleep 90\n");
+        assert!(kiro_sessions(t.path(), &procs, 0).is_empty(), "a sleep is not a Kiro agent");
+        let procs = parse_ps_tree("40 1 ttys001 zsh\n50 40 ?? /Applications/Kiro CLI.app/Contents/MacOS/kiro-cli-chat acp\n");
+        assert_eq!(kiro_sessions(t.path(), &procs, 0).len(), 1);
+    }
+
+    #[test]
+    fn a_lock_under_mayas_own_process_is_not_a_session() {
+        // Maya's one-shot runs (the brain) inherit a tty when Maya itself runs from a terminal.
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join("s1.lock"), r#"{"pid":50}"#).unwrap();
+        std::fs::write(t.path().join("s1.json"), r#"{"session_id":"s1","cwd":"/p","updated_at":"2026-10-03T12:00:00Z","title":null}"#).unwrap();
+        let procs = parse_ps_tree("30 1 ttys001 maya\n40 30 ttys001 kiro-cli chat\n50 40 ttys001 kiro-cli-chat acp\n");
+        assert!(kiro_sessions(t.path(), &procs, 30).is_empty(), "under Maya (pid 30)");
+        assert_eq!(kiro_sessions(t.path(), &procs, 999).len(), 1, "under someone else");
     }
 
     #[test]

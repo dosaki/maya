@@ -271,7 +271,7 @@ impl Store {
             self.foreign.entry(s.pid).and_modify(|e| e.name = s.name.clone()).or_insert(s);
         }
         // Kiro's locks name a pid too, and its title changes with `/rename`.
-        let kiro = foreign::kiro_sessions(&self.kiro_dir, &(self.process_tree)());
+        let kiro = foreign::kiro_sessions(&self.kiro_dir, &(self.process_tree)(), std::process::id() as i32);
         let kiro_pids: std::collections::HashSet<i32> = kiro.iter().map(|s| s.pid).collect();
         self.foreign.retain(|pid, s| s.harness != Harness::Kiro || kiro_pids.contains(pid));
         for s in kiro {
@@ -615,7 +615,7 @@ mod tests {
         }
         std::fs::copy(fixtures.join("marker.json"), run.join("turn-markers/95441-1791030218653.json")).unwrap();
         let alive = crate::kiro::markers(&run)[0].alive_ms;
-        let procs = foreign::parse_ps_tree("95245 93903 ttys010\n95295 95245 ttys010\n95441 95295 ttys010\n95508 95441 ??\n");
+        let procs = foreign::parse_ps_tree("95245 93903 ttys010 kiro-cli chat\n95295 95245 ttys010 kiro-cli-chat chat\n95441 95295 ttys010 bun tui.js chat\n95508 95441 ?? kiro-cli-chat acp\n");
         let mut store = Store::new(dir.path().join("claude")).with_alive(|_| true).with_kiro(sessions, run, procs);
         let now = alive + 500;
         let cards = store.refresh(now);
