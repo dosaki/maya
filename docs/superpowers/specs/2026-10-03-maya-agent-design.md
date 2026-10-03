@@ -1,7 +1,7 @@
 # Choose the agent that powers Maya — design
 
 Date: 2026-10-03
-Status: approved
+Status: implemented
 Builds on: `2026-10-02-maya-choose-agent-design.md` (the agent list, the
 per-agent launch flags and pending names) and
 `2026-09-29-maya-voice-assistant-design.md` (the interpreter).
@@ -64,12 +64,12 @@ Session controls, from each agent's docs and binary:
 | Agent | /compact | /model, /effort | Mode cycle | `/` lines | `!` lines |
 |---|---|---|---|---|---|
 | Claude Code | yes | yes | Shift+Tab | yes | yes |
-| Codex | yes | `/model` only | to probe: `/approvals` or Shift+Tab | yes | to probe |
-| Antigravity | yes | to probe | Shift+Tab (default, accept-edits, plan) | yes | to probe |
-| Grok Build | yes | yes | Shift+Tab (Normal, Plan, Always-approve) | yes | to probe |
+| Codex | yes | `/model` only | no | yes | no |
+| Antigravity | yes | no | Shift+Tab (default, accept-edits, plan) | yes | no |
+| Grok Build | yes | yes | Shift+Tab (Normal, Plan, Always-approve) | yes | no |
 
-The "to probe" cells are settled by a short probe of each TUI at the start
-of implementation, and this table is corrected to what was seen.
+The Codex, Antigravity and Grok Build cells that the probe would have
+settled are at their safe defaults until it runs.
 
 ## Behaviour
 
