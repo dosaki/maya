@@ -40,22 +40,26 @@ pub fn rename_command(name: &str) -> Result<String, String> {
     Ok(format!("/rename {name}"))
 }
 
-/// The longest slash command line the board will type.
+/// The longest command line the board will type.
 pub const MAX_COMMAND_CHARS: usize = 2000;
 
-/// Checks a slash command typed in the composer: one non-blank line that
-/// starts with `/`, with a name after the slash, of at most
-/// `MAX_COMMAND_CHARS` characters. It is typed into the terminal as is.
-pub fn check_slash_command(text: &str) -> Result<String, String> {
+/// Checks a command typed in the composer for the terminal: one non-blank
+/// line of at most `MAX_COMMAND_CHARS` characters that is a `/command`,
+/// with a name right after the slash, or a `!` shell line, with a command
+/// somewhere after the bang. It is typed into the terminal as is.
+pub fn check_terminal_command(text: &str) -> Result<String, String> {
     let line = text.trim();
-    if !line.starts_with('/') {
-        return Err("A command starts with a slash.".into());
+    if !line.starts_with(['/', '!']) {
+        return Err("A command starts with / or !.".into());
     }
     if line.chars().any(|c| c.is_control()) {
         return Err("A command must be one line.".into());
     }
-    if line.len() == 1 || line[1..].starts_with(char::is_whitespace) {
+    if line.starts_with('/') && (line.len() == 1 || line[1..].starts_with(char::is_whitespace)) {
         return Err("The command has no name after the slash.".into());
+    }
+    if line.starts_with('!') && line[1..].trim().is_empty() {
+        return Err("There is no command after the !.".into());
     }
     if line.chars().count() > MAX_COMMAND_CHARS {
         return Err(format!("The command is too long (over {MAX_COMMAND_CHARS} characters)."));
@@ -170,15 +174,26 @@ mod tests {
 
     #[test]
     fn slash_commands_from_the_composer_are_one_named_line() {
-        assert_eq!(check_slash_command("  /compact  "), Ok("/compact".to_string()));
-        assert_eq!(check_slash_command("/review  the diff"), Ok("/review  the diff".to_string()));
-        assert!(check_slash_command("hello").unwrap_err().contains("slash"));
-        assert!(check_slash_command("/").unwrap_err().contains("no name"));
-        assert!(check_slash_command("/ compact").unwrap_err().contains("no name"));
-        assert!(check_slash_command("/compact\nmore").unwrap_err().contains("one line"));
-        assert!(check_slash_command("/x\x1b[B").unwrap_err().contains("one line"));
+        assert_eq!(check_terminal_command("  /compact  "), Ok("/compact".to_string()));
+        assert_eq!(check_terminal_command("/review  the diff"), Ok("/review  the diff".to_string()));
+        assert!(check_terminal_command("hello").unwrap_err().contains("/ or !"));
+        assert!(check_terminal_command("/").unwrap_err().contains("no name"));
+        assert!(check_terminal_command("/ compact").unwrap_err().contains("no name"));
+        assert!(check_terminal_command("/compact\nmore").unwrap_err().contains("one line"));
+        assert!(check_terminal_command("/x\x1b[B").unwrap_err().contains("one line"));
         let long = format!("/{}", "a".repeat(MAX_COMMAND_CHARS));
-        assert!(check_slash_command(&long).unwrap_err().contains("too long"));
+        assert!(check_terminal_command(&long).unwrap_err().contains("too long"));
+    }
+
+    #[test]
+    fn shell_lines_from_the_composer_need_a_command_after_the_bang() {
+        assert_eq!(check_terminal_command("!ls -la"), Ok("!ls -la".to_string()));
+        assert_eq!(check_terminal_command("  ! git status  "), Ok("! git status".to_string()));
+        assert!(check_terminal_command("!").unwrap_err().contains("no command"));
+        assert!(check_terminal_command("!   ").unwrap_err().contains("no command"));
+        assert!(check_terminal_command("!ls\npwd").unwrap_err().contains("one line"));
+        let long = format!("!{}", "a".repeat(MAX_COMMAND_CHARS));
+        assert!(check_terminal_command(&long).unwrap_err().contains("too long"));
     }
 
     #[test]

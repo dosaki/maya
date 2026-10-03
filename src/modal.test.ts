@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isSlashCommand, parsePanelSize, renderModal } from "./modal";
+import { PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -351,9 +351,9 @@ describe("renderModal", () => {
   });
 
   it("types a /command into the terminal instead of sending it as a reply, for Claude Code only", () => {
-    expect(isSlashCommand("  /review")).toBe(true);
-    expect(isSlashCommand("review /x")).toBe(false);
-    expect(isSlashCommand("")).toBe(false);
+    expect(isTerminalCommand("  /review")).toBe(true);
+    expect(isTerminalCommand("review /x")).toBe(false);
+    expect(isTerminalCommand("")).toBe(false);
     const h = handlers();
     const el = renderModal({ card: base, turns: [], status: null, draft: "", attachments: [{ name: "a.png", path: "/a.png" }] }, h);
     expect(el.querySelector<HTMLTextAreaElement>("textarea")!.placeholder).toContain("/command");
@@ -369,6 +369,19 @@ describe("renderModal", () => {
     codex.querySelector<HTMLButtonElement>("button[data-action=send]")!.click();
     expect(h.onSend).toHaveBeenCalledWith("/status");
     expect(h.onCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("types a !shell line into the terminal the same way", () => {
+    expect(isTerminalCommand(" !ls")).toBe(true);
+    expect(isTerminalCommand("ls !")).toBe(false);
+    const h = handlers();
+    const el = renderModal({ card: base, turns: [], status: null, draft: "" }, h);
+    expect(el.querySelector<HTMLTextAreaElement>("textarea")!.placeholder).toContain("!shell");
+    const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
+    ta.value = " ! git status ";
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    expect(h.onCommand).toHaveBeenCalledWith("! git status");
+    expect(h.onSend).not.toHaveBeenCalled();
   });
 
   it("shows the awaiting banner with a terminal button, and a status line", () => {

@@ -36,7 +36,7 @@ export interface ModalHandlers {
   onOpenPr(): void;
   /** Give the session a new name (typed as `/rename`). */
   onRename(name: string): void;
-  /** Type a slash command from the composer into the session's terminal. */
+  /** Type a `/command` or `!` shell line from the composer into the session's terminal. */
   onCommand(text: string): void;
   /** Compact the session's context (typed as `/compact`). */
   onCompact(): void;
@@ -384,9 +384,10 @@ function watchPanelSize(panel: HTMLElement | null): void {
   panelObserver.observe(panel);
 }
 
-/** True when the composer holds a slash command: its first non-blank character is `/`. */
-export function isSlashCommand(text: string): boolean {
-  return text.trimStart().startsWith("/");
+/** True when the composer holds a line for the terminal: a `/command` or a `!` shell line. */
+export function isTerminalCommand(text: string): boolean {
+  const first = text.trimStart()[0];
+  return first === "/" || first === "!";
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -506,14 +507,14 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const form = el("div", "modal__composer");
     const ta = el("textarea", "modal__input");
     ta.placeholder = claude
-      ? `Message this session… (${sendShortcut()} to send, paste or drop files to attach; a /command is typed into its terminal)`
-      : `Message this session… (${sendShortcut()} to send; typed into its terminal as one line)`;
+      ? `Message this session… (${sendShortcut()} to send, paste or drop files to attach; a /command or !shell line is typed into its terminal)`
+      : `Message this session… (${sendShortcut()} to send; typed into its terminal as one line, so /commands and !shell lines run there)`;
     ta.value = m.draft;
     ta.rows = 3;
     const trySend = () => {
-      // A slash command is for Claude Code itself, not a message: it is
-      // typed into the terminal. Other harnesses type every line anyway.
-      if (claude && isSlashCommand(ta.value)) {
+      // A /command or !shell line is for Claude Code itself, not a message:
+      // it is typed into the terminal. Other harnesses type every line anyway.
+      if (claude && isTerminalCommand(ta.value)) {
         h.onCommand(ta.value.trim());
         return;
       }
@@ -773,7 +774,7 @@ const guardedSend = makeSendGuard(async (text: string) => {
   }
 }, composerLock);
 
-/** Types a slash command into the terminal; attachments have nowhere to go with it. */
+/** Types a /command or !shell line into the terminal; attachments have nowhere to go with it. */
 const guardedCommand = makeSendGuard(async (text: string) => {
   if (!current) return;
   const me = current;
