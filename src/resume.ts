@@ -34,6 +34,8 @@ export interface ResumeModel {
   /** The chosen machine's agents, Claude Code first. */
   agents: AgentInfo[];
   agent: Harness;
+  /** Set once `loadAgents` has settled the real agent; a remembered directory waits for it before fetching sessions. */
+  agentReady: boolean;
 }
 
 export interface ResumeHandlers {
@@ -230,8 +232,19 @@ async function loadDirs(machine: string): Promise<void> {
     me.model.needsSetup = machine !== "" && dirs.length === 0;
     const last = rememberedDir();
     if (machine === "" && last && dirs.includes(last)) {
-      await loadSessions(last);
-      return;
+      if (me.model.agentReady) {
+        await loadSessions(last);
+        return;
+      }
+      // The agent isn't settled yet; `loadAgents`'s trailing load fetches
+      // sessions once it is, so the real agent is sent and not "claude-code".
+      me.model.dir = last;
+      me.model.loading = true;
+      try {
+        localStorage.setItem(DIR_KEY, last);
+      } catch {
+        /* nothing to remember */
+      }
     }
   } catch (e) {
     if (current !== me || me.model.machine !== machine) return;
@@ -258,6 +271,7 @@ async function loadAgents(machine: string): Promise<void> {
   if (current !== me || me.model.machine !== machine) return;
   me.model.agents = agents;
   me.model.agent = defaultAgent(agents, brain);
+  me.model.agentReady = true;
   paint();
   if (me.model.dir) await loadSessions(me.model.dir);
 }
@@ -280,6 +294,7 @@ async function chooseMachine(machine: string): Promise<void> {
   current.model.sessions = [];
   current.model.agents = [CLAUDE_AGENT];
   current.model.agent = "claude-code";
+  current.model.agentReady = false;
   paint();
   void loadAgents(machine);
   await loadDirs(machine);
@@ -351,6 +366,7 @@ export async function openResume(): Promise<void> {
       machine: "",
       agents: [CLAUDE_AGENT],
       agent: "claude-code",
+      agentReady: false,
     },
     keyHandler,
   };

@@ -18,6 +18,7 @@ const base = {
   machine: "",
   agents: [{ harness: "claude-code" as const, models: [], efforts: [], modes: [] }],
   agent: "claude-code" as const,
+  agentReady: true,
 };
 const twoMachines = [{ name: "This Mac", value: "" }, { name: "laptop", value: "laptop" }];
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -167,6 +168,7 @@ describe("resume flow", () => {
     machineSel.value = "laptop";
     machineSel.dispatchEvent(new Event("change"));
     await flush();
+    // Not toHaveBeenLastCalledWith: loadAgents's own get_config/list_agents calls race this and may land last.
     expect(invoke).toHaveBeenCalledWith("list_project_dirs", { machine: "laptop" });
     expect([...document.querySelectorAll<HTMLOptionElement>("select[name=dir] option")].map((o) => o.textContent)).toEqual(["Choose a directory…", "remote-proj"]);
   });
@@ -250,5 +252,32 @@ describe("resume flow", () => {
     answerLocal([{ id: "local-1", title: "Here", lastActiveMs: 1, running: false }]);
     await flush();
     expect([...document.querySelectorAll<HTMLButtonElement>("button[data-action=resume]")].map((b) => b.dataset.id)).toEqual(["remote-1"]);
+  });
+
+  it("waits for the agent before fetching a remembered folder's sessions, then fetches them once, under that agent", async () => {
+    let resolveAgents: (v: unknown) => void = () => {};
+    localStorage.setItem("maya.resume.dir", "maya");
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "get_config") return Promise.resolve({ agent: "codex" });
+      // list_agents settles after list_project_dirs, as it would when the backend is slower to answer.
+      if (cmd === "list_agents") return new Promise((r) => (resolveAgents = r));
+      if (cmd === "list_project_dirs") return Promise.resolve(["eye", "maya"]);
+      if (cmd === "list_resumable_sessions") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openResume();
+    await flush();
+    // The remembered folder is known, but not yet fetched: the agent isn't settled.
+    expect(document.querySelector<HTMLSelectElement>("select[name=dir]")!.value).toBe("maya");
+    expect(document.querySelector(".resume__hint")?.textContent).toContain("Loading sessions");
+    expect(invoke.mock.calls.filter((c) => c[0] === "list_resumable_sessions")).toHaveLength(0);
+    const claude = { harness: "claude-code" as const, models: [], efforts: [], modes: [] };
+    const codex = { harness: "codex" as const, models: [], efforts: [], modes: [] };
+    resolveAgents({ agents: [claude, codex], names: true });
+    await flush();
+    const sessionCalls = invoke.mock.calls.filter((c) => c[0] === "list_resumable_sessions");
+    expect(sessionCalls).toHaveLength(1);
+    expect(sessionCalls[0][1]).toEqual({ dir: "maya", machine: "", agent: "codex" });
   });
 });
