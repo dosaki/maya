@@ -515,6 +515,11 @@ mod tests {
             let r = parse_reply(agent, &fixture(file)).unwrap();
             assert_eq!((r.say.as_str(), r.action.is_none(), r.confirm), ("hi", true, false), "{file}");
         }
+        // Kiro's final text is read from its last event; the reply inside is parsed as for every agent.
+        let kiro = "{\"type\":\"runFinished\",\"data\":{\"status\":\"success\",\"finalText\":\"{\\\"say\\\":\\\"hi\\\",\\\"action\\\":null,\\\"confirm\\\":false}\"}}\n";
+        let r = parse_reply(crate::model::Harness::Kiro, kiro).unwrap();
+        assert_eq!((r.say.as_str(), r.action.is_none(), r.confirm), ("hi", true, false));
+        assert!(parse_reply(crate::model::Harness::Kiro, &fixture("kiro.jsonl")).unwrap_err().contains("no JSON reply"), "a plain 'pong' has no reply in it");
     }
 
     #[test]

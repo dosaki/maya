@@ -896,13 +896,16 @@ mod tests {
         assert!(line(&opts(Harness::Codex), None).ends_with("&& codex -- \"$p\""));
         assert!(line(&opts(Harness::Antigravity), None).ends_with("&& agy --prompt-interactive=\"$p\""));
         assert!(line(&opts(Harness::Grok), Some("0b9c-id")).ends_with("&& grok --session-id '0b9c-id' -- \"$p\""));
+        assert!(line(&opts(Harness::Kiro), None).ends_with("&& kiro-cli chat -- \"$p\""));
+        let trusted = LaunchOptions { agent: Harness::Kiro, model: Some("auto".into()), effort: Some("high".into()), mode: Some("trust-all".into()), ..Default::default() };
+        assert!(line(&trusted, None).ends_with("&& kiro-cli chat --model auto --effort high --trust-all-tools -- \"$p\""), "{}", line(&trusted, None));
     }
 
     #[test]
     fn each_agent_takes_a_dash_prompt_as_the_prompt() {
         // The prompt is never in the line itself: it is read from the file into
         // $p, and given after `--`, or as `--flag="$p"` for Go's flag parser.
-        for agent in [Harness::ClaudeCode, Harness::Codex, Harness::Antigravity, Harness::Grok] {
+        for agent in [Harness::ClaudeCode, Harness::Codex, Harness::Antigravity, Harness::Grok, Harness::Kiro] {
             let s = session_command(Path::new("/r"), Path::new("/p/1.txt"), &opts(agent), None);
             assert!(s.ends_with(" -- \"$p\"") || s.ends_with("--prompt-interactive=\"$p\""), "{s}");
         }
@@ -1064,6 +1067,14 @@ mod tests {
         let k = oneshot_args(Harness::Grok, Some("grok-4.7"), Some("SYS"), "USER");
         assert_eq!(&k[..2], ["-p", "USER"]);
         assert!(pair(&k, "--output-format", "json") && pair(&k, "--tools", "") && pair(&k, "--max-turns", "1") && pair(&k, "--permission-mode", "plan") && pair(&k, "-m", "grok-4.7") && pair(&k, "--system-prompt-override", "SYS"));
+
+        let r = oneshot_args(Harness::Kiro, Some("auto"), Some("SYS"), "USER");
+        assert_eq!(&r[..2], ["chat", "--no-interactive"]);
+        assert!(r.contains(&"--trust-tools=".to_string()) && pair(&r, "--output-format", "stream-json") && pair(&r, "--model", "auto"));
+        assert_eq!(r[r.len() - 2], "--");
+        assert_eq!(r.last().unwrap(), "SYS\n\nUSER", "no system flag: the system text leads the prompt");
+        assert!(!oneshot_args(Harness::Kiro, None, None, "U").iter().any(|x| x == "--model"));
+        assert!(oneshot_args(Harness::Other, None, None, "U").is_empty());
     }
 
     #[test]
@@ -1072,6 +1083,7 @@ mod tests {
         assert_eq!(final_text(Harness::Codex, &oneshot_fixture("codex.jsonl")).unwrap(), r#"{"say":"hi","action":null,"confirm":false}"#);
         assert_eq!(final_text(Harness::Antigravity, &oneshot_fixture("agy.json")).unwrap().trim(), r#"{"say":"hi","action":null,"confirm":false}"#);
         assert_eq!(final_text(Harness::Grok, &oneshot_fixture("grok.json")).unwrap(), r#"{"say":"hi","action":null,"confirm":false}"#);
+        assert_eq!(final_text(Harness::Kiro, &oneshot_fixture("kiro.jsonl")).unwrap(), "pong");
     }
 
     #[test]
@@ -1082,6 +1094,10 @@ mod tests {
         assert!(final_text(Harness::Codex, "{\"type\":\"error\",\"message\":\"quota\"}\n").unwrap_err().contains("quota"));
         assert!(final_text(Harness::Antigravity, r#"{"status":"ERROR","response":""}"#).unwrap_err().contains("agy failed"));
         assert!(final_text(Harness::Grok, r#"{"stopReason":"error"}"#).unwrap_err().contains("no text"));
+        assert!(final_text(Harness::Kiro, "{\"type\":\"runStarted\",\"data\":{}}\n{\"type\":\"metadata\",\"data\":{}}\n").unwrap_err().contains("last event: metadata"));
+        assert!(final_text(Harness::Kiro, "{\"type\":\"runFinished\",\"data\":{\"status\":\"error\",\"message\":\"Not logged in\"}}\n").unwrap_err().contains("Not logged in"));
+        assert!(final_text(Harness::Kiro, "").unwrap_err().contains("last event: none"));
+        assert!(final_text(Harness::Other, "{}").unwrap_err().contains("unknown agent"));
     }
 
     #[test]

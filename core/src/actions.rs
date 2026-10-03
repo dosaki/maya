@@ -623,6 +623,34 @@ mod tests {
     }
 
     #[test]
+    fn a_kiro_session_has_no_compact_but_takes_model_effort_and_shell_lines() {
+        let (t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        let sessions = t.path().join("kiro");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kiro");
+        let id = "efcba1da-5c0b-4b39-96f9-9a4740ead331";
+        for (from, to) in [("lock.json", "lock"), ("session.json", "json")] {
+            std::fs::copy(fixtures.join(from), sessions.join(format!("{id}.{to}"))).unwrap();
+        }
+        // A finished turn, no marker: the card is Completed, so free.
+        let finished: String = std::fs::read_to_string(fixtures.join("events.jsonl")).unwrap().lines().take(4).map(|l| format!("{l}\n")).collect();
+        std::fs::write(sessions.join(format!("{id}.jsonl")), finished).unwrap();
+        let procs = crate::foreign::parse_ps_tree("95245 93903 ttys010\n95295 95245 ttys010\n95441 95295 ttys010\n95508 95441 ??\n");
+        let store = Mutex::new(store.into_inner().unwrap().with_kiro(sessions, t.path().join("no-run"), procs));
+        let info = crate::agents::AgentInfo { harness: Harness::Kiro, models: vec![crate::agents::ModelInfo { id: "auto".into(), label: "auto".into(), efforts: vec![] }], efforts: vec!["low".into(), "high".into()], modes: vec![] };
+        let store = with_agents(store, vec![agents::claude(), info]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
+        assert_eq!(compact_session(&l, id).unwrap_err(), "Kiro CLI has no /compact.");
+        set_session_option(&l, id, "model", "auto").unwrap();
+        set_session_option(&l, id, "effort", "high").unwrap();
+        send_slash_command(&l, id, "!ls").unwrap();
+        let typed: Vec<String> = fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Type { tty, text } if tty == "/dev/ttys010" => Some(text.clone()), _ => None }).collect();
+        assert_eq!(typed, vec!["/model auto", "/effort high", "!ls"]);
+    }
+
+    #[test]
     fn a_model_switch_is_checked_against_the_agents_own_list() {
         let (t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
         // A Grok session whose last turn has ended, so the card is free. Grok's
