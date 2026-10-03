@@ -128,6 +128,71 @@ pub fn list_tui_processes() -> Vec<(i32, String, Harness)> {
         .unwrap_or_default()
 }
 
+/// A process with its parent and terminal, from `ps -axo pid=,ppid=,tty=`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proc {
+    pub pid: i32,
+    pub ppid: i32,
+    pub tty: Option<String>,
+}
+
+pub fn parse_ps_tree(ps: &str) -> Vec<Proc> {
+    ps.lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let (pid, ppid, tty) = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?, parts.next()?);
+            Some(Proc { pid, ppid, tty: crate::tty::tty_from_ps(tty) })
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+pub fn list_process_tree() -> Vec<Proc> {
+    crate::command("ps")
+        .args(["-axo", "pid=,ppid=,tty="])
+        .stdin(Stdio::null())
+        .output()
+        .map(|o| parse_ps_tree(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
+}
+
+/// On Windows every process reaches its console by pid, so each one "has a tty".
+#[cfg(windows)]
+pub fn list_process_tree() -> Vec<Proc> {
+    crate::win_process::tree().into_iter().map(|(pid, ppid)| Proc { pid: pid as i32, ppid: ppid as i32, tty: Some(crate::win_console::console_key(pid as i32)) }).collect()
+}
+
+/// The tty of `pid` or of the nearest ancestor that has one, up to six levels.
+pub fn tty_above(procs: &[Proc], pid: i32) -> Option<String> {
+    let mut cur = pid;
+    for _ in 0..6 {
+        let p = procs.iter().find(|p| p.pid == cur)?;
+        if let Some(t) = &p.tty {
+            return Some(t.clone());
+        }
+        cur = p.ppid;
+    }
+    None
+}
+
+/// Live Kiro sessions: each lock names its agent process; the session's TUI
+/// is that process's parent, and the terminal is the first one above it.
+/// A lock with no live pid, or none with a terminal above it (a headless
+/// run), is not a session.
+pub fn kiro_sessions(sessions_dir: &std::path::Path, procs: &[Proc]) -> Vec<ForeignSession> {
+    crate::kiro::locks(sessions_dir)
+        .into_iter()
+        .filter_map(|lock| {
+            let agent = procs.iter().find(|p| p.pid == lock.pid)?;
+            let tui = agent.ppid;
+            let tty = tty_above(procs, tui)?;
+            let meta = crate::kiro::session_meta(&std::fs::read_to_string(sessions_dir.join(format!("{}.json", lock.session_id))).ok()?)?;
+            let name = meta.title.unwrap_or_else(|| format!("kiro-{tui}"));
+            Some(ForeignSession { harness: Harness::Kiro, pid: tui, tty: Some(tty), session_id: lock.session_id.clone(), cwd: meta.cwd, name, transcript_path: sessions_dir.join(format!("{}.jsonl", lock.session_id)) })
+        })
+        .collect()
+}
+
 /// What `lsof -p <pid> -Fn` reveals: the working directory and open paths.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ProcInfo {
@@ -193,7 +258,8 @@ pub fn tail_for(s: &ForeignSession) -> ForeignTail {
         Harness::Codex => crate::codex::parse_tail(&tail_of(&s.transcript_path, crate::transcript::TAIL_BYTES)),
         Harness::Antigravity => crate::antigravity::parse_tail(&tail_of(&s.transcript_path, crate::transcript::TAIL_BYTES)),
         Harness::Grok => crate::grok::tail_for_dir(s.transcript_path.parent().unwrap_or(&s.transcript_path)),
-        Harness::ClaudeCode | Harness::Kiro | Harness::Other => ForeignTail::default(),
+        Harness::Kiro => crate::kiro::parse_events(&tail_of(&s.transcript_path, crate::transcript::TAIL_BYTES)),
+        Harness::ClaudeCode | Harness::Other => ForeignTail::default(),
     }
 }
 
@@ -204,7 +270,8 @@ pub fn turns_for(s: &ForeignSession, max_turns: usize) -> Vec<crate::transcript:
         Harness::Codex => crate::codex::parse_turns(&tail_of(&s.transcript_path, big), max_turns),
         Harness::Antigravity => crate::antigravity::parse_turns(&tail_of(&s.transcript_path, big), max_turns),
         Harness::Grok => crate::grok::parse_turns(&tail_of(&s.transcript_path.with_file_name("chat_history.jsonl"), big), max_turns),
-        Harness::ClaudeCode | Harness::Kiro | Harness::Other => vec![],
+        Harness::Kiro => crate::kiro::parse_turns(&tail_of(&s.transcript_path, big), max_turns),
+        Harness::ClaudeCode | Harness::Other => vec![],
     }
 }
 
@@ -383,6 +450,53 @@ mod tests {
         );
         let found = tui_processes(ps);
         assert_eq!(found, vec![(39566, "/dev/ttys002".to_string(), Harness::Codex), (76468, "/dev/ttys023".to_string(), Harness::Antigravity), (76470, "/dev/ttys024".to_string(), Harness::Antigravity), (123, "/dev/ttys001".to_string(), Harness::Codex)]);
+    }
+
+    #[test]
+    fn a_process_tree_gives_the_first_tty_above_a_pid() {
+        let ps = "95245 93903 ttys010\n95295 95245 ttys010\n95441 95295 ttys010\n95508 95441 ??\n  777     1 ?\n";
+        let procs = parse_ps_tree(ps);
+        assert_eq!(procs.len(), 5);
+        assert_eq!(procs[3], Proc { pid: 95508, ppid: 95441, tty: None });
+        assert_eq!(tty_above(&procs, 95508).as_deref(), Some("/dev/ttys010"), "the agent has no tty; its TUI has");
+        assert_eq!(tty_above(&procs, 95441).as_deref(), Some("/dev/ttys010"));
+        assert_eq!(tty_above(&procs, 777), None);
+        assert_eq!(tty_above(&procs, 1), None, "an unknown pid has no tty");
+    }
+
+    #[test]
+    fn kiro_sessions_come_from_live_locks_with_a_terminal_above_them() {
+        let t = tempfile::tempdir().unwrap();
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kiro");
+        let id = "efcba1da-5c0b-4b39-96f9-9a4740ead331";
+        std::fs::copy(fixtures.join("lock.json"), t.path().join(format!("{id}.lock"))).unwrap();
+        std::fs::copy(fixtures.join("session.json"), t.path().join(format!("{id}.json"))).unwrap();
+        std::fs::copy(fixtures.join("events.jsonl"), t.path().join(format!("{id}.jsonl"))).unwrap();
+        // A headless run: alive, but nothing above it has a tty.
+        std::fs::write(t.path().join("headless.lock"), r#"{"pid":600}"#).unwrap();
+        std::fs::write(t.path().join("headless.json"), r#"{"session_id":"headless","cwd":"/p","updated_at":"2026-10-03T12:00:00Z","title":null}"#).unwrap();
+        // A lock whose pid is gone.
+        std::fs::write(t.path().join("dead.lock"), r#"{"pid":700}"#).unwrap();
+        let procs = parse_ps_tree("95245 93903 ttys010\n95295 95245 ttys010\n95441 95295 ttys010\n95508 95441 ??\n600 599 ??\n599 1 ??\n");
+        let found = kiro_sessions(t.path(), &procs);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let s = &found[0];
+        assert_eq!((s.harness, s.pid, s.tty.as_deref(), s.session_id.as_str(), s.cwd.as_str(), s.name.as_str()), (Harness::Kiro, 95441, Some("/dev/ttys010"), id, "/Users/tiagocorreia", "run ls"));
+        assert_eq!(s.transcript_path, t.path().join(format!("{id}.jsonl")));
+        let tail = tail_for(s);
+        assert_eq!(tail.last_agent_text.as_deref(), Some("shell: mkdir -p /tmp/kiro-probe && sleep 90"));
+        assert_eq!(turns_for(s, 10).len(), 5);
+    }
+
+    #[test]
+    fn an_untitled_kiro_session_is_named_after_its_tui_pid() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join("n1.lock"), r#"{"pid":50}"#).unwrap();
+        std::fs::write(t.path().join("n1.json"), r#"{"session_id":"n1","cwd":"/p","updated_at":"2026-10-03T12:00:00Z","title":null}"#).unwrap();
+        let procs = parse_ps_tree("40 1 ttys001\n50 40 ??\n");
+        let found = kiro_sessions(t.path(), &procs);
+        assert_eq!(found[0].name, "kiro-40");
+        assert_eq!(found[0].pid, 40);
     }
 
     #[test]

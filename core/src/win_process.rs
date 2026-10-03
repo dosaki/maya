@@ -27,6 +27,28 @@ pub fn list() -> Vec<(u32, String)> {
     out
 }
 
+/// `(pid, parent pid)` of every running process.
+pub fn tree() -> Vec<(u32, u32)> {
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    let mut out = Vec::new();
+    // SAFETY: as in `list`: a snapshot walked with a correctly sized entry, then closed.
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return out;
+        }
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut ok = Process32FirstW(snap, &mut e) != 0;
+        while ok {
+            out.push((e.th32ProcessID, e.th32ParentProcessID));
+            ok = Process32NextW(snap, &mut e) != 0;
+        }
+        CloseHandle(snap);
+    }
+    out
+}
+
 /// Pids of the processes that have `path` open, per the Restart Manager.
 pub fn holders(path: &std::path::Path) -> Vec<u32> {
     use std::os::windows::ffi::OsStrExt;
