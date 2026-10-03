@@ -254,6 +254,36 @@ describe("resume flow", () => {
     expect([...document.querySelectorAll<HTMLButtonElement>("button[data-action=resume]")].map((b) => b.dataset.id)).toEqual(["remote-1"]);
   });
 
+  it("defers a folder picked by hand until the agent is known, then fetches once under it", async () => {
+    localStorage.clear();
+    let settle: (v: { agents: unknown[]; names: boolean }) => void = () => {};
+    const listing = new Promise<{ agents: unknown[]; names: boolean }>((r) => { settle = r; });
+    const codex = { harness: "codex", models: [], efforts: [], modes: [] };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["maya"]);
+      if (cmd === "list_agents") return listing;
+      if (cmd === "get_config") return Promise.resolve({ agent: "codex" });
+      if (cmd === "list_resumable_sessions") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openResume();
+    await flush();
+    const dir = document.querySelector<HTMLSelectElement>("select[name=dir]")!;
+    dir.value = "maya";
+    dir.dispatchEvent(new Event("change"));
+    await flush();
+    expect(invoke.mock.calls.filter((c) => c[0] === "list_resumable_sessions")).toHaveLength(0);
+    expect(document.querySelector(".resume__hint")?.textContent).toContain("Loading");
+    settle({ agents: [{ harness: "claude-code", models: [], efforts: [], modes: [] }, codex], names: true });
+    await flush();
+    await flush();
+    const calls = invoke.mock.calls.filter((c) => c[0] === "list_resumable_sessions");
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]).toEqual({ dir: "maya", machine: "", agent: "codex" });
+    closeResume();
+  });
+
   it("waits for the agent before fetching a remembered folder's sessions, then fetches them once, under that agent", async () => {
     let resolveAgents: (v: unknown) => void = () => {};
     localStorage.setItem("maya.resume.dir", "maya");

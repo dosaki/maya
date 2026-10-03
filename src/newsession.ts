@@ -104,6 +104,8 @@ export interface NewSessionModel {
   agent: Harness;
   /** The machine's Maya takes names (an older one does not). */
   names: boolean;
+  /** The machine's agent listing has landed: until then Start waits, so a prompt cannot run under a provisional agent. */
+  agentsLoaded: boolean;
   name: string;
 }
 
@@ -280,8 +282,9 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   const start = el("button", "card__btn card__btn--primary", m.busy ? "Starting…" : "Start");
   start.type = "button";
   start.dataset.action = "start";
+  if (!m.agentsLoaded) start.title = "Finding the agents on this machine…";
   const sync = () => {
-    start.disabled = m.busy || ta.value.trim() === "" || (remoteMachine && select.value === "");
+    start.disabled = m.busy || !m.agentsLoaded || ta.value.trim() === "" || (remoteMachine && select.value === "");
   };
   const tryStart = () => {
     if (start.disabled) return;
@@ -444,6 +447,7 @@ async function loadAgents(machine: string): Promise<void> {
   if (current !== me || me.model.machine !== machine) return;
   me.model.agent = wanted;
   me.model.options = optionsFor(wanted);
+  me.model.agentsLoaded = true;
   repaint();
 }
 
@@ -461,6 +465,7 @@ async function chooseMachine(machine: string): Promise<void> {
   m.agents = [CLAUDE_AGENT];
   m.agent = "claude-code";
   m.names = machine === "";
+  m.agentsLoaded = false;
   m.options = optionsFor("claude-code");
   repaint();
   void loadAgents(machine);
@@ -527,6 +532,7 @@ export async function openNewSession(): Promise<void> {
       agents: [CLAUDE_AGENT],
       agent: "claude-code",
       names: true,
+      agentsLoaded: false,
       name: draftName,
     },
     keyHandler,

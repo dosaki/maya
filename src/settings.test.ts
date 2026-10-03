@@ -99,6 +99,17 @@ describe("renderSettings", () => {
     expect([...model.options].map((o) => o.value)).toEqual([""]);
   });
 
+  it("disables the Model select the moment the Agent changes, until the repaint brings the new list", () => {
+    const h = handlers();
+    const el = renderSettings({ ...voiceBase, agents, agent: "grok", agentModel: "grok-4.7" }, h);
+    const agent = el.querySelector<HTMLSelectElement>("select[name=agent]")!;
+    const model = el.querySelector<HTMLSelectElement>("select[name=agentModel]")!;
+    expect(model.disabled).toBe(false);
+    agent.value = "claude-code";
+    agent.dispatchEvent(new Event("change"));
+    expect(model.disabled).toBe(true);
+  });
+
   it("falls back to Default for a model the agent no longer lists, and to Claude Code before the listing", () => {
     const el = renderSettings({ ...voiceBase, agents, agent: "grok", agentModel: "grok-9" }, handlers());
     expect(el.querySelector<HTMLSelectElement>("select[name=agentModel]")!.value).toBe("");

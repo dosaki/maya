@@ -312,7 +312,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     agentSel.append(o);
   }
   agentSel.value = chosenAgent.harness;
-  agentSel.addEventListener("change", () => h.onAgent(agentSel.value as Harness));
+  agentSel.addEventListener("change", () => {
+    // The old agent's models stay on screen until the save repaints; a pick
+    // in that window would pair the new agent with one of them.
+    agentModelSel.disabled = true;
+    h.onAgent(agentSel.value as Harness);
+  });
   agentLabel.append(agentSel);
   maya.append(agentLabel);
   const agentHint = document.createElement("div");

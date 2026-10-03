@@ -15,12 +15,24 @@ const base: NewSessionModel = {
   agents: [CLAUDE_AGENT],
   agent: "claude-code",
   names: true,
+  agentsLoaded: true,
   name: "",
 };
 const twoMachines = [{ name: "This Mac", value: "" }, { name: "laptop", value: "laptop" }];
 const defaults = { agent: "claude-code", name: "", model: "", effort: "", mode: "" };
 
 describe("renderNewSession", () => {
+  it("keeps Start disabled until the machine's agents are listed", () => {
+    const h = handlers();
+    const waiting = renderNewSession({ ...base, prompt: "fix the build", agentsLoaded: false }, h);
+    const start = waiting.querySelector<HTMLButtonElement>("button[data-action=start]")!;
+    expect(start.disabled).toBe(true);
+    start.click();
+    expect(h.onStart).not.toHaveBeenCalled();
+    const ready = renderNewSession({ ...base, prompt: "fix the build" }, h);
+    expect(ready.querySelector<HTMLButtonElement>("button[data-action=start]")!.disabled).toBe(false);
+  });
+
   it("lists Let Maya choose first, then the folders", () => {
     const el = renderNewSession(base, handlers());
     const opts = [...el.querySelectorAll<HTMLOptionElement>("select[name=dir] option")];

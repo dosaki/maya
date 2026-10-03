@@ -232,19 +232,8 @@ async function loadDirs(machine: string): Promise<void> {
     me.model.needsSetup = machine !== "" && dirs.length === 0;
     const last = rememberedDir();
     if (machine === "" && last && dirs.includes(last)) {
-      if (me.model.agentReady) {
-        await loadSessions(last);
-        return;
-      }
-      // The agent isn't settled yet; `loadAgents`'s trailing load fetches
-      // sessions once it is, so the real agent is sent and not "claude-code".
-      me.model.dir = last;
-      me.model.loading = true;
-      try {
-        localStorage.setItem(DIR_KEY, last);
-      } catch {
-        /* nothing to remember */
-      }
+      await loadSessions(last);
+      return;
     }
   } catch (e) {
     if (current !== me || me.model.machine !== machine) return;
@@ -300,6 +289,12 @@ async function chooseMachine(machine: string): Promise<void> {
   await loadDirs(machine);
 }
 
+/**
+ * Shows the folder's sessions. Until the machine's agent listing has
+ * settled the agent, the folder is only shown as loading: `loadAgents`'s
+ * trailing load fetches once the real agent is known, so no list is ever
+ * fetched under the provisional "claude-code".
+ */
 async function loadSessions(dir: string): Promise<void> {
   if (!current) return;
   const me = current;
@@ -316,6 +311,7 @@ async function loadSessions(dir: string): Promise<void> {
     }
   }
   paint();
+  if (!me.model.agentReady) return;
   try {
     const sessions = await invoke<ResumableSession[]>("list_resumable_sessions", { dir, machine, agent });
     // A late answer for another folder, machine or agent (the same folder name can exist on both) is dropped.
