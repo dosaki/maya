@@ -16,7 +16,7 @@ the right terminal first.
 
 - Shows Claude Code, Codex, Antigravity and Grok Build sessions on one board as cards in a Kanban-like board
   - Each session card lands in a column: Idle, Working, Awaiting Decision or Completed
-- Lets you reply, answer questions and run slash commands from the card
+- Lets you reply, answer questions, and run slash commands and `!` shell lines from the card
 - Starts new sessions and resumes old ones
 - Tells you when a session needs you
   - Using built-in notifications, and/or a voice and/or a Dock badge
@@ -140,9 +140,9 @@ What is different on Linux:
 
 - **Sessions run in tmux.** A session Maya starts or resumes runs in a
   tmux session (`maya-<8 hex>`) shown in a terminal window, and Maya
-  types answers and slash commands into it through tmux. A session you
-  started by hand outside tmux is on the board and takes replies, but
-  Maya cannot type into it and its card has no Terminal button.
+  types answers, slash commands and `!` shell lines into it through tmux.
+  A session you started by hand outside tmux is on the board and takes
+  replies, but Maya cannot type into it and its card has no Terminal button.
 - **The Terminal button.** On X11 it raises the window Maya opened
   (with `wmctrl` installed; without it, it opens a new one). On
   GNOME's Wayland, which lets no other app raise a window, it opens a

@@ -847,7 +847,7 @@ fn close_session(app: AppHandle, state: TauriState<AppState>, session_id: String
     actions::close_session(&local(&state), &session_id)
 }
 
-/// Types a slash command from the composer into the session's terminal.
+/// Types a `/command` or `!` shell line from the composer into the session's terminal.
 #[tauri::command(async)]
 fn send_slash_command(app: AppHandle, state: TauriState<AppState>, session_id: String, text: String) -> Result<(), String> {
     if let Some(machine) = remote_machine_of(&state, &session_id) {
