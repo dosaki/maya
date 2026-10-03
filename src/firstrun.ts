@@ -132,6 +132,8 @@ export async function maybeShowFirstRun(): Promise<void> {
             const fresh = await invoke<ConfigLike>("get_config");
             const agentModel = model.chosen === "claude-code" ? (fresh.agentModel ?? "") : "";
             await invoke("set_config", { config: { ...fresh, agent: model.chosen, agentModel } });
+            // Settings may already be showing, with the config read before this save.
+            window.dispatchEvent(new CustomEvent("maya:config-changed"));
             host.replaceChildren();
             resolve();
           } catch (e) {

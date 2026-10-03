@@ -60,6 +60,8 @@ describe("maybeShowFirstRun", () => {
       }
       return Promise.reject(new Error("unexpected " + cmd));
     });
+    const changed = vi.fn();
+    window.addEventListener("maya:config-changed", changed);
     const shown = maybeShowFirstRun();
     await flush();
     expect(document.querySelector("h2")?.textContent).toBe("Which agent should power Maya?");
@@ -71,6 +73,9 @@ describe("maybeShowFirstRun", () => {
     await shown;
     expect(invoke).toHaveBeenCalledWith("set_config", { config: expect.objectContaining({ agent: "codex", agentModel: "" }) });
     expect(document.querySelector(".modal")).toBeNull();
+    // Settings, if already showing, rereads the config.
+    expect(changed).toHaveBeenCalledTimes(1);
+    window.removeEventListener("maya:config-changed", changed);
   });
 
   it("offers Skip for now when the save is refused, which closes without saving", async () => {

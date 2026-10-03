@@ -1081,6 +1081,27 @@ export async function initSettings(): Promise<void> {
     },
   };
 
+  // Others write the config too (the first-start modal saves the agent), and
+  // a stale agent here would pair a model with the wrong agent: read it again
+  // when the tab is shown, and when a save elsewhere says it changed. A
+  // hidden pane is only marked stale, and repainted once shown.
+  const refetchAndPaint = () =>
+    void invoke<ConfigJson>("get_config")
+      .then((c) => {
+        applyConfig(c);
+        stale = true;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!panel.hidden && stale) {
+          stale = false;
+          paint();
+        }
+      });
+  // Registered before the first await, so an early first-start save (with
+  // Settings already the visible tab) cannot be missed.
+  window.addEventListener("maya:config-changed", refetchAndPaint);
+
   // The voice panel can turn listening on or off on its own; mirror that
   // into the model so the Settings checkbox doesn't show a stale state.
   // Every partial transcript emits `voice`: repaint only when listening
@@ -1107,23 +1128,9 @@ export async function initSettings(): Promise<void> {
   });
 
   // Events that arrive while the tab is hidden update the model only; a
-  // repaint when the tab is shown brings the pane up to date. The config is
-  // read again first: others write it too (the first-start modal saves the
-  // agent), and a stale agent here would pair a model with the wrong agent.
+  // repaint when the tab is shown brings the pane up to date.
   new MutationObserver(() => {
-    if (panel.hidden) return;
-    void invoke<ConfigJson>("get_config")
-      .then((c) => {
-        applyConfig(c);
-        stale = true;
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        if (!panel.hidden && stale) {
-          stale = false;
-          paint();
-        }
-      });
+    if (!panel.hidden) refetchAndPaint();
   }).observe(panel, { attributes: true, attributeFilter: ["hidden"] });
 
   // The pairing code's countdown, and its end. Updated in place: a full

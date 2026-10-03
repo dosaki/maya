@@ -162,6 +162,47 @@ describe("settings flow", () => {
     expect(invoke).toHaveBeenCalledWith("set_config", { config: expect.objectContaining({ agent: "codex", agentModel: "gpt-5.5" }) });
   });
 
+  it("follows a first-start agent choice while Settings is already the visible tab", async () => {
+    let config: Record<string, unknown> = {
+      completedTimeoutMinutes: 30,
+      projectsDir: null,
+      clonesDir: null,
+      notifyOnAwaiting: true,
+      speakNotifications: true,
+      voiceProvider: "builtin",
+      elevenlabsVoiceId: null,
+      listen: false,
+      microphone: null,
+      agent: null,
+      agentModel: "",
+      reviewPrompt: "",
+    };
+    const agents = [
+      { harness: "claude-code" as const, models: [{ id: "opus", label: "Opus", efforts: [] }], efforts: [], modes: [] },
+      { harness: "codex" as const, models: [{ id: "gpt-5.5", label: "gpt-5.5", efforts: [] }], efforts: [], modes: [] },
+    ];
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents, names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+
+    // The remembered tab was Settings: it is visible from the start, so
+    // `hidden` never toggles after the first-start modal saves.
+    document.getElementById("settings")!.hidden = false;
+    await initSettings();
+    await flush();
+    expect(document.querySelector<HTMLSelectElement>("select[name=agent]")!.value).toBe("claude-code");
+    config = { ...config, agent: "codex" };
+    window.dispatchEvent(new CustomEvent("maya:config-changed"));
+    await flush();
+    expect(document.querySelector<HTMLSelectElement>("select[name=agent]")!.value).toBe("codex");
+  });
+
   it("loads the rest of Settings when the Codex hook status cannot be read", async () => {
     const config = { completedTimeoutMinutes: 42, projectsDir: "/p", clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku" };
     invoke.mockImplementation((cmd: string) => {
