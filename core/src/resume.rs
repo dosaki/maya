@@ -167,6 +167,27 @@ fn grok_sessions(grok_dir: &Path, dir: &str) -> Vec<ResumableSession> {
         .collect()
 }
 
+/// Kiro's sessions whose `cwd` is `dir`, from `<id>.json` files, named by
+/// their title, else their first prompt, else their id.
+fn kiro_sessions(kiro_dir: &Path, dir: &str) -> Vec<ResumableSession> {
+    let Ok(entries) = std::fs::read_dir(kiro_dir) else { return vec![] };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| {
+            let path = e.path();
+            let meta = crate::kiro::session_meta(&std::fs::read_to_string(&path).ok()?)?;
+            if meta.cwd != dir {
+                return None;
+            }
+            let id = path.file_stem()?.to_str()?.to_string();
+            let last_active_ms = if meta.updated_ms > 0 { meta.updated_ms } else { mtime_ms(&path)? };
+            let title = meta.title.or_else(|| crate::kiro::first_prompt(&head(&path.with_extension("jsonl"), HEAD_BYTES))).unwrap_or_else(|| id.clone());
+            Some(ResumableSession { id, title, last_active_ms, running: false })
+        })
+        .collect()
+}
+
 /// The agent's sessions recorded for `dir`, newest first, running ones marked.
 pub fn list_sessions(agent: Harness, dirs: &AgentDirs, dir: &str, running_ids: &[String]) -> Vec<ResumableSession> {
     let mut out = match agent {
@@ -174,7 +195,8 @@ pub fn list_sessions(agent: Harness, dirs: &AgentDirs, dir: &str, running_ids: &
         Harness::Codex => codex_sessions(&dirs.codex, dir),
         Harness::Antigravity => antigravity_sessions(&dirs.agy, dir),
         Harness::Grok => grok_sessions(&dirs.grok, dir),
-        Harness::Kiro | Harness::Other => vec![],
+        Harness::Kiro => kiro_sessions(&dirs.kiro, dir),
+        Harness::Other => vec![],
     };
     for s in &mut out {
         s.running = running_ids.contains(&s.id);
@@ -318,12 +340,34 @@ mod tests {
     }
 
     #[test]
+    fn kiro_sessions_of_a_folder_come_from_their_session_files_newest_first() {
+        let t = tempfile::tempdir().unwrap();
+        let d = dirs_in(t.path());
+        std::fs::create_dir_all(&d.kiro).unwrap();
+        let meta = |id: &str, cwd: &str, title: &str, at: &str| format!("{{\"session_id\":\"{id}\",\"cwd\":\"{cwd}\",\"created_at\":\"{at}\",\"updated_at\":\"{at}\",\"title\":{title},\"session_state\":{{}}}}");
+        std::fs::write(d.kiro.join("k-old.json"), meta("k-old", "/p/maya", "\"Rename test\"", "2026-10-02T16:57:07.186467Z")).unwrap();
+        std::fs::write(d.kiro.join("k-new.json"), meta("k-new", "/p/maya", "null", "2026-10-03T12:20:54.892589Z")).unwrap();
+        std::fs::write(d.kiro.join("k-new.jsonl"), "{\"version\":\"v1\",\"kind\":\"Prompt\",\"data\":{\"content\":[{\"kind\":\"text\",\"data\":\"run ls\\nplease\"}],\"meta\":{\"timestamp\":1791030044}}}\n").unwrap();
+        std::fs::write(d.kiro.join("k-bare.json"), meta("k-bare", "/p/maya", "null", "2026-10-01T10:00:00Z")).unwrap();
+        std::fs::write(d.kiro.join("k-else.json"), meta("k-else", "/p/other", "\"Elsewhere\"", "2026-10-03T13:00:00Z")).unwrap();
+        std::fs::write(d.kiro.join("k-new.lock"), "{\"pid\":1}").unwrap();
+        let list = list_sessions(Harness::Kiro, &d, "/p/maya", &["k-new".to_string()]);
+        assert_eq!(list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["k-new", "k-old", "k-bare"]);
+        assert_eq!(list[0].title, "run ls", "no title: the first prompt's first line");
+        assert!(list[0].running);
+        assert_eq!(list[1].title, "Rename test");
+        assert_eq!(list[2].title, "k-bare", "no title and no prompt: the id");
+        assert!(list_sessions(Harness::Kiro, &d, "/p/nowhere", &[]).is_empty());
+    }
+
+    #[test]
     fn resume_commands_per_agent_quote_folder_and_id() {
         let dir = Path::new("/Users/x/dev/it's");
         assert_eq!(resume_command(Harness::ClaudeCode, dir, "abc-123"), "cd '/Users/x/dev/it'\\''s' && claude --resume 'abc-123'");
         assert_eq!(resume_command(Harness::Codex, dir, "abc-123"), "cd '/Users/x/dev/it'\\''s' && codex resume 'abc-123'");
         assert_eq!(resume_command(Harness::Antigravity, dir, "abc-123"), "cd '/Users/x/dev/it'\\''s' && agy --conversation 'abc-123'");
         assert_eq!(resume_command(Harness::Grok, dir, "abc-123"), "cd '/Users/x/dev/it'\\''s' && grok -r 'abc-123'");
+        assert_eq!(resume_command(Harness::Kiro, dir, "abc-123"), "cd '/Users/x/dev/it'\\''s' && kiro-cli chat --resume-id 'abc-123'");
     }
 
     #[test]
