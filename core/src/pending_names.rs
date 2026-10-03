@@ -443,7 +443,6 @@ mod tests {
         assert_eq!(cards[0].name, "Linked card", "the card's folder goes through the link");
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_path_whose_only_existing_ancestor_is_the_root_is_left_alone() {
         // On Windows "/" canonicalizes to the current drive, so resolving
@@ -454,6 +453,7 @@ mod tests {
         assert_eq!(p.cwd, "/maya-no-such-dir-xyz/a");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_not_yet_cloned_folder_behind_a_symlink_is_still_resolved() {
         // A review clone is named before `gh repo clone` creates its folder:
