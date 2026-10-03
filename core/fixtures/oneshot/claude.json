@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","is_error":false,"result":"```json\n{\"say\":\"Telling hexgrid: go ahead.\",\"action\":{\"kind\":\"reply\",\"session\":\"hexgrid\",\"text\":\"go ahead\"},\"confirm\":true}\n```"}
