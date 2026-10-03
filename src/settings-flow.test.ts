@@ -28,7 +28,7 @@ describe("settings flow", () => {
       elevenlabsVoiceId: null,
       listen: true,
       microphone: null,
-      interpreterModel: "haiku",
+      agentModel: "haiku",
     };
     invoke.mockImplementation((cmd: string, args?: { config?: Record<string, unknown> }) => {
       if (cmd === "codex_hook_status") return Promise.resolve(false);

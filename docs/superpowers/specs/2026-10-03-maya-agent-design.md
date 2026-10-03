@@ -42,8 +42,8 @@ Every agent has a one-shot mode:
 | Agent | One-shot | Model | Output | No tools / sandbox |
 |---|---|---|---|---|
 | Claude Code | `claude -p` | `--model` | `--output-format json`, `--system-prompt` | `--tools ""`, `--max-turns 1` |
-| Codex | `codex exec --ephemeral --skip-git-repo-check` | `-m` | `--json`, `-o <file>` (the last message) | `-s read-only` |
-| Antigravity | `agy -p` | `--model` | `--output-format json` | `--sandbox` |
+| Codex | `codex exec --ephemeral --skip-git-repo-check` | `-m` | `--json` (the last `agent_message` item on stdout) | `-s read-only` |
+| Antigravity | `agy -p=<prompt>` (the prompt attached to the flag; other flags before it) | `--model` | `--output-format json` | `--sandbox` |
 | Grok Build | `grok -p` | `-m` | `--output-format json`, `--system-prompt-override` | `--tools ""`, `--max-turns 1` |
 
 Codex and Antigravity have no system-prompt flag; the system text is
@@ -110,10 +110,10 @@ of implementation, and this table is corrected to what was seen.
 - The system and user prompts are the same for every agent. For Codex and
   Antigravity the system prompt goes first in the prompt text, separated
   by a blank line.
-- The reply is the agent's final text: Claude's `result`, Codex's `-o`
-  file, Antigravity's and Grok's `json` output's result field. The first
-  JSON object in it is the reply, as today. Validation against the board
-  is unchanged.
+- The reply is the agent's final text: Claude's `result`, the text of
+  Codex's last `agent_message` item, Antigravity's `response`, Grok's
+  `text`. The first JSON object in it is the reply, as today. Validation
+  against the board is unchanged.
 - The classifier keeps its own prompt and text output, run the same way,
   with the agent's default model when `agentModel` is empty.
 - When the agent's binary is missing, Maya says "I can't find the
@@ -176,9 +176,8 @@ of implementation, and this table is corrected to what was seen.
 - `Resume` over the network carries the agent; listing resumable
   sessions carries it too. A board without `agents` (an older Maya)
   offers Claude Code only in both modals.
-- The review session over the network carries the agent and the
-  rendered prompt. Maya's agent and the review prompt are the main
-  machine's settings.
+- Reviews start on the main machine, as today; Maya's agent and the
+  review prompt are its settings.
 
 ## Code
 
@@ -206,7 +205,8 @@ of implementation, and this table is corrected to what was seen.
 - `src/firstrun.ts` (new): the first-start modal, opened from `main.ts`
   when `get_config` has no `agent`.
 - `src/resume.ts`: the Agent field. `src/modal.ts`: controls gated on
-  the card's capabilities, which the board carries per card.
+  the agent's capabilities, mirrored in `src/harness.ts` from the Rust
+  table.
 - `src/newsession.ts`: default agent, "Let Maya choose" copy.
 - `README.md`: requirements say one of the four agents, installed and
   signed in.

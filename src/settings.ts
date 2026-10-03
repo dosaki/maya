@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, recognizerOptions, secretStore, thisComputerLower } from "./platform";
+import type { Harness } from "./types";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -165,7 +166,9 @@ interface ConfigJson {
   elevenlabsVoiceId?: string | null;
   listen: boolean;
   microphone?: string | null;
-  interpreterModel: string;
+  agent?: Harness | null;
+  agentModel?: string;
+  reviewPrompt?: string;
   recognizer: Recognizer;
   whisperModel: string;
   network?: NetworkConfigJson;
@@ -881,7 +884,7 @@ export async function initSettings(): Promise<void> {
     model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
     model.listen = c.listen;
     model.microphone = c.microphone ?? "";
-    model.interpreterModel = c.interpreterModel;
+    model.interpreterModel = c.agentModel ?? "";
     model.recognizer = c.recognizer;
     model.whisperModel = c.whisperModel;
     applyNetworkConfig(c);
@@ -931,7 +934,7 @@ export async function initSettings(): Promise<void> {
     onTryVoice: () => void run(() => invoke("try_voice")),
     onListen: (on) => void run(async () => { await invoke("voice_listen", { on }); model.listen = on; }),
     onMicrophone: (name) => void run(() => saveConfig({ microphone: name || null })),
-    onInterpreter: (m) => void run(() => saveConfig({ interpreterModel: m })),
+    onInterpreter: (m) => void run(() => saveConfig({ agentModel: m })),
     onRecognizer: (r) => void run(() => saveConfig({ recognizer: r })),
     onWhisperModel: (id) => void run(() => saveConfig({ whisperModel: id })),
     onDownloadModel: (id) => {
@@ -1071,7 +1074,7 @@ export async function initSettings(): Promise<void> {
     model.elevenVoiceId = config.elevenlabsVoiceId ?? "";
     model.listen = config.listen;
     model.microphone = config.microphone ?? "";
-    model.interpreterModel = config.interpreterModel;
+    model.interpreterModel = config.agentModel ?? "";
     model.recognizer = config.recognizer;
     model.whisperModel = config.whisperModel;
     applyNetworkConfig(config);

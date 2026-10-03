@@ -307,7 +307,7 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
         let dirs_local = store.config.projects_dir_path().map(|r| launch::list_project_dirs(&r)).unwrap_or_default();
-        (dirs_local, store.config.interpreter_model.clone(), store.claude_dir().join("maya"))
+        (dirs_local, store.config.agent_model.clone(), store.claude_dir().join("maya"))
     };
     // Cards and remote dirs come from the same merged board `list_sessions`
     // shows, taken after `store` is released (lock order: `store` then `network`).
