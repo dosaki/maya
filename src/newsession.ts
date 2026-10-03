@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { showToast } from "./toast";
 import { sendShortcut, thisComputer } from "./platform";
 import { harnessLabel } from "./harness";
+import { brainAgent, defaultAgent } from "./brain";
 import type { Harness } from "./types";
 
 /** Choices for a new session; "" means "use the agent's default". */
@@ -103,6 +104,8 @@ export interface NewSessionModel {
   agent: Harness;
   /** The machine's Maya takes names (an older one does not). */
   names: boolean;
+  /** The machine's agent listing has landed: until then Start waits, so a prompt cannot run under a provisional agent. */
+  agentsLoaded: boolean;
   name: string;
 }
 
@@ -216,7 +219,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   }
 
   const remoteMachine = m.machine !== "";
-  // Claude cannot choose on a remote machine: a folder is always picked there.
+  // Maya cannot choose on a remote machine: a folder is always picked there.
   if (remoteMachine && !m.dir && m.dirs.length > 0) m.dir = m.dirs[0];
   const dirLabel = el("label", "newsession__field");
   dirLabel.append(el("span", "newsession__label", "Directory"));
@@ -224,7 +227,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   select.name = "dir";
   const auto = document.createElement("option");
   auto.value = "";
-  auto.textContent = "Let Claude choose";
+  auto.textContent = "Let Maya choose";
   auto.disabled = remoteMachine;
   select.append(auto);
   for (const d of m.dirs) {
@@ -235,7 +238,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   }
   select.value = m.dir ?? "";
   dirLabel.append(select);
-  if (remoteMachine) dirLabel.append(el("p", "newsession__hint", "Claude can't choose for you on a remote machine; pick a folder."));
+  if (remoteMachine) dirLabel.append(el("p", "newsession__hint", "Maya can't choose for you on a remote machine; pick a folder."));
 
   // An older Maya over there would ignore a name, so it is not offered.
   let nameInput: HTMLInputElement | null = null;
@@ -279,8 +282,9 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   const start = el("button", "card__btn card__btn--primary", m.busy ? "Starting…" : "Start");
   start.type = "button";
   start.dataset.action = "start";
+  if (!m.agentsLoaded) start.title = "Finding the agents on this machine…";
   const sync = () => {
-    start.disabled = m.busy || ta.value.trim() === "" || (remoteMachine && select.value === "");
+    start.disabled = m.busy || !m.agentsLoaded || ta.value.trim() === "" || (remoteMachine && select.value === "");
   };
   const tryStart = () => {
     if (start.disabled) return;
@@ -315,8 +319,6 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
 let current: { model: NewSessionModel; keyHandler: (e: KeyboardEvent) => void } | null = null;
 let draft = "";
 let draftName = "";
-/** The agent last chosen, offered again wherever the machine has it. */
-let lastAgent: Harness = "claude-code";
 /** The last options per agent; unlike the prompt they are kept after a start. */
 const lastOptions: Partial<Record<Harness, SessionOptions>> = {};
 const EMPTY: SessionOptions = { model: "", effort: "", mode: "" };
@@ -344,7 +346,7 @@ function saveOptions(host: ParentNode, agent: Harness): void {
 function startedText(r: StartResult): string {
   const name = r.dir.split("/").filter(Boolean).pop() ?? r.dir;
   if (r.how === "chosen") return `Started in ${name}`;
-  if (r.how === "classifier") return `Started in ${name} (chosen by Claude)`;
+  if (r.how === "classifier") return `Started in ${name} (chosen by Maya)`;
   return `Started in ${name} (no clear match, so the projects directory itself)`;
 }
 
@@ -383,7 +385,7 @@ function repaint(): void {
       onAgent: (agent) => {
         if (!current) return;
         capture();
-        current.model.agent = lastAgent = agent;
+        current.model.agent = agent;
         current.model.options = optionsFor(agent);
         // Not paint(): the selects on screen belong to the old agent.
         repaint();
@@ -441,9 +443,11 @@ async function loadAgents(machine: string): Promise<void> {
   capture();
   me.model.agents = reply.agents.length > 0 ? reply.agents : [CLAUDE_AGENT];
   me.model.names = reply.names;
-  const wanted = me.model.agents.some((a) => a.harness === lastAgent) ? lastAgent : "claude-code";
+  const wanted = defaultAgent(me.model.agents, await brainAgent());
+  if (current !== me || me.model.machine !== machine) return;
   me.model.agent = wanted;
   me.model.options = optionsFor(wanted);
+  me.model.agentsLoaded = true;
   repaint();
 }
 
@@ -461,6 +465,7 @@ async function chooseMachine(machine: string): Promise<void> {
   m.agents = [CLAUDE_AGENT];
   m.agent = "claude-code";
   m.names = machine === "";
+  m.agentsLoaded = false;
   m.options = optionsFor("claude-code");
   repaint();
   void loadAgents(machine);
@@ -527,6 +532,7 @@ export async function openNewSession(): Promise<void> {
       agents: [CLAUDE_AGENT],
       agent: "claude-code",
       names: true,
+      agentsLoaded: false,
       name: draftName,
     },
     keyHandler,

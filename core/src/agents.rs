@@ -1,4 +1,4 @@
-//! The agents this machine can start, and the models each offers, from the
+//! The agents installed on this machine, and the models each offers, from the
 //! agents' own listings (`codex debug models`, `agy models`, `grok models`).
 //! A listing can take seconds (`agy models` asks a server), so the list is
 //! cached for ten minutes and refreshed in the background.
@@ -134,9 +134,12 @@ pub fn info_for(agent: Harness, listing: Option<&str>) -> AgentInfo {
     AgentInfo { harness: agent, models, efforts, modes: strings(launch::modes(agent)) }
 }
 
-/// Claude Code, then each other agent `find` locates, with the models `run` lists for it.
+/// Each installed agent, Claude Code first, with the models `run` lists for it.
 pub fn build(find: impl Fn(&str) -> Option<PathBuf>, run: impl Fn(&Path, &[&str]) -> Option<String>) -> Vec<AgentInfo> {
-    let mut out = vec![claude()];
+    let mut out = vec![];
+    if find("claude").is_some() {
+        out.push(claude());
+    }
     for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok] {
         let Some(bin) = find(launch::binary_name(agent)) else { continue };
         let listing = run(&bin, listing_args(agent));
@@ -299,8 +302,18 @@ mod tests {
     }
 
     #[test]
+    fn build_lists_only_the_agents_found() {
+        let none = build(|_| None, |_, _| None);
+        assert!(none.is_empty(), "no agent installed, none listed: {none:?}");
+        let only_grok = build(|name| (name == "grok").then(|| PathBuf::from("/bin/grok")), |_, _| Some("Available models:\n  grok-4.7 (default)\n".into()));
+        assert_eq!(only_grok.iter().map(|a| a.harness).collect::<Vec<_>>(), vec![Harness::Grok]);
+        let both = build(|name| matches!(name, "claude" | "codex").then(|| PathBuf::from(format!("/bin/{name}"))), |_, _| None);
+        assert_eq!(both.iter().map(|a| a.harness).collect::<Vec<_>>(), vec![Harness::ClaudeCode, Harness::Codex], "Claude Code stays first");
+    }
+
+    #[test]
     fn build_lists_claude_then_each_agent_it_finds() {
-        let found = |name: &str| (name == "codex" || name == "grok").then(|| PathBuf::from(format!("/bin/{name}")));
+        let found = |name: &str| matches!(name, "claude" | "codex" | "grok").then(|| PathBuf::from(format!("/bin/{name}")));
         let run = |bin: &Path, args: &[&str]| -> Option<String> {
             match (bin.to_str().unwrap(), args) {
                 ("/bin/codex", ["debug", "models"]) => Some(fixture("codex/models.json")),

@@ -116,7 +116,7 @@ pub fn answer_question(l: &Local, session_id: &str, ask_id: u64, question: usize
 
 /// Types `/compact` into the session's terminal.
 pub fn compact_session(l: &Local, session_id: &str) -> Result<(), String> {
-    type_into_session(l, session_id, answer::COMPACT)
+    type_into_session(l, session_id, answer::COMPACT, "/compact", |c| c.compact)
 }
 
 /// How long Close waits for Claude to exit before it leaves the shell alone.
@@ -240,34 +240,63 @@ pub fn run_due_renames(l: &Local) {
     }
 }
 
-/// Types `/model x` or `/effort y` into the session's terminal.
+/// Types `/model x` or `/effort y` into the session's terminal, after
+/// checking the value against the agent's own listing.
 pub fn set_session_option(l: &Local, session_id: &str, setting: &str, value: &str) -> Result<(), String> {
-    type_into_session(l, session_id, &answer::slash_command(setting, value)?)
+    let (harness, agents) = {
+        let mut store = l.store.lock().unwrap();
+        let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
+        (card.harness, store.agents_source())
+    };
+    let is_model = setting == "model";
+    let allowed = move |c: &launch::Capabilities| if is_model { c.model_switch } else { c.effort_switch };
+    // An agent without the command is refused before its models are listed.
+    if matches!(setting, "model" | "effort") && !allowed(&launch::capabilities(harness)) {
+        return Err(format!("{} has no /{setting}.", launch::label(harness)));
+    }
+    let info = if harness == model::Harness::ClaudeCode {
+        crate::agents::claude()
+    } else {
+        agents().into_iter().find(|a| a.harness == harness).unwrap_or_else(|| crate::agents::info_for(harness, None))
+    };
+    let line = answer::slash_command(setting, value, &info.model_ids(), &info.efforts)?;
+    type_into_session(l, session_id, &line, &format!("/{setting}"), allowed)
 }
 
 /// Types a `/command` or `!` shell line from the composer into the
 /// session's terminal, after `answer::check_terminal_command`.
 pub fn send_slash_command(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
-    type_into_session(l, session_id, &answer::check_terminal_command(text)?)
+    let line = answer::check_terminal_command(text)?;
+    let shell = line.starts_with('!');
+    type_into_session(l, session_id, &line, if shell { "! shell lines" } else { "/ commands" }, move |c| if shell { c.shell_lines } else { c.slash_lines })
 }
 
-/// Sends Shift+Tab to the session's terminal, cycling its permission mode.
+/// Sends the agent's mode-cycle keys (Shift+Tab) to the session's terminal.
 pub fn cycle_session_mode(l: &Local, session_id: &str) -> Result<(), String> {
-    type_into_session(l, session_id, answer::SHIFT_TAB)
+    let harness = l.store.lock().unwrap().card_for(session_id, now_ms()).ok_or("Session is no longer running.")?.harness;
+    let keys = launch::capabilities(harness).mode_cycle.ok_or_else(|| format!("{} has no mode cycle.", launch::label(harness)))?;
+    type_into_session(l, session_id, keys, "mode cycle", |c| c.mode_cycle.is_some())
 }
 
-/// Types `text` into a free Claude Code session's terminal.
-fn type_into_session(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
-    let tty = {
+/// Types `text` into a free session's terminal when the agent has `control`
+/// (`allowed` reads that off its capabilities). Claude Code queues what is
+/// typed while it works; the other agents must be idle or completed, since
+/// keys typed into their TUIs elsewhere act as shortcuts.
+fn type_into_session(l: &Local, session_id: &str, text: &str, control: &str, allowed: impl Fn(&launch::Capabilities) -> bool) -> Result<(), String> {
+    let (harness, tty) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
-        if card.harness != model::Harness::ClaudeCode {
-            return Err("That command is only available for Claude Code sessions.".into());
+        if !allowed(&launch::capabilities(card.harness)) {
+            return Err(format!("{} has no {control}.", launch::label(card.harness)));
         }
-        answer::check_free(&card)?;
-        session_tty(&store, session_id, card.pid)?
+        if card.harness == model::Harness::ClaudeCode {
+            answer::check_free(&card)?;
+        } else if !crate::pending_names::is_free(&card) {
+            return Err("Wait until the session is free.".into());
+        }
+        (card.harness, session_tty(&store, session_id, card.pid)?)
     };
-    l.terminal.type_line(&tty, text)
+    type_line_for(l, harness, &tty, text)
 }
 
 /// The session's last turns.
@@ -301,13 +330,13 @@ pub fn list_project_dirs(l: &Local) -> Result<Vec<String>, String> {
     Ok(launch::list_project_dirs(&root))
 }
 
-/// Past sessions of a project folder, newest first, with running ones marked.
-pub fn list_resumable_sessions(l: &Local, dir: &str) -> Result<Vec<resume::ResumableSession>, String> {
-    let (path, claude_dir, running) = {
+/// The agent's past sessions of a project folder, newest first, running ones marked.
+pub fn list_resumable_sessions(l: &Local, agent: model::Harness, dir: &str) -> Result<Vec<resume::ResumableSession>, String> {
+    let (path, dirs, running) = {
         let store = l.store.lock().unwrap();
-        (project_path(&store, dir)?, store.claude_dir().to_path_buf(), store.live_session_ids())
+        (project_path(&store, dir)?, store.agent_dirs(), store.live_session_ids())
     };
-    Ok(resume::list_sessions(&claude_dir, &path.to_string_lossy(), &running))
+    Ok(resume::list_sessions(agent, &dirs, &path.to_string_lossy(), &running))
 }
 
 /// A Codex effort must be one the chosen model takes, or with "Default" one
@@ -329,9 +358,9 @@ fn check_codex_effort(info: &crate::agents::AgentInfo, options: &launch::LaunchO
 }
 
 /// Opens a terminal in a project folder running the chosen agent on
-/// `prompt`. With no `dir`, Claude picks the folder from the prompt. A name
-/// for an agent that takes none on its command line waits in the store for
-/// the new session, to be typed as `/rename` once it is free.
+/// `prompt`. With no `dir`, Maya's agent picks the folder from the prompt. A
+/// name for an agent that takes none on its command line waits in the store
+/// for the new session, to be typed as `/rename` once it is free.
 pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: launch::LaunchOptions) -> Result<StartResult, String> {
     if prompt.trim().is_empty() {
         return Err("Type a prompt first.".into());
@@ -341,18 +370,12 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
         let store = l.store.lock().unwrap();
         (projects_root(&store)?, store.claude_dir().join("maya"), store.agents_source())
     };
-    let label_of = |h: model::Harness| match h {
-        model::Harness::ClaudeCode => "Claude Code",
-        model::Harness::Codex => "Codex",
-        model::Harness::Antigravity => "Antigravity",
-        model::Harness::Grok => "Grok Build",
-    };
     // Claude Code's models are Maya's own fixed list. Listing the agents is
     // only for the others, and can take seconds, so a Claude start skips it.
     let info = if options.agent == model::Harness::ClaudeCode {
         crate::agents::claude()
     } else {
-        agents().into_iter().find(|a| a.harness == options.agent).ok_or_else(|| format!("{} is not installed on this machine.", label_of(options.agent)))?
+        agents().into_iter().find(|a| a.harness == options.agent).ok_or_else(|| format!("{} is not installed on this machine.", launch::label(options.agent)))?
     };
     options.validate(&info.model_ids())?;
     check_codex_effort(&info, &options)?;
@@ -360,8 +383,12 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
     let picked = match dir {
         Some(_) => None,
         None => {
-            let binary = launch::claude_binary().ok_or("Could not find the claude command.")?;
-            launch::classify(&binary, &root, &prompt, &dirs, launch::CLASSIFIER_TIMEOUT)
+            let (brain, model) = {
+                let store = l.store.lock().unwrap();
+                (store.config.brain(), store.config.brain_model().map(String::from))
+            };
+            let binary = launch::find_binary(brain)?;
+            launch::classify(brain, &binary, model.as_deref(), &root, &prompt, &dirs, launch::CLASSIFIER_TIMEOUT)
         }
     };
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
@@ -383,19 +410,60 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
     Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string(), terminal })
 }
 
-/// Opens a terminal in the folder running `claude --resume <id>`.
-pub fn resume_session(l: &Local, dir: &str, session_id: &str) -> Result<(), String> {
-    let (path, claude_dir, running) = {
+/// Opens a terminal in the folder resuming `session_id` with `agent`. The id
+/// must be one the agent recorded for that folder, so nothing typed or
+/// relayed reaches the shell line unchecked.
+pub fn resume_session(l: &Local, agent: model::Harness, dir: &str, session_id: &str) -> Result<(), String> {
+    if !resume::plain_session_id(session_id) {
+        return Err("No such session in that folder.".into());
+    }
+    let (path, dirs, running) = {
         let store = l.store.lock().unwrap();
-        (project_path(&store, dir)?, store.claude_dir().to_path_buf(), store.live_session_ids())
+        (project_path(&store, dir)?, store.agent_dirs(), store.live_session_ids())
     };
     if running.iter().any(|id| id == session_id) {
         return Err("That session is already running.".into());
     }
-    if !resume::transcript_exists(&claude_dir, &path.to_string_lossy(), session_id) {
+    let known = resume::list_sessions(agent, &dirs, &path.to_string_lossy(), &running);
+    if !known.iter().any(|s| s.id == session_id) {
         return Err("No such session in that folder.".into());
     }
-    l.terminal.open(&resume::resume_command(&path, session_id), &path, &tmux_label()).map(|_| ())
+    l.terminal.open(&resume::resume_command(agent, &path, session_id), &path, &tmux_label()).map(|_| ())
+}
+
+/// Opens a terminal reviewing `pr` with Maya's agent: in the project
+/// checkout when it is free, else in a clone under the clones directory.
+/// Returns the folder. For an agent that takes no name on its command line
+/// the review name waits in the store, as `start_session`'s does.
+pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, String> {
+    let (agent, projects, clones, live, maya_dir, template, agents) = {
+        let store = l.store.lock().unwrap();
+        (store.config.brain(), store.config.projects_dir_path(), store.config.clones_dir_path(), store.live_cwds(), store.claude_dir().join("maya"), store.config.review_prompt.clone(), store.agents_source())
+    };
+    let projects = projects.ok_or("Set a projects directory in Settings first.")?;
+    if agent != model::Harness::ClaudeCode && !agents().iter().any(|a| a.harness == agent) {
+        return Err(format!("{} is not installed on this machine.", launch::label(agent)));
+    }
+    let target = crate::reviews::resolve_target(&projects, &clones, &pr.repo, pr.number, &live);
+    let file = launch::write_prompt_file(&maya_dir, &crate::reviews::render_prompt(&template, pr))?;
+    let grok_id = (agent == model::Harness::Grok).then(launch::new_session_uuid);
+    let known = {
+        let mut store = l.store.lock().unwrap();
+        store.refresh(now_ms());
+        store.live_session_ids()
+    };
+    // A clone's folder does not exist yet: the terminal opens in its parent,
+    // the clones root, made first (a terminal cannot start in a missing folder).
+    let cwd = if target.clone { target.dir.parent().map(Path::to_path_buf).unwrap_or_else(|| target.dir.clone()) } else { target.dir.clone() };
+    if target.clone {
+        std::fs::create_dir_all(&cwd).map_err(|e| format!("Could not create the clones folder {}: {e}.", cwd.display()))?;
+    }
+    l.terminal.open(&crate::reviews::shell_command(agent, &target, &pr.repo, pr.number, &file, grok_id.as_deref()), &cwd, &tmux_label())?;
+    if agent != model::Harness::ClaudeCode {
+        let name = crate::reviews::session_name(&pr.repo, pr.number);
+        l.store.lock().unwrap().add_pending_name(crate::pending_names::PendingName::new(agent, &target.dir.to_string_lossy(), &name, now_ms(), known, grok_id));
+    }
+    Ok(target.dir.to_string_lossy().into_owned())
 }
 
 /// Brings the terminal hosting the session forward.
@@ -539,6 +607,47 @@ mod tests {
         (t, Mutex::new(store), path)
     }
 
+    #[test]
+    fn controls_follow_the_agents_capabilities() {
+        let (_t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        // Codex: /compact is typed (with Codex's second Enter), a /model value is refused, Shift+Tab has no meaning.
+        compact_session(&l, "c1").unwrap();
+        assert!(fake.calls.lock().unwrap().iter().any(|c| matches!(c, Call::Type { tty, text } if tty == "ttys009" && text == "/compact")));
+        assert_eq!(set_session_option(&l, "c1", "model", "gpt-5.5").unwrap_err(), "Codex has no /model.");
+        assert_eq!(cycle_session_mode(&l, "c1").unwrap_err(), "Codex has no mode cycle.");
+        send_slash_command(&l, "c1", "/status").unwrap();
+        assert!(fake.calls.lock().unwrap().iter().any(|c| matches!(c, Call::Type { text, .. } if text == "/status")));
+        assert_eq!(send_slash_command(&l, "c1", "!ls").unwrap_err(), "Codex has no ! shell lines.");
+    }
+
+    #[test]
+    fn a_model_switch_is_checked_against_the_agents_own_list() {
+        let (t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        // A Grok session whose last turn has ended, so the card is free. Grok's
+        // own registry (under `with_foreign`'s Grok folder) keeps it listed.
+        let grok_dir = t.path().join("agy").join("no-grok");
+        let dir = t.path().join("grok-session");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&grok_dir).unwrap();
+        std::fs::write(grok_dir.join("active_sessions.json"), r#"[{"session_id":"g1","pid":78,"cwd":"/x"}]"#).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/grok");
+        for f in ["events.jsonl", "chat_history.jsonl"] {
+            std::fs::copy(fixtures.join(f), dir.join(f)).unwrap();
+        }
+        let grok = ForeignSession { harness: Harness::Grok, pid: 78, tty: Some("ttys010".into()), session_id: "g1".into(), cwd: "/x".into(), name: "Grok".into(), transcript_path: dir.join("events.jsonl") };
+        let store = Mutex::new(store.into_inner().unwrap().with_processes(vec![grok]));
+        let info = crate::agents::AgentInfo { harness: Harness::Grok, models: vec![crate::agents::ModelInfo { id: "grok-4.7".into(), label: "grok-4.7".into(), efforts: vec![] }], efforts: vec![], modes: vec![] };
+        let store = with_agents(store, vec![agents::claude(), info]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
+        assert!(set_session_option(&l, "g1", "model", "grok-9").unwrap_err().contains("Unknown model"));
+        set_session_option(&l, "g1", "model", "grok-4.7").unwrap();
+        assert!(fake.calls.lock().unwrap().iter().any(|c| matches!(c, Call::Type { tty, text } if tty == "ttys010" && text == "/model grok-4.7")));
+    }
+
     /// Codex listing two models that take different efforts.
     fn codex_info() -> crate::agents::AgentInfo {
         crate::agents::info_for(
@@ -631,6 +740,50 @@ mod tests {
         assert!(start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap_err().contains("model"));
         assert!(fake.calls.lock().unwrap().is_empty());
         drop(dir);
+    }
+
+    #[test]
+    fn start_review_runs_maya_agent_and_queues_the_review_name() {
+        let (dir, store) = store_with_projects(&["elsewhere"]);
+        {
+            let mut s = store.lock().unwrap();
+            s.config.agent = Some(Harness::Codex);
+            s.config.clones_dir = Some(dir.path().join("clones").to_string_lossy().into_owned());
+            s.config.review_prompt = "/should-i-approve".into();
+        }
+        let store = with_agents(store, vec![agents::claude(), crate::agents::info_for(Harness::Codex, None)]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let pr = crate::reviews::ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![] };
+        assert!(!dir.path().join("clones").exists());
+        let folder = start_review(&l, &pr).unwrap();
+        assert!(Path::new(&folder).ends_with(Path::new("clones").join("bedrock-451")), "{folder}");
+        // The terminal opens in the clones root, so it must exist by then.
+        assert!(dir.path().join("clones").is_dir());
+        let calls = fake.calls.lock().unwrap();
+        let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
+        assert!(command.contains("gh repo clone 'Org/bedrock'") && command.ends_with("&& codex -- \"$p\""), "{command}");
+        let file = command.split("cat '").nth(1).unwrap().split('\'').next().unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
+        drop(calls);
+        assert!(store.lock().unwrap().has_pending_name_for_test("review bedrock #451"), "the name waits for the Codex session");
+        // The clone folder does not exist yet: its pending cwd must still be
+        // resolved physically, through whatever symlink its existing
+        // ancestor sits behind (macOS's /tmp, a linked clones directory).
+        let canonical_clone = std::fs::canonicalize(dir.path()).unwrap().join("clones").join("bedrock-451");
+        assert_eq!(store.lock().unwrap().pending_cwds_for_test(), vec![canonical_clone.to_string_lossy().into_owned()]);
+    }
+
+    #[test]
+    fn start_review_refuses_an_agent_that_is_not_installed() {
+        let (_dir, store) = store_with_projects(&["elsewhere"]);
+        store.lock().unwrap().config.agent = Some(Harness::Grok);
+        let store = with_agents(store, vec![agents::claude()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let pr = crate::reviews::ReviewPr { number: 1, repo: "o/r".into(), title: String::new(), author: String::new(), url: "https://github.com/o/r/pull/1".into(), is_draft: false, updated_at: String::new(), reasons: vec![] };
+        assert_eq!(start_review(&l, &pr).unwrap_err(), "Grok Build is not installed on this machine.");
+        assert!(fake.calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -827,10 +980,29 @@ mod tests {
         let (dir, store) = store_with_projects_and_running(&["proj"], "s1");
         let t = FakeTerminal::default();
         let l = Local { store: &store, terminal: &t };
-        assert_eq!(resume_session(&l, "proj", "s1"), Err("That session is already running.".into()));
-        assert_eq!(resume_session(&l, "proj", "nope"), Err("No such session in that folder.".into()));
+        assert_eq!(resume_session(&l, Harness::ClaudeCode, "proj", "s1"), Err("That session is already running.".into()));
+        assert_eq!(resume_session(&l, Harness::ClaudeCode, "proj", "nope"), Err("No such session in that folder.".into()));
         assert!(t.calls.lock().unwrap().is_empty());
         drop(dir);
+    }
+
+    #[test]
+    fn resume_refuses_ids_the_agent_did_not_record_and_resumes_known_ones() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let grok_dir = dir.path().join("grok");
+        let proj = dir.path().join("projects").join("proj");
+        let folder = grok_dir.join("sessions").join(crate::grok::encode_cwd(&proj.to_string_lossy())).join("g-1");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("summary.json"), r#"{"session_summary":"Probe","updated_at":"2026-10-02T20:24:44.754218Z"}"#).unwrap();
+        let store = Mutex::new(store.into_inner().unwrap().with_agent_dirs(dir.path().join("codex"), dir.path().join("agy"), grok_dir));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(resume_session(&l, Harness::Grok, "proj", "../g-1").unwrap_err(), "No such session in that folder.");
+        assert_eq!(resume_session(&l, Harness::Grok, "proj", "g-9").unwrap_err(), "No such session in that folder.");
+        assert_eq!(resume_session(&l, Harness::Codex, "proj", "g-1").unwrap_err(), "No such session in that folder.", "another agent's id");
+        resume_session(&l, Harness::Grok, "proj", "g-1").unwrap();
+        let calls = fake.calls.lock().unwrap();
+        assert!(matches!(&calls[0], Call::Open { command, .. } if command.ends_with("&& grok -r 'g-1'")), "{calls:?}");
     }
 
     #[test]

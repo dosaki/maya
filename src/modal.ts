@@ -5,10 +5,10 @@ import { composeMessage, makeAttachments, pastedFiles, renderChips, type Attachm
 import { renderMarkdown } from "./markdown";
 import { projectName } from "./format";
 import { iconElement } from "./icons";
-import { EFFORT_CHOICES, MODEL_CHOICES, renderChoice } from "./newsession";
+import { CLAUDE_AGENT, renderChoice, type AgentInfo } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
-import { harnessBadge } from "./harness";
+import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
 import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, remoteTitle, type Card, type Turn } from "./types";
 import { sendShortcut } from "./platform";
 
@@ -21,6 +21,8 @@ export interface ModalModel {
   next?: number;
   /** Files the next message will point the session at. */
   attachments?: Attachment[];
+  /** The card's agent with its model list, for the Model and Effort pickers; absent until listed. */
+  agent?: AgentInfo;
 }
 
 export interface ModalHandlers {
@@ -94,41 +96,52 @@ function renderTitle(name: string, h: ModalHandlers): HTMLElement {
 }
 
 /**
- * Model and effort pickers plus a Cycle mode button. The pickers start blank
- * so a background repaint never re-applies a choice; Apply sends each one
- * that was changed and clears them.
+ * The Model and Effort pickers and the Cycle mode button the agent has, or
+ * nothing when it has none. The pickers start blank so a background repaint
+ * never re-applies a choice; Apply sends each one that was changed and
+ * clears them.
  */
-function renderTweaks(h: ModalHandlers): HTMLElement {
+function renderTweaks(h: ModalHandlers, caps: Capabilities, info: AgentInfo): HTMLElement | null {
   const row = el("div", "modal__tweaks");
-  const model = renderChoice("model", "", MODEL_CHOICES, "", "Model");
-  const effort = renderChoice("effort", "", EFFORT_CHOICES, "", "Effort");
-  const selects: ["model" | "effort", HTMLSelectElement][] = [
-    ["model", model.querySelector("select")!],
-    ["effort", effort.querySelector("select")!],
-  ];
-  const apply = el("button", "card__btn", "Apply");
-  apply.type = "button";
-  apply.dataset.action = "apply";
-  const sync = () => {
-    apply.disabled = selects.every(([, sel]) => sel.value === "");
-  };
-  for (const [, sel] of selects) sel.addEventListener("change", sync);
-  apply.addEventListener("click", () => {
-    if (apply.disabled) return;
-    for (const [name, sel] of selects) {
-      if (sel.value) h.onSetOption(name, sel.value);
-      sel.value = "";
-    }
+  const selects: ["model" | "effort", HTMLSelectElement][] = [];
+  if (caps.modelSwitch && info.models.length > 0) {
+    const model = renderChoice("model", "", info.models.map((m) => [m.id, m.label]), "", "Model");
+    selects.push(["model", model.querySelector("select")!]);
+    row.append(model);
+  }
+  if (caps.effortSwitch && info.efforts.length > 0) {
+    const effort = renderChoice("effort", "", info.efforts.map((v) => [v, v]), "", "Effort");
+    selects.push(["effort", effort.querySelector("select")!]);
+    row.append(effort);
+  }
+  if (selects.length > 0) {
+    const apply = el("button", "card__btn", "Apply");
+    apply.type = "button";
+    apply.dataset.action = "apply";
+    const sync = () => {
+      apply.disabled = selects.every(([, sel]) => sel.value === "");
+    };
+    for (const [, sel] of selects) sel.addEventListener("change", sync);
+    apply.addEventListener("click", () => {
+      if (apply.disabled) return;
+      for (const [name, sel] of selects) {
+        if (sel.value) h.onSetOption(name, sel.value);
+        sel.value = "";
+      }
+      sync();
+    });
     sync();
-  });
-  sync();
-  const cycle = el("button", "card__btn", "Cycle mode");
-  cycle.type = "button";
-  cycle.dataset.action = "cycle-mode";
-  cycle.title = "Sends Shift+Tab to the terminal: the next permission mode. Check the terminal to see which.";
-  cycle.addEventListener("click", () => h.onCycleMode());
-  row.append(model, effort, apply, cycle);
-  return row;
+    row.append(apply);
+  }
+  if (caps.modeCycle) {
+    const cycle = el("button", "card__btn", "Cycle mode");
+    cycle.type = "button";
+    cycle.dataset.action = "cycle-mode";
+    cycle.title = "Sends Shift+Tab to the terminal: the next mode. Check the terminal to see which.";
+    cycle.addEventListener("click", () => h.onCycleMode());
+    row.append(cycle);
+  }
+  return row.childElementCount > 0 ? row : null;
 }
 
 /** Where the panel size the user dragged is kept, across opens and restarts. */
@@ -413,6 +426,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const head = el("header", "modal__head");
   const titles = el("div", "modal__titles");
   const claude = m.card.harness === "claude-code";
+  const caps = capabilitiesOf(m.card.harness);
   titles.append(renderTitle(m.card.name, h));
   if (m.card.machine) {
     const remote = el("span", "card__remote");
@@ -431,7 +445,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const ctx = el("span", "modal__context", `ctx ${m.card.context.percent}%`);
     ctx.title = `Context ${m.card.context.percent}% · ${formatTokens(m.card.context.used)} of ${formatTokens(m.card.context.window)}`;
     titles.append(ctx);
-    if (claude && m.card.context.percent >= COMPACT_AT) {
+    if (caps.compact && m.card.context.percent >= COMPACT_AT) {
       const compact = compactButton();
       compact.addEventListener("click", () => h.onCompact());
       titles.append(compact);
@@ -498,7 +512,8 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     h.onOpenLink(a.getAttribute("href") ?? "");
   });
   panel.append(history);
-  if (claude) panel.append(renderTweaks(h));
+  const tweaks = renderTweaks(h, caps, m.agent ?? (claude ? CLAUDE_AGENT : { harness: m.card.harness, models: [], efforts: [], modes: [] }));
+  if (tweaks) panel.append(tweaks);
 
   // Other harnesses have no inbox; a reply is typed into their terminal instead.
   if (m.card.hasInbox || !claude) {
@@ -506,16 +521,19 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     panel.append(renderChips(attachments, (path) => h.onRemoveAttachment?.(path)));
     const form = el("div", "modal__composer");
     const ta = el("textarea", "modal__input");
+    // Promise only the terminal lines this agent takes (see `caps`).
+    const runs = [caps.slashLines && "/commands", caps.shellLines && "!shell lines"].filter(Boolean).join(" and ");
     ta.placeholder = claude
       ? `Message this session… (${sendShortcut()} to send, paste or drop files to attach; a /command or !shell line is typed into its terminal)`
-      : `Message this session… (${sendShortcut()} to send; typed into its terminal as one line, so /commands and !shell lines run there)`;
+      : `Message this session… (${sendShortcut()} to send; typed into its terminal as one line${runs ? `, so ${runs} run there` : ""})`;
     ta.value = m.draft;
     ta.rows = 3;
     const trySend = () => {
-      // A /command or !shell line is for Claude Code itself, not a message:
-      // it is typed into the terminal. Other harnesses type every line anyway.
-      if (claude && isTerminalCommand(ta.value)) {
-        h.onCommand(ta.value.trim());
+      // A /command or !shell line the agent takes is for the agent itself,
+      // not a message: it is typed into the terminal. Any other line is a reply.
+      const line = ta.value.trim();
+      if (isTerminalCommand(line) && (line.startsWith("/") ? caps.slashLines : caps.shellLines)) {
+        h.onCommand(line);
         return;
       }
       const text = composeMessage(ta.value, attachments);
@@ -825,6 +843,16 @@ export async function openModal(card: Card): Promise<void> {
   document.addEventListener("keydown", keyHandler);
   void watchDrops();
   paint({ focusInput: true });
+  if (card.harness !== "claude-code") {
+    const me = current;
+    void invoke<{ agents: AgentInfo[] }>("list_agents", { machine: card.machine ?? "" })
+      .then((r) => {
+        if (current !== me) return;
+        me.model.agent = r.agents.find((a) => a.harness === card.harness);
+        paint();
+      })
+      .catch(() => undefined);
+  }
   await loadTurns({ force: true, focusInput: true });
 }
 

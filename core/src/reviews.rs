@@ -1,4 +1,5 @@
-use crate::launch::shell_single_quote;
+use crate::launch::{shell_single_quote, LaunchOptions};
+use crate::model::Harness;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -160,15 +161,32 @@ pub fn session_name(name_with_owner: &str, number: u64) -> String {
     format!("review {repo_name} #{number}")
 }
 
-/// The shell line the review terminal runs.
-pub fn shell_command(target: &ReviewTarget, name_with_owner: &str, number: u64) -> String {
-    let dir = shell_single_quote(&target.dir.to_string_lossy());
-    let start = format!(
-        "cd {dir} && claude --name {} -- {}",
-        shell_single_quote(&session_name(name_with_owner, number)),
-        shell_single_quote(&format!("/should-i-approve PR #{number}"))
-    );
+/// The prompt a review session starts with: the template with `{number}`,
+/// `{repo}` and `{url}` filled in. A blank template means the built-in one;
+/// a template that names none of the three gets ` PR #<number> (<url>)`
+/// appended, so a bare slash command still says which pull request.
+pub const DEFAULT_REVIEW_PROMPT: &str = "Review pull request #{number} of {repo} ({url}). Make use of code review skills, and at the end give at most 3 options: Approve; Ask <questions here>; Request changes <changes here>. Mark the recommended option \"(Recommended)\". Show Ask and Request changes only when they are needed.";
+
+pub fn render_prompt(template: &str, pr: &ReviewPr) -> String {
+    let t = template.trim();
+    let t = if t.is_empty() { DEFAULT_REVIEW_PROMPT } else { t };
+    let number = pr.number.to_string();
+    if ["{number}", "{repo}", "{url}"].iter().any(|p| t.contains(p)) {
+        t.replace("{number}", &number).replace("{repo}", &pr.repo).replace("{url}", &pr.url)
+    } else {
+        format!("{t} PR #{number} ({})", pr.url)
+    }
+}
+
+/// The shell line the review terminal runs: a clone first when needed, then
+/// the agent in the folder on the prompt file, as a new session named
+/// `review <repo> #<number>` (`-n` for Claude Code; the others get the name
+/// typed later, as `actions::start_session` does).
+pub fn shell_command(agent: Harness, target: &ReviewTarget, name_with_owner: &str, number: u64, prompt_file: &Path, grok_id: Option<&str>) -> String {
+    let opts = LaunchOptions { agent, name: Some(session_name(name_with_owner, number)), ..Default::default() };
+    let start = crate::launch::session_command(&target.dir, prompt_file, &opts, grok_id);
     if target.clone {
+        let dir = shell_single_quote(&target.dir.to_string_lossy());
         let parent = shell_single_quote(&target.dir.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
         format!("mkdir -p {parent} && gh repo clone {} {dir} && {start}", shell_single_quote(name_with_owner))
     } else {
@@ -265,15 +283,38 @@ mod tests {
     }
 
     #[test]
-    fn shell_command_clones_when_needed_then_starts_the_review() {
-        let plain = shell_command(&ReviewTarget { dir: "/Users/x/dev/bedrock".into(), clone: false }, "Org/bedrock", 451);
-        assert_eq!(plain, "cd '/Users/x/dev/bedrock' && claude --name 'review bedrock #451' -- '/should-i-approve PR #451'");
-        let cloned = shell_command(&ReviewTarget { dir: "/Users/x/dev/reviews/bedrock-451".into(), clone: true }, "Org/bedrock", 451);
-        assert_eq!(cloned, "mkdir -p '/Users/x/dev/reviews' && gh repo clone 'Org/bedrock' '/Users/x/dev/reviews/bedrock-451' && cd '/Users/x/dev/reviews/bedrock-451' && claude --name 'review bedrock #451' -- '/should-i-approve PR #451'");
+    fn review_session_name_is_predictable() {
+        assert_eq!(session_name("Org/bedrock", 451), "review bedrock #451");
+    }
+
+    fn pr() -> ReviewPr {
+        ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review] }
     }
 
     #[test]
-    fn review_session_name_is_predictable() {
-        assert_eq!(session_name("Org/bedrock", 451), "review bedrock #451");
+    fn the_review_prompt_fills_placeholders_or_appends_the_pr() {
+        let d = render_prompt("", &pr());
+        assert!(d.starts_with("Review pull request #451 of Org/bedrock (https://github.com/Org/bedrock/pull/451)."), "{d}");
+        assert!(d.contains("(Recommended)") && d.contains("Request changes"), "{d}");
+        assert_eq!(render_prompt("  \n", &pr()), d, "blank means the default");
+        assert_eq!(render_prompt("/should-i-approve PR #{number}", &pr()), "/should-i-approve PR #451");
+        assert_eq!(render_prompt("Look at {url} ({repo})", &pr()), "Look at https://github.com/Org/bedrock/pull/451 (Org/bedrock)");
+        assert_eq!(render_prompt("/should-i-approve", &pr()), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
+    }
+
+    #[test]
+    fn the_review_shell_line_runs_the_agent_on_the_prompt_file_with_the_review_name() {
+        let file = Path::new("/Users/x/.claude/maya/prompts/1.txt");
+        let free = ReviewTarget { dir: PathBuf::from("/Users/x/dev/bedrock"), clone: false };
+        let s = shell_command(crate::model::Harness::ClaudeCode, &free, "Org/bedrock", 451, file, None);
+        assert_eq!(s, "cd '/Users/x/dev/bedrock' && p=\"$(cat '/Users/x/.claude/maya/prompts/1.txt')\" && rm -f '/Users/x/.claude/maya/prompts/1.txt' && claude -n 'review bedrock #451' -- \"$p\"");
+        let clone = ReviewTarget { dir: PathBuf::from("/Users/x/dev/reviews/bedrock-451"), clone: true };
+        let s = shell_command(crate::model::Harness::Codex, &clone, "Org/bedrock", 451, file, None);
+        assert!(s.starts_with("mkdir -p '/Users/x/dev/reviews' && gh repo clone 'Org/bedrock' '/Users/x/dev/reviews/bedrock-451' && "), "{s}");
+        assert!(s.ends_with("&& codex -- \"$p\""), "no -n for Codex: the name waits as a pending name: {s}");
+        let s = shell_command(crate::model::Harness::Grok, &free, "Org/bedrock", 451, file, Some("1111-2222"));
+        assert!(s.ends_with("&& grok --session-id '1111-2222' -- \"$p\""), "{s}");
+        let s = shell_command(crate::model::Harness::Antigravity, &free, "Org/bedrock", 451, file, None);
+        assert!(s.ends_with("&& agy --prompt-interactive=\"$p\""), "{s}");
     }
 }

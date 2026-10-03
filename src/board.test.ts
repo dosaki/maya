@@ -115,12 +115,12 @@ describe("renderCard", () => {
 });
 
 describe("other harnesses", () => {
-  it("shows the harness icon and no Compact button for a Codex card", () => {
+  it("shows the harness icon and the Compact button for a Codex card", () => {
     const el = renderCard(card({ harness: "codex", hasInbox: false, context: { used: 160_000, window: 200_000, percent: 80 } }), NOW);
     const badge = el.querySelector<HTMLImageElement>("img.card__harness")!;
     expect(badge.alt).toBe("Codex");
     expect(badge.src).not.toBe("");
-    expect(el.querySelector("button[data-action=compact]")).toBeNull();
+    expect(el.querySelector("button[data-action=compact]")).not.toBeNull();
     expect(el.querySelector("button[data-action=reply]")).not.toBeNull();
     const agy = renderCard(card({ harness: "antigravity", hasInbox: false }), NOW);
     expect(agy.querySelector<HTMLImageElement>("img.card__harness")!.alt).toBe("Antigravity");

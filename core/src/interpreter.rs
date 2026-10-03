@@ -1,4 +1,4 @@
-//! Turns a spoken command into one action with a one-shot `claude -p` call.
+//! Turns a spoken command into one action with a one-shot call to Maya's agent.
 //! The model sees the board summary and the last exchanges; Maya validates
 //! whatever comes back before acting on it.
 
@@ -103,22 +103,22 @@ fn json_in(text: &str) -> Option<Value> {
     serde_json::from_str(&text[start..=end]).ok()
 }
 
-/// The reply inside `claude -p --output-format json` output.
-pub fn parse_reply(claude_json: &str) -> Result<Reply, String> {
-    let v: Value = serde_json::from_str(claude_json).map_err(|e| format!("claude output was not JSON: {e}"))?;
-    let result = v["result"].as_str().unwrap_or("");
-    if v["is_error"].as_bool() == Some(true) {
-        return Err(format!("claude failed: {}", result.chars().take(120).collect::<String>()));
-    }
-    let r = json_in(result).ok_or_else(|| format!("no JSON reply in: {}", result.chars().take(120).collect::<String>()))?;
-    Ok(Reply {
+/// The reply inside the agent's one-shot output.
+pub fn parse_reply(agent: crate::model::Harness, stdout: &str) -> Result<Reply, String> {
+    let text = crate::launch::final_text(agent, stdout)?;
+    let r = json_in(&text).ok_or_else(|| format!("no JSON reply in: {}", text.chars().take(120).collect::<String>()))?;
+    let reply = Reply {
         say: r["say"].as_str().unwrap_or("").trim().to_string(),
         action: match &r["action"] {
             Value::Null => None,
             a => Some(a.clone()),
         },
         confirm: r["confirm"].as_bool().unwrap_or(false),
-    })
+    };
+    if reply.say.is_empty() && reply.action.is_none() {
+        return Err("reply has no say and no action".into());
+    }
+    Ok(reply)
 }
 
 fn loose(s: &str) -> String {
@@ -356,22 +356,10 @@ impl std::fmt::Display for RunError {
     }
 }
 
-/// The `claude -p` arguments. The run is sandboxed, since board text is
-/// written by other agents: no tools, and Maya's system prompt in place of
-/// Claude Code's. Only the user's own settings load (they may hold the auth
-/// or provider setup, such as an apiKeyHelper or a Bedrock env); project and
-/// local settings do not.
-pub fn claude_args(model: &str, system: &str, user: &str) -> Vec<String> {
-    let flags = [
-        "-p", "--model", model, "--output-format", "json", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--max-turns", "1", "--tools", "", "--setting-sources", "user", "--system-prompt", system,
-    ];
-    flags.iter().map(|s| s.to_string()).chain(std::iter::once(user.to_string())).collect()
-}
-
 /// Runs `cmd` and returns its stdout, killing it once `timeout` passes.
 /// Stdout is read on its own thread so a large reply cannot stall the child.
-pub fn output_within(mut cmd: Command, timeout: Duration) -> Result<String, RunError> {
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| RunError::Failed(format!("could not run claude: {e}")))?;
+pub fn output_within(program: &str, mut cmd: Command, timeout: Duration) -> Result<String, RunError> {
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| RunError::Failed(format!("could not run {program}: {e}")))?;
     let mut stdout = child.stdout.take().ok_or_else(|| RunError::Failed("no stdout".into()))?;
     let reader = std::thread::spawn(move || {
         let mut s = String::new();
@@ -395,24 +383,24 @@ pub fn output_within(mut cmd: Command, timeout: Duration) -> Result<String, RunE
             }
         }
     }
-    reader.join().map_err(|_| RunError::Failed("could not read claude's output".into()))
+    reader.join().map_err(|_| RunError::Failed(format!("could not read {program}'s output")))
 }
 
-/// Runs the interpreter. `binary` is the claude executable; `cwd` is a
-/// neutral directory (Maya's data dir), so no project's CLAUDE.md or
-/// settings load.
-pub fn run(binary: &Path, model: &str, command: &str, cards: &[Card], prs: &[ReviewPr], history: &[(String, String)], cwd: &Path, timeout: Duration) -> Result<Reply, RunError> {
+/// Runs the interpreter on `agent` at `binary`. `cwd` is a neutral directory
+/// (Maya's data dir), so no project's instructions or settings load.
+pub fn run(agent: crate::model::Harness, binary: &Path, model: Option<&str>, command: &str, cards: &[Card], prs: &[ReviewPr], history: &[(String, String)], cwd: &Path, timeout: Duration) -> Result<Reply, RunError> {
     std::fs::create_dir_all(cwd).map_err(|e| RunError::Failed(format!("could not create {}: {e}", cwd.display())))?;
     let summary = board_summary(cards);
     let pr_lines = pr_summary(prs);
     let prompt = user_prompt(command, &summary, &pr_lines, history);
-    crate::log::line("interpreter", format!("asking {model}: {command}\nboard:\n{summary}\npull requests:\n{}\nrecent exchanges: {}", if pr_lines.is_empty() { "none" } else { pr_lines.as_str() }, history.len()));
+    let program = crate::launch::binary_name(agent);
+    crate::log::line("interpreter", format!("asking {program} {}: {command}\nboard:\n{summary}\npull requests:\n{}\nrecent exchanges: {}", model.unwrap_or("(default model)"), if pr_lines.is_empty() { "none" } else { pr_lines.as_str() }, history.len()));
     let mut cmd = crate::command(binary);
-    cmd.args(claude_args(model, &system_prompt(), &prompt)).current_dir(cwd).env_clear().envs(crate::launch::clean_env(std::env::vars()));
+    cmd.args(crate::launch::oneshot_args(agent, model, Some(&system_prompt()), &prompt)).current_dir(cwd).env_clear().envs(crate::launch::clean_env(std::env::vars()));
     let started = std::time::Instant::now();
-    let out = output_within(cmd, timeout).inspect_err(|e| crate::log::line("interpreter", format!("failed after {:.1}s: {e}", started.elapsed().as_secs_f32())))?;
+    let out = output_within(program, cmd, timeout).inspect_err(|e| crate::log::line("interpreter", format!("failed after {:.1}s: {e}", started.elapsed().as_secs_f32())))?;
     let ms = started.elapsed().as_millis();
-    let reply = parse_reply(&out).map_err(RunError::Failed);
+    let reply = parse_reply(agent, &out).map_err(RunError::Failed);
     match &reply {
         Ok(r) => crate::log::line("interpreter", format!("reply in {ms} ms: say={:?} action={} confirm={}", r.say, r.action.as_ref().map_or("null".to_string(), |a| a.to_string()), r.confirm)),
         Err(e) => crate::log::line("interpreter", format!("unusable reply in {ms} ms: {e}\nraw: {}", crate::log::clip(&out, 1500))),
@@ -513,17 +501,28 @@ mod tests {
         assert!(system_prompt().contains("answer to that question"), "the model is told to read a follow-up as the answer to Maya's last question");
     }
 
+    fn fixture(name: &str) -> String {
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/oneshot").join(name)).unwrap()
+    }
+
     #[test]
-    fn parses_the_json_inside_claude_print_output() {
-        let out = r#"{"type":"result","subtype":"success","is_error":false,"result":"```json\n{\"say\":\"Telling hexgrid: go ahead.\",\"action\":{\"kind\":\"reply\",\"session\":\"hexgrid\",\"text\":\"go ahead\"},\"confirm\":true}\n```"}"#;
-        let r = parse_reply(out).unwrap();
+    fn parses_the_reply_inside_each_agents_output() {
+        let r = parse_reply(crate::model::Harness::ClaudeCode, &fixture("claude.json")).unwrap();
         assert_eq!(r.say, "Telling hexgrid: go ahead.");
         assert_eq!(r.action.unwrap()["kind"], "reply");
         assert!(r.confirm);
-        let plain = r#"{"type":"result","result":"{\"say\":\"Nothing is waiting.\",\"action\":null,\"confirm\":false}"}"#;
-        assert!(parse_reply(plain).unwrap().action.is_none());
-        assert!(parse_reply(r#"{"type":"result","is_error":true,"result":"boom"}"#).unwrap_err().contains("boom"));
-        assert!(parse_reply(r#"{"type":"result","result":"I am not JSON"}"#).is_err());
+        for (agent, file) in [(crate::model::Harness::Codex, "codex.jsonl"), (crate::model::Harness::Antigravity, "agy.json"), (crate::model::Harness::Grok, "grok.json")] {
+            let r = parse_reply(agent, &fixture(file)).unwrap();
+            assert_eq!((r.say.as_str(), r.action.is_none(), r.confirm), ("hi", true, false), "{file}");
+        }
+    }
+
+    #[test]
+    fn garbage_and_failures_are_errors_not_replies() {
+        assert!(parse_reply(crate::model::Harness::Grok, "hello").unwrap_err().contains("not JSON"));
+        assert!(parse_reply(crate::model::Harness::Grok, r#"{"text":"no json here"}"#).unwrap_err().contains("no JSON reply"));
+        assert_eq!(parse_reply(crate::model::Harness::Grok, r#"{"text":"{}"}"#).unwrap_err(), "reply has no say and no action");
+        assert!(parse_reply(crate::model::Harness::ClaudeCode, r#"{"type":"result","is_error":true,"result":"Not logged in"}"#).unwrap_err().contains("Not logged in"));
     }
 
     #[test]
@@ -643,28 +642,16 @@ mod tests {
     }
 
     #[test]
-    fn the_run_has_no_tools_only_user_settings_and_only_its_own_system_prompt() {
-        let a = claude_args("haiku", "SYSTEM", "USER");
-        let pair = |flag: &str, value: &str| a.windows(2).any(|w| w[0] == flag && w[1] == value);
-        assert!(pair("--tools", ""), "{a:?}");
-        assert!(pair("--setting-sources", "user"), "the user's own settings (auth, provider env) load; project and local do not: {a:?}");
-        assert!(pair("--system-prompt", "SYSTEM"), "{a:?}");
-        assert!(pair("--model", "haiku"));
-        assert!(!a.iter().any(|x| x == "--append-system-prompt"), "the Claude Code system prompt must not ride along");
-        assert_eq!(a.last().map(String::as_str), Some("USER"));
-    }
-
-    #[test]
     fn a_run_past_its_deadline_is_killed_and_reported() {
         let started = std::time::Instant::now();
         let mut slow = Command::new("sleep");
         slow.arg("5");
-        assert_eq!(output_within(slow, Duration::from_millis(200)), Err(RunError::TimedOut));
+        assert_eq!(output_within("sh", slow, Duration::from_millis(200)), Err(RunError::TimedOut));
         assert!(started.elapsed() < Duration::from_secs(2), "the child was killed, not waited for");
         let mut quick = Command::new("echo");
         quick.arg("hi");
-        assert_eq!(output_within(quick, Duration::from_secs(5)).unwrap(), "hi\n");
-        assert!(matches!(output_within(Command::new("/no/such/binary"), Duration::from_secs(1)), Err(RunError::Failed(_))));
+        assert_eq!(output_within("sh", quick, Duration::from_secs(5)).unwrap(), "hi\n");
+        assert!(matches!(output_within("sh", Command::new("/no/such/binary"), Duration::from_secs(1)), Err(RunError::Failed(_))));
     }
 
     #[test]

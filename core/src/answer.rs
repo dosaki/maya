@@ -1,4 +1,4 @@
-use crate::launch::{check_choice, EFFORTS, MODELS};
+use crate::launch::check_choice;
 use crate::model::{AwaitKind, Card, State};
 
 /// The slash command that compacts a running session's context.
@@ -10,14 +10,18 @@ pub const EXIT: &str = "/exit";
 pub const SHIFT_TAB: &str = "\x1b[Z";
 
 /// The slash command that changes `setting` to `value` in a running session.
-/// Only the model and effort have such a command; both values are checked
-/// against the same lists the launcher uses.
-pub fn slash_command(setting: &str, value: &str) -> Result<String, String> {
-    match setting {
-        "model" => check_choice("model", value, MODELS)?,
-        "effort" => check_choice("effort", value, EFFORTS)?,
+/// Only the model and effort have such a command; the value must be in
+/// the agent's own list and plain enough to type.
+pub fn slash_command(setting: &str, value: &str, models: &[String], efforts: &[String]) -> Result<String, String> {
+    let allowed: Vec<&str> = match setting {
+        "model" => models.iter().map(String::as_str).collect(),
+        "effort" => efforts.iter().map(String::as_str).collect(),
         _ => return Err(format!("Unknown setting: {setting}")),
+    };
+    if !crate::launch::plain_model_id(value) {
+        return Err(format!("Unknown {setting}: {value}"));
     }
+    check_choice(setting, value, &allowed)?;
     Ok(format!("/{setting} {value}"))
 }
 
@@ -154,12 +158,16 @@ mod tests {
     }
 
     #[test]
-    fn slash_commands_only_for_known_settings() {
-        assert_eq!(slash_command("model", "opus"), Ok("/model opus".to_string()));
-        assert_eq!(slash_command("effort", "xhigh"), Ok("/effort xhigh".to_string()));
-        assert!(slash_command("model", "gpt").unwrap_err().contains("model"));
-        assert!(slash_command("effort", "turbo").unwrap_err().contains("effort"));
-        assert!(slash_command("mode", "plan").unwrap_err().contains("setting"));
+    fn slash_commands_only_for_listed_values() {
+        let models = vec!["opus".to_string(), "grok-4.7".to_string()];
+        let efforts = vec!["xhigh".to_string()];
+        assert_eq!(slash_command("model", "opus", &models, &efforts), Ok("/model opus".to_string()));
+        assert_eq!(slash_command("model", "grok-4.7", &models, &efforts), Ok("/model grok-4.7".to_string()));
+        assert_eq!(slash_command("effort", "xhigh", &models, &efforts), Ok("/effort xhigh".to_string()));
+        assert!(slash_command("model", "gpt", &models, &efforts).unwrap_err().contains("model"));
+        assert!(slash_command("effort", "turbo", &models, &efforts).unwrap_err().contains("effort"));
+        assert!(slash_command("model", "opus; rm -rf", &models, &efforts).unwrap_err().contains("model"));
+        assert!(slash_command("mode", "plan", &models, &efforts).unwrap_err().contains("setting"));
     }
 
     #[test]

@@ -59,6 +59,7 @@ body { margin: 0; background: var(--bg); }
 .settings__body { display: flex; flex-direction: column; gap: 10px; }
 .settings label { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .settings input { width: 70px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+.settings textarea { font: inherit; width: 100%; max-width: 640px; resize: vertical; }
 .settings__status { color: var(--muted); font-size: 12.5px; }
 .settings__error { color: #dc2626; font-size: 12.5px; }
 .settings__row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -160,6 +161,8 @@ body { margin: 0; background: var(--bg); }
 .newsession__actions { display: flex; justify-content: flex-end; }
 .modal__setup { padding: 16px; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
 .modal__setup p { margin: 0; color: var(--muted); }
+.firstrun__row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+.firstrun__row:has(input:checked) { border-color: var(--working); }
 
 .settings__check { display: flex; align-items: center; gap: 8px; }
 .settings__check input { width: auto; }

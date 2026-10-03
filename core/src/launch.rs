@@ -44,6 +44,46 @@ pub fn modes(agent: Harness) -> &'static [&'static str] {
     }
 }
 
+/// The agent's name as the UI shows it.
+pub fn label(agent: Harness) -> &'static str {
+    match agent {
+        Harness::ClaudeCode => "Claude Code",
+        Harness::Codex => "Codex",
+        Harness::Antigravity => "Antigravity",
+        Harness::Grok => "Grok Build",
+    }
+}
+
+/// What Maya can type into a running session of this agent: from each
+/// agent's docs and a probe of its TUI (the design's capability table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    /// `/compact` is a command.
+    pub compact: bool,
+    /// `/model <id>` switches the model; false where `/model` only opens a picker.
+    pub model_switch: bool,
+    /// `/effort <level>` switches the effort.
+    pub effort_switch: bool,
+    /// The keys that cycle the permission or execution mode; None where no key does.
+    pub mode_cycle: Option<&'static str>,
+    /// `/` lines are commands to the agent.
+    pub slash_lines: bool,
+    /// `!` lines run in the shell.
+    pub shell_lines: bool,
+}
+
+pub fn capabilities(agent: Harness) -> Capabilities {
+    let shift_tab = Some(crate::answer::SHIFT_TAB);
+    match agent {
+        Harness::ClaudeCode => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true },
+        // `/model` and `/permissions` open pickers in Codex; a typed value does nothing.
+        Harness::Codex => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: true, shell_lines: false },
+        Harness::Antigravity => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false },
+        // Grok's `--help` lists no effort values, so none can be checked before typing.
+        Harness::Grok => Capabilities { compact: true, model_switch: true, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false },
+    }
+}
+
 /// A model id is put in a shell line only when it is plain: letters,
 /// digits, `.`, `_` and `-`.
 pub fn plain_model_id(id: &str) -> bool {
@@ -171,6 +211,110 @@ pub fn clean_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, S
     vars.filter(|(k, _)| k != "ANTHROPIC_API_KEY" && k != "CLAUDECODE" && !k.starts_with("CLAUDE_CODE_")).collect()
 }
 
+/// The arguments for one non-interactive turn of `agent`: `user`, answered
+/// under `system`, with no tools, nothing persisted, one turn, and the
+/// agent's JSON envelope on stdout (see `final_text`). Codex and
+/// Antigravity have no system-prompt flag: the system text leads the
+/// prompt for them. Antigravity reads the prompt only attached to `-p`.
+pub fn oneshot_args(agent: Harness, model: Option<&str>, system: Option<&str>, user: &str) -> Vec<String> {
+    let s = |v: &str| v.to_string();
+    let folded = match system {
+        Some(sys) => format!("{sys}\n\n{user}"),
+        None => user.to_string(),
+    };
+    match agent {
+        Harness::ClaudeCode => {
+            let mut a = vec![s("-p"), s("--output-format"), s("json"), s("--strict-mcp-config"), s("--disable-slash-commands"), s("--no-session-persistence"), s("--max-turns"), s("1"), s("--tools"), s(""), s("--setting-sources"), s("user")];
+            if let Some(sys) = system {
+                a.extend([s("--system-prompt"), s(sys)]);
+            }
+            if let Some(m) = model {
+                a.extend([s("--model"), s(m)]);
+            }
+            a.push(s(user));
+            a
+        }
+        Harness::Codex => {
+            let mut a = vec![s("exec"), s("--json"), s("--ephemeral"), s("--skip-git-repo-check"), s("-s"), s("read-only"), s("--color"), s("never")];
+            if let Some(m) = model {
+                a.extend([s("-m"), s(m)]);
+            }
+            a.extend([s("--"), folded]);
+            a
+        }
+        Harness::Antigravity => {
+            let mut a = vec![s("--output-format"), s("json"), s("--sandbox"), s("--disable-slash-commands")];
+            if let Some(m) = model {
+                a.extend([s("--model"), s(m)]);
+            }
+            a.push(format!("-p={folded}"));
+            a
+        }
+        Harness::Grok => {
+            let mut a = vec![s("-p"), s(user), s("--output-format"), s("json"), s("--tools"), s(""), s("--max-turns"), s("1"), s("--permission-mode"), s("plan")];
+            if let Some(sys) = system {
+                a.extend([s("--system-prompt-override"), s(sys)]);
+            }
+            if let Some(m) = model {
+                a.extend([s("-m"), s(m)]);
+            }
+            a
+        }
+    }
+}
+
+/// The agent's final answer inside its one-shot output: Claude's `result`,
+/// the text of Codex's last `agent_message` item, Antigravity's `response`,
+/// Grok's `text`. Err names the failure the envelope reports.
+pub fn final_text(agent: Harness, stdout: &str) -> Result<String, String> {
+    use serde_json::Value;
+    let clip = |t: &str| t.chars().take(120).collect::<String>();
+    let json = |who: &str| serde_json::from_str::<Value>(stdout.trim()).map_err(|e| format!("{who} output was not JSON: {e}"));
+    match agent {
+        Harness::ClaudeCode => {
+            let v = json("claude")?;
+            let result = v["result"].as_str().unwrap_or("");
+            if v["is_error"].as_bool() == Some(true) {
+                return Err(format!("claude failed: {}", clip(result)));
+            }
+            Ok(result.to_string())
+        }
+        Harness::Codex => {
+            let mut last = None;
+            for line in stdout.lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                match v["type"].as_str() {
+                    Some("item.completed") if v["item"]["type"].as_str() == Some("agent_message") => last = v["item"]["text"].as_str().map(str::to_string),
+                    Some("error") => return Err(format!("codex failed: {}", clip(v["message"].as_str().unwrap_or("")))),
+                    Some("turn.failed") => return Err(format!("codex failed: {}", clip(&v["error"].to_string()))),
+                    _ => {}
+                }
+            }
+            last.ok_or_else(|| format!("no agent message in: {}", clip(stdout)))
+        }
+        Harness::Antigravity => {
+            let v = json("agy")?;
+            if v["status"].as_str() != Some("SUCCESS") {
+                return Err(format!("agy failed: {}", clip(&v.to_string())));
+            }
+            Ok(v["response"].as_str().unwrap_or("").to_string())
+        }
+        Harness::Grok => {
+            let v = json("grok")?;
+            v["text"].as_str().map(str::to_string).ok_or_else(|| format!("no text in: {}", clip(stdout)))
+        }
+    }
+}
+
+/// The agent's binary, or the message that names the command to install.
+pub fn find_binary(agent: Harness) -> Result<PathBuf, String> {
+    find_binary_named(binary_name(agent))
+}
+
+fn find_binary_named(name: &str) -> Result<PathBuf, String> {
+    agent_binary(name).ok_or_else(|| format!("Could not find the {name} command."))
+}
+
 /// What the AppImage's runtime (`APPDIR`, `APPIMAGE`, `ARGV0`, `OWD`) and
 /// linuxdeploy's GTK hook export into Maya's environment, removed outright
 /// from the processes that outlive Maya. Every other variable that points
@@ -244,7 +388,7 @@ pub fn scrub_appimage_env(cmd: &mut std::process::Command) {
 #[cfg(not(target_os = "linux"))]
 pub fn scrub_appimage_env(_cmd: &mut std::process::Command) {}
 
-/// The login shell `claude_binary` asks last: zsh is macOS's default, and a
+/// The login shell `agent_binary` asks last: zsh is macOS's default, and a
 /// Linux box or container may not have it, so `sh` there.
 #[cfg(target_os = "macos")]
 pub const LOGIN_SHELL: &str = "zsh";
@@ -328,16 +472,11 @@ pub fn agent_binary(name: &str) -> Option<PathBuf> {
     }
 }
 
-/// The `claude` binary, for the folder classifier.
-pub fn claude_binary() -> Option<PathBuf> {
-    agent_binary("claude")
-}
-
-/// Runs the headless picker; None on NONE, no match, timeout or any error.
-pub fn classify(binary: &Path, root: &Path, user_prompt: &str, dirs: &[String], timeout: Duration) -> Option<String> {
+/// Runs the headless folder picker on `agent`; None on NONE, no match,
+/// timeout or any error.
+pub fn classify(agent: Harness, binary: &Path, model: Option<&str>, root: &Path, user_prompt: &str, dirs: &[String], timeout: Duration) -> Option<String> {
     let mut child = crate::command(binary)
-        .args(["-p", "--strict-mcp-config", "--disable-slash-commands", "--model", "haiku", "--output-format", "text", "--no-session-persistence", "--max-turns", "1"])
-        .arg(classifier_prompt(user_prompt, dirs))
+        .args(oneshot_args(agent, model, None, &classifier_prompt(user_prompt, dirs)))
         .current_dir(root)
         .env_clear()
         .envs(clean_env(std::env::vars()))
@@ -362,7 +501,8 @@ pub fn classify(binary: &Path, root: &Path, user_prompt: &str, dirs: &[String], 
     if !out.status.success() {
         return None;
     }
-    pick_dir(&String::from_utf8_lossy(&out.stdout), dirs)
+    let text = final_text(agent, &String::from_utf8_lossy(&out.stdout)).ok()?;
+    pick_dir(&text, dirs)
 }
 
 /// Prompt files older than this are removed whenever a new one is written.
@@ -766,10 +906,13 @@ mod tests {
     #[test]
     fn classify_uses_the_reply_and_ignores_none() {
         let t = tempfile::tempdir().unwrap();
-        let bin = fake_binary(t.path(), "echo b");
-        assert_eq!(classify(&bin, t.path(), "p", &dirs(), Duration::from_secs(5)).as_deref(), Some("b"));
-        let bin = fake_binary(t.path(), "echo NONE");
-        assert_eq!(classify(&bin, t.path(), "p", &dirs(), Duration::from_secs(5)), None);
+        let bin = fake_binary(t.path(), r#"echo '{"type":"result","result":"b"}'"#);
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), Duration::from_secs(5)).as_deref(), Some("b"));
+        let bin = fake_binary(t.path(), r#"echo '{"type":"result","result":"NONE"}'"#);
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), Duration::from_secs(5)), None);
+        // Another agent's envelope is read the same way.
+        let bin = fake_binary(t.path(), r#"echo '{"text":"sonarqube","stopReason":"end_turn"}'"#);
+        assert_eq!(classify(Harness::Grok, &bin, Some("grok-4.7"), t.path(), "p", &dirs(), Duration::from_secs(5)).as_deref(), Some("sonarqube"));
     }
 
     #[cfg(unix)]
@@ -778,7 +921,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let bin = fake_binary(t.path(), "sleep 5; echo b");
         let start = Instant::now();
-        assert_eq!(classify(&bin, t.path(), "p", &dirs(), Duration::from_secs(1)), None);
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), Duration::from_secs(1)), None);
         assert!(start.elapsed() < Duration::from_secs(3));
     }
 
@@ -809,5 +952,81 @@ mod tests {
         assert!(resolve_target(root, &d, Some("../.."), None).unwrap_err().contains("not in the projects directory"));
         assert_eq!(resolve_target(root, &d, None, Some("sonarqube")).unwrap(), (PathBuf::from("/r/sonarqube"), "classifier"));
         assert_eq!(resolve_target(root, &d, None, None).unwrap(), (PathBuf::from("/r"), "fallback"));
+    }
+
+    fn oneshot_fixture(name: &str) -> String {
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/oneshot").join(name)).unwrap()
+    }
+
+    #[test]
+    fn labels_name_every_agent() {
+        assert_eq!(label(Harness::ClaudeCode), "Claude Code");
+        assert_eq!(label(Harness::Codex), "Codex");
+        assert_eq!(label(Harness::Antigravity), "Antigravity");
+        assert_eq!(label(Harness::Grok), "Grok Build");
+    }
+
+    #[test]
+    fn capabilities_follow_the_table() {
+        let c = capabilities(Harness::ClaudeCode);
+        assert!(c.compact && c.model_switch && c.effort_switch && c.slash_lines && c.shell_lines);
+        assert_eq!(c.mode_cycle, Some(crate::answer::SHIFT_TAB));
+        let x = capabilities(Harness::Codex);
+        assert!(x.compact && x.slash_lines);
+        assert!(!x.model_switch && !x.effort_switch, "Codex's /model opens a picker");
+        let g = capabilities(Harness::Grok);
+        assert!(g.compact && g.model_switch && g.slash_lines);
+        assert_eq!(g.mode_cycle, Some(crate::answer::SHIFT_TAB));
+        assert_eq!(capabilities(Harness::Antigravity).mode_cycle, Some(crate::answer::SHIFT_TAB));
+    }
+
+    #[test]
+    fn oneshot_args_per_agent() {
+        let pair = |a: &[String], f: &str, v: &str| a.windows(2).any(|w| w[0] == f && w[1] == v);
+        let a = oneshot_args(Harness::ClaudeCode, Some("haiku"), Some("SYS"), "USER");
+        assert_eq!(a[0], "-p");
+        assert!(pair(&a, "--model", "haiku") && pair(&a, "--system-prompt", "SYS") && pair(&a, "--output-format", "json") && pair(&a, "--tools", "") && pair(&a, "--max-turns", "1"));
+        assert_eq!(a.last().unwrap(), "USER");
+        assert!(!oneshot_args(Harness::ClaudeCode, None, None, "U").iter().any(|x| x == "--model" || x == "--system-prompt"));
+
+        let c = oneshot_args(Harness::Codex, Some("gpt-5.5"), Some("SYS"), "USER");
+        assert_eq!(&c[..2], ["exec", "--json"]);
+        assert!(c.contains(&"--ephemeral".to_string()) && c.contains(&"--skip-git-repo-check".to_string()) && pair(&c, "-s", "read-only") && pair(&c, "-m", "gpt-5.5"));
+        assert_eq!(c[c.len() - 2], "--");
+        assert_eq!(c.last().unwrap(), "SYS\n\nUSER", "no system flag: the system text leads the prompt");
+
+        let g = oneshot_args(Harness::Antigravity, None, Some("SYS"), "USER");
+        assert!(pair(&g, "--output-format", "json") && g.contains(&"--sandbox".to_string()) && g.contains(&"--disable-slash-commands".to_string()));
+        assert_eq!(g.last().unwrap(), "-p=SYS\n\nUSER", "agy takes the prompt attached to -p");
+        assert!(!g.iter().any(|x| x == "--model"));
+
+        let k = oneshot_args(Harness::Grok, Some("grok-4.7"), Some("SYS"), "USER");
+        assert_eq!(&k[..2], ["-p", "USER"]);
+        assert!(pair(&k, "--output-format", "json") && pair(&k, "--tools", "") && pair(&k, "--max-turns", "1") && pair(&k, "--permission-mode", "plan") && pair(&k, "-m", "grok-4.7") && pair(&k, "--system-prompt-override", "SYS"));
+    }
+
+    #[test]
+    fn final_text_reads_each_agents_envelope() {
+        assert!(final_text(Harness::ClaudeCode, &oneshot_fixture("claude.json")).unwrap().contains("\"say\":\"Telling hexgrid: go ahead.\""));
+        assert_eq!(final_text(Harness::Codex, &oneshot_fixture("codex.jsonl")).unwrap(), r#"{"say":"hi","action":null,"confirm":false}"#);
+        assert_eq!(final_text(Harness::Antigravity, &oneshot_fixture("agy.json")).unwrap().trim(), r#"{"say":"hi","action":null,"confirm":false}"#);
+        assert_eq!(final_text(Harness::Grok, &oneshot_fixture("grok.json")).unwrap(), r#"{"say":"hi","action":null,"confirm":false}"#);
+    }
+
+    #[test]
+    fn final_text_reports_failures_and_garbage() {
+        assert!(final_text(Harness::ClaudeCode, r#"{"type":"result","is_error":true,"result":"Not logged in"}"#).unwrap_err().contains("Not logged in"));
+        assert!(final_text(Harness::ClaudeCode, "not json").unwrap_err().contains("not JSON"));
+        assert!(final_text(Harness::Codex, "{\"type\":\"turn.started\"}\n").unwrap_err().contains("no agent message"));
+        assert!(final_text(Harness::Codex, "{\"type\":\"error\",\"message\":\"quota\"}\n").unwrap_err().contains("quota"));
+        assert!(final_text(Harness::Antigravity, r#"{"status":"ERROR","response":""}"#).unwrap_err().contains("agy failed"));
+        assert!(final_text(Harness::Grok, r#"{"stopReason":"error"}"#).unwrap_err().contains("no text"));
+    }
+
+    #[test]
+    fn find_binary_names_the_missing_command() {
+        // A binary no machine has: the message names the command the user must install.
+        let err = find_binary_named("maya-no-such-agent-xyz").unwrap_err();
+        assert_eq!(err, "Could not find the maya-no-such-agent-xyz command.");
     }
 }

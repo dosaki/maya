@@ -360,20 +360,13 @@ fn open_review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Res
     open_in_browser(&pr.url)
 }
 
-/// Opens a Terminal that reviews a listed PR with /should-i-approve, in the
-/// project checkout when it is free, else in a clone under the clones dir.
+/// Opens a terminal that reviews a listed PR with Maya's agent and the
+/// review prompt from Settings, in the project checkout when it is free,
+/// else in a clone under the clones dir.
 #[tauri::command(async)]
 fn review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<String, String> {
     let pr = review_pr_for(&state, &repo, number)?;
-    let (projects, clones, live) = {
-        let store = state.store.lock().unwrap();
-        let live: Vec<String> = store.live_cwds();
-        (store.config.projects_dir_path(), store.config.clones_dir_path(), live)
-    };
-    let projects = projects.ok_or("Set a projects directory in Settings first.")?;
-    let target = reviews::resolve_target(&projects, &clones, &pr.repo, pr.number, &live);
-    term::open_terminal_with(&reviews::shell_command(&target, &pr.repo, pr.number))?;
-    Ok(target.dir.to_string_lossy().into_owned())
+    actions::start_review(&local(&state), &pr)
 }
 
 fn claude_dir() -> std::path::PathBuf {
@@ -870,24 +863,28 @@ fn is_local(machine: &Option<String>) -> bool {
     machine.as_deref().is_none_or(str::is_empty)
 }
 
-/// Past sessions of a project folder, newest first, with running ones marked.
+/// Past sessions of a project folder for `agent`, newest first, with running ones marked.
 #[tauri::command(async)]
-fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: String, machine: Option<String>) -> Result<Vec<resume::ResumableSession>, String> {
+fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: String, machine: Option<String>, agent: Option<Harness>) -> Result<Vec<resume::ResumableSession>, String> {
+    let agent = agent.unwrap_or_default();
     if !is_local(&machine) {
         let machine = machine.unwrap();
-        return route_data(&app, &machine, CommandKind::ListResumable { dir });
+        check_remote_agent(agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
+        return route_data(&app, &machine, CommandKind::ListResumable { dir, agent });
     }
-    actions::list_resumable_sessions(&local(&state), &dir)
+    actions::list_resumable_sessions(&local(&state), agent, &dir)
 }
 
-/// Opens a Terminal in the folder running `claude --resume <id>`.
+/// Opens a terminal in the folder resuming the session with `agent`.
 #[tauri::command(async)]
-fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>) -> Result<(), String> {
+fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<(), String> {
+    let agent = agent.unwrap_or_default();
     if !is_local(&machine) {
         let machine = machine.unwrap();
-        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id });
+        check_remote_agent(agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
+        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent });
     }
-    actions::resume_session(&local(&state), &dir, &session_id)
+    actions::resume_session(&local(&state), agent, &dir, &session_id)
 }
 
 #[tauri::command(async)]

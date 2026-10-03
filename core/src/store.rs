@@ -178,6 +178,18 @@ impl Store {
         self.pending.apply(cards, now_ms());
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_pending_name_for_test(&self, name: &str) -> bool {
+        self.pending.names().iter().any(|n| n == name)
+    }
+
+    /// The folders waiting on a pending name, each already resolved
+    /// physically (see `pending_names::physical`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pending_cwds_for_test(&self) -> Vec<String> {
+        self.pending.cwds()
+    }
+
     /// Where the installed agents come from; called without the store's lock
     /// held, since the first listing can take seconds.
     pub fn agents_source(&self) -> std::sync::Arc<dyn Fn() -> Vec<crate::agents::AgentInfo> + Send + Sync> {
@@ -192,6 +204,14 @@ impl Store {
         let pids: Vec<(i32, String, Harness)> = sessions.iter().map(|s| (s.pid, s.tty.clone().unwrap_or_default(), s.harness)).collect();
         self.foreign = sessions.into_iter().map(|s| (s.pid, s)).collect();
         self.processes = Box::new(move || pids.clone());
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_agent_dirs(mut self, codex: PathBuf, agy: PathBuf, grok: PathBuf) -> Self {
+        self.codex_dir = codex;
+        self.agy_dir = agy;
+        self.grok_dir = grok;
         self
     }
 
@@ -264,6 +284,11 @@ impl Store {
 
     pub fn claude_dir(&self) -> &Path {
         &self.claude_dir
+    }
+
+    /// Where each agent keeps its sessions.
+    pub fn agent_dirs(&self) -> crate::resume::AgentDirs {
+        crate::resume::AgentDirs { claude: self.claude_dir.clone(), codex: self.codex_dir.clone(), agy: self.agy_dir.clone(), grok: self.grok_dir.clone() }
     }
 
     fn registry(&self) -> Vec<RegistrySession> {

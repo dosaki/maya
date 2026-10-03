@@ -17,6 +17,7 @@ import { remoteTerminalToast, type Card, type ReviewState } from "./types";
 import { initMute } from "./mute";
 import { initVoice } from "./voice";
 import { initDebug } from "./debug";
+import { maybeShowFirstRun } from "./firstrun";
 
 let cards: Card[] = [];
 const guard = makeClickGuard();
@@ -152,6 +153,7 @@ async function start(): Promise<void> {
   void initMute();
   void initVoice();
   void initDebug();
+  void maybeShowFirstRun();
   tabs = makeTabs();
   document.getElementById("reviews")?.addEventListener("click", (ev) => void reviewAction(ev.target as Element));
   await listen<ReviewState>("reviews", (e) => {

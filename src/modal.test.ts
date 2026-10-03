@@ -159,15 +159,28 @@ describe("renderModal", () => {
     expect(el.querySelector(".modal__banner")).toBeNull();
   });
 
-  it("keeps Claude-only controls off a Codex session but still lets you type a reply", () => {
+  it("shows the controls the agent has", () => {
+    const h = handlers();
+    const codex = renderModal({ card: { ...base, harness: "codex", hasInbox: false, context: { used: 80_000, window: 100_000, percent: 80 } }, turns: [], status: null, draft: "" }, h);
+    expect(codex.querySelector("button[data-action=compact]")).not.toBeNull();
+    expect(codex.querySelector("select[name=model]")).toBeNull();
+    expect(codex.querySelector("button[data-action=cycle-mode]")).toBeNull();
+    const grok = renderModal({ card: { ...base, harness: "grok", hasInbox: false }, turns: [], status: null, draft: "", agent: { harness: "grok", models: [{ id: "grok-4.7", label: "grok-4.7", efforts: [] }], efforts: [], modes: [] } }, h);
+    expect([...grok.querySelectorAll<HTMLOptionElement>("select[name=model] option")].map((o) => o.value)).toEqual(["", "grok-4.7"]);
+    expect(grok.querySelector("select[name=effort]")).toBeNull();
+    expect(grok.querySelector("button[data-action=cycle-mode]")).not.toBeNull();
+  });
+
+  it("keeps controls Codex lacks off its session but still lets you type a reply", () => {
     const h = handlers();
     const codex = { ...base, harness: "codex" as const, hasInbox: false, context: { used: 160_000, window: 200_000, percent: 80 } };
     const el = renderModal({ card: codex, turns: [], status: null, draft: "" }, h);
     expect(el.querySelector(".modal__tweaks")).toBeNull();
-    expect(el.querySelector("button[data-action=compact]")).toBeNull();
+    expect(el.querySelector("button[data-action=compact]")).not.toBeNull();
     expect(el.querySelector(".modal__context")?.textContent).toBe("ctx 80%");
     const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
-    expect(ta.placeholder).toContain("typed into its terminal");
+    expect(ta.placeholder).toContain("typed into its terminal as one line, so /commands run there)");
+    expect(ta.placeholder).not.toContain("!shell");
     expect(el.querySelector(".modal__noinbox")).toBeNull();
     ta.value = "carry on";
     el.querySelector<HTMLButtonElement>("button[data-action=send]")!.click();
@@ -350,7 +363,7 @@ describe("renderModal", () => {
     expect(h.onSend).toHaveBeenCalledWith("reply please");
   });
 
-  it("types a /command into the terminal instead of sending it as a reply, for Claude Code only", () => {
+  it("types a /command into the terminal instead of sending it as a reply, for agents that take them", () => {
     expect(isTerminalCommand("  /review")).toBe(true);
     expect(isTerminalCommand("review /x")).toBe(false);
     expect(isTerminalCommand("")).toBe(false);
@@ -362,13 +375,16 @@ describe("renderModal", () => {
     ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
     expect(h.onCommand).toHaveBeenCalledWith("/review the diff");
     expect(h.onSend).not.toHaveBeenCalled();
-    // Codex types every line into its terminal already: a slash line is just a reply there.
+    // Codex takes / commands too, but has no ! shell lines: one is just a reply there.
     const codex = renderModal({ card: { ...base, harness: "codex", hasInbox: false }, turns: [], status: null, draft: "" }, h);
     const ta2 = codex.querySelector<HTMLTextAreaElement>("textarea")!;
     ta2.value = "/status";
     codex.querySelector<HTMLButtonElement>("button[data-action=send]")!.click();
-    expect(h.onSend).toHaveBeenCalledWith("/status");
-    expect(h.onCommand).toHaveBeenCalledTimes(1);
+    expect(h.onCommand).toHaveBeenLastCalledWith("/status");
+    ta2.value = "!ls";
+    codex.querySelector<HTMLButtonElement>("button[data-action=send]")!.click();
+    expect(h.onSend).toHaveBeenCalledWith("!ls");
+    expect(h.onCommand).toHaveBeenCalledTimes(2);
   });
 
   it("types a !shell line into the terminal the same way", () => {

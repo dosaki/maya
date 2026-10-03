@@ -48,19 +48,42 @@ describe("new-session options", () => {
     for (const sel of document.querySelectorAll<HTMLSelectElement>("select")) sel.value = "";
   });
 
-  it("remembers the agent and each agent's options", async () => {
+  it("enables Start only once the agent listing has landed, so a prompt cannot start under the wrong agent", async () => {
+    let settle: (v: { agents: unknown[]; names: boolean }) => void = () => {};
+    const listing = new Promise<{ agents: unknown[]; names: boolean }>((r) => { settle = r; });
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") return listing;
+      if (cmd === "get_config") return Promise.resolve({ agent: "claude-code" });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    const ta = document.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")!;
+    ta.value = "fix the build";
+    ta.dispatchEvent(new Event("input"));
+    expect(document.querySelector<HTMLButtonElement>("button[data-action=start]")!.disabled).toBe(true);
+    settle({ agents: [CLAUDE_AGENT], names: true });
+    await flush();
+    await flush();
+    expect(document.querySelector<HTMLButtonElement>("button[data-action=start]")!.disabled).toBe(false);
+    closeNewSession();
+  });
+
+  it("defaults to Maya's agent, and remembers each agent's options", async () => {
     const codex = { harness: "codex", models: [{ id: "gpt-5.5", label: "GPT-5.5", efforts: ["low"] }], efforts: ["low"], modes: ["read-only"] };
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "list_machines") return Promise.resolve([]);
       if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
       if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT, codex], names: true });
+      if (cmd === "get_config") return Promise.resolve({ agent: "codex" });
       return Promise.reject(new Error("unexpected " + cmd));
     });
     await openNewSession();
     await flush();
-    const agent = document.querySelector<HTMLSelectElement>("select[name=agent]")!;
-    agent.value = "codex";
-    agent.dispatchEvent(new Event("change"));
+    // Maya's own agent (codex, from the config) is offered without choosing it.
+    expect(document.querySelector<HTMLSelectElement>("select[name=agent]")!.value).toBe("codex");
     document.querySelector<HTMLSelectElement>("select[name=model]")!.value = "gpt-5.5";
     closeNewSession();
     await openNewSession();

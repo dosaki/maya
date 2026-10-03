@@ -3,6 +3,10 @@ import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, recognizerOptions, secretStore, thisComputerLower } from "./platform";
+import type { Harness } from "./types";
+import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
+import { harnessLabel } from "./harness";
+import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -63,7 +67,14 @@ export interface SettingsModel {
   listen: boolean;
   microphone: string;
   microphones: string[];
-  interpreterModel: string;
+  /** The agent that powers Maya; null until chosen (the first-start modal asks). */
+  agent: Harness | null;
+  /** That agent's model id; "" is the agent's default. */
+  agentModel: string;
+  /** The agents installed on this machine, with their models; empty until listed. */
+  agents: AgentInfo[];
+  /** The review prompt; "" means the built-in one. */
+  reviewPrompt: string;
   /** Why the listener stopped (Dictation off, no microphone…), shown under the toggle. */
   listenError: string | null;
   recognizer: Recognizer;
@@ -125,7 +136,10 @@ export interface SettingsHandlers {
   onTryVoice(): void;
   onListen(on: boolean): void;
   onMicrophone(name: string): void;
-  onInterpreter(model: string): void;
+  onAgent(agent: Harness): void;
+  /** Saves the model paired with the agent the Agent select shows. */
+  onAgentModel(agent: Harness, id: string): void;
+  onReviewPrompt(text: string): void;
   onRecognizer(r: Recognizer): void;
   onWhisperModel(id: string): void;
   onDownloadModel(id: string): void;
@@ -165,7 +179,9 @@ interface ConfigJson {
   elevenlabsVoiceId?: string | null;
   listen: boolean;
   microphone?: string | null;
-  interpreterModel: string;
+  agent?: Harness | null;
+  agentModel?: string;
+  reviewPrompt?: string;
   recognizer: Recognizer;
   whisperModel: string;
   network?: NetworkConfigJson;
@@ -267,11 +283,67 @@ export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = document.createElement("div");
   root.className = "settings__body";
+  const maya = section("Maya");
   const sessions = section("Sessions");
   const notifications = section("Notifications");
   const assistant = section("Voice assistant");
   const network = section("Network");
-  root.append(sessions, notifications, assistant, network);
+  root.append(maya, sessions, notifications, assistant, network);
+
+  const agents = model.agents.length > 0 ? model.agents : [CLAUDE_AGENT];
+  // An agent that is chosen but not listed (uninstalled, or the listing has
+  // not landed yet) stays selected, with only its Default model, rather than
+  // the select silently showing another agent.
+  const chosenAgent: AgentInfo = agents.find((a) => a.harness === model.agent) ?? (model.agent ? { harness: model.agent, models: [], efforts: [], modes: [] } : agents[0]);
+  const agentLabel = document.createElement("label");
+  agentLabel.textContent = "Agent";
+  const agentSel = document.createElement("select");
+  agentSel.name = "agent";
+  for (const a of agents) {
+    const o = document.createElement("option");
+    o.value = a.harness;
+    o.textContent = harnessLabel(a.harness);
+    agentSel.append(o);
+  }
+  if (!agents.includes(chosenAgent)) {
+    const o = document.createElement("option");
+    o.value = chosenAgent.harness;
+    o.textContent = harnessLabel(chosenAgent.harness) + (model.agents.length > 0 ? " (not installed)" : "");
+    agentSel.append(o);
+  }
+  agentSel.value = chosenAgent.harness;
+  agentSel.addEventListener("change", () => {
+    // The old agent's models stay on screen until the save repaints; a pick
+    // in that window would pair the new agent with one of them.
+    agentModelSel.disabled = true;
+    h.onAgent(agentSel.value as Harness);
+  });
+  agentLabel.append(agentSel);
+  maya.append(agentLabel);
+  const agentHint = document.createElement("div");
+  agentHint.className = "settings__hint";
+  agentHint.dataset.for = "agent";
+  agentHint.textContent = "Interprets your voice commands, picks folders for 'Let Maya choose', and is the default for new and resumed sessions and reviews.";
+  maya.append(agentHint);
+
+  const agentModelLabel = document.createElement("label");
+  agentModelLabel.textContent = "Model";
+  const agentModelSel = document.createElement("select");
+  agentModelSel.name = "agentModel";
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = "Default";
+  agentModelSel.append(def);
+  for (const m of chosenAgent.models) {
+    const o = document.createElement("option");
+    o.value = m.id;
+    o.textContent = m.label;
+    agentModelSel.append(o);
+  }
+  agentModelSel.value = chosenAgent.models.some((m) => m.id === model.agentModel) ? model.agentModel : "";
+  agentModelSel.addEventListener("change", () => h.onAgentModel(agentSel.value as Harness, agentModelSel.value));
+  agentModelLabel.append(agentModelSel);
+  maya.append(agentModelLabel);
 
   const net = model.network ?? DEFAULT_NETWORK_STATUS;
   const netRole = model.networkRole ?? net.role;
@@ -355,6 +427,22 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   clonesInput.addEventListener("change", () => h.onClonesDir(clonesInput.value.trim()));
   clonesLabel.append(clonesInput);
   sessions.append(clonesLabel);
+
+  const reviewLabel = document.createElement("label");
+  reviewLabel.textContent = "Review prompt (for the Review button)";
+  const reviewInput = document.createElement("textarea");
+  reviewInput.name = "reviewPrompt";
+  reviewInput.rows = 4;
+  reviewInput.placeholder = DEFAULT_REVIEW_PROMPT;
+  reviewInput.value = model.reviewPrompt;
+  reviewInput.addEventListener("change", () => h.onReviewPrompt(reviewInput.value.trim()));
+  reviewLabel.append(reviewInput);
+  sessions.append(reviewLabel);
+  const reviewHint = document.createElement("div");
+  reviewHint.className = "settings__hint";
+  reviewHint.dataset.for = "reviewPrompt";
+  reviewHint.textContent = "Blank uses the built-in prompt. {number}, {repo} and {url} are filled in; a prompt that uses none gets \" PR #<number> (<url>)\" appended.";
+  sessions.append(reviewHint);
 
   const notifyLabel = document.createElement("label");
   notifyLabel.className = "settings__check";
@@ -532,21 +620,6 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   mic.addEventListener("change", () => h.onMicrophone(mic.value));
   micLabel.append(mic);
   assistant.append(micLabel);
-
-  const modelLabel = document.createElement("label");
-  modelLabel.textContent = "Voice interpreter";
-  const modelSel = document.createElement("select");
-  modelSel.name = "interpreterModel";
-  for (const [v, text] of [["haiku", "Haiku (fast)"], ["sonnet", "Sonnet"], ["opus", "Opus"]] as const) {
-    const o = document.createElement("option");
-    o.value = v;
-    o.textContent = text;
-    modelSel.append(o);
-  }
-  modelSel.value = model.interpreterModel;
-  modelSel.addEventListener("change", () => h.onInterpreter(modelSel.value));
-  modelLabel.append(modelSel);
-  assistant.append(modelLabel);
 
   const providerLabel = document.createElement("label");
   providerLabel.textContent = "Voice";
@@ -827,7 +900,10 @@ export async function initSettings(): Promise<void> {
     listen: false,
     microphone: "",
     microphones: [],
-    interpreterModel: "haiku",
+    agent: null,
+    agentModel: "",
+    agents: [],
+    reviewPrompt: "",
     listenError: null,
     recognizer: "system",
     whisperModel: "base.en-q5_1",
@@ -864,14 +940,7 @@ export async function initSettings(): Promise<void> {
     }
   };
 
-  const saveConfig = async (patch: Partial<ConfigJson>) => {
-    // The local model can be stale for fields it doesn't own (e.g. `listen`,
-    // which the voice panel can flip independently), so fetch the freshest
-    // config and merge the patch onto that rather than onto `model`.
-    const fresh = await invoke<ConfigJson>("get_config");
-    const c = await invoke<ConfigJson>("set_config", {
-      config: { ...fresh, ...patch },
-    });
+  const applyConfig = (c: ConfigJson) => {
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
     model.clonesDir = c.clonesDir ?? "";
@@ -881,10 +950,23 @@ export async function initSettings(): Promise<void> {
     model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
     model.listen = c.listen;
     model.microphone = c.microphone ?? "";
-    model.interpreterModel = c.interpreterModel;
+    model.agent = c.agent ?? null;
+    model.agentModel = c.agentModel ?? "";
+    model.reviewPrompt = c.reviewPrompt ?? "";
     model.recognizer = c.recognizer;
     model.whisperModel = c.whisperModel;
     applyNetworkConfig(c);
+  };
+
+  const saveConfig = async (patch: Partial<ConfigJson>) => {
+    // The local model can be stale for fields it doesn't own (e.g. `listen`,
+    // which the voice panel can flip independently), so fetch the freshest
+    // config and merge the patch onto that rather than onto `model`.
+    const fresh = await invoke<ConfigJson>("get_config");
+    const c = await invoke<ConfigJson>("set_config", {
+      config: { ...fresh, ...patch },
+    });
+    applyConfig(c);
   };
 
   const saveNetwork = (patch: Partial<NetworkConfigJson>) =>
@@ -931,7 +1013,9 @@ export async function initSettings(): Promise<void> {
     onTryVoice: () => void run(() => invoke("try_voice")),
     onListen: (on) => void run(async () => { await invoke("voice_listen", { on }); model.listen = on; }),
     onMicrophone: (name) => void run(() => saveConfig({ microphone: name || null })),
-    onInterpreter: (m) => void run(() => saveConfig({ interpreterModel: m })),
+    onAgent: (agent) => void run(() => saveConfig({ agent, agentModel: "" })),
+    onAgentModel: (agent, id) => void run(() => saveConfig({ agent, agentModel: id })),
+    onReviewPrompt: (text) => void run(() => saveConfig({ reviewPrompt: text })),
     onRecognizer: (r) => void run(() => saveConfig({ recognizer: r })),
     onWhisperModel: (id) => void run(() => saveConfig({ whisperModel: id })),
     onDownloadModel: (id) => {
@@ -1002,6 +1086,27 @@ export async function initSettings(): Promise<void> {
     },
   };
 
+  // Others write the config too (the first-start modal saves the agent), and
+  // a stale agent here would pair a model with the wrong agent: read it again
+  // when the tab is shown, and when a save elsewhere says it changed. A
+  // hidden pane is only marked stale, and repainted once shown.
+  const refetchAndPaint = () =>
+    void invoke<ConfigJson>("get_config")
+      .then((c) => {
+        applyConfig(c);
+        stale = true;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!panel.hidden && stale) {
+          stale = false;
+          paint();
+        }
+      });
+  // Registered before the first await, so an early first-start save (with
+  // Settings already the visible tab) cannot be missed.
+  window.addEventListener("maya:config-changed", refetchAndPaint);
+
   // The voice panel can turn listening on or off on its own; mirror that
   // into the model so the Settings checkbox doesn't show a stale state.
   // Every partial transcript emits `voice`: repaint only when listening
@@ -1030,10 +1135,7 @@ export async function initSettings(): Promise<void> {
   // Events that arrive while the tab is hidden update the model only; a
   // repaint when the tab is shown brings the pane up to date.
   new MutationObserver(() => {
-    if (!panel.hidden && stale) {
-      stale = false;
-      paint();
-    }
+    if (!panel.hidden) refetchAndPaint();
   }).observe(panel, { attributes: true, attributeFilter: ["hidden"] });
 
   // The pairing code's countdown, and its end. Updated in place: a full
@@ -1062,19 +1164,7 @@ export async function initSettings(): Promise<void> {
     model.focusVisible = await focusVisible;
     model.hookInstalled = installed;
     model.codexHookInstalled = codexInstalled;
-    model.completedTimeoutMinutes = config.completedTimeoutMinutes;
-    model.projectsDir = config.projectsDir ?? "";
-    model.clonesDir = config.clonesDir ?? "";
-    model.notifyOnAwaiting = config.notifyOnAwaiting;
-    model.speakNotifications = config.speakNotifications;
-    model.voiceProvider = config.voiceProvider;
-    model.elevenVoiceId = config.elevenlabsVoiceId ?? "";
-    model.listen = config.listen;
-    model.microphone = config.microphone ?? "";
-    model.interpreterModel = config.interpreterModel;
-    model.recognizer = config.recognizer;
-    model.whisperModel = config.whisperModel;
-    applyNetworkConfig(config);
+    applyConfig(config);
     await loadVoices();
     await loadModels();
     try {
@@ -1091,4 +1181,15 @@ export async function initSettings(): Promise<void> {
       // ignore: an older backend or a stray failure just leaves Network off
     }
   });
+
+  // Listing installed agents can take seconds (it probes each harness), so
+  // it runs after the rest of Settings is already usable rather than inside
+  // the `run` above, which would otherwise block the whole panel on it.
+  void invoke<{ agents: AgentInfo[] }>("list_agents", { machine: "" })
+    .then((r) => {
+      model.agents = r.agents;
+      if (!panel.hidden) paint();
+      else stale = true;
+    })
+    .catch(() => undefined);
 }

@@ -2,6 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { formatAge } from "./format";
 import { showToast } from "./toast";
 import { thisComputer } from "./platform";
+import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
+import { harnessLabel } from "./harness";
+import { brainAgent, defaultAgent } from "./brain";
+import type { Harness } from "./types";
 
 export interface ResumableSession {
   id: string;
@@ -27,6 +31,11 @@ export interface ResumeModel {
   machines: MachineChoice[];
   /** The chosen machine's value; "" is this Mac. */
   machine: string;
+  /** The chosen machine's agents, Claude Code first. */
+  agents: AgentInfo[];
+  agent: Harness;
+  /** Set once `loadAgents` has settled the real agent; a remembered directory waits for it before fetching sessions. */
+  agentReady: boolean;
 }
 
 export interface ResumeHandlers {
@@ -35,6 +44,7 @@ export interface ResumeHandlers {
   onClose(): void;
   onOpenSettings(): void;
   onMachine(machine: string): void;
+  onAgent(agent: Harness): void;
 }
 
 const DIR_KEY = "maya.resume.dir";
@@ -104,6 +114,23 @@ export function renderResume(m: ResumeModel, h: ResumeHandlers, nowMs: number = 
     machineSelect.addEventListener("change", () => h.onMachine(machineSelect.value));
     machineLabel.append(machineSelect);
     form.append(machineLabel);
+  }
+
+  if (m.agents.length > 1) {
+    const agentLabel = el("label", "newsession__field");
+    agentLabel.append(el("span", "newsession__label", "Agent"));
+    const agentSelect = el("select", "newsession__select");
+    agentSelect.name = "agent";
+    for (const a of m.agents) {
+      const o = document.createElement("option");
+      o.value = a.harness;
+      o.textContent = harnessLabel(a.harness);
+      agentSelect.append(o);
+    }
+    agentSelect.value = m.agents.some((a) => a.harness === m.agent) ? m.agent : m.agents[0].harness;
+    agentSelect.addEventListener("change", () => h.onAgent(agentSelect.value as Harness));
+    agentLabel.append(agentSelect);
+    form.append(agentLabel);
   }
 
   if (m.needsSetup) {
@@ -189,6 +216,7 @@ function paint(): void {
         document.querySelector<HTMLElement>("[data-tab=settings]")?.click();
       },
       onMachine: (machine) => void chooseMachine(machine),
+      onAgent: (agent) => void chooseAgent(agent),
     }),
   );
 }
@@ -216,6 +244,35 @@ async function loadDirs(machine: string): Promise<void> {
   paint();
 }
 
+/** Lists the machine's agents and settles on Maya's, then refreshes the sessions if a folder is chosen. */
+async function loadAgents(machine: string): Promise<void> {
+  const me = current;
+  if (!me) return;
+  let agents: AgentInfo[];
+  try {
+    const reply = await invoke<{ agents: AgentInfo[]; names: boolean }>("list_agents", { machine });
+    // An older Maya over there resumes Claude Code only.
+    agents = reply.names && reply.agents.length > 0 ? reply.agents : [CLAUDE_AGENT];
+  } catch {
+    agents = [CLAUDE_AGENT];
+  }
+  const brain = await brainAgent();
+  if (current !== me || me.model.machine !== machine) return;
+  me.model.agents = agents;
+  me.model.agent = defaultAgent(agents, brain);
+  me.model.agentReady = true;
+  paint();
+  if (me.model.dir) await loadSessions(me.model.dir);
+}
+
+async function chooseAgent(agent: Harness): Promise<void> {
+  if (!current) return;
+  current.model.agent = agent;
+  current.model.sessions = [];
+  paint();
+  if (current.model.dir) await loadSessions(current.model.dir);
+}
+
 async function chooseMachine(machine: string): Promise<void> {
   if (!current) return;
   current.model.machine = machine;
@@ -224,14 +281,25 @@ async function chooseMachine(machine: string): Promise<void> {
   // Setup belongs to the machine that needed it; `loadDirs` decides again for this one.
   current.model.needsSetup = false;
   current.model.sessions = [];
+  current.model.agents = [CLAUDE_AGENT];
+  current.model.agent = "claude-code";
+  current.model.agentReady = false;
   paint();
+  void loadAgents(machine);
   await loadDirs(machine);
 }
 
+/**
+ * Shows the folder's sessions. Until the machine's agent listing has
+ * settled the agent, the folder is only shown as loading: `loadAgents`'s
+ * trailing load fetches once the real agent is known, so no list is ever
+ * fetched under the provisional "claude-code".
+ */
 async function loadSessions(dir: string): Promise<void> {
   if (!current) return;
   const me = current;
   const machine = me.model.machine;
+  const agent = me.model.agent;
   me.model.dir = dir;
   me.model.loading = true;
   me.model.status = null;
@@ -243,13 +311,14 @@ async function loadSessions(dir: string): Promise<void> {
     }
   }
   paint();
+  if (!me.model.agentReady) return;
   try {
-    const sessions = await invoke<ResumableSession[]>("list_resumable_sessions", { dir, machine });
-    // A late answer for another folder or machine (the same folder name can exist on both) is dropped.
-    if (current !== me || me.model.dir !== dir || me.model.machine !== machine) return;
+    const sessions = await invoke<ResumableSession[]>("list_resumable_sessions", { dir, machine, agent });
+    // A late answer for another folder, machine or agent (the same folder name can exist on both) is dropped.
+    if (current !== me || me.model.dir !== dir || me.model.machine !== machine || me.model.agent !== agent) return;
     me.model.sessions = sessions;
   } catch (e) {
-    if (current !== me || me.model.dir !== dir || me.model.machine !== machine) return;
+    if (current !== me || me.model.dir !== dir || me.model.machine !== machine || me.model.agent !== agent) return;
     me.model.sessions = [];
     me.model.status = { ok: false, text: String(e) };
   }
@@ -261,8 +330,9 @@ async function resume(dir: string, sessionId: string): Promise<void> {
   if (!current) return;
   const me = current;
   const machine = me.model.machine;
+  const agent = me.model.agent;
   try {
-    await invoke("resume_session", { dir, sessionId, machine });
+    await invoke("resume_session", { dir, sessionId, machine, agent });
     if (current === me) closeResume();
     showToast(`Resuming in ${dir}`);
   } catch (e) {
@@ -281,7 +351,19 @@ export async function openResume(): Promise<void> {
     if (e.key === "Escape") closeResume();
   };
   current = {
-    model: { dirs: [], dir: null, sessions: [], loading: false, status: null, needsSetup: false, machines: [{ name: thisComputer(), value: "" }], machine: "" },
+    model: {
+      dirs: [],
+      dir: null,
+      sessions: [],
+      loading: false,
+      status: null,
+      needsSetup: false,
+      machines: [{ name: thisComputer(), value: "" }],
+      machine: "",
+      agents: [CLAUDE_AGENT],
+      agent: "claude-code",
+      agentReady: false,
+    },
     keyHandler,
   };
   document.addEventListener("keydown", keyHandler);
@@ -293,6 +375,7 @@ export async function openResume(): Promise<void> {
       paint();
     })
     .catch(() => undefined);
+  void loadAgents("");
   await loadDirs("");
 }
 

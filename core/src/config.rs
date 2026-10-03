@@ -1,3 +1,4 @@
+use crate::model::Harness;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -80,9 +81,23 @@ pub struct Config {
     /// Microphone name for the listener; None picks the built-in one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub microphone: Option<String>,
-    /// Model alias for the voice interpreter.
-    #[serde(default = "default_interpreter_model")]
-    pub interpreter_model: String,
+    /// The agent that powers Maya: it interprets voice commands, picks
+    /// folders for "Let Maya choose", and is the default for new, resumed
+    /// and review sessions. None until the first-start modal or Settings
+    /// sets it; `brain()` then reads Claude Code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<Harness>,
+    /// That agent's model id; "" means the agent's own default.
+    #[serde(default)]
+    pub agent_model: String,
+    /// The prompt a review session starts with; "" means the built-in one
+    /// (`reviews::DEFAULT_REVIEW_PROMPT`).
+    #[serde(default)]
+    pub review_prompt: String,
+    /// The voice interpreter's model before 0.10, kept only to be read once
+    /// by `migrate`; never written again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpreter_model: Option<String>,
     /// System (Apple) or Built-in (whisper.cpp) recognition.
     #[serde(default)]
     pub recognizer: Recognizer,
@@ -120,10 +135,6 @@ fn default_true() -> bool {
     true
 }
 
-fn default_interpreter_model() -> String {
-    "haiku".into()
-}
-
 fn default_whisper_model() -> String {
     DEFAULT_MODEL.into()
 }
@@ -141,7 +152,10 @@ impl Default for Config {
             clones_dir: None,
             listen: false,
             microphone: None,
-            interpreter_model: "haiku".into(),
+            agent: None,
+            agent_model: String::new(),
+            review_prompt: String::new(),
+            interpreter_model: None,
             recognizer: if cfg!(any(windows, target_os = "linux")) { Recognizer::Builtin } else { Recognizer::System },
             whisper_model: DEFAULT_MODEL.into(),
             network: NetworkConfig::default(),
@@ -152,6 +166,27 @@ impl Default for Config {
 impl Config {
     pub fn completed_timeout_ms(&self) -> u64 {
         self.completed_timeout_minutes * 60_000
+    }
+
+    /// The agent that powers Maya; Claude Code until one is chosen.
+    pub fn brain(&self) -> Harness {
+        self.agent.unwrap_or(Harness::ClaudeCode)
+    }
+
+    /// Maya's agent's model, or None for the agent's own default.
+    pub fn brain_model(&self) -> Option<&str> {
+        Some(self.agent_model.trim()).filter(|m| !m.is_empty())
+    }
+
+    /// Carries a pre-0.10 `interpreterModel` into `agentModel`, only when
+    /// Maya's agent is (still) Claude Code, whose aliases it named.
+    pub fn migrate(mut self) -> Config {
+        if let Some(m) = self.interpreter_model.take() {
+            if self.agent_model.trim().is_empty() && self.brain() == Harness::ClaudeCode {
+                self.agent_model = m;
+            }
+        }
+        self
     }
 
     /// The projects directory with `~` expanded, if configured.
@@ -195,7 +230,7 @@ pub fn expand_home(s: &str) -> PathBuf {
 
 /// Missing or unreadable file gives `Config::default()`.
 pub fn load(path: &Path) -> Config {
-    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Config>(&t).ok()).unwrap_or_default().for_this_platform()
+    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Config>(&t).ok()).unwrap_or_default().migrate().for_this_platform()
 }
 
 impl Config {
@@ -331,15 +366,51 @@ mod tests {
     }
 
     #[test]
-    fn voice_settings_default_off_with_haiku() {
+    fn voice_settings_default_off() {
         let c = Config::default();
         assert!(!c.listen);
         assert!(c.microphone.is_none());
-        assert_eq!(c.interpreter_model, "haiku");
-        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "listen": true, "microphone": "USB Mic", "interpreterModel": "sonnet"}"#).unwrap();
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "listen": true, "microphone": "USB Mic"}"#).unwrap();
         assert!(c.listen);
         assert_eq!(c.microphone.as_deref(), Some("USB Mic"));
-        assert_eq!(c.interpreter_model, "sonnet");
+    }
+
+    #[test]
+    fn agent_defaults_to_none_and_the_brain_to_claude_code() {
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
+        assert_eq!(c.agent, None);
+        assert_eq!(c.brain(), crate::model::Harness::ClaudeCode);
+        assert_eq!(c.brain_model(), None);
+        assert_eq!(c.review_prompt, "");
+        let text = serde_json::to_string(&c).unwrap();
+        assert!(!text.contains("\"agent\""), "an unset agent is not written: {text}");
+        assert!(!text.contains("interpreterModel"), "{text}");
+    }
+
+    #[test]
+    fn an_old_interpreter_model_becomes_the_claude_agent_model_only() {
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30,"interpreterModel":"sonnet"}"#).unwrap();
+        let c = c.migrate();
+        assert_eq!(c.agent_model, "sonnet");
+        assert_eq!(c.interpreter_model, None);
+        assert_eq!(c.brain_model(), Some("sonnet"));
+        let codex: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30,"agent":"codex","interpreterModel":"sonnet"}"#).unwrap();
+        assert_eq!(codex.migrate().agent_model, "", "a Claude alias is not carried to another agent");
+        let kept: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30,"agentModel":"haiku","interpreterModel":"sonnet"}"#).unwrap();
+        assert_eq!(kept.migrate().agent_model, "haiku", "a model already chosen wins");
+    }
+
+    #[test]
+    fn agent_model_and_review_prompt_round_trip() {
+        let c = Config { agent: Some(crate::model::Harness::Grok), agent_model: "grok-4.7".into(), review_prompt: "/should-i-approve".into(), ..Default::default() };
+        let text = serde_json::to_string(&c).unwrap();
+        assert!(text.contains("\"agent\":\"grok\""), "{text}");
+        assert!(text.contains("\"agentModel\":\"grok-4.7\""), "{text}");
+        assert!(text.contains("\"reviewPrompt\":\"/should-i-approve\""), "{text}");
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.brain(), crate::model::Harness::Grok);
+        assert_eq!(back.brain_model(), Some("grok-4.7"));
+        assert_eq!(Config { agent_model: "   ".into(), ..Default::default() }.brain_model(), None, "blank means the agent's default");
     }
 
     #[test]

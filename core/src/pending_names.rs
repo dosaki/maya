@@ -6,6 +6,7 @@
 
 use crate::model::{Card, Harness, State};
 use std::collections::HashSet;
+use std::path::Path;
 
 /// How long a name waits for its session to appear.
 pub const MATCH_WINDOW_MS: u64 = 10 * 60 * 1000;
@@ -38,9 +39,35 @@ impl PendingName {
     }
 }
 
-/// `dir` with symlinks resolved, or None when it does not exist.
+/// `dir` with symlinks resolved as far as the filesystem allows: when `dir`
+/// itself does not exist yet (a review's clone folder, named before `gh
+/// repo clone` creates it), the nearest existing ancestor is canonicalized
+/// and the remaining, not-yet-existing components are rejoined onto it
+/// untouched. None when no ancestor below the filesystem root exists: the
+/// root always canonicalizes (on Windows to the current drive, as
+/// `\\?\C:\`), which would rewrite a folder that is simply not there.
 fn physical(dir: &str) -> Option<String> {
-    std::fs::canonicalize(dir).ok().map(|p| p.to_string_lossy().into_owned())
+    let path = Path::new(dir);
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return Some(p.to_string_lossy().into_owned());
+    }
+    let mut suffix = Vec::new();
+    let mut cur = path;
+    while let Some(parent) = cur.parent() {
+        suffix.push(cur.file_name()?.to_os_string());
+        if parent.parent().is_none() {
+            return None;
+        }
+        if let Ok(base) = std::fs::canonicalize(parent) {
+            let mut out = base;
+            for comp in suffix.iter().rev() {
+                out.push(comp);
+            }
+            return Some(out.to_string_lossy().into_owned());
+        }
+        cur = parent;
+    }
+    None
 }
 
 /// Ready for typed input: not running a turn and not asking anything.
@@ -81,6 +108,17 @@ impl PendingNames {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// The names waiting, in no particular order.
+    pub fn names(&self) -> Vec<String> {
+        self.entries.iter().map(|p| p.name.clone()).collect()
+    }
+
+    /// The folders waiting, in no particular order: each already resolved
+    /// physically by `PendingName::new`.
+    pub fn cwds(&self) -> Vec<String> {
+        self.entries.iter().map(|p| p.cwd.clone()).collect()
     }
 
     /// Drops the name waiting for `session_id`: the user renamed it themselves.
@@ -403,6 +441,35 @@ mod tests {
         let mut cards = vec![card("b", Harness::Codex, &linked, State::Working, "")];
         p.apply(&mut cards, 2_000);
         assert_eq!(cards[0].name, "Linked card", "the card's folder goes through the link");
+    }
+
+    #[test]
+    fn a_path_whose_only_existing_ancestor_is_the_root_is_left_alone() {
+        // On Windows "/" canonicalizes to the current drive, so resolving
+        // through the root would turn a folder like "/dev/a" into
+        // "\\?\D:\dev\a". A path with no real ancestor is kept as given.
+        assert_eq!(physical("/maya-no-such-dir-xyz/a"), None);
+        let p = PendingName::new(Harness::Codex, "/maya-no-such-dir-xyz/a", "x", 1_000, vec![], None);
+        assert_eq!(p.cwd, "/maya-no-such-dir-xyz/a");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_not_yet_cloned_folder_behind_a_symlink_is_still_resolved() {
+        // A review clone is named before `gh repo clone` creates its folder:
+        // `cwd` must still resolve through a symlinked ancestor (macOS's
+        // /tmp, a linked clones directory), by canonicalizing the nearest
+        // existing ancestor and rejoining the rest untouched.
+        let t = tempfile::tempdir().unwrap();
+        let real = t.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let canonical_real = std::fs::canonicalize(&real).unwrap();
+
+        let target = link.join("not-yet-cloned");
+        let p = PendingName::new(Harness::Codex, &target.to_string_lossy(), "review x #1", 1_000, vec![], None);
+        assert_eq!(p.cwd, canonical_real.join("not-yet-cloned").to_string_lossy().into_owned());
     }
 
     #[test]

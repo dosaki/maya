@@ -22,7 +22,8 @@ the right terminal first.
   - Using built-in notifications, and/or a voice and/or a Dock badge
   - Keeps quiet under a Focus mode, or when you mute her from the top bar
 - Lists the pull requests that wait for your review, and reviews them in one click
-- Does what you tell it by voice: "Maya, tell <session> to do <thing>"
+- Does what you tell her by voice, through the agent you choose: "Maya, tell <session> to do <thing>"
+- Resumes old sessions of any of them, and reviews pull requests with the agent you chose, on a prompt you can edit in Settings
 - Shows the sessions of all your machines on one board.
 - Runs headless over SSH with the `maya` command.
 
@@ -33,7 +34,7 @@ Run the commands below, or download Maya manually from the
 
 Requirements:
 
-- [Claude Code](https://claude.com/claude-code), installed and signed in.
+- One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity or Grok Build, installed and signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
 - The [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`,
   for the Pull Requests tab.
 - macOS on Apple Silicon or Intel (macOS 14 or later for voice).
