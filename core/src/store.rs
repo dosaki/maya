@@ -183,6 +183,13 @@ impl Store {
         self.pending.names().iter().any(|n| n == name)
     }
 
+    /// The folders waiting on a pending name, each already resolved
+    /// physically (see `pending_names::physical`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pending_cwds_for_test(&self) -> Vec<String> {
+        self.pending.cwds()
+    }
+
     /// Where the installed agents come from; called without the store's lock
     /// held, since the first listing can take seconds.
     pub fn agents_source(&self) -> std::sync::Arc<dyn Fn() -> Vec<crate::agents::AgentInfo> + Send + Sync> {

@@ -760,6 +760,11 @@ mod tests {
         assert_eq!(std::fs::read_to_string(file).unwrap(), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
         drop(calls);
         assert!(store.lock().unwrap().has_pending_name_for_test("review bedrock #451"), "the name waits for the Codex session");
+        // The clone folder does not exist yet: its pending cwd must still be
+        // resolved physically, through whatever symlink its existing
+        // ancestor sits behind (macOS's /tmp, a linked clones directory).
+        let canonical_clone = std::fs::canonicalize(dir.path()).unwrap().join("clones/bedrock-451");
+        assert_eq!(store.lock().unwrap().pending_cwds_for_test(), vec![canonical_clone.to_string_lossy().into_owned()]);
     }
 
     #[test]
