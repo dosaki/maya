@@ -41,3 +41,24 @@ export function harnessBadge(h: Harness, className: string): HTMLElement {
   span.title = `Running under ${label}`;
   return span;
 }
+
+/** What Maya can type into a running session of each agent: the Rust table in `core/src/launch.rs`. */
+export interface Capabilities {
+  compact: boolean;
+  modelSwitch: boolean;
+  effortSwitch: boolean;
+  modeCycle: boolean;
+  slashLines: boolean;
+  shellLines: boolean;
+}
+
+export const CAPABILITIES: Record<Harness, Capabilities> = {
+  "claude-code": { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true },
+  codex: { compact: true, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: true, shellLines: false },
+  antigravity: { compact: true, modelSwitch: false, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false },
+  grok: { compact: true, modelSwitch: true, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false },
+};
+
+export function capabilitiesOf(h: Harness): Capabilities {
+  return CAPABILITIES[h] ?? CAPABILITIES["claude-code"];
+}

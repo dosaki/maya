@@ -123,3 +123,15 @@ describe("renderCard: the Close button", () => {
     expect(close({ ...base, machine: "laptop", machinePlatform: "macos", stale: true })).toBeNull();
   });
 });
+
+describe("renderCard: the Compact button", () => {
+  const compact = (card: Card) => renderCard(card, 0).querySelector("button[data-action=compact]");
+  const full = { used: 160_000, window: 200_000, percent: 80 };
+
+  it("shows from 75 percent for every agent that has /compact", () => {
+    expect(compact({ ...base, context: full })).not.toBeNull();
+    expect(compact({ ...base, harness: "codex", hasInbox: false, context: full })).not.toBeNull();
+    expect(compact({ ...base, harness: "antigravity", hasInbox: false, context: full })).not.toBeNull();
+    expect(compact({ ...base, harness: "codex", hasInbox: false, context: { used: 140_000, window: 200_000, percent: 70 } })).toBeNull();
+  });
+});

@@ -116,7 +116,7 @@ pub fn answer_question(l: &Local, session_id: &str, ask_id: u64, question: usize
 
 /// Types `/compact` into the session's terminal.
 pub fn compact_session(l: &Local, session_id: &str) -> Result<(), String> {
-    type_into_session(l, session_id, answer::COMPACT)
+    type_into_session(l, session_id, answer::COMPACT, "/compact", |c| c.compact)
 }
 
 /// How long Close waits for Claude to exit before it leaves the shell alone.
@@ -240,34 +240,63 @@ pub fn run_due_renames(l: &Local) {
     }
 }
 
-/// Types `/model x` or `/effort y` into the session's terminal.
+/// Types `/model x` or `/effort y` into the session's terminal, after
+/// checking the value against the agent's own listing.
 pub fn set_session_option(l: &Local, session_id: &str, setting: &str, value: &str) -> Result<(), String> {
-    type_into_session(l, session_id, &answer::slash_command(setting, value)?)
+    let (harness, agents) = {
+        let mut store = l.store.lock().unwrap();
+        let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
+        (card.harness, store.agents_source())
+    };
+    let is_model = setting == "model";
+    let allowed = move |c: &launch::Capabilities| if is_model { c.model_switch } else { c.effort_switch };
+    // An agent without the command is refused before its models are listed.
+    if matches!(setting, "model" | "effort") && !allowed(&launch::capabilities(harness)) {
+        return Err(format!("{} has no /{setting}.", launch::label(harness)));
+    }
+    let info = if harness == model::Harness::ClaudeCode {
+        crate::agents::claude()
+    } else {
+        agents().into_iter().find(|a| a.harness == harness).unwrap_or_else(|| crate::agents::info_for(harness, None))
+    };
+    let line = answer::slash_command(setting, value, &info.model_ids(), &info.efforts)?;
+    type_into_session(l, session_id, &line, &format!("/{setting}"), allowed)
 }
 
 /// Types a `/command` or `!` shell line from the composer into the
 /// session's terminal, after `answer::check_terminal_command`.
 pub fn send_slash_command(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
-    type_into_session(l, session_id, &answer::check_terminal_command(text)?)
+    let line = answer::check_terminal_command(text)?;
+    let shell = line.starts_with('!');
+    type_into_session(l, session_id, &line, if shell { "! shell lines" } else { "/ commands" }, move |c| if shell { c.shell_lines } else { c.slash_lines })
 }
 
-/// Sends Shift+Tab to the session's terminal, cycling its permission mode.
+/// Sends the agent's mode-cycle keys (Shift+Tab) to the session's terminal.
 pub fn cycle_session_mode(l: &Local, session_id: &str) -> Result<(), String> {
-    type_into_session(l, session_id, answer::SHIFT_TAB)
+    let harness = l.store.lock().unwrap().card_for(session_id, now_ms()).ok_or("Session is no longer running.")?.harness;
+    let keys = launch::capabilities(harness).mode_cycle.ok_or_else(|| format!("{} has no mode cycle.", launch::label(harness)))?;
+    type_into_session(l, session_id, keys, "mode cycle", |c| c.mode_cycle.is_some())
 }
 
-/// Types `text` into a free Claude Code session's terminal.
-fn type_into_session(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
-    let tty = {
+/// Types `text` into a free session's terminal when the agent has `control`
+/// (`allowed` reads that off its capabilities). Claude Code queues what is
+/// typed while it works; the other agents must be idle or completed, since
+/// keys typed into their TUIs elsewhere act as shortcuts.
+fn type_into_session(l: &Local, session_id: &str, text: &str, control: &str, allowed: impl Fn(&launch::Capabilities) -> bool) -> Result<(), String> {
+    let (harness, tty) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
-        if card.harness != model::Harness::ClaudeCode {
-            return Err("That command is only available for Claude Code sessions.".into());
+        if !allowed(&launch::capabilities(card.harness)) {
+            return Err(format!("{} has no {control}.", launch::label(card.harness)));
         }
-        answer::check_free(&card)?;
-        session_tty(&store, session_id, card.pid)?
+        if card.harness == model::Harness::ClaudeCode {
+            answer::check_free(&card)?;
+        } else if !crate::pending_names::is_free(&card) {
+            return Err("Wait until the session is free.".into());
+        }
+        (card.harness, session_tty(&store, session_id, card.pid)?)
     };
-    l.terminal.type_line(&tty, text)
+    type_line_for(l, harness, &tty, text)
 }
 
 /// The session's last turns.
@@ -535,6 +564,47 @@ mod tests {
         let s = ForeignSession { harness: Harness::Codex, pid: 77, tty: Some("ttys009".into()), session_id: "c1".into(), cwd: "/x".into(), name: "Say hi".into(), transcript_path: path.clone() };
         let store = Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), t.path().join("agy"), vec![s]);
         (t, Mutex::new(store), path)
+    }
+
+    #[test]
+    fn controls_follow_the_agents_capabilities() {
+        let (_t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        // Codex: /compact is typed (with Codex's second Enter), a /model value is refused, Shift+Tab has no meaning.
+        compact_session(&l, "c1").unwrap();
+        assert!(fake.calls.lock().unwrap().iter().any(|c| matches!(c, Call::Type { tty, text } if tty == "ttys009" && text == "/compact")));
+        assert_eq!(set_session_option(&l, "c1", "model", "gpt-5.5").unwrap_err(), "Codex has no /model.");
+        assert_eq!(cycle_session_mode(&l, "c1").unwrap_err(), "Codex has no mode cycle.");
+        send_slash_command(&l, "c1", "/status").unwrap();
+        assert!(fake.calls.lock().unwrap().iter().any(|c| matches!(c, Call::Type { text, .. } if text == "/status")));
+        assert_eq!(send_slash_command(&l, "c1", "!ls").unwrap_err(), "Codex has no ! shell lines.");
+    }
+
+    #[test]
+    fn a_model_switch_is_checked_against_the_agents_own_list() {
+        let (t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        // A Grok session whose last turn has ended, so the card is free. Grok's
+        // own registry (under `with_foreign`'s Grok folder) keeps it listed.
+        let grok_dir = t.path().join("agy").join("no-grok");
+        let dir = t.path().join("grok-session");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&grok_dir).unwrap();
+        std::fs::write(grok_dir.join("active_sessions.json"), r#"[{"session_id":"g1","pid":78,"cwd":"/x"}]"#).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/grok");
+        for f in ["events.jsonl", "chat_history.jsonl"] {
+            std::fs::copy(fixtures.join(f), dir.join(f)).unwrap();
+        }
+        let grok = ForeignSession { harness: Harness::Grok, pid: 78, tty: Some("ttys010".into()), session_id: "g1".into(), cwd: "/x".into(), name: "Grok".into(), transcript_path: dir.join("events.jsonl") };
+        let store = Mutex::new(store.into_inner().unwrap().with_processes(vec![grok]));
+        let info = crate::agents::AgentInfo { harness: Harness::Grok, models: vec![crate::agents::ModelInfo { id: "grok-4.7".into(), label: "grok-4.7".into(), efforts: vec![] }], efforts: vec![], modes: vec![] };
+        let store = with_agents(store, vec![agents::claude(), info]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
+        assert!(set_session_option(&l, "g1", "model", "grok-9").unwrap_err().contains("Unknown model"));
+        set_session_option(&l, "g1", "model", "grok-4.7").unwrap();
+        assert!(fake.calls.lock().unwrap().iter().any(|c| matches!(c, Call::Type { tty, text } if tty == "ttys010" && text == "/model grok-4.7")));
     }
 
     /// Codex listing two models that take different efforts.

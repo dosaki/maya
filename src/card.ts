@@ -1,6 +1,6 @@
 import { formatAge, projectName } from "./format";
 import { OPEN_DELAY_MS, renderOptions } from "./options";
-import { harnessBadge } from "./harness";
+import { capabilitiesOf, harnessBadge } from "./harness";
 import { iconButton, iconElement } from "./icons";
 import { isLinux } from "./platform";
 import { COMPACT_AT, compactButton, contextMeter, prButton, remoteTitle, type Card } from "./types";
@@ -73,7 +73,7 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
     actions.append(terminal);
   }
   if (card.pr) actions.append(prButton(card.pr));
-  if (card.harness === "claude-code" && card.context && card.context.percent >= COMPACT_AT) actions.append(compactButton());
+  if (capabilitiesOf(card.harness).compact && card.context && card.context.percent >= COMPACT_AT) actions.append(compactButton());
   actions.append(reply);
   root.append(actions);
   return root;
