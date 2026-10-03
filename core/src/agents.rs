@@ -106,7 +106,8 @@ fn listing_args(agent: Harness) -> &'static [&'static str] {
     match agent {
         Harness::Codex => &["debug", "models"],
         Harness::Antigravity | Harness::Grok => &["models"],
-        Harness::ClaudeCode => &[],
+        Harness::Kiro => &["chat", "--list-models", "-f", "json"],
+        Harness::ClaudeCode | Harness::Other => &[],
     }
 }
 

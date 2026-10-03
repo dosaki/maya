@@ -130,7 +130,9 @@ fn parse_start(rest: &[String]) -> Result<Cmd, String> {
             "--mode" => options.mode = Some(take_value(rest, &mut i, "--mode")?),
             "--agent" => {
                 let v = take_value(rest, &mut i, "--agent")?;
-                options.agent = serde_json::from_value(serde_json::Value::String(v.clone())).map_err(|_| format!("{USAGE}\nunknown agent: {v} (claude-code, codex, antigravity or grok)"))?;
+                // The decode fallback for agents this build does not know is not a choice.
+                let agent = serde_json::from_value::<maya_core::model::Harness>(serde_json::Value::String(v.clone())).ok().filter(|a| *a != maya_core::model::Harness::Other);
+                options.agent = agent.ok_or_else(|| format!("{USAGE}\nunknown agent: {v} (claude-code, codex, antigravity, grok or kiro)"))?;
             }
             "--name" => options.name = Some(take_value(rest, &mut i, "--name")?),
             s => return Err(format!("{USAGE}\nunknown flag: {s}")),

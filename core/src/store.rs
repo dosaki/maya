@@ -288,7 +288,7 @@ impl Store {
 
     /// Where each agent keeps its sessions.
     pub fn agent_dirs(&self) -> crate::resume::AgentDirs {
-        crate::resume::AgentDirs { claude: self.claude_dir.clone(), codex: self.codex_dir.clone(), agy: self.agy_dir.clone(), grok: self.grok_dir.clone() }
+        crate::resume::AgentDirs { claude: self.claude_dir.clone(), codex: self.codex_dir.clone(), agy: self.agy_dir.clone(), grok: self.grok_dir.clone(), kiro: PathBuf::new() }
     }
 
     fn registry(&self) -> Vec<RegistrySession> {

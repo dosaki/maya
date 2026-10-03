@@ -60,6 +60,7 @@ pub struct AgentDirs {
     pub codex: PathBuf,
     pub agy: PathBuf,
     pub grok: PathBuf,
+    pub kiro: PathBuf,
 }
 
 fn store_for(claude_dir: &Path, dir: &str) -> PathBuf {
@@ -173,6 +174,7 @@ pub fn list_sessions(agent: Harness, dirs: &AgentDirs, dir: &str, running_ids: &
         Harness::Codex => codex_sessions(&dirs.codex, dir),
         Harness::Antigravity => antigravity_sessions(&dirs.agy, dir),
         Harness::Grok => grok_sessions(&dirs.grok, dir),
+        Harness::Kiro | Harness::Other => vec![],
     };
     for s in &mut out {
         s.running = running_ids.contains(&s.id);
@@ -196,6 +198,8 @@ pub fn resume_command(agent: Harness, dir: &Path, id: &str) -> String {
         Harness::Codex => format!("cd {d} && codex resume {i}"),
         Harness::Antigravity => format!("cd {d} && agy --conversation {i}"),
         Harness::Grok => format!("cd {d} && grok -r {i}"),
+        Harness::Kiro => format!("cd {d} && kiro-cli chat --resume-id {i}"),
+        Harness::Other => format!("cd {d} && echo 'Maya does not know that agent.'"),
     }
 }
 
@@ -237,7 +241,7 @@ mod tests {
         write(&store, "ccc.jsonl", "", 600);
         write(&store.join("subagent-dir"), "ddd.jsonl", "{\"type\":\"custom-title\",\"customTitle\":\"nested\"}\n", 1);
         std::fs::write(store.join("notes.txt"), "x").unwrap();
-        let dirs = AgentDirs { claude: claude.to_path_buf(), codex: PathBuf::new(), agy: PathBuf::new(), grok: PathBuf::new() };
+        let dirs = AgentDirs { claude: claude.to_path_buf(), codex: PathBuf::new(), agy: PathBuf::new(), grok: PathBuf::new(), kiro: PathBuf::new() };
         let list = list_sessions(Harness::ClaudeCode, &dirs, "/Users/x/dev/eye", &["ccc".to_string()]);
         assert_eq!(list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["bbb", "ccc", "aaa"]);
         assert_eq!(list[0].title, "Fresh");
@@ -251,7 +255,7 @@ mod tests {
     use crate::model::Harness;
 
     fn dirs_in(t: &Path) -> AgentDirs {
-        AgentDirs { claude: t.join("claude"), codex: t.join("codex"), agy: t.join("agy"), grok: t.join("grok") }
+        AgentDirs { claude: t.join("claude"), codex: t.join("codex"), agy: t.join("agy"), grok: t.join("grok"), kiro: t.join("kiro") }
     }
 
     #[test]
