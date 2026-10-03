@@ -95,11 +95,17 @@ describe("settings flow", () => {
       return Promise.reject(new Error("unexpected " + cmd));
     });
 
-    document.getElementById("settings")!.hidden = false;
+    // Settings starts hidden (the app opens on Sessions), and the agent
+    // listing can take seconds, so it typically lands while the tab is
+    // still hidden: the Agent select must pick it up once the tab is shown
+    // rather than being stuck on Claude Code alone.
     await initSettings();
     await flush();
     await flush();
+    document.getElementById("settings")!.hidden = false;
+    await flush();
     const agent = document.querySelector<HTMLSelectElement>("select[name=agent]")!;
+    expect([...agent.options].map((o) => o.value)).toEqual(["claude-code", "grok"]);
     agent.value = "grok";
     agent.dispatchEvent(new Event("change"));
     await flush();

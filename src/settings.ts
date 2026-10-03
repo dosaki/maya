@@ -1166,6 +1166,7 @@ export async function initSettings(): Promise<void> {
     .then((r) => {
       model.agents = r.agents;
       if (!panel.hidden) paint();
+      else stale = true;
     })
     .catch(() => undefined);
 }
