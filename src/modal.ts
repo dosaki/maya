@@ -595,6 +595,10 @@ export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
   swap(".modal__state");
   swap(".modal__banner", ".modal__history");
   swap(".modal__history");
+  // The pickers arrive with the agent list, after the first paint; a choice
+  // waiting for Apply keeps the row it was made in.
+  const pending = [...panel.querySelectorAll<HTMLSelectElement>(".modal__tweaks select")].some((s) => s.value !== "");
+  if (!pending) swap(".modal__tweaks", ".modal__chips, .modal__composer");
   swap(".modal__chips", ".modal__composer");
   swap(".modal__status");
 }
