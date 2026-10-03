@@ -146,12 +146,33 @@ fn is_harness_tag(text: &str) -> bool {
     rest[..name_len].contains('-') && rest[name_len..].starts_with(['>', ' ', '\n'])
 }
 
+/// Whether a hidden user line was still the user's doing: the echo of a
+/// `/command` or the input of a `!` shell line. What the assistant said
+/// before one is a finished answer, not narration.
+fn is_user_initiated(text: &str) -> bool {
+    text.starts_with("<command-name>") || text.starts_with("<bash-input>")
+}
+
+/// A turn to show, or an invisible break between assistant runs.
+enum Item {
+    Turn(Turn),
+    Break,
+}
+
 /// Only the last text of each assistant run (the texts between two
-/// user or peer turns) is an answer; the ones before it narrate progress.
-fn drop_narration(turns: Vec<Turn>) -> Vec<Turn> {
-    let mut kept = Vec::with_capacity(turns.len());
+/// user or peer turns, or breaks) is an answer; the ones before it
+/// narrate progress.
+fn drop_narration(items: Vec<Item>) -> Vec<Turn> {
+    let mut kept = Vec::with_capacity(items.len());
     let mut last_text_in_run: Option<usize> = None;
-    for t in turns {
+    for item in items {
+        let t = match item {
+            Item::Turn(t) => t,
+            Item::Break => {
+                last_text_in_run = None;
+                continue;
+            }
+        };
         match t.kind {
             TurnKind::Assistant => {
                 if let Some(i) = last_text_in_run {
@@ -172,7 +193,7 @@ fn drop_narration(turns: Vec<Turn>) -> Vec<Turn> {
 /// Subagent sidechain lines, harness-injected user lines (skill bodies,
 /// notifications, subagent hand-backs) and progress narration are skipped.
 pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
-    let mut turns = Vec::new();
+    let mut items = Vec::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if v["isSidechain"].as_bool() == Some(true) {
@@ -188,29 +209,34 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
                     match unwrap_peer_message(&text) {
                         // A subagent's final report comes back framed as a peer message.
                         Some(inner) if inner.starts_with("<agent-message") => {}
-                        Some(inner) => turns.push(Turn { kind: TurnKind::Peer, text: inner }),
+                        Some(inner) => items.push(Item::Turn(Turn { kind: TurnKind::Peer, text: inner })),
                         // Other meta lines are skill bodies, reminders and caveats.
-                        None if meta || is_harness_tag(&text) => {}
-                        None => turns.push(Turn { kind: TurnKind::User, text }),
+                        None if meta => {}
+                        None if is_harness_tag(&text) => {
+                            if is_user_initiated(&text) {
+                                items.push(Item::Break);
+                            }
+                        }
+                        None => items.push(Item::Turn(Turn { kind: TurnKind::User, text })),
                     }
                 }
             }
             Some("assistant") => {
                 let t = text_blocks(content);
                 if !t.is_empty() {
-                    turns.push(Turn { kind: TurnKind::Assistant, text: t.join("\n\n") });
+                    items.push(Item::Turn(Turn { kind: TurnKind::Assistant, text: t.join("\n\n") }));
                 }
                 if let Some(blocks) = content.as_array() {
                     for b in blocks.iter().filter(|b| b["type"] == "tool_use") {
                         let name = b["name"].as_str().unwrap_or("tool");
-                        turns.push(Turn { kind: TurnKind::Tool, text: tool_summary(name, &b["input"]) });
+                        items.push(Item::Turn(Turn { kind: TurnKind::Tool, text: tool_summary(name, &b["input"]) }));
                     }
                 }
             }
             _ => {}
         }
     }
-    keep_last_messages(drop_narration(turns), max_turns)
+    keep_last_messages(drop_narration(items), max_turns)
 }
 
 /// Last `max_turns` turns from the last 1 MB of the transcript.
@@ -518,6 +544,38 @@ mod tests {
         assert_eq!(turns, vec![
             Turn { kind: TurnKind::Peer, text: "Looks good. Commit this".into() },
             Turn { kind: TurnKind::User, text: "<b>bold</b> is how I start my prompts".into() },
+        ]);
+    }
+
+    #[test]
+    fn a_hidden_command_still_ends_an_assistant_run() {
+        let peer = |body: &str| format!("Another Claude session sent a message:\n{body}\n\nThis came from another Claude session.");
+        let text = [
+            user_line("fix A", false),
+            assistant_line("Fixed A.", None),
+            user_line("<command-name>/review</command-name>\n<command-message>review</command-message>", false),
+            assistant_line("Review: fine.", None),
+            user_line("<bash-input>ls</bash-input>", false),
+            user_line("<bash-stdout>a b</bash-stdout>", false),
+            assistant_line("Two files.", None),
+            user_line("do B", false),
+            assistant_line("Delegating.", Some("Agent")),
+            // A subagent's report is not the user's doing: narration around it still collapses.
+            user_line(&peer("<agent-message from=\"x\">\n[Subagent hand-back] DONE\n</agent-message>"), true),
+            user_line("<task-notification>done</task-notification>", false),
+            assistant_line("Done B.", None),
+        ]
+        .join("\n");
+        let turns = parse_turns(&text, 30);
+        let got: Vec<(TurnKind, &str)> = turns.iter().map(|t| (t.kind, t.text.as_str())).collect();
+        assert_eq!(got, vec![
+            (TurnKind::User, "fix A"),
+            (TurnKind::Assistant, "Fixed A."),
+            (TurnKind::Assistant, "Review: fine."),
+            (TurnKind::Assistant, "Two files."),
+            (TurnKind::User, "do B"),
+            (TurnKind::Tool, "Agent"),
+            (TurnKind::Assistant, "Done B."),
         ]);
     }
 
