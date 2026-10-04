@@ -175,14 +175,27 @@ pub fn list_process_tree() -> Vec<Proc> {
         .unwrap_or_default()
 }
 
-/// On Windows every process reaches its console by pid, so each one "has a tty".
+/// On Windows a console is found per process, by attaching to it (see
+/// `console_of`), so the tree carries no "tty" of its own.
 #[cfg(windows)]
 pub fn list_process_tree() -> Vec<Proc> {
     let names: std::collections::HashMap<u32, String> = crate::win_process::list().into_iter().collect();
     crate::win_process::tree()
         .into_iter()
-        .map(|(pid, ppid)| Proc { pid: pid as i32, ppid: ppid as i32, tty: Some(crate::win_console::console_key(pid as i32)), command: names.get(&pid).cloned().unwrap_or_default() })
+        .map(|(pid, ppid)| Proc { pid: pid as i32, ppid: ppid as i32, tty: None, command: names.get(&pid).cloned().unwrap_or_default() })
         .collect()
+}
+
+/// The console key of `pid` when it has a console Maya can attach to;
+/// a headless process (a scheduler's, a service's) has none.
+#[cfg(windows)]
+fn console_of(pid: i32) -> Option<String> {
+    crate::win_console::other_console_pids(pid as u32).ok().map(|_| crate::win_console::console_key(pid))
+}
+
+#[cfg(unix)]
+fn console_of(_pid: i32) -> Option<String> {
+    None
 }
 
 /// The tty of `pid` or of the nearest ancestor that has one, up to six levels.
@@ -227,7 +240,7 @@ pub fn kiro_sessions(sessions_dir: &std::path::Path, procs: &[Proc], self_pid: i
                 return None;
             }
             let tui = agent.ppid;
-            let tty = tty_above(procs, tui)?;
+            let tty = tty_above(procs, tui).or_else(|| console_of(tui))?;
             let meta = crate::kiro::session_meta(&std::fs::read_to_string(sessions_dir.join(format!("{}.json", lock.session_id))).ok()?)?;
             let name = meta.title.unwrap_or_else(|| format!("kiro-{tui}"));
             Some(ForeignSession { harness: Harness::Kiro, pid: tui, tty: Some(tty), session_id: lock.session_id.clone(), cwd: meta.cwd, name, transcript_path: sessions_dir.join(format!("{}.jsonl", lock.session_id)) })

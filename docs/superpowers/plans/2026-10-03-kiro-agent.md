@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-03-maya-kiro-agent-design.md`
 
+**Amended after the real-app check (2026-10-04):** Kiro's `/compact` summarises the conversation, so `compact` is true for Kiro everywhere below; and every agent takes `/exit`, so the capability table gained a `close` field (true for every agent, false for `Other`) and Close works for all five. The spec is the authority; the snippets below were corrected where they said otherwise.
+
 ## Global Constraints
 
 - Branch `feat/kiro-agent` (already created, holds the spec); never commit to or push `main`; ask the user before each push (user rule).
@@ -18,7 +20,7 @@
 - Shell lines quote every user-derived value with `launch::shell_single_quote`; model ids pass `launch::plain_model_id`; session ids pass `resume::plain_session_id`.
 - A one-shot run has no tools, one turn, 25 s timeout, Maya's data folder as its working directory, cleared environment plus `launch::clean_env`.
 - Copy: the Kiro label is "Kiro CLI"; the unknown-harness label is "Unknown agent"; refusals read "<Agent> has no <control>."; the five-agent list reads "Claude Code, Codex, Antigravity, Grok Build or Kiro CLI".
-- Kiro has the Compact control: its `/compact` summarises the conversation (the plan first said otherwise, from a misread of its docs).
+- Kiro has the Compact control: its `/compact` summarises the conversation.
 - Fixtures in `core/fixtures/kiro/` were saved from this Mac (Kiro CLI 2.27.0) and are already in the working tree, untracked: `session.json`, `events.jsonl` (a finished turn with a tool call, then a second prompt whose tool call has no result yet), `lock.json`, `marker.json`, `models.json`, `oneshot.jsonl`. `src/assets/icons/kiro.png` (64x64) is there too. Task 1 commits them.
 - Tests: `cargo test --workspace` from the repo root and `pnpm test`; the frontend must also pass `pnpm build` (runs `tsc`).
 - Release: a `feat`, so the last task bumps the minor version from `main`'s (0.10.0 → 0.11.0 unless `main` moved) with `sh scripts/set-version.sh`, committed alone as `chore(release): 0.11.0`.
@@ -72,8 +74,7 @@ In `core/src/launch.rs` tests, extend `labels_name_every_agent`, `capabilities_f
 
 ```rust
         let k = capabilities(Harness::Kiro);
-        assert!(!k.compact, "Kiro's /compact only changes display density");
-        assert!(k.model_switch && k.effort_switch && k.slash_lines && k.shell_lines);
+        assert!(k.compact && k.model_switch && k.effort_switch && k.slash_lines && k.shell_lines);
         assert_eq!(k.mode_cycle, Some(crate::answer::SHIFT_TAB));
         let o = capabilities(Harness::Other);
         assert!(!o.compact && !o.model_switch && !o.effort_switch && !o.slash_lines && !o.shell_lines);
@@ -188,8 +189,8 @@ pub fn label(agent: Harness) -> &'static str {
 In `capabilities`:
 
 ```rust
-        // Kiro's /compact only changes display density; /model and /effort take a value.
-        Harness::Kiro => Capabilities { compact: false, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true },
+        // Kiro's /compact summarises the conversation; /model and /effort take a value.
+        Harness::Kiro => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true },
         Harness::Other => Capabilities { compact: false, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: false, shell_lines: false },
 ```
 
@@ -1007,7 +1008,7 @@ git commit -m "feat(core): list Kiro's models for New session and Settings"
 **Files:**
 - Modify: `core/src/launch.rs` tests (`each_agent_runs_its_binary_with_the_prompt`, `each_agent_takes_a_dash_prompt_as_the_prompt`, `oneshot_args_per_agent`, `final_text_reads_each_agents_envelope`, `final_text_reports_failures_and_garbage`)
 - Modify: `core/src/interpreter.rs` tests (`parses_the_reply_inside_each_agents_output`)
-- Modify: `core/src/actions.rs` tests (`controls_follow_the_agents_capabilities` gains a Kiro case)
+- Modify: `core/src/actions.rs` tests (a Kiro controls test beside `controls_follow_the_agents_capabilities`)
 
 **Interfaces:**
 - Consumes: `oneshot_args`, `final_text`, `session_command` Kiro arms from Task 1.
@@ -1062,7 +1063,7 @@ In `actions.rs`, add a test next to `controls_follow_the_agents_capabilities`:
 
 ```rust
     #[test]
-    fn a_kiro_session_has_no_compact_but_takes_model_effort_and_shell_lines() {
+    fn a_kiro_session_takes_compact_model_effort_and_shell_lines() {
         let (t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
         let sessions = t.path().join("kiro");
         std::fs::create_dir_all(&sessions).unwrap();
@@ -1081,12 +1082,12 @@ In `actions.rs`, add a test next to `controls_follow_the_agents_capabilities`:
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
         store.lock().unwrap().refresh(now_ms());
-        assert_eq!(compact_session(&l, id).unwrap_err(), "Kiro CLI has no /compact.");
+        compact_session(&l, id).unwrap();
         set_session_option(&l, id, "model", "auto").unwrap();
         set_session_option(&l, id, "effort", "high").unwrap();
         send_slash_command(&l, id, "!ls").unwrap();
         let typed: Vec<String> = fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Type { tty, text } if tty == "/dev/ttys010" => Some(text.clone()), _ => None }).collect();
-        assert_eq!(typed, vec!["/model auto", "/effort high", "!ls"]);
+        assert_eq!(typed, vec!["/compact", "/model auto", "/effort high", "!ls"]);
     }
 ```
 
@@ -1094,14 +1095,13 @@ In `actions.rs`, add a test next to `controls_follow_the_agents_capabilities`:
 
 - [ ] **Step 2: Run the tests to see them fail**
 
-Run: `cargo test -p maya-core -- each_agent_runs oneshot_args_per_agent final_text parses_the_reply a_kiro_session_has_no_compact`
+Run: `cargo test -p maya-core -- each_agent_runs oneshot_args_per_agent final_text parses_the_reply a_kiro_session_takes_compact`
 Expected: the launch and interpreter tests PASS already if Task 1's arms were typed exactly; the actions test FAILS until Step 3's check. Whatever fails, fix it in Step 3.
 
 - [ ] **Step 3: Implement what is missing**
 
 Most of this task's code landed in Task 1. Check:
 - `session_command` renders `kiro-cli chat` then the flags then ` -- "$p"`.
-- `compact_session` in `actions.rs` is gated on `capabilities(harness).compact`; if it is not (it may type `/compact` unconditionally), route it through `type_into_session(l, session_id, answer::COMPACT, "/compact", |c| c.compact)`.
 
 - [ ] **Step 4: Run the tests**
 
@@ -1287,7 +1287,7 @@ describe("capabilities", () => {
       codex: { compact: true, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: true, shellLines: false },
       antigravity: { compact: true, modelSwitch: false, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false },
       grok: { compact: true, modelSwitch: true, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false },
-      kiro: { compact: false, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true },
+      kiro: { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true },
       other: { compact: false, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: false, shellLines: false },
     });
     expect(capabilitiesOf("antigravity")).toBe(CAPABILITIES.antigravity);
@@ -1342,7 +1342,7 @@ export const HARNESS_LABEL: Record<Harness, string> = {
 add `kiro: kiroIcon,` to `HARNESS_ICON` (no entry for `other`: it falls back to the text badge), and to `CAPABILITIES`:
 
 ```ts
-  kiro: { compact: false, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true },
+  kiro: { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true },
   other: { compact: false, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: false, shellLines: false },
 ```
 

@@ -154,7 +154,7 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
         (card.harness, card.pid, session_tty(&store, session_id, card.pid)?)
     };
     let after = l.terminal.reach_after_exit(&tty);
-    l.terminal.type_line(&tty, answer::EXIT)?;
+    type_line_for(l, harness, &tty, answer::EXIT)?;
     // Typed while the agent still runs, `exit` would land in its prompt as a message.
     if !exited(pid) {
         return Err(format!("{} did not exit; the terminal was left open.", launch::label(harness)));
@@ -985,6 +985,16 @@ mod tests {
         assert_eq!(close_session_with(&l, "s1", |_| false), Err("Claude Code did not exit; the terminal was left open.".into()));
         assert_eq!(t.calls.lock().unwrap().len(), 1);
         drop(dir);
+    }
+
+    #[test]
+    fn close_gives_codex_the_second_enter_that_submits_exit() {
+        let (_t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        close_session_with(&l, "c1", |_| true).unwrap();
+        let texts: Vec<_> = fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Type { text, .. } => Some(text.clone()), _ => None }).collect();
+        assert_eq!(texts, ["/exit", "", "exit"], "Codex reads /exit plus Enter as a paste; a lone Enter after a pause submits it");
     }
 
     #[test]
