@@ -101,7 +101,7 @@ function renderTitle(name: string, h: ModalHandlers): HTMLElement {
  * never re-applies a choice; Apply sends each one that was changed and
  * clears them.
  */
-function renderTweaks(h: ModalHandlers, caps: Capabilities, info: AgentInfo): HTMLElement | null {
+function renderTweaks(h: ModalHandlers, caps: Capabilities, info: AgentInfo, cardModel?: string | null): HTMLElement | null {
   const row = el("div", "modal__tweaks");
   const selects: ["model" | "effort", HTMLSelectElement][] = [];
   if (caps.modelSwitch && info.models.length > 0) {
@@ -109,8 +109,11 @@ function renderTweaks(h: ModalHandlers, caps: Capabilities, info: AgentInfo): HT
     selects.push(["model", model.querySelector("select")!]);
     row.append(model);
   }
-  if (caps.effortSwitch && info.efforts.length > 0) {
-    const effort = renderChoice("effort", "", info.efforts.map((v) => [v, v]), "", "Effort");
+  // Efforts that differ by model (OpenCode's variants) are the card's own model's.
+  const own = cardModel ? info.models.find((m) => m.id === cardModel)?.efforts ?? [] : [];
+  const efforts = own.length > 0 ? own : info.efforts;
+  if (caps.effortSwitch && efforts.length > 0) {
+    const effort = renderChoice("effort", "", efforts.map((v) => [v, v]), "", "Effort");
     selects.push(["effort", effort.querySelector("select")!]);
     row.append(effort);
   }
@@ -137,7 +140,7 @@ function renderTweaks(h: ModalHandlers, caps: Capabilities, info: AgentInfo): HT
     const cycle = el("button", "card__btn", "Cycle mode");
     cycle.type = "button";
     cycle.dataset.action = "cycle-mode";
-    cycle.title = "Sends Shift+Tab to the terminal: the next mode. Check the terminal to see which.";
+    cycle.title = info.harness === "opencode" ? "Switches between the build and plan agents." : "Sends Shift+Tab to the terminal: the next mode. Check the terminal to see which.";
     cycle.addEventListener("click", () => h.onCycleMode());
     row.append(cycle);
   }
@@ -512,7 +515,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     h.onOpenLink(a.getAttribute("href") ?? "");
   });
   panel.append(history);
-  const tweaks = renderTweaks(h, caps, m.agent ?? (claude ? CLAUDE_AGENT : { harness: m.card.harness, models: [], efforts: [], modes: [] }));
+  const tweaks = renderTweaks(h, caps, m.agent ?? (claude ? CLAUDE_AGENT : { harness: m.card.harness, models: [], efforts: [], modes: [] }), m.card.model);
   if (tweaks) panel.append(tweaks);
 
   // Other harnesses have no inbox; a reply is typed into their terminal instead.

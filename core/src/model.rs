@@ -62,6 +62,8 @@ pub enum Harness {
     Antigravity,
     Grok,
     Kiro,
+    #[serde(rename = "opencode")]
+    OpenCode,
     #[serde(other)]
     Other,
 }
@@ -128,11 +130,21 @@ pub struct Card {
     /// True when the machine has not reported for a while or is disconnected.
     #[serde(default)]
     pub stale: bool,
+    /// The model the session runs on, when its agent says (OpenCode's
+    /// `provider/model`): the modal offers that model's own efforts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_has_a_wire_name() {
+        assert_eq!(serde_json::to_string(&Harness::OpenCode).unwrap(), "\"opencode\"");
+        assert_eq!(serde_json::from_str::<Harness>("\"opencode\"").unwrap(), Harness::OpenCode);
+    }
 
     #[test]
     fn kiro_and_unknown_harnesses_have_wire_names() {
@@ -181,7 +193,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false,
+            stale: false, model: None
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["context"]["percent"], 62);

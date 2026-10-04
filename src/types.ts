@@ -17,7 +17,7 @@ export interface Question {
 }
 
 /** The agent runner behind a session; "other" is one this build does not know. */
-export type Harness = "claude-code" | "codex" | "antigravity" | "grok" | "kiro" | "other";
+export type Harness = "claude-code" | "codex" | "antigravity" | "grok" | "kiro" | "opencode" | "other";
 
 export interface PullRequest {
   number: number;
@@ -108,6 +108,8 @@ export interface Card {
   machinePlatform?: string | null;
   /** The assistant's tmux session name for this card, if it has one. */
   terminal?: string | null;
+  /** The model the session runs on, when its agent says (OpenCode's provider/model). */
+  model?: string | null;
   /** True when the machine has not reported for a while or is disconnected. */
   stale?: boolean;
 }

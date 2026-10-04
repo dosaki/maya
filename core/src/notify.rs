@@ -523,7 +523,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false,
+            stale: false, model: None
         }
     }
 
@@ -589,7 +589,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false,
+            stale: false, model: None
         }
     }
 

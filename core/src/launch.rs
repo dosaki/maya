@@ -20,6 +20,7 @@ pub fn binary_name(agent: Harness) -> &'static str {
         Harness::Antigravity => "agy",
         Harness::Grok => "grok",
         Harness::Kiro => "kiro-cli",
+        Harness::OpenCode => "opencode",
         // Never installed: find_binary names it in its "could not find" message.
         Harness::Other => "unknown-agent",
     }
@@ -34,7 +35,8 @@ pub fn efforts(agent: Harness) -> &'static [&'static str] {
         Harness::Antigravity => &["low", "medium", "high", "max"],
         Harness::Grok => &[],
         Harness::Kiro => &["low", "medium", "high", "xhigh", "max"],
-        Harness::Other => &[],
+        // OpenCode's efforts are each model's variants, from the listing.
+        Harness::OpenCode | Harness::Other => &[],
     }
 }
 
@@ -48,6 +50,8 @@ pub fn modes(agent: Harness) -> &'static [&'static str] {
         Harness::Antigravity => &["accept-edits", "plan"],
         Harness::Grok => &["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"],
         Harness::Kiro => &["default", "trust-all"],
+        // `auto` approves every permission no rule denies.
+        Harness::OpenCode => &["default", "auto"],
         Harness::Other => &[],
     }
 }
@@ -60,6 +64,7 @@ pub fn label(agent: Harness) -> &'static str {
         Harness::Antigravity => "Antigravity",
         Harness::Grok => "Grok Build",
         Harness::Kiro => "Kiro CLI",
+        Harness::OpenCode => "OpenCode",
         Harness::Other => "Unknown agent",
     }
 }
@@ -95,6 +100,8 @@ pub fn capabilities(agent: Harness) -> Capabilities {
         Harness::Grok => Capabilities { compact: true, model_switch: true, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false, close: true },
         // Kiro's /compact summarises the conversation; /model and /effort take a value.
         Harness::Kiro => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true, close: true },
+        // Every control is a server call; `agent` names the build/plan switch.
+        Harness::OpenCode => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: Some("agent"), slash_lines: true, shell_lines: true, close: true },
         Harness::Other => Capabilities { compact: false, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: false, shell_lines: false, close: false },
     }
 }
@@ -103,6 +110,23 @@ pub fn capabilities(agent: Harness) -> Capabilities {
 /// digits, `.`, `_` and `-`.
 pub fn plain_model_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 100 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+}
+
+/// An OpenCode model reference, `provider/model`, where the model id may
+/// hold slashes of its own (`mlx/mlx-community/Qwen3-…`); every segment is
+/// a plain id. It never reaches a shell line: it goes to the server, or to
+/// the one-shot's argument list.
+pub fn plain_model_ref(id: &str) -> bool {
+    let mut parts = id.split('/');
+    let provider = parts.next().unwrap_or("");
+    let rest: Vec<&str> = parts.collect();
+    plain_model_id(provider) && !rest.is_empty() && rest.iter().all(|m| plain_model_id(m))
+}
+
+/// The shell line that opens a terminal on an OpenCode session the server
+/// already has; `--auto` approves every permission no rule denies.
+pub fn opencode_open_command(dir: &Path, id: &str, auto: bool) -> String {
+    format!("cd {} && opencode --session {}{}", shell_single_quote(&dir.to_string_lossy()), shell_single_quote(id), if auto { " --auto" } else { "" })
 }
 
 /// Per-session choices for a new session. None or "" means "use the defaults".
@@ -138,12 +162,21 @@ impl LaunchOptions {
     /// Checks everything that can be checked without the agent's model list.
     pub fn validate_shape(&self) -> Result<(), String> {
         if let Some(m) = chosen(&self.model) {
-            if !plain_model_id(m) {
+            let plain = if self.agent == Harness::OpenCode { plain_model_ref(m) } else { plain_model_id(m) };
+            if !plain {
                 return Err(format!("Unknown model: {m}"));
             }
         }
         if let Some(e) = chosen(&self.effort) {
-            check_choice("effort", e, efforts(self.agent))?;
+            // OpenCode's efforts are each model's variants, checked against the
+            // listing when the session starts; here only the shape is checked.
+            if self.agent == Harness::OpenCode {
+                if !plain_model_id(e) {
+                    return Err(format!("Unknown effort: {e}"));
+                }
+            } else {
+                check_choice("effort", e, efforts(self.agent))?;
+            }
         }
         if let Some(m) = chosen(&self.mode) {
             check_choice("mode", m, modes(self.agent))?;
@@ -174,7 +207,8 @@ impl LaunchOptions {
             Harness::Grok => ("-m", None, Some("--permission-mode")),
             // Kiro's "trust-all" mode is a bare flag; "default" passes nothing.
             Harness::Kiro => ("--model", Some("--effort"), None),
-            Harness::Other => return String::new(),
+            // OpenCode's options are set on the server when the session is created.
+            Harness::OpenCode | Harness::Other => return String::new(),
         };
         let mut out = String::new();
         if let Some(m) = model {
@@ -288,6 +322,14 @@ pub fn oneshot_args(agent: Harness, model: Option<&str>, system: Option<&str>, u
             a.extend([s("--"), folded]);
             a
         }
+        Harness::OpenCode => {
+            let mut a = vec![s("run"), s("--format"), s("json"), s("--title"), s("Maya")];
+            if let Some(m) = model {
+                a.extend([s("-m"), s(m)]);
+            }
+            a.push(folded);
+            a
+        }
         Harness::Other => vec![],
     }
 }
@@ -347,6 +389,21 @@ pub fn final_text(agent: Harness, stdout: &str) -> Result<String, String> {
                 }
             }
             Err(format!("kiro-cli did not finish its run (last event: {})", if last_type.is_empty() { "none" } else { &last_type }))
+        }
+        Harness::OpenCode => {
+            let mut text = String::new();
+            let mut last_type = String::new();
+            for line in stdout.lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                last_type = v["type"].as_str().unwrap_or("").to_string();
+                if last_type == "text" {
+                    text.push_str(v["part"]["text"].as_str().unwrap_or(""));
+                }
+            }
+            if text.is_empty() {
+                return Err(format!("opencode printed no text (last event: {})", if last_type.is_empty() { "none" } else { &last_type }));
+            }
+            Ok(text)
         }
         Harness::Other => Err("unknown agent".into()),
     }
@@ -494,7 +551,7 @@ pub fn agent_binary(name: &str) -> Option<PathBuf> {
         return Some(p);
     }
     let home = dirs::home_dir()?;
-    Some(home.join(".local").join("bin").join(&exe)).filter(|p| p.is_file())
+    [home.join(".local").join("bin").join(&exe), home.join(".opencode").join("bin").join(&exe)].into_iter().find(|p| p.is_file())
 }
 
 /// The `name` binary: from this process's PATH, then the usual install
@@ -505,7 +562,7 @@ pub fn agent_binary(name: &str) -> Option<PathBuf> {
         return Some(p);
     }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    let candidates = [home.join(".local/bin").join(name), PathBuf::from("/opt/homebrew/bin").join(name), PathBuf::from("/usr/local/bin").join(name)];
+    let candidates = [home.join(".local/bin").join(name), home.join(".opencode/bin").join(name), PathBuf::from("/opt/homebrew/bin").join(name), PathBuf::from("/usr/local/bin").join(name)];
     if let Some(p) = candidates.iter().find(|p| p.is_file()) {
         return Some(p.clone());
     }
@@ -520,10 +577,11 @@ pub fn agent_binary(name: &str) -> Option<PathBuf> {
 
 /// Runs the headless folder picker on `agent`; None on NONE, no match,
 /// timeout or any error.
-pub fn classify(agent: Harness, binary: &Path, model: Option<&str>, root: &Path, user_prompt: &str, dirs: &[String], timeout: Duration) -> Option<String> {
+pub fn classify(agent: Harness, binary: &Path, model: Option<&str>, root: &Path, user_prompt: &str, dirs: &[String], cwd: &Path, timeout: Duration) -> Option<String> {
+    let _ = root; // the folders are in the prompt; the run itself happens in `cwd` (Maya's data folder)
     let mut child = crate::command(binary)
         .args(oneshot_args(agent, model, None, &classifier_prompt(user_prompt, dirs)))
-        .current_dir(root)
+        .current_dir(cwd)
         .env_clear()
         .envs(clean_env(std::env::vars()))
         .stdin(Stdio::null())
@@ -857,6 +915,10 @@ mod tests {
         assert_eq!(trust.flags(), " --trust-all-tools");
         let other = LaunchOptions { agent: Harness::Other, model: Some("m-1".into()), effort: Some("high".into()), ..Default::default() };
         assert_eq!(other.flags(), "", "an unknown agent gets no flags");
+        let oc = LaunchOptions { agent: Harness::OpenCode, model: Some("p/m-1".into()), effort: Some("high".into()), mode: Some("auto".into()), ..Default::default() };
+        assert_eq!(oc.flags(), "", "OpenCode's options go to the server, not the command line");
+        assert_eq!(modes(Harness::OpenCode), ["default", "auto"]);
+        assert!(efforts(Harness::OpenCode).is_empty(), "variants come per model from the listing");
     }
 
     #[test]
@@ -879,6 +941,23 @@ mod tests {
         assert!(m("gpt; rm -rf /").validate_shape().unwrap_err().contains("model"));
         assert!(plain_model_id("claude-opus-4-6-thinking") && plain_model_id("grok-4.7"));
         assert!(!plain_model_id("") && !plain_model_id("a b") && !plain_model_id("$(x)"));
+    }
+
+    #[test]
+    fn an_opencode_model_is_a_provider_and_a_model() {
+        assert!(plain_model_ref("anthropic/claude-sonnet-4-5") && plain_model_ref("opencode/fledge-alpha-free"));
+        assert!(!plain_model_ref("claude-sonnet-4-5"), "no provider");
+        assert!(plain_model_ref("mlx/mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit"), "a model id may hold slashes of its own");
+        assert!(!plain_model_ref("a/") && !plain_model_ref("/b") && !plain_model_ref("a b/c") && !plain_model_ref("a//c") && !plain_model_ref("a/b/"));
+        let oc = LaunchOptions { agent: Harness::OpenCode, model: Some("anthropic/claude-sonnet-4-5".into()), effort: Some("high".into()), mode: Some("auto".into()), ..Default::default() };
+        assert!(oc.validate_shape().is_ok(), "{:?}", oc.validate_shape());
+        assert!(oc.validate(&["anthropic/claude-sonnet-4-5".to_string()]).is_ok());
+        let odd = LaunchOptions { agent: Harness::OpenCode, effort: Some("hi gh".into()), ..Default::default() };
+        assert!(odd.validate_shape().unwrap_err().contains("effort"), "an effort is a plain token; the model's variants are checked at start");
+        let claude = LaunchOptions { model: Some("anthropic/opus".into()), ..Default::default() };
+        assert!(claude.validate_shape().unwrap_err().contains("model"), "a slash is OpenCode's alone");
+        assert_eq!(opencode_open_command(Path::new("/Users/x/dev/it's"), "ses_0a", true), "cd '/Users/x/dev/it'\\''s' && opencode --session 'ses_0a' --auto");
+        assert_eq!(opencode_open_command(Path::new("/p"), "ses_0a", false), "cd '/p' && opencode --session 'ses_0a'");
     }
 
     #[test]
@@ -964,12 +1043,24 @@ mod tests {
     fn classify_uses_the_reply_and_ignores_none() {
         let t = tempfile::tempdir().unwrap();
         let bin = fake_binary(t.path(), r#"echo '{"type":"result","result":"b"}'"#);
-        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), Duration::from_secs(5)).as_deref(), Some("b"));
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), t.path(), Duration::from_secs(5)).as_deref(), Some("b"));
         let bin = fake_binary(t.path(), r#"echo '{"type":"result","result":"NONE"}'"#);
-        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), Duration::from_secs(5)), None);
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), t.path(), Duration::from_secs(5)), None);
         // Another agent's envelope is read the same way.
         let bin = fake_binary(t.path(), r#"echo '{"text":"sonarqube","stopReason":"end_turn"}'"#);
-        assert_eq!(classify(Harness::Grok, &bin, Some("grok-4.7"), t.path(), "p", &dirs(), Duration::from_secs(5)).as_deref(), Some("sonarqube"));
+        assert_eq!(classify(Harness::Grok, &bin, Some("grok-4.7"), t.path(), "p", &dirs(), t.path(), Duration::from_secs(5)).as_deref(), Some("sonarqube"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_runs_in_the_folder_it_is_given_not_the_projects_root() {
+        // A one-shot leaves a session wherever it ran: Maya's data folder keeps it off the board.
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("maya-data");
+        std::fs::create_dir_all(&data).unwrap();
+        let bin = fake_binary(t.path(), r#"echo "{\"type\":\"result\",\"result\":\"$(basename "$(pwd)")\"}""#);
+        let dirs = vec!["maya-data".to_string(), "other".to_string()];
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs, &data, Duration::from_secs(5)).as_deref(), Some("maya-data"));
     }
 
     #[cfg(unix)]
@@ -978,7 +1069,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let bin = fake_binary(t.path(), "sleep 5; echo b");
         let start = Instant::now();
-        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), Duration::from_secs(1)), None);
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), t.path(), Duration::from_secs(1)), None);
         assert!(start.elapsed() < Duration::from_secs(3));
     }
 
@@ -1022,6 +1113,7 @@ mod tests {
         assert_eq!(label(Harness::Antigravity), "Antigravity");
         assert_eq!(label(Harness::Grok), "Grok Build");
         assert_eq!(label(Harness::Kiro), "Kiro CLI");
+        assert_eq!(label(Harness::OpenCode), "OpenCode");
         assert_eq!(label(Harness::Other), "Unknown agent");
     }
 
@@ -1045,6 +1137,9 @@ mod tests {
         let o = capabilities(Harness::Other);
         assert!(!o.compact && !o.model_switch && !o.effort_switch && !o.slash_lines && !o.shell_lines);
         assert_eq!(o.mode_cycle, None);
+        let oc = capabilities(Harness::OpenCode);
+        assert!(oc.compact && oc.model_switch && oc.effort_switch && oc.slash_lines && oc.shell_lines && oc.close);
+        assert_eq!(oc.mode_cycle, Some("agent"), "the cycle is a server call, not a key");
     }
 
     #[test]
@@ -1078,6 +1173,12 @@ mod tests {
         assert_eq!(r.last().unwrap(), "SYS\n\nUSER", "no system flag: the system text leads the prompt");
         assert!(!oneshot_args(Harness::Kiro, None, None, "U").iter().any(|x| x == "--model"));
         assert!(oneshot_args(Harness::Other, None, None, "U").is_empty());
+
+        let c = oneshot_args(Harness::OpenCode, Some("anthropic/claude-sonnet-4-5#high"), Some("SYS"), "USER");
+        assert_eq!(&c[..3], ["run", "--format", "json"]);
+        assert!(pair(&c, "-m", "anthropic/claude-sonnet-4-5#high") && pair(&c, "--title", "Maya"));
+        assert_eq!(c.last().unwrap(), "SYS\n\nUSER", "no system flag: the system text leads the prompt");
+        assert!(!oneshot_args(Harness::OpenCode, None, None, "U").iter().any(|x| x == "-m"));
     }
 
     #[test]
@@ -1087,6 +1188,7 @@ mod tests {
         assert_eq!(final_text(Harness::Antigravity, &oneshot_fixture("agy.json")).unwrap().trim(), r#"{"say":"hi","action":null,"confirm":false}"#);
         assert_eq!(final_text(Harness::Grok, &oneshot_fixture("grok.json")).unwrap(), r#"{"say":"hi","action":null,"confirm":false}"#);
         assert_eq!(final_text(Harness::Kiro, &oneshot_fixture("kiro.jsonl")).unwrap(), "pong");
+        assert_eq!(final_text(Harness::OpenCode, &oneshot_fixture("opencode.jsonl")).unwrap(), "pong");
     }
 
     #[test]
@@ -1101,6 +1203,8 @@ mod tests {
         assert!(final_text(Harness::Kiro, "{\"type\":\"runFinished\",\"data\":{\"status\":\"error\",\"message\":\"Not logged in\"}}\n").unwrap_err().contains("Not logged in"));
         assert!(final_text(Harness::Kiro, "").unwrap_err().contains("last event: none"));
         assert!(final_text(Harness::Other, "{}").unwrap_err().contains("unknown agent"));
+        assert!(final_text(Harness::OpenCode, "{\"type\":\"step_start\",\"part\":{}}\n").unwrap_err().contains("last event: step_start"));
+        assert!(final_text(Harness::OpenCode, "").unwrap_err().contains("last event: none"));
     }
 
     #[test]

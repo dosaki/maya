@@ -153,7 +153,7 @@ pub fn start_with(claude_dir: &Path, dir: Option<String>, prompt: Option<String>
     // theirs typed as `/rename` later, from a store that would die with
     // this process: refuse rather than drop the name without a word.
     if options.chosen_name().is_some() && options.agent != maya_core::model::Harness::ClaudeCode {
-        return Err("--name only works for Claude Code from the command line; name Codex, Antigravity, Grok and Kiro sessions from the Maya app, or rename them once they are free.".into());
+        return Err("--name only works for Claude Code from the command line; name Codex, Antigravity, Grok, Kiro and OpenCode sessions from the Maya app, or rename them once they are free.".into());
     }
     let store = Mutex::new(Store::new(claude_dir.to_path_buf()));
     let l = actions::Local { store: &store, terminal: &*terminal };
@@ -306,10 +306,10 @@ mod tests {
         // A pending name lives in the store, which dies with this process.
         let (dir, _store) = store_with_projects(&["proj"]);
         let fake = Arc::new(FakeTerminal::default());
-        for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok, Harness::Kiro] {
+        for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok, Harness::Kiro, Harness::OpenCode] {
             let opts = LaunchOptions { agent, name: Some("Fix CI".into()), ..Default::default() };
             let err = start_with(dir.path(), Some("proj".into()), Some("hello".into()), opts, fake.clone()).unwrap_err();
-            assert_eq!(err, "--name only works for Claude Code from the command line; name Codex, Antigravity, Grok and Kiro sessions from the Maya app, or rename them once they are free.", "{agent:?}");
+            assert_eq!(err, "--name only works for Claude Code from the command line; name Codex, Antigravity, Grok, Kiro and OpenCode sessions from the Maya app, or rename them once they are free.", "{agent:?}");
         }
         assert!(fake.calls.lock().unwrap().is_empty(), "nothing started");
         let opts = LaunchOptions { name: Some("Fix CI".into()), ..Default::default() };

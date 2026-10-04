@@ -1,4 +1,4 @@
-pub use maya_core::{actions, answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, kiro, launch, log, model, net, notify, pr, registry, resume, reviews, state, store, terminal, transcript, tty, watcher};
+pub use maya_core::{actions, answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, kiro, launch, log, model, net, notify, opencode, pr, registry, resume, reviews, state, store, terminal, transcript, tty, watcher};
 
 pub mod badge;
 #[cfg(target_os = "macos")]
@@ -1379,7 +1379,7 @@ mod route_tests {
             machine: Some("laptop".into()),
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false,
+            stale: false, model: None
         };
         assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));
         assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
