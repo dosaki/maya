@@ -22,6 +22,12 @@ pub struct Store {
     /// Kiro's sessions folder and its run folder (the turn markers).
     kiro_dir: PathBuf,
     kiro_run_dir: PathBuf,
+    /// Where OpenCode's server writes its state file (`opencode/service.json` under it).
+    opencode_state_dir: PathBuf,
+    /// The open OpenCode terminals as `(pid, folder)`; replaceable in tests.
+    opencode_windows: Box<dyn Fn() -> Vec<(i32, String)> + Send>,
+    /// OpenCode's sessions as of the last refresh.
+    opencode: Vec<crate::opencode::Fetched>,
     /// Sessions of other harnesses, keyed by pid, kept between refreshes so
     /// `lsof` runs once per process rather than every five seconds.
     foreign: std::collections::HashMap<i32, ForeignSession>,
@@ -98,6 +104,39 @@ fn sent_hash(text: &str) -> String {
 
 pub const DEFAULT_COMPACT_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
 
+/// Where OpenCode keeps its state: the XDG state dir (`~/.local/state`),
+/// on Windows `%LOCALAPPDATA%\opencode\state`'s parent when that file
+/// exists, else `~/.local/state` (unverified on Windows; see the README).
+fn opencode_state_dir(home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(local) = dirs::data_local_dir() {
+        if crate::opencode::service_file(&local.join("opencode/state")).exists() {
+            return local.join("opencode/state");
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(state) = dirs::state_dir() {
+        return state;
+    }
+    home.join(".local/state")
+}
+
+/// The open OpenCode terminals: `opencode` processes on a tty, with the
+/// folder each was opened in. Windows reads no process's folder.
+#[cfg(unix)]
+fn opencode_windows() -> Vec<(i32, String)> {
+    foreign::list_process_tree()
+        .into_iter()
+        .filter(|p| p.command == "opencode" && p.tty.is_some())
+        .filter_map(|p| Some((p.pid, foreign::proc_info(p.pid).cwd?)))
+        .collect()
+}
+
+#[cfg(windows)]
+fn opencode_windows() -> Vec<(i32, String)> {
+    vec![]
+}
+
 impl Store {
     pub fn new(claude_dir: PathBuf) -> Self {
         let config = config::load(&claude_dir.join("maya/config.json"));
@@ -112,6 +151,9 @@ impl Store {
             kiro_dir: home.join(".kiro/sessions/cli"),
             // `~/Library/Application Support` on macOS, `~/.local/share` on Linux, `%LOCALAPPDATA%` on Windows.
             kiro_run_dir: dirs::data_local_dir().unwrap_or_else(|| home.join(".local/share")).join("kiro-cli/run"),
+            opencode_state_dir: opencode_state_dir(&home),
+            opencode_windows: Box::new(opencode_windows),
+            opencode: Vec::new(),
             foreign: std::collections::HashMap::new(),
             processes: Box::new(foreign::list_tui_processes),
             process_tree: Box::new(foreign::list_process_tree),
@@ -174,6 +216,8 @@ impl Store {
         self.process_tree = Box::new(Vec::new);
         self.grok_dir = PathBuf::from("/nonexistent/grok");
         self.kiro_dir = PathBuf::from("/nonexistent/kiro");
+        self.opencode_state_dir = PathBuf::from("/nonexistent/state");
+        self.opencode_windows = Box::new(Vec::new);
         // Nor do they list the machine's agents, which runs each one.
         self.agents = std::sync::Arc::new(|| vec![crate::agents::claude()]);
         self
@@ -218,6 +262,37 @@ impl Store {
         self.foreign = sessions.into_iter().map(|s| (s.pid, s)).collect();
         self.processes = Box::new(move || pids.clone());
         self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_opencode(mut self, state_dir: PathBuf, windows: Vec<(i32, String)>) -> Self {
+        self.opencode_state_dir = state_dir;
+        self.opencode_windows = Box::new(move || windows.clone());
+        self
+    }
+
+    /// OpenCode's server when its state file names one that is alive.
+    pub fn opencode_service(&self) -> Option<crate::opencode::Service> {
+        crate::opencode::read_service(&self.opencode_state_file()).filter(|s| (self.alive)(s.pid))
+    }
+
+    pub fn opencode_state_file(&self) -> PathBuf {
+        crate::opencode::service_file(&self.opencode_state_dir)
+    }
+
+    /// The OpenCode card with this id, as of the last refresh.
+    pub fn opencode_card(&self, session_id: &str) -> Option<Card> {
+        self.opencode.iter().find(|f| f.session.id == session_id).map(|f| f.card.clone())
+    }
+
+    /// The OpenCode session and what the server said about it, as of the last refresh.
+    pub fn opencode_session(&self, session_id: &str) -> Option<(crate::opencode::SessionInfo, crate::opencode::Live)> {
+        self.opencode.iter().find(|f| f.session.id == session_id).map(|f| (f.session.clone(), f.live.clone()))
+    }
+
+    /// The newest OpenCode terminal open on `dir`.
+    pub fn opencode_window(&self, dir: &str) -> Option<i32> {
+        (self.opencode_windows)().into_iter().filter(|(_, d)| d == dir).map(|(pid, _)| pid).max()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -325,7 +400,7 @@ impl Store {
 
     /// Ids of every live session, any harness.
     pub fn live_session_ids(&self) -> Vec<String> {
-        self.registry().into_iter().map(|s| s.session_id).chain(self.foreign.values().map(|s| s.session_id.clone())).collect()
+        self.registry().into_iter().map(|s| s.session_id).chain(self.foreign.values().map(|s| s.session_id.clone())).chain(self.opencode.iter().map(|f| f.session.id.clone())).collect()
     }
 
     /// Working directories of every live session, any harness.
@@ -422,6 +497,19 @@ impl Store {
             card.pr = self.prs.get(&s.cwd);
             cards.push(card);
         }
+        // OpenCode's sessions live in its server: asked on every refresh while it runs.
+        self.opencode = match self.opencode_service() {
+            Some(svc) => {
+                let client = crate::opencode::Client::new(&svc);
+                let windows = (self.opencode_windows)();
+                let data_dir = self.claude_dir.join("maya").to_string_lossy().into_owned();
+                // The context limit comes from the listing when one has landed; a refresh never waits for it.
+                let models: Vec<crate::agents::ModelInfo> = crate::agents::cached().unwrap_or_default().into_iter().find(|a| a.harness == Harness::OpenCode).map(|a| a.models).unwrap_or_default();
+                crate::opencode::fetch(&client, svc.pid, &windows, &data_dir, now_ms, timeout, |p, m| models.iter().find(|x| x.id == format!("{p}/{m}")).and_then(|x| x.context))
+            }
+            None => vec![],
+        };
+        cards.extend(self.opencode.iter().map(|f| f.card.clone()));
         let due = self.pending.apply(&mut cards, now_ms);
         self.due_renames.extend(due);
         self.log_pending_events();
@@ -600,6 +688,37 @@ mod tests {
         crate::hook_install::append_record_named(&store.claude_dir.join("maya"), "codex-events.jsonl",
             r#"{"session_id":"aaa","hook_event_name":"Stop"}"#, 1_800_000_000_002).unwrap();
         assert_eq!(store.card_for("aaa", 1_800_000_000_003).unwrap().state, State::Completed);
+    }
+
+    #[test]
+    fn opencode_sessions_come_from_its_server_and_a_dead_pid_makes_no_call() {
+        let (base, hits) = crate::opencode::fake::fake_server(vec![
+            ("GET /api/session?limit=50", include_str!("../fixtures/opencode/sessions.json")),
+            ("GET /api/session/active", "{\"data\":{\"ses_efe57d285ffeRMX70aswKZ9qCO\":{\"type\":\"running\"}}}"),
+            ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/permission", "{\"data\":[]}"),
+            ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/form", "{\"data\":[]}"),
+            ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/message?limit=5&order=desc", include_str!("../fixtures/opencode/messages.json")),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(state.join("opencode")).unwrap();
+        let me = std::process::id();
+        std::fs::write(state.join("opencode/service.json"), format!("{{\"url\":\"{base}\",\"pid\":{me},\"password\":\"pw\"}}")).unwrap();
+        let mut store = Store::new(dir.path().join("claude")).with_alive(move |pid| pid == me as i32).with_opencode(state.clone(), vec![(31, "/Users/tiagocorreia".into())]);
+        let cards = store.refresh(1_791_029_170_000);
+        let c = cards.iter().find(|c| c.session_id == "ses_efe57d285ffeRMX70aswKZ9qCO").expect("the running session");
+        assert_eq!((c.harness, c.state, c.pid, c.snippet.as_str(), c.name.as_str()), (Harness::OpenCode, State::Working, 31, "Hi", "Saying \"Hi\" request"));
+        assert!(store.live_session_ids().contains(&c.session_id));
+        assert!(cards.iter().filter(|c| c.harness == Harness::OpenCode).count() >= 2, "the completed ones within the window show too");
+        assert!(store.opencode_card("ses_efe57d285ffeRMX70aswKZ9qCO").is_some());
+        assert_eq!(store.opencode_window("/Users/tiagocorreia"), Some(31));
+        // The server died but left its file: nothing is asked.
+        std::fs::write(state.join("opencode/service.json"), format!("{{\"url\":\"{base}\",\"pid\":999999,\"password\":\"pw\"}}")).unwrap();
+        let before = hits.lock().unwrap().len();
+        let cards = store.refresh(1_791_029_170_000);
+        assert!(cards.iter().all(|c| c.harness != Harness::OpenCode));
+        assert_eq!(hits.lock().unwrap().len(), before, "no request to a dead server");
+        assert!(store.opencode_service().is_none());
     }
 
     #[test]

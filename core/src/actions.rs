@@ -637,7 +637,7 @@ mod tests {
         std::fs::write(sessions.join(format!("{id}.jsonl")), finished).unwrap();
         let procs = crate::foreign::parse_ps_tree("95245 93903 ttys010 kiro-cli chat\n95295 95245 ttys010 kiro-cli-chat chat\n95441 95295 ttys010 bun tui.js chat\n95508 95441 ?? kiro-cli-chat acp\n");
         let store = Mutex::new(store.into_inner().unwrap().with_kiro(sessions, t.path().join("no-run"), procs));
-        let info = crate::agents::AgentInfo { harness: Harness::Kiro, models: vec![crate::agents::ModelInfo { id: "auto".into(), label: "auto".into(), efforts: vec![] }], efforts: vec!["low".into(), "high".into()], modes: vec![] };
+        let info = crate::agents::AgentInfo { harness: Harness::Kiro, models: vec![crate::agents::ModelInfo { id: "auto".into(), label: "auto".into(), efforts: vec![], context: None }], efforts: vec!["low".into(), "high".into()], modes: vec![] };
         let store = with_agents(store, vec![agents::claude(), info]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
@@ -676,7 +676,7 @@ mod tests {
         }
         let grok = ForeignSession { harness: Harness::Grok, pid: 78, tty: Some("ttys010".into()), session_id: "g1".into(), cwd: "/x".into(), name: "Grok".into(), transcript_path: dir.join("events.jsonl") };
         let store = Mutex::new(store.into_inner().unwrap().with_processes(vec![grok]));
-        let info = crate::agents::AgentInfo { harness: Harness::Grok, models: vec![crate::agents::ModelInfo { id: "grok-4.7".into(), label: "grok-4.7".into(), efforts: vec![] }], efforts: vec![], modes: vec![] };
+        let info = crate::agents::AgentInfo { harness: Harness::Grok, models: vec![crate::agents::ModelInfo { id: "grok-4.7".into(), label: "grok-4.7".into(), efforts: vec![], context: None }], efforts: vec![], modes: vec![] };
         let store = with_agents(store, vec![agents::claude(), info]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };

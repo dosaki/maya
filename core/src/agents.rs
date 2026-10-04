@@ -22,6 +22,9 @@ pub struct ModelInfo {
     /// empty means the agent's own list.
     #[serde(default)]
     pub efforts: Vec<String>,
+    /// The context window in tokens, when the listing says (OpenCode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -52,7 +55,7 @@ pub fn claude() -> AgentInfo {
     let label = |id: &str| id[..1].to_uppercase() + &id[1..];
     AgentInfo {
         harness: Harness::ClaudeCode,
-        models: launch::MODELS.iter().map(|id| ModelInfo { id: id.to_string(), label: label(id), efforts: vec![] }).collect(),
+        models: launch::MODELS.iter().map(|id| ModelInfo { id: id.to_string(), label: label(id), efforts: vec![], context: None }).collect(),
         efforts: strings(launch::EFFORTS),
         modes: strings(launch::MODES),
     }
@@ -71,7 +74,7 @@ pub fn parse_codex(json: &str) -> Vec<ModelInfo> {
         .filter_map(|m| {
             let id = m["slug"].as_str().filter(|id| launch::plain_model_id(id))?;
             let efforts = m["supported_reasoning_levels"].as_array().into_iter().flatten().filter_map(|l| l["effort"].as_str()).filter(|e| known.contains(e)).map(String::from).collect();
-            Some(ModelInfo { id: id.to_string(), label: m["display_name"].as_str().unwrap_or(id).to_string(), efforts })
+            Some(ModelInfo { id: id.to_string(), label: m["display_name"].as_str().unwrap_or(id).to_string(), efforts, context: None })
         })
         .collect()
 }
@@ -82,7 +85,7 @@ pub fn parse_agy(text: &str) -> Vec<ModelInfo> {
         .filter_map(|l| {
             let (id, label) = l.split_once('\t')?;
             let id = id.trim();
-            launch::plain_model_id(id).then(|| ModelInfo { id: id.to_string(), label: label.trim().to_string(), efforts: vec![] })
+            launch::plain_model_id(id).then(|| ModelInfo { id: id.to_string(), label: label.trim().to_string(), efforts: vec![], context: None })
         })
         .collect()
 }
@@ -97,7 +100,7 @@ pub fn parse_grok(text: &str) -> Vec<ModelInfo> {
         .take_while(|l| !l.is_empty())
         .filter_map(|l| {
             let id = l.trim_start_matches('*').trim().trim_end_matches("(default)").trim();
-            launch::plain_model_id(id).then(|| ModelInfo { id: id.to_string(), label: id.to_string(), efforts: vec![] })
+            launch::plain_model_id(id).then(|| ModelInfo { id: id.to_string(), label: id.to_string(), efforts: vec![], context: None })
         })
         .collect()
 }
@@ -112,7 +115,7 @@ pub fn parse_kiro(json: &str) -> Vec<ModelInfo> {
         .flatten()
         .filter_map(|m| {
             let id = m["model_id"].as_str().filter(|id| launch::plain_model_id(id))?;
-            Some(ModelInfo { id: id.to_string(), label: m["model_name"].as_str().unwrap_or(id).to_string(), efforts: vec![] })
+            Some(ModelInfo { id: id.to_string(), label: m["model_name"].as_str().unwrap_or(id).to_string(), efforts: vec![], context: None })
         })
         .collect()
 }
@@ -131,6 +134,7 @@ pub fn parse_opencode(json: &str) -> Vec<ModelInfo> {
             launch::plain_model_ref(&id).then(|| ModelInfo {
                 label: m["name"].as_str().unwrap_or(&id).to_string(),
                 efforts: m["variants"].as_array().into_iter().flatten().filter_map(|x| x["id"].as_str()).map(String::from).collect(),
+                context: m["limit"]["context"].as_u64(),
                 id,
             })
         })
@@ -267,6 +271,12 @@ fn refresh_if_stale(c: &mut Cache) {
     });
 }
 
+/// The agents as last listed, if a listing has landed; never waits and
+/// never starts one.
+pub fn cached() -> Option<Vec<AgentInfo>> {
+    CACHE.lock().unwrap_or_else(|e| e.into_inner()).list.clone()
+}
+
 /// The agents as last listed, starting a new listing when that one is over
 /// ten minutes old. Never waits: before the first listing it is Claude Code alone.
 pub fn snapshot() -> Vec<AgentInfo> {
@@ -306,7 +316,7 @@ mod tests {
     #[test]
     fn antigravity_models_are_the_tab_separated_lines() {
         let m = parse_agy(&fixture("antigravity/models.txt"));
-        assert_eq!(m[0], ModelInfo { id: "gemini-3.8-flash-high".into(), label: "Gemini 3.8 Flash (High)".into(), efforts: vec![] });
+        assert_eq!(m[0], ModelInfo { id: "gemini-3.8-flash-high".into(), label: "Gemini 3.8 Flash (High)".into(), efforts: vec![], context: None });
         assert!(m.iter().all(|m| !m.id.starts_with("Fetching")));
         assert_eq!(m.len(), 14);
     }
@@ -346,6 +356,7 @@ mod tests {
         assert_eq!(m[0].efforts, vec!["low", "high", "max"]);
         assert!(m.iter().any(|x| x.id == "openai/gpt-6.1-sol") && m.iter().any(|x| x.id == "github-copilot/gpt-6.1-sol"), "the same model under two providers stays distinct");
         assert!(m.iter().all(|x| x.id.matches('/').count() == 1));
+        assert_eq!(m[0].context, Some(1_048_576), "the context limit travels with the model");
         assert!(parse_opencode("not json").is_empty());
         assert!(parse_opencode(r#"{"data":[{"id":"a","providerID":"p","name":"A","variants":[],"enabled":false,"limit":{"context":1,"output":1}}]}"#).is_empty(), "disabled models are not offered");
     }

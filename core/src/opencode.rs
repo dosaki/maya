@@ -226,6 +226,45 @@ pub fn messages(v: &Value) -> (Option<String>, Vec<Turn>) {
     (last, turns)
 }
 
+/// One refresh's view of the server: every root session worth a card, with
+/// what the server says about it and the card itself.
+pub struct Fetched {
+    pub session: SessionInfo,
+    pub live: Live,
+    pub card: Card,
+}
+
+/// Asks the server for its sessions and the running ones, then for each
+/// candidate its pending permission, question and newest messages, and
+/// builds the cards. `windows` are the open OpenCode terminals as
+/// `(pid, folder)`; `context_of(provider, model)` is the model's window.
+pub fn fetch(client: &Client, server_pid: i32, windows: &[(i32, String)], data_dir: &str, now_ms: u64, timeout_ms: u64, context_of: impl Fn(&str, &str) -> Option<u64>) -> Vec<Fetched> {
+    let Ok(list) = client.get("/api/session?limit=50") else { return vec![] };
+    let active = client.get("/api/session/active").map(|v| active_ids(&v)).unwrap_or_default();
+    let mut out = Vec::new();
+    for s in sessions(&list) {
+        if s.parent_id.is_some() || s.directory == data_dir {
+            continue;
+        }
+        let window = windows.iter().filter(|(_, dir)| *dir == s.directory).map(|(pid, _)| *pid).max();
+        let last = s.updated_ms.max(s.idle_ms.unwrap_or(0)).max(s.viewed_ms.unwrap_or(0));
+        let running = active.contains(&s.id);
+        // A quiet session past the timeout with no window is not a card: no calls for it.
+        if !running && now_ms.saturating_sub(last) >= timeout_ms && window.is_none() {
+            continue;
+        }
+        let permission = client.get(&format!("/api/session/{}/permission", s.id)).map(|v| permissions(&v)).unwrap_or_default().into_iter().next();
+        let form = if permission.is_none() { client.get(&format!("/api/session/{}/form", s.id)).map(|v| forms(&v)).unwrap_or_default().into_iter().next() } else { None };
+        let (snippet, _) = client.get(&format!("/api/session/{}/message?limit=5&order=desc", s.id)).map(|v| messages(&v)).unwrap_or((None, vec![]));
+        let live = Live { running, permission, form };
+        let window_ctx = s.model.as_ref().and_then(|(p, m, _)| context_of(p, m));
+        if let Some(card) = card_for(&s, &live, snippet, window_ctx, window, server_pid, data_dir, now_ms, timeout_ms) {
+            out.push(Fetched { session: s, live, card });
+        }
+    }
+    out
+}
+
 /// What a permission card offers, in order.
 pub const PERMISSION_CHOICES: [&str; 3] = ["Once", "Always", "Reject"];
 
