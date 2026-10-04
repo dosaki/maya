@@ -171,6 +171,15 @@ describe("renderModal", () => {
     expect(grok.querySelector("button[data-action=cycle-mode]")).not.toBeNull();
   });
 
+  it("offers an OpenCode card the efforts of its own model", () => {
+    const h = handlers();
+    const agent = { harness: "opencode" as const, models: [{ id: "opencode/fledge-alpha-free", label: "Fledge", efforts: ["low", "max"] }, { id: "mlx/qwen", label: "Qwen", efforts: [] }], efforts: [], modes: [] };
+    const el = renderModal({ card: { ...base, harness: "opencode", hasInbox: false, model: "opencode/fledge-alpha-free" }, turns: [], status: null, draft: "", agent }, h);
+    expect([...el.querySelectorAll<HTMLOptionElement>("select[name=effort] option")].map((o) => o.value)).toEqual(["", "low", "max"]);
+    const bare = renderModal({ card: { ...base, harness: "opencode", hasInbox: false, model: "mlx/qwen" }, turns: [], status: null, draft: "", agent }, h);
+    expect(bare.querySelector("select[name=effort]")).toBeNull();
+  });
+
   it("names OpenCode's mode cycle as the build and plan agents", () => {
     const h = handlers();
     const el = renderModal({ card: { ...base, harness: "opencode", hasInbox: false }, turns: [], status: null, draft: "" }, h);

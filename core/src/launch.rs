@@ -573,10 +573,11 @@ pub fn agent_binary(name: &str) -> Option<PathBuf> {
 
 /// Runs the headless folder picker on `agent`; None on NONE, no match,
 /// timeout or any error.
-pub fn classify(agent: Harness, binary: &Path, model: Option<&str>, root: &Path, user_prompt: &str, dirs: &[String], timeout: Duration) -> Option<String> {
+pub fn classify(agent: Harness, binary: &Path, model: Option<&str>, root: &Path, user_prompt: &str, dirs: &[String], cwd: &Path, timeout: Duration) -> Option<String> {
+    let _ = root; // the folders are in the prompt; the run itself happens in `cwd` (Maya's data folder)
     let mut child = crate::command(binary)
         .args(oneshot_args(agent, model, None, &classifier_prompt(user_prompt, dirs)))
-        .current_dir(root)
+        .current_dir(cwd)
         .env_clear()
         .envs(clean_env(std::env::vars()))
         .stdin(Stdio::null())
@@ -1037,12 +1038,24 @@ mod tests {
     fn classify_uses_the_reply_and_ignores_none() {
         let t = tempfile::tempdir().unwrap();
         let bin = fake_binary(t.path(), r#"echo '{"type":"result","result":"b"}'"#);
-        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), Duration::from_secs(5)).as_deref(), Some("b"));
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), t.path(), Duration::from_secs(5)).as_deref(), Some("b"));
         let bin = fake_binary(t.path(), r#"echo '{"type":"result","result":"NONE"}'"#);
-        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), Duration::from_secs(5)), None);
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), t.path(), Duration::from_secs(5)), None);
         // Another agent's envelope is read the same way.
         let bin = fake_binary(t.path(), r#"echo '{"text":"sonarqube","stopReason":"end_turn"}'"#);
-        assert_eq!(classify(Harness::Grok, &bin, Some("grok-4.7"), t.path(), "p", &dirs(), Duration::from_secs(5)).as_deref(), Some("sonarqube"));
+        assert_eq!(classify(Harness::Grok, &bin, Some("grok-4.7"), t.path(), "p", &dirs(), t.path(), Duration::from_secs(5)).as_deref(), Some("sonarqube"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_runs_in_the_folder_it_is_given_not_the_projects_root() {
+        // A one-shot leaves a session wherever it ran: Maya's data folder keeps it off the board.
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("maya-data");
+        std::fs::create_dir_all(&data).unwrap();
+        let bin = fake_binary(t.path(), r#"echo "{\"type\":\"result\",\"result\":\"$(basename "$(pwd)")\"}""#);
+        let dirs = vec!["maya-data".to_string(), "other".to_string()];
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs, &data, Duration::from_secs(5)).as_deref(), Some("maya-data"));
     }
 
     #[cfg(unix)]
@@ -1051,7 +1064,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let bin = fake_binary(t.path(), "sleep 5; echo b");
         let start = Instant::now();
-        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), Duration::from_secs(1)), None);
+        assert_eq!(classify(Harness::ClaudeCode, &bin, None, t.path(), "p", &dirs(), t.path(), Duration::from_secs(1)), None);
         assert!(start.elapsed() < Duration::from_secs(3));
     }
 

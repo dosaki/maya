@@ -190,7 +190,7 @@ pub fn derive(i: &DeriveInput) -> Card {
         machine: None,
         machine_address: None, machine_platform: None,
         terminal: None,
-        stale: false,
+        stale: false, model: None
     }
 }
 

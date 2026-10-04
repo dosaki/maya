@@ -74,7 +74,7 @@ mod tests {
         Card {
             session_id: String::new(), pid: 0, name: String::new(), cwd: String::new(), state, state_since: 0, snippet: String::new(),
             awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None,
-            machine_address: None, machine_platform: None, terminal: None, stale: false,
+            machine_address: None, machine_platform: None, terminal: None, stale: false, model: None
         }
     }
 

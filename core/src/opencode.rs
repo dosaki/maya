@@ -42,12 +42,25 @@ pub struct Client {
     password: String,
 }
 
+/// For an action: the server may take a while to run a prompt's admission.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// For the board's poll, which runs under the store's lock: a hung server
+/// must not freeze every card for long.
+const POLL_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl Client {
     pub fn new(s: &Service) -> Self {
-        let config = ureq::Agent::config_builder().timeout_global(Some(REQUEST_TIMEOUT)).http_status_as_error(true).build();
+        Self::with_timeout(s, REQUEST_TIMEOUT)
+    }
+
+    pub fn with_timeout(s: &Service, timeout: Duration) -> Self {
+        let config = ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(true).build();
         Client { agent: ureq::Agent::new_with_config(config), base: s.url.clone(), password: s.password.clone() }
+    }
+
+    /// The client the board polls with.
+    pub fn for_poll(s: &Service) -> Self {
+        Self::with_timeout(s, POLL_TIMEOUT)
     }
 
     fn auth(&self) -> String {
@@ -55,24 +68,46 @@ impl Client {
         format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("opencode:{}", self.password)))
     }
 
-    fn read(r: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<Value, String> {
+    fn read(r: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<Value, Failure> {
         match r {
-            Ok(mut resp) => resp.body_mut().read_json::<Value>().map_err(|e| format!("OpenCode's server: unreadable reply: {e}")),
-            Err(ureq::Error::StatusCode(code)) => Err(format!("OpenCode's server: HTTP {code}")),
-            Err(e) => Err(format!("OpenCode's server: {e}")),
+            Ok(mut resp) => resp.body_mut().read_json::<Value>().map_err(|e| Failure::Transport(format!("OpenCode's server: unreadable reply: {e}"))),
+            Err(ureq::Error::StatusCode(code)) => Err(Failure::Status(code)),
+            Err(e) => Err(Failure::Transport(format!("OpenCode's server: {e}"))),
         }
     }
 
-    pub fn get(&self, path: &str) -> Result<Value, String> {
+    /// A GET whose failure says whether the server answered at all.
+    pub fn get_raw(&self, path: &str) -> Result<Value, Failure> {
         Self::read(self.agent.get(format!("{}{path}", self.base)).header("Authorization", &self.auth()).call())
     }
 
+    pub fn get(&self, path: &str) -> Result<Value, String> {
+        self.get_raw(path).map_err(|e| e.to_string())
+    }
+
     pub fn post(&self, path: &str, body: Value) -> Result<Value, String> {
-        Self::read(self.agent.post(format!("{}{path}", self.base)).header("Authorization", &self.auth()).send_json(body))
+        Self::read(self.agent.post(format!("{}{path}", self.base)).header("Authorization", &self.auth()).send_json(body)).map_err(|e| e.to_string())
     }
 
     pub fn patch(&self, path: &str, body: Value) -> Result<Value, String> {
-        Self::read(self.agent.patch(format!("{}{path}", self.base)).header("Authorization", &self.auth()).send_json(body))
+        Self::read(self.agent.patch(format!("{}{path}", self.base)).header("Authorization", &self.auth()).send_json(body)).map_err(|e| e.to_string())
+    }
+}
+
+/// Why a call failed: the server answered with an error status (this
+/// session, this route), or it did not answer (every call will fail alike).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    Status(u16),
+    Transport(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Status(code) => write!(f, "OpenCode's server: HTTP {code}"),
+            Failure::Transport(e) => f.write_str(e),
+        }
     }
 }
 
@@ -253,9 +288,32 @@ pub fn fetch(client: &Client, server_pid: i32, windows: &[(i32, String)], data_d
         if !running && now_ms.saturating_sub(last) >= timeout_ms && window.is_none() {
             continue;
         }
-        let permission = client.get(&format!("/api/session/{}/permission", s.id)).map(|v| permissions(&v)).unwrap_or_default().into_iter().next();
-        let form = if permission.is_none() { client.get(&format!("/api/session/{}/form", s.id)).map(|v| forms(&v)).unwrap_or_default().into_iter().next() } else { None };
-        let (snippet, _) = client.get(&format!("/api/session/{}/message?limit=5&order=desc", s.id)).map(|v| messages(&v)).unwrap_or((None, vec![]));
+        // Only a running turn can be waiting on the user. A server that does
+        // not answer (hung, restarting) ends the poll with what it has; an
+        // error status is this session's alone.
+        let permission = if running {
+            match client.get_raw(&format!("/api/session/{}/permission", s.id)) {
+                Ok(v) => permissions(&v).into_iter().next(),
+                Err(Failure::Transport(_)) => break,
+                Err(Failure::Status(_)) => None,
+            }
+        } else {
+            None
+        };
+        let form = if running && permission.is_none() {
+            match client.get_raw(&format!("/api/session/{}/form", s.id)) {
+                Ok(v) => forms(&v).into_iter().next(),
+                Err(Failure::Transport(_)) => break,
+                Err(Failure::Status(_)) => None,
+            }
+        } else {
+            None
+        };
+        let (snippet, _) = match client.get_raw(&format!("/api/session/{}/message?limit=5&order=desc", s.id)) {
+            Ok(v) => messages(&v),
+            Err(Failure::Transport(_)) => break,
+            Err(Failure::Status(_)) => (None, vec![]),
+        };
         let live = Live { running, permission, form };
         let window_ctx = s.model.as_ref().and_then(|(p, m, _)| context_of(p, m));
         if let Some(card) = card_for(&s, &live, snippet, window_ctx, window, server_pid, data_dir, now_ms, timeout_ms) {
@@ -354,14 +412,15 @@ pub fn ensure_service(state_file: &Path, alive: &dyn Fn(i32) -> bool, start: imp
     Err("OpenCode's server did not start.".into())
 }
 
-/// `opencode service start`, for `ensure_service`.
+/// `opencode service start`, for `ensure_service`: spawned and left to run,
+/// since `ensure_service` watches the state file rather than the command;
+/// a start that stalls or fails only costs the wait.
 pub fn start_service(binary: &Path) -> Result<(), String> {
-    let status = crate::command(binary).args(["service", "start"]).env_clear().envs(crate::launch::clean_env(std::env::vars())).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map_err(|e| format!("Could not run opencode service start: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("OpenCode's server did not start.".into())
-    }
+    let mut child = crate::command(binary).args(["service", "start"]).env_clear().envs(crate::launch::clean_env(std::env::vars())).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().map_err(|e| format!("Could not run opencode service start: {e}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// The root sessions of `dir`, newest first, for Resume.
@@ -401,13 +460,14 @@ pub fn card_for(s: &SessionInfo, live: &Live, snippet: Option<String>, context_w
         return None;
     }
     let last = s.updated_ms.max(s.idle_ms.unwrap_or(0)).max(s.viewed_ms.unwrap_or(0));
+    // An ask's id is the turn's time: `viewed` moves when the window is merely looked at.
     let (state, since, awaiting) = if let Some(p) = &live.permission {
         let detail = format!("{}: {}", p.action, p.resource);
         let q = Question { question: detail.clone(), header: "Permission".into(), options: PERMISSION_CHOICES.iter().map(|l| Choice { label: l.to_string(), description: String::new() }).collect(), multi_select: false };
-        (State::Awaiting, last, Some(Awaiting { kind: AwaitKind::Question, detail: truncate(&detail, SNIPPET_CHARS), questions: vec![q] }))
+        (State::Awaiting, s.updated_ms, Some(Awaiting { kind: AwaitKind::Question, detail: truncate(&detail, SNIPPET_CHARS), questions: vec![q] }))
     } else if let Some(f) = &live.form {
         let qs = f.fields.iter().map(|fl| Question { question: fl.title.clone(), header: fl.key.clone(), options: fl.options.iter().map(|(v, l)| Choice { label: l.clone(), description: v.clone() }).collect(), multi_select: false }).collect();
-        (State::Awaiting, last, Some(Awaiting { kind: AwaitKind::Question, detail: truncate(&f.title, SNIPPET_CHARS), questions: qs }))
+        (State::Awaiting, s.updated_ms, Some(Awaiting { kind: AwaitKind::Question, detail: truncate(&f.title, SNIPPET_CHARS), questions: qs }))
     } else if live.running {
         (State::Working, s.updated_ms, None)
     } else if now_ms.saturating_sub(last) < timeout_ms {
@@ -437,6 +497,7 @@ pub fn card_for(s: &SessionInfo, live: &Live, snippet: Option<String>, context_w
         machine_platform: None,
         terminal: None,
         stale: false,
+        model: s.model.as_ref().map(|(p, m, _)| format!("{p}/{m}")),
     })
 }
 
@@ -584,6 +645,67 @@ mod tests {
         assert!(card_for(&session("ses_2", "/maya", 1_000), &Live { running: true, ..quiet.clone() }, None, None, None, 7, "/maya", 5_000, 30 * min).is_none(), "Maya's own one-shot");
         let child = SessionInfo { parent_id: Some("ses_1".into()), ..session("ses_3", "/p", 1_000) };
         assert!(card_for(&child, &Live { running: true, ..quiet }, None, None, None, 7, "/maya", 5_000, 30 * min).is_none(), "a subagent child");
+    }
+
+    #[test]
+    fn the_card_carries_its_session_model_for_the_effort_picker() {
+        let mut s = session("ses_1", "/p", 1_000);
+        s.model = Some(("opencode".into(), "fledge-alpha-free".into(), Some("max".into())));
+        let c = card_for(&s, &Live { running: true, ..Default::default() }, None, None, None, 7, "/maya", 5_000, 60_000).unwrap();
+        assert_eq!(c.model.as_deref(), Some("opencode/fledge-alpha-free"));
+        assert_eq!(card_for(&session("ses_2", "/p", 1_000), &Live { running: true, ..Default::default() }, None, None, None, 7, "/maya", 5_000, 60_000).unwrap().model, None);
+    }
+
+    #[test]
+    fn an_awaiting_card_keeps_its_ask_id_when_the_terminal_is_merely_viewed() {
+        let min = 60_000;
+        let mut s = session("ses_1", "/p", 1_000);
+        s.viewed_ms = Some(4_000);
+        let live = Live { running: true, permission: Some(Permission { id: "per_1".into(), action: "edit".into(), resource: "/tmp/x".into() }), form: None };
+        let c = card_for(&s, &live, None, None, None, 7, "/maya", 5_000, 30 * min).unwrap();
+        assert_eq!(c.state_since, 1_000, "the ask moves with the turn, not with a glance at the window");
+    }
+
+    #[test]
+    fn fetch_asks_pending_only_for_running_sessions_and_shrugs_off_a_missing_route() {
+        let (base, hits) = fake::fake_server(vec![
+            ("GET /api/session?limit=50", include_str!("../fixtures/opencode/sessions.json")),
+            ("GET /api/session/active", "{\"data\":{\"ses_efe57d285ffeRMX70aswKZ9qCO\":{\"type\":\"running\"}}}"),
+            ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/permission", "{\"data\":[]}"),
+            ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/form", "{\"data\":[]}"),
+            // No messages routes: a 404 costs that session its snippet, nothing more.
+        ]);
+        let c = Client::new(&Service { url: base, pid: 1, password: "pw".into() });
+        let got = fetch(&c, 1, &[], "/maya", 1_791_029_170_000, 30 * 60_000, |_, _| None);
+        let h = hits.lock().unwrap();
+        assert_eq!(h.iter().filter(|r| r.contains("/permission")).count(), 1, "only the running session's permission is asked");
+        assert!(!h.iter().any(|r| r.contains("ses_efe568c4dffeefYKhkbkEX18Qm/permission") || r.contains("ses_efe568c4dffeefYKhkbkEX18Qm/form")), "a quiet session is not asked what it waits on");
+        assert!(got.iter().any(|f| f.session.id == "ses_efe57d285ffeRMX70aswKZ9qCO" && f.card.state == State::Working), "{}", got.len());
+    }
+
+    #[test]
+    fn fetch_stops_when_the_server_does_not_answer() {
+        let port = { let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); l.local_addr().unwrap().port() };
+        let c = Client::for_poll(&Service { url: format!("http://127.0.0.1:{port}"), pid: 1, password: "pw".into() });
+        let started = std::time::Instant::now();
+        assert!(fetch(&c, 1, &[], "/maya", 1, 1, |_, _| None).is_empty());
+        assert!(started.elapsed() < Duration::from_secs(3), "a refused connection ends the poll at once");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_service_start_does_not_hang_the_caller() {
+        let t = tempfile::tempdir().unwrap();
+        let script = t.path().join("opencode-bin");
+        std::fs::write(&script, "#!/bin/sh\nsleep 3\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let file = t.path().join("opencode/service.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let started = std::time::Instant::now();
+        let err = ensure_service(&file, &|_| false, || start_service(&script), Duration::from_millis(400)).unwrap_err();
+        assert_eq!(err, "OpenCode's server did not start.");
+        assert!(started.elapsed() < Duration::from_secs(2), "the start was not waited for: {:?}", started.elapsed());
     }
 
     #[test]

@@ -130,6 +130,10 @@ pub struct Card {
     /// True when the machine has not reported for a while or is disconnected.
     #[serde(default)]
     pub stale: bool,
+    /// The model the session runs on, when its agent says (OpenCode's
+    /// `provider/model`): the modal offers that model's own efforts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[cfg(test)]
@@ -189,7 +193,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false,
+            stale: false, model: None
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["context"]["percent"], 62);

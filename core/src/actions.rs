@@ -70,14 +70,16 @@ struct ServerCard {
     live: crate::opencode::Live,
 }
 
-/// The server behind `session_id` when it is an OpenCode session; None for
-/// every other card (and for an id no card has, which the caller reports).
-fn server_card(l: &Local, session_id: &str) -> Result<Option<ServerCard>, String> {
+/// The server behind `session_id` when it is an OpenCode session, as of the
+/// last refresh; None for every other card (and for an id no card has,
+/// which the caller reports). With `fresh` the board is refreshed first,
+/// for the actions whose answer depends on the session's state right now.
+fn server_card(l: &Local, session_id: &str, fresh: bool) -> Result<Option<ServerCard>, String> {
     let mut store = l.store.lock().unwrap();
-    let Some(card) = store.card_for(session_id, now_ms()) else { return Ok(None) };
-    if card.harness != model::Harness::OpenCode {
-        return Ok(None);
+    if fresh {
+        store.refresh(now_ms());
     }
+    let Some(card) = store.opencode_card(session_id) else { return Ok(None) };
     let service = store.opencode_service().ok_or("OpenCode's server is not running.")?;
     let (session, live) = store.opencode_session(session_id).ok_or("Session is no longer running.")?;
     Ok(Some(ServerCard { client: crate::opencode::Client::new(&service), card, session, live }))
@@ -86,12 +88,18 @@ fn server_card(l: &Local, session_id: &str) -> Result<Option<ServerCard>, String
 /// Sends `text` to the session: through its inbox, or typed into the
 /// terminal of a harness that has none.
 pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
-    if let Some(sc) = server_card(l, session_id)? {
-        if sc.card.state == model::State::Working {
-            return Err("Wait until the session is free.".into());
-        }
+    if let Some(sc) = server_card(l, session_id, true)? {
         if text.trim().is_empty() {
             return Err("Message is empty.".into());
+        }
+        // A question with no options is answered from the composer.
+        if let Some(f) = &sc.live.form {
+            if let Some(field) = f.fields.iter().find(|fl| fl.options.is_empty()) {
+                return crate::opencode::reply_form(&sc.client, &sc.session.id, &f.id, &field.key, text.trim());
+            }
+        }
+        if sc.card.state == model::State::Working {
+            return Err("Wait until the session is free.".into());
         }
         return crate::opencode::prompt(&sc.client, &sc.session.id, text.trim());
     }
@@ -129,7 +137,7 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String>
 
 /// Picks `option` of `question` in the session's open ask `ask_id`.
 pub fn answer_question(l: &Local, session_id: &str, ask_id: u64, question: usize, option: usize) -> Result<(), String> {
-    if let Some(sc) = server_card(l, session_id)? {
+    if let Some(sc) = server_card(l, session_id, true)? {
         answer::check(&sc.card, ask_id, question, option, now_ms())?;
         if let Some(p) = &sc.live.permission {
             return crate::opencode::reply_permission(&sc.client, &sc.session.id, &p.id, crate::opencode::decision(option));
@@ -159,7 +167,7 @@ pub fn answer_question(l: &Local, session_id: &str, ask_id: u64, question: usize
 
 /// Types `/compact` into the session's terminal, or asks OpenCode's server.
 pub fn compact_session(l: &Local, session_id: &str) -> Result<(), String> {
-    if let Some(sc) = server_card(l, session_id)? {
+    if let Some(sc) = server_card(l, session_id, false)? {
         return crate::opencode::compact(&sc.client, &sc.session.id);
     }
     type_into_session(l, session_id, answer::COMPACT, "/compact", |c| c.compact)
@@ -224,7 +232,7 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
 /// keys typed into its TUI elsewhere act as shortcuts. The new name comes
 /// back through the agent's own files on the next refresh.
 pub fn rename_session(l: &Local, session_id: &str, name: &str) -> Result<(), String> {
-    if let Some(sc) = server_card(l, session_id)? {
+    if let Some(sc) = server_card(l, session_id, false)? {
         answer::rename_command(name)?;
         return crate::opencode::rename(&sc.client, &sc.session.id, name.trim());
     }
@@ -297,7 +305,7 @@ pub fn run_due_renames(l: &Local) {
 /// Types `/model x` or `/effort y` into the session's terminal, after
 /// checking the value against the agent's own listing.
 pub fn set_session_option(l: &Local, session_id: &str, setting: &str, value: &str) -> Result<(), String> {
-    if let Some(sc) = server_card(l, session_id)? {
+    if let Some(sc) = server_card(l, session_id, false)? {
         let info = l.store.lock().unwrap().agents_source()().into_iter().find(|a| a.harness == model::Harness::OpenCode).unwrap_or_else(|| crate::agents::info_for(model::Harness::OpenCode, None));
         let (provider, model, variant) = sc.session.model.clone().ok_or("The session has no model yet.")?;
         return match setting {
@@ -341,7 +349,7 @@ pub fn set_session_option(l: &Local, session_id: &str, setting: &str, value: &st
 /// session's terminal, after `answer::check_terminal_command`.
 pub fn send_slash_command(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
     let line = answer::check_terminal_command(text)?;
-    if let Some(sc) = server_card(l, session_id)? {
+    if let Some(sc) = server_card(l, session_id, false)? {
         if let Some(cmd) = line.strip_prefix('!') {
             return crate::opencode::shell(&sc.client, &sc.session.id, cmd.trim());
         }
@@ -355,7 +363,7 @@ pub fn send_slash_command(l: &Local, session_id: &str, text: &str) -> Result<(),
 
 /// Sends the agent's mode-cycle keys (Shift+Tab) to the session's terminal.
 pub fn cycle_session_mode(l: &Local, session_id: &str) -> Result<(), String> {
-    if let Some(sc) = server_card(l, session_id)? {
+    if let Some(sc) = server_card(l, session_id, false)? {
         return crate::opencode::switch_agent(&sc.client, &sc.session.id, crate::opencode::next_agent(&sc.session.agent));
     }
     let harness = l.store.lock().unwrap().card_for(session_id, now_ms()).ok_or("Session is no longer running.")?.harness;
@@ -386,7 +394,7 @@ fn type_into_session(l: &Local, session_id: &str, text: &str, control: &str, all
 
 /// The session's last turns.
 pub fn session_history(l: &Local, session_id: &str) -> Result<Vec<transcript::Turn>, String> {
-    if let Some(sc) = server_card(l, session_id)? {
+    if let Some(sc) = server_card(l, session_id, false)? {
         return crate::opencode::history(&sc.client, &sc.session.id);
     }
     let (path, foreign) = {
@@ -512,7 +520,8 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
                 (store.config.brain(), store.config.brain_model().map(String::from))
             };
             let binary = launch::find_binary(brain)?;
-            launch::classify(brain, &binary, model.as_deref(), &root, &prompt, &dirs, launch::CLASSIFIER_TIMEOUT)
+            // The one-shot runs in Maya's data folder, where no project's settings load and no board reads.
+            launch::classify(brain, &binary, model.as_deref(), &root, &prompt, &dirs, &maya_dir, launch::CLASSIFIER_TIMEOUT)
         }
     };
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
@@ -733,7 +742,7 @@ mod tests {
 
     /// A working session's card, under the agent's own name.
     fn test_card(id: &str, harness: Harness, cwd: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state: State::Working, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false }
+        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state: State::Working, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None }
     }
 
     /// Codex rollout lines: a turn starting, and that turn finished with a reply.
@@ -798,6 +807,11 @@ mod tests {
         ]
     }
 
+    /// The JSON body of a recorded request, after its blank line.
+    fn body_json(r: &str) -> serde_json::Value {
+        r.split("\n\n").last().and_then(|b| serde_json::from_str(b.trim()).ok()).unwrap_or(serde_json::Value::Null)
+    }
+
     fn opencode_info() -> crate::agents::AgentInfo {
         crate::agents::AgentInfo { harness: Harness::OpenCode, models: vec![crate::agents::ModelInfo { id: "opencode/fledge-alpha-free".into(), label: "Fledge".into(), efforts: vec!["low".into(), "max".into()], context: None }], efforts: vec!["low".into(), "max".into()], modes: vec!["default".into(), "auto".into()] }
     }
@@ -808,6 +822,7 @@ mod tests {
         let store = with_agents(store, vec![agents::claude(), opencode_info()]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
         send_reply(&l, SES, "go on").unwrap();
         rename_session(&l, SES, "Renamed").unwrap();
         compact_session(&l, SES).unwrap();
@@ -820,28 +835,55 @@ mod tests {
         assert_eq!(turns.len(), 2);
         assert!(fake.calls.lock().unwrap().is_empty(), "nothing typed into any terminal");
         let h = hits.lock().unwrap();
-        // The bodies are pretty-printed: compare them without whitespace.
-        let bodies: Vec<String> = h.iter().filter(|r| r.starts_with("POST") || r.starts_with("PATCH")).map(|r| r.replace("\r\n", "\n").replace("\n  ", "").replace("\n", "").replace(": ", ":")).collect();
-        assert!(bodies.iter().any(|r| r.contains("/prompt") && r.contains("\"text\":\"go on\"")), "{bodies:?}");
-        assert!(bodies.iter().any(|r| r.starts_with("PATCH") && r.contains("\"title\":\"Renamed\"")));
-        assert!(bodies.iter().any(|r| r.contains("/compact")));
-        assert!(bodies.iter().any(|r| r.contains("/model") && r.contains("\"providerID\":\"opencode\"") && r.contains("\"id\":\"fledge-alpha-free\"")));
-        assert!(bodies.iter().any(|r| r.contains("/model") && r.contains("\"variant\":\"max\"")));
-        assert!(bodies.iter().any(|r| r.contains("/agent") && r.contains("\"agent\":\"plan\"")), "build cycles to plan");
-        assert!(bodies.iter().any(|r| r.contains("/command") && r.contains("\"name\":\"share\"") && r.contains("\"text\":\"now\"")));
-        assert!(bodies.iter().any(|r| r.contains("/shell") && r.contains("\"command\":\"ls\"")));
+        let sent = |path: &str, want: serde_json::Value| h.iter().any(|r| r.lines().next().unwrap_or("").ends_with(path) && body_json(r) == want);
+        assert!(sent("/prompt", serde_json::json!({"text": "go on"})), "{h:?}");
+        assert!(sent(SES, serde_json::json!({"title": "Renamed"})));
+        assert!(h.iter().any(|r| r.starts_with("POST") && r.contains("/compact")));
+        assert!(sent("/model", serde_json::json!({"model": {"providerID": "opencode", "id": "fledge-alpha-free", "variant": "max"}})), "the model switch keeps the variant, the effort switch keeps the model");
+        assert!(sent("/agent", serde_json::json!({"agent": "plan"})), "build cycles to plan");
+        assert!(sent("/command", serde_json::json!({"name": "share", "text": "now"})));
+        assert!(sent("/shell", serde_json::json!({"command": "ls"})));
+    }
+
+    #[test]
+    fn an_opencode_control_does_not_refresh_the_whole_board_first() {
+        let (_d, store, hits) = opencode_store(base_routes("{\"data\":{}}", "{\"data\":[]}"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
+        let lists = |h: &Vec<String>| h.iter().filter(|r| r.starts_with("GET /api/session?limit=50")).count();
+        let before = lists(&hits.lock().unwrap());
+        compact_session(&l, SES).unwrap();
+        assert_eq!(lists(&hits.lock().unwrap()), before, "a control uses the last refresh's card");
+    }
+
+    #[test]
+    fn a_free_text_question_is_answered_from_the_composer() {
+        let mut routes = base_routes("{\"data\":{\"ses_efe57d285ffeRMX70aswKZ9qCO\":{\"type\":\"running\"}}}", "{\"data\":[]}");
+        routes[3] = ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/form", "{\"data\":[{\"id\":\"frm_02\",\"sessionID\":\"ses_efe57d285ffeRMX70aswKZ9qCO\",\"title\":\"Commit message?\",\"fields\":[{\"key\":\"message\",\"type\":\"string\",\"title\":\"Message\"}],\"state\":{\"status\":\"pending\"}}]}");
+        routes.push(("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/form/frm_02/reply", "{\"data\":{}}"));
+        let (_d, store, hits) = opencode_store(routes);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let card = store.lock().unwrap().card_for(SES, now_ms()).unwrap();
+        assert_eq!(card.state, State::Awaiting);
+        assert!(card.awaiting.as_ref().unwrap().questions[0].options.is_empty(), "no buttons: the composer answers");
+        send_reply(&l, SES, "fix: the thing").unwrap();
+        let h = hits.lock().unwrap();
+        assert!(h.iter().any(|r| r.contains("/form/frm_02/reply") && body_json(r) == serde_json::json!({"answer": {"message": "fix: the thing"}})), "{h:?}");
+        assert!(!h.iter().any(|r| r.contains("/prompt")), "not a prompt into a waiting turn");
     }
 
     #[test]
     fn an_opencode_permission_is_answered_with_a_decision_and_a_stale_ask_is_refused() {
-        let (_d, store, hits) = opencode_store(base_routes("{\"data\":{}}", include_str!("../fixtures/opencode/permission.json")));
+        let (_d, store, hits) = opencode_store(base_routes("{\"data\":{\"ses_efe57d285ffeRMX70aswKZ9qCO\":{\"type\":\"running\"}}}", include_str!("../fixtures/opencode/permission.json")));
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
         let card = store.lock().unwrap().card_for(SES, now_ms()).unwrap();
         assert_eq!(card.state, State::Awaiting);
         let ask = card.state_since;
         answer_question(&l, SES, ask, 0, 1).unwrap();
-        assert!(hits.lock().unwrap().iter().map(|r| r.replace("\r\n", "\n").replace("\n  ", "").replace("\n", "").replace(": ", ":")).any(|r| r.contains("/permission/per_01/reply") && r.contains("\"decision\":\"always\"")));
+        assert!(hits.lock().unwrap().iter().any(|r| r.contains("/permission/per_01/reply") && body_json(r) == serde_json::json!({"decision": "always"})));
         assert_eq!(answer_question(&l, SES, ask + 1, 0, 1).unwrap_err(), "The question has changed; look again.");
         assert!(fake.calls.lock().unwrap().is_empty());
     }
@@ -888,10 +930,11 @@ mod tests {
         let opts = LaunchOptions { agent: Harness::OpenCode, model: Some("opencode/fledge-alpha-free".into()), effort: Some("low".into()), mode: Some("auto".into()), name: Some("Fix CI".into()) };
         start_session(&l, Some("proj".into()), "-v please say hi".into(), opts).unwrap();
         let h = hits.lock().unwrap();
-        let flat = |r: &String| r.replace("\r\n", "\n").replace("\n  ", "").replace("\n", "").replace(": ", ":");
-        let create = h.iter().map(flat).find(|r| r.starts_with("POST /api/session{") || r.starts_with("POST /api/sessionPOST")).expect("created on the server: {h:?}");
-        assert!(create.contains("\"title\":\"Fix CI\"") && create.contains("proj") && create.contains("\"variant\":\"low\"") && create.contains("\"id\":\"fledge-alpha-free\""), "{create}");
-        assert!(h.iter().map(flat).any(|r| r.contains("/ses_new01/prompt") && r.contains("-v please say hi")), "the prompt goes over the wire, never a shell line");
+        let create = h.iter().find(|r| r.starts_with("POST /api/session\n")).map(|r| body_json(r)).expect("created on the server");
+        assert_eq!(create["title"], "Fix CI");
+        assert!(create["location"]["directory"].as_str().unwrap().ends_with("proj"));
+        assert_eq!(create["model"], serde_json::json!({"providerID": "opencode", "id": "fledge-alpha-free", "variant": "low"}));
+        assert!(h.iter().any(|r| r.contains("/ses_new01/prompt") && body_json(r) == serde_json::json!({"text": "-v please say hi"})), "the prompt goes over the wire, never a shell line");
         let opened: Vec<String> = fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Open { command, .. } => Some(command.clone()), _ => None }).collect();
         assert_eq!(opened.len(), 1);
         assert!(opened[0].ends_with("&& opencode --session 'ses_new01' --auto"), "{}", opened[0]);

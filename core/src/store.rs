@@ -500,7 +500,7 @@ impl Store {
         // OpenCode's sessions live in its server: asked on every refresh while it runs.
         self.opencode = match self.opencode_service() {
             Some(svc) => {
-                let client = crate::opencode::Client::new(&svc);
+                let client = crate::opencode::Client::for_poll(&svc);
                 let windows = (self.opencode_windows)();
                 let data_dir = self.claude_dir.join("maya").to_string_lossy().into_owned();
                 // The context limit comes from the listing when one has landed; a refresh never waits for it.
