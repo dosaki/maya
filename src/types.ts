@@ -17,7 +17,7 @@ export interface Question {
 }
 
 /** The agent runner behind a session; "other" is one this build does not know. */
-export type Harness = "claude-code" | "codex" | "antigravity" | "grok" | "kiro" | "other";
+export type Harness = "claude-code" | "codex" | "antigravity" | "grok" | "kiro" | "opencode" | "other";
 
 export interface PullRequest {
   number: number;

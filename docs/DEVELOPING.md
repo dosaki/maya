@@ -292,7 +292,8 @@ Three workflows in `.github/workflows/`:
   `watcher.rs`, `answer.rs` and `launch.rs` (Terminal automation),
   `terminal_tmux.rs` (tmux sessions, for the CLI and the Linux app),
   `inbox.rs` (Claude Code's session socket), `foreign.rs` with `codex.rs`,
-  `antigravity.rs`, `grok.rs`, `kiro.rs` (other agents), `reviews.rs` and `pr.rs`
+  `antigravity.rs`, `grok.rs`, `kiro.rs` (other agents), `opencode.rs` (OpenCode's
+  server client, over `ureq`), `reviews.rs` and `pr.rs`
   (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
   `interpreter.rs`, `log.rs` (the Debug tab and `maya.log`), and `net/`
   with `protocol.rs` (message types, encode/decode, pairing and HMAC),

@@ -14,7 +14,7 @@ the right terminal first.
 
 ## What it does
 
-- Shows Claude Code, Codex, Antigravity, Grok Build and Kiro CLI sessions on one board as cards in a Kanban-like board
+- Shows Claude Code, Codex, Antigravity, Grok Build, Kiro CLI and OpenCode sessions on one board as cards in a Kanban-like board
   - Each session card lands in a column: Idle, Working, Awaiting Decision or Completed
 - Lets you reply, answer questions, and run slash commands and `!` shell lines from the card
 - Starts new sessions and resumes old ones
@@ -34,7 +34,7 @@ Run the commands below, or download Maya manually from the
 
 Requirements:
 
-- One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity, Grok Build or [Kiro CLI](https://kiro.dev/cli), installed and signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
+- One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity, Grok Build, [Kiro CLI](https://kiro.dev/cli) or [OpenCode](https://opencode.ai), installed and signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
 - The [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`,
   for the Pull Requests tab.
 - macOS on Apple Silicon or Intel (macOS 14 or later for voice).
@@ -332,6 +332,13 @@ write and drives them through their own interfaces.
   running processes and their own session files. A Kiro session waiting
   for a tool approval shows as Working with the command it is waiting on:
   Kiro writes nothing to disk that tells the two apart.
+- **OpenCode** sessions come from its background server (the state file
+  under `~/.local/state/opencode`), not from files: cards, replies,
+  approvals, questions and every control go through the server, and Close
+  types `/exit` into the OpenCode window open on the session's folder.
+  Only the shared service is found; a `--standalone` server is not. A new
+  session is created on the server first, so its name, model and effort
+  are set from the start, then shown in a window opened on it.
 - **States** come from the hook events in `~/.claude/maya/events.jsonl`
   when the hook is installed, with a rule-based reading of the transcript
   as the fallback (a turn that ends in a question is "Awaiting Decision").
@@ -367,7 +374,10 @@ speech models under `models/`.
   sessions by which `codex` process holds a thread's writer lock. A new
   `agy` shows once its first prompt starts a conversation. Kiro sessions
   are found as on macOS: each session's lock file names its agent
-  process, and the console is the TUI's.
+  process, and the console is the TUI's. OpenCode's state file is looked
+  for under `%LOCALAPPDATA%\opencode\state` and `~/.local/state`,
+  unverified on this release; no process's folder is readable, so Focus
+  falls back to the server and Close is refused for OpenCode there.
 - Focus raises the Windows Terminal window hosting a session; when several
   sessions are tabs of one window, pick the tab yourself.
 - The `maya` command line tool drives sessions through tmux, so on Windows

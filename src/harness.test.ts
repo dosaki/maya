@@ -10,6 +10,7 @@ describe("capabilities", () => {
       antigravity: { compact: true, modelSwitch: false, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false, close: true },
       grok: { compact: true, modelSwitch: true, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false, close: true },
       kiro: { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true, close: true },
+      opencode: { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true, close: true },
       other: { compact: false, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: false, shellLines: false, close: false },
     });
     expect(capabilitiesOf("antigravity")).toBe(CAPABILITIES.antigravity);
@@ -23,6 +24,8 @@ describe("capabilities", () => {
 describe("labels and badges", () => {
   it("name Kiro and show an unknown agent as text", () => {
     expect(harnessLabel("kiro")).toBe("Kiro CLI");
+    expect(harnessLabel("opencode")).toBe("OpenCode");
+    expect(harnessBadge("opencode", "b").tagName).toBe("IMG");
     expect(harnessLabel("other")).toBe("Unknown agent");
     expect(harnessBadge("kiro", "b").tagName).toBe("IMG");
     const badge = harnessBadge("other", "b");

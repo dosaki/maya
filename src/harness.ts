@@ -3,6 +3,7 @@ import claudeCodeIcon from "./assets/claude-code.png";
 import codexIcon from "./assets/icons/codex.svg";
 import grokIcon from "./assets/icons/grok.png";
 import kiroIcon from "./assets/icons/kiro.png";
+import opencodeIcon from "./assets/icons/opencode.svg";
 import type { Harness } from "./types";
 
 export const HARNESS_LABEL: Record<Harness, string> = {
@@ -11,6 +12,7 @@ export const HARNESS_LABEL: Record<Harness, string> = {
   antigravity: "Antigravity",
   grok: "Grok Build",
   kiro: "Kiro CLI",
+  opencode: "OpenCode",
   other: "Unknown agent",
 };
 
@@ -21,6 +23,7 @@ export const HARNESS_ICON: Partial<Record<Harness, string>> = {
   antigravity: antigravityIcon,
   grok: grokIcon,
   kiro: kiroIcon,
+  opencode: opencodeIcon,
 };
 
 export function harnessLabel(h: Harness): string {
@@ -64,6 +67,7 @@ export const CAPABILITIES: Record<Harness, Capabilities> = {
   antigravity: { compact: true, modelSwitch: false, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false, close: true },
   grok: { compact: true, modelSwitch: true, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false, close: true },
   kiro: { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true, close: true },
+  opencode: { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true, close: true },
   other: { compact: false, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: false, shellLines: false, close: false },
 };
 

@@ -171,6 +171,15 @@ describe("renderModal", () => {
     expect(grok.querySelector("button[data-action=cycle-mode]")).not.toBeNull();
   });
 
+  it("names OpenCode's mode cycle as the build and plan agents", () => {
+    const h = handlers();
+    const el = renderModal({ card: { ...base, harness: "opencode", hasInbox: false }, turns: [], status: null, draft: "" }, h);
+    const cycle = el.querySelector<HTMLButtonElement>("button[data-action=cycle-mode]")!;
+    expect(cycle.title).toContain("build and plan");
+    const grok = renderModal({ card: { ...base, harness: "grok", hasInbox: false }, turns: [], status: null, draft: "" }, h);
+    expect(grok.querySelector<HTMLButtonElement>("button[data-action=cycle-mode]")!.title).toContain("Shift+Tab");
+  });
+
   it("brings the pickers in on a repaint, but keeps an unapplied choice", () => {
     const h = handlers();
     const grok = { ...base, harness: "grok" as const, hasInbox: false };

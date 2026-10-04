@@ -137,7 +137,7 @@ function renderTweaks(h: ModalHandlers, caps: Capabilities, info: AgentInfo): HT
     const cycle = el("button", "card__btn", "Cycle mode");
     cycle.type = "button";
     cycle.dataset.action = "cycle-mode";
-    cycle.title = "Sends Shift+Tab to the terminal: the next mode. Check the terminal to see which.";
+    cycle.title = info.harness === "opencode" ? "Switches between the build and plan agents." : "Sends Shift+Tab to the terminal: the next mode. Check the terminal to see which.";
     cycle.addEventListener("click", () => h.onCycleMode());
     row.append(cycle);
   }
