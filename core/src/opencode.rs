@@ -320,6 +320,62 @@ pub fn history(c: &Client, id: &str) -> Result<Vec<Turn>, String> {
     c.get(&format!("/api/session/{id}/message?limit=60&order=desc")).map(|v| messages(&v).1)
 }
 
+/// Creates a session on the server for `dir`, with its title, model and
+/// variant set at birth, and returns its id.
+pub fn create_session(c: &Client, dir: &str, title: Option<&str>, model: Option<(&str, &str)>, variant: Option<&str>) -> Result<String, String> {
+    let mut body = serde_json::json!({ "location": { "directory": dir } });
+    if let Some(t) = title {
+        body["title"] = Value::String(t.into());
+    }
+    if let Some((p, m)) = model {
+        body["model"] = serde_json::json!({ "providerID": p, "id": m });
+        if let Some(v) = variant {
+            body["model"]["variant"] = Value::String(v.into());
+        }
+    }
+    let v = c.post("/api/session", body)?;
+    v["data"]["id"].as_str().map(String::from).ok_or_else(|| "OpenCode's server returned no session id.".to_string())
+}
+
+/// The server, started with `start` when its state file names no live one,
+/// then waited for up to `wait`.
+pub fn ensure_service(state_file: &Path, alive: &dyn Fn(i32) -> bool, start: impl FnOnce() -> Result<(), String>, wait: Duration) -> Result<Service, String> {
+    if let Some(s) = read_service(state_file).filter(|s| alive(s.pid)) {
+        return Ok(s);
+    }
+    start()?;
+    let deadline = std::time::Instant::now() + wait;
+    while std::time::Instant::now() < deadline {
+        if let Some(s) = read_service(state_file).filter(|s| alive(s.pid)) {
+            return Ok(s);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err("OpenCode's server did not start.".into())
+}
+
+/// `opencode service start`, for `ensure_service`.
+pub fn start_service(binary: &Path) -> Result<(), String> {
+    let status = crate::command(binary).args(["service", "start"]).env_clear().envs(crate::launch::clean_env(std::env::vars())).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map_err(|e| format!("Could not run opencode service start: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("OpenCode's server did not start.".into())
+    }
+}
+
+/// The root sessions of `dir`, newest first, for Resume.
+pub fn resumable(c: &Client, dir: &str, running: &[String]) -> Vec<crate::resume::ResumableSession> {
+    let Ok(v) = c.get("/api/session?limit=200") else { return vec![] };
+    let mut out: Vec<_> = sessions(&v)
+        .into_iter()
+        .filter(|s| s.parent_id.is_none() && s.directory == dir)
+        .map(|s| crate::resume::ResumableSession { running: running.contains(&s.id), title: s.title.clone().unwrap_or_else(|| s.id.clone()), last_active_ms: s.updated_ms.max(s.idle_ms.unwrap_or(0)), id: s.id })
+        .collect();
+    out.sort_by(|a, b| b.last_active_ms.cmp(&a.last_active_ms));
+    out
+}
+
 /// What a permission card offers, in order.
 pub const PERMISSION_CHOICES: [&str; 3] = ["Once", "Always", "Reject"];
 

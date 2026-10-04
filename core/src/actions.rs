@@ -420,10 +420,14 @@ pub fn list_project_dirs(l: &Local) -> Result<Vec<String>, String> {
 
 /// The agent's past sessions of a project folder, newest first, running ones marked.
 pub fn list_resumable_sessions(l: &Local, agent: model::Harness, dir: &str) -> Result<Vec<resume::ResumableSession>, String> {
-    let (path, dirs, running) = {
+    let (path, dirs, running, service) = {
         let store = l.store.lock().unwrap();
-        (project_path(&store, dir)?, store.agent_dirs(), store.live_session_ids())
+        (project_path(&store, dir)?, store.agent_dirs(), store.live_session_ids(), store.opencode_service())
     };
+    if agent == model::Harness::OpenCode {
+        // With the server down there is nothing to list, not an error.
+        return Ok(service.map(|s| crate::opencode::resumable(&crate::opencode::Client::new(&s), &path.to_string_lossy(), &running)).unwrap_or_default());
+    }
     Ok(resume::list_sessions(agent, &dirs, &path.to_string_lossy(), &running))
 }
 
@@ -443,6 +447,38 @@ fn check_codex_effort(info: &crate::agents::AgentInfo, options: &launch::LaunchO
     } else {
         Err(format!("Unknown effort for {model}: {effort}"))
     }
+}
+
+/// How long New session waits for `opencode service start` to write the state file.
+const OPENCODE_START_WAIT: Duration = Duration::from_secs(10);
+
+/// Starts an OpenCode session: created on the server with its name, model
+/// and variant, prompted over the wire, then shown in a terminal opened on
+/// its id. Returns the terminal's name, as `Terminal::open` does.
+fn start_opencode(l: &Local, target: &Path, prompt: &str, name: Option<&str>, options: &launch::LaunchOptions, info: &crate::agents::AgentInfo) -> Result<Option<String>, String> {
+    let model = options.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+    let effort = options.effort.as_deref().map(str::trim).filter(|e| !e.is_empty());
+    // An effort is one of the chosen model's variants, or with "Default" one every model has.
+    if let Some(e) = effort {
+        let allowed: Vec<String> = match model.and_then(|m| info.models.iter().find(|x| x.id == m)) {
+            Some(m) => m.efforts.clone(),
+            None => info.efforts.clone(),
+        };
+        if !allowed.iter().any(|a| a == e) {
+            return Err(format!("Unknown effort: {e}"));
+        }
+    }
+    let (state_file, binary) = {
+        let store = l.store.lock().unwrap();
+        (store.opencode_state_file(), launch::find_binary(model::Harness::OpenCode)?)
+    };
+    let service = crate::opencode::ensure_service(&state_file, &crate::registry::pid_alive, || crate::opencode::start_service(&binary), OPENCODE_START_WAIT)?;
+    let client = crate::opencode::Client::new(&service);
+    let dir = target.to_string_lossy();
+    let id = crate::opencode::create_session(&client, &dir, name, model.and_then(|m| m.split_once('/')), effort)?;
+    crate::opencode::prompt(&client, &id, prompt)?;
+    let auto = options.mode.as_deref().map(str::trim) == Some("auto");
+    l.terminal.open(&launch::opencode_open_command(target, &id, auto), target, &tmux_label())
 }
 
 /// Opens a terminal in a project folder running the chosen agent on
@@ -480,6 +516,10 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
         }
     };
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
+    if options.agent == model::Harness::OpenCode {
+        let terminal = start_opencode(l, &target, &prompt, options.chosen_name(), &options, &info)?;
+        return Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string(), terminal });
+    }
     let file = launch::write_prompt_file(&maya_dir, &prompt)?;
     let grok_id = (options.agent == model::Harness::Grok).then(launch::new_session_uuid);
     // Sessions already running cannot be the new one. They come from a fresh
@@ -512,7 +552,7 @@ pub fn resume_session(l: &Local, agent: model::Harness, dir: &str, session_id: &
     if running.iter().any(|id| id == session_id) {
         return Err("That session is already running.".into());
     }
-    let known = resume::list_sessions(agent, &dirs, &path.to_string_lossy(), &running);
+    let known = if agent == model::Harness::OpenCode { list_resumable_sessions(l, agent, dir)? } else { resume::list_sessions(agent, &dirs, &path.to_string_lossy(), &running) };
     if !known.iter().any(|s| s.id == session_id) {
         return Err("No such session in that folder.".into());
     }
@@ -533,6 +573,21 @@ pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, 
         return Err(format!("{} is not installed on this machine.", launch::label(agent)));
     }
     let target = crate::reviews::resolve_target(&projects, &clones, &pr.repo, pr.number, &live);
+    if agent == model::Harness::OpenCode {
+        // The review shell line clones a missing checkout before the agent runs;
+        // OpenCode's session is created on the server first, so it needs the folder.
+        if target.clone {
+            return Err("OpenCode reviews need the repository checked out under the projects directory.".into());
+        }
+        let (brain_model, info) = {
+            let store = l.store.lock().unwrap();
+            (store.config.brain_model().map(String::from), agents().into_iter().find(|a| a.harness == model::Harness::OpenCode).unwrap_or_else(|| crate::agents::info_for(model::Harness::OpenCode, None)))
+        };
+        let options = launch::LaunchOptions { agent, model: brain_model, ..Default::default() };
+        let name = crate::reviews::session_name(&pr.repo, pr.number);
+        start_opencode(l, &target.dir, &crate::reviews::render_prompt(&template, pr), Some(&name), &options, &info)?;
+        return Ok(target.dir.to_string_lossy().into_owned());
+    }
     let file = launch::write_prompt_file(&maya_dir, &crate::reviews::render_prompt(&template, pr))?;
     let grok_id = (agent == model::Harness::Grok).then(launch::new_session_uuid);
     let known = {
@@ -809,6 +864,77 @@ mod tests {
         let err = close_session_with(&l, SES, |_| true).unwrap_err();
         assert!(err.contains("tty") || err.contains("console") || err.contains("terminal"), "{err}");
         assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    /// A sessions list whose folder is `dir`, for a fake server (leaked: routes are static).
+    fn sessions_in(dir: &str) -> &'static str {
+        let text = include_str!("../fixtures/opencode/sessions.json").replace("/Users/tiagocorreia", dir);
+        Box::leak(text.into_boxed_str())
+    }
+
+    #[test]
+    fn starting_an_opencode_session_creates_it_prompts_it_and_opens_a_window_on_it() {
+        let projects = tempfile::tempdir().unwrap();
+        let proj = projects.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let mut routes = base_routes("{\"data\":{}}", "{\"data\":[]}");
+        routes.push(("POST /api/session", "{\"data\":{\"id\":\"ses_new01\"}}"));
+        routes.push(("POST /api/session/ses_new01/prompt", "{\"data\":{}}"));
+        let (_d, store, hits) = opencode_store(routes);
+        store.lock().unwrap().config.projects_dir = Some(projects.path().to_string_lossy().into_owned());
+        let store = with_agents(store, vec![agents::claude(), opencode_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = LaunchOptions { agent: Harness::OpenCode, model: Some("opencode/fledge-alpha-free".into()), effort: Some("low".into()), mode: Some("auto".into()), name: Some("Fix CI".into()) };
+        start_session(&l, Some("proj".into()), "-v please say hi".into(), opts).unwrap();
+        let h = hits.lock().unwrap();
+        let flat = |r: &String| r.replace("\r\n", "\n").replace("\n  ", "").replace("\n", "").replace(": ", ":");
+        let create = h.iter().map(flat).find(|r| r.starts_with("POST /api/session{") || r.starts_with("POST /api/sessionPOST")).expect("created on the server: {h:?}");
+        assert!(create.contains("\"title\":\"Fix CI\"") && create.contains("proj") && create.contains("\"variant\":\"low\"") && create.contains("\"id\":\"fledge-alpha-free\""), "{create}");
+        assert!(h.iter().map(flat).any(|r| r.contains("/ses_new01/prompt") && r.contains("-v please say hi")), "the prompt goes over the wire, never a shell line");
+        let opened: Vec<String> = fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Open { command, .. } => Some(command.clone()), _ => None }).collect();
+        assert_eq!(opened.len(), 1);
+        assert!(opened[0].ends_with("&& opencode --session 'ses_new01' --auto"), "{}", opened[0]);
+        let bad = LaunchOptions { agent: Harness::OpenCode, model: Some("opencode/fledge-alpha-free".into()), effort: Some("ultra".into()), ..Default::default() };
+        assert!(start_session(&l, Some("proj".into()), "hi".into(), bad).unwrap_err().contains("effort"), "an effort the model lacks is refused before anything runs");
+    }
+
+    #[test]
+    fn the_server_is_started_on_demand_and_a_start_that_leaves_no_file_fails() {
+        let t = tempfile::tempdir().unwrap();
+        let file = t.path().join("opencode/service.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let me = std::process::id();
+        let started = std::cell::Cell::new(false);
+        let s = crate::opencode::ensure_service(&file, &|pid| pid == me as i32, || { started.set(true); std::fs::write(&file, format!("{{\"url\":\"http://127.0.0.1:1\",\"pid\":{me},\"password\":\"x\"}}")).unwrap(); Ok(()) }, Duration::from_secs(2)).unwrap();
+        assert!(started.get() && s.pid == me as i32);
+        let s2 = crate::opencode::ensure_service(&file, &|pid| pid == me as i32, || panic!("already running"), Duration::from_secs(2)).unwrap();
+        assert_eq!(s2.url, "http://127.0.0.1:1");
+        std::fs::remove_file(&file).unwrap();
+        let err = crate::opencode::ensure_service(&file, &|_| false, || Ok(()), Duration::from_millis(300)).unwrap_err();
+        assert_eq!(err, "OpenCode's server did not start.");
+    }
+
+    #[test]
+    fn opencode_sessions_of_a_folder_are_listed_from_the_server_and_resumed_by_id() {
+        let projects = tempfile::tempdir().unwrap();
+        let proj = projects.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let dir = proj.to_string_lossy().into_owned();
+        let mut routes = base_routes("{\"data\":{}}", "{\"data\":[]}");
+        routes[0] = ("GET /api/session?limit=50", sessions_in(&dir));
+        routes.push(("GET /api/session?limit=200", sessions_in(&dir)));
+        let (_d, store, _hits) = opencode_store(routes);
+        store.lock().unwrap().config.projects_dir = Some(projects.path().to_string_lossy().into_owned());
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let list = list_resumable_sessions(&l, Harness::OpenCode, "proj").unwrap();
+        assert!(list.iter().any(|s| s.id == SES && s.title == "Saying \"Hi\" request"), "{list:?}");
+        assert!(list.windows(2).all(|w| w[0].last_active_ms >= w[1].last_active_ms), "newest first");
+        resume_session(&l, Harness::OpenCode, "proj", SES).unwrap();
+        let opened: Vec<String> = fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Open { command, .. } => Some(command.clone()), _ => None }).collect();
+        assert!(opened[0].ends_with(&format!("&& opencode --session '{SES}'")), "{}", opened[0]);
+        assert_eq!(resume_session(&l, Harness::OpenCode, "proj", "ses_nope").unwrap_err(), "No such session in that folder.");
     }
 
     #[test]
