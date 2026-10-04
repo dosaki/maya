@@ -476,11 +476,9 @@ fn start_opencode(l: &Local, target: &Path, prompt: &str, name: Option<&str>, op
             return Err(format!("Unknown effort: {e}"));
         }
     }
-    let (state_file, binary) = {
-        let store = l.store.lock().unwrap();
-        (store.opencode_state_file(), launch::find_binary(model::Harness::OpenCode)?)
-    };
-    let service = crate::opencode::ensure_service(&state_file, &crate::registry::pid_alive, || crate::opencode::start_service(&binary), OPENCODE_START_WAIT)?;
+    let state_file = l.store.lock().unwrap().opencode_state_file();
+    // The binary is only needed to start a server that is not running yet.
+    let service = crate::opencode::ensure_service(&state_file, &crate::registry::pid_alive, || crate::opencode::start_service(&launch::find_binary(model::Harness::OpenCode)?), OPENCODE_START_WAIT)?;
     let client = crate::opencode::Client::new(&service);
     let dir = target.to_string_lossy();
     let id = crate::opencode::create_session(&client, &dir, name, model.and_then(|m| m.split_once('/')), effort)?;
