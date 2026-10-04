@@ -906,9 +906,11 @@ mod tests {
         assert!(fake.calls.lock().unwrap().is_empty());
     }
 
-    /// A sessions list whose folder is `dir`, for a fake server (leaked: routes are static).
+    /// A sessions list whose folder is `dir`, for a fake server (leaked: routes
+    /// are static). The folder is JSON-escaped: a Windows path has backslashes.
     fn sessions_in(dir: &str) -> &'static str {
-        let text = include_str!("../fixtures/opencode/sessions.json").replace("/Users/tiagocorreia", dir);
+        let escaped = serde_json::to_string(dir).unwrap();
+        let text = include_str!("../fixtures/opencode/sessions.json").replace("\"/Users/tiagocorreia\"", &escaped);
         Box::leak(text.into_boxed_str())
     }
 
