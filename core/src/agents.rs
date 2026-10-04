@@ -170,6 +170,8 @@ pub fn info_for(agent: Harness, listing: Option<&str>) -> AgentInfo {
     // With "Default" chosen the model may be any of them: offer what all take.
     // With none listed nothing is known about what Codex's default takes, so
     // no effort is offered rather than every one.
+    // OpenCode's variants belong to a model: with "Default" chosen none can be
+    // set (the server takes a variant only with a model), so none is offered.
     let efforts = if matches!(agent, Harness::Codex | Harness::OpenCode) {
         launch::efforts(agent).iter().filter(|e| !models.is_empty() && models.iter().all(|m| m.efforts.iter().any(|x| x == *e))).map(|e| e.to_string()).collect()
     } else {
@@ -355,7 +357,7 @@ mod tests {
         assert_eq!(m[0].label, "Fledge Alpha Free");
         assert_eq!(m[0].efforts, vec!["low", "high", "max"]);
         assert!(m.iter().any(|x| x.id == "openai/gpt-6.1-sol") && m.iter().any(|x| x.id == "github-copilot/gpt-6.1-sol"), "the same model under two providers stays distinct");
-        assert!(m.iter().all(|x| x.id.matches('/').count() == 1));
+        assert!(m.iter().all(|x| x.id.contains('/')));
         assert_eq!(m[0].context, Some(1_048_576), "the context limit travels with the model");
         assert!(parse_opencode("not json").is_empty());
         assert!(parse_opencode(r#"{"data":[{"id":"a","providerID":"p","name":"A","variants":[],"enabled":false,"limit":{"context":1,"output":1}}]}"#).is_empty(), "disabled models are not offered");
@@ -365,7 +367,9 @@ mod tests {
     fn opencode_default_model_offers_the_variants_every_model_has() {
         let info = info_for(Harness::OpenCode, Some(&fixture("opencode/models.json")));
         assert_eq!(info.models.len(), 6);
-        assert!(info.efforts.is_empty(), "one fixture model has no variants, so Default offers none");
+        assert!(info.efforts.is_empty(), "a variant cannot be set without a model, so Default offers none");
+        let shared = parse_opencode(r#"{"data":[{"id":"a","providerID":"p","name":"A","variants":[{"id":"low"},{"id":"high"}],"enabled":true,"limit":{"context":1,"output":1}},{"id":"b","providerID":"p","name":"B","variants":[{"id":"high"}],"enabled":true,"limit":{"context":1,"output":1}}]}"#);
+        assert_eq!(shared.len(), 2);
         assert_eq!(info.modes, vec!["default", "auto"]);
         assert!(info_for(Harness::OpenCode, None).models.is_empty());
     }

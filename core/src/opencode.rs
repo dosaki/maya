@@ -275,7 +275,8 @@ pub struct Fetched {
 /// `(pid, folder)`; `context_of(provider, model)` is the model's window.
 pub fn fetch(client: &Client, server_pid: i32, windows: &[(i32, String)], data_dir: &str, now_ms: u64, timeout_ms: u64, context_of: impl Fn(&str, &str) -> Option<u64>) -> Vec<Fetched> {
     let Ok(list) = client.get("/api/session?limit=50") else { return vec![] };
-    let active = client.get("/api/session/active").map(|v| active_ids(&v)).unwrap_or_default();
+    // Without the running list every session would look free: better no cards this time.
+    let Ok(active) = client.get("/api/session/active").map(|v| active_ids(&v)) else { return vec![] };
     let mut out = Vec::new();
     for s in sessions(&list) {
         if s.parent_id.is_some() || s.directory == data_dir {
@@ -325,6 +326,13 @@ pub fn fetch(client: &Client, server_pid: i32, windows: &[(i32, String)], data_d
 
 fn ok(r: Result<Value, String>) -> Result<(), String> {
     r.map(|_| ())
+}
+
+/// The session as the server has it right now: the model, variant and
+/// agent a change must build on, rather than the last poll's copy.
+pub fn session(c: &Client, id: &str) -> Result<SessionInfo, String> {
+    let v = c.get(&format!("/api/session/{id}"))?;
+    sessions(&serde_json::json!({ "data": [v["data"].clone()] })).into_iter().next().ok_or_else(|| "Session is no longer running.".to_string())
 }
 
 /// Posts a prompt: the server runs the turn, whichever window shows the session.
@@ -460,14 +468,23 @@ pub fn card_for(s: &SessionInfo, live: &Live, snippet: Option<String>, context_w
         return None;
     }
     let last = s.updated_ms.max(s.idle_ms.unwrap_or(0)).max(s.viewed_ms.unwrap_or(0));
-    // An ask's id is the turn's time: `viewed` moves when the window is merely looked at.
+    // An ask's id is the turn's time (`viewed` moves when the window is merely
+    // looked at) plus a few milliseconds from the request's own id, so a click
+    // meant for one request never answers the next one at the same time.
+    let ask_id = |request: &str| s.updated_ms + request.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)) % 1_000;
     let (state, since, awaiting) = if let Some(p) = &live.permission {
         let detail = format!("{}: {}", p.action, p.resource);
         let q = Question { question: detail.clone(), header: "Permission".into(), options: PERMISSION_CHOICES.iter().map(|l| Choice { label: l.to_string(), description: String::new() }).collect(), multi_select: false };
-        (State::Awaiting, s.updated_ms, Some(Awaiting { kind: AwaitKind::Question, detail: truncate(&detail, SNIPPET_CHARS), questions: vec![q] }))
+        (State::Awaiting, ask_id(&p.id), Some(Awaiting { kind: AwaitKind::Question, detail: truncate(&detail, SNIPPET_CHARS), questions: vec![q] }))
     } else if let Some(f) = &live.form {
-        let qs = f.fields.iter().map(|fl| Question { question: fl.title.clone(), header: fl.key.clone(), options: fl.options.iter().map(|(v, l)| Choice { label: l.clone(), description: v.clone() }).collect(), multi_select: false }).collect();
-        (State::Awaiting, s.updated_ms, Some(Awaiting { kind: AwaitKind::Question, detail: truncate(&f.title, SNIPPET_CHARS), questions: qs }))
+        if f.fields.iter().all(|fl| fl.options.is_empty()) {
+            // Nothing to pick: a text ask, answered from the composer, naming what is asked.
+            let prompt = f.fields.first().map(|fl| format!("{}: {}", f.title, fl.title)).unwrap_or_else(|| f.title.clone());
+            (State::Awaiting, ask_id(&f.id), Some(Awaiting { kind: AwaitKind::Text, detail: truncate(&prompt, SNIPPET_CHARS), questions: vec![] }))
+        } else {
+            let qs = f.fields.iter().map(|fl| Question { question: fl.title.clone(), header: fl.key.clone(), options: fl.options.iter().map(|(v, l)| Choice { label: l.clone(), description: v.clone() }).collect(), multi_select: false }).collect();
+            (State::Awaiting, ask_id(&f.id), Some(Awaiting { kind: AwaitKind::Question, detail: truncate(&f.title, SNIPPET_CHARS), questions: qs }))
+        }
     } else if live.running {
         (State::Working, s.updated_ms, None)
     } else if now_ms.saturating_sub(last) < timeout_ms {
@@ -657,13 +674,44 @@ mod tests {
     }
 
     #[test]
+    fn a_different_request_at_the_same_turn_time_is_a_different_ask() {
+        let s = session("ses_1", "/p", 1_000);
+        let ask = |rid: &str| card_for(&s, &Live { running: true, permission: Some(Permission { id: rid.into(), action: "edit".into(), resource: "/x".into() }), form: None }, None, None, None, 7, "/maya", 5_000, 60_000).unwrap().state_since;
+        assert_ne!(ask("per_01"), ask("per_02"), "a click meant for one request never answers the next");
+        assert!(ask("per_01").abs_diff(1_000) < 1_000, "still the turn's time to the eye");
+        assert_eq!(ask("per_01"), ask("per_01"));
+    }
+
+    #[test]
+    fn a_free_text_only_form_is_a_text_ask_naming_its_prompt() {
+        let s = session("ses_1", "/p", 1_000);
+        let form = Form { id: "frm_02".into(), title: "Commit message?".into(), fields: vec![FormField { key: "message".into(), title: "Message".into(), options: vec![] }] };
+        let c = card_for(&s, &Live { running: true, permission: None, form: Some(form) }, None, None, None, 7, "/maya", 5_000, 60_000).unwrap();
+        let aw = c.awaiting.unwrap();
+        assert_eq!(aw.kind, AwaitKind::Text, "no buttons: the composer answers");
+        assert_eq!(aw.detail, "Commit message?: Message");
+        assert!(aw.questions.is_empty());
+    }
+
+    #[test]
+    fn a_failed_active_request_ends_the_poll_rather_than_calling_every_session_free() {
+        let (base, hits) = fake::fake_server(vec![
+            ("GET /api/session?limit=50", include_str!("../fixtures/opencode/sessions.json")),
+            // no /api/session/active route
+        ]);
+        let c = Client::new(&Service { url: base, pid: 1, password: "pw".into() });
+        assert!(fetch(&c, 1, &[], "/maya", 1_791_029_170_000, 30 * 60_000, |_, _| None).is_empty());
+        assert!(!hits.lock().unwrap().iter().any(|r| r.contains("/message")), "no per-session calls after the failure");
+    }
+
+    #[test]
     fn an_awaiting_card_keeps_its_ask_id_when_the_terminal_is_merely_viewed() {
         let min = 60_000;
         let mut s = session("ses_1", "/p", 1_000);
         s.viewed_ms = Some(4_000);
         let live = Live { running: true, permission: Some(Permission { id: "per_1".into(), action: "edit".into(), resource: "/tmp/x".into() }), form: None };
         let c = card_for(&s, &live, None, None, None, 7, "/maya", 5_000, 30 * min).unwrap();
-        assert_eq!(c.state_since, 1_000, "the ask moves with the turn, not with a glance at the window");
+        assert!(c.state_since.abs_diff(1_000) < 1_000, "the ask moves with the turn, not with a glance at the window: {}", c.state_since);
     }
 
     #[test]

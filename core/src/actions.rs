@@ -76,6 +76,11 @@ struct ServerCard {
 /// for the actions whose answer depends on the session's state right now.
 fn server_card(l: &Local, session_id: &str, fresh: bool) -> Result<Option<ServerCard>, String> {
     let mut store = l.store.lock().unwrap();
+    // Only an OpenCode card is worth a refresh here: another agent's action
+    // must not wait on OpenCode's server.
+    if store.opencode_card(session_id).is_none() {
+        return Ok(None);
+    }
     if fresh {
         store.refresh(now_ms());
     }
@@ -85,6 +90,14 @@ fn server_card(l: &Local, session_id: &str, fresh: bool) -> Result<Option<Server
     Ok(Some(ServerCard { client: crate::opencode::Client::new(&service), card, session, live }))
 }
 
+/// A control reaches an OpenCode session only when no turn is running.
+fn opencode_free(sc: &ServerCard) -> Result<(), String> {
+    if sc.card.state == model::State::Working {
+        return Err("Wait until the session is free.".into());
+    }
+    Ok(())
+}
+
 /// Sends `text` to the session: through its inbox, or typed into the
 /// terminal of a harness that has none.
 pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
@@ -92,15 +105,17 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String>
         if text.trim().is_empty() {
             return Err("Message is empty.".into());
         }
-        // A question with no options is answered from the composer.
+        // A question with no options is answered from the composer; a pending
+        // choice is answered on the card, not with a prompt into a waiting turn.
         if let Some(f) = &sc.live.form {
             if let Some(field) = f.fields.iter().find(|fl| fl.options.is_empty()) {
                 return crate::opencode::reply_form(&sc.client, &sc.session.id, &f.id, &field.key, text.trim());
             }
         }
-        if sc.card.state == model::State::Working {
-            return Err("Wait until the session is free.".into());
+        if sc.live.permission.is_some() || sc.live.form.is_some() {
+            return Err("Answer the question on the card first.".into());
         }
+        opencode_free(&sc)?;
         return crate::opencode::prompt(&sc.client, &sc.session.id, text.trim());
     }
     // Other harnesses have no inbox: the reply is typed into their tty as one line.
@@ -168,6 +183,7 @@ pub fn answer_question(l: &Local, session_id: &str, ask_id: u64, question: usize
 /// Types `/compact` into the session's terminal, or asks OpenCode's server.
 pub fn compact_session(l: &Local, session_id: &str) -> Result<(), String> {
     if let Some(sc) = server_card(l, session_id, false)? {
+        opencode_free(&sc)?;
         return crate::opencode::compact(&sc.client, &sc.session.id);
     }
     type_into_session(l, session_id, answer::COMPACT, "/compact", |c| c.compact)
@@ -306,8 +322,13 @@ pub fn run_due_renames(l: &Local) {
 /// checking the value against the agent's own listing.
 pub fn set_session_option(l: &Local, session_id: &str, setting: &str, value: &str) -> Result<(), String> {
     if let Some(sc) = server_card(l, session_id, false)? {
-        let info = l.store.lock().unwrap().agents_source()().into_iter().find(|a| a.harness == model::Harness::OpenCode).unwrap_or_else(|| crate::agents::info_for(model::Harness::OpenCode, None));
-        let (provider, model, variant) = sc.session.model.clone().ok_or("The session has no model yet.")?;
+        opencode_free(&sc)?;
+        // The listing can take seconds: never under the store's lock.
+        let agents = l.store.lock().unwrap().agents_source();
+        let info = agents().into_iter().find(|a| a.harness == model::Harness::OpenCode).unwrap_or_else(|| crate::agents::info_for(model::Harness::OpenCode, None));
+        // Build on what the server has now, not the last poll: Apply sends a model then an effort.
+        let current = crate::opencode::session(&sc.client, &sc.session.id)?;
+        let (provider, model, variant) = current.model.clone().ok_or("The session has no model yet.")?;
         return match setting {
             "model" => {
                 let m = info.models.iter().find(|m| m.id == value).ok_or_else(|| format!("Unknown model: {value}"))?;
@@ -350,11 +371,16 @@ pub fn set_session_option(l: &Local, session_id: &str, setting: &str, value: &st
 pub fn send_slash_command(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
     let line = answer::check_terminal_command(text)?;
     if let Some(sc) = server_card(l, session_id, false)? {
+        opencode_free(&sc)?;
         if let Some(cmd) = line.strip_prefix('!') {
             return crate::opencode::shell(&sc.client, &sc.session.id, cmd.trim());
         }
         let rest = line.trim_start_matches('/');
         let (name, text) = rest.split_once(' ').map(|(n, t)| (n, t.trim())).unwrap_or((rest, ""));
+        // A typed /model or /effort is the picker's switch, checked the same way.
+        if matches!(name, "model" | "effort") && !text.is_empty() {
+            return set_session_option(l, session_id, name, text);
+        }
         return crate::opencode::command(&sc.client, &sc.session.id, name, text);
     }
     let shell = line.starts_with('!');
@@ -364,7 +390,9 @@ pub fn send_slash_command(l: &Local, session_id: &str, text: &str) -> Result<(),
 /// Sends the agent's mode-cycle keys (Shift+Tab) to the session's terminal.
 pub fn cycle_session_mode(l: &Local, session_id: &str) -> Result<(), String> {
     if let Some(sc) = server_card(l, session_id, false)? {
-        return crate::opencode::switch_agent(&sc.client, &sc.session.id, crate::opencode::next_agent(&sc.session.agent));
+        opencode_free(&sc)?;
+        let current = crate::opencode::session(&sc.client, &sc.session.id)?;
+        return crate::opencode::switch_agent(&sc.client, &sc.session.id, crate::opencode::next_agent(&current.agent));
     }
     let harness = l.store.lock().unwrap().card_for(session_id, now_ms()).ok_or("Session is no longer running.")?.harness;
     let keys = launch::capabilities(harness).mode_cycle.ok_or_else(|| format!("{} has no mode cycle.", launch::label(harness)))?;
@@ -674,7 +702,7 @@ pub mod test_support {
     }
 
     /// Writes an idle registry entry for `id` on `/dev/pts/3`.
-    fn write_session(claude: &Path, id: &str, pid: i32, cwd: &str) {
+    pub fn write_session(claude: &Path, id: &str, pid: i32, cwd: &str) {
         let entry = serde_json::json!({"pid": pid, "sessionId": id, "cwd": cwd, "name": id, "status": "idle", "tty": "/dev/pts/3"});
         std::fs::write(claude.join(format!("sessions/{pid}.json")), entry.to_string()).unwrap();
     }
@@ -802,6 +830,7 @@ mod tests {
             ("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/agent", "{\"data\":{}}"),
             ("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/command", "{\"data\":{}}"),
             ("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/shell", "{\"data\":{}}"),
+            ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO", "{\"data\":{\"id\":\"ses_efe57d285ffeRMX70aswKZ9qCO\",\"projectID\":\"p\",\"agent\":\"build\",\"model\":{\"providerID\":\"opencode\",\"id\":\"fledge-alpha-free\",\"variant\":\"max\"},\"cost\":0,\"tokens\":{\"input\":1,\"output\":1,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"time\":{\"created\":1,\"updated\":2},\"location\":{\"directory\":\"/Users/tiagocorreia\"}}}"),
         ]
     }
 
@@ -865,11 +894,84 @@ mod tests {
         let l = Local { store: &store, terminal: &fake };
         let card = store.lock().unwrap().card_for(SES, now_ms()).unwrap();
         assert_eq!(card.state, State::Awaiting);
-        assert!(card.awaiting.as_ref().unwrap().questions[0].options.is_empty(), "no buttons: the composer answers");
+        assert_eq!(card.awaiting.as_ref().unwrap().kind, crate::model::AwaitKind::Text, "no buttons: the composer answers");
         send_reply(&l, SES, "fix: the thing").unwrap();
         let h = hits.lock().unwrap();
         assert!(h.iter().any(|r| r.contains("/form/frm_02/reply") && body_json(r) == serde_json::json!({"answer": {"message": "fix: the thing"}})), "{h:?}");
         assert!(!h.iter().any(|r| r.contains("/prompt")), "not a prompt into a waiting turn");
+    }
+
+    #[test]
+    fn a_reply_to_another_agents_card_never_polls_opencode() {
+        let (d, store, hits) = opencode_store(base_routes("{\"data\":{}}", "{\"data\":[]}"));
+        std::fs::create_dir_all(d.path().join("claude/sessions")).unwrap();
+        write_session(&d.path().join("claude"), "cc1", 4242, "/Users/x/dev/eye");
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let before = hits.lock().unwrap().len();
+        let _ = send_reply(&l, "cc1", "hi");
+        assert_eq!(hits.lock().unwrap().len(), before, "a Claude Code reply asks OpenCode's server nothing");
+    }
+
+    #[test]
+    fn composer_text_while_a_choice_is_pending_is_refused_not_prompted() {
+        let (_d, store, hits) = opencode_store(base_routes("{\"data\":{\"ses_efe57d285ffeRMX70aswKZ9qCO\":{\"type\":\"running\"}}}", include_str!("../fixtures/opencode/permission.json")));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
+        assert_eq!(send_reply(&l, SES, "yes please").unwrap_err(), "Answer the question on the card first.");
+        assert!(!hits.lock().unwrap().iter().any(|r| r.contains("/prompt")));
+    }
+
+    #[test]
+    fn opencode_controls_wait_for_a_free_session_but_rename_and_history_do_not() {
+        let (_d, store, hits) = opencode_store(base_routes("{\"data\":{\"ses_efe57d285ffeRMX70aswKZ9qCO\":{\"type\":\"running\"}}}", "{\"data\":[]}"));
+        let store = with_agents(store, vec![agents::claude(), opencode_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
+        for r in [compact_session(&l, SES), set_session_option(&l, SES, "effort", "max"), send_slash_command(&l, SES, "/share"), send_slash_command(&l, SES, "!ls"), cycle_session_mode(&l, SES)] {
+            assert_eq!(r.unwrap_err(), "Wait until the session is free.");
+        }
+        rename_session(&l, SES, "Busy but renamed").unwrap();
+        assert_eq!(session_history(&l, SES).unwrap().len(), 2);
+        let h = hits.lock().unwrap();
+        assert!(h.iter().any(|r| r.starts_with("PATCH")));
+        assert!(!h.iter().any(|r| r.contains("/compact") || r.contains("/model") || r.contains("/command") || r.contains("/shell") || r.contains("/agent")));
+    }
+
+    #[test]
+    fn effort_and_mode_changes_read_the_sessions_current_model_and_agent_from_the_server() {
+        let mut routes = base_routes("{\"data\":{}}", "{\"data\":[]}");
+        routes.retain(|(k, _)| *k != "GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO");
+        // The session has since moved to another model and to the plan agent.
+        routes.push(("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO", "{\"data\":{\"id\":\"ses_efe57d285ffeRMX70aswKZ9qCO\",\"projectID\":\"p\",\"agent\":\"plan\",\"model\":{\"providerID\":\"openai\",\"id\":\"gpt-6.1-sol\",\"variant\":\"low\"},\"cost\":0,\"tokens\":{\"input\":1,\"output\":1,\"reasoning\":0,\"cache\":{\"read\":0,\"write\":0}},\"time\":{\"created\":1,\"updated\":2},\"location\":{\"directory\":\"/Users/tiagocorreia\"}}}"));
+        let (_d, store, hits) = opencode_store(routes);
+        let mut info = opencode_info();
+        info.models.push(crate::agents::ModelInfo { id: "openai/gpt-6.1-sol".into(), label: "GPT".into(), efforts: vec!["low".into(), "xhigh".into()], context: None });
+        let store = with_agents(store, vec![agents::claude(), info]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
+        set_session_option(&l, SES, "effort", "xhigh").unwrap();
+        cycle_session_mode(&l, SES).unwrap();
+        let h = hits.lock().unwrap();
+        assert!(h.iter().any(|r| r.contains("/model") && body_json(r) == serde_json::json!({"model": {"providerID": "openai", "id": "gpt-6.1-sol", "variant": "xhigh"}})), "the effort goes with the model the server has now");
+        assert!(h.iter().any(|r| r.contains("/agent") && body_json(r) == serde_json::json!({"agent": "build"})), "plan cycles to build");
+    }
+
+    #[test]
+    fn a_typed_model_or_effort_line_goes_through_the_model_switch() {
+        let (_d, store, hits) = opencode_store(base_routes("{\"data\":{}}", "{\"data\":[]}"));
+        let store = with_agents(store, vec![agents::claude(), opencode_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
+        send_slash_command(&l, SES, "/model opencode/fledge-alpha-free").unwrap();
+        assert!(send_slash_command(&l, SES, "/effort ultra").unwrap_err().contains("effort"));
+        let h = hits.lock().unwrap();
+        assert!(h.iter().any(|r| r.contains("/model") && body_json(r)["model"]["id"] == "fledge-alpha-free"));
+        assert!(!h.iter().any(|r| r.contains("/command")), "not a generic command");
     }
 
     #[test]
@@ -891,6 +993,7 @@ mod tests {
         let (_d, store, hits) = opencode_store(base_routes("{\"data\":{\"ses_efe57d285ffeRMX70aswKZ9qCO\":{\"type\":\"running\"}}}", "{\"data\":[]}"));
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
         assert_eq!(send_reply(&l, SES, "hi").unwrap_err(), "Wait until the session is free.");
         assert!(!hits.lock().unwrap().iter().any(|r| r.contains("/prompt")));
     }

@@ -112,11 +112,15 @@ pub fn plain_model_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 100 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
 }
 
-/// An OpenCode model reference, `provider/model`, each half a plain id.
-/// It never reaches a shell line: it goes to the server, or to the
-/// one-shot's argument list.
+/// An OpenCode model reference, `provider/model`, where the model id may
+/// hold slashes of its own (`mlx/mlx-community/Qwen3-…`); every segment is
+/// a plain id. It never reaches a shell line: it goes to the server, or to
+/// the one-shot's argument list.
 pub fn plain_model_ref(id: &str) -> bool {
-    matches!(id.split_once('/'), Some((p, m)) if plain_model_id(p) && plain_model_id(m))
+    let mut parts = id.split('/');
+    let provider = parts.next().unwrap_or("");
+    let rest: Vec<&str> = parts.collect();
+    plain_model_id(provider) && !rest.is_empty() && rest.iter().all(|m| plain_model_id(m))
 }
 
 /// The shell line that opens a terminal on an OpenCode session the server
@@ -943,7 +947,8 @@ mod tests {
     fn an_opencode_model_is_a_provider_and_a_model() {
         assert!(plain_model_ref("anthropic/claude-sonnet-4-5") && plain_model_ref("opencode/fledge-alpha-free"));
         assert!(!plain_model_ref("claude-sonnet-4-5"), "no provider");
-        assert!(!plain_model_ref("a/b/c") && !plain_model_ref("a/") && !plain_model_ref("/b") && !plain_model_ref("a b/c"));
+        assert!(plain_model_ref("mlx/mlx-community/Qwen3-Coder-30B-A3B-Instruct-8bit"), "a model id may hold slashes of its own");
+        assert!(!plain_model_ref("a/") && !plain_model_ref("/b") && !plain_model_ref("a b/c") && !plain_model_ref("a//c") && !plain_model_ref("a/b/"));
         let oc = LaunchOptions { agent: Harness::OpenCode, model: Some("anthropic/claude-sonnet-4-5".into()), effort: Some("high".into()), mode: Some("auto".into()), ..Default::default() };
         assert!(oc.validate_shape().is_ok(), "{:?}", oc.validate_shape());
         assert!(oc.validate(&["anthropic/claude-sonnet-4-5".to_string()]).is_ok());
