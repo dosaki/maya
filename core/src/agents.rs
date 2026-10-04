@@ -117,12 +117,33 @@ pub fn parse_kiro(json: &str) -> Vec<ModelInfo> {
         .collect()
 }
 
+/// Models from `opencode api GET /api/model`: enabled ones, as
+/// `provider/model`, with their variants as efforts.
+pub fn parse_opencode(json: &str) -> Vec<ModelInfo> {
+    let v: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+    v["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["enabled"].as_bool() != Some(false))
+        .filter_map(|m| {
+            let id = format!("{}/{}", m["providerID"].as_str()?, m["id"].as_str()?);
+            launch::plain_model_ref(&id).then(|| ModelInfo {
+                label: m["name"].as_str().unwrap_or(&id).to_string(),
+                efforts: m["variants"].as_array().into_iter().flatten().filter_map(|x| x["id"].as_str()).map(String::from).collect(),
+                id,
+            })
+        })
+        .collect()
+}
+
 /// The arguments that make an agent print its models.
 fn listing_args(agent: Harness) -> &'static [&'static str] {
     match agent {
         Harness::Codex => &["debug", "models"],
         Harness::Antigravity | Harness::Grok => &["models"],
         Harness::Kiro => &["chat", "--list-models", "-f", "json"],
+        Harness::OpenCode => &["api", "GET", "/api/model"],
         Harness::ClaudeCode | Harness::Other => &[],
     }
 }
@@ -139,12 +160,13 @@ pub fn info_for(agent: Harness, listing: Option<&str>) -> AgentInfo {
         (Harness::Antigravity, Some(t)) => parse_agy(t),
         (Harness::Grok, Some(t)) => parse_grok(t),
         (Harness::Kiro, Some(t)) => parse_kiro(t),
+        (Harness::OpenCode, Some(t)) => parse_opencode(t),
         _ => vec![],
     };
     // With "Default" chosen the model may be any of them: offer what all take.
     // With none listed nothing is known about what Codex's default takes, so
     // no effort is offered rather than every one.
-    let efforts = if agent == Harness::Codex {
+    let efforts = if matches!(agent, Harness::Codex | Harness::OpenCode) {
         launch::efforts(agent).iter().filter(|e| !models.is_empty() && models.iter().all(|m| m.efforts.iter().any(|x| x == *e))).map(|e| e.to_string()).collect()
     } else {
         strings(launch::efforts(agent))
@@ -158,7 +180,7 @@ pub fn build(find: impl Fn(&str) -> Option<PathBuf>, run: impl Fn(&Path, &[&str]
     if find("claude").is_some() {
         out.push(claude());
     }
-    for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok, Harness::Kiro] {
+    for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok, Harness::Kiro, Harness::OpenCode] {
         let Some(bin) = find(launch::binary_name(agent)) else { continue };
         let listing = run(&bin, listing_args(agent));
         crate::log::line("agents", format!("{agent:?} at {}: listing {} bytes", bin.display(), listing.as_ref().map_or(0, |s| s.len())));
@@ -317,6 +339,27 @@ mod tests {
     }
 
     #[test]
+    fn opencode_models_are_provider_slash_model_with_their_variants() {
+        let m = parse_opencode(&fixture("opencode/models.json"));
+        assert_eq!(m[0].id, "opencode/fledge-alpha-free");
+        assert_eq!(m[0].label, "Fledge Alpha Free");
+        assert_eq!(m[0].efforts, vec!["low", "high", "max"]);
+        assert!(m.iter().any(|x| x.id == "openai/gpt-6.1-sol") && m.iter().any(|x| x.id == "github-copilot/gpt-6.1-sol"), "the same model under two providers stays distinct");
+        assert!(m.iter().all(|x| x.id.matches('/').count() == 1));
+        assert!(parse_opencode("not json").is_empty());
+        assert!(parse_opencode(r#"{"data":[{"id":"a","providerID":"p","name":"A","variants":[],"enabled":false,"limit":{"context":1,"output":1}}]}"#).is_empty(), "disabled models are not offered");
+    }
+
+    #[test]
+    fn opencode_default_model_offers_the_variants_every_model_has() {
+        let info = info_for(Harness::OpenCode, Some(&fixture("opencode/models.json")));
+        assert_eq!(info.models.len(), 6);
+        assert!(info.efforts.is_empty(), "one fixture model has no variants, so Default offers none");
+        assert_eq!(info.modes, vec!["default", "auto"]);
+        assert!(info_for(Harness::OpenCode, None).models.is_empty());
+    }
+
+    #[test]
     fn codex_default_model_offers_the_efforts_every_model_takes() {
         let info = info_for(Harness::Codex, Some(&fixture("codex/models.json")));
         assert_eq!(info.efforts, vec!["low", "medium", "high", "xhigh"]);
@@ -351,21 +394,23 @@ mod tests {
 
     #[test]
     fn build_lists_claude_then_each_agent_it_finds() {
-        let found = |name: &str| matches!(name, "claude" | "codex" | "grok" | "kiro-cli").then(|| PathBuf::from(format!("/bin/{name}")));
+        let found = |name: &str| matches!(name, "claude" | "codex" | "grok" | "kiro-cli" | "opencode").then(|| PathBuf::from(format!("/bin/{name}")));
         let run = |bin: &Path, args: &[&str]| -> Option<String> {
             match (bin.to_str().unwrap(), args) {
                 ("/bin/codex", ["debug", "models"]) => Some(fixture("codex/models.json")),
                 ("/bin/grok", ["models"]) => None,
                 ("/bin/kiro-cli", ["chat", "--list-models", "-f", "json"]) => Some(fixture("kiro/models.json")),
+                ("/bin/opencode", ["api", "GET", "/api/model"]) => Some(fixture("opencode/models.json")),
                 other => panic!("unexpected {other:?}"),
             }
         };
         let list = build(found, run);
-        assert_eq!(list.iter().map(|a| a.harness).collect::<Vec<_>>(), vec![Harness::ClaudeCode, Harness::Codex, Harness::Grok, Harness::Kiro]);
+        assert_eq!(list.iter().map(|a| a.harness).collect::<Vec<_>>(), vec![Harness::ClaudeCode, Harness::Codex, Harness::Grok, Harness::Kiro, Harness::OpenCode]);
         assert_eq!(list[0], claude());
         assert_eq!(list[1].models.len(), 3);
         assert!(list[2].models.is_empty(), "a failed listing still lists the agent");
         assert_eq!(list[3].models.len(), 9);
+        assert_eq!(list[4].models.len(), 6);
     }
 
     #[test]

@@ -297,7 +297,7 @@ pub fn discover(procs: &[(i32, String, Harness)], info: impl Fn(i32) -> ProcInfo
                 let path = crate::antigravity::transcript_path(agy_dir, &id);
                 out.push(ForeignSession { harness: *harness, pid: *pid, tty: Some(tty.clone()), session_id: id, cwd, name, transcript_path: path });
             }
-            Harness::ClaudeCode | Harness::Grok | Harness::Kiro | Harness::Other => {}
+            Harness::ClaudeCode | Harness::Grok | Harness::Kiro | Harness::OpenCode | Harness::Other => {}
         }
     }
     out
@@ -314,7 +314,7 @@ pub fn tail_for(s: &ForeignSession) -> ForeignTail {
         Harness::Antigravity => crate::antigravity::parse_tail(&tail_of(&s.transcript_path, crate::transcript::TAIL_BYTES)),
         Harness::Grok => crate::grok::tail_for_dir(s.transcript_path.parent().unwrap_or(&s.transcript_path)),
         Harness::Kiro => crate::kiro::parse_events(&tail_of(&s.transcript_path, crate::transcript::TAIL_BYTES)),
-        Harness::ClaudeCode | Harness::Other => ForeignTail::default(),
+        Harness::ClaudeCode | Harness::OpenCode | Harness::Other => ForeignTail::default(),
     }
 }
 
@@ -326,7 +326,7 @@ pub fn turns_for(s: &ForeignSession, max_turns: usize) -> Vec<crate::transcript:
         Harness::Antigravity => crate::antigravity::parse_turns(&tail_of(&s.transcript_path, big), max_turns),
         Harness::Grok => crate::grok::parse_turns(&tail_of(&s.transcript_path.with_file_name("chat_history.jsonl"), big), max_turns),
         Harness::Kiro => crate::kiro::parse_turns(&tail_of(&s.transcript_path, big), max_turns),
-        Harness::ClaudeCode | Harness::Other => vec![],
+        Harness::ClaudeCode | Harness::OpenCode | Harness::Other => vec![],
     }
 }
 
@@ -354,7 +354,7 @@ pub fn discover_from_files(procs: &[(i32, String, Harness)], holders: impl Fn(&s
                 let name = crate::codex::thread_name(&index, &id).unwrap_or_else(|| format!("codex-{pid}"));
                 out.push(ForeignSession { harness: *harness, pid: *pid, tty: Some(tty.clone()), session_id: id, cwd, name, transcript_path: path });
             }
-            Harness::ClaudeCode | Harness::Grok | Harness::Kiro | Harness::Other => {}
+            Harness::ClaudeCode | Harness::Grok | Harness::Kiro | Harness::OpenCode | Harness::Other => {}
         }
     }
     out

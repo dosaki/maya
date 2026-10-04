@@ -62,6 +62,8 @@ pub enum Harness {
     Antigravity,
     Grok,
     Kiro,
+    #[serde(rename = "opencode")]
+    OpenCode,
     #[serde(other)]
     Other,
 }
@@ -133,6 +135,12 @@ pub struct Card {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_has_a_wire_name() {
+        assert_eq!(serde_json::to_string(&Harness::OpenCode).unwrap(), "\"opencode\"");
+        assert_eq!(serde_json::from_str::<Harness>("\"opencode\"").unwrap(), Harness::OpenCode);
+    }
 
     #[test]
     fn kiro_and_unknown_harnesses_have_wire_names() {

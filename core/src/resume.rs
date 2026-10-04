@@ -196,7 +196,8 @@ pub fn list_sessions(agent: Harness, dirs: &AgentDirs, dir: &str, running_ids: &
         Harness::Antigravity => antigravity_sessions(&dirs.agy, dir),
         Harness::Grok => grok_sessions(&dirs.grok, dir),
         Harness::Kiro => kiro_sessions(&dirs.kiro, dir),
-        Harness::Other => vec![],
+        // OpenCode's sessions live in its server: `actions` lists them before coming here.
+        Harness::OpenCode | Harness::Other => vec![],
     };
     for s in &mut out {
         s.running = running_ids.contains(&s.id);
@@ -221,6 +222,7 @@ pub fn resume_command(agent: Harness, dir: &Path, id: &str) -> String {
         Harness::Antigravity => format!("cd {d} && agy --conversation {i}"),
         Harness::Grok => format!("cd {d} && grok -r {i}"),
         Harness::Kiro => format!("cd {d} && kiro-cli chat --resume-id {i}"),
+        Harness::OpenCode => format!("cd {d} && opencode --session {i}"),
         Harness::Other => format!("cd {d} && echo 'Maya does not know that agent.'"),
     }
 }
@@ -368,6 +370,7 @@ mod tests {
         assert_eq!(resume_command(Harness::Antigravity, dir, "abc-123"), "cd '/Users/x/dev/it'\\''s' && agy --conversation 'abc-123'");
         assert_eq!(resume_command(Harness::Grok, dir, "abc-123"), "cd '/Users/x/dev/it'\\''s' && grok -r 'abc-123'");
         assert_eq!(resume_command(Harness::Kiro, dir, "abc-123"), "cd '/Users/x/dev/it'\\''s' && kiro-cli chat --resume-id 'abc-123'");
+        assert_eq!(resume_command(Harness::OpenCode, dir, "ses_0a"), "cd '/Users/x/dev/it'\\''s' && opencode --session 'ses_0a'");
     }
 
     #[test]
