@@ -80,20 +80,22 @@ pub struct Capabilities {
     pub slash_lines: bool,
     /// `!` lines run in the shell.
     pub shell_lines: bool,
+    /// `/exit` ends the session, so Close can type it and then close the terminal.
+    pub close: bool,
 }
 
 pub fn capabilities(agent: Harness) -> Capabilities {
     let shift_tab = Some(crate::answer::SHIFT_TAB);
     match agent {
-        Harness::ClaudeCode => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true },
+        Harness::ClaudeCode => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true, close: true },
         // `/model` and `/permissions` open pickers in Codex; a typed value does nothing.
-        Harness::Codex => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: true, shell_lines: false },
-        Harness::Antigravity => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false },
+        Harness::Codex => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: true, shell_lines: false, close: true },
+        Harness::Antigravity => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false, close: true },
         // Grok's `--help` lists no effort values, so none can be checked before typing.
-        Harness::Grok => Capabilities { compact: true, model_switch: true, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false },
-        // Kiro's /compact only changes display density; /model and /effort take a value.
-        Harness::Kiro => Capabilities { compact: false, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true },
-        Harness::Other => Capabilities { compact: false, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: false, shell_lines: false },
+        Harness::Grok => Capabilities { compact: true, model_switch: true, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false, close: true },
+        // Kiro's /compact summarises the conversation; /model and /effort take a value.
+        Harness::Kiro => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true, close: true },
+        Harness::Other => Capabilities { compact: false, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: false, shell_lines: false, close: false },
     }
 }
 
@@ -1036,8 +1038,9 @@ mod tests {
         assert_eq!(g.mode_cycle, Some(crate::answer::SHIFT_TAB));
         assert_eq!(capabilities(Harness::Antigravity).mode_cycle, Some(crate::answer::SHIFT_TAB));
         let k = capabilities(Harness::Kiro);
-        assert!(!k.compact, "Kiro's /compact only changes display density");
-        assert!(k.model_switch && k.effort_switch && k.slash_lines && k.shell_lines);
+        assert!(k.compact && k.model_switch && k.effort_switch && k.slash_lines && k.shell_lines && k.close);
+        assert!([Harness::ClaudeCode, Harness::Codex, Harness::Antigravity, Harness::Grok].iter().all(|a| capabilities(*a).close), "every agent takes /exit");
+        assert!(!capabilities(Harness::Other).close);
         assert_eq!(k.mode_cycle, Some(crate::answer::SHIFT_TAB));
         let o = capabilities(Harness::Other);
         assert!(!o.compact && !o.model_switch && !o.effort_switch && !o.slash_lines && !o.shell_lines);

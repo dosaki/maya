@@ -18,7 +18,7 @@
 - Shell lines quote every user-derived value with `launch::shell_single_quote`; model ids pass `launch::plain_model_id`; session ids pass `resume::plain_session_id`.
 - A one-shot run has no tools, one turn, 25 s timeout, Maya's data folder as its working directory, cleared environment plus `launch::clean_env`.
 - Copy: the Kiro label is "Kiro CLI"; the unknown-harness label is "Unknown agent"; refusals read "<Agent> has no <control>."; the five-agent list reads "Claude Code, Codex, Antigravity, Grok Build or Kiro CLI".
-- Kiro has no Compact control (its `/compact` changes display density only).
+- Kiro has the Compact control: its `/compact` summarises the conversation (the plan first said otherwise, from a misread of its docs).
 - Fixtures in `core/fixtures/kiro/` were saved from this Mac (Kiro CLI 2.27.0) and are already in the working tree, untracked: `session.json`, `events.jsonl` (a finished turn with a tool call, then a second prompt whose tool call has no result yet), `lock.json`, `marker.json`, `models.json`, `oneshot.jsonl`. `src/assets/icons/kiro.png` (64x64) is there too. Task 1 commits them.
 - Tests: `cargo test --workspace` from the repo root and `pnpm test`; the frontend must also pass `pnpm build` (runs `tsc`).
 - Release: a `feat`, so the last task bumps the minor version from `main`'s (0.10.0 → 0.11.0 unless `main` moved) with `sh scripts/set-version.sh`, committed alone as `chore(release): 0.11.0`.

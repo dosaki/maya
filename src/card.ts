@@ -18,7 +18,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
  * remote, only while its machine is connected.
  */
 function canClose(card: Card): boolean {
-  if (card.harness !== "claude-code" || (card.state !== "idle" && card.state !== "completed") || card.stale) return false;
+  if (!capabilitiesOf(card.harness).close || (card.state !== "idle" && card.state !== "completed") || card.stale) return false;
   const linux = card.machine ? card.machinePlatform === "linux" : isLinux();
   return !linux || Boolean(card.terminal);
 }

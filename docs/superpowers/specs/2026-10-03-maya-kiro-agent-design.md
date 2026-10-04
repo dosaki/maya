@@ -30,8 +30,9 @@ Decisions taken during design:
   pending tool call as its snippet. Verified: while an approval sat
   unanswered for five hours the per-turn marker kept its heartbeat and
   the event log ended at the tool call, exactly as while the tool ran.
-- Kiro's `/compact` changes display density, not the context, so Kiro
-  has no Compact control.
+- Kiro's `/compact` summarises older messages to free context (its
+  terminal-UI table calls it "compact message display", which misled the
+  first draft of this design), so Kiro has the Compact control.
 - Maya's one-shot runs leave sessions in Kiro's store. They run in Maya's
   own data folder, so they never appear in a project's Resume list.
 
@@ -87,8 +88,9 @@ Codex and Antigravity. `--trust-tools=` with an empty list trusts no tool.
 
 Session controls, from the terminal UI docs and the live session:
 `/model` and `/effort <level>` switch; Shift+Tab (or `/plan`) toggles plan
-mode; `/` lines work; `!` lines run shell commands; `/rename <name>` sets
-the title and is written to the `.json` file.
+mode; `/` lines work; `!` lines run shell commands; `/compact` summarises
+the conversation; `/rename <name>` sets the title and is written to the
+`.json` file.
 
 ## Behaviour
 
@@ -137,10 +139,12 @@ line.
 
 Replies are typed into the tty, one line, when the session is free (not
 Working and not Awaiting a permission), the rule the other foreign agents
-use. Capabilities: model switch (`/model <id>`), effort switch
-(`/effort <level>`), mode cycle (Shift+Tab), `/` lines, `!` lines. No
-Compact. Close stays Claude Code only. `/rename` follows the shared
-rename path.
+use. Capabilities: Compact (`/compact`), model switch (`/model <id>`),
+effort switch (`/effort <level>`), mode cycle (Shift+Tab), `/` lines, `!`
+lines, and Close: every agent takes `/exit`, so Close types it, waits for
+the agent's process to end and then closes the terminal, for Kiro and the
+other four alike (until now Close was Claude Code only). `/rename` follows
+the shared rename path.
 
 ### New session
 

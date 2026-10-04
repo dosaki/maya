@@ -161,6 +161,7 @@ pub fn build(find: impl Fn(&str) -> Option<PathBuf>, run: impl Fn(&Path, &[&str]
     for agent in [Harness::Codex, Harness::Antigravity, Harness::Grok, Harness::Kiro] {
         let Some(bin) = find(launch::binary_name(agent)) else { continue };
         let listing = run(&bin, listing_args(agent));
+        crate::log::line("agents", format!("{agent:?} at {}: listing {} bytes", bin.display(), listing.as_ref().map_or(0, |s| s.len())));
         out.push(info_for(agent, listing.as_deref()));
     }
     out
