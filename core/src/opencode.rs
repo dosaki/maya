@@ -265,6 +265,61 @@ pub fn fetch(client: &Client, server_pid: i32, windows: &[(i32, String)], data_d
     out
 }
 
+fn ok(r: Result<Value, String>) -> Result<(), String> {
+    r.map(|_| ())
+}
+
+/// Posts a prompt: the server runs the turn, whichever window shows the session.
+pub fn prompt(c: &Client, id: &str, text: &str) -> Result<(), String> {
+    ok(c.post(&format!("/api/session/{id}/prompt"), serde_json::json!({ "text": text })))
+}
+
+pub fn reply_permission(c: &Client, id: &str, request_id: &str, decision: &str) -> Result<(), String> {
+    ok(c.post(&format!("/api/session/{id}/permission/{request_id}/reply"), serde_json::json!({ "decision": decision })))
+}
+
+pub fn reply_form(c: &Client, id: &str, form_id: &str, key: &str, value: &str) -> Result<(), String> {
+    ok(c.post(&format!("/api/session/{id}/form/{form_id}/reply"), serde_json::json!({ "answer": { key: value } })))
+}
+
+pub fn rename(c: &Client, id: &str, title: &str) -> Result<(), String> {
+    ok(c.patch(&format!("/api/session/{id}"), serde_json::json!({ "title": title })))
+}
+
+pub fn compact(c: &Client, id: &str) -> Result<(), String> {
+    ok(c.post(&format!("/api/session/{id}/compact"), serde_json::json!({})))
+}
+
+pub fn switch_model(c: &Client, id: &str, provider: &str, model: &str, variant: Option<&str>) -> Result<(), String> {
+    let mut m = serde_json::json!({ "providerID": provider, "id": model });
+    if let Some(v) = variant {
+        m["variant"] = Value::String(v.to_string());
+    }
+    ok(c.post(&format!("/api/session/{id}/model"), serde_json::json!({ "model": m })))
+}
+
+pub fn switch_agent(c: &Client, id: &str, agent: &str) -> Result<(), String> {
+    ok(c.post(&format!("/api/session/{id}/agent"), serde_json::json!({ "agent": agent })))
+}
+
+/// The mode cycle: the primary agent after `current`.
+pub fn next_agent(current: &str) -> &'static str {
+    if current == "build" { "plan" } else { "build" }
+}
+
+pub fn command(c: &Client, id: &str, name: &str, text: &str) -> Result<(), String> {
+    ok(c.post(&format!("/api/session/{id}/command"), serde_json::json!({ "name": name, "text": text })))
+}
+
+pub fn shell(c: &Client, id: &str, line: &str) -> Result<(), String> {
+    ok(c.post(&format!("/api/session/{id}/shell"), serde_json::json!({ "command": line })))
+}
+
+/// The session's last 60 messages as turns, oldest first.
+pub fn history(c: &Client, id: &str) -> Result<Vec<Turn>, String> {
+    c.get(&format!("/api/session/{id}/message?limit=60&order=desc")).map(|v| messages(&v).1)
+}
+
 /// What a permission card offers, in order.
 pub const PERMISSION_CHOICES: [&str; 3] = ["Once", "Always", "Reject"];
 

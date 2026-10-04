@@ -61,9 +61,40 @@ fn type_line_for(l: &Local, harness: model::Harness, tty: &str, line: &str) -> R
     Ok(())
 }
 
+/// An OpenCode card with its server: every action on such a card is a call
+/// to the server rather than keys typed into a terminal.
+struct ServerCard {
+    client: crate::opencode::Client,
+    card: model::Card,
+    session: crate::opencode::SessionInfo,
+    live: crate::opencode::Live,
+}
+
+/// The server behind `session_id` when it is an OpenCode session; None for
+/// every other card (and for an id no card has, which the caller reports).
+fn server_card(l: &Local, session_id: &str) -> Result<Option<ServerCard>, String> {
+    let mut store = l.store.lock().unwrap();
+    let Some(card) = store.card_for(session_id, now_ms()) else { return Ok(None) };
+    if card.harness != model::Harness::OpenCode {
+        return Ok(None);
+    }
+    let service = store.opencode_service().ok_or("OpenCode's server is not running.")?;
+    let (session, live) = store.opencode_session(session_id).ok_or("Session is no longer running.")?;
+    Ok(Some(ServerCard { client: crate::opencode::Client::new(&service), card, session, live }))
+}
+
 /// Sends `text` to the session: through its inbox, or typed into the
 /// terminal of a harness that has none.
 pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
+    if let Some(sc) = server_card(l, session_id)? {
+        if sc.card.state == model::State::Working {
+            return Err("Wait until the session is free.".into());
+        }
+        if text.trim().is_empty() {
+            return Err("Message is empty.".into());
+        }
+        return crate::opencode::prompt(&sc.client, &sc.session.id, text.trim());
+    }
     // Other harnesses have no inbox: the reply is typed into their tty as one line.
     let foreign = l.store.lock().unwrap().foreign(session_id);
     if let Some(f) = foreign {
@@ -98,6 +129,18 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String>
 
 /// Picks `option` of `question` in the session's open ask `ask_id`.
 pub fn answer_question(l: &Local, session_id: &str, ask_id: u64, question: usize, option: usize) -> Result<(), String> {
+    if let Some(sc) = server_card(l, session_id)? {
+        answer::check(&sc.card, ask_id, question, option, now_ms())?;
+        if let Some(p) = &sc.live.permission {
+            return crate::opencode::reply_permission(&sc.client, &sc.session.id, &p.id, crate::opencode::decision(option));
+        }
+        if let Some(f) = &sc.live.form {
+            let field = f.fields.get(question).ok_or("That question has no such option.")?;
+            let (value, _) = field.options.get(option).ok_or("That question has no such option.")?;
+            return crate::opencode::reply_form(&sc.client, &sc.session.id, &f.id, &field.key, value);
+        }
+        return Err("This session is not waiting for a question.".into());
+    }
     let (card, tty) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
@@ -114,8 +157,11 @@ pub fn answer_question(l: &Local, session_id: &str, ask_id: u64, question: usize
     Ok(())
 }
 
-/// Types `/compact` into the session's terminal.
+/// Types `/compact` into the session's terminal, or asks OpenCode's server.
 pub fn compact_session(l: &Local, session_id: &str) -> Result<(), String> {
+    if let Some(sc) = server_card(l, session_id)? {
+        return crate::opencode::compact(&sc.client, &sc.session.id);
+    }
     type_into_session(l, session_id, answer::COMPACT, "/compact", |c| c.compact)
 }
 
@@ -151,6 +197,10 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
         if !matches!(card.state, model::State::Idle | model::State::Completed) {
             return Err("Only an idle or completed session can be closed.".into());
         }
+        // An OpenCode session lives in its server; Close needs a window to type /exit into.
+        if card.harness == model::Harness::OpenCode && store.opencode_window(&card.cwd).is_none() {
+            return Err("No OpenCode window is open for that folder.".into());
+        }
         (card.harness, card.pid, session_tty(&store, session_id, card.pid)?)
     };
     let after = l.terminal.reach_after_exit(&tty);
@@ -174,6 +224,10 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
 /// keys typed into its TUI elsewhere act as shortcuts. The new name comes
 /// back through the agent's own files on the next refresh.
 pub fn rename_session(l: &Local, session_id: &str, name: &str) -> Result<(), String> {
+    if let Some(sc) = server_card(l, session_id)? {
+        answer::rename_command(name)?;
+        return crate::opencode::rename(&sc.client, &sc.session.id, name.trim());
+    }
     let line = answer::rename_command(name)?;
     let (harness, tty) = {
         let mut store = l.store.lock().unwrap();
@@ -243,6 +297,26 @@ pub fn run_due_renames(l: &Local) {
 /// Types `/model x` or `/effort y` into the session's terminal, after
 /// checking the value against the agent's own listing.
 pub fn set_session_option(l: &Local, session_id: &str, setting: &str, value: &str) -> Result<(), String> {
+    if let Some(sc) = server_card(l, session_id)? {
+        let info = l.store.lock().unwrap().agents_source()().into_iter().find(|a| a.harness == model::Harness::OpenCode).unwrap_or_else(|| crate::agents::info_for(model::Harness::OpenCode, None));
+        let (provider, model, variant) = sc.session.model.clone().ok_or("The session has no model yet.")?;
+        return match setting {
+            "model" => {
+                let m = info.models.iter().find(|m| m.id == value).ok_or_else(|| format!("Unknown model: {value}"))?;
+                let (p, id) = m.id.split_once('/').ok_or_else(|| format!("Unknown model: {value}"))?;
+                crate::opencode::switch_model(&sc.client, &sc.session.id, p, id, variant.as_deref().filter(|v| m.efforts.iter().any(|e| e == v)))
+            }
+            "effort" => {
+                let current = format!("{provider}/{model}");
+                let allowed = info.models.iter().find(|m| m.id == current).map(|m| m.efforts.clone()).unwrap_or_else(|| info.efforts.clone());
+                if !allowed.iter().any(|e| e == value) {
+                    return Err(format!("Unknown effort: {value}"));
+                }
+                crate::opencode::switch_model(&sc.client, &sc.session.id, &provider, &model, Some(value))
+            }
+            _ => Err(format!("Unknown setting: {setting}")),
+        };
+    }
     let (harness, agents) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
@@ -267,12 +341,23 @@ pub fn set_session_option(l: &Local, session_id: &str, setting: &str, value: &st
 /// session's terminal, after `answer::check_terminal_command`.
 pub fn send_slash_command(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
     let line = answer::check_terminal_command(text)?;
+    if let Some(sc) = server_card(l, session_id)? {
+        if let Some(cmd) = line.strip_prefix('!') {
+            return crate::opencode::shell(&sc.client, &sc.session.id, cmd.trim());
+        }
+        let rest = line.trim_start_matches('/');
+        let (name, text) = rest.split_once(' ').map(|(n, t)| (n, t.trim())).unwrap_or((rest, ""));
+        return crate::opencode::command(&sc.client, &sc.session.id, name, text);
+    }
     let shell = line.starts_with('!');
     type_into_session(l, session_id, &line, if shell { "! shell lines" } else { "/ commands" }, move |c| if shell { c.shell_lines } else { c.slash_lines })
 }
 
 /// Sends the agent's mode-cycle keys (Shift+Tab) to the session's terminal.
 pub fn cycle_session_mode(l: &Local, session_id: &str) -> Result<(), String> {
+    if let Some(sc) = server_card(l, session_id)? {
+        return crate::opencode::switch_agent(&sc.client, &sc.session.id, crate::opencode::next_agent(&sc.session.agent));
+    }
     let harness = l.store.lock().unwrap().card_for(session_id, now_ms()).ok_or("Session is no longer running.")?.harness;
     let keys = launch::capabilities(harness).mode_cycle.ok_or_else(|| format!("{} has no mode cycle.", launch::label(harness)))?;
     type_into_session(l, session_id, keys, "mode cycle", |c| c.mode_cycle.is_some())
@@ -301,6 +386,9 @@ fn type_into_session(l: &Local, session_id: &str, text: &str, control: &str, all
 
 /// The session's last turns.
 pub fn session_history(l: &Local, session_id: &str) -> Result<Vec<transcript::Turn>, String> {
+    if let Some(sc) = server_card(l, session_id)? {
+        return crate::opencode::history(&sc.client, &sc.session.id);
+    }
     let (path, foreign) = {
         let store = l.store.lock().unwrap();
         if let Some(f) = store.foreign(session_id) {
@@ -470,9 +558,10 @@ pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, 
 pub fn focus_session(l: &Local, session_id: &str) -> Result<(), String> {
     let tty = {
         let store = l.store.lock().unwrap();
-        let pid = match store.foreign(session_id) {
-            Some(f) => f.pid,
-            None => store.session(session_id).ok_or("Session is no longer running.")?.pid,
+        let pid = match (store.foreign(session_id), store.opencode_card(session_id)) {
+            (Some(f), _) => f.pid,
+            (None, Some(c)) => c.pid,
+            (None, None) => store.session(session_id).ok_or("Session is no longer running.")?.pid,
         };
         session_tty(&store, session_id, pid)?
     };
@@ -620,6 +709,106 @@ mod tests {
         send_slash_command(&l, "c1", "/status").unwrap();
         assert!(fake.calls.lock().unwrap().iter().any(|c| matches!(c, Call::Type { text, .. } if text == "/status")));
         assert_eq!(send_slash_command(&l, "c1", "!ls").unwrap_err(), "Codex has no ! shell lines.");
+    }
+
+    fn opencode_store(routes: Vec<(&'static str, &'static str)>) -> (tempfile::TempDir, Mutex<Store>, std::sync::Arc<Mutex<Vec<String>>>) {
+        let (base, hits) = crate::opencode::fake::fake_server(routes);
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(state.join("opencode")).unwrap();
+        let me = std::process::id();
+        std::fs::write(state.join("opencode/service.json"), format!("{{\"url\":\"{base}\",\"pid\":{me},\"password\":\"pw\"}}")).unwrap();
+        let store = Store::new(dir.path().join("claude")).with_alive(move |pid| pid == me as i32).with_opencode(state, vec![(31, "/Users/tiagocorreia".into())]);
+        (dir, Mutex::new(store), hits)
+    }
+
+    const SES: &str = "ses_efe57d285ffeRMX70aswKZ9qCO";
+
+    fn base_routes(active: &'static str, permission: &'static str) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("GET /api/session?limit=50", include_str!("../fixtures/opencode/sessions.json")),
+            ("GET /api/session/active", active),
+            ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/permission", permission),
+            ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/form", "{\"data\":[]}"),
+            ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/message?limit=5&order=desc", include_str!("../fixtures/opencode/messages.json")),
+            ("GET /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/message?limit=60&order=desc", include_str!("../fixtures/opencode/messages.json")),
+            ("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/prompt", "{\"data\":{}}"),
+            ("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/permission/per_01/reply", "{\"data\":{}}"),
+            ("PATCH /api/session/ses_efe57d285ffeRMX70aswKZ9qCO", "{\"data\":{}}"),
+            ("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/compact", "{\"data\":{}}"),
+            ("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/model", "{\"data\":{}}"),
+            ("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/agent", "{\"data\":{}}"),
+            ("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/command", "{\"data\":{}}"),
+            ("POST /api/session/ses_efe57d285ffeRMX70aswKZ9qCO/shell", "{\"data\":{}}"),
+        ]
+    }
+
+    fn opencode_info() -> crate::agents::AgentInfo {
+        crate::agents::AgentInfo { harness: Harness::OpenCode, models: vec![crate::agents::ModelInfo { id: "opencode/fledge-alpha-free".into(), label: "Fledge".into(), efforts: vec!["low".into(), "max".into()], context: None }], efforts: vec!["low".into(), "max".into()], modes: vec!["default".into(), "auto".into()] }
+    }
+
+    #[test]
+    fn opencode_actions_are_server_calls_and_nothing_is_typed() {
+        let (_d, store, hits) = opencode_store(base_routes("{\"data\":{}}", "{\"data\":[]}"));
+        let store = with_agents(store, vec![agents::claude(), opencode_info()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        send_reply(&l, SES, "go on").unwrap();
+        rename_session(&l, SES, "Renamed").unwrap();
+        compact_session(&l, SES).unwrap();
+        set_session_option(&l, SES, "model", "opencode/fledge-alpha-free").unwrap();
+        set_session_option(&l, SES, "effort", "max").unwrap();
+        cycle_session_mode(&l, SES).unwrap();
+        send_slash_command(&l, SES, "/share now").unwrap();
+        send_slash_command(&l, SES, "!ls").unwrap();
+        let turns = session_history(&l, SES).unwrap();
+        assert_eq!(turns.len(), 2);
+        assert!(fake.calls.lock().unwrap().is_empty(), "nothing typed into any terminal");
+        let h = hits.lock().unwrap();
+        // The bodies are pretty-printed: compare them without whitespace.
+        let bodies: Vec<String> = h.iter().filter(|r| r.starts_with("POST") || r.starts_with("PATCH")).map(|r| r.replace("\r\n", "\n").replace("\n  ", "").replace("\n", "").replace(": ", ":")).collect();
+        assert!(bodies.iter().any(|r| r.contains("/prompt") && r.contains("\"text\":\"go on\"")), "{bodies:?}");
+        assert!(bodies.iter().any(|r| r.starts_with("PATCH") && r.contains("\"title\":\"Renamed\"")));
+        assert!(bodies.iter().any(|r| r.contains("/compact")));
+        assert!(bodies.iter().any(|r| r.contains("/model") && r.contains("\"providerID\":\"opencode\"") && r.contains("\"id\":\"fledge-alpha-free\"")));
+        assert!(bodies.iter().any(|r| r.contains("/model") && r.contains("\"variant\":\"max\"")));
+        assert!(bodies.iter().any(|r| r.contains("/agent") && r.contains("\"agent\":\"plan\"")), "build cycles to plan");
+        assert!(bodies.iter().any(|r| r.contains("/command") && r.contains("\"name\":\"share\"") && r.contains("\"text\":\"now\"")));
+        assert!(bodies.iter().any(|r| r.contains("/shell") && r.contains("\"command\":\"ls\"")));
+    }
+
+    #[test]
+    fn an_opencode_permission_is_answered_with_a_decision_and_a_stale_ask_is_refused() {
+        let (_d, store, hits) = opencode_store(base_routes("{\"data\":{}}", include_str!("../fixtures/opencode/permission.json")));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let card = store.lock().unwrap().card_for(SES, now_ms()).unwrap();
+        assert_eq!(card.state, State::Awaiting);
+        let ask = card.state_since;
+        answer_question(&l, SES, ask, 0, 1).unwrap();
+        assert!(hits.lock().unwrap().iter().map(|r| r.replace("\r\n", "\n").replace("\n  ", "").replace("\n", "").replace(": ", ":")).any(|r| r.contains("/permission/per_01/reply") && r.contains("\"decision\":\"always\"")));
+        assert_eq!(answer_question(&l, SES, ask + 1, 0, 1).unwrap_err(), "The question has changed; look again.");
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_working_opencode_session_refuses_a_reply() {
+        let (_d, store, hits) = opencode_store(base_routes("{\"data\":{\"ses_efe57d285ffeRMX70aswKZ9qCO\":{\"type\":\"running\"}}}", "{\"data\":[]}"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(send_reply(&l, SES, "hi").unwrap_err(), "Wait until the session is free.");
+        assert!(!hits.lock().unwrap().iter().any(|r| r.contains("/prompt")));
+    }
+
+    #[test]
+    fn closing_an_opencode_session_types_exit_into_its_window() {
+        let (_d, store, _hits) = opencode_store(base_routes("{\"data\":{}}", "{\"data\":[]}"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        // The window's pid (31) has no tty in a test: the lookup says so rather than typing anywhere.
+        let err = close_session_with(&l, SES, |_| true).unwrap_err();
+        assert!(err.contains("tty") || err.contains("console") || err.contains("terminal"), "{err}");
+        assert!(fake.calls.lock().unwrap().is_empty());
     }
 
     #[test]
