@@ -1546,9 +1546,10 @@ mod tests {
         assert_eq!(note(&handle), Some(format!("runs Maya t; this Mac runs {ours}")));
         send(&mut ws, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![], agents: None });
         wait_until(|| handle.boards().iter().any(|b| b.cards.len() == 1));
-        // A newer Maya's board: a harness this version does not know.
+        // A newer Maya's board: a card state this version does not know. (An
+        // unknown harness is readable since 0.11.0: it decodes to Other.)
         let mut future = serde_json::to_value(Up::Board { cards: vec![card("r2", "y")], dirs: vec![], agents: None }).unwrap();
-        future["cards"][0]["harness"] = "future-harness".into();
+        future["cards"][0]["state"] = "future-state".into();
         ws.send(Message::text(future.to_string())).unwrap();
         wait_until(|| note(&handle).is_some_and(|n| n.ends_with(UNREADABLE_BOARD)));
         assert_eq!(note(&handle).unwrap(), format!("runs Maya t; this Mac runs {ours}; {UNREADABLE_BOARD}"));

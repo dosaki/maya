@@ -10,6 +10,7 @@ pub mod context;
 pub mod events;
 pub mod foreign;
 pub mod grok;
+pub mod kiro;
 pub mod hook_install;
 pub mod inbox;
 pub mod interpreter;

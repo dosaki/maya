@@ -56,7 +56,7 @@ pub enum Up {
 /// the whole board and freeze every card from that machine.
 fn known_agents<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<crate::agents::AgentInfo>>, D::Error> {
     let raw: Option<Vec<Value>> = Option::deserialize(d)?;
-    Ok(raw.map(|list| list.into_iter().filter_map(|a| serde_json::from_value(a).ok()).collect()))
+    Ok(raw.map(|list| list.into_iter().filter_map(|a| serde_json::from_value::<crate::agents::AgentInfo>(a).ok()).filter(|a| a.harness != crate::model::Harness::Other).collect()))
 }
 
 /// Main → assistant.
@@ -249,6 +249,15 @@ mod tests {
         assert_eq!(agents, None);
         let new = encode(&Up::Board { cards: vec![], dirs: vec![], agents: Some(vec![crate::agents::claude()]) });
         assert!(new.contains("\"agents\":[{\"harness\":\"claude-code\""), "{new}");
+    }
+
+    #[test]
+    fn a_card_from_an_agent_this_maya_does_not_know_still_decodes() {
+        use crate::model::{Card, Harness, State};
+        let card = Card { session_id: "s1".into(), pid: 1, name: "s1".into(), cwd: "/x".into(), state: State::Idle, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness: Harness::Kiro, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false };
+        let text = encode(&Up::Board { cards: vec![card], dirs: vec![], agents: None }).replace("\"harness\":\"kiro\"", "\"harness\":\"future-agent\"");
+        let Up::Board { cards, .. } = decode_up(&text).unwrap() else { panic!() };
+        assert_eq!(cards[0].harness, Harness::Other);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, renderModal } from "./modal";
+import { PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -169,6 +169,22 @@ describe("renderModal", () => {
     expect([...grok.querySelectorAll<HTMLOptionElement>("select[name=model] option")].map((o) => o.value)).toEqual(["", "grok-4.7"]);
     expect(grok.querySelector("select[name=effort]")).toBeNull();
     expect(grok.querySelector("button[data-action=cycle-mode]")).not.toBeNull();
+  });
+
+  it("brings the pickers in on a repaint, but keeps an unapplied choice", () => {
+    const h = handlers();
+    const grok = { ...base, harness: "grok" as const, hasInbox: false };
+    const agent = { harness: "grok" as const, models: [{ id: "grok-4.7", label: "grok-4.7", efforts: [] }], efforts: [], modes: [] };
+    // First paint: the agent list has not landed, so only the mode cycle shows.
+    const root = renderModal({ card: grok, turns: [], status: null, draft: "" }, h);
+    expect(root.querySelector("select[name=model]")).toBeNull();
+    patchModal(root, renderModal({ card: grok, turns: [], status: null, draft: "", agent }, h));
+    const model = root.querySelector<HTMLSelectElement>("select[name=model]");
+    expect(model, "the picker arrives with the agent list").not.toBeNull();
+    // A choice waiting for Apply survives a background repaint.
+    model!.value = "grok-4.7";
+    patchModal(root, renderModal({ card: grok, turns: [], status: null, draft: "", agent }, h));
+    expect(root.querySelector<HTMLSelectElement>("select[name=model]")!.value).toBe("grok-4.7");
   });
 
   it("keeps controls Codex lacks off its session but still lets you type a reply", () => {

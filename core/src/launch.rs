@@ -19,6 +19,9 @@ pub fn binary_name(agent: Harness) -> &'static str {
         Harness::Codex => "codex",
         Harness::Antigravity => "agy",
         Harness::Grok => "grok",
+        Harness::Kiro => "kiro-cli",
+        // Never installed: find_binary names it in its "could not find" message.
+        Harness::Other => "unknown-agent",
     }
 }
 
@@ -30,17 +33,22 @@ pub fn efforts(agent: Harness) -> &'static [&'static str] {
         Harness::Codex => &["low", "medium", "high", "xhigh", "max", "ultra"],
         Harness::Antigravity => &["low", "medium", "high", "max"],
         Harness::Grok => &[],
+        Harness::Kiro => &["low", "medium", "high", "xhigh", "max"],
+        Harness::Other => &[],
     }
 }
 
 /// The modes an agent takes: Claude's and Grok's permission modes, Codex's
-/// sandbox policies, Antigravity's execution modes.
+/// sandbox policies, Antigravity's execution modes, and for Kiro whether
+/// every tool is trusted.
 pub fn modes(agent: Harness) -> &'static [&'static str] {
     match agent {
         Harness::ClaudeCode => MODES,
         Harness::Codex => &["read-only", "workspace-write", "danger-full-access"],
         Harness::Antigravity => &["accept-edits", "plan"],
         Harness::Grok => &["default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"],
+        Harness::Kiro => &["default", "trust-all"],
+        Harness::Other => &[],
     }
 }
 
@@ -51,6 +59,8 @@ pub fn label(agent: Harness) -> &'static str {
         Harness::Codex => "Codex",
         Harness::Antigravity => "Antigravity",
         Harness::Grok => "Grok Build",
+        Harness::Kiro => "Kiro CLI",
+        Harness::Other => "Unknown agent",
     }
 }
 
@@ -70,17 +80,22 @@ pub struct Capabilities {
     pub slash_lines: bool,
     /// `!` lines run in the shell.
     pub shell_lines: bool,
+    /// `/exit` ends the session, so Close can type it and then close the terminal.
+    pub close: bool,
 }
 
 pub fn capabilities(agent: Harness) -> Capabilities {
     let shift_tab = Some(crate::answer::SHIFT_TAB);
     match agent {
-        Harness::ClaudeCode => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true },
+        Harness::ClaudeCode => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true, close: true },
         // `/model` and `/permissions` open pickers in Codex; a typed value does nothing.
-        Harness::Codex => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: true, shell_lines: false },
-        Harness::Antigravity => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false },
+        Harness::Codex => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: true, shell_lines: false, close: true },
+        Harness::Antigravity => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false, close: true },
         // Grok's `--help` lists no effort values, so none can be checked before typing.
-        Harness::Grok => Capabilities { compact: true, model_switch: true, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false },
+        Harness::Grok => Capabilities { compact: true, model_switch: true, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false, close: true },
+        // Kiro's /compact summarises the conversation; /model and /effort take a value.
+        Harness::Kiro => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true, close: true },
+        Harness::Other => Capabilities { compact: false, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: false, shell_lines: false, close: false },
     }
 }
 
@@ -153,10 +168,13 @@ impl LaunchOptions {
     pub fn flags(&self) -> String {
         let (model, effort, mode) = (chosen(&self.model), chosen(&self.effort), chosen(&self.mode));
         let (m_flag, e_flag, mode_flag) = match self.agent {
-            Harness::ClaudeCode => ("--model", Some("--effort"), "--permission-mode"),
-            Harness::Codex => ("-m", Some("-c model_reasoning_effort="), "-s"),
-            Harness::Antigravity => ("--model", Some("--effort"), "--mode"),
-            Harness::Grok => ("-m", None, "--permission-mode"),
+            Harness::ClaudeCode => ("--model", Some("--effort"), Some("--permission-mode")),
+            Harness::Codex => ("-m", Some("-c model_reasoning_effort="), Some("-s")),
+            Harness::Antigravity => ("--model", Some("--effort"), Some("--mode")),
+            Harness::Grok => ("-m", None, Some("--permission-mode")),
+            // Kiro's "trust-all" mode is a bare flag; "default" passes nothing.
+            Harness::Kiro => ("--model", Some("--effort"), None),
+            Harness::Other => return String::new(),
         };
         let mut out = String::new();
         if let Some(m) = model {
@@ -167,8 +185,10 @@ impl LaunchOptions {
             (Some(f), Some(e)) => out.push_str(&format!(" {f} {e}")),
             _ => {}
         }
-        if let Some(m) = mode {
-            out.push_str(&format!(" {mode_flag} {m}"));
+        match (mode_flag, mode) {
+            (Some(f), Some(m)) => out.push_str(&format!(" {f} {m}")),
+            (None, Some("trust-all")) if self.agent == Harness::Kiro => out.push_str(" --trust-all-tools"),
+            _ => {}
         }
         out
     }
@@ -260,6 +280,15 @@ pub fn oneshot_args(agent: Harness, model: Option<&str>, system: Option<&str>, u
             }
             a
         }
+        Harness::Kiro => {
+            let mut a = vec![s("chat"), s("--no-interactive"), s("--trust-tools="), s("--output-format"), s("stream-json")];
+            if let Some(m) = model {
+                a.extend([s("--model"), s(m)]);
+            }
+            a.extend([s("--"), folded]);
+            a
+        }
+        Harness::Other => vec![],
     }
 }
 
@@ -303,6 +332,23 @@ pub fn final_text(agent: Harness, stdout: &str) -> Result<String, String> {
             let v = json("grok")?;
             v["text"].as_str().map(str::to_string).ok_or_else(|| format!("no text in: {}", clip(stdout)))
         }
+        Harness::Kiro => {
+            let mut last_type = String::new();
+            for line in stdout.lines() {
+                let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+                let kind = v["type"].as_str().unwrap_or("");
+                last_type = kind.to_string();
+                if kind == "runFinished" {
+                    let status = v["data"]["status"].as_str().unwrap_or("");
+                    if status != "success" {
+                        return Err(format!("kiro-cli failed: {status} {}", clip(&v["data"].to_string())));
+                    }
+                    return Ok(v["data"]["finalText"].as_str().unwrap_or("").to_string());
+                }
+            }
+            Err(format!("kiro-cli did not finish its run (last event: {})", if last_type.is_empty() { "none" } else { &last_type }))
+        }
+        Harness::Other => Err("unknown agent".into()),
     }
 }
 
@@ -571,11 +617,12 @@ pub fn session_command(target: &Path, prompt_file: &Path, opts: &LaunchOptions, 
         args.push_str(&format!(" --session-id {}", shell_single_quote(id)));
     }
     let prompt = if opts.agent == Harness::Antigravity { " --prompt-interactive=\"$p\"" } else { " -- \"$p\"" };
-    format!(
-        "cd {} && p=\"$(cat {file})\" && rm -f {file} && {}{args}{prompt}",
-        shell_single_quote(&target.to_string_lossy()),
-        binary_name(opts.agent)
-    )
+    // Kiro's interactive chat is a subcommand of its binary.
+    let program = match opts.agent {
+        Harness::Kiro => "kiro-cli chat",
+        agent => binary_name(agent),
+    };
+    format!("cd {} && p=\"$(cat {file})\" && rm -f {file} && {program}{args}{prompt}", shell_single_quote(&target.to_string_lossy()))
 }
 
 pub fn applescript_launch(target: &Path, prompt_file: &Path, opts: &LaunchOptions) -> String {
@@ -805,6 +852,11 @@ mod tests {
         assert_eq!(all(Harness::Antigravity).flags(), " --model m-1 --effort high --mode accept-edits");
         // Grok lists no effort values, so none is passed.
         assert_eq!(all(Harness::Grok).flags(), " -m m-1 --permission-mode default");
+        assert_eq!(all(Harness::Kiro).flags(), " --model m-1 --effort high", "the default mode passes nothing");
+        let trust = LaunchOptions { agent: Harness::Kiro, mode: Some("trust-all".into()), ..Default::default() };
+        assert_eq!(trust.flags(), " --trust-all-tools");
+        let other = LaunchOptions { agent: Harness::Other, model: Some("m-1".into()), effort: Some("high".into()), ..Default::default() };
+        assert_eq!(other.flags(), "", "an unknown agent gets no flags");
     }
 
     #[test]
@@ -814,6 +866,8 @@ mod tests {
         assert!(o(Harness::Codex, "high", "plan").validate_shape().unwrap_err().contains("mode"));
         assert!(o(Harness::Antigravity, "xhigh", "plan").validate_shape().unwrap_err().contains("effort"));
         assert!(o(Harness::Grok, "high", "plan").validate_shape().unwrap_err().contains("effort"));
+        assert!(o(Harness::Kiro, "high", "plan").validate_shape().unwrap_err().contains("mode"));
+        assert!(o(Harness::Kiro, "ultra", "default").validate_shape().unwrap_err().contains("effort"));
     }
 
     #[test]
@@ -844,13 +898,16 @@ mod tests {
         assert!(line(&opts(Harness::Codex), None).ends_with("&& codex -- \"$p\""));
         assert!(line(&opts(Harness::Antigravity), None).ends_with("&& agy --prompt-interactive=\"$p\""));
         assert!(line(&opts(Harness::Grok), Some("0b9c-id")).ends_with("&& grok --session-id '0b9c-id' -- \"$p\""));
+        assert!(line(&opts(Harness::Kiro), None).ends_with("&& kiro-cli chat -- \"$p\""));
+        let trusted = LaunchOptions { agent: Harness::Kiro, model: Some("auto".into()), effort: Some("high".into()), mode: Some("trust-all".into()), ..Default::default() };
+        assert!(line(&trusted, None).ends_with("&& kiro-cli chat --model auto --effort high --trust-all-tools -- \"$p\""), "{}", line(&trusted, None));
     }
 
     #[test]
     fn each_agent_takes_a_dash_prompt_as_the_prompt() {
         // The prompt is never in the line itself: it is read from the file into
         // $p, and given after `--`, or as `--flag="$p"` for Go's flag parser.
-        for agent in [Harness::ClaudeCode, Harness::Codex, Harness::Antigravity, Harness::Grok] {
+        for agent in [Harness::ClaudeCode, Harness::Codex, Harness::Antigravity, Harness::Grok, Harness::Kiro] {
             let s = session_command(Path::new("/r"), Path::new("/p/1.txt"), &opts(agent), None);
             assert!(s.ends_with(" -- \"$p\"") || s.ends_with("--prompt-interactive=\"$p\""), "{s}");
         }
@@ -964,6 +1021,8 @@ mod tests {
         assert_eq!(label(Harness::Codex), "Codex");
         assert_eq!(label(Harness::Antigravity), "Antigravity");
         assert_eq!(label(Harness::Grok), "Grok Build");
+        assert_eq!(label(Harness::Kiro), "Kiro CLI");
+        assert_eq!(label(Harness::Other), "Unknown agent");
     }
 
     #[test]
@@ -978,6 +1037,14 @@ mod tests {
         assert!(g.compact && g.model_switch && g.slash_lines);
         assert_eq!(g.mode_cycle, Some(crate::answer::SHIFT_TAB));
         assert_eq!(capabilities(Harness::Antigravity).mode_cycle, Some(crate::answer::SHIFT_TAB));
+        let k = capabilities(Harness::Kiro);
+        assert!(k.compact && k.model_switch && k.effort_switch && k.slash_lines && k.shell_lines && k.close);
+        assert!([Harness::ClaudeCode, Harness::Codex, Harness::Antigravity, Harness::Grok].iter().all(|a| capabilities(*a).close), "every agent takes /exit");
+        assert!(!capabilities(Harness::Other).close);
+        assert_eq!(k.mode_cycle, Some(crate::answer::SHIFT_TAB));
+        let o = capabilities(Harness::Other);
+        assert!(!o.compact && !o.model_switch && !o.effort_switch && !o.slash_lines && !o.shell_lines);
+        assert_eq!(o.mode_cycle, None);
     }
 
     #[test]
@@ -1003,6 +1070,14 @@ mod tests {
         let k = oneshot_args(Harness::Grok, Some("grok-4.7"), Some("SYS"), "USER");
         assert_eq!(&k[..2], ["-p", "USER"]);
         assert!(pair(&k, "--output-format", "json") && pair(&k, "--tools", "") && pair(&k, "--max-turns", "1") && pair(&k, "--permission-mode", "plan") && pair(&k, "-m", "grok-4.7") && pair(&k, "--system-prompt-override", "SYS"));
+
+        let r = oneshot_args(Harness::Kiro, Some("auto"), Some("SYS"), "USER");
+        assert_eq!(&r[..2], ["chat", "--no-interactive"]);
+        assert!(r.contains(&"--trust-tools=".to_string()) && pair(&r, "--output-format", "stream-json") && pair(&r, "--model", "auto"));
+        assert_eq!(r[r.len() - 2], "--");
+        assert_eq!(r.last().unwrap(), "SYS\n\nUSER", "no system flag: the system text leads the prompt");
+        assert!(!oneshot_args(Harness::Kiro, None, None, "U").iter().any(|x| x == "--model"));
+        assert!(oneshot_args(Harness::Other, None, None, "U").is_empty());
     }
 
     #[test]
@@ -1011,6 +1086,7 @@ mod tests {
         assert_eq!(final_text(Harness::Codex, &oneshot_fixture("codex.jsonl")).unwrap(), r#"{"say":"hi","action":null,"confirm":false}"#);
         assert_eq!(final_text(Harness::Antigravity, &oneshot_fixture("agy.json")).unwrap().trim(), r#"{"say":"hi","action":null,"confirm":false}"#);
         assert_eq!(final_text(Harness::Grok, &oneshot_fixture("grok.json")).unwrap(), r#"{"say":"hi","action":null,"confirm":false}"#);
+        assert_eq!(final_text(Harness::Kiro, &oneshot_fixture("kiro.jsonl")).unwrap(), "pong");
     }
 
     #[test]
@@ -1021,6 +1097,10 @@ mod tests {
         assert!(final_text(Harness::Codex, "{\"type\":\"error\",\"message\":\"quota\"}\n").unwrap_err().contains("quota"));
         assert!(final_text(Harness::Antigravity, r#"{"status":"ERROR","response":""}"#).unwrap_err().contains("agy failed"));
         assert!(final_text(Harness::Grok, r#"{"stopReason":"error"}"#).unwrap_err().contains("no text"));
+        assert!(final_text(Harness::Kiro, "{\"type\":\"runStarted\",\"data\":{}}\n{\"type\":\"metadata\",\"data\":{}}\n").unwrap_err().contains("last event: metadata"));
+        assert!(final_text(Harness::Kiro, "{\"type\":\"runFinished\",\"data\":{\"status\":\"error\",\"message\":\"Not logged in\"}}\n").unwrap_err().contains("Not logged in"));
+        assert!(final_text(Harness::Kiro, "").unwrap_err().contains("last event: none"));
+        assert!(final_text(Harness::Other, "{}").unwrap_err().contains("unknown agent"));
     }
 
     #[test]

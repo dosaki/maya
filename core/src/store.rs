@@ -19,11 +19,17 @@ pub struct Store {
     codex_dir: PathBuf,
     agy_dir: PathBuf,
     grok_dir: PathBuf,
+    /// Kiro's sessions folder and its run folder (the turn markers).
+    kiro_dir: PathBuf,
+    kiro_run_dir: PathBuf,
     /// Sessions of other harnesses, keyed by pid, kept between refreshes so
     /// `lsof` runs once per process rather than every five seconds.
     foreign: std::collections::HashMap<i32, ForeignSession>,
     /// The process lister, replaceable in tests.
     processes: Box<dyn Fn() -> Vec<(i32, String, Harness)> + Send>,
+    /// The process tree (pid, parent, tty), for agents whose session files
+    /// name a pid with no terminal of its own; replaceable in tests.
+    process_tree: Box<dyn Fn() -> Vec<foreign::Proc> + Send>,
     /// Finds the sessions of processes not yet known, from the Codex and
     /// Antigravity folders; replaceable in tests, where no `lsof` can.
     discover: Box<Discover>,
@@ -103,8 +109,12 @@ impl Store {
             codex_dir: crate::codex_hooks::dir(),
             agy_dir: home.join(".gemini/antigravity-cli"),
             grok_dir: home.join(".grok"),
+            kiro_dir: home.join(".kiro/sessions/cli"),
+            // `~/Library/Application Support` on macOS, `~/.local/share` on Linux, `%LOCALAPPDATA%` on Windows.
+            kiro_run_dir: dirs::data_local_dir().unwrap_or_else(|| home.join(".local/share")).join("kiro-cli/run"),
             foreign: std::collections::HashMap::new(),
             processes: Box::new(foreign::list_tui_processes),
+            process_tree: Box::new(foreign::list_process_tree),
             discover: Box::new(discover_sessions),
             config,
             alive: Box::new(registry::pid_alive),
@@ -161,7 +171,9 @@ impl Store {
         self.alive = Box::new(alive);
         // Tests never see the machine's real codex/agy/grok sessions.
         self.processes = Box::new(Vec::new);
+        self.process_tree = Box::new(Vec::new);
         self.grok_dir = PathBuf::from("/nonexistent/grok");
+        self.kiro_dir = PathBuf::from("/nonexistent/kiro");
         // Nor do they list the machine's agents, which runs each one.
         self.agents = std::sync::Arc::new(|| vec![crate::agents::claude()]);
         self
@@ -201,9 +213,18 @@ impl Store {
         self.codex_dir = codex_dir;
         self.agy_dir = agy_dir.clone();
         self.grok_dir = agy_dir.join("no-grok");
+        self.kiro_dir = agy_dir.join("no-kiro");
         let pids: Vec<(i32, String, Harness)> = sessions.iter().map(|s| (s.pid, s.tty.clone().unwrap_or_default(), s.harness)).collect();
         self.foreign = sessions.into_iter().map(|s| (s.pid, s)).collect();
         self.processes = Box::new(move || pids.clone());
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_kiro(mut self, sessions_dir: PathBuf, run_dir: PathBuf, procs: Vec<foreign::Proc>) -> Self {
+        self.kiro_dir = sessions_dir;
+        self.kiro_run_dir = run_dir;
+        self.process_tree = Box::new(move || procs.clone());
         self
     }
 
@@ -249,6 +270,13 @@ impl Store {
             // Grok's title changes with `/rename`: keep the newest.
             self.foreign.entry(s.pid).and_modify(|e| e.name = s.name.clone()).or_insert(s);
         }
+        // Kiro's locks name a pid too, and its title changes with `/rename`.
+        let kiro = foreign::kiro_sessions(&self.kiro_dir, &(self.process_tree)(), std::process::id() as i32);
+        let kiro_pids: std::collections::HashSet<i32> = kiro.iter().map(|s| s.pid).collect();
+        self.foreign.retain(|pid, s| s.harness != Harness::Kiro || kiro_pids.contains(pid));
+        for s in kiro {
+            self.foreign.entry(s.pid).and_modify(|e| e.name = s.name.clone()).or_insert(s);
+        }
         self.refresh_names();
     }
 
@@ -288,7 +316,7 @@ impl Store {
 
     /// Where each agent keeps its sessions.
     pub fn agent_dirs(&self) -> crate::resume::AgentDirs {
-        crate::resume::AgentDirs { claude: self.claude_dir.clone(), codex: self.codex_dir.clone(), agy: self.agy_dir.clone(), grok: self.grok_dir.clone() }
+        crate::resume::AgentDirs { claude: self.claude_dir.clone(), codex: self.codex_dir.clone(), agy: self.agy_dir.clone(), grok: self.grok_dir.clone(), kiro: self.kiro_dir.clone() }
     }
 
     fn registry(&self) -> Vec<RegistrySession> {
@@ -384,6 +412,9 @@ impl Store {
         let timeout = self.config.completed_timeout_ms();
         for s in self.foreign.values() {
             let mut tail = foreign::tail_for(s);
+            if s.harness == Harness::Kiro {
+                crate::kiro::apply_live(&mut tail, &self.kiro_run_dir, s.pid, &s.transcript_path, now_ms);
+            }
             if s.harness == Harness::Codex {
                 crate::codex_hooks::apply(&mut tail, self.codex_events.events_for(&s.session_id));
             }
@@ -569,6 +600,34 @@ mod tests {
         crate::hook_install::append_record_named(&store.claude_dir.join("maya"), "codex-events.jsonl",
             r#"{"session_id":"aaa","hook_event_name":"Stop"}"#, 1_800_000_000_002).unwrap();
         assert_eq!(store.card_for("aaa", 1_800_000_000_003).unwrap().state, State::Completed);
+    }
+
+    #[test]
+    fn kiro_sessions_come_from_their_locks_and_show_working_from_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sessions, run) = (dir.path().join("kiro"), dir.path().join("kiro-run"));
+        std::fs::create_dir_all(run.join("turn-markers")).unwrap();
+        std::fs::create_dir_all(&sessions).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kiro");
+        let id = "efcba1da-5c0b-4b39-96f9-9a4740ead331";
+        for (from, to) in [("lock.json", "lock"), ("session.json", "json"), ("events.jsonl", "jsonl")] {
+            std::fs::copy(fixtures.join(from), sessions.join(format!("{id}.{to}"))).unwrap();
+        }
+        std::fs::copy(fixtures.join("marker.json"), run.join("turn-markers/95441-1791030218653.json")).unwrap();
+        let alive = crate::kiro::markers(&run)[0].alive_ms;
+        let procs = foreign::parse_ps_tree("95245 93903 ttys010 kiro-cli chat\n95295 95245 ttys010 kiro-cli-chat chat\n95441 95295 ttys010 bun tui.js chat\n95508 95441 ?? kiro-cli-chat acp\n");
+        let mut store = Store::new(dir.path().join("claude")).with_alive(|_| true).with_kiro(sessions, run, procs);
+        let now = alive + 500;
+        let cards = store.refresh(now);
+        let k = cards.iter().find(|c| c.harness == Harness::Kiro).expect("a Kiro card");
+        assert_eq!((k.pid, k.name.as_str(), k.cwd.as_str(), k.state), (95441, "run ls", "/Users/tiagocorreia", State::Working));
+        assert_eq!(k.snippet, "shell: mkdir -p /tmp/kiro-probe && sleep 90");
+        assert_eq!(k.context.as_ref().map(|c| c.percent), Some(1));
+        assert!(store.live_session_ids().contains(&id.to_string()));
+        // The marker's heartbeat stops: the turn is over, the card is Completed.
+        let later = now + crate::kiro::MARKER_STALE_MS + 1;
+        let k = store.refresh(later).into_iter().find(|c| c.harness == Harness::Kiro).unwrap();
+        assert_eq!(k.state, State::Completed);
     }
 
     #[test]

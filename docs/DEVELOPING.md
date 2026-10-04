@@ -79,7 +79,10 @@ What is different on Windows, and where:
   and names the processes holding a file open (the Restart Manager).
   `foreign::discover_from_files` maps an `agy` pid to its conversation
   through its own `log/cli-*.log`, and a `codex` pid to its thread through
-  the `thread-writer-locks/<id>.lock` it holds.
+  the `thread-writer-locks/<id>.lock` it holds. A `kiro-cli-chat` agent
+  pid maps to its session through the lock file beside the session, and
+  to its console through the TUI that is its parent
+  (`foreign::kiro_sessions`).
 - **Ear.** `ear-rs/`: the Swift ear's protocol over WASAPI and whisper.cpp,
   with the VAD ported case for case. `cargo run -p maya-ear --release
   --example transcribe -- <model.bin> <file.wav>` runs a WAV through it.
@@ -289,7 +292,7 @@ Three workflows in `.github/workflows/`:
   `watcher.rs`, `answer.rs` and `launch.rs` (Terminal automation),
   `terminal_tmux.rs` (tmux sessions, for the CLI and the Linux app),
   `inbox.rs` (Claude Code's session socket), `foreign.rs` with `codex.rs`,
-  `antigravity.rs`, `grok.rs` (other agents), `reviews.rs` and `pr.rs`
+  `antigravity.rs`, `grok.rs`, `kiro.rs` (other agents), `reviews.rs` and `pr.rs`
   (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
   `interpreter.rs`, `log.rs` (the Debug tab and `maya.log`), and `net/`
   with `protocol.rs` (message types, encode/decode, pairing and HMAC),

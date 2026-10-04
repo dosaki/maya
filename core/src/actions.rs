@@ -122,9 +122,9 @@ pub fn compact_session(l: &Local, session_id: &str) -> Result<(), String> {
 /// How long Close waits for Claude to exit before it leaves the shell alone.
 const EXIT_WAIT: Duration = Duration::from_secs(5);
 
-/// Ends an idle or completed Claude Code session and closes its terminal:
-/// types `/exit`, waits for Claude's process to end, then types `exit` into
-/// the shell left behind.
+/// Ends an idle or completed session and closes its terminal: types `/exit`
+/// (every agent takes it), waits for the agent's process to end, then types
+/// `exit` into the shell left behind.
 pub fn close_session(l: &Local, session_id: &str) -> Result<(), String> {
     close_session_with(l, session_id, |pid| {
         let deadline = std::time::Instant::now() + EXIT_WAIT;
@@ -140,24 +140,24 @@ pub fn close_session(l: &Local, session_id: &str) -> Result<(), String> {
 
 /// `close_session` with `exited(pid)`, which says whether the process ended in time.
 fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool) -> Result<(), String> {
-    // Everything is looked up before `/exit`: once Claude exits, its registry
-    // entry goes, and on Windows so does the console key found through it.
-    let (pid, tty) = {
+    // Everything is looked up before `/exit`: once the agent exits, its
+    // registry entry goes, and on Windows so does the console key found through it.
+    let (harness, pid, tty) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
-        if card.harness != model::Harness::ClaudeCode {
-            return Err("That command is only available for Claude Code sessions.".into());
+        if !launch::capabilities(card.harness).close {
+            return Err(format!("{} has no Close.", launch::label(card.harness)));
         }
         if !matches!(card.state, model::State::Idle | model::State::Completed) {
             return Err("Only an idle or completed session can be closed.".into());
         }
-        (card.pid, session_tty(&store, session_id, card.pid)?)
+        (card.harness, card.pid, session_tty(&store, session_id, card.pid)?)
     };
     let after = l.terminal.reach_after_exit(&tty);
-    l.terminal.type_line(&tty, answer::EXIT)?;
-    // Typed while Claude still runs, `exit` would land in its prompt as a message.
+    type_line_for(l, harness, &tty, answer::EXIT)?;
+    // Typed while the agent still runs, `exit` would land in its prompt as a message.
     if !exited(pid) {
-        return Err("Claude did not exit; the terminal was left open.".into());
+        return Err(format!("{} did not exit; the terminal was left open.", launch::label(harness)));
     }
     let mut last = "nothing else is attached to its terminal".to_string();
     for key in &after {
@@ -623,6 +623,44 @@ mod tests {
     }
 
     #[test]
+    fn a_kiro_session_takes_compact_model_effort_and_shell_lines() {
+        let (t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        let sessions = t.path().join("kiro");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kiro");
+        let id = "efcba1da-5c0b-4b39-96f9-9a4740ead331";
+        for (from, to) in [("lock.json", "lock"), ("session.json", "json")] {
+            std::fs::copy(fixtures.join(from), sessions.join(format!("{id}.{to}"))).unwrap();
+        }
+        // A finished turn, no marker: the card is Completed, so free.
+        let finished: String = std::fs::read_to_string(fixtures.join("events.jsonl")).unwrap().lines().take(4).map(|l| format!("{l}\n")).collect();
+        std::fs::write(sessions.join(format!("{id}.jsonl")), finished).unwrap();
+        let procs = crate::foreign::parse_ps_tree("95245 93903 ttys010 kiro-cli chat\n95295 95245 ttys010 kiro-cli-chat chat\n95441 95295 ttys010 bun tui.js chat\n95508 95441 ?? kiro-cli-chat acp\n");
+        let store = Mutex::new(store.into_inner().unwrap().with_kiro(sessions, t.path().join("no-run"), procs));
+        let info = crate::agents::AgentInfo { harness: Harness::Kiro, models: vec![crate::agents::ModelInfo { id: "auto".into(), label: "auto".into(), efforts: vec![] }], efforts: vec!["low".into(), "high".into()], modes: vec![] };
+        let store = with_agents(store, vec![agents::claude(), info]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        store.lock().unwrap().refresh(now_ms());
+        compact_session(&l, id).unwrap();
+        set_session_option(&l, id, "model", "auto").unwrap();
+        set_session_option(&l, id, "effort", "high").unwrap();
+        send_slash_command(&l, id, "!ls").unwrap();
+        let typed: Vec<String> = fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Type { tty, text } if tty == "/dev/ttys010" => Some(text.clone()), _ => None }).collect();
+        assert_eq!(typed, vec!["/compact", "/model auto", "/effort high", "!ls"]);
+        // Close: /exit into Kiro, then exit into the shell once the TUI is gone.
+        let waited = Mutex::new(None);
+        close_session_with(&l, id, |pid| {
+            *waited.lock().unwrap() = Some(pid);
+            true
+        })
+        .unwrap();
+        assert_eq!(*waited.lock().unwrap(), Some(95441), "waits on the TUI's pid");
+        let typed: Vec<String> = fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Type { tty, text } if tty == "/dev/ttys010" => Some(text.clone()), _ => None }).collect();
+        assert_eq!(&typed[4..], ["/exit", "exit"]);
+    }
+
+    #[test]
     fn a_model_switch_is_checked_against_the_agents_own_list() {
         let (t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
         // A Grok session whose last turn has ended, so the card is free. Grok's
@@ -944,9 +982,19 @@ mod tests {
         let (dir, store) = store_with_session("s1", 4242);
         let t = FakeTerminal::default();
         let l = Local { store: &store, terminal: &t };
-        assert_eq!(close_session_with(&l, "s1", |_| false), Err("Claude did not exit; the terminal was left open.".into()));
+        assert_eq!(close_session_with(&l, "s1", |_| false), Err("Claude Code did not exit; the terminal was left open.".into()));
         assert_eq!(t.calls.lock().unwrap().len(), 1);
         drop(dir);
+    }
+
+    #[test]
+    fn close_gives_codex_the_second_enter_that_submits_exit() {
+        let (_t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n{TURN_COMPLETE}\n"));
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        close_session_with(&l, "c1", |_| true).unwrap();
+        let texts: Vec<_> = fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Type { text, .. } => Some(text.clone()), _ => None }).collect();
+        assert_eq!(texts, ["/exit", "", "exit"], "Codex reads /exit plus Enter as a paste; a lone Enter after a pause submits it");
     }
 
     #[test]

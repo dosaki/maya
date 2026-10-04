@@ -29,7 +29,7 @@ describe("renderFirstRun", () => {
 
   it("says when nothing is installed and falls back to Claude Code", () => {
     const el = renderFirstRun({ agents: [], chosen: "claude-code", saving: false, error: null }, handlers());
-    expect(el.textContent).toContain("Claude Code, Codex, Antigravity or Grok Build");
+    expect(el.textContent).toContain("Claude Code, Codex, Antigravity, Grok Build or Kiro CLI");
     expect(el.querySelector("button[data-action=continue]")?.textContent).toBe("Continue with Claude Code");
     expect(renderFirstRun({ agents: null, chosen: "claude-code", saving: false, error: null }, handlers()).textContent).toContain("Looking for agents");
   });

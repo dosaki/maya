@@ -97,12 +97,14 @@ describe("renderCard: the Close button", () => {
   afterEach(() => Object.defineProperty(navigator, "userAgent", { value: original, configurable: true }));
   const close = (card: Card) => renderCard(card, 0).querySelector("button[data-action=close]");
 
-  it("shows only on idle and completed Claude Code cards", () => {
+  it("shows only on idle and completed cards of an agent that takes /exit", () => {
     expect(close(base)).not.toBeNull();
     expect(close({ ...base, state: "completed" })).not.toBeNull();
     expect(close({ ...base, state: "working" })).toBeNull();
     expect(close({ ...base, state: "awaiting" })).toBeNull();
-    expect(close({ ...base, harness: "codex" })).toBeNull();
+    expect(close({ ...base, harness: "codex" })).not.toBeNull();
+    expect(close({ ...base, harness: "kiro", hasInbox: false })).not.toBeNull();
+    expect(close({ ...base, harness: "other", hasInbox: false })).toBeNull();
   });
 
   it("sits in the header's top-right corner, after the age", () => {

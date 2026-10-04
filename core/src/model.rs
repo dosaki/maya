@@ -50,8 +50,10 @@ pub fn parse_questions(input: &serde_json::Value) -> Vec<Question> {
         .unwrap_or_default()
 }
 
-/// The agent runner a session belongs to. Only Claude Code has a session
-/// source today; a new harness adds a variant here and its own reader.
+/// The agent runner a session belongs to. A new harness adds a variant here
+/// and its own reader module. `Other` is what an unknown wire name decodes
+/// to, so a board from a newer Maya still reads; it has no binary, no
+/// listing and no controls.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Harness {
@@ -59,6 +61,9 @@ pub enum Harness {
     Codex,
     Antigravity,
     Grok,
+    Kiro,
+    #[serde(other)]
+    Other,
 }
 
 /// A new session runs Claude Code unless the caller picks another agent.
@@ -128,6 +133,15 @@ pub struct Card {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kiro_and_unknown_harnesses_have_wire_names() {
+        assert_eq!(serde_json::to_string(&Harness::Kiro).unwrap(), "\"kiro\"");
+        assert_eq!(serde_json::from_str::<Harness>("\"kiro\"").unwrap(), Harness::Kiro);
+        // A harness this build has never heard of decodes to Other instead of failing the whole board.
+        assert_eq!(serde_json::from_str::<Harness>("\"future-agent\"").unwrap(), Harness::Other);
+        assert_eq!(serde_json::to_string(&Harness::Other).unwrap(), "\"other\"");
+    }
 
     #[test]
     fn parses_questions_from_tool_input_tolerantly() {

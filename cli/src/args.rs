@@ -28,7 +28,7 @@ pub enum ConfigOp {
 }
 
 pub const USAGE: &str = "usage: maya <pair|run|status|hooks|config|start|--version> …
-       maya start [--dir <dir>] [--prompt <prompt>] [--agent <claude-code|codex|antigravity|grok>] [--model <model>] [--effort <effort>] [--mode <mode>] [--name <name>]";
+       maya start [--dir <dir>] [--prompt <prompt>] [--agent <claude-code|codex|antigravity|grok|kiro>] [--model <model>] [--effort <effort>] [--mode <mode>] [--name <name>]";
 
 /// The main Maya's default port when none is given after the host.
 const DEFAULT_PORT: u16 = 4127;
@@ -130,7 +130,9 @@ fn parse_start(rest: &[String]) -> Result<Cmd, String> {
             "--mode" => options.mode = Some(take_value(rest, &mut i, "--mode")?),
             "--agent" => {
                 let v = take_value(rest, &mut i, "--agent")?;
-                options.agent = serde_json::from_value(serde_json::Value::String(v.clone())).map_err(|_| format!("{USAGE}\nunknown agent: {v} (claude-code, codex, antigravity or grok)"))?;
+                // The decode fallback for agents this build does not know is not a choice.
+                let agent = serde_json::from_value::<maya_core::model::Harness>(serde_json::Value::String(v.clone())).ok().filter(|a| *a != maya_core::model::Harness::Other);
+                options.agent = agent.ok_or_else(|| format!("{USAGE}\nunknown agent: {v} (claude-code, codex, antigravity, grok or kiro)"))?;
             }
             "--name" => options.name = Some(take_value(rest, &mut i, "--name")?),
             s => return Err(format!("{USAGE}\nunknown flag: {s}")),
@@ -212,5 +214,9 @@ mod tests {
         assert_eq!(options.agent, maya_core::model::Harness::Codex);
         assert_eq!(options.name.as_deref(), Some("Fix CI"));
         assert!(parse(&a("start --agent gpt")).unwrap_err().contains("unknown agent: gpt"));
+        let Cmd::Start { options, .. } = parse(&a("start --agent kiro --prompt go")).unwrap() else { panic!() };
+        assert_eq!(options.agent, maya_core::model::Harness::Kiro);
+        assert!(parse(&a("start --agent other")).unwrap_err().contains("unknown agent: other"), "the decode fallback is not a choice");
+        assert!(USAGE.contains("kiro"));
     }
 }

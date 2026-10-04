@@ -50,7 +50,7 @@ export function renderFirstRun(m: FirstRunModel, h: FirstRunHandlers): HTMLEleme
   if (m.agents === null) {
     body.append(el("p", "", "Looking for agents on this machine…"));
   } else if (m.agents.length === 0) {
-    body.append(el("p", "", "None of the agents Maya can use is installed: Claude Code, Codex, Antigravity or Grok Build. Install one, then pick it in Settings."));
+    body.append(el("p", "", "None of the agents Maya can use is installed: Claude Code, Codex, Antigravity, Grok Build or Kiro CLI. Install one, then pick it in Settings."));
   } else {
     body.append(el("p", "", "It interprets your voice commands, picks folders for 'Let Maya choose', and is the default for new and resumed sessions and reviews. You can change it in Settings."));
     const list = el("div", "resume__list");
