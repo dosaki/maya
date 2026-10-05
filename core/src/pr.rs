@@ -18,7 +18,7 @@ pub fn parse(stdout: &str) -> Option<PullRequest> {
 /// Asks `gh` for the PR of `dir`'s current branch. None when there is no
 /// repo, remote, PR, or `gh` itself.
 pub fn lookup(dir: &Path) -> Option<PullRequest> {
-    let out = crate::command("gh")
+    let out = crate::gh()
         .args(["pr", "view", "--json", "number,url,state,isDraft"])
         .current_dir(dir)
         .stdin(Stdio::null())

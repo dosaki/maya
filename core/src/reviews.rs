@@ -71,7 +71,7 @@ pub fn merge(a: Vec<ReviewPr>, b: Vec<ReviewPr>) -> Vec<ReviewPr> {
 }
 
 fn search(flag: &str, reason: Reason) -> Result<Vec<ReviewPr>, String> {
-    let out = crate::command("gh")
+    let out = crate::gh()
         .args(["search", "prs", flag, "--state=open", "--limit", "50", "--json", SEARCH_FIELDS])
         .stdin(Stdio::null())
         .output()
