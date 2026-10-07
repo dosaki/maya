@@ -14,6 +14,7 @@
     "version:set": "sh scripts/set-version.sh",
     "dev:mobile": "vite --config vite.mobile.config.ts",
     "build:mobile": "tsc && vite build --config vite.mobile.config.ts",
+    "mobile": "cd mobile && tauri",
     "mobile:desktop": "cd mobile && tauri dev",
     "mobile:dev": "cd mobile && tauri android dev",
     "mobile:build": "cd mobile && tauri android build --apk --target aarch64"

@@ -38,3 +38,5 @@ vendor/
 # The phone app (mobile/): generated schemas and the Vite build
 mobile/gen/schemas
 dist-mobile
+mobile/gen/android/keystore.properties
+*.jks
