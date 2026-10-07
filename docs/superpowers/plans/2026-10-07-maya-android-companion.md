@@ -3709,7 +3709,7 @@ and in `buildTypes { getByName("release") { … } }` add `signingConfig = signin
 - [ ] **Step 5: Build a debug APK and run it**
 
 ```bash
-pnpm mobile:build -- --debug
+pnpm mobile:build --debug
 ls mobile/gen/android/app/build/outputs/apk/universal/debug/
 ```
 
@@ -3884,7 +3884,7 @@ Then:
     pnpm install
     pnpm mobile:dev            # on the connected phone or the running emulator
     pnpm mobile:build          # a release APK, debug-signed without a keystore
-    pnpm mobile:build -- --debug
+    pnpm mobile:build --debug
     pnpm mobile:desktop        # the phone's app in a desktop window, for quick page work
     pnpm test                  # the page, src/mobile included
     cargo test -p maya-mobile  # the hub against a core client on localhost
