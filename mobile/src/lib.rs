@@ -114,6 +114,7 @@ pub fn run() {
             if let Err(e) = android::create_channels(&handle) {
                 log::line("android", format!("notification channels: {e}"));
             }
+            android::clear_leftovers(&handle);
             log::line("app", format!("started Maya {} for Android", env!("CARGO_PKG_VERSION")));
             // The server comes back on its own when it was running last time.
             let was_main = hub.settings.lock().unwrap().config.network.role == NetworkRole::Main;

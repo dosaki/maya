@@ -60,16 +60,28 @@ pub trait Alerts: Send + Sync {
     fn service_line(&self, line: &str);
 }
 
+/// The foreground service's notification id (`KeepAliveService.NOTIFICATION_ID`).
+pub const SERVICE_NOTIFICATION_ID: i32 = 1;
+
 /// FNV-1a over the session id, folded to a positive i32 and kept clear of
-/// 1, the service's own id. The same id across runs, so a notification left
-/// from an earlier run is replaced or cleared rather than doubled.
+/// the service's own id. The same id across runs, so a notification left
+/// from an earlier run is replaced in place rather than doubled.
 pub fn notification_id(session_id: &str) -> i32 {
     let mut h: u32 = 0x811c_9dc5;
     for b in session_id.bytes() {
         h ^= u32::from(b);
         h = h.wrapping_mul(0x0100_0193);
     }
-    ((h & 0x7fff_ffff) as i32).max(2)
+    ((h & 0x7fff_ffff) as i32).max(SERVICE_NOTIFICATION_ID + 1)
+}
+
+/// The notifications an earlier run left on screen, to clear at startup.
+/// `Posted` lives only in memory, so a decision taken or a session gone
+/// while Maya was not running would otherwise leave its notification up
+/// for good. The board shows whatever is still pending. The service's own
+/// notification is not ours to clear.
+pub fn leftovers(active: &[i32]) -> Vec<i32> {
+    active.iter().copied().filter(|&id| id != SERVICE_NOTIFICATION_ID).collect()
 }
 
 /// "hexgrid on maya-mini needs a decision" / "… is finished"; the machine is
@@ -240,6 +252,13 @@ mod tests {
         for id in ["1", "x", "session-9"] {
             assert!(notification_id(id) >= 2, "{id}");
         }
+    }
+
+    #[test]
+    fn leftovers_are_every_active_notification_but_the_services() {
+        assert_eq!(leftovers(&[1, 42, 7]), vec![42, 7]);
+        assert!(leftovers(&[SERVICE_NOTIFICATION_ID]).is_empty());
+        assert!(leftovers(&[]).is_empty());
     }
 
     #[test]

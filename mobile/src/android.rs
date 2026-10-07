@@ -117,6 +117,25 @@ mod imp {
         call::<R, ListReply>(app, "localAddresses", ()).map(|r| r.value).unwrap_or_default()
     }
 
+    /// Clears the notifications an earlier run left behind (`alerts::leftovers`).
+    pub fn clear_leftovers<R: Runtime>(app: &AppHandle<R>) {
+        let n = app.notification();
+        let active = match n.active() {
+            Ok(active) => active,
+            Err(e) => {
+                log::line("android", format!("active notifications: {e}"));
+                return;
+            }
+        };
+        let ids = crate::alerts::leftovers(&active.iter().map(|a| a.id()).collect::<Vec<_>>());
+        if ids.is_empty() {
+            return;
+        }
+        if let Err(e) = n.remove_active(ids) {
+            log::line("android", format!("clear leftover notifications: {e}"));
+        }
+    }
+
     /// The two channels the switches gate; creating an existing channel is a no-op on Android.
     pub fn create_channels<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         let n = app.notification();
@@ -191,6 +210,8 @@ mod imp {
     pub fn local_addresses<R: Runtime>(_: &AppHandle<R>) -> Vec<String> {
         vec![]
     }
+
+    pub fn clear_leftovers<R: Runtime>(_: &AppHandle<R>) {}
 
     pub fn create_channels<R: Runtime>(_: &AppHandle<R>) -> Result<(), String> {
         Ok(())
