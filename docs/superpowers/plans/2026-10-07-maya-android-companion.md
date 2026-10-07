@@ -2284,7 +2284,8 @@ describe("columns for a width", () => {
   it("gives one column on a phone upright, three or four sideways, never more than four", () => {
     expect(columnsFor(360)).toBe(1);
     expect(columnsFor(411)).toBe(1);
-    expect(columnsFor(640)).toBe(3);
+    expect(columnsFor(640)).toBe(2);
+    expect(columnsFor(700)).toBe(3);
     expect(columnsFor(800)).toBe(3);
     expect(columnsFor(915)).toBe(4);
     expect(columnsFor(1280)).toBe(4);
