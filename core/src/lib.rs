@@ -59,6 +59,20 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     cmd
 }
 
+/// A `command` for GitHub's `gh`, found the way the agents are: Maya opened
+/// from the Dock gets launchd's bare PATH, which leaves out Homebrew. Only a
+/// hit is remembered, so a `gh` installed later is still found.
+pub fn gh() -> std::process::Command {
+    static FOUND: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    if let Some(p) = FOUND.get() {
+        return command(p);
+    }
+    match launch::agent_binary("gh") {
+        Some(p) => command(FOUND.get_or_init(|| p)),
+        None => command("gh"),
+    }
+}
+
 /// Epoch milliseconds now.
 pub fn now_ms() -> u64 {
     store::now_ms()
