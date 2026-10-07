@@ -64,10 +64,13 @@ export function swapBoard(host: HTMLElement, fresh: HTMLElement): void {
     const list = col.querySelector<HTMLElement>(".column__cards");
     if (list && col.dataset.state) scroll.set(col.dataset.state, list.scrollTop);
   }
+  // The board itself scrolls sideways on a phone; that position is kept too.
+  const across = host.querySelector<HTMLElement>(".board")?.scrollLeft ?? 0;
   host.replaceChildren(fresh);
   for (const col of fresh.querySelectorAll<HTMLElement>(".column")) {
     const list = col.querySelector<HTMLElement>(".column__cards");
     const top = col.dataset.state ? scroll.get(col.dataset.state) : undefined;
     if (list && top) list.scrollTop = top;
   }
+  if (across) fresh.scrollLeft = across;
 }

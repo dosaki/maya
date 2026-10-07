@@ -11,10 +11,16 @@
     "test": "vitest run",
     "ear:build": "sh scripts/build-ear.sh",
     "ear:test": "sh scripts/test-ear.sh",
-    "version:set": "sh scripts/set-version.sh"
+    "version:set": "sh scripts/set-version.sh",
+    "dev:mobile": "vite --config vite.mobile.config.ts",
+    "build:mobile": "tsc && vite build --config vite.mobile.config.ts",
+    "mobile:desktop": "cd mobile && tauri dev",
+    "mobile:dev": "cd mobile && tauri android dev",
+    "mobile:build": "cd mobile && tauri android build --apk --target aarch64"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-notification": "^2",
     "dompurify": "^3.4.16",
     "marked": "^18.0.14"
   },

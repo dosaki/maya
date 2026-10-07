@@ -1,0 +1,40 @@
+/* The phone's layout over styles.css: one to four columns that snap
+   sideways, a strip naming them, full-screen cards and dialogs, and
+   touch-sized controls. */
+#board { --col-w: 100%; }
+.board { display: flex; grid-template-columns: none; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; gap: 12px; padding: 8px 12px 12px; scrollbar-width: none; }
+.board::-webkit-scrollbar { display: none; }
+.column { flex: 0 0 var(--col-w); scroll-snap-align: start; min-width: 0; }
+.board__hint { margin: 24px auto; padding: 0 24px; text-align: center; color: var(--muted); max-width: 360px; }
+.board__hint button { margin-top: 12px; }
+
+.strip { display: flex; gap: 4px; padding: 6px 12px 0; }
+.strip__tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 2px; background: none; border: 0; border-bottom: 3px solid var(--border); color: var(--muted); font: inherit; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.strip__tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--gold); }
+.strip__count { font-size: 13px; font-weight: 600; }
+.strip__tab--awaiting[aria-selected="true"] { border-bottom-color: var(--awaiting); }
+.strip__tab--working[aria-selected="true"] { border-bottom-color: var(--working); }
+.strip__tab--completed[aria-selected="true"] { border-bottom-color: var(--completed); }
+
+/* Cards and dialogs fill the screen; the × in the header is the way back. */
+.modal__panel, .modal__panel--compact { width: 100vw; height: 100vh; max-width: none; max-height: none; min-width: 0; min-height: 0; border: 0; border-radius: 0; }
+.modal__backdrop { display: none; }
+.modal__attach { margin-right: 6px; }
+
+.topbar { padding: 8px 12px; }
+.tabs .tab__count { display: none; }
+.card__btn, .settings button, .strip__tab, .modal__close { min-height: 40px; }
+.card { padding: 12px 14px; }
+
+#setup { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--bg); z-index: 20; }
+.setup__card { width: 100%; max-width: 420px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+.setup__card h2 { margin: 0; color: var(--gold-bright); }
+.setup__card label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+.setup__card input { font: inherit; font-size: 15px; padding: 8px 10px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
+.setup__error { color: #f87171; }
+
+.network__code { font-size: 32px; letter-spacing: .12em; font-variant-numeric: tabular-nums; color: var(--gold-bright); }
+.network__addresses { color: var(--muted); }
+.network__assistant { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.network__assistant-name { flex: 1; min-width: 0; }
+.network__assistant-meta { color: var(--muted); font-size: 12px; }
