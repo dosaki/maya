@@ -382,10 +382,24 @@ jobs:
             echo "storeFile=$RUNNER_TEMP/maya.jks"
           } > mobile/gen/android/keystore.properties
           echo "signing with the release keystore"
+      # Without the release keystore the release APK takes the debug key,
+      # which Gradle only creates on a debug build, so a fresh runner has
+      # none: make one where Gradle looks for it.
       - name: Build the APK
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
-        run: pnpm mobile:build
+        run: |
+          set -euo pipefail
+          if [ ! -f mobile/gen/android/keystore.properties ]; then
+            debug="$HOME/.config/.android/debug.keystore"
+            if [ ! -f "$debug" ]; then
+              mkdir -p "$(dirname "$debug")"
+              keytool -genkeypair -v -keystore "$debug" -storepass android -keypass android \
+                -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          fi
+          pnpm mobile:build
       - name: Package
         run: |
           set -euo pipefail
