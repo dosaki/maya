@@ -34,3 +34,7 @@ vendor/
 
 # Release files staged by CI (dist/ is the Vite build)
 /release/
+
+# The phone app (mobile/): generated schemas and the Vite build
+mobile/gen/schemas
+dist-mobile
