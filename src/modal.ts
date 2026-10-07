@@ -693,6 +693,19 @@ async function watchDrops(): Promise<void> {
 }
 let enableTimer: ReturnType<typeof setTimeout> | undefined;
 
+/** Told when the user dismisses the card (×, Escape, the backdrop); not when code closes it. */
+let onDismiss: (() => void) | null = null;
+
+export function setOnDismiss(f: (() => void) | null): void {
+  onDismiss = f;
+}
+
+function dismiss(): void {
+  if (!current) return;
+  closeModal();
+  onDismiss?.();
+}
+
 /** Share the board's question-progress tracker with the modal. */
 export function setProgress(p: Progress): void {
   progress = p;
@@ -719,7 +732,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   const fresh = renderModal(m, {
     onSend: (text) => void guardedSend(text),
     onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
-    onClose: closeModal,
+    onClose: dismiss,
     onAnswer: (q, opt, btn) => void answer(q, opt, btn),
     onSetOption: (setting, value) => void setOption(setting, value),
     onCycleMode: () => void cycleMode(),
@@ -867,7 +880,7 @@ async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): 
 export async function openModal(card: Card): Promise<void> {
   closeModal();
   const keyHandler = (e: KeyboardEvent) => {
-    if (e.key === "Escape") closeModal();
+    if (e.key === "Escape") dismiss();
   };
   current = { model: { card, turns: [], status: null, draft: "" }, keyHandler, lastRemoteFetchAt: 0 };
   attachments.clear();

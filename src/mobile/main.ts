@@ -9,7 +9,7 @@ import { renderBoard, swapBoard } from "../board";
 import { makeClickGuard } from "../clickguard";
 import { initDebug } from "../debug";
 import { setLocalMachine } from "../machines";
-import { closeModal, openModal, refreshModal, setComposerOptions, setProgress } from "../modal";
+import { closeModal, openModal, refreshModal, setComposerOptions, setOnDismiss, setProgress } from "../modal";
 import { closeNewSession, openNewSession } from "../newsession";
 import { nextEnableDelay } from "../options";
 import { makeProgress } from "../progress";
@@ -17,6 +17,7 @@ import { closeResume, openResume } from "../resume";
 import { makeTabs } from "../tabs";
 import { showToast } from "../toast";
 import type { Card, CardState } from "../types";
+import { makeCardHistory } from "./card-history";
 import { initNetwork, type NetworkStatus } from "./network";
 import { watchTaps } from "./notify-tap";
 import { initSetup } from "./setup";
@@ -40,6 +41,8 @@ let known = new Set<string>();
 let tabs: ReturnType<typeof makeTabs> | null = null;
 /** "The server is stopped." with Start, shown in place of the columns while the server is down. */
 let stopped: HTMLElement | null = null;
+const cardHistory = makeCardHistory();
+setOnDismiss(() => cardHistory.dismissed());
 
 function boardEl(): HTMLElement | null {
   return document.querySelector<HTMLElement>("#board .board");
@@ -126,7 +129,7 @@ async function run(label: string, f: () => Promise<unknown>, done?: string): Pro
 function open(card: Card): void {
   closeNewSession();
   closeResume();
-  history.pushState({ card: card.sessionId }, "");
+  cardHistory.opened(card.sessionId);
   void openModal(card);
 }
 
