@@ -169,7 +169,11 @@ function openFromTap(sessionId: string): void {
 
 async function start(): Promise<void> {
   void initDebug();
-  tabs = makeTabs();
+  // The column strip sits above the panes but belongs to the board: it goes when another pane shows.
+  tabs = makeTabs((tab) => {
+    const strip = document.getElementById("strip-host");
+    if (strip) strip.hidden = tab !== "sessions";
+  });
   const recheckNotifications = initNetwork((s) => {
     status = s;
     paint();

@@ -41,6 +41,14 @@ describe("makeTabs", () => {
     expect(makeTabs().current()).toBe("debug");
   });
 
+  it("tells its listener which tab shows, the first one included", () => {
+    const seen: string[] = [];
+    const tabs = makeTabs((tab) => seen.push(tab));
+    tabs.show("debug");
+    document.querySelector<HTMLButtonElement>("[data-tab=settings]")!.click();
+    expect(seen).toEqual(["sessions", "debug", "settings"]);
+  });
+
   it("remembers the chosen tab across restarts, but never a bad value", () => {
     makeTabs().show("reviews");
     dom();

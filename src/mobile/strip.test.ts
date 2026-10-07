@@ -59,7 +59,7 @@ describe("renderStrip", () => {
     const tabs = [...el.querySelectorAll<HTMLButtonElement>(".strip__tab")];
     expect(tabs.map((t) => t.dataset.column)).toEqual(["idle", "working", "awaiting", "completed"]);
     expect(tabs.map((t) => t.querySelector(".strip__count")!.textContent)).toEqual(["11", "3", "1", "0"]);
-    expect(tabs.map((t) => t.getAttribute("aria-selected"))).toEqual(["false", "true", "true", "false"]);
+    expect(tabs.map((t) => t.getAttribute("aria-pressed"))).toEqual(["false", "true", "true", "false"]);
     tabs[3].click();
     expect(onPick).toHaveBeenCalledWith(3);
   });

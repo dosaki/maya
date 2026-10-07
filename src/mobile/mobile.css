@@ -10,11 +10,11 @@
 
 .strip { display: flex; gap: 4px; padding: 6px 12px 0; }
 .strip__tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 2px; background: none; border: 0; border-bottom: 3px solid var(--border); color: var(--muted); font: inherit; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
-.strip__tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--gold); }
+.strip__tab[aria-pressed="true"] { color: var(--text); border-bottom-color: var(--gold); }
 .strip__count { font-size: 13px; font-weight: 600; }
-.strip__tab--awaiting[aria-selected="true"] { border-bottom-color: var(--awaiting); }
-.strip__tab--working[aria-selected="true"] { border-bottom-color: var(--working); }
-.strip__tab--completed[aria-selected="true"] { border-bottom-color: var(--completed); }
+.strip__tab--awaiting[aria-pressed="true"] { border-bottom-color: var(--awaiting); }
+.strip__tab--working[aria-pressed="true"] { border-bottom-color: var(--working); }
+.strip__tab--completed[aria-pressed="true"] { border-bottom-color: var(--completed); }
 
 /* Cards and dialogs fill the screen; the × in the header is the way back. */
 .modal__panel, .modal__panel--compact { width: 100vw; height: 100vh; max-width: none; max-height: none; min-width: 0; min-height: 0; border: 0; border-radius: 0; }

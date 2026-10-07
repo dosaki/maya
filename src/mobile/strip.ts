@@ -52,7 +52,7 @@ export function renderStrip(counts: Record<CardState, number>, visible: number[]
     b.type = "button";
     b.className = `strip__tab strip__tab--${col.state}`;
     b.dataset.column = col.state;
-    b.setAttribute("aria-selected", String(visible.includes(i)));
+    b.setAttribute("aria-pressed", String(visible.includes(i)));
     const name = document.createElement("span");
     name.className = "strip__name";
     name.textContent = col.title;
