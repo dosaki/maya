@@ -342,7 +342,7 @@ jobs:
           java-version: 21
       - uses: android-actions/setup-android@v3
         with:
-          packages: platform-tools platforms;android-37.0 build-tools;36.0.0 ndk;27.2.12479018
+          packages: platform-tools platforms;android-37.0 build-tools;36.0.0 ndk;${{ env.NDK_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
@@ -387,7 +387,7 @@ jobs:
       # none: make one where Gradle looks for it.
       - name: Build the APK
         env:
-          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
         run: |
           set -euo pipefail
           if [ ! -f mobile/gen/android/keystore.properties ]; then

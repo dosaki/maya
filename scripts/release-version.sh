@@ -3,7 +3,8 @@
 # jobs to share. Prints two lines for $GITHUB_OUTPUT:
 #   version=<the version in src-tauri/tauri.conf.json>
 #   release=true    when no release v<version> exists yet, else release=false
-# Fails when tauri.conf.json, package.json and Cargo.toml disagree.
+# Fails when src-tauri/tauri.conf.json, mobile/tauri.conf.json,
+# package.json and Cargo.toml disagree.
 # Needs node and an authenticated gh (GH_TOKEN).
 # Usage: sh scripts/release-version.sh >> "$GITHUB_OUTPUT"
 set -eu

@@ -1,5 +1,6 @@
 #!/bin/sh
-# Sets the app version in the three places that carry it, so a push to main
+# Sets the app version everywhere it is carried (package.json, both
+# tauri.conf.json files, Cargo.toml and Cargo.lock), so a push to main
 # publishes release v<version>. Usage: sh scripts/set-version.sh 0.2.0
 set -eu
 cd "$(dirname "$0")/.."

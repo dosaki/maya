@@ -36,7 +36,14 @@
 .setup__card--stopped { width: calc(100% - 24px); margin: 24px auto; box-sizing: border-box; }
 
 .network__code { font-size: 32px; letter-spacing: .12em; font-variant-numeric: tabular-nums; color: var(--gold-bright); }
-.network__addresses { color: var(--muted); }
+.network__addresses { color: var(--muted); overflow-wrap: anywhere; }
 .network__assistant { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .network__assistant-name { flex: 1; min-width: 0; }
 .network__assistant-meta { color: var(--muted); font-size: 12px; }
+
+/* The Network tab fits a 320 px screen: one column below the desktop's
+   380 px minimum, and each field's label above a full-width input. */
+.settings.pane .settings__body.network { grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); }
+.network .settings__section { min-width: 0; }
+.network .settings__section > label:not(.settings__switch) { flex-direction: column; align-items: stretch; gap: 4px; }
+.network .settings__section > label:not(.settings__switch) > input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 8px 10px; }
