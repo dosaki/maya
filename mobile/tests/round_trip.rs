@@ -154,7 +154,7 @@ fn pairs_merges_a_board_routes_a_reply_and_notifies_only_what_is_new() {
     let cards = hub.cards();
     assert_eq!(cards[0].machine.as_deref(), Some("laptop"), "merged cards carry the label");
     assert!(alerts.posts.lock().unwrap().is_empty(), "a first board after pairing is seeded, not announced");
-    wait_until("the service line", || page.service.lock().unwrap().iter().any(|l| l.contains("1 assistant")) || alerts.service.lock().unwrap().iter().any(|l| l.contains("connected")));
+    wait_until("the service line", || alerts.service.lock().unwrap().iter().any(|l| l == "Main for 1 assistant, connected"));
 
     // A reply from the phone reaches the assistant through the server.
     hub.send("s1", |s| CommandKind::Reply { session: s, text: "go ahead".into(), attachments: vec![] }).unwrap();

@@ -52,8 +52,11 @@ pub fn load_settings(maya_dir: &Path, model: &str) -> Settings {
 pub struct Hub {
     /// `<app data dir>/maya`: the config, the log and saved attachments.
     pub maya_dir: PathBuf,
-    /// Lock order: `server`, then the server's own mutex, then `settings`;
+    /// Serializes `refresh`, so a stale snapshot never overtakes a newer one.
+    /// Lock order: `refresh` first, alone (its callers hold no other lock);
+    /// then `server`, then the server's own mutex, then `settings`;
     /// `notifier` and `posted` are taken alone.
+    refresh: Mutex<()>,
     pub settings: Mutex<Settings>,
     pub server: Mutex<Option<ServerHandle>>,
     /// Why the server is not running (the port is taken…); `None` once it runs.
@@ -66,7 +69,7 @@ pub struct Hub {
 
 impl Hub {
     pub fn new(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>) -> Arc<Hub> {
-        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink })
+        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), refresh: Mutex::new(()), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink })
     }
 
     fn handle(&self) -> Option<ServerHandle> {
@@ -85,6 +88,7 @@ impl Hub {
 
     /// Repaints the page and posts or clears notifications for what changed.
     pub fn refresh(&self) {
+        let _serial = self.refresh.lock().unwrap();
         let cards = self.cards();
         let (fresh, finished) = {
             let mut n = self.notifier.lock().unwrap();
