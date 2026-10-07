@@ -7,4 +7,6 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- The page's background, var(bg) in src/styles.css: shows behind the status and gesture bars. -->
+    <color name="maya_bg">#FF0C0B09</color>
 </resources>

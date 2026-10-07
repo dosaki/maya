@@ -2,17 +2,37 @@ package com.dosaki.maya.mobile
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
-    enableEdgeToEdge()
+    // The page is dark, so the bars over it get light icons in every system theme.
+    enableEdgeToEdge(SystemBarStyle.dark(Color.TRANSPARENT), SystemBarStyle.dark(Color.TRANSPARENT))
     super.onCreate(savedInstanceState)
+    insetForSystemBars()
     requestLocalNetwork()
+  }
+
+  // Edge-to-edge lays the web view under the status bar and the gesture bar,
+  // and the web view does not inset itself for them (its safe-area insets
+  // only report a display cutout). Pad the content view by the bars and the
+  // keyboard instead, so the page always sits between them; the strips they
+  // cover show the theme's window background, the page's own colour.
+  private fun insetForSystemBars() {
+    val content = findViewById<android.view.View>(android.R.id.content)
+    ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+      val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime())
+      view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+      WindowInsetsCompat.CONSUMED
+    }
   }
 
   // Android 16 gates the local network behind a runtime permission. Without
