@@ -1,9 +1,9 @@
 name: Release
 
-# Every push to main builds Linux, Windows and macOS again, in parallel
-# and without the tests (the pull request ran them), and then, when the
-# version in src-tauri/tauri.conf.json has no release yet, publishes
-# v<version> with everything they built. A push whose version is
+# Every push to main builds Linux, Windows, macOS and Android again, in
+# parallel and without the tests (the pull request ran them), and then,
+# when the version in src-tauri/tauri.conf.json has no release yet,
+# publishes v<version> with everything they built. A push whose version is
 # already released only builds (`sh scripts/set-version.sh 0.3.0` sets the
 # version everywhere; see CLAUDE.md for when to bump it).
 on:
@@ -72,4 +72,4 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "Maya v${VERSION}" \
             --generate-notes \
-            --notes "Built from ${GITHUB_SHA} on main. macOS builds are not notarised: install with the one-line installer in the README, which clears the quarantine flag, or right-click the app and choose Open the first time. Windows installers are not signed: SmartScreen asks once, choose More info, then Run anyway."
+            --notes "Built from ${GITHUB_SHA} on main. macOS builds are not notarised: install with the one-line installer in the README, which clears the quarantine flag, or right-click the app and choose Open the first time. Windows installers are not signed: SmartScreen asks once, choose More info, then Run anyway. The Android APK is debug-signed unless the release keystore secrets are set; allow installs from your browser to install it."
