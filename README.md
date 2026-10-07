@@ -171,6 +171,11 @@ Android asks to allow installs from your browser once (the builds are not
 on the Play Store). The phone is a **main** Maya and nothing else: it runs
 no agents and shows the sessions of the assistants paired with it.
 
+Without the release keystore secrets, each release's APK is signed with a
+new key, so installing a newer one over an older one means uninstalling
+first, which forgets the pairings; setting the `ANDROID_*` secrets gives
+in-place updates.
+
 1. Open Maya and press **Start**. It asks to post notifications; allow it.
    The Network tab shows a six-digit pairing code and the phone's Wi‑Fi
    address.
