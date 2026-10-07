@@ -13,7 +13,8 @@ use maya_core::config::NetworkRole;
 use maya_core::log;
 use maya_core::model::Card;
 use maya_core::net::NetworkStatus;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// The hub's way out: events to the page, and the foreground service.
@@ -37,6 +38,22 @@ impl Sink for TauriSink {
     fn service_stop(&self) {
         android::service_stop(&self.app);
     }
+}
+
+/// How often the boards are re-merged with no new frame, so an assistant
+/// that went away greys and, after the core's five minutes, leaves the
+/// board and takes its notifications with it.
+const REFRESH_EVERY: Duration = Duration::from_secs(10);
+
+/// Re-merges the boards every `REFRESH_EVERY` for as long as the hub lives.
+fn spawn_refresh(hub: Weak<Hub>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(REFRESH_EVERY);
+        match hub.upgrade() {
+            Some(hub) => hub.refresh(),
+            None => break,
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -92,6 +109,7 @@ pub fn run() {
             let settings = hub::load_settings(&maya_dir, &android::device_model(&handle));
             let hub = Hub::new(maya_dir, settings, android::alerts(&handle), Arc::new(TauriSink { app: handle.clone() }));
             app.manage(hub.clone());
+            spawn_refresh(Arc::downgrade(&hub));
             if let Err(e) = android::create_channels(&handle) {
                 log::line("android", format!("notification channels: {e}"));
             }

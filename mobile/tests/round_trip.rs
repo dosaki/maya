@@ -202,3 +202,58 @@ fn a_taken_port_is_reported_and_starts_no_service() {
     assert!(page.service.lock().unwrap().is_empty(), "no foreground service for a server that is not running");
     assert_eq!(hub.pairing_code().unwrap_err(), err);
 }
+
+#[test]
+fn a_refresh_with_no_new_frame_drops_an_expired_assistant_and_clears_its_notification() {
+    use maya_core::net::merge::EXPIRE_MS;
+    use std::sync::atomic::AtomicU64;
+
+    let dir = tempfile::tempdir().unwrap();
+    let maya_dir = dir.path().join("maya");
+    let port = free_port();
+    let mut config = Config::default();
+    config.network.port = port;
+    config.network.name = "Pixel".into();
+    let settings = Settings { path: maya_dir.join("config.json"), config };
+    let alerts = Arc::new(Recording::default());
+    let page = Arc::new(Page::default());
+    // The hub's clock runs `ahead` of the real one, which the server stamps boards with.
+    let ahead = Arc::new(AtomicU64::new(0));
+    let clock = {
+        let ahead = ahead.clone();
+        move || maya_core::store::now_ms() + ahead.load(Ordering::SeqCst)
+    };
+    let hub = Hub::with_clock(maya_dir, settings, alerts.clone(), page.clone(), clock);
+
+    hub.start_server().unwrap();
+    let code = hub.pairing_code().unwrap().code.expect("a pairing code").code;
+    let assistant = Arc::new(FakeAssistant { cards: Mutex::new(vec![card("s1", State::Working, 1_000)]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) });
+    let (_, id, token) = pair_with(assistant.clone(), "127.0.0.1", port, "laptop", &code).unwrap();
+    let link = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), assistant_id: id, token, ..Default::default() };
+    let stop = Arc::new(AtomicBool::new(false));
+    let client = {
+        let (assistant, stop) = (assistant.clone(), stop.clone());
+        std::thread::spawn(move || run_once(&link, assistant, Arc::new(Quiet), &stop, None))
+    };
+    wait_until("the first board", || hub.cards().iter().any(|c| c.session_id == "s1"));
+    *assistant.cards.lock().unwrap() = vec![card("s1", State::Awaiting, 2_000)];
+    assistant.due.store(true, Ordering::SeqCst);
+    wait_until("the decision notification", || !alerts.posts.lock().unwrap().is_empty());
+    let posted = alerts.posts.lock().unwrap()[0].id;
+
+    // The assistant goes away: its card stays, greyed, and so does the notification.
+    stop.store(true, Ordering::SeqCst);
+    let _ = client.join();
+    wait_until("the disconnect", || hub.status().assistants.iter().all(|a| !a.connected));
+    hub.refresh();
+    assert!(hub.cards().iter().any(|c| c.session_id == "s1" && c.stale), "a disconnected board shows greyed until it expires");
+    assert!(alerts.cleared.lock().unwrap().is_empty());
+
+    // Five minutes on, a refresh with no new frame drops the board and clears the notification.
+    ahead.store(EXPIRE_MS + 1_000, Ordering::SeqCst);
+    hub.refresh();
+    assert!(hub.cards().is_empty());
+    assert!(page.boards.lock().unwrap().last().unwrap().is_empty(), "the page is told the board emptied");
+    assert_eq!(alerts.cleared.lock().unwrap().as_slice(), [posted]);
+    hub.stop_server();
+}

@@ -65,11 +65,19 @@ pub struct Hub {
     pub posted: Mutex<Posted>,
     pub alerts: Arc<dyn Alerts>,
     pub sink: Arc<dyn Sink>,
+    /// The time boards are merged and routed at: the real clock, or a
+    /// test's, so expiry can be checked without waiting five minutes.
+    now: Box<dyn Fn() -> u64 + Send + Sync>,
 }
 
 impl Hub {
     pub fn new(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>) -> Arc<Hub> {
-        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), refresh: Mutex::new(()), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink })
+        Hub::with_clock(maya_dir, settings, alerts, sink, now_ms)
+    }
+
+    /// `new` with the clock boards are merged at.
+    pub fn with_clock(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>, now: impl Fn() -> u64 + Send + Sync + 'static) -> Arc<Hub> {
+        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), refresh: Mutex::new(()), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now) })
     }
 
     fn handle(&self) -> Option<ServerHandle> {
@@ -83,10 +91,12 @@ impl Hub {
 
     /// The board: every connected assistant's cards, no local ones.
     pub fn cards(&self) -> Vec<Card> {
-        merge::merged(vec![], &self.boards(), now_ms())
+        merge::merged(vec![], &self.boards(), (self.now)())
     }
 
     /// Repaints the page and posts or clears notifications for what changed.
+    /// Runs on every new board and on a timer, so a board that went quiet
+    /// greys and then drops (with its notifications) without a new frame.
     pub fn refresh(&self) {
         let _serial = self.refresh.lock().unwrap();
         let cards = self.cards();
@@ -210,7 +220,7 @@ impl Hub {
     /// Sends a session command to the machine that lists the session. There
     /// are no local sessions: a session nobody lists is no longer running.
     pub fn send(&self, session_id: &str, kind: impl FnOnce(String) -> CommandKind) -> Result<Option<Value>, String> {
-        let machine = merge::route(&[], &self.boards(), session_id, now_ms()).ok_or("Session is no longer running.")?;
+        let machine = merge::route(&[], &self.boards(), session_id, (self.now)()).ok_or("Session is no longer running.")?;
         self.send_to(&machine, kind(session_id.to_string()))
     }
 
