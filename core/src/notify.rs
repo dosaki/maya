@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Mutex, OnceLock};
 

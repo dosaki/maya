@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use std::io::Write;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 use std::os::unix::io::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
