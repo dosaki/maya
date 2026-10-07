@@ -12,6 +12,13 @@ import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
 import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, remoteTitle, type Card, type Turn } from "./types";
 import { sendShortcut } from "./platform";
 
+/** Composer features the page turns on: the phone has a picker instead of drag-and-drop. */
+const composer = { attachButton: false };
+
+export function setComposerOptions(o: Partial<typeof composer>): void {
+  Object.assign(composer, o);
+}
+
 export interface ModalModel {
   card: Card;
   turns: Turn[];
@@ -560,7 +567,24 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     send.type = "button";
     send.dataset.action = "send";
     send.addEventListener("click", trySend);
-    form.append(ta, send);
+    if (composer.attachButton) {
+      const pick = el("input", "modal__file");
+      pick.type = "file";
+      pick.multiple = true;
+      pick.hidden = true;
+      pick.addEventListener("change", () => {
+        const files = [...(pick.files ?? [])].map((file) => ({ name: file.name, file }));
+        if (files.length > 0) h.onPasteFiles?.(files);
+        pick.value = "";
+      });
+      const attach = el("button", "card__btn modal__attach", "Attach");
+      attach.type = "button";
+      attach.dataset.action = "attach";
+      attach.addEventListener("click", () => pick.click());
+      form.append(ta, pick, attach, send);
+    } else {
+      form.append(ta, send);
+    }
     panel.append(form);
   } else {
     panel.append(el("div", "modal__noinbox", "This session has no inbox. Use the terminal."));

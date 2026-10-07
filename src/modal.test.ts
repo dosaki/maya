@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal } from "./modal";
+import { PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, setComposerOptions } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
 const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCommand: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn() });
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCommand: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn(), onPasteFiles: vi.fn() });
 
 describe("historyRefetchDue", () => {
   it("always refetches a local card, and a remote one only when its state, state time or snippet moved", () => {
@@ -521,5 +521,28 @@ describe("renderModal", () => {
     el.querySelector<HTMLElement>(".modal__backdrop")!.click();
     el.querySelector<HTMLButtonElement>("button[data-action=close]")!.click();
     expect(h.onClose).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("the Attach button", () => {
+  it("is absent by default and, when on, hands picked files to onPasteFiles", () => {
+    const h = handlers();
+    const model = { card: base, turns: [], status: null, draft: "" };
+    expect(renderModal(model, h).querySelector("button[data-action=attach]")).toBeNull();
+    setComposerOptions({ attachButton: true });
+    try {
+      const el = renderModal(model, h);
+      const attach = el.querySelector<HTMLButtonElement>("button[data-action=attach]")!;
+      const pick = el.querySelector<HTMLInputElement>("input[type=file]")!;
+      expect(pick.multiple).toBe(true);
+      expect(pick.hidden).toBe(true);
+      const file = new File(["hi"], "note.txt", { type: "text/plain" });
+      Object.defineProperty(pick, "files", { value: [file] });
+      pick.dispatchEvent(new Event("change"));
+      expect(h.onPasteFiles).toHaveBeenCalledWith([{ name: "note.txt", file }]);
+      expect(attach.textContent).toBe("Attach");
+    } finally {
+      setComposerOptions({ attachButton: false });
+    }
   });
 });
