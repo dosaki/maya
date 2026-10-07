@@ -11,6 +11,9 @@ pub const HOOK_MARKER: &str = ".claude/maya/maya-hook";
 /// no jq, so the hook there is Maya's own `maya-hook.exe`.
 #[cfg(windows)]
 pub const HOOK_MARKER: &str = ".claude/maya/maya-hook.exe";
+/// The phone app installs no hook; the marker only lets the crate build.
+#[cfg(target_os = "android")]
+pub const HOOK_MARKER: &str = ".claude/maya/maya-hook";
 /// Where `install_script_to` puts the jq hook script: the hook on macOS,
 /// and the headless CLI's on Linux, whose single binary has no `maya-hook`
 /// beside it.

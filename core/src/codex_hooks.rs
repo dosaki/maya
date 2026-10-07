@@ -131,6 +131,11 @@ pub fn install_to(dir: &Path) -> Result<bool, String> {
         write(dir, &install(value, &command)?)?;
         status(dir)
     }
+    #[cfg(target_os = "android")]
+    {
+        let _ = dir;
+        Err("Codex hooks are not installed from the phone".into())
+    }
 }
 
 /// The installed copy of the hook binary, named so the command carries `MARKER`.
