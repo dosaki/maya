@@ -70,6 +70,8 @@ export function initSetup(): void {
     host.replaceChildren(renderSetup(model, { onStart: (name, port) => void start(name, port) }));
   };
   const start = async (name: string, port: number) => {
+    model.name = name;
+    model.port = port;
     model.busy = true;
     model.error = null;
     host.replaceChildren(renderSetup(model, { onStart: () => undefined }));

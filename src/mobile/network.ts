@@ -148,6 +148,38 @@ interface ConfigView {
   notifyOnCompleted: boolean;
 }
 
+/** Carry forward name/port edits across repaints. Returns typed values that differ from the model. */
+export function carryEdits(pane: ParentNode, model: { name: string; port: number }): { name?: string; port?: string; focus?: "name" | "port" } {
+  const nameInput = pane.querySelector<HTMLInputElement>("input[name=name]");
+  const portInput = pane.querySelector<HTMLInputElement>("input[name=port]");
+  const edits: { name?: string; port?: string; focus?: "name" | "port" } = {};
+  if (nameInput && nameInput.value !== model.name) edits.name = nameInput.value;
+  if (portInput && portInput.value !== String(model.port)) edits.port = portInput.value;
+  const doc = pane.ownerDocument;
+  if (doc && nameInput && doc.activeElement === nameInput) edits.focus = "name";
+  else if (doc && portInput && doc.activeElement === portInput) edits.focus = "port";
+  return edits;
+}
+
+/** Restore carried edits into the pane after a repaint. */
+export function restoreEdits(pane: ParentNode, edits: ReturnType<typeof carryEdits>): void {
+  if (edits.name !== undefined) {
+    const nameInput = pane.querySelector<HTMLInputElement>("input[name=name]");
+    if (nameInput) nameInput.value = edits.name;
+  }
+  if (edits.port !== undefined) {
+    const portInput = pane.querySelector<HTMLInputElement>("input[name=port]");
+    if (portInput) portInput.value = edits.port;
+  }
+  if (edits.focus === "name") {
+    const nameInput = pane.querySelector<HTMLInputElement>("input[name=name]");
+    if (nameInput) nameInput.focus();
+  } else if (edits.focus === "port") {
+    const portInput = pane.querySelector<HTMLInputElement>("input[name=port]");
+    if (portInput) portInput.focus();
+  }
+}
+
 /** Mounts the tab into `#settings`, keeps it current, and reports every status to `onStatus`. */
 export function initNetwork(onStatus: (s: NetworkStatus) => void): void {
   const pane = document.getElementById("settings");
@@ -164,7 +196,11 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): void {
     busy: false,
     error: null,
   };
-  const paint = () => pane.replaceChildren(renderNetwork(model, handlers));
+  const paint = () => {
+    const edits = carryEdits(pane, model);
+    pane.replaceChildren(renderNetwork(model, handlers));
+    restoreEdits(pane, edits);
+  };
   const setStatus = (s: NetworkStatus) => {
     model.status = s;
     onStatus(s);

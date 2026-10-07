@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderNetwork, type NetworkModel, type NetworkStatus } from "./network";
+import { carryEdits, renderNetwork, restoreEdits, type NetworkModel, type NetworkStatus } from "./network";
 
 const NOW = Date.parse("2026-10-07T10:00:00Z");
 const running: NetworkStatus = {
@@ -75,5 +75,43 @@ describe("renderNetwork", () => {
     const el = renderNetwork(base, handlers(), NOW + 10 * 60_000);
     expect(el.querySelector(".network__code")).toBeNull();
     expect(el.querySelector<HTMLButtonElement>("button[data-action=regenerate-code]")!.textContent).toBe("Show pairing code");
+  });
+});
+
+describe("carryEdits and restoreEdits", () => {
+  it("carries typed name when it differs from the model", () => {
+    const el = renderNetwork(base, handlers(), NOW);
+    const nameInput = el.querySelector<HTMLInputElement>("input[name=name]")!;
+    nameInput.value = "Fold";
+    const edits = carryEdits(el, base);
+    expect(edits.name).toBe("Fold");
+    expect(edits.port).toBeUndefined();
+  });
+
+  it("carries typed port when it differs from the model", () => {
+    const el = renderNetwork(base, handlers(), NOW);
+    const portInput = el.querySelector<HTMLInputElement>("input[name=port]")!;
+    portInput.value = "5000";
+    const edits = carryEdits(el, base);
+    expect(edits.port).toBe("5000");
+    expect(edits.name).toBeUndefined();
+  });
+
+  it("carries nothing when inputs match the model", () => {
+    const el = renderNetwork(base, handlers(), NOW);
+    const edits = carryEdits(el, base);
+    expect(edits.name).toBeUndefined();
+    expect(edits.port).toBeUndefined();
+  });
+
+  it("restores typed values into fresh inputs", () => {
+    const el1 = renderNetwork(base, handlers(), NOW);
+    const nameInput = el1.querySelector<HTMLInputElement>("input[name=name]")!;
+    nameInput.value = "Fold";
+    const edits = carryEdits(el1, base);
+    const el2 = renderNetwork(base, handlers(), NOW);
+    restoreEdits(el2, edits);
+    const restored = el2.querySelector<HTMLInputElement>("input[name=name]")!;
+    expect(restored.value).toBe("Fold");
   });
 });
