@@ -250,7 +250,7 @@ or later (CI uses 21), and the Android SDK command-line tools (`brew
 install --cask android-commandlinetools`, or Android Studio's SDK Manager)
 with:
 
-    sdkmanager "platform-tools" "platforms;android-37" "build-tools;36.0.0" "ndk;27.2.12479018"
+    sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;36.0.0" "ndk;27.2.12479018"
     rustup target add aarch64-linux-android x86_64-linux-android
     export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools   # or ~/Library/Android/sdk
     export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
