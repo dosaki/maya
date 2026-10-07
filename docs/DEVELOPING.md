@@ -284,9 +284,11 @@ What is where:
   posts and clears; **`mobile/src/android.rs`** is the `keepalive` plugin
   bridge and the Android notifications, with host no-ops.
 - **`mobile/gen/android/`** is the generated project, committed, plus
-  `KeepAliveService.kt` (the foreground service) and `KeepAlivePlugin.kt`.
+  `KeepAliveService.kt` (the foreground service), `KeepAlivePlugin.kt`,
+  `MainActivity.kt`'s `onNewIntent` (it keeps the tapped notification's
+  intent) and `res/drawable/ic_stat_maya.xml` (the status-bar icon).
   Everything else in it is Tauri's; regenerate with `pnpm mobile android
-  init` only if you must, then restore those two files, the manifest's
+  init` only if you must, then restore those four files, the manifest's
   permissions and service, and `build.gradle.kts`'s signing block. (Run
   the Tauri CLI through `pnpm mobile …` from the repository root; `pnpm
   exec tauri` does not work from inside `mobile/`.)
