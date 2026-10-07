@@ -124,13 +124,17 @@ mod imp {
         n.create_channel(Channel::builder(crate::alerts::Kind::Finished.channel_id(), "Finished").description("A session finished its turn").importance(Importance::Default).build()).map_err(|e| e.to_string())
     }
 
+    /// `res/drawable/ic_stat_maya.xml`: a white glyph, since Android draws
+    /// status-bar icons as alpha masks and the launcher icon shows as a blob.
+    const STATUS_ICON: &str = "ic_stat_maya";
+
     struct AndroidAlerts<R: Runtime> {
         app: AppHandle<R>,
     }
 
     impl<R: Runtime> Alerts for AndroidAlerts<R> {
         fn post(&self, p: &Post) {
-            let shown = self.app.notification().builder().id(p.id).channel_id(p.kind.channel_id()).title(&p.title).body(&p.body).extra("sessionId", &p.session_id).auto_cancel().show();
+            let shown = self.app.notification().builder().id(p.id).channel_id(p.kind.channel_id()).icon(STATUS_ICON).title(&p.title).body(&p.body).extra("sessionId", &p.session_id).auto_cancel().show();
             if let Err(e) = shown {
                 log::line("android", format!("notification: {e}"));
             }

@@ -95,7 +95,7 @@ class KeepAliveService : Service() {
             val launch = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
             val open = PendingIntent.getActivity(ctx, 0, launch, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             return NotificationCompat.Builder(ctx, CHANNEL)
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.drawable.ic_stat_maya)
                 .setContentTitle("Maya")
                 .setContentText(line)
                 .setOngoing(true)
