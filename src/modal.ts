@@ -658,11 +658,28 @@ let progress: Progress | null = null;
 const attachments = makeAttachments();
 let unlistenDrop: (() => void) | null = null;
 
+/** The backend's cap on one attachment (`maya_core::attachments::MAX_BYTES`). */
+export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+/**
+ * The backend's error for a file over the cap, or null. Checked before the
+ * file is read: reading it into a number array costs several times its size,
+ * enough to take the web view down before the backend could refuse it.
+ */
+export function attachmentTooLarge(size: number): string | null {
+  return size > MAX_ATTACHMENT_BYTES ? "The file is too large (over 20 MB)." : null;
+}
+
 /** Saves pasted files through the backend and attaches the saved paths. */
 async function attachPasted(files: { name: string; file: File }[]): Promise<void> {
   if (!current) return;
   const me = current;
   for (const { name, file } of files) {
+    const tooLarge = attachmentTooLarge(file.size);
+    if (tooLarge) {
+      if (current === me) setStatus(false, tooLarge);
+      return;
+    }
     try {
       const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
       const path = await invoke<string>("save_attachment", { name, bytes });

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, setComposerOptions } from "./modal";
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, setComposerOptions } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -521,6 +521,14 @@ describe("renderModal", () => {
     el.querySelector<HTMLElement>(".modal__backdrop")!.click();
     el.querySelector<HTMLButtonElement>("button[data-action=close]")!.click();
     expect(h.onClose).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("an attachment's size", () => {
+  it("is refused over the backend's 20 MB cap before the file is read, with the backend's own words", () => {
+    expect(attachmentTooLarge(0)).toBeNull();
+    expect(attachmentTooLarge(MAX_ATTACHMENT_BYTES)).toBeNull();
+    expect(attachmentTooLarge(MAX_ATTACHMENT_BYTES + 1)).toBe("The file is too large (over 20 MB).");
   });
 });
 
