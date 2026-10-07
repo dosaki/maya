@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { showToast } from "./toast";
-import { sendShortcut, thisComputer } from "./platform";
+import { sendShortcut } from "./platform";
+import { hasLocalMachine, initialChoices, machineChoices, type MachineChoice, type MachineInfo } from "./machines";
 import { harnessLabel } from "./harness";
 import { brainAgent, defaultAgent } from "./brain";
 import type { Harness } from "./types";
@@ -79,11 +80,7 @@ export function renderChoice(name: string, label: string, choices: [string, stri
   return field;
 }
 
-/** A machine choice for the picker: "This Mac" first, then each connected assistant. */
-export interface MachineChoice {
-  name: string;
-  value: string;
-}
+export type { MachineChoice } from "./machines";
 
 export interface NewSessionModel {
   dirs: string[];
@@ -93,6 +90,8 @@ export interface NewSessionModel {
   status: { ok: boolean; text: string } | null;
   busy: boolean;
   needsSetup: boolean;
+  /** No assistant is connected and this machine runs no sessions: the form gives way to "Pair an assistant first." */
+  noMachines?: boolean;
   /** Set once a start succeeded: the prompt is spent and must not come back as a draft. */
   done?: boolean;
   /** "This Mac" first, then each connected assistant. */
@@ -131,6 +130,17 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   n.className = className;
   if (text !== undefined) n.textContent = text;
   return n;
+}
+
+function renderNoMachines(h: { onOpenSettings(): void }): HTMLElement {
+  const setup = el("div", "modal__setup");
+  setup.append(el("p", "", "Pair an assistant first."));
+  const open = el("button", "card__btn card__btn--primary", "Open Network");
+  open.type = "button";
+  open.dataset.action = "open-settings";
+  open.addEventListener("click", () => h.onOpenSettings());
+  setup.append(open);
+  return setup;
 }
 
 /**
@@ -175,7 +185,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   const form = el("div", "newsession");
 
   // The picker comes first, so a machine without folders can still be left for another.
-  if (m.machines.length > 1) {
+  if (m.machines.length > 1 || (!hasLocalMachine() && m.machines.length > 0)) {
     const machineLabel = el("label", "newsession__field");
     machineLabel.append(el("span", "newsession__label", "Machine"));
     const machineSelect = el("select", "newsession__select");
@@ -190,6 +200,12 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
     machineSelect.addEventListener("change", () => h.onMachine(machineSelect.value));
     machineLabel.append(machineSelect);
     form.append(machineLabel);
+  }
+
+  if (m.noMachines) {
+    panel.append(renderNoMachines(h));
+    root.append(backdrop, panel);
+    return root;
   }
 
   if (m.needsSetup) {
@@ -526,7 +542,7 @@ export async function openNewSession(): Promise<void> {
       status: null,
       busy: false,
       needsSetup: false,
-      machines: [{ name: thisComputer(), value: "" }],
+      machines: initialChoices(),
       machine: "",
       // Claude Code until this Mac's listing arrives; `loadAgents` brings back the last agent.
       agents: [CLAUDE_AGENT],
@@ -539,15 +555,27 @@ export async function openNewSession(): Promise<void> {
   };
   document.addEventListener("keydown", keyHandler);
   paint();
-  void invoke<{ name: string; hostname: string; platform: string; connected: boolean }[]>("list_machines")
-    .then((machines) => {
+  const listing = invoke<MachineInfo[]>("list_machines").catch(() => [] as MachineInfo[]);
+  if (hasLocalMachine()) {
+    void listing.then((machines) => {
       if (!current) return;
-      current.model.machines = [{ name: thisComputer(), value: "" }, ...machines.filter((m) => m.connected).map((m) => ({ name: m.name, value: m.name }))];
+      current.model.machines = machineChoices(machines);
       paint();
-    })
-    .catch(() => undefined);
-  void loadAgents("");
-  await loadDirs("");
+    });
+    void loadAgents("");
+    await loadDirs("");
+    return;
+  }
+  // No sessions here: the first connected assistant is the machine, or there is nothing to start.
+  const machines = machineChoices(await listing);
+  if (!current) return;
+  current.model.machines = machines;
+  if (machines.length === 0) {
+    current.model.noMachines = true;
+    paint();
+    return;
+  }
+  await chooseMachine(machines[0].value);
 }
 
 export function closeNewSession(): void {

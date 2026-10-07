@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
+import { setLocalMachine } from "./machines";
 import { CLAUDE_AGENT, closeNewSession, openNewSession } from "./newsession";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -288,5 +289,44 @@ describe("new-session machine picker", () => {
     expect(setup.textContent).toContain("Set a projects directory in Settings on laptop");
     expect(setup.querySelector("button[data-action=open-settings]")).toBeNull();
     expect(document.querySelector("select[name=machine]")).not.toBeNull();
+  });
+
+  it("without a local machine opens on the first connected assistant and never asks this machine", async () => {
+    setLocalMachine(false);
+    try {
+      invoke.mockImplementation((cmd: string, args?: { machine?: string }) => {
+        if (cmd === "list_machines") return Promise.resolve([{ name: "mini", hostname: "mini", platform: "linux", connected: false }, { name: "laptop", hostname: "laptop", platform: "macos", connected: true }]);
+        if (cmd === "list_project_dirs") return args?.machine === "laptop" ? Promise.resolve(["hexgrid"]) : Promise.reject(new Error("asked " + args?.machine));
+        if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true });
+        if (cmd === "get_config") return Promise.resolve({});
+        return Promise.reject(new Error("unexpected " + cmd));
+      });
+      await openNewSession();
+      await flush();
+      await flush();
+      expect(invoke).not.toHaveBeenCalledWith("list_project_dirs", { machine: "" });
+      expect(invoke).toHaveBeenCalledWith("list_project_dirs", { machine: "laptop" });
+      expect(document.querySelector<HTMLSelectElement>("select[name=machine]")!.value).toBe("laptop");
+      expect([...document.querySelectorAll<HTMLOptionElement>("select[name=dir] option")].map((o) => o.textContent)).toContain("hexgrid");
+    } finally {
+      setLocalMachine(true);
+    }
+  });
+
+  it("without any connected assistant asks to pair one", async () => {
+    setLocalMachine(false);
+    try {
+      invoke.mockImplementation((cmd: string) => {
+        if (cmd === "list_machines") return Promise.resolve([]);
+        if (cmd === "get_config") return Promise.resolve({});
+        return Promise.reject(new Error("unexpected " + cmd));
+      });
+      await openNewSession();
+      await flush();
+      expect(document.getElementById("modal-host")!.textContent).toContain("Pair an assistant first.");
+      expect(invoke).not.toHaveBeenCalledWith("list_project_dirs", expect.anything());
+    } finally {
+      setLocalMachine(true);
+    }
   });
 });
