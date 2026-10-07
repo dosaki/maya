@@ -26,12 +26,14 @@
 .card__btn, .settings button, .strip__tab, .modal__close { min-height: 40px; }
 .card { padding: 12px 14px; }
 
+/* The first run's overlay; a stopped server's card sits on the board instead, under live tabs. */
 #setup { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--bg); z-index: 20; }
 .setup__card { width: 100%; max-width: 420px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
 .setup__card h2 { margin: 0; color: var(--gold-bright); }
 .setup__card label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
 .setup__card input { font: inherit; font-size: 15px; padding: 8px 10px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
 .setup__error { color: #f87171; }
+.setup__card--stopped { width: calc(100% - 24px); margin: 24px auto; box-sizing: border-box; }
 
 .network__code { font-size: 32px; letter-spacing: .12em; font-variant-numeric: tabular-nums; color: var(--gold-bright); }
 .network__addresses { color: var(--muted); }

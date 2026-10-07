@@ -180,10 +180,14 @@ export function restoreEdits(pane: ParentNode, edits: ReturnType<typeof carryEdi
   }
 }
 
-/** Mounts the tab into `#settings`, keeps it current, and reports every status to `onStatus`. */
-export function initNetwork(onStatus: (s: NetworkStatus) => void): void {
+/**
+ * Mounts the tab into `#settings`, keeps it current, and reports every
+ * status to `onStatus`. Returns a recheck of Android's notification
+ * permission, for after something asked for it.
+ */
+export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
   const pane = document.getElementById("settings");
-  if (!pane) return;
+  if (!pane) return () => undefined;
   let config: ConfigView | null = null;
   const model: NetworkModel = {
     status: { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, mainError: null },
@@ -196,10 +200,25 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): void {
     busy: false,
     error: null,
   };
-  const paint = () => {
+  const render = () => {
     const edits = carryEdits(pane, model);
     pane.replaceChildren(renderNetwork(model, handlers));
     restoreEdits(pane, edits);
+  };
+  // The permission changes behind the page (the first run's prompt, Android's
+  // settings), so every repaint reads it again and repaints if it moved.
+  const recheck = () => {
+    void invoke<boolean>("notifications_allowed")
+      .catch(() => true)
+      .then((allowed) => {
+        if (allowed === model.notificationsAllowed) return;
+        model.notificationsAllowed = allowed;
+        render();
+      });
+  };
+  const paint = () => {
+    render();
+    recheck();
   };
   const setStatus = (s: NetworkStatus) => {
     model.status = s;
@@ -253,7 +272,6 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): void {
     model.notifyAwaiting = config.notifyOnAwaiting;
     model.notifyCompleted = config.notifyOnCompleted;
     model.addresses = await invoke<string[]>("local_addresses").catch(() => []);
-    model.notificationsAllowed = await invoke<boolean>("notifications_allowed").catch(() => true);
     setStatus(await invoke<NetworkStatus>("network_status"));
   })();
   // The code's countdown and the addresses move without an event.
@@ -261,4 +279,5 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): void {
     void invoke<string[]>("local_addresses").then((a) => { model.addresses = a; }).catch(() => undefined);
     if (!pane.hidden) paint();
   }, 30_000);
+  return recheck;
 }

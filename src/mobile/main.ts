@@ -38,6 +38,8 @@ let retry: ReturnType<typeof setTimeout> | undefined;
 let enableTimer: ReturnType<typeof setTimeout> | undefined;
 let known = new Set<string>();
 let tabs: ReturnType<typeof makeTabs> | null = null;
+/** "The server is stopped." with Start, shown in place of the columns while the server is down. */
+let stopped: HTMLElement | null = null;
 
 function boardEl(): HTMLElement | null {
   return document.querySelector<HTMLElement>("#board .board");
@@ -92,6 +94,11 @@ function paint(): void {
   }
   const host = document.getElementById("board");
   if (!host) return;
+  if (stopped) {
+    if (host.firstElementChild !== stopped) host.replaceChildren(stopped);
+    paintStrip();
+    return;
+  }
   swapBoard(host, renderBoard(cards, Date.now(), (c) => progress.next(c)));
   paintHint(host);
   guard.markPaint(Date.now(), { movedUnderPointer: false });
@@ -160,11 +167,17 @@ function openFromTap(sessionId: string): void {
 async function start(): Promise<void> {
   void initDebug();
   tabs = makeTabs();
-  initNetwork((s) => {
+  const recheckNotifications = initNetwork((s) => {
     status = s;
     paint();
   });
-  initSetup();
+  initSetup({
+    onStopped: (view) => {
+      stopped = view;
+      paint();
+    },
+    onPermissionAsked: recheckNotifications,
+  });
   layout();
   window.addEventListener("resize", layout);
   // Android's back button pops the history entry a card pushed: close the card.

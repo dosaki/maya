@@ -1,5 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
-import { carryEdits, renderNetwork, restoreEdits, type NetworkModel, type NetworkStatus } from "./network";
+
+const tauri = vi.hoisted(() => ({
+  replies: {} as Record<string, unknown>,
+  listeners: {} as Record<string, (e: { payload: unknown }) => void>,
+}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async (cmd: string) => tauri.replies[cmd]) }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (name: string, f: (e: { payload: unknown }) => void) => {
+    tauri.listeners[name] = f;
+    return () => undefined;
+  }),
+}));
+
+import { carryEdits, initNetwork, renderNetwork, restoreEdits, type NetworkModel, type NetworkStatus } from "./network";
 
 const NOW = Date.parse("2026-10-07T10:00:00Z");
 const running: NetworkStatus = {
@@ -113,5 +126,30 @@ describe("carryEdits and restoreEdits", () => {
     restoreEdits(el2, edits);
     const restored = el2.querySelector<HTMLInputElement>("input[name=name]")!;
     expect(restored.value).toBe("Fold");
+  });
+});
+
+describe("initNetwork", () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it("reads Android's notification permission again on every repaint and after a recheck", async () => {
+    document.body.innerHTML = '<div id="settings"></div>';
+    tauri.replies = { get_config: { network: { name: "Pixel 8", port: 4127 }, notifyOnAwaiting: true, notifyOnCompleted: true }, local_addresses: [], network_status: running, notifications_allowed: false };
+    const recheck = initNetwork(() => undefined);
+    await settle();
+    const pane = document.getElementById("settings")!;
+    expect(pane.textContent).toContain("Notifications are off for Maya in Android settings.");
+
+    // Allowed in the permission prompt: the next repaint drops the line.
+    tauri.replies.notifications_allowed = true;
+    tauri.listeners.network({ payload: running });
+    await settle();
+    expect(pane.textContent).not.toContain("Notifications are off");
+
+    // Turned off in Android's settings: a recheck brings it back.
+    tauri.replies.notifications_allowed = false;
+    recheck();
+    await settle();
+    expect(pane.textContent).toContain("Notifications are off for Maya in Android settings.");
   });
 });
