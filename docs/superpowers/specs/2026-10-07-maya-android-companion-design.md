@@ -1,7 +1,7 @@
 # Maya for Android: a main Maya in your pocket — design
 
 Date: 2026-10-07
-Status: draft for review
+Status: implemented
 Builds on: `2026-09-30-maya-remote-assistants-design.md`,
 `2026-09-30-maya-cli-design.md`
 
@@ -211,15 +211,22 @@ gets the desktop's hint, "Set a projects directory in Settings on
 
 Workspace member, package `maya-mobile`, Tauri identifier
 `com.dosaki.maya.mobile`. Depends on `maya_core`, `tauri`,
-`tauri-plugin-notification`, `tauri-plugin-dialog` (the file picker),
-`tauri-plugin-opener` (links and PRs), `serde`, `serde_json`.
+`tauri-plugin-notification`, `tauri-plugin-opener` (links and PRs),
+`serde`, `serde_json`. There is no dialog plugin: the file picker is the
+WebView's own `<input type="file">` behind the modal's Attach button.
 
-- `mobile/src/lib.rs` — the Tauri entry: `AppState` (the `Config` and its
-  path, the `ServerHandle`, the `Notifier`, the merged cards), the
-  `Notify` adapter (`board_changed` merges, diffs, emits `sessions`, posts
-  and cancels notifications, and updates the service's notification;
-  `board_seeded` seeds; `status_changed` emits `network`; `paired` and
-  `paired_list_changed` save the config), start and stop of the server.
+- `mobile/src/lib.rs` — the Tauri entry: it builds the hub with the
+  Tauri event sink and the Android alerts, and registers the commands.
+- `mobile/src/hub.rs` — the app with the page and Android behind two
+  traits, `Sink` (the events the page hears) and `Alerts` (the
+  notifications and the service's line): the config and its path, the
+  server handle, the merged cards, the notifier diff and the alert state,
+  and the `Notify` adapter (`board_changed` merges, diffs, emits
+  `sessions`, posts and cancels notifications, and updates the service's
+  notification; `board_seeded` seeds; `status_changed` emits `network`;
+  `paired` and `paired_list_changed` save the config), start and stop of
+  the server. `mobile/tests/round_trip.rs` drives it against a real core
+  client on localhost.
 - `mobile/src/commands.rs` — the Tauri commands, the same names and
   argument shapes the page calls on the desktop: `list_sessions`,
   `session_history`, `send_reply`, `answer_question`, `set_session_option`,
@@ -253,24 +260,27 @@ Workspace member, package `maya-mobile`, Tauri identifier
 One field: `notify_on_completed` on `Config` (default true, ignored by the
 desktop until it wants it). Nothing else: `config::load`/`save` take a
 path, the server, merge and routing are platform-neutral, and the notifier
-and line builders are pure.
+and line builders are pure. `net::routing` holds the main-side helpers the
+desktop had, now shared.
 
 ### Frontend
 
-- `mobile.html` and `src/mobile/main.ts`, a second Vite entry
-  (`vite.config.ts` builds both; the desktop bundle does not change). It
+- `mobile/web/index.html` and `src/mobile/main.ts`, a second Vite build
+  (`vite.mobile.config.ts`, into `dist-mobile/`; the desktop bundle does
+  not change). It
   wires the same events (`sessions`, `network`) and the same modules as
   `src/main.ts`, without reviews, voice, mute, first-run and settings.
 - Reused unchanged: `board.ts`, `card.ts`, `modal.ts`, `answer.ts`,
   `actions.ts`, `newsession.ts`, `resume.ts`, `types.ts`, `markdown.ts`,
   `toast.ts`, `debug.ts`, `progress.ts`, `options.ts`, `clickguard.ts`,
   `harness.ts`, `icons.ts`, `format.ts`.
+- `src/machines.ts`: the dialogs' machine switch (the "+" and Resume
+  pickers' choices from `list_machines`), shared by both pages.
 - New under `src/mobile/`: `strip.ts` (the column strip, the active and
   visible columns, the opening column, the column count for a width),
   `network.ts` (the Network screen), `setup.ts` (first run and the
   stopped-server state), `notify-tap.ts` (opening a card from a
-  notification), `attach.ts` (the picker in place of drag-and-drop, behind
-  `save_attachment`), and `mobile.css` layered over `styles.css`: the
+  notification), and `mobile.css` layered over `styles.css`: the
   scroll-snap board, the strip, the full-screen card and dialogs, and touch
   sizes.
 - `modal.ts`, `newsession.ts` and `resume.ts` mount themselves into the

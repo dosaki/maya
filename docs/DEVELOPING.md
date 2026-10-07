@@ -1,9 +1,9 @@
 # Developing Maya
 
 Maya is a Tauri 2 app: a Rust backend in a Cargo workspace (`core/`,
-`src-tauri/`, `cli/`, `hook/` and `ear-rs/`), a vanilla TypeScript frontend
-in `src/` (vitest), and a listener sidecar: Swift in `ear/` on macOS, Rust
-in `ear-rs/` on Windows and Linux.
+`src-tauri/`, `cli/`, `hook/`, `ear-rs/`, and `mobile/` for the Android
+app), a vanilla TypeScript frontend in `src/` (vitest), and a listener
+sidecar: Swift in `ear/` on macOS, Rust in `ear-rs/` on Windows and Linux.
 
 ## Requirements
 
@@ -238,6 +238,67 @@ built once (`pnpm tauri build --bundles appimage`):
   heard is a gap the VM cannot close: a developer with a sound card should
   expect the call to return once it has actually spoken.
 
+## Android
+
+The phone app is a second Tauri crate, `mobile/`, that depends on
+`maya_core` and reuses the frontend's board, card, modal and dialogs from
+`mobile/web/index.html` through `src/mobile/main.ts`. It is only ever a
+main: it runs no sessions, so it needs no sidecar and no `jq`.
+
+Requirements: `rustup` (Homebrew's `rust` has no Android targets), Java 17
+or later (CI uses 21), and the Android SDK command-line tools (`brew
+install --cask android-commandlinetools`, or Android Studio's SDK Manager)
+with:
+
+    sdkmanager "platform-tools" "platforms;android-37" "build-tools;36.0.0" "ndk;27.2.12479018"
+    rustup target add aarch64-linux-android x86_64-linux-android
+    export ANDROID_HOME=/opt/homebrew/share/android-commandlinetools   # or ~/Library/Android/sdk
+    export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+
+Then:
+
+    pnpm install
+    pnpm mobile:dev            # on the connected phone or the running emulator
+    pnpm mobile:build          # a release APK for arm64, debug-signed without a keystore
+    pnpm mobile:build --debug
+    pnpm mobile:desktop        # the phone's app in a desktop window, for quick page work
+    pnpm test                  # the page, src/mobile included
+    cargo test -p maya-mobile  # the hub against a core client on localhost
+
+The APK lands in `mobile/gen/android/app/build/outputs/apk/universal/`.
+`adb logcat -s RustStdoutStderr:V` shows what the Rust side prints to
+stdout and stderr, panics included; Maya's own log is `maya/maya.log` in
+the app's data directory, which `adb shell run-as com.dosaki.maya.mobile`
+reaches on a debug build. On the emulator the phone's address is not
+reachable from the Mac: `adb forward tcp:4127 tcp:4127` and pair the
+desktop with `127.0.0.1`.
+
+What is where:
+
+- **`mobile/src/hub.rs`** is the app with the page and Android behind
+  traits: the config, the server handle, the notifier diff and the alert
+  state. `mobile/tests/round_trip.rs` drives it with a real core client.
+- **`mobile/src/commands.rs`** is the page's commands, by the desktop's
+  names, every session command routed with `merge::route(&[], …)`.
+- **`mobile/src/alerts.rs`** decides which notifications a board change
+  posts and clears; **`mobile/src/android.rs`** is the `keepalive` plugin
+  bridge and the Android notifications, with host no-ops.
+- **`mobile/gen/android/`** is the generated project, committed, plus
+  `KeepAliveService.kt` (the foreground service) and `KeepAlivePlugin.kt`.
+  Everything else in it is Tauri's; regenerate with `pnpm mobile android
+  init` only if you must, then restore those two files, the manifest's
+  permissions and service, and `build.gradle.kts`'s signing block. (Run
+  the Tauri CLI through `pnpm mobile …` from the repository root; `pnpm
+  exec tauri` does not work from inside `mobile/`.)
+- The Android job of the build workflow (see [CI](#ci)) runs the tests
+  and builds the APK; `release.yml` attaches it as `Maya_<version>.apk`.
+  With `ANDROID_KEYSTORE` (a `.jks` as base64), `ANDROID_KEYSTORE_PASSWORD`,
+  `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` set as repository secrets
+  the APK is release-signed; without them it is debug-signed. The job
+  writes them to `mobile/gen/android/keystore.properties` (ignored by
+  git), which `build.gradle.kts` reads; put the same file there to sign a
+  local build.
+
 ## The CLI
 
 `cli/` builds on its own, with no Node toolchain and no `pnpm ear:build`:
@@ -258,11 +319,13 @@ guard that keeps `maya_core` free of macOS-only code.
 Three workflows in `.github/workflows/`:
 
 - `build.yml` tests and builds on Linux (x86_64 and aarch64: the CLI in
-  `linux`, the app in `linux-app`), Windows and macOS (aarch64 and
+  `linux`, the app in `linux-app`), Windows, macOS (aarch64 and
   x86_64, one `macos` job each, both on Apple Silicon runners; the
-  tests run in the aarch64 one), the jobs running in parallel, and keeps
+  tests run in the aarch64 one) and Android (the host-side tests and an
+  arm64 APK, in `android`), the jobs running in parallel, and keeps
   what each built as run artifacts (`maya-linux-<arch>`,
-  `maya-linux-app-<arch>`, `maya-windows`, `maya-macos-<arch>`; and
+  `maya-linux-app-<arch>`, `maya-windows`, `maya-macos-<arch>`,
+  `maya-android`; and
   `smoke-<arch>`, the Linux smoke test's screenshot, which is not
   released). It is only ever called by the other two.
 - `ci.yml` ("CI") runs on every pull request to `main`: `build.yml`
@@ -288,6 +351,8 @@ Three workflows in `.github/workflows/`:
 - `cli/` — `maya_cli`, binary `maya-cli`: the headless assistant for
   SSH boxes and containers (`pair`, `run`, `status`, `hooks`, `config`, `start`);
   depends on `maya_core`, no Tauri.
+- `mobile/` — `maya-mobile`, the Android app: `hub.rs`, `commands.rs`,
+  `alerts.rs`, `android.rs`, `tests/round_trip.rs`, and `gen/android/`.
 - `core/src/` — `store.rs` (session cache), `state.rs` (card states),
   `watcher.rs`, `answer.rs` and `launch.rs` (Terminal automation),
   `terminal_tmux.rs` (tmux sessions, for the CLI and the Linux app),
@@ -315,6 +380,10 @@ Three workflows in `.github/workflows/`:
   (`~/.claude/maya/cli-status.json`, read by `maya status`).
 - `src/` — `main.ts`, `board.ts`, `card.ts`, `modal.ts`, `reviews.ts`,
   `settings.ts`, `voice.ts`, `debug.ts`, `tabs.ts`.
+- `src/mobile/` — the phone's page: `main.ts`, `strip.ts` (the column
+  strip and the one-to-four-column layout), `network.ts`, `setup.ts`,
+  `notify-tap.ts`, `mobile.css`; `src/machines.ts` is the dialogs'
+  machine switch both pages share.
 - `ear/` — `main.swift` (audio capture, the System and Whisper engines),
   `vad.swift` (voice activity detection), `vadtest.swift`.
 - `docs/superpowers/specs/` — the design documents behind each feature.
@@ -330,9 +399,10 @@ release version; bump it everywhere, commit and push to `main`:
 
 The Release workflow publishes `v0.2.0` for every platform, with notes generated
 from the merged pull requests and commits. A push whose version already has
-a release only builds; a mismatch between `tauri.conf.json`,
-`package.json` and `Cargo.toml` fails the run, a pull request's too (see
-[CI](#ci)). Pull requests bump the version themselves: see the rule in
+a release only builds; a mismatch between `src-tauri/tauri.conf.json`,
+`mobile/tauri.conf.json`, `package.json` and `Cargo.toml` fails the run,
+a pull request's too (see [CI](#ci)); `pnpm version:set` keeps all of
+them in step, the phone app's included. Pull requests bump the version themselves: see the rule in
 [CLAUDE.md](../CLAUDE.md).
 
 ## Signing
