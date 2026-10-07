@@ -82,7 +82,7 @@ function paintHint(host: HTMLElement): void {
   open.textContent = "Open Network";
   open.addEventListener("click", () => tabs?.show("settings"));
   hint.append(p, open);
-  host.append(hint);
+  host.prepend(hint);
 }
 
 function paint(): void {
@@ -171,7 +171,7 @@ async function start(): Promise<void> {
   window.addEventListener("popstate", () => closeModal());
   const board = document.getElementById("board");
   board?.addEventListener("pointerdown", () => guard.setPointerDown(true));
-  window.addEventListener("pointerup", () => guard.setPointerDown(false));
+  for (const ev of ["pointerup", "pointercancel", "touchend"] as const) window.addEventListener(ev, () => guard.setPointerDown(false));
   board?.addEventListener("click", (ev) => {
     const target = ev.target as Element;
     if (target.closest("[data-action=new-session]")) {

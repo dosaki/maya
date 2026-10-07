@@ -1,11 +1,11 @@
 /* The phone's layout over styles.css: one to four columns that snap
    sideways, a strip naming them, full-screen cards and dialogs, and
    touch-sized controls. */
-#board { --col-w: 100%; }
+#board { --col-w: 100%; flex-direction: column; }
 .board { display: flex; grid-template-columns: none; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; gap: 12px; padding: 8px 12px 12px; scrollbar-width: none; }
 .board::-webkit-scrollbar { display: none; }
 .column { flex: 0 0 var(--col-w); scroll-snap-align: start; min-width: 0; }
-.board__hint { margin: 24px auto; padding: 0 24px; text-align: center; color: var(--muted); max-width: 360px; }
+.board__hint { flex: 0 0 auto; margin: 24px auto; padding: 0 24px; text-align: center; color: var(--muted); max-width: 360px; }
 .board__hint button { margin-top: 12px; }
 
 .strip { display: flex; gap: 4px; padding: 6px 12px 0; }
