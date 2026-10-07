@@ -172,6 +172,9 @@ fn pairs_merges_a_board_routes_a_reply_and_notifies_only_what_is_new() {
     assert_eq!(posts[0].title, "s2 on laptop needs a decision");
     assert_eq!(posts[0].body, "Run the tests?");
     assert!(alerts.cleared.lock().unwrap().is_empty());
+    // A tap hands back only the notification's id: it leads to the card.
+    assert_eq!(hub.session_for_notification(posts[0].id).as_deref(), Some("s2"));
+    assert_eq!(hub.wait_for_notification(posts[0].id.wrapping_add(1), Duration::from_millis(300)), None);
 
     // Answered at the desk: the notification goes.
     *assistant.cards.lock().unwrap() = vec![card("s2", State::Working, 3_000)];

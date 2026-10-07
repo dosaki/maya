@@ -94,7 +94,8 @@ pub fn run() {
             commands::server_stop,
             commands::local_addresses,
             commands::request_battery_exemption,
-            commands::notifications_allowed
+            commands::notifications_allowed,
+            commands::pending_tap
         ])
         .setup(|app| {
             let handle = app.handle().clone();

@@ -243,6 +243,22 @@ pub fn notifications_allowed(app: AppHandle) -> bool {
     android::notifications_allowed(&app)
 }
 
+/// The session of the last tapped notification, once. The id Android hands
+/// back is matched to a card; after Android killed the app the card comes
+/// back only once its assistant reconnects, so this waits for it a while.
+#[tauri::command(async)]
+pub fn pending_tap(app: AppHandle, hub: H) -> Option<String> {
+    let id = android::pending_tap(&app)?;
+    let found = hub.wait_for_notification(id, TAP_WAIT);
+    if found.is_none() {
+        log::line("android", format!("tapped notification {id}: no card for it"));
+    }
+    found
+}
+
+/// How long a tapped notification waits for its card.
+const TAP_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[cfg(test)]
 mod tests {
     use super::*;

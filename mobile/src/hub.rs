@@ -94,6 +94,25 @@ impl Hub {
         merge::merged(vec![], &self.boards(), (self.now)())
     }
 
+    /// The session whose notification has this id, if its card is on the board.
+    pub fn session_for_notification(&self, id: i32) -> Option<String> {
+        self.cards().into_iter().map(|c| c.session_id).find(|s| alerts::notification_id(s) == id)
+    }
+
+    /// `session_for_notification`, waiting up to `timeout` for the card.
+    pub fn wait_for_notification(&self, id: i32, timeout: Duration) -> Option<String> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(s) = self.session_for_notification(id) {
+                return Some(s);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
     /// Repaints the page and posts or clears notifications for what changed.
     /// Runs on every new board and on a timer, so a board that went quiet
     /// greys and then drops (with its notifications) without a new frame.

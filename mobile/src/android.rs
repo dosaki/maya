@@ -34,6 +34,12 @@ struct ListReply {
     value: Vec<String>,
 }
 
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct MaybeIdReply {
+    value: Option<i32>,
+}
+
 /// The Kotlin `KeepAlivePlugin`, once registered.
 #[cfg(target_os = "android")]
 struct KeepAlive<R: Runtime>(tauri::plugin::PluginHandle<R>);
@@ -90,6 +96,17 @@ mod imp {
 
     pub fn notifications_allowed<R: Runtime>(app: &AppHandle<R>) -> bool {
         call::<R, BoolReply>(app, "notificationsAllowed", ()).map(|r| r.value).unwrap_or(true)
+    }
+
+    /// The id of the last tapped notification, once.
+    pub fn pending_tap<R: Runtime>(app: &AppHandle<R>) -> Option<i32> {
+        match call::<R, MaybeIdReply>(app, "pendingTap", ()) {
+            Ok(r) => r.value,
+            Err(e) => {
+                log::line("android", format!("pendingTap: {e}"));
+                None
+            }
+        }
     }
 
     pub fn device_model<R: Runtime>(app: &AppHandle<R>) -> String {
@@ -157,6 +174,10 @@ mod imp {
 
     pub fn notifications_allowed<R: Runtime>(_: &AppHandle<R>) -> bool {
         true
+    }
+
+    pub fn pending_tap<R: Runtime>(_: &AppHandle<R>) -> Option<i32> {
+        None
     }
 
     pub fn device_model<R: Runtime>(_: &AppHandle<R>) -> String {
