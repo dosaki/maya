@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { pairingRepaintDue, renderSettings, tickPairingCode, type SettingsModel } from "./settings";
+import { pairingRepaintDue, renderSettings, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -418,6 +418,28 @@ describe("Network settings", () => {
     const addr = el.querySelector(".settings__addresses")!;
     expect(addr.textContent).toBe("This machine's addresses: 192.168.1.20, 10.0.0.5");
     expect(addr.previousElementSibling?.querySelector("input[name=networkPort]")).not.toBeNull();
+  });
+
+  it("tickAddresses updates, adds and removes the addresses line in place without a repaint", () => {
+    const network = { role: "main" as const, code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, addresses: ["192.168.1.20"] };
+    const model = { ...voiceBase, networkRole: "main" as const, network };
+    const el = renderSettings(model, handlers());
+    const port = el.querySelector<HTMLInputElement>("input[name=networkPort]")!;
+    port.value = "5000"; // an unsaved edit the refresh must not wipe
+
+    expect(tickAddresses(el, model, ["192.168.1.20"])).toBe(false);
+    expect(tickAddresses(el, model, ["10.0.0.5", "192.168.1.20"])).toBe(true);
+    expect(el.querySelector(".settings__addresses")!.textContent).toBe("This machine's addresses: 10.0.0.5, 192.168.1.20");
+    expect(model.network.addresses).toEqual(["10.0.0.5", "192.168.1.20"]);
+
+    expect(tickAddresses(el, model, [])).toBe(true);
+    expect(el.querySelector(".settings__addresses")).toBeNull();
+
+    expect(tickAddresses(el, model, ["10.0.0.5"])).toBe(true);
+    const line = el.querySelector(".settings__addresses")!;
+    expect(line.textContent).toBe("This machine's addresses: 10.0.0.5");
+    expect(line.previousElementSibling?.querySelector("input[name=networkPort]")).not.toBeNull();
+    expect(el.contains(port) && port.value).toBe("5000");
   });
 
   it("roles off and assistant do not list the addresses", () => {

@@ -276,6 +276,33 @@ export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: 
   }
 }
 
+function addressesLine(addresses: string[]): HTMLElement {
+  const line = document.createElement("div");
+  line.className = "settings__hint settings__addresses";
+  line.textContent = `This machine's addresses: ${addresses.join(", ")}`;
+  return line;
+}
+
+/**
+ * Puts a fresh address list on the page in place, since no event follows
+ * a Wi‑Fi, VPN or sleep/wake change. A repaint would wipe unsaved edits in
+ * the other fields. Returns whether anything changed.
+ */
+export function tickAddresses(panel: ParentNode, model: SettingsModel, addresses: string[]): boolean {
+  const before = model.network?.addresses ?? [];
+  if (before.length === addresses.length && before.every((a, i) => a === addresses[i])) return false;
+  if (model.network) model.network.addresses = addresses;
+  const line = panel.querySelector<HTMLElement>(".settings__addresses");
+  if (addresses.length === 0) {
+    line?.remove();
+  } else if (line) {
+    line.textContent = addressesLine(addresses).textContent;
+  } else {
+    panel.querySelector("input[name=networkPort]")?.closest("label")?.insertAdjacentElement("afterend", addressesLine(addresses));
+  }
+  return true;
+}
+
 /**
  * True while a pairing code is on screen or has just expired: the timer
  * ticks then, so the countdown moves and the code goes when it expires.
@@ -743,12 +770,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     portInput.addEventListener("change", () => h.onPort(readPort()));
     portLabel.append(portInput);
     network.append(portLabel);
-    if (net.addresses && net.addresses.length > 0) {
-      const addresses = document.createElement("div");
-      addresses.className = "settings__hint settings__addresses";
-      addresses.textContent = `This machine's addresses: ${net.addresses.join(", ")}`;
-      network.append(addresses);
-    }
+    if (net.addresses && net.addresses.length > 0) network.append(addressesLine(net.addresses));
     network.append(nameField());
 
     if (net.code && nowMs <= net.code.expiresAt) {
@@ -1157,12 +1179,16 @@ export async function initSettings(): Promise<void> {
     if (!panel.hidden) refetchAndPaint();
   }).observe(panel, { attributes: true, attributeFilter: ["hidden"] });
 
-  // The pairing code's countdown, and its end. Updated in place: a full
+  // The pairing code's countdown and its end, and the main's addresses
+  // (no event follows an interface change). Updated in place: a full
   // repaint here would wipe unsaved text in the other sections every 30 s.
   setInterval(() => {
     const now = Date.now();
-    if (panel.hidden || !pairingRepaintDue(model, now)) return;
-    tickPairingCode(panel, model, now);
+    if (panel.hidden) return;
+    if ((model.networkRole ?? model.network?.role) === "main") {
+      void invoke<NetworkStatus>("network_status").then((s) => tickAddresses(panel, model, s.addresses ?? [])).catch(() => undefined);
+    }
+    if (pairingRepaintDue(model, now)) tickPairingCode(panel, model, now);
   }, PAIRING_TICK_MS);
 
   await listen<{ id: string; received: number; total: number }>("voice-model", (e) => {

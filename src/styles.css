@@ -56,7 +56,7 @@ body { margin: 0; background: var(--bg); }
 .settings__section--network { grid-area: network; }
 .settings__section--assistant { grid-area: assistant; }
 @media (max-width: 1199px) {
-  .settings.pane .settings__body { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "maya sessions" "network sessions" "notifications assistant"; }
+  .settings.pane .settings__body { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "maya sessions" "notifications sessions" "network assistant"; }
 }
 @media (max-width: 799px) {
   .settings.pane .settings__body { grid-template-columns: minmax(0, 1fr); grid-template-areas: "maya" "sessions" "notifications" "network" "assistant"; }
