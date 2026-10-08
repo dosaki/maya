@@ -1,0 +1,24 @@
+[package]
+name = "maya-mobile"
+version.workspace = true
+description = "Maya for Android: a main Maya that coordinates the assistants paired with it"
+authors.workspace = true
+edition.workspace = true
+
+[lib]
+name = "maya_mobile_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+maya-core = { path = "../core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

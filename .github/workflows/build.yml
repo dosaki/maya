@@ -1,7 +1,7 @@
 name: Build
 
-# Tests and builds Maya on Linux, Windows and macOS, the three in parallel,
-# and keeps what each built as run artifacts. Called by ci.yml for every
+# Tests and builds Maya on Linux, Windows, macOS and Android, all in
+# parallel, and keeps what each built as run artifacts. Called by ci.yml for every
 # pull request and by release.yml for every push to main, which builds
 # without the tests (the pull request ran them); it never publishes
 # anything itself.
@@ -22,6 +22,14 @@ on:
       APPLE_CERTIFICATE_PASSWORD:
         required: false
       APPLE_SIGNING_IDENTITY:
+        required: false
+      ANDROID_KEYSTORE:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
         required: false
 
 permissions:
@@ -307,5 +315,101 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: maya-macos-${{ matrix.arch }}
+          path: release/*
+          if-no-files-found: error
+
+  # The phone's app: the host-side tests (the hub against a core client on
+  # localhost, the planner, the page), then an arm64 APK. Signed with the
+  # keystore from the ANDROID_* secrets on a release; debug-signed
+  # otherwise, which still installs on your own phone.
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 27.2.12479018
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-37.0 build-tools;36.0.0 ndk;${{ env.NDK_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: android
+      - name: Install the desktop libraries the host-side tests link against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Test
+        if: inputs.test
+        run: |
+          pnpm test
+          cargo test -p maya-mobile
+      - name: Signing (releases with the secrets set)
+        if: inputs.sign
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANDROID_KEYSTORE:-}" ] || [ -z "${ANDROID_KEY_ALIAS:-}" ]; then
+            echo "no signing secrets; the APK will be debug-signed"
+            exit 0
+          fi
+          echo "$ANDROID_KEYSTORE" | base64 --decode > "$RUNNER_TEMP/maya.jks"
+          {
+            echo "keyAlias=$ANDROID_KEY_ALIAS"
+            echo "password=$ANDROID_KEY_PASSWORD"
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "storeFile=$RUNNER_TEMP/maya.jks"
+          } > mobile/gen/android/keystore.properties
+          echo "signing with the release keystore"
+      # Without the release keystore the release APK takes the debug key,
+      # which Gradle only creates on a debug build, so a fresh runner has
+      # none: make one where Gradle looks for it.
+      - name: Build the APK
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          set -euo pipefail
+          if [ ! -f mobile/gen/android/keystore.properties ]; then
+            debug="$HOME/.config/.android/debug.keystore"
+            if [ ! -f "$debug" ]; then
+              mkdir -p "$(dirname "$debug")"
+              keytool -genkeypair -v -keystore "$debug" -storepass android -keypass android \
+                -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          fi
+          pnpm mobile:build
+      - name: Package
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./mobile/tauri.conf.json').version")"
+          mkdir -p release
+          apk="$(ls mobile/gen/android/app/build/outputs/apk/*/release/*.apk | head -n 1)"
+          cp "$apk" "release/Maya_${version}.apk"
+          ls -la release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: maya-android
           path: release/*
           if-no-files-found: error

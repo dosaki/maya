@@ -80,13 +80,13 @@ fn open_in_browser(url: &str) -> Result<(), String> {
     }
 }
 
-use base64::Engine;
 use config::Config;
 use listener::VoiceState;
-use maya_core::agents::{self, AgentInfo};
+use maya_core::agents;
+use maya_core::net::routing::{agents_reply, check_remote_agent, machines_of, remote_attachments, AgentsReply, MachineInfo, ROUTE_TIMEOUT};
 use model::{Card, Harness};
 use net::merge;
-use net::protocol::{Attachment, CommandKind};
+use net::protocol::CommandKind;
 use net::server::Notify;
 use net::{NetChange, NetworkStatus};
 use serde::Serialize;
@@ -94,9 +94,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 use store::{now_ms, Store};
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
-
-/// How long the main waits for a command's result from an assistant.
-const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A remote session's machine, when this Maya is the main and the session
 /// belongs to one of its connected assistants; else `None` for a local one.
@@ -118,50 +115,14 @@ fn route_data<T: for<'de> serde::Deserialize<'de>>(app: &AppHandle, machine: &st
     serde_json::from_value(value).map_err(|e| e.to_string())
 }
 
-/// Reads and base64-encodes local files for a remote reply's attachments;
-/// refuses a missing file, one over 20 MB, or files over 20 MB together
-/// (the command must fit in one frame). `name` on each `Attachment` is the
-/// path exactly as given, since the assistant matches on it.
-fn remote_attachments(paths: &[String]) -> Result<Vec<Attachment>, String> {
-    const MAX_BYTES: u64 = 20 * 1024 * 1024;
-    let mut total = 0u64;
-    for p in paths {
-        let meta = std::fs::metadata(p).map_err(|_| format!("Attachment not found: {p}"))?;
-        if meta.len() > MAX_BYTES {
-            return Err("The file is too large (over 20 MB).".into());
-        }
-        total += meta.len();
-    }
-    if total > MAX_BYTES {
-        return Err("Attachments total more than 20 MB.".into());
-    }
-    let mut out = Vec::with_capacity(paths.len());
-    for p in paths {
-        let bytes = std::fs::read(p).map_err(|_| format!("Attachment not found: {p}"))?;
-        out.push(Attachment { name: p.clone(), bytes: base64::engine::general_purpose::STANDARD.encode(bytes) });
-    }
-    Ok(out)
-}
-
 /// Builds the `Start` command a "+" dialog on a remote machine sends.
 fn start_kind_for(dir: Option<String>, prompt: String, options: launch::LaunchOptions) -> CommandKind {
     CommandKind::Start { dir, prompt, options }
 }
 
-/// What Settings' Machine pickers show: each connected assistant's display
-/// name, host and platform.
-#[derive(Serialize, Clone, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct MachineInfo {
-    pub name: String,
-    pub hostname: String,
-    pub platform: String,
-    pub connected: bool,
-}
-
 #[tauri::command]
 fn list_machines(state: TauriState<AppState>) -> Vec<MachineInfo> {
-    network_status_of(&state).assistants.into_iter().map(|a| MachineInfo { name: a.name, hostname: a.hostname, platform: a.platform, connected: a.connected }).collect()
+    machines_of(&network_status_of(&state))
 }
 
 pub struct AppState {
@@ -896,26 +857,6 @@ fn list_project_dirs(state: TauriState<AppState>, machine: Option<String>) -> Re
     actions::list_project_dirs(&local(&state))
 }
 
-#[derive(serde::Serialize, Debug, PartialEq)]
-#[serde(rename_all = "camelCase")]
-struct AgentsReply {
-    agents: Vec<AgentInfo>,
-    /// The machine runs a Maya that names sessions; an older one ignores names.
-    names: bool,
-}
-
-/// A remote that reports no agents runs an older Maya: it starts only
-/// Claude Code and ignores a name.
-fn agents_reply(local: bool, remote: Option<Vec<AgentInfo>>, local_list: impl FnOnce() -> Vec<AgentInfo>) -> AgentsReply {
-    if local {
-        return AgentsReply { agents: local_list(), names: true };
-    }
-    match remote {
-        Some(agents) => AgentsReply { agents, names: true },
-        None => AgentsReply { agents: vec![agents::claude()], names: false },
-    }
-}
-
 /// The agents the chosen machine can start, with their models. Locally the
 /// first call waits for the listing (seconds); a remote's comes with its board.
 #[tauri::command(async)]
@@ -923,15 +864,6 @@ fn list_agents(state: TauriState<AppState>, machine: Option<String>) -> AgentsRe
     let local = is_local(&machine);
     let remote = if local { None } else { merge::agents_of(&remote_boards(&state), machine.as_deref().unwrap_or_default()) };
     agents_reply(local, remote, agents::current)
-}
-
-/// An older Maya ignores the agent and starts Claude Code: refuse instead.
-fn check_remote_agent(agent: Harness, remote: &Option<Vec<AgentInfo>>, machine: &str) -> Result<(), String> {
-    match remote {
-        None if agent != Harness::ClaudeCode => Err(format!("{machine} runs an older Maya that can only start Claude Code.")),
-        Some(list) if !list.iter().any(|a| a.harness == agent) => Err(format!("That agent is not installed on {machine}.")),
-        _ => Ok(()),
-    }
 }
 
 #[tauri::command(async)]
@@ -1304,61 +1236,6 @@ mod route_tests {
         let mut cache: std::collections::HashMap<i32, Option<String>> = [(1, Some("/dev/pts/1".to_string())), (2, Some("/dev/pts/2".to_string())), (4, None)].into();
         prune_ttys(&mut cache, &[2, 3, 4].into());
         assert_eq!(cache, [(2, Some("/dev/pts/2".to_string())), (4, None)].into());
-    }
-
-    #[test]
-    fn remote_attachments_encodes_a_small_file() {
-        let dir = std::env::temp_dir().join(format!("maya-route-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("note.txt");
-        std::fs::write(&path, b"hello there").unwrap();
-        let path_str = path.to_string_lossy().into_owned();
-
-        let out = remote_attachments(&[path_str.clone()]).unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].name, path_str, "the name carries the main's full local path exactly");
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&out[0].bytes).unwrap();
-        assert_eq!(decoded, b"hello there");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn remote_attachments_refuses_a_missing_file() {
-        let err = remote_attachments(&["/no/such/file-for-maya-tests.txt".to_string()]).unwrap_err();
-        assert!(err.contains("Attachment not found"), "{err}");
-    }
-
-    #[test]
-    fn remote_attachments_refuses_a_file_over_20_mb() {
-        let dir = std::env::temp_dir().join(format!("maya-route-test-big-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("big.bin");
-        let file = std::fs::File::create(&path).unwrap();
-        file.set_len(20 * 1024 * 1024 + 1).unwrap();
-        drop(file);
-        let path_str = path.to_string_lossy().into_owned();
-
-        let err = remote_attachments(&[path_str]).unwrap_err();
-        assert_eq!(err, "The file is too large (over 20 MB).");
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn remote_attachments_refuses_files_over_20_mb_together() {
-        let dir = std::env::temp_dir().join(format!("maya-route-test-total-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths: Vec<String> = (0..2)
-            .map(|i| {
-                let path = dir.join(format!("part{i}.bin"));
-                std::fs::File::create(&path).unwrap().set_len(11 * 1024 * 1024).unwrap();
-                path.to_string_lossy().into_owned()
-            })
-            .collect();
-        assert!(remote_attachments(&paths[..1]).is_ok(), "one alone fits");
-        assert_eq!(remote_attachments(&paths).unwrap_err(), "Attachments total more than 20 MB.");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

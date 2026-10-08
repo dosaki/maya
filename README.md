@@ -26,6 +26,7 @@ the right terminal first.
 - Resumes old sessions of any of them, and reviews pull requests with the agent you chose, on a prompt you can edit in Settings
 - Shows the sessions of all your machines on one board.
 - Runs headless over SSH with the `maya` command.
+- Comes as an Android app too: a main Maya in your pocket that shows every assistant's sessions and notifies you when one needs you.
 
 ## Install
 
@@ -41,6 +42,7 @@ Requirements:
 - Windows 10 or 11, 64-bit, with [Git for Windows](https://git-scm.com/download/win).
 - Ubuntu 24.04 or later with GNOME, x86_64 or arm64. Other distributions
   with glibc 2.39 or later can run the AppImage.
+- Android 8 or later, for the phone app.
 
 ### macOS
 
@@ -161,6 +163,43 @@ The Linux build is tested in CI under a virtual display, not yet on real
 hardware. On a real Ubuntu machine, check what a virtual display cannot:
 that you hear a notification and the voice, that "Maya, what's waiting on
 me?" gets an answer, and that Terminal on a card brings up its session.
+
+### Android
+
+Download `Maya_<version>.apk` from the release and open it on the phone;
+Android asks to allow installs from your browser once (the builds are not
+on the Play Store). The phone is a **main** Maya and nothing else: it runs
+no agents and shows the sessions of the assistants paired with it.
+
+Without the release keystore secrets, each release's APK is signed with a
+new key, so installing a newer one over an older one means uninstalling
+first, which forgets the pairings; setting the `ANDROID_*` secrets gives
+in-place updates.
+
+1. Open Maya and press **Start**. It asks to post notifications; allow it.
+   The Network tab shows a six-digit pairing code and the phone's Wi‑Fi
+   address.
+2. On each computer, open Maya's Settings › Network, choose "Assistant to
+   a main Maya", type the phone's address, port 4127 and the code, and
+   Pair. Its sessions appear on the phone's board.
+3. Upright, the board shows one column at a time: swipe, or tap the
+   strip at the top. Sideways it shows up to four.
+
+With the screen off Maya keeps running behind a persistent notification
+("Main for 2 assistants, 1 connected"). Android may still stop it on some
+phones: press **Keep Maya awake** on the Network tab to exempt it from
+battery optimisation. If the notification disappears, open Maya again and
+the assistants reconnect on their own. A new Wi‑Fi address has to be
+retyped on the assistants.
+
+Each ask and each finished turn is a notification you can turn off on the
+Network tab, or silence per channel in Android's settings; tapping one
+opens the card. There is no voice on the phone, and no Pull Requests tab.
+
+Hand checks for a new build, which CI cannot run: pair a computer, rotate
+between one and four columns, answer a decision from the phone, lock the
+phone and receive a notification, start a session on the computer from
+the phone, and stop and start the server and watch the computer reconnect.
 
 ## Voice
 
@@ -386,7 +425,9 @@ speech models under `models/`.
 ## Developing
 
 Building from source, cutting a release and code signing are covered in
-[docs/DEVELOPING.md](docs/DEVELOPING.md).
+[docs/DEVELOPING.md](docs/DEVELOPING.md), the Android app included
+(`pnpm mobile:dev`, `pnpm mobile:build`, and the `ANDROID_*` repository
+secrets that release-sign its APK).
 
 ### Codex lifecycle hooks
 

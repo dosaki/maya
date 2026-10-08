@@ -1,8 +1,8 @@
 name: CI
 
-# Every pull request to main: tests and builds on Linux, Windows and macOS
-# in parallel, so a merge is known to build everywhere. Nothing is signed
-# or published.
+# Every pull request to main: tests and builds on Linux, Windows, macOS and
+# Android in parallel, so a merge is known to build everywhere. Nothing is
+# signed or published.
 on:
   pull_request:
     branches: [main]

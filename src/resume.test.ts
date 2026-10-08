@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
+import { setLocalMachine } from "./machines";
 import { closeResume, openResume, renderResume } from "./resume";
 
 const NOW = Date.parse("2026-09-29T11:00:00Z");
@@ -100,6 +101,23 @@ describe("renderResume", () => {
     select.value = "claude-code";
     select.dispatchEvent(new Event("change"));
     expect(h.onAgent).toHaveBeenCalledWith("claude-code");
+  });
+
+  it("without a local machine shows the lone assistant, and asks to pair when there is none", () => {
+    setLocalMachine(false);
+    try {
+      const one = renderResume({ ...base, machines: [{ name: "laptop", value: "laptop" }], machine: "laptop" }, handlers(), NOW);
+      expect([...one.querySelectorAll<HTMLOptionElement>("select[name=machine] option")].map((o) => o.textContent)).toEqual(["laptop"]);
+      const h = handlers();
+      const none = renderResume({ ...base, machines: [], machine: "", noMachines: true }, h, NOW);
+      expect(none.textContent).toContain("Pair an assistant first.");
+      expect(none.querySelector("select[name=dir]")).toBeNull();
+      expect(none.querySelector("textarea[name=prompt]")).toBeNull();
+      none.querySelector<HTMLButtonElement>("button[data-action=open-settings]")!.click();
+      expect(h.onOpenSettings).toHaveBeenCalled();
+    } finally {
+      setLocalMachine(true);
+    }
   });
 });
 

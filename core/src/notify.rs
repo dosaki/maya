@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "android")))]
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Mutex, OnceLock};
 
@@ -199,6 +199,12 @@ pub fn focus_active() -> bool {
     })
 }
 
+/// The phone app never reads a desktop's quiet state: never quiet.
+#[cfg(target_os = "android")]
+pub fn focus_active() -> bool {
+    false
+}
+
 /// Whether a Focus mode is on right now; Windows and GNOME always let Maya tell.
 #[cfg(not(target_os = "macos"))]
 pub fn focus_status() -> Option<bool> {
@@ -233,6 +239,10 @@ fn say_builtin(line: &str) {
     }
     let _ = cmd.arg(line).status();
 }
+
+/// The phone app does not speak.
+#[cfg(target_os = "android")]
+fn say_builtin(_line: &str) {}
 
 /// Speaks one line with its chosen voice. An ElevenLabs failure falls back to
 /// the built-in voice unless the utterance says not to.

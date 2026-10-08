@@ -226,3 +226,17 @@ describe("card actions", () => {
     expect(el.querySelector("button[data-action=reply] svg.icon-reply")).not.toBeNull();
   });
 });
+
+describe("swapBoard on a sideways-scrolling board", () => {
+  it("keeps the board's own horizontal scroll across a repaint", () => {
+    const host = document.createElement("div");
+    host.append(renderBoard([card({})], NOW));
+    const old = host.querySelector<HTMLElement>(".board")!;
+    Object.defineProperty(old, "scrollLeft", { value: 640, writable: true });
+    const fresh = renderBoard([card({})], NOW);
+    let set = 0;
+    Object.defineProperty(fresh, "scrollLeft", { get: () => set, set: (v: number) => { set = v; } });
+    swapBoard(host, fresh);
+    expect(set).toBe(640);
+  });
+});

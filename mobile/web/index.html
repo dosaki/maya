@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Maya</title>
+    <link rel="stylesheet" href="../../src/styles.css" />
+    <link rel="stylesheet" href="../../src/mobile/mobile.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <h1 class="topbar__title" title="Manage All Your Agents"><img class="topbar__logo" src="../../src/assets/maya-logo.png" alt="" width="26" height="26" /> Maya</h1>
+        <nav class="tabs" role="tablist">
+          <button class="tab" type="button" role="tab" data-tab="sessions">Sessions</button>
+          <span class="tabs__spacer"></span>
+          <button class="tab" type="button" role="tab" data-tab="debug">Debug</button>
+          <button class="tab" type="button" role="tab" data-tab="settings">Network</button>
+        </nav>
+      </header>
+      <div id="strip-host"></div>
+      <div id="board"></div>
+      <div id="debug" class="pane" hidden></div>
+      <div id="settings" class="settings pane" hidden></div>
+      <div id="setup" hidden></div>
+      <div id="modal-host"></div>
+      <div id="toast" class="toast" hidden></div>
+    </div>
+    <script type="module" src="../../src/mobile/main.ts"></script>
+  </body>
+</html>

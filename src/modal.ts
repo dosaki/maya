@@ -12,6 +12,13 @@ import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
 import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, remoteTitle, type Card, type Turn } from "./types";
 import { sendShortcut } from "./platform";
 
+/** Composer features the page turns on: the phone has a picker instead of drag-and-drop. */
+const composer = { attachButton: false };
+
+export function setComposerOptions(o: Partial<typeof composer>): void {
+  Object.assign(composer, o);
+}
+
 export interface ModalModel {
   card: Card;
   turns: Turn[];
@@ -560,7 +567,24 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     send.type = "button";
     send.dataset.action = "send";
     send.addEventListener("click", trySend);
-    form.append(ta, send);
+    if (composer.attachButton) {
+      const pick = el("input", "modal__file");
+      pick.type = "file";
+      pick.multiple = true;
+      pick.hidden = true;
+      pick.addEventListener("change", () => {
+        const files = [...(pick.files ?? [])].map((file) => ({ name: file.name, file }));
+        if (files.length > 0) h.onPasteFiles?.(files);
+        pick.value = "";
+      });
+      const attach = el("button", "card__btn modal__attach", "Attach");
+      attach.type = "button";
+      attach.dataset.action = "attach";
+      attach.addEventListener("click", () => pick.click());
+      form.append(ta, pick, attach, send);
+    } else {
+      form.append(ta, send);
+    }
     panel.append(form);
   } else {
     panel.append(el("div", "modal__noinbox", "This session has no inbox. Use the terminal."));
@@ -634,11 +658,28 @@ let progress: Progress | null = null;
 const attachments = makeAttachments();
 let unlistenDrop: (() => void) | null = null;
 
+/** The backend's cap on one attachment (`maya_core::attachments::MAX_BYTES`). */
+export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+/**
+ * The backend's error for a file over the cap, or null. Checked before the
+ * file is read: reading it into a number array costs several times its size,
+ * enough to take the web view down before the backend could refuse it.
+ */
+export function attachmentTooLarge(size: number): string | null {
+  return size > MAX_ATTACHMENT_BYTES ? "The file is too large (over 20 MB)." : null;
+}
+
 /** Saves pasted files through the backend and attaches the saved paths. */
 async function attachPasted(files: { name: string; file: File }[]): Promise<void> {
   if (!current) return;
   const me = current;
   for (const { name, file } of files) {
+    const tooLarge = attachmentTooLarge(file.size);
+    if (tooLarge) {
+      if (current === me) setStatus(false, tooLarge);
+      return;
+    }
     try {
       const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
       const path = await invoke<string>("save_attachment", { name, bytes });
@@ -669,6 +710,19 @@ async function watchDrops(): Promise<void> {
 }
 let enableTimer: ReturnType<typeof setTimeout> | undefined;
 
+/** Told when the user dismisses the card (×, Escape, the backdrop); not when code closes it. */
+let onDismiss: (() => void) | null = null;
+
+export function setOnDismiss(f: (() => void) | null): void {
+  onDismiss = f;
+}
+
+function dismiss(): void {
+  if (!current) return;
+  closeModal();
+  onDismiss?.();
+}
+
 /** Share the board's question-progress tracker with the modal. */
 export function setProgress(p: Progress): void {
   progress = p;
@@ -695,7 +749,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   const fresh = renderModal(m, {
     onSend: (text) => void guardedSend(text),
     onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
-    onClose: closeModal,
+    onClose: dismiss,
     onAnswer: (q, opt, btn) => void answer(q, opt, btn),
     onSetOption: (setting, value) => void setOption(setting, value),
     onCycleMode: () => void cycleMode(),
@@ -843,7 +897,7 @@ async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): 
 export async function openModal(card: Card): Promise<void> {
   closeModal();
   const keyHandler = (e: KeyboardEvent) => {
-    if (e.key === "Escape") closeModal();
+    if (e.key === "Escape") dismiss();
   };
   current = { model: { card, turns: [], status: null, draft: "" }, keyHandler, lastRemoteFetchAt: 0 };
   attachments.clear();

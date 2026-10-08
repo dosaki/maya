@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { setLocalMachine } from "./machines";
 import { CLAUDE_AGENT, optionFields, renderNewSession, type AgentInfo, type NewSessionModel } from "./newsession";
 
 const handlers = () => ({ onStart: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn(), onMachine: vi.fn(), onAgent: vi.fn(), onModel: vi.fn() });
@@ -159,6 +160,23 @@ describe("renderNewSession", () => {
     const local = renderNewSession({ ...base, machines: twoMachines, machine: "" }, handlers());
     expect(local.querySelector<HTMLOptionElement>("select[name=dir] option[value='']")!.disabled).toBe(false);
     expect(local.querySelector(".newsession__hint")).toBeNull();
+  });
+
+  it("without a local machine shows the lone assistant, and asks to pair when there is none", () => {
+    setLocalMachine(false);
+    try {
+      const one = renderNewSession({ ...base, machines: [{ name: "laptop", value: "laptop" }], machine: "laptop" }, handlers());
+      expect([...one.querySelectorAll<HTMLOptionElement>("select[name=machine] option")].map((o) => o.textContent)).toEqual(["laptop"]);
+      const h = handlers();
+      const none = renderNewSession({ ...base, machines: [], machine: "", noMachines: true }, h);
+      expect(none.textContent).toContain("Pair an assistant first.");
+      expect(none.querySelector("select[name=dir]")).toBeNull();
+      expect(none.querySelector("textarea[name=prompt]")).toBeNull();
+      none.querySelector<HTMLButtonElement>("button[data-action=open-settings]")!.click();
+      expect(h.onOpenSettings).toHaveBeenCalled();
+    } finally {
+      setLocalMachine(true);
+    }
   });
 });
 

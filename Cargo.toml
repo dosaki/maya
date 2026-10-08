@@ -1,9 +1,9 @@
 [workspace]
-members = ["cli", "core", "ear-rs", "hook", "src-tauri"]
+members = ["cli", "core", "ear-rs", "hook", "mobile", "src-tauri"]
 resolver = "2"
 
 [workspace.package]
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 authors = ["Tiago Correia"]
 

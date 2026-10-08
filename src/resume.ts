@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { formatAge } from "./format";
 import { showToast } from "./toast";
-import { thisComputer } from "./platform";
+import { hasLocalMachine, initialChoices, machineChoices, type MachineChoice, type MachineInfo } from "./machines";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
 import { brainAgent, defaultAgent } from "./brain";
@@ -14,11 +14,7 @@ export interface ResumableSession {
   running: boolean;
 }
 
-/** A machine choice for the picker: "This Mac" first, then each connected assistant. */
-export interface MachineChoice {
-  name: string;
-  value: string;
-}
+export type { MachineChoice } from "./machines";
 
 export interface ResumeModel {
   dirs: string[];
@@ -27,6 +23,8 @@ export interface ResumeModel {
   loading: boolean;
   status: { ok: boolean; text: string } | null;
   needsSetup: boolean;
+  /** No assistant is connected and this machine runs no sessions: the form gives way to "Pair an assistant first." */
+  noMachines?: boolean;
   /** "This Mac" first, then each connected assistant. */
   machines: MachineChoice[];
   /** The chosen machine's value; "" is this Mac. */
@@ -54,6 +52,17 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   n.className = className;
   if (text !== undefined) n.textContent = text;
   return n;
+}
+
+function renderNoMachines(h: { onOpenSettings(): void }): HTMLElement {
+  const setup = el("div", "modal__setup");
+  setup.append(el("p", "", "Pair an assistant first."));
+  const open = el("button", "card__btn card__btn--primary", "Open Network");
+  open.type = "button";
+  open.dataset.action = "open-settings";
+  open.addEventListener("click", () => h.onOpenSettings());
+  setup.append(open);
+  return setup;
 }
 
 /**
@@ -99,7 +108,7 @@ export function renderResume(m: ResumeModel, h: ResumeHandlers, nowMs: number = 
   const form = el("div", "newsession");
 
   // The picker comes first, so a machine without folders can still be left for another.
-  if (m.machines.length > 1) {
+  if (m.machines.length > 1 || (!hasLocalMachine() && m.machines.length > 0)) {
     const machineLabel = el("label", "newsession__field");
     machineLabel.append(el("span", "newsession__label", "Machine"));
     const machineSelect = el("select", "newsession__select");
@@ -131,6 +140,12 @@ export function renderResume(m: ResumeModel, h: ResumeHandlers, nowMs: number = 
     agentSelect.addEventListener("change", () => h.onAgent(agentSelect.value as Harness));
     agentLabel.append(agentSelect);
     form.append(agentLabel);
+  }
+
+  if (m.noMachines) {
+    panel.append(renderNoMachines(h));
+    root.append(backdrop, panel);
+    return root;
   }
 
   if (m.needsSetup) {
@@ -358,7 +373,7 @@ export async function openResume(): Promise<void> {
       loading: false,
       status: null,
       needsSetup: false,
-      machines: [{ name: thisComputer(), value: "" }],
+      machines: initialChoices(),
       machine: "",
       agents: [CLAUDE_AGENT],
       agent: "claude-code",
@@ -368,15 +383,27 @@ export async function openResume(): Promise<void> {
   };
   document.addEventListener("keydown", keyHandler);
   paint();
-  void invoke<{ name: string; hostname: string; platform: string; connected: boolean }[]>("list_machines")
-    .then((machines) => {
+  const listing = invoke<MachineInfo[]>("list_machines").catch(() => [] as MachineInfo[]);
+  if (hasLocalMachine()) {
+    void listing.then((machines) => {
       if (!current) return;
-      current.model.machines = [{ name: thisComputer(), value: "" }, ...machines.filter((m) => m.connected).map((m) => ({ name: m.name, value: m.name }))];
+      current.model.machines = machineChoices(machines);
       paint();
-    })
-    .catch(() => undefined);
-  void loadAgents("");
-  await loadDirs("");
+    });
+    void loadAgents("");
+    await loadDirs("");
+    return;
+  }
+  // No sessions here: the first connected assistant is the machine, or there is nothing to start.
+  const machines = machineChoices(await listing);
+  if (!current) return;
+  current.model.machines = machines;
+  if (machines.length === 0) {
+    current.model.noMachines = true;
+    paint();
+    return;
+  }
+  await chooseMachine(machines[0].value);
 }
 
 export function closeResume(): void {

@@ -22,8 +22,10 @@ function stored(): Tab {
  * Settings on the right. Sessions is the default; the choice is remembered
  * per browser. Switching only toggles `hidden`, so the board keeps its
  * scroll positions and the session watcher keeps running underneath.
+ * `onChange` hears every switch, the first included, for what lives outside
+ * the panes but belongs to one (the phone's column strip).
  */
-export function makeTabs() {
+export function makeTabs(onChange?: (tab: Tab) => void) {
   let current: Tab = stored();
   const show = (tab: Tab) => {
     current = tab;
@@ -40,6 +42,7 @@ export function makeTabs() {
     } catch {
       /* private mode: nothing to remember */
     }
+    onChange?.(tab);
   };
   for (const btn of document.querySelectorAll<HTMLElement>("[data-tab]")) {
     btn.addEventListener("click", () => show(asTab(btn.dataset.tab)));
