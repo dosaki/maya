@@ -265,7 +265,7 @@ impl Server {
                 AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: self.conns.contains_key(&p.id), last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note) }
             })
             .collect();
-        NetworkStatus { role: NetworkRole::Main, code, assistants, ..Default::default() }
+        NetworkStatus { role: NetworkRole::Main, code, assistants, addresses: super::local_addresses(), ..Default::default() }
     }
 }
 
