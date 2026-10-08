@@ -36,8 +36,9 @@ Run the commands below, or download Maya manually from the
 Requirements:
 
 - One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity, Grok Build, [Kiro CLI](https://kiro.dev/cli) or [OpenCode](https://opencode.ai), installed and signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
-- The [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`,
-  for the Pull Requests tab.
+- The [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`
+  or with a `GH_TOKEN` or `GITHUB_TOKEN` exported by your shell, for the
+  Pull Requests tab.
 - macOS on Apple Silicon or Intel (macOS 14 or later for voice).
 - Windows 10 or 11, 64-bit, with [Git for Windows](https://git-scm.com/download/win).
 - Ubuntu 24.04 or later with GNOME, x86_64 or arm64. Other distributions
