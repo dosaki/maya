@@ -289,7 +289,9 @@ What is where:
   intent) and `res/drawable/ic_stat_maya.xml` (the status-bar icon).
   Everything else in it is Tauri's; regenerate with `pnpm mobile android
   init` only if you must, then restore those four files, the manifest's
-  permissions and service, and `build.gradle.kts`'s signing block. (Run
+  permissions and service, `build.gradle.kts`'s signing block, and the
+  launcher icon with `cp -R mobile/icons/android/. mobile/gen/android/app/src/main/res/`
+  (`sh scripts/check-android-icons.sh`, run in CI, fails without it). (Run
   the Tauri CLI through `pnpm mobile …` from the repository root; `pnpm
   exec tauri` does not work from inside `mobile/`.)
 - The Android job of the build workflow (see [CI](#ci)) runs the tests
