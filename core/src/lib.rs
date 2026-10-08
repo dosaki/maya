@@ -73,7 +73,8 @@ pub fn gh() -> std::process::Command {
             None => command("gh"),
         },
     };
-    if !has_gh_token(std::env::vars()) {
+    let own = GH_TOKEN_VARS.iter().filter_map(|n| Some((n.to_string(), std::env::var_os(n)?.to_string_lossy().into_owned())));
+    if !has_gh_token(own) {
         cmd.envs(shell_gh_tokens().iter().cloned());
     }
     cmd
@@ -94,10 +95,13 @@ const GH_PROBE_END: &str = "MAYA-GH-END";
 
 /// The shell line that prints each of `GH_TOKEN_VARS` as `NAME=value`
 /// between two marker lines, so whatever the user's rc files print around
-/// them is told apart from the tokens.
+/// them is told apart from the tokens. Each item starts on a fresh line, so
+/// rc output without a trailing newline does not glue onto the first
+/// marker; the expansions are unset-safe, so an rc file's `set -u` does not
+/// abort the line.
 pub fn gh_token_probe() -> String {
-    let vars: Vec<String> = GH_TOKEN_VARS.iter().map(|n| format!("\"{n}=${n}\"")).collect();
-    format!("printf '%s\\n' {GH_PROBE_BEGIN} {} {GH_PROBE_END}", vars.join(" "))
+    let vars: Vec<String> = GH_TOKEN_VARS.iter().map(|n| format!("\"{n}=${{{n}-}}\"")).collect();
+    format!("printf '\\n%s\\n' {GH_PROBE_BEGIN} {} {GH_PROBE_END}", vars.join(" "))
 }
 
 /// The non-empty `NAME=value` pairs between the probe's markers in `out`;
@@ -160,7 +164,7 @@ mod gh_token_tests {
 
     #[test]
     fn the_probe_output_yields_the_tokens_between_the_markers_ignoring_rc_noise() {
-        let out = "Restored session: Thu  8 Oct 2026\nMAYA-GH-BEGIN\nGH_TOKEN=\nGITHUB_TOKEN=ghp_abc=def\nMAYA-GH-END\nSaving session...completed.\n";
+        let out = "Restored session: Thu  8 Oct 2026\nMAYA-GH-BEGIN\n\nGH_TOKEN=\n\nGITHUB_TOKEN=ghp_abc=def\n\nMAYA-GH-END\nSaving session...completed.\n";
         assert_eq!(parse_gh_token_probe(out), vars(&[("GITHUB_TOKEN", "ghp_abc=def")]));
     }
 
@@ -173,10 +177,12 @@ mod gh_token_tests {
     #[test]
     fn the_probe_prints_every_gh_variable_between_the_markers() {
         let line = gh_token_probe();
-        assert!(line.starts_with("printf "), "{line}");
+        // A newline first, so rc output without one does not glue onto the marker.
+        assert!(line.starts_with("printf '\\n%s\\n' MAYA-GH-BEGIN "), "{line}");
         for name in GH_TOKEN_VARS {
-            assert!(line.contains(&format!("\"{name}=${name}\"")), "{line}");
+            // Unset-safe, so an rc file's `set -u` does not abort the line.
+            assert!(line.contains(&format!("\"{name}=${{{name}-}}\"")), "{line}");
         }
-        assert!(line.contains("MAYA-GH-BEGIN") && line.contains("MAYA-GH-END"), "{line}");
+        assert!(line.ends_with(" MAYA-GH-END"), "{line}");
     }
 }
