@@ -1,3 +1,4 @@
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
@@ -45,6 +46,8 @@ export interface NetworkStatus {
   assistant: AssistantLink;
   /** Why the main's server is not running (the port is taken…). */
   mainError?: string | null;
+  /** This machine's IPv4 addresses, for an assistant to type as the main's host. */
+  addresses?: string[];
 }
 
 const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } };
@@ -81,6 +84,8 @@ export interface SettingsModel {
   whisperModel: string;
   models: ModelInfo[];
   downloading: { id: string; received: number; total: number } | null;
+  /** The app version, shown under Maya; unset until Tauri answers. */
+  version?: string;
   /** The live status from `network_status`/the `network` event. */
   network?: NetworkStatus;
   /** The Network select's current value; can diverge from `network.role` while previewing "Assistant" before Pair succeeds. */
@@ -188,9 +193,9 @@ interface ConfigJson {
 }
 
 /** A titled card in the settings grid. */
-function section(title: string): HTMLElement {
+function section(title: string, key: string): HTMLElement {
   const s = document.createElement("section");
-  s.className = "settings__section";
+  s.className = `settings__section settings__section--${key}`;
   const heading = document.createElement("h2");
   heading.className = "settings__heading";
   heading.textContent = title;
@@ -283,12 +288,14 @@ export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = document.createElement("div");
   root.className = "settings__body";
-  const maya = section("Maya");
-  const sessions = section("Sessions");
-  const notifications = section("Notifications");
-  const assistant = section("Voice assistant");
-  const network = section("Network");
-  root.append(maya, sessions, notifications, assistant, network);
+  // DOM order is the grid's reading order: the three across the top, then
+  // Network bottom-left and Voice assistant bottom-right (Sessions spans).
+  const maya = section("Maya", "maya");
+  const sessions = section("Sessions", "sessions");
+  const notifications = section("Notifications", "notifications");
+  const network = section("Network", "network");
+  const assistant = section("Voice assistant", "assistant");
+  root.append(maya, sessions, notifications, network, assistant);
 
   const agents = model.agents.length > 0 ? model.agents : [CLAUDE_AGENT];
   // An agent that is chosen but not listed (uninstalled, or the listing has
@@ -344,6 +351,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   agentModelSel.addEventListener("change", () => h.onAgentModel(agentSel.value as Harness, agentModelSel.value));
   agentModelLabel.append(agentModelSel);
   maya.append(agentModelLabel);
+  if (model.version) {
+    const version = document.createElement("div");
+    version.className = "settings__hint settings__version";
+    version.textContent = `Maya ${model.version}`;
+    maya.append(version);
+  }
 
   const net = model.network ?? DEFAULT_NETWORK_STATUS;
   const netRole = model.networkRole ?? net.role;
@@ -730,6 +743,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     portInput.addEventListener("change", () => h.onPort(readPort()));
     portLabel.append(portInput);
     network.append(portLabel);
+    if (net.addresses && net.addresses.length > 0) {
+      const addresses = document.createElement("div");
+      addresses.className = "settings__hint settings__addresses";
+      addresses.textContent = `This machine's addresses: ${net.addresses.join(", ")}`;
+      network.append(addresses);
+    }
     network.append(nameField());
 
     if (net.code && nowMs <= net.code.expiresAt) {
@@ -1160,8 +1179,11 @@ export async function initSettings(): Promise<void> {
     // installing it reports what is wrong with the file.
     const codexStatus = invoke<boolean>("codex_hook_status").catch(() => false);
     const focusVisible = invoke<boolean>("focus_visible").catch(() => true);
+    // Purely informational, so a failure just leaves the line out.
+    const version = getVersion().catch(() => "");
     const [installed, config, codexInstalled] = await Promise.all([invoke<boolean>("hook_status"), invoke<ConfigJson>("get_config"), codexStatus]);
     model.focusVisible = await focusVisible;
+    model.version = await version;
     model.hookInstalled = installed;
     model.codexHookInstalled = codexInstalled;
     applyConfig(config);

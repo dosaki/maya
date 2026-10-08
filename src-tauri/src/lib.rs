@@ -498,7 +498,8 @@ fn network_status_of(state: &AppState) -> NetworkStatus {
             // A main whose server is down still lists its assistants, disconnected.
             let assistants = if main { net::paired_offline(&paired) } else { vec![] };
             let main_error = if main { stored.main_error.clone() } else { None };
-            NetworkStatus { role, code: None, assistants, main_error, ..stored }
+            let addresses = if main { net::local_addresses() } else { vec![] };
+            NetworkStatus { role, code: None, assistants, main_error, addresses, ..stored }
         }
     }
 }

@@ -6,6 +6,9 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(
 const eventListen = vi.fn((..._args: unknown[]) => Promise.resolve(() => {}));
 vi.mock("@tauri-apps/api/event", () => ({ listen: (...args: unknown[]) => eventListen(...args) }));
 
+const getVersion = vi.fn(() => Promise.resolve("0.13.0"));
+vi.mock("@tauri-apps/api/app", () => ({ getVersion: () => getVersion() }));
+
 import { initSettings } from "./settings";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -15,6 +18,30 @@ describe("settings flow", () => {
     document.body.innerHTML = '<div id="settings" class="settings pane" hidden></div>';
     invoke.mockReset();
     eventListen.mockClear();
+  });
+
+  it("shows the app version Tauri reports under Maya, and nothing when it cannot", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "" };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+
+    await initSettings();
+    await flush();
+    expect(document.querySelector(".settings__section--maya .settings__version")?.textContent).toBe("Maya 0.13.0");
+
+    getVersion.mockImplementationOnce(() => Promise.reject(new Error("no tauri")));
+    document.body.innerHTML = '<div id="settings" class="settings pane" hidden></div>';
+    await initSettings();
+    await flush();
+    expect(document.querySelector("input[name=timeout]")).not.toBeNull();
+    expect(document.querySelector(".settings__version")).toBeNull();
   });
 
   it("saves against the freshest config rather than a stale local model", async () => {

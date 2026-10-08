@@ -271,10 +271,25 @@ describe("renderSettings", () => {
     expect(renderSettings({ ...voiceBase, listen: true, listenError: null }, h).querySelector(".settings__error[data-for=listen]")).toBeNull();
   });
 
-  it("groups the fields into titled sections", () => {
+  it("groups the fields into titled sections, in the order the grid lays them out", () => {
     const el = renderSettings(voiceBase, handlers());
-    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["Maya", "Sessions", "Notifications", "Voice assistant", "Network"]);
+    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["Maya", "Sessions", "Notifications", "Network", "Voice assistant"]);
+    expect([...el.querySelectorAll(".settings__section")].map((x) => x.classList[1])).toEqual([
+      "settings__section--maya",
+      "settings__section--sessions",
+      "settings__section--notifications",
+      "settings__section--network",
+      "settings__section--assistant",
+    ]);
     expect(el.querySelector(".settings__section input[name=listen]")).not.toBeNull();
+  });
+
+  it("shows the app version at the end of the Maya section once it is known", () => {
+    const el = renderSettings({ ...voiceBase, version: "0.13.0" }, handlers());
+    const maya = el.querySelector(".settings__section--maya")!;
+    expect(maya.lastElementChild?.className).toBe("settings__hint settings__version");
+    expect(maya.lastElementChild?.textContent).toBe("Maya 0.13.0");
+    expect(renderSettings(voiceBase, handlers()).querySelector(".settings__version")).toBeNull();
   });
 
   it("has the listen toggle and a microphone picker", () => {
@@ -395,6 +410,22 @@ describe("Network settings", () => {
     expect(h.onRole).toHaveBeenCalledWith("main");
   });
 
+  it("role main lists this machine's IP addresses, right after the port", () => {
+    const el = renderSettings(
+      { ...voiceBase, networkRole: "main", network: { role: "main", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, addresses: ["192.168.1.20", "10.0.0.5"] } },
+      handlers(),
+    );
+    const addr = el.querySelector(".settings__addresses")!;
+    expect(addr.textContent).toBe("This machine's addresses: 192.168.1.20, 10.0.0.5");
+    expect(addr.previousElementSibling?.querySelector("input[name=networkPort]")).not.toBeNull();
+  });
+
+  it("roles off and assistant do not list the addresses", () => {
+    const network = { role: "main" as const, code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, addresses: ["192.168.1.20"] };
+    expect(renderSettings({ ...voiceBase, networkRole: "off", network }, handlers()).querySelector(".settings__addresses")).toBeNull();
+    expect(renderSettings({ ...voiceBase, networkRole: "assistant", network }, handlers()).querySelector(".settings__addresses")).toBeNull();
+  });
+
   it("role main shows the port, the pairing code, Regenerate and the assistants list", () => {
     const h = handlers();
     const el = renderSettings(
@@ -415,6 +446,7 @@ describe("Network settings", () => {
     expect(el.querySelector<HTMLSelectElement>("select[name=networkRole]")!.value).toBe("main");
     const port = el.querySelector<HTMLInputElement>("input[name=networkPort]")!;
     expect(port.value).toBe("4127");
+    expect(el.querySelector(".settings__addresses")).toBeNull();
     port.value = "5000";
     port.dispatchEvent(new Event("change"));
     expect(h.onPort).toHaveBeenCalledWith(5000);

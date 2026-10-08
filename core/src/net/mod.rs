@@ -21,6 +21,29 @@ pub struct NetworkStatus {
     pub assistant: AssistantLink,
     /// Why the main's server is not running (the port is taken…); `None` once it starts.
     pub main_error: Option<String>,
+    /// This machine's IPv4 addresses, for an assistant to type as the main's host.
+    pub addresses: Vec<String>,
+}
+
+/// An address another machine on the LAN could reach: not loopback,
+/// link-local (169.254/16) or unspecified.
+fn usable_v4(ip: std::net::Ipv4Addr) -> bool {
+    !(ip.is_loopback() || ip.is_link_local() || ip.is_unspecified())
+}
+
+/// This machine's usable IPv4 addresses, sorted; empty when they cannot be listed.
+pub fn local_addresses() -> Vec<String> {
+    let mut v: Vec<String> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| match i.addr {
+            if_addrs::IfAddr::V4(a) if usable_v4(a.ip) => Some(a.ip.to_string()),
+            _ => None,
+        })
+        .collect();
+    v.sort();
+    v.dedup();
+    v
 }
 
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
@@ -132,6 +155,23 @@ pub fn local_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usable_addresses_skip_loopback_and_link_local() {
+        let ip = |s: &str| s.parse::<std::net::Ipv4Addr>().unwrap();
+        assert!(usable_v4(ip("192.168.1.20")));
+        assert!(usable_v4(ip("10.0.0.5")));
+        assert!(!usable_v4(ip("127.0.0.1")));
+        assert!(!usable_v4(ip("169.254.10.1")));
+        assert!(!usable_v4(ip("0.0.0.0")));
+    }
+
+    #[test]
+    fn local_addresses_are_usable_v4_strings() {
+        for a in local_addresses() {
+            assert!(usable_v4(a.parse().unwrap()), "{a}");
+        }
+    }
 
     fn with(role: NetworkRole, f: impl FnOnce(&mut Config)) -> Config {
         let mut c = Config::default();
