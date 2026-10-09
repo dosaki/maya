@@ -60,7 +60,9 @@ What is different on Windows, and where:
   shell lines as macOS. A session's "tty" is `console:<pid>`;
   `core/src/win_console.rs` attaches to that console to type key events
   into it and to find the window showing it.
-- **Inbox.** `core/src/inbox.rs`: a named pipe, opened with the auth line
+- **Inbox.** The fallback for replies: `actions::send_reply` types a
+  Claude Code reply into the terminal (`answer::reply_lines`) and uses the
+  inbox only when nothing reached the terminal. `core/src/inbox.rs`: a named pipe, opened with the auth line
   `{"type":"auth","token":…}` after checking the pipe's server is the
   session. The token is the session's `CLAUDE_CODE_MESSAGING_TOKEN`, which
   Claude Code exports only to the session's hooks and Bash commands; the
@@ -128,7 +130,7 @@ What is different on Linux, and where:
   Wayland lets no other process raise a window, so there it opens a fresh
   window attached to the same tmux session. `lib.rs`'s
   `fill_terminal_names` gives each card its tmux session's name.
-- **Inbox.** As on macOS, the session's Unix socket (`core/src/inbox.rs`),
+- **Inbox.** The fallback for replies, as on Windows. As on macOS, the session's Unix socket (`core/src/inbox.rs`),
   its owner checked with `SO_PEERCRED`; no token.
 - **Hook.** `core/src/hook_install.rs`: the hook is `hook/`'s `maya-hook`,
   bundled beside the app (as `maya-hook` or Tauri's
