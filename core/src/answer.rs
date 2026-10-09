@@ -81,6 +81,28 @@ pub fn check_free(card: &Card) -> Result<(), String> {
     Ok(())
 }
 
+/// Most characters a reply typed into a terminal may have; the inbox takes more.
+pub const TYPED_MAX_CHARS: usize = 20_000;
+
+/// The lines to type for a reply to Claude Code, each followed by Enter.
+/// Every line but the last ends in `\`, Claude Code's continuation, so its
+/// Enter adds a line instead of sending; the last line's Enter sends. A
+/// last line that itself ends in `\` gets a space, so its Enter still sends.
+pub fn reply_lines(text: &str) -> Vec<String> {
+    let text = text.replace('\r', "");
+    let lines: Vec<&str> = text.trim_matches('\n').split('\n').collect();
+    let last = lines.len() - 1;
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| match (i < last, l.ends_with('\\')) {
+            (true, _) => format!("{l}\\"),
+            (false, true) => format!("{l} "),
+            (false, false) => l.to_string(),
+        })
+        .collect()
+}
+
 /// The picker must be on screen before any key is sent; PreToolUse fires just before it renders.
 pub const OPEN_DELAY_MS: u64 = 1000;
 /// Pause between the last answer and the Enter on the "Submit answers" screen.
@@ -263,5 +285,25 @@ mod tests {
         let mut perm = c.clone();
         perm.awaiting = Some(Awaiting { kind: AwaitKind::Permission, detail: "Bash".into(), questions: vec![] });
         assert!(check(&perm, 1000, 0, 0, 2000).unwrap_err().contains("not waiting"));
+    }
+
+    #[test]
+    fn reply_lines_continue_every_line_but_the_last() {
+        assert_eq!(reply_lines("go on"), vec!["go on"]);
+        assert_eq!(reply_lines("a\nb\nc"), vec!["a\\", "b\\", "c"]);
+    }
+
+    #[test]
+    fn reply_lines_keep_blank_lines_and_drop_carriage_returns_and_outer_newlines() {
+        assert_eq!(reply_lines("a\n\nb"), vec!["a\\", "\\", "b"]);
+        assert_eq!(reply_lines("a\r\nb\r\n"), vec!["a\\", "b"]);
+        assert_eq!(reply_lines("\n\nhi\n"), vec!["hi"]);
+    }
+
+    #[test]
+    fn reply_lines_still_send_when_the_last_line_ends_in_a_backslash() {
+        assert_eq!(reply_lines("see C:\\"), vec!["see C:\\ "]);
+        // A middle line ending in `\` gets the continuation after it; the live check confirms what Claude Code makes of `\\`.
+        assert_eq!(reply_lines("a\\\nb"), vec!["a\\\\", "b"]);
     }
 }
