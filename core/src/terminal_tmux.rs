@@ -103,6 +103,18 @@ impl Terminal for Tmux {
         for args in send_keys_args(&target, text) { self.run(&args)?; }
         Ok(())
     }
+    /// The pane is looked up once. Past that, a failed `send-keys` may follow
+    /// keys that went in (a line's text and its Enter are separate commands),
+    /// so it counts as partly typed and the reply is not sent again.
+    fn type_lines(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
+        let (target, _) = self.pane(tty).ok_or((0, NOT_IN_TMUX.to_string()))?;
+        for (i, line) in lines.iter().enumerate() {
+            for args in send_keys_args(&target, line) {
+                self.run(&args).map_err(|e| (i + 1, e))?;
+            }
+        }
+        Ok(())
+    }
     fn focus(&self, tty: &str) -> Result<(), String> {
         Err(match self.pane(tty) { Some((_, s)) => format!("Attach with: tmux attach -t {s}"), None => "Attach with: tmux attach -t <session>".into() })
     }
@@ -188,5 +200,26 @@ mod tests {
         assert_eq!(t.name_for_tty("/dev/pts/3"), None);
         assert!(t.names_for_ttys(&["/dev/pts/3".into()]).is_empty());
         assert_eq!(t.focus("/dev/pts/3"), Err("Attach with: tmux attach -t <session>".into()));
+    }
+
+    /// A `tmux` that knows one pane, `/dev/pts/3`, takes literal text and
+    /// fails on Enter, as a server that died between the two commands does.
+    #[cfg(unix)]
+    fn tmux_failing_on_enter(dir: &Path) -> Tmux {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("tmux");
+        std::fs::write(&bin, "#!/bin/sh\ncase \"$1\" in\n  list-panes) printf '/dev/pts/3\\ts:0.0\\ts\\n' ;;\n  send-keys) for a; do [ \"$a\" = Enter ] && exit 1; done ;;\nesac\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Tmux { binary: bin }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reply_whose_text_went_in_before_a_failure_counts_as_partly_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = tmux_failing_on_enter(dir.path());
+        let (typed, _) = t.type_lines("/dev/pts/3", &["approved".to_string()]).unwrap_err();
+        assert!(typed > 0, "the text was sent before Enter failed, so it must not be resent through the inbox");
+        assert_eq!(t.type_lines("/dev/pts/9", &["approved".to_string()]), Err((0, NOT_IN_TMUX.to_string())), "no pane: nothing went in");
     }
 }
