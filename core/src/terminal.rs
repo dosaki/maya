@@ -8,6 +8,15 @@ pub trait Terminal: Send + Sync {
     fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String>;
     /// Types `text` then Enter into the terminal hosting `tty`.
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String>;
+    /// Types each of `lines`, each then Enter, into the terminal hosting
+    /// `tty`, as close together as the terminal allows. On failure, how many
+    /// lines went in first (0: nothing reached the terminal) and why.
+    fn type_lines(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
+        for (i, line) in lines.iter().enumerate() {
+            self.type_line(tty, line).map_err(|e| (i, e))?;
+        }
+        Ok(())
+    }
     /// Brings the terminal hosting `tty` forward; Err says what to do instead.
     fn focus(&self, tty: &str) -> Result<(), String>;
     /// The terminal's own name for the pane hosting `tty`, if it has one.

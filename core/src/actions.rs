@@ -126,16 +126,11 @@ enum TypeFail {
     Partial(String),
 }
 
-/// Types `lines` into the terminal on `tty`, one `type_line` each, holding
-/// `TYPING` throughout so no other typed action lands inside the reply.
+/// Types `lines` into the terminal on `tty` in one go, holding `TYPING` so
+/// no other typed action lands inside the reply.
 fn type_reply(l: &Local, tty: &str, lines: &[String]) -> Result<(), TypeFail> {
     let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
-    for (i, line) in lines.iter().enumerate() {
-        if let Err(e) = l.terminal.type_line(tty, line) {
-            return Err(if i == 0 { TypeFail::NotReached(e) } else { TypeFail::Partial(e) });
-        }
-    }
-    Ok(())
+    l.terminal.type_lines(tty, lines).map_err(|(typed, e)| if typed == 0 { TypeFail::NotReached(e) } else { TypeFail::Partial(e) })
 }
 
 /// Sends `text` to the session as the user: typed into its terminal, or a
@@ -177,6 +172,10 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<Route, Stri
     if text.chars().count() > answer::TYPED_MAX_CHARS {
         return Err(format!("Message is too long to type (over {} characters).", answer::TYPED_MAX_CHARS));
     }
+    let lines = answer::reply_lines(text);
+    if lines.len() > answer::TYPED_MAX_LINES {
+        return Err(format!("Message has too many lines to type (over {}).", answer::TYPED_MAX_LINES));
+    }
     let (tty, inbox) = {
         let mut store = l.store.lock().unwrap();
         let card = store.claude_card(session_id, now_ms()).ok_or("Session is no longer running.")?;
@@ -185,7 +184,7 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<Route, Stri
         (session_tty(&store, session_id, s.pid).ok(), s.messaging_socket_path.clone().map(|p| (p, s.pid)))
     };
     let typed = match &tty {
-        Some(tty) => type_reply(l, tty, &answer::reply_lines(text)),
+        Some(tty) => type_reply(l, tty, &lines),
         None => Err(TypeFail::NotReached("no terminal found for the session".into())),
     };
     let result = match typed {
@@ -1690,5 +1689,16 @@ mod tests {
         assert_eq!(Route::from_data(Some(&Route::Inbox.data())), Some(Route::Inbox));
         assert_eq!(Route::from_data(None), None, "an older Maya sends no data");
         assert_eq!(Route::from_data(Some(&serde_json::json!({"route": "carrier pigeon"}))), None);
+    }
+
+    #[test]
+    fn a_typed_reply_has_a_line_cap_so_it_cannot_outrun_the_phone() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let long = vec!["x"; answer::TYPED_MAX_LINES + 1].join("\n");
+        assert_eq!(send_reply(&l, "s1", &long), Err("Message has too many lines to type (over 200).".into()));
+        assert!(fake.calls.lock().unwrap().is_empty());
+        assert_eq!(send_reply(&l, "s1", &vec!["x"; answer::TYPED_MAX_LINES].join("\n")), Ok(Route::Typed));
     }
 }

@@ -84,6 +84,10 @@ pub fn check_free(card: &Card) -> Result<(), String> {
 /// Most characters a reply typed into a terminal may have; the inbox takes more.
 pub const TYPED_MAX_CHARS: usize = 20_000;
 
+/// Most lines a typed reply may have, so typing it ends well inside the
+/// time a phone or another Mac waits for the answer.
+pub const TYPED_MAX_LINES: usize = 200;
+
 /// `text` as keys that only ever type text: a tab becomes four spaces, and
 /// escape sequences (colour codes, or Shift+Tab and the arrows a terminal
 /// would act on) and the other control characters but newline go.
