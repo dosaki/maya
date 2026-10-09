@@ -1,7 +1,7 @@
 # Typed replies: what you send through Maya counts as you — design
 
 Date: 2026-10-09
-Status: approved design, awaiting implementation plan
+Status: implemented
 Builds on: `2026-09-28-eye-reply-modal-design.md`,
 `2026-10-07-maya-android-companion-design.md`
 
