@@ -84,12 +84,38 @@ pub fn check_free(card: &Card) -> Result<(), String> {
 /// Most characters a reply typed into a terminal may have; the inbox takes more.
 pub const TYPED_MAX_CHARS: usize = 20_000;
 
+/// `text` as keys that only ever type text: a tab becomes four spaces, and
+/// escape sequences (colour codes, or Shift+Tab and the arrows a terminal
+/// would act on) and the other control characters but newline go.
+fn typeable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => out.push('\n'),
+            '\t' => out.push_str("    "),
+            // A CSI sequence runs to its final byte, '@' to '~'.
+            '\x1b' if chars.peek() == Some(&'[') => {
+                chars.next();
+                while let Some(n) = chars.next() {
+                    if ('@'..='~').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The lines to type for a reply to Claude Code, each followed by Enter.
 /// Every line but the last ends in `\`, Claude Code's continuation, so its
 /// Enter adds a line instead of sending; the last line's Enter sends. A
 /// last line that itself ends in `\` gets a space, so its Enter still sends.
 pub fn reply_lines(text: &str) -> Vec<String> {
-    let text = text.replace('\r', "");
+    let text = typeable(text);
     let lines: Vec<&str> = text.trim_matches('\n').split('\n').collect();
     let last = lines.len() - 1;
     lines
@@ -305,5 +331,14 @@ mod tests {
         assert_eq!(reply_lines("see C:\\"), vec!["see C:\\ "]);
         // A middle line ending in `\` gets the continuation after it; the live check confirms what Claude Code makes of `\\`.
         assert_eq!(reply_lines("a\\\nb"), vec!["a\\\\", "b"]);
+    }
+
+    #[test]
+    fn reply_lines_type_tabs_as_spaces_and_drop_control_keys() {
+        assert_eq!(reply_lines("fn a() {\n\treturn 1;\n}"), vec!["fn a() {\\", "    return 1;\\", "}"]);
+        // Coloured output pasted from a terminal: the colour codes go, the text stays.
+        assert_eq!(reply_lines("\x1b[31merror\x1b[0m: boom"), vec!["error: boom"]);
+        // Shift+Tab and Down as escape sequences, a bare Esc, a bell and DEL.
+        assert_eq!(reply_lines("a\x1b[Zb\x1b[Bc\x1bd\x07e\x7f"), vec!["abcde"]);
     }
 }
