@@ -173,6 +173,11 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<Route, Stri
         return Err(format!("Message is too long to type (over {} characters).", answer::TYPED_MAX_CHARS));
     }
     let lines = answer::reply_lines(text);
+    // Cleaned of control codes, it may hold nothing: a bare Enter would send
+    // whatever already sits in Claude's input.
+    if lines.iter().all(|l| l.trim_end_matches('\\').trim().is_empty()) {
+        return Err("Message is empty.".into());
+    }
     if lines.len() > answer::TYPED_MAX_LINES {
         return Err(format!("Message has too many lines to type (over {}).", answer::TYPED_MAX_LINES));
     }
@@ -1700,5 +1705,15 @@ mod tests {
         assert_eq!(send_reply(&l, "s1", &long), Err("Message has too many lines to type (over 200).".into()));
         assert!(fake.calls.lock().unwrap().is_empty());
         assert_eq!(send_reply(&l, "s1", &vec!["x"; answer::TYPED_MAX_LINES].join("\n")), Ok(Route::Typed));
+    }
+
+    #[test]
+    fn a_reply_that_is_only_control_codes_is_empty_and_types_nothing() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(send_reply(&l, "s1", "\x1b[31m"), Err("Message is empty.".into()));
+        assert_eq!(send_reply(&l, "s1", "\x1b[31m\n\t\n"), Err("Message is empty.".into()));
+        assert!(fake.calls.lock().unwrap().is_empty(), "not even a bare Enter");
     }
 }

@@ -89,8 +89,9 @@ pub const TYPED_MAX_CHARS: usize = 20_000;
 pub const TYPED_MAX_LINES: usize = 200;
 
 /// `text` as keys that only ever type text: a tab becomes four spaces, and
-/// escape sequences (colour codes, or Shift+Tab and the arrows a terminal
-/// would act on) and the other control characters but newline go.
+/// escape sequences (colour codes, hyperlinks and titles, or Shift+Tab and
+/// the arrows a terminal would act on) and the other control characters but
+/// newline go.
 fn typeable(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -103,6 +104,18 @@ fn typeable(text: &str) -> String {
                 chars.next();
                 while let Some(n) = chars.next() {
                     if ('@'..='~').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            // An OSC sequence (a hyperlink, a window title) runs to BEL or ESC \.
+            '\x1b' if chars.peek() == Some(&']') => {
+                chars.next();
+                while let Some(n) = chars.next() {
+                    if n == '\x07' || (n == '\x1b' && chars.peek() == Some(&'\\')) {
+                        if n == '\x1b' {
+                            chars.next();
+                        }
                         break;
                     }
                 }
@@ -344,5 +357,12 @@ mod tests {
         assert_eq!(reply_lines("\x1b[31merror\x1b[0m: boom"), vec!["error: boom"]);
         // Shift+Tab and Down as escape sequences, a bare Esc, a bell and DEL.
         assert_eq!(reply_lines("a\x1b[Zb\x1b[Bc\x1bd\x07e\x7f"), vec!["abcde"]);
+    }
+
+    #[test]
+    fn reply_lines_drop_osc_sequences_with_their_payload() {
+        // A terminal hyperlink, ended by ESC \, and a window title, ended by BEL.
+        assert_eq!(reply_lines("see \x1b]8;;https://x.dev\x1b\\docs\x1b]8;;\x1b\\ now"), vec!["see docs now"]);
+        assert_eq!(reply_lines("\x1b]0;my title\x07hello"), vec!["hello"]);
     }
 }
