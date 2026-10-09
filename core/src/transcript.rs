@@ -58,6 +58,8 @@ pub enum TurnKind {
     Tool,
     /// A message posted into the session's inbox (by Maya or another session).
     Peer,
+    /// Something Claude Code noted in the conversation: a compaction or an interrupt.
+    Notice,
 }
 
 const PEER_PREFIX: &str = "Another Claude session sent a message:";
@@ -71,6 +73,27 @@ fn unwrap_peer_message(text: &str) -> Option<String> {
         None => rest,
     };
     Some(body.trim().to_string())
+}
+
+/// Claude Code's line when the user pressed Esc, sometimes with " for tool use".
+const INTERRUPTED: &str = "[Request interrupted by user";
+
+/// The user's text without Claude Code's `<pasted_content …>` wrappers.
+fn strip_paste_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("<pasted_content") {
+        out.push_str(&rest[..i]);
+        match rest[i..].find('>') {
+            Some(j) => rest = &rest[i + j + 1..],
+            None => {
+                rest = &rest[i..];
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.replace("</pasted_content>", "").trim().to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -159,6 +182,10 @@ enum Item {
     Break,
 }
 
+fn notice(text: &str) -> Item {
+    Item::Turn(Turn { kind: TurnKind::Notice, text: text.into() })
+}
+
 /// Only the last text of each assistant run (the texts between two
 /// user or peer turns, or breaks) is an answer; the ones before it
 /// narrate progress.
@@ -180,7 +207,7 @@ fn drop_narration(items: Vec<Item>) -> Vec<Turn> {
                 }
                 last_text_in_run = Some(kept.len());
             }
-            TurnKind::User | TurnKind::Peer => last_text_in_run = None,
+            TurnKind::User | TurnKind::Peer | TurnKind::Notice => last_text_in_run = None,
             TurnKind::Tool => {}
         }
         kept.push(t);
@@ -191,7 +218,8 @@ fn drop_narration(items: Vec<Item>) -> Vec<Turn> {
 /// Conversation turns (user prompts, assistant text, tool calls) in order,
 /// keeping the last `max_turns` messages and the tool calls among them.
 /// Subagent sidechain lines, harness-injected user lines (skill bodies,
-/// notifications, subagent hand-backs) and progress narration are skipped.
+/// notifications, subagent hand-backs) and progress narration are skipped;
+/// a compaction or an interrupt is a notice.
 pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
     let mut items = Vec::new();
     for line in text.lines() {
@@ -202,6 +230,10 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
         let content = &v["message"]["content"];
         match v["type"].as_str() {
             Some("user") => {
+                if v["isCompactSummary"].as_bool() == Some(true) {
+                    items.push(notice("Earlier conversation compacted"));
+                    continue;
+                }
                 let t = text_blocks(content);
                 if !t.is_empty() {
                     let text = t.join("\n\n");
@@ -210,6 +242,7 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
                         // A subagent's final report comes back framed as a peer message.
                         Some(inner) if inner.starts_with("<agent-message") => {}
                         Some(inner) => items.push(Item::Turn(Turn { kind: TurnKind::Peer, text: inner })),
+                        None if text.starts_with(INTERRUPTED) => items.push(notice("Interrupted")),
                         // Other meta lines are skill bodies, reminders and caveats.
                         None if meta => {}
                         None if is_harness_tag(&text) => {
@@ -217,7 +250,12 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
                                 items.push(Item::Break);
                             }
                         }
-                        None => items.push(Item::Turn(Turn { kind: TurnKind::User, text })),
+                        None => {
+                            let text = strip_paste_tags(&text);
+                            if !text.is_empty() {
+                                items.push(Item::Turn(Turn { kind: TurnKind::User, text }));
+                            }
+                        }
                     }
                 }
             }
@@ -600,6 +638,54 @@ mod tests {
             (TurnKind::User, "thanks"),
             (TurnKind::Assistant, "Working on the next bit."),
             (TurnKind::Tool, "Bash"),
+        ]);
+    }
+
+    fn turn(kind: TurnKind, text: &str) -> Turn {
+        Turn { kind, text: text.into() }
+    }
+
+    #[test]
+    fn a_compaction_summary_is_a_notice_not_the_users_words() {
+        let mut summary: serde_json::Value = serde_json::from_str(&user_line("This session is being continued from a previous conversation that ran out of context. The summary below…", false)).unwrap();
+        summary["isCompactSummary"] = true.into();
+        summary["isVisibleInTranscriptOnly"] = true.into();
+        let text = [user_line("old ask", false), assistant_line("old answer", None), summary.to_string(), user_line("new ask", false)].join("\n");
+        assert_eq!(parse_turns(&text, 30), vec![
+            turn(TurnKind::User, "old ask"),
+            turn(TurnKind::Assistant, "old answer"),
+            turn(TurnKind::Notice, "Earlier conversation compacted"),
+            turn(TurnKind::User, "new ask"),
+        ]);
+    }
+
+    #[test]
+    fn an_interrupt_is_a_notice_and_keeps_claudes_last_words() {
+        let text = [
+            user_line("fix A", false),
+            assistant_line("Looking at A.", None),
+            assistant_line("Found it in a.rs.", None),
+            user_line("[Request interrupted by user]", false),
+            user_line("[Request interrupted by user for tool use]", false),
+            user_line("carry on", false),
+        ]
+        .join("\n");
+        assert_eq!(parse_turns(&text, 30), vec![
+            turn(TurnKind::User, "fix A"),
+            turn(TurnKind::Assistant, "Found it in a.rs."),
+            turn(TurnKind::Notice, "Interrupted"),
+            turn(TurnKind::Notice, "Interrupted"),
+            turn(TurnKind::User, "carry on"),
+        ]);
+    }
+
+    #[test]
+    fn pasted_text_loses_its_tags_and_keeps_what_was_typed_around_it() {
+        let pasted = "<pasted_content id=\"0b51\">\nLets reorganise the Settings page.\n</pasted_content>";
+        let text = [user_line(pasted, false), user_line(&format!("Do this:\n{pasted}\nthanks"), false)].join("\n");
+        assert_eq!(parse_turns(&text, 30), vec![
+            turn(TurnKind::User, "Lets reorganise the Settings page."),
+            turn(TurnKind::User, "Do this:\n\nLets reorganise the Settings page.\n\nthanks"),
         ]);
     }
 }
