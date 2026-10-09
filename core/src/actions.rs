@@ -108,6 +108,18 @@ pub enum Route {
     Inbox,
 }
 
+impl Route {
+    /// The `data` a `Reply` command's result carries.
+    pub fn data(self) -> serde_json::Value {
+        serde_json::json!({ "route": self })
+    }
+
+    /// The route in a `Reply` result's `data`; None from a Maya that sends none.
+    pub fn from_data(data: Option<&serde_json::Value>) -> Option<Route> {
+        data.and_then(|d| serde_json::from_value(d["route"].clone()).ok())
+    }
+}
+
 /// Why a typed reply failed: before any key reached the terminal, or partway.
 enum TypeFail {
     NotReached(String),
@@ -1670,5 +1682,13 @@ mod tests {
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
         assert_eq!(session_history(&l, "s1").unwrap(), vec![transcript::Turn { kind: transcript::TurnKind::Peer, text: "hello".into() }]);
+    }
+
+    #[test]
+    fn route_from_data_reads_the_route_and_tolerates_none() {
+        assert_eq!(Route::Typed.data(), serde_json::json!({"route": "typed"}));
+        assert_eq!(Route::from_data(Some(&Route::Inbox.data())), Some(Route::Inbox));
+        assert_eq!(Route::from_data(None), None, "an older Maya sends no data");
+        assert_eq!(Route::from_data(Some(&serde_json::json!({"route": "carrier pigeon"}))), None);
     }
 }

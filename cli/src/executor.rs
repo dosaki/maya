@@ -59,7 +59,7 @@ impl Executor for CliExecutor {
                     let mut s = self.store.lock().unwrap();
                     (s.claude_dir().join("maya"), s.card_for(&session, now_ms()).is_some())
                 };
-                done(client::reply_with_attachments(&maya_dir, exists, &text, attachments, now_ms(), |text| actions::send_reply(&l, &session, &text)))
+                client::reply_with_attachments(&maya_dir, exists, &text, attachments, now_ms(), |text| actions::send_reply(&l, &session, &text)).map(|route| Some(route.data()))
             }
             CommandKind::Answer { session, ask_id, question, option } => done(actions::answer_question(&l, &session, ask_id, question, option)),
             CommandKind::Compact { session } => done(actions::compact_session(&l, &session)),
