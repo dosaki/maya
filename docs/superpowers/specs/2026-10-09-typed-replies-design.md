@@ -95,7 +95,13 @@ dropped. A last line that itself ends in `\` gets a trailing space, so its
 Enter still sends instead of adding a line.
 
 Typed replies are capped at 20,000 characters ("Message is too long to type
-(over 20000 characters)."); the inbox keeps its 100,000.
+(over 20000 characters).") and 200 lines ("Message has too many lines to
+type (over 200)."), so typing ends well inside the 30 s a phone or another
+Mac waits; the inbox keeps its 100,000 characters. The whole reply is typed
+in one burst (`Terminal::type_lines`; one AppleScript on Terminal.app), so
+a prompt that opens while Claude works cannot land between its lines. Tabs
+are typed as four spaces; escape sequences and other control characters
+are dropped, so a reply only ever types text.
 
 Bracketed paste is out of scope; it can replace line-by-line typing later
 if long replies prove slow.
@@ -138,6 +144,9 @@ Turn kinds become `user`, `assistant`, `tool`, `peer` and `notice`.
 - Pasted text: `<pasted_content …>` and `</pasted_content>` tags are
   removed from a user turn; the pasted text and anything typed around it
   stay, trimmed.
+- On the wire (to the page and to other Mayas) a notice is a `tool` turn
+  with `"notice": true`, so a Maya from before notices still reads the
+  history and shows it as a plain line.
 - A notice ends an assistant run like a user turn, so Claude's last text
   before an interrupt is kept as its answer rather than dropped as
   narration.
