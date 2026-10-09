@@ -97,9 +97,34 @@ fn strip_paste_tags(text: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(into = "WireTurn", from = "WireTurn")]
 pub struct Turn {
     pub kind: TurnKind,
     pub text: String,
+}
+
+/// A turn as it travels to the page and to other Mayas. A notice goes as a
+/// tool line marked `notice`, so a Maya from before notices (0.14) still
+/// reads the history and shows it as a plain line.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WireTurn {
+    kind: TurnKind,
+    text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    notice: bool,
+}
+
+impl From<Turn> for WireTurn {
+    fn from(t: Turn) -> Self {
+        let notice = t.kind == TurnKind::Notice;
+        WireTurn { kind: if notice { TurnKind::Tool } else { t.kind }, text: t.text, notice }
+    }
+}
+
+impl From<WireTurn> for Turn {
+    fn from(w: WireTurn) -> Self {
+        Turn { kind: if w.notice { TurnKind::Notice } else { w.kind }, text: w.text }
+    }
 }
 
 /// `<name>: <first useful argument>` for a tool_use block, or just the name.
@@ -687,5 +712,21 @@ mod tests {
             turn(TurnKind::User, "Lets reorganise the Settings page."),
             turn(TurnKind::User, "Do this:\n\nLets reorganise the Settings page.\n\nthanks"),
         ]);
+    }
+
+    #[test]
+    fn a_notice_reaches_an_older_maya_as_a_plain_line_it_can_read() {
+        let json = serde_json::to_value(vec![turn(TurnKind::Notice, "Interrupted"), turn(TurnKind::User, "hi")]).unwrap();
+        assert_eq!(json, serde_json::json!([{"kind": "tool", "text": "Interrupted", "notice": true}, {"kind": "user", "text": "hi"}]));
+        // 0.14's Turn: no notice kind, no notice field.
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        #[serde(rename_all = "lowercase")]
+        enum OldKind { User, Assistant, Tool, Peer }
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct OldTurn { kind: OldKind, text: String }
+        let old: Vec<OldTurn> = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(old[0], OldTurn { kind: OldKind::Tool, text: "Interrupted".into() });
+        let back: Vec<Turn> = serde_json::from_value(json).unwrap();
+        assert_eq!(back, vec![turn(TurnKind::Notice, "Interrupted"), turn(TurnKind::User, "hi")]);
     }
 }

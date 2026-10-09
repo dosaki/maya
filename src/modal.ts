@@ -506,11 +506,12 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const history = el("div", "modal__history");
   if (m.turns.length === 0) history.append(el("div", "modal__empty", "No transcript found."));
   for (const t of m.turns) {
-    const turn = el("div", `turn turn--${t.kind}`);
-    const who = { user: "You", assistant: "Claude", peer: "From another session", tool: "", notice: "" }[t.kind];
+    const kind = t.notice ? "notice" : t.kind;
+    const turn = el("div", `turn turn--${kind}`);
+    const who = { user: "You", assistant: "Claude", peer: "From another session", tool: "", notice: "" }[kind];
     if (who) turn.append(el("div", "turn__who", who));
     const text = el("div", "turn__text");
-    if (t.kind === "tool" || t.kind === "notice") text.textContent = t.text;
+    if (kind === "tool" || kind === "notice") text.textContent = t.text;
     else text.append(renderMarkdown(t.text));
     turn.append(text);
     history.append(turn);
@@ -631,7 +632,7 @@ export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
 
 /** True when both lists hold the same turns in the same order. */
 export function sameTurns(a: Turn[], b: Turn[]): boolean {
-  return a.length === b.length && a.every((t, i) => t.kind === b[i].kind && t.text === b[i].text);
+  return a.length === b.length && a.every((t, i) => t.kind === b[i].kind && t.text === b[i].text && !!t.notice === !!b[i].notice);
 }
 
 /**

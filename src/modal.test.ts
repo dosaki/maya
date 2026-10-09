@@ -560,7 +560,7 @@ describe("replyStatus", () => {
 
 describe("renderModal notices and statuses", () => {
   it("shows a notice as a line with no speaker", () => {
-    const el = renderModal({ card: base, turns: [{ kind: "notice", text: "Interrupted" }], status: null, draft: "" }, handlers());
+    const el = renderModal({ card: base, turns: [{ kind: "tool", text: "Interrupted", notice: true }], status: null, draft: "" }, handlers());
     const t = el.querySelector(".turn--notice")!;
     expect(t.querySelector(".turn__who")).toBeNull();
     expect(t.textContent).toBe("Interrupted");
