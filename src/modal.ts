@@ -22,7 +22,7 @@ export function setComposerOptions(o: Partial<typeof composer>): void {
 export interface ModalModel {
   card: Card;
   turns: Turn[];
-  status: { ok: boolean; text: string } | null;
+  status: { ok: boolean; text: string; warn?: boolean } | null;
   draft: string;
   /** Index of the next unanswered question when the session is asking one. */
   next?: number;
@@ -484,8 +484,8 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
           ? `This session asked you something. Reply below. "${m.card.awaiting?.detail ?? ""}"`
           : `This session asked you something. Reply below or in its terminal. "${m.card.awaiting?.detail ?? ""}"`
         : remote
-          ? `This session is waiting for a decision on ${m.card.machine}. A reply will queue behind it.`
-          : "This session is waiting for a decision in its terminal. A reply will queue behind it.";
+          ? `This session is waiting for a decision on ${m.card.machine}. Answer it there before replying.`
+          : "This session is waiting for a decision in its terminal. Answer it there before replying.";
     banner.append(el("span", "", text));
     if (!m.card.machine) {
       const open = el("button", "card__btn", "Open terminal");
@@ -507,10 +507,10 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   if (m.turns.length === 0) history.append(el("div", "modal__empty", "No transcript found."));
   for (const t of m.turns) {
     const turn = el("div", `turn turn--${t.kind}`);
-    const who = { user: "You", assistant: "Claude", peer: "Message", tool: "" }[t.kind];
+    const who = { user: "You", assistant: "Claude", peer: "From another session", tool: "", notice: "" }[t.kind];
     if (who) turn.append(el("div", "turn__who", who));
     const text = el("div", "turn__text");
-    if (t.kind === "tool") text.textContent = t.text;
+    if (t.kind === "tool" || t.kind === "notice") text.textContent = t.text;
     else text.append(renderMarkdown(t.text));
     turn.append(text);
     history.append(turn);
@@ -525,8 +525,9 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const tweaks = renderTweaks(h, caps, m.agent ?? (claude ? CLAUDE_AGENT : { harness: m.card.harness, models: [], efforts: [], modes: [] }), m.card.model);
   if (tweaks) panel.append(tweaks);
 
-  // Other harnesses have no inbox; a reply is typed into their terminal instead.
-  if (m.card.hasInbox || !claude) {
+  // Every card takes replies: they are typed into the session's terminal, with
+  // a Claude session's inbox as the fallback.
+  {
     const attachments = m.attachments ?? [];
     panel.append(renderChips(attachments, (path) => h.onRemoveAttachment?.(path)));
     const form = el("div", "modal__composer");
@@ -586,10 +587,8 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
       form.append(ta, send);
     }
     panel.append(form);
-  } else {
-    panel.append(el("div", "modal__noinbox", "This session has no inbox. Use the terminal."));
   }
-  if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.ok ? "ok" : "error"}`, m.status.text));
+  if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.warn ? "warn" : m.status.ok ? "ok" : "error"}`, m.status.text));
 
   root.append(backdrop, panel);
   return root;
@@ -769,7 +768,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   if (enableTimer) clearTimeout(enableTimer);
   enableTimer = delay === null ? undefined : setTimeout(() => { enableTimer = undefined; paint(); }, delay + 50);
   const existing = host.querySelector<HTMLElement>(".modal");
-  const composerUnchanged = !!existing && !!existing.querySelector("textarea") === (m.card.hasInbox || m.card.harness !== "claude-code");
+  const composerUnchanged = !!existing && !!existing.querySelector("textarea");
   if (existing && composerUnchanged) patchModal(existing, fresh);
   else {
     host.replaceChildren(fresh);
@@ -828,6 +827,13 @@ async function cycleMode(): Promise<void> {
   }
 }
 
+/** The status line after a reply, by how it reached the session. */
+export function replyStatus(route: "typed" | "inbox" | null): { ok: boolean; text: string; warn?: boolean } {
+  if (route === "typed") return { ok: true, text: "Sent as you" };
+  if (route === "inbox") return { ok: true, warn: true, text: "Sent as a message from another session: it can't approve anything" };
+  return { ok: true, text: "Delivered" };
+}
+
 function setStatus(ok: boolean, text: string): void {
   if (!current) return;
   current.model.status = { ok, text };
@@ -841,12 +847,12 @@ const guardedSend = makeSendGuard(async (text: string) => {
   if (!current) return;
   const { card } = current.model;
   try {
-    await invoke("send_reply", { sessionId: card.sessionId, text, attachments: current.model.attachments?.map((a) => a.path) ?? [] });
+    const route = await invoke<"typed" | "inbox" | null>("send_reply", { sessionId: card.sessionId, text, attachments: current.model.attachments?.map((a) => a.path) ?? [] });
     const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea");
     if (ta) ta.value = "";
     current.model.draft = "";
     attachments.clear();
-    current.model.status = { ok: true, text: "Delivered" };
+    current.model.status = replyStatus(route ?? null);
     await loadTurns({ force: true, focusInput: true });
   } catch (e) {
     setStatus(false, String(e));

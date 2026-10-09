@@ -133,7 +133,7 @@ export const COLUMNS: { state: CardState; title: string }[] = [
 ];
 
 export interface Turn {
-  kind: "user" | "assistant" | "tool" | "peer";
+  kind: "user" | "assistant" | "tool" | "peer" | "notice";
   text: string;
 }
 
