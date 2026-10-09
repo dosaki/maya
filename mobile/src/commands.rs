@@ -4,7 +4,7 @@
 
 use crate::hub::Hub;
 use crate::android;
-use maya_core::actions::StartResult;
+use maya_core::actions::{Route, StartResult};
 use maya_core::agents::AgentInfo;
 use maya_core::config::{Config, NetworkRole};
 use maya_core::launch::LaunchOptions;
@@ -45,9 +45,9 @@ pub fn session_history(hub: H, session_id: String) -> Result<Vec<Turn>, String> 
 }
 
 #[tauri::command(async)]
-pub fn send_reply(hub: H, session_id: String, text: String, attachments: Vec<String>) -> Result<(), String> {
+pub fn send_reply(hub: H, session_id: String, text: String, attachments: Vec<String>) -> Result<Option<Route>, String> {
     let attachments = remote_attachments(&attachments)?;
-    hub.send(&session_id, |session| CommandKind::Reply { session, text, attachments }).map(|_| ())
+    hub.send(&session_id, |session| CommandKind::Reply { session, text, attachments }).map(|d| Route::from_data(d.as_ref()))
 }
 
 #[tauri::command(async)]

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, setComposerOptions } from "./modal";
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, replyStatus, setComposerOptions } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -154,7 +154,7 @@ describe("renderModal", () => {
     expect(el.querySelector(".modal__state")?.textContent).toBe("Idle");
     const kinds = [...el.querySelectorAll(".turn")].map((t) => t.className);
     expect(kinds).toEqual(["turn turn--user", "turn turn--assistant", "turn turn--tool", "turn turn--peer"]);
-    expect([...el.querySelectorAll(".turn__who")].map((w) => w.textContent)).toEqual(["You", "Claude", "Message"]);
+    expect([...el.querySelectorAll(".turn__who")].map((w) => w.textContent)).toEqual(["You", "Claude", "From another session"]);
     expect(el.querySelector("textarea")).not.toBeNull();
     expect(el.querySelector(".modal__banner")).toBeNull();
   });
@@ -352,10 +352,11 @@ describe("renderModal", () => {
     expect(h.onCycleMode).toHaveBeenCalledTimes(1);
   });
 
-  it("still offers the tweaks row when the session has no inbox", () => {
+  it("offers the tweaks row and the composer when a Claude session has no inbox", () => {
     const el = renderModal({ card: { ...base, hasInbox: false }, turns: [], status: null, draft: "" }, handlers());
     expect(el.querySelector(".modal__tweaks")).not.toBeNull();
-    expect(el.querySelector("textarea")).toBeNull();
+    expect(el.querySelector("textarea")).not.toBeNull();
+    expect(el.querySelector(".modal__noinbox")).toBeNull();
   });
 
   it("renders turns as markdown and routes link clicks to the handler without navigating", () => {
@@ -453,12 +454,6 @@ describe("renderModal", () => {
     expect(el.querySelector(".modal__status")?.className).toContain("modal__status--error");
   });
 
-  it("replaces the composer when the session has no inbox", () => {
-    const el = renderModal({ card: { ...base, hasInbox: false }, turns: [], status: null, draft: "" }, handlers());
-    expect(el.querySelector("textarea")).toBeNull();
-    expect(el.querySelector(".modal__noinbox")?.textContent).toContain("no inbox");
-  });
-
   it("shows the machine in the header and drops the terminal button from the awaiting banner for a remote card", () => {
     const h = handlers();
     const remote = { ...base, machine: "laptop", state: "awaiting" as const, awaiting: { kind: "permission" as const, detail: "Bash: rm", questions: [] } };
@@ -552,5 +547,33 @@ describe("the Attach button", () => {
     } finally {
       setComposerOptions({ attachButton: false });
     }
+  });
+});
+
+describe("replyStatus", () => {
+  it("says whether a reply went in as the user or as another session", () => {
+    expect(replyStatus("typed")).toEqual({ ok: true, text: "Sent as you" });
+    expect(replyStatus("inbox")).toEqual({ ok: true, warn: true, text: "Sent as a message from another session: it can't approve anything" });
+    expect(replyStatus(null)).toEqual({ ok: true, text: "Delivered" });
+  });
+});
+
+describe("renderModal notices and statuses", () => {
+  it("shows a notice as a line with no speaker", () => {
+    const el = renderModal({ card: base, turns: [{ kind: "tool", text: "Interrupted", notice: true }], status: null, draft: "" }, handlers());
+    const t = el.querySelector(".turn--notice")!;
+    expect(t.querySelector(".turn__who")).toBeNull();
+    expect(t.textContent).toBe("Interrupted");
+  });
+
+  it("colours an inbox fallback as a warning", () => {
+    const el = renderModal({ card: base, turns: [], status: replyStatus("inbox"), draft: "" }, handlers());
+    expect(el.querySelector(".modal__status")?.className).toBe("modal__status modal__status--warn");
+  });
+
+  it("tells the user to answer a pending decision before replying", () => {
+    const awaiting = { ...base, state: "awaiting" as const, awaiting: { kind: "permission" as const, detail: "Bash: git push", questions: [] } };
+    const el = renderModal({ card: awaiting, turns: [], status: null, draft: "" }, handlers());
+    expect(el.querySelector(".modal__banner")?.textContent).toContain("Answer it there before replying.");
   });
 });

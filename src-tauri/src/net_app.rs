@@ -169,7 +169,7 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
                 (store.claude_dir().join("maya"), store.card_for(&session, now_ms()).is_some())
             };
             // The files are local once saved; nothing further to attach.
-            done(reply_with_attachments(&maya_dir, exists, &text, attachments, now_ms(), |text| actions::send_reply(&l, &session, &text)))
+            reply_with_attachments(&maya_dir, exists, &text, attachments, now_ms(), |text| actions::send_reply(&l, &session, &text)).map(|route| Some(route.data()))
         }
         CommandKind::Answer { session, ask_id, question, option } => done(actions::answer_question(&l, &session, ask_id, question, option)),
         CommandKind::Compact { session } => done(actions::compact_session(&l, &session)),

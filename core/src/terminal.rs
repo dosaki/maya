@@ -8,6 +8,15 @@ pub trait Terminal: Send + Sync {
     fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String>;
     /// Types `text` then Enter into the terminal hosting `tty`.
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String>;
+    /// Types each of `lines`, each then Enter, into the terminal hosting
+    /// `tty`, as close together as the terminal allows. On failure, how many
+    /// lines went in first (0: nothing reached the terminal) and why.
+    fn type_lines(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
+        for (i, line) in lines.iter().enumerate() {
+            self.type_line(tty, line).map_err(|e| (i, e))?;
+        }
+        Ok(())
+    }
     /// Brings the terminal hosting `tty` forward; Err says what to do instead.
     fn focus(&self, tty: &str) -> Result<(), String>;
     /// The terminal's own name for the pane hosting `tty`, if it has one.
@@ -53,6 +62,9 @@ pub mod test_support {
         pub peers: Mutex<HashMap<String, Vec<String>>>,
         /// Ttys that refuse typing, as a console whose process has exited does.
         pub dead: Mutex<std::collections::HashSet<String>>,
+        /// Typing fails once this many lines have been typed, as a terminal
+        /// closed in the middle of a reply does.
+        pub fail_after: Option<usize>,
     }
 
     impl Terminal for FakeTerminal {
@@ -63,6 +75,11 @@ pub mod test_support {
         fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
             if let Some(e) = &self.fail_type {
                 return Err(e.clone());
+            }
+            if let Some(n) = self.fail_after {
+                if self.calls.lock().unwrap().iter().filter(|c| matches!(c, Call::Type { .. })).count() >= n {
+                    return Err("the terminal went away".into());
+                }
             }
             if self.dead.lock().unwrap().contains(tty) {
                 return Err(format!("{tty} is gone"));

@@ -687,12 +687,13 @@ fn session_history(app: AppHandle, state: TauriState<AppState>, session_id: Stri
 }
 
 #[tauri::command(async)]
-fn send_reply(app: AppHandle, state: TauriState<AppState>, session_id: String, text: String, attachments: Vec<String>) -> Result<(), String> {
+fn send_reply(app: AppHandle, state: TauriState<AppState>, session_id: String, text: String, attachments: Vec<String>) -> Result<Option<actions::Route>, String> {
     if let Some(machine) = remote_machine_of(&state, &session_id) {
         let attachments = remote_attachments(&attachments)?;
-        return route_done(&app, &machine, CommandKind::Reply { session: session_id, text, attachments });
+        let data = net_app::send_command(&app, &machine, CommandKind::Reply { session: session_id, text, attachments }, ROUTE_TIMEOUT)?;
+        return Ok(actions::Route::from_data(data.as_ref()));
     }
-    actions::send_reply(&local(&state), &session_id, &text)
+    actions::send_reply(&local(&state), &session_id, &text).map(Some)
 }
 
 #[tauri::command(async)]

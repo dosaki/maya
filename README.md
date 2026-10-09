@@ -382,12 +382,18 @@ write and drives them through their own interfaces.
 - **States** come from the hook events in `~/.claude/maya/events.jsonl`
   when the hook is installed, with a rule-based reading of the transcript
   as the fallback (a turn that ends in a question is "Awaiting Decision").
-- **Replies** go through Claude Code's session inbox (a Unix socket on
-  macOS and Linux, a named pipe on Windows), or are typed into the session's
-  terminal for the other agents. Slash commands, answers, renames and the
-  model, effort and mode changes are typed into the terminal too. On Windows every inbox connection must
-  open with the session's token, which Claude Code gives only to the
-  session's hooks, so replies there need the hook installed: the hook keeps
+- **Replies** are typed into the session's terminal, so the agent takes
+  them as yours: a Claude Code session can be approved from Maya or the
+  phone. A multi-line reply to Claude Code is typed line by line with its
+  `\` continuation. When Maya cannot type into a Claude Code session (one
+  in iTerm, VS Code or Ghostty, or over SSH outside tmux) it posts the
+  reply to the session's inbox instead (a Unix socket on macOS and Linux,
+  a named pipe on Windows), where Claude takes it as a message from
+  another session that cannot approve anything, and the reply box says
+  so. Slash commands, answers, renames and the model, effort and mode
+  changes are typed into the terminal too. On Windows every inbox
+  connection must open with the session's token, which Claude Code gives
+  only to the session's hooks, so the inbox fallback there needs the hook installed: the hook keeps
   each session's token in `~/.claude/maya/inbox/`, and a session that was
   already running when the hook went in takes replies after its next hook
   event (your next prompt in it, say). On macOS terminal actions use AppleScript and AppKit on

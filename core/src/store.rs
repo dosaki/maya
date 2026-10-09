@@ -48,10 +48,6 @@ pub struct Store {
     prs: PrCache,
     /// Compact the event log during refresh once it exceeds this many bytes.
     pub compact_threshold_bytes: u64,
-    /// The last replies Maya sent each session, newest last: the session
-    /// records them as messages from another session, and the history
-    /// shows them as the user's own.
-    sent: std::collections::HashMap<String, std::collections::VecDeque<String>>,
     /// Codex and Antigravity names, re-read only when their files change.
     names: NameFiles,
     /// Names chosen in the New session modal, waiting for their sessions.
@@ -91,16 +87,6 @@ fn discover_sessions(procs: &[(i32, String, Harness)], codex_dir: &Path, agy_dir
 #[cfg(windows)]
 fn discover_sessions(procs: &[(i32, String, Harness)], codex_dir: &Path, agy_dir: &Path) -> Vec<ForeignSession> {
     foreign::discover_from_files(procs, crate::win_process::holders, codex_dir, agy_dir)
-}
-
-/// Replies remembered per session.
-const SENT_KEPT: usize = 50;
-
-/// Hex SHA-256 of a reply as it reads trimmed: enough to recognise it in
-/// the transcript, without keeping a second copy of what was said.
-fn sent_hash(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    Sha256::digest(text.trim().as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub const DEFAULT_COMPACT_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
@@ -166,49 +152,11 @@ impl Store {
             tails: TailCache::default(),
             prs: PrCache::default(),
             compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
-            sent: Default::default(),
             names: NameFiles::default(),
             pending: Default::default(),
             due_renames: Default::default(),
             agents: std::sync::Arc::new(crate::agents::current),
         }
-    }
-
-    /// Where the hashes of replies Maya sent `session_id` are kept, so its
-    /// history still shows them as the user's after Maya restarts. None for
-    /// an id that is not a plain file name.
-    fn sent_path(&self, session_id: &str) -> Option<PathBuf> {
-        let plain = !session_id.is_empty() && session_id.len() <= 128 && session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        plain.then(|| self.claude_dir.join("maya").join("sent").join(format!("{session_id}.json")))
-    }
-
-    /// Remembers a reply Maya delivered to `session_id`: its hash, among the
-    /// last `SENT_KEPT`, in memory and on disk.
-    pub fn note_sent(&mut self, session_id: &str, text: &str) {
-        let mut kept = self.sent_hashes(session_id);
-        kept.push_back(sent_hash(text));
-        while kept.len() > SENT_KEPT {
-            kept.pop_front();
-        }
-        if let Some(path) = self.sent_path(session_id) {
-            if let (Some(dir), Ok(json)) = (path.parent(), serde_json::to_string(&kept)) {
-                let _ = std::fs::create_dir_all(dir).and_then(|_| config::write_private(&path, json.as_bytes()));
-            }
-        }
-        self.sent.insert(session_id.to_string(), kept);
-    }
-
-    /// Hashes of the replies Maya delivered to `session_id`, oldest first.
-    fn sent_hashes(&self, session_id: &str) -> std::collections::VecDeque<String> {
-        if let Some(k) = self.sent.get(session_id) {
-            return k.clone();
-        }
-        self.sent_path(session_id).and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
-    }
-
-    /// Whether Maya delivered `text` to `session_id`, in this run or an earlier one.
-    pub fn was_sent(&self, session_id: &str, text: &str) -> bool {
-        self.sent_hashes(session_id).contains(&sent_hash(text))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -437,6 +385,16 @@ impl Store {
         self.refresh(now_ms).into_iter().find(|c| c.session_id == session_id)
     }
 
+    /// One Claude Code session's card, without refreshing the other agents
+    /// (OpenCode's server among them): enough to know whether it is free.
+    pub fn claude_card(&mut self, session_id: &str, now_ms: u64) -> Option<Card> {
+        let _ = self.events.read_new();
+        let s = self.session(session_id)?;
+        let path = self.transcript_path_for(&s);
+        let tail = self.tails.get(&path);
+        Some(derive(&DeriveInput { registry: &s, events: self.events.events_for(&s.session_id), transcript: &tail, now_ms, completed_timeout_ms: self.config.completed_timeout_ms() }))
+    }
+
     /// Drops event-log lines for sessions no longer in the registry. A Codex
     /// thread is kept while its writer lock exists, which holds from its
     /// start, whether or not a refresh has matched it to a process yet (at
@@ -569,31 +527,6 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn replies_maya_sent_are_remembered_per_session_and_capped() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::new(dir.path().to_path_buf());
-        store.note_sent("a", "  hello
-");
-        assert!(store.was_sent("a", "hello"));
-        assert!(!store.was_sent("b", "hello"), "per session");
-        assert!(!store.was_sent("a", "hell"));
-        for i in 0..SENT_KEPT {
-            store.note_sent("a", &i.to_string());
-        }
-        assert!(!store.was_sent("a", "hello"), "the oldest goes once more than {SENT_KEPT} are kept");
-        assert!(store.was_sent("a", "0"));
-        // A restarted Maya still knows them, from hashes rather than the text.
-        let again = Store::new(dir.path().to_path_buf());
-        assert!(again.was_sent("a", "0") && again.was_sent("a", &(SENT_KEPT - 1).to_string()));
-        assert!(!again.was_sent("a", "hello"));
-        let saved = std::fs::read_to_string(dir.path().join("maya/sent/a.json")).unwrap();
-        assert!(!saved.contains("\"0\""), "no reply text on disk: {saved}");
-        // An id that is not a file name is remembered for this run only.
-        store.note_sent("../x", "hi");
-        assert!(store.was_sent("../x", "hi"));
-        assert!(!dir.path().join("maya/x.json").exists());
-    }
     use crate::model::State;
 
     #[test]

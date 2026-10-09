@@ -118,7 +118,7 @@ pub fn rewrite_attachments(text: &str, saved: &[(String, PathBuf)]) -> String {
 /// unless `session_exists`; the files are saved under `maya_dir`, `send`
 /// gets the text pointing at them, and on any failure the files saved so
 /// far are deleted again.
-pub fn reply_with_attachments(maya_dir: &Path, session_exists: bool, text: &str, attachments: Vec<Attachment>, now_ms: u64, send: impl FnOnce(String) -> Result<(), String>) -> Result<(), String> {
+pub fn reply_with_attachments<T>(maya_dir: &Path, session_exists: bool, text: &str, attachments: Vec<Attachment>, now_ms: u64, send: impl FnOnce(String) -> Result<T, String>) -> Result<T, String> {
     if !session_exists {
         return Err("Session is no longer running.".into());
     }
@@ -603,15 +603,15 @@ mod tests {
         let file = |name: &str, bytes: &str| Attachment { name: name.into(), bytes: bytes.into() };
         let good = || file("/main/a.png", "aGVsbG8=");
         // A session that is gone: nothing is written, nothing is sent.
-        let out = reply_with_attachments(dir.path(), false, "hi", vec![good()], 1, |_| panic!("not sent"));
+        let out: Result<(), _> = reply_with_attachments(dir.path(), false, "hi", vec![good()], 1, |_| panic!("not sent"));
         assert_eq!(out, Err("Session is no longer running.".to_string()));
         assert_eq!(files(), 0);
         // The second attachment is unreadable: the first is deleted again.
-        let out = reply_with_attachments(dir.path(), true, "hi", vec![good(), file("/main/b.png", "not base64!")], 2, |_| panic!("not sent"));
+        let out: Result<(), _> = reply_with_attachments(dir.path(), true, "hi", vec![good(), file("/main/b.png", "not base64!")], 2, |_| panic!("not sent"));
         assert_eq!(out, Err("The attachment /main/b.png could not be read.".to_string()));
         assert_eq!(files(), 0);
         // The reply itself fails: the saved files go too.
-        let out = reply_with_attachments(dir.path(), true, "hi", vec![good()], 3, |_| Err("no inbox".into()));
+        let out: Result<(), _> = reply_with_attachments(dir.path(), true, "hi", vec![good()], 3, |_| Err("no inbox".into()));
         assert_eq!(out, Err("no inbox".to_string()));
         assert_eq!(files(), 0);
         // All good: the files stay and the text points at them.

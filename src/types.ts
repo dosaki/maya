@@ -134,6 +134,8 @@ export const COLUMNS: { state: CardState; title: string }[] = [
 
 export interface Turn {
   kind: "user" | "assistant" | "tool" | "peer";
+  /** A compaction or an interrupt, sent as a tool line so older Mayas can read it. */
+  notice?: boolean;
   text: string;
 }
 
