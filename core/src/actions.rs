@@ -98,9 +98,38 @@ fn opencode_free(sc: &ServerCard) -> Result<(), String> {
     Ok(())
 }
 
-/// Sends `text` to the session: through its inbox, or typed into the
-/// terminal of a harness that has none.
-pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String> {
+/// How a reply reached its session: as the user's own input (typed into its
+/// terminal, or OpenCode's server), or through the inbox as a message from
+/// another session, which cannot approve anything.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Route {
+    Typed,
+    Inbox,
+}
+
+/// Why a typed reply failed: before any key reached the terminal, or partway.
+enum TypeFail {
+    NotReached(String),
+    Partial(String),
+}
+
+/// Types `lines` into the terminal on `tty`, one `type_line` each, holding
+/// `TYPING` throughout so no other typed action lands inside the reply.
+fn type_reply(l: &Local, tty: &str, lines: &[String]) -> Result<(), TypeFail> {
+    let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
+    for (i, line) in lines.iter().enumerate() {
+        if let Err(e) = l.terminal.type_line(tty, line) {
+            return Err(if i == 0 { TypeFail::NotReached(e) } else { TypeFail::Partial(e) });
+        }
+    }
+    Ok(())
+}
+
+/// Sends `text` to the session as the user: typed into its terminal, or a
+/// call to OpenCode's server. A Claude Code session Maya cannot type into
+/// gets it through its inbox instead, as a message from another session.
+pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<Route, String> {
     if let Some(sc) = server_card(l, session_id, true)? {
         if text.trim().is_empty() {
             return Err("Message is empty.".into());
@@ -109,14 +138,14 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String>
         // choice is answered on the card, not with a prompt into a waiting turn.
         if let Some(f) = &sc.live.form {
             if let Some(field) = f.fields.iter().find(|fl| fl.options.is_empty()) {
-                return crate::opencode::reply_form(&sc.client, &sc.session.id, &f.id, &field.key, text.trim());
+                return crate::opencode::reply_form(&sc.client, &sc.session.id, &f.id, &field.key, text.trim()).map(|()| Route::Typed);
             }
         }
         if sc.live.permission.is_some() || sc.live.form.is_some() {
             return Err("Answer the question on the card first.".into());
         }
         opencode_free(&sc)?;
-        return crate::opencode::prompt(&sc.client, &sc.session.id, text.trim());
+        return crate::opencode::prompt(&sc.client, &sc.session.id, text.trim()).map(|()| Route::Typed);
     }
     // Other harnesses have no inbox: the reply is typed into their tty as one line.
     let foreign = l.store.lock().unwrap().foreign(session_id);
@@ -128,23 +157,44 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<(), String>
             return Err("Message is empty.".into());
         }
         let tty = session_tty(&l.store.lock().unwrap(), session_id, f.pid)?;
-        return type_line_for(l, f.harness, &tty, &line);
+        return type_line_for(l, f.harness, &tty, &line).map(|()| Route::Typed);
     }
-    let (socket, pid) = {
-        let store = l.store.lock().unwrap();
+    if text.trim().is_empty() {
+        return Err("Message is empty.".into());
+    }
+    if text.chars().count() > answer::TYPED_MAX_CHARS {
+        return Err(format!("Message is too long to type (over {} characters).", answer::TYPED_MAX_CHARS));
+    }
+    let (tty, inbox) = {
+        let mut store = l.store.lock().unwrap();
+        let card = store.claude_card(session_id, now_ms()).ok_or("Session is no longer running.")?;
+        answer::check_free(&card)?;
         let s = store.session(session_id).ok_or("Session is no longer running.")?;
-        let socket = s.messaging_socket_path.clone().ok_or("This session has no inbox. Use the terminal.")?;
-        (socket, s.pid)
+        (session_tty(&store, session_id, s.pid).ok(), s.messaging_socket_path.clone().map(|p| (p, s.pid)))
     };
-    let result = inbox::send(Path::new(&socket), pid, text);
-    if result.is_ok() {
-        l.store.lock().unwrap().note_sent(session_id, text);
-    }
+    let typed = match &tty {
+        Some(tty) => type_reply(l, tty, &answer::reply_lines(text)),
+        None => Err(TypeFail::NotReached("no terminal found for the session".into())),
+    };
+    let result = match typed {
+        Ok(()) => Ok(Route::Typed),
+        Err(TypeFail::Partial(e)) => {
+            crate::log::line("reply", format!("typing into {session_id} stopped partway: {e}"));
+            Err("Part of the reply was typed into the terminal; check it there.".into())
+        }
+        Err(TypeFail::NotReached(e)) => match inbox {
+            Some((socket, pid)) => {
+                crate::log::line("reply", format!("could not type into {session_id} ({e}); using its inbox"));
+                inbox::send(Path::new(&socket), pid, text).map(|()| Route::Inbox)
+            }
+            None => Err("Maya can't type into this session's terminal and it has no inbox. Use the terminal.".into()),
+        },
+    };
     crate::log::line(
         "reply",
         match &result {
-            Ok(()) => format!("sent {} characters to {session_id} (pid {pid}) at {socket}", text.chars().count()),
-            Err(e) => format!("could not send to {session_id} (pid {pid}) at {socket}: {e}"),
+            Ok(route) => format!("sent {} characters to {session_id} ({route:?})", text.chars().count()),
+            Err(e) => format!("could not send to {session_id}: {e}"),
         },
     );
     result
@@ -436,15 +486,7 @@ pub fn session_history(l: &Local, session_id: &str) -> Result<Vec<transcript::Tu
     };
     match foreign {
         Some(f) => Ok(foreign::turns_for(&f, 30)),
-        None => {
-            // What Maya sent arrives as a message from another session: it is the user's.
-            let mut turns = transcript::read_turns(&path, 30);
-            let store = l.store.lock().unwrap();
-            for t in turns.iter_mut().filter(|t| t.kind == transcript::TurnKind::Peer && store.was_sent(session_id, &t.text)) {
-                t.kind = transcript::TurnKind::User;
-            }
-            Ok(turns)
-        }
+        None => Ok(transcript::read_turns(&path, 30)),
     }
 }
 
@@ -1528,5 +1570,105 @@ mod tests {
         let l = tmux_label();
         assert_eq!(l.len(), 13);
         assert!(l.starts_with("maya-") && l[5..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// Points `id`'s registry entry (pid `pid`, from `store_with_session`) at
+    /// an inbox socket this test listens on.
+    #[cfg(unix)]
+    fn with_inbox(store: &Mutex<Store>, id: &str, pid: i32) -> std::os::unix::net::UnixListener {
+        let claude = store.lock().unwrap().claude_dir().to_path_buf();
+        let socket = claude.join(format!("{id}.sock"));
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let path = claude.join(format!("sessions/{pid}.json"));
+        let mut entry: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        entry["messagingSocketPath"] = socket.to_string_lossy().into_owned().into();
+        std::fs::write(&path, entry.to_string()).unwrap();
+        listener
+    }
+
+    fn typed(fake: &FakeTerminal) -> Vec<String> {
+        fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Type { text, .. } => Some(text.clone()), _ => None }).collect()
+    }
+
+    #[test]
+    fn a_claude_reply_is_typed_line_by_line_as_the_user() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(send_reply(&l, "s1", "push it\n\nthanks"), Ok(Route::Typed));
+        assert_eq!(typed(&fake), vec!["push it\\", "\\", "thanks"]);
+        assert!(fake.calls.lock().unwrap().iter().all(|c| matches!(c, Call::Type { tty, .. } if tty == "/dev/pts/3")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn falls_back_to_the_inbox_when_nothing_reached_the_terminal() {
+        use std::io::Read;
+        let pid = std::process::id() as i32;
+        let (_d, store) = store_with_session("s1", pid);
+        let inbox = with_inbox(&store, "s1", pid);
+        let fake = FakeTerminal { fail_type: Some("No Terminal tab found for /dev/pts/3.".into()), ..Default::default() };
+        let l = Local { store: &store, terminal: &fake };
+        let reader = std::thread::spawn(move || {
+            let (mut s, _) = inbox.accept().unwrap();
+            let mut got = String::new();
+            s.read_to_string(&mut got).unwrap();
+            got
+        });
+        assert_eq!(send_reply(&l, "s1", "approved"), Ok(Route::Inbox));
+        assert_eq!(reader.join().unwrap(), inbox::message_line("approved"));
+    }
+
+    #[test]
+    fn a_reply_cut_off_partway_is_not_resent_through_the_inbox() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let fake = FakeTerminal { fail_after: Some(1), ..Default::default() };
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(send_reply(&l, "s1", "one\ntwo"), Err("Part of the reply was typed into the terminal; check it there.".into()));
+        assert_eq!(typed(&fake), vec!["one\\"]);
+    }
+
+    #[test]
+    fn says_so_when_neither_the_terminal_nor_an_inbox_is_there() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let fake = FakeTerminal { fail_type: Some("No Terminal tab found for /dev/pts/3.".into()), ..Default::default() };
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(send_reply(&l, "s1", "hi"), Err("Maya can't type into this session's terminal and it has no inbox. Use the terminal.".into()));
+    }
+
+    #[test]
+    fn a_reply_while_claude_asks_permission_is_refused_and_nothing_is_sent() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let maya = store.lock().unwrap().claude_dir().join("maya");
+        crate::hook_install::append_record_named(&maya, "events.jsonl", r#"{"session_id":"s1","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git push"}}"#, now_ms()).unwrap();
+        store.lock().unwrap().refresh(now_ms());
+        assert_eq!(store.lock().unwrap().card_for("s1", now_ms()).unwrap().state, State::Awaiting);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(send_reply(&l, "s1", "yes"), Err("This session is waiting for a decision; answer it first.".into()));
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_typed_reply_has_its_own_length_cap() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(send_reply(&l, "s1", &"x".repeat(answer::TYPED_MAX_CHARS + 1)), Err("Message is too long to type (over 20000 characters).".into()));
+        assert_eq!(send_reply(&l, "s1", "  \n "), Err("Message is empty.".into()));
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_peer_message_in_the_history_stays_a_peer_turn() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let s = store.lock().unwrap().session("s1").unwrap();
+        let path = store.lock().unwrap().transcript_path_for(&s);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let line = serde_json::json!({"type":"user","message":{"role":"user","content":"Another Claude session sent a message:\nhello\n\nThis came from another Claude session."}});
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(session_history(&l, "s1").unwrap(), vec![transcript::Turn { kind: transcript::TurnKind::Peer, text: "hello".into() }]);
     }
 }

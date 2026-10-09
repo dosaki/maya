@@ -53,6 +53,9 @@ pub mod test_support {
         pub peers: Mutex<HashMap<String, Vec<String>>>,
         /// Ttys that refuse typing, as a console whose process has exited does.
         pub dead: Mutex<std::collections::HashSet<String>>,
+        /// Typing fails once this many lines have been typed, as a terminal
+        /// closed in the middle of a reply does.
+        pub fail_after: Option<usize>,
     }
 
     impl Terminal for FakeTerminal {
@@ -63,6 +66,11 @@ pub mod test_support {
         fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
             if let Some(e) = &self.fail_type {
                 return Err(e.clone());
+            }
+            if let Some(n) = self.fail_after {
+                if self.calls.lock().unwrap().iter().filter(|c| matches!(c, Call::Type { .. })).count() >= n {
+                    return Err("the terminal went away".into());
+                }
             }
             if self.dead.lock().unwrap().contains(tty) {
                 return Err(format!("{tty} is gone"));
