@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn voice_volume_defaults_to_full_and_stays_in_range() {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 30}"#).unwrap();
-        assert_eq!(c.voice_volume(), 100, "a config from before the slider speaks as loud as before");
+        assert_eq!(c.voice_volume(), 100, "a config from before the slider reads as the slider's 100%");
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 30, "voiceVolume": 60}"#).unwrap();
         assert_eq!(c.voice_volume(), 60);
         assert_eq!(serde_json::to_value(&c).unwrap()["voiceVolume"], 60);
