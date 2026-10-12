@@ -7,6 +7,7 @@ import { builtinVoiceName, recognizerOptions, secretStore, thisComputerLower } f
 import type { Harness } from "./types";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
+import { promoteLines } from "./promote";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
@@ -94,6 +95,10 @@ export interface SettingsModel {
   network?: NetworkStatus;
   /** The Network select's current value; can diverge from `network.role` while previewing "Assistant" before Pair succeeds. */
   networkRole?: NetworkRole;
+  /** The assistant whose Make main confirmation is open. */
+  networkPromote?: string | null;
+  /** A handover is running; it can take up to 30 s. */
+  networkPromoting?: boolean;
   /** This Maya's listening port as a main. */
   networkPort?: number;
   /** The assistant's target: the main's host/address. */
@@ -164,6 +169,9 @@ export interface SettingsHandlers {
   /** Opens pairing (mints a code) or, if one is already open, regenerates it. */
   onRegenerate(): void;
   onRemoveAssistant(id: string): void;
+  onMakeMain(id: string): void;
+  onPromote(id: string): void;
+  onPromoteCancel(): void;
   onPair(host: string, port: number, name: string, code: string): void;
 }
 
@@ -792,6 +800,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     regen.type = "button";
     regen.dataset.action = "regenerate-code";
     regen.textContent = net.code && nowMs <= net.code.expiresAt ? "Regenerate" : "Show pairing code";
+    // Reopening pairing mid-handover would let a new assistant pair with a main about to stop.
+    regen.disabled = !!model.networkPromoting;
     regen.addEventListener("click", () => h.onRegenerate());
     network.append(regen);
 
@@ -814,9 +824,44 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       rm.dataset.action = "remove-assistant";
       rm.dataset.id = a.id;
       rm.textContent = "Remove";
+      rm.disabled = !!model.networkPromoting;
       rm.addEventListener("click", () => h.onRemoveAssistant(a.id));
       row.append(info, rm);
+      if (a.connected && a.canLead) {
+        const mk = document.createElement("button");
+        mk.type = "button";
+        mk.dataset.action = "make-main";
+        mk.dataset.id = a.id;
+        mk.textContent = "Make main";
+        mk.disabled = !!model.networkPromoting;
+        mk.addEventListener("click", () => h.onMakeMain(a.id));
+        row.append(mk);
+      }
       list.append(row);
+      if (model.networkPromote === a.id) {
+        const confirm = document.createElement("div");
+        confirm.className = "settings__confirm";
+        confirm.dataset.for = "promote-confirm";
+        for (const line of promoteLines(net.assistants, a.id, thisComputerLower())) {
+          const p = document.createElement("p");
+          p.textContent = line;
+          confirm.append(p);
+        }
+        const yes = document.createElement("button");
+        yes.type = "button";
+        yes.dataset.action = "promote-confirm";
+        yes.textContent = model.networkPromoting ? "Handing over…" : "Make main";
+        yes.disabled = !!model.networkPromoting;
+        yes.addEventListener("click", () => h.onPromote(a.id));
+        const no = document.createElement("button");
+        no.type = "button";
+        no.dataset.action = "promote-cancel";
+        no.textContent = "Cancel";
+        no.disabled = !!model.networkPromoting;
+        no.addEventListener("click", () => h.onPromoteCancel());
+        confirm.append(yes, no);
+        list.append(confirm);
+      }
     }
     network.append(list);
   } else if (netRole === "assistant") {
@@ -1100,6 +1145,29 @@ export async function initSettings(): Promise<void> {
     },
     onRegenerate: () => void run(async () => { model.network = await invoke<NetworkStatus>("network_pairing_code"); }),
     onRemoveAssistant: (id) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_assistant", { id }); }),
+    onMakeMain: (id) => {
+      model.networkPromote = id;
+      paint();
+    },
+    onPromoteCancel: () => {
+      model.networkPromote = null;
+      paint();
+    },
+    onPromote: (id) => {
+      if (model.networkPromoting) return;
+      model.networkPromoting = true;
+      paint();
+      void run(async () => {
+        try {
+          model.network = await invoke<NetworkStatus>("network_promote", { id });
+          model.networkRole = model.network.role;
+          model.networkPromote = null;
+          refetchAndPaint();
+        } finally {
+          model.networkPromoting = false;
+        }
+      });
+    },
     onPair: (host, port, name, code) => {
       // One Pair at a time: a second would pair twice with one code.
       if (model.networkPairing) return;
@@ -1171,7 +1239,11 @@ export async function initSettings(): Promise<void> {
     // Previewing "Assistant" before Pair succeeds is local only; an
     // unrelated event must not snap the form back to the saved role.
     const previewingAssistant = model.networkRole === "assistant" && e.payload.role !== "assistant";
+    // A promotion, or a move made from another machine, changes the role or
+    // the main's name; the Host and Port fields come from the config.
+    const moved = model.network?.role !== e.payload.role || model.network?.assistant?.mainName !== e.payload.assistant?.mainName;
     model.network = e.payload;
+    if (moved) refetchAndPaint();
     if (!previewingAssistant) model.networkRole = e.payload.role;
     if (!panel.hidden) paint();
     else stale = true;
