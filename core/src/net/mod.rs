@@ -68,6 +68,10 @@ pub struct AssistantStatus {
     /// Something the user should know: a different Maya version, or a board
     /// this Maya could not read.
     pub note: Option<String>,
+    /// Connected and able to become the main.
+    pub can_lead: bool,
+    /// Connected and able to follow a new main; false for an older Maya.
+    pub can_follow: bool,
 }
 
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
@@ -129,7 +133,7 @@ pub fn paired_offline(paired: &[PairedAssistant]) -> Vec<AssistantStatus> {
     paired
         .iter()
         .zip(merge::display_names(&entries))
-        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: false, last_seen: p.last_seen, note: None })
+        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: false, last_seen: p.last_seen, note: None, can_lead: false, can_follow: false })
         .collect()
 }
 

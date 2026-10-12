@@ -28,6 +28,10 @@ export interface AssistantStatus {
   lastSeen: number | null;
   /** A different Maya version, or a board this Maya could not read. */
   note?: string | null;
+  /** Connected and able to become the main (`lead`). */
+  canLead?: boolean;
+  /** Connected and able to follow a new main (`follow`); false for an older Maya. */
+  canFollow?: boolean;
 }
 
 export interface AssistantLink {

@@ -22,7 +22,7 @@
 //! in the app's lib.rs), and nothing takes the server's mutex while holding `store`.
 
 use super::merge::{display_names, RemoteBoard};
-use super::protocol::{decode_up, encode, mac, mac_matches, new_id, new_nonce, new_token, Attempts, CommandKind, Down, NonceLog, PairingWindow, Up, MAX_FRAME, PROTOCOL};
+use super::protocol::{decode_up, encode, mac, mac_matches, new_id, new_nonce, new_token, Attempts, CommandKind, Down, NonceLog, PairingWindow, Up, CAP_FOLLOW, CAP_LEAD, MAX_FRAME, PROTOCOL};
 use super::{AssistantStatus, NetworkStatus, PairingCode};
 use crate::config::{NetworkConfig, NetworkRole, PairedAssistant};
 use crate::log;
@@ -91,6 +91,8 @@ struct Pending {
 struct Peer {
     /// The Maya version it runs.
     app: String,
+    /// What it can do (`CAP_FOLLOW`, `CAP_LEAD`); empty for an older Maya.
+    caps: Vec<String>,
     last_seen: u64,
     /// Its last board failed to decode; the one before it is kept.
     unreadable_board: bool,
@@ -132,11 +134,13 @@ pub struct Server {
     nonces: NonceLog,
     paired: Vec<PairedAssistant>,
     peers: HashMap<String, Peer>,
+    /// A handover to a new main is running; no second one may start.
+    handover: bool,
 }
 
 impl Server {
     fn new(paired: Vec<PairedAssistant>) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new() }
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new(), handover: false }
     }
 
     fn next(&mut self) -> u64 {
@@ -262,7 +266,9 @@ impl Server {
             .zip(labels)
             .map(|(p, (_, name))| {
                 let peer = self.peers.get(&p.id);
-                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: self.conns.contains_key(&p.id), last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note) }
+                let connected = self.conns.contains_key(&p.id);
+                let can = |cap: &str| connected && peer.is_some_and(|x| x.caps.iter().any(|c| c == cap));
+                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected, last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note), can_lead: can(CAP_LEAD), can_follow: can(CAP_FOLLOW) }
             })
             .collect();
         NetworkStatus { role: NetworkRole::Main, code, assistants, addresses: super::local_addresses(), ..Default::default() }
@@ -600,7 +606,6 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         bye(ws, "protocol");
         return None;
     };
-    let _ = caps; // Task 3 uses it.
     if protocol != PROTOCOL {
         log::line("network", format!("{ip}: protocol {protocol}, expected {PROTOCOL}"));
         bye(ws, "protocol");
@@ -647,7 +652,7 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
             match saved {
                 Ok(()) => {
                     let serial = s.next();
-                    s.peers.insert(id.clone(), Peer { app, last_seen: now, unreadable_board: false });
+                    s.peers.insert(id.clone(), Peer { app, caps: caps.into_iter().map(|c| clean(&c)).collect(), last_seen: now, unreadable_board: false });
                     // A newer connection replaces an older one; dropping its sender ends it.
                     s.conns.insert(id.clone(), Conn { tx, serial });
                     if let Some(b) = s.by_id.get_mut(&id) {
@@ -795,19 +800,20 @@ fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: 
 /// connection replaced it, or the assistant was removed (`bye` queued).
 const NOT_CURRENT: &str = "replaced by a newer connection";
 
-/// Writes the frames queued for this connection, up to a `bye`. `Some(why)`
+/// Writes the frames queued for this connection, up to a `bye` or `move`. `Some(why)`
 /// when the connection ends: the `bye` went out, a write failed, or the
 /// sender is gone (a newer connection replaced this one).
 fn send_queued(ws: &mut Ws, link: &Link) -> Option<String> {
     loop {
         match link.rx.try_recv() {
             Ok(down) => {
-                let last = matches!(down, Down::Bye { .. });
+                let last = matches!(down, Down::Bye { .. } | Down::Move { .. });
+                let why = if matches!(down, Down::Move { .. }) { "moved" } else { "removed" };
                 if let Err(e) = send_down(ws, &down) {
                     return Some(e);
                 }
                 if last {
-                    return Some("removed".into());
+                    return Some(why.into());
                 }
             }
             Err(TryRecvError::Empty) => return None,
@@ -1008,38 +1014,141 @@ pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
     }
 }
 
+/// The end of the error when an assistant does not answer a command in time.
+pub(crate) const NO_ANSWER: &str = "did not answer in time";
+/// How long the new main has to answer `promote`.
+const PROMOTE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the old main waits for moved connections to close.
+const MOVE_WAIT: Duration = Duration::from_secs(3);
+
 /// Sends `kind` to the assistant shown as `machine` and waits for its result.
 pub fn send_command_with(shared: &Arc<Mutex<Server>>, machine: &str, kind: CommandKind, timeout: Duration) -> Result<Option<Value>, String> {
+    let Some(id) = lock(shared).id_for(machine) else {
+        return Err(format!("{machine} is not connected"));
+    };
+    send_command_to(shared, &id, kind, timeout)
+}
+
+/// Sends `kind` to the assistant `id` and waits for its result.
+pub fn send_command_to(shared: &Arc<Mutex<Server>>, id: &str, kind: CommandKind, timeout: Duration) -> Result<Option<Value>, String> {
     let name = kind_name(&kind);
-    let (rx, id) = {
+    let (rx, cmd, machine) = {
         let mut s = lock(shared);
-        let conn = s.id_for(machine).and_then(|id| s.conns.get(&id).map(|c| (c.tx.clone(), c.serial)));
+        let machine = s.label(id);
+        let conn = s.conns.get(id).map(|c| (c.tx.clone(), c.serial));
         let Some((tx, serial)) = conn else {
             return Err(format!("{machine} is not connected"));
         };
-        let id = s.next();
+        let cmd = s.next();
         let (rtx, rrx) = channel();
-        s.pending.insert(id, Pending { conn: serial, tx: rtx });
-        if tx.send(Down::Command { id, kind }).is_err() {
-            s.pending.remove(&id);
+        s.pending.insert(cmd, Pending { conn: serial, tx: rtx });
+        if tx.send(Down::Command { id: cmd, kind }).is_err() {
+            s.pending.remove(&cmd);
             return Err(format!("{machine} is not connected"));
         }
-        (rrx, id)
+        (rrx, cmd, machine)
     };
-    log::line("network", format!("{machine}: command {id} {name}"));
+    log::line("network", format!("{machine}: command {cmd} {name}"));
     let out = match rx.recv_timeout(timeout) {
         Ok(Err(e)) if e == DISCONNECTED => Err(format!("{machine} disconnected before answering.")),
         Ok(r) => r,
         Err(RecvTimeoutError::Timeout) => {
-            lock(shared).pending.remove(&id);
-            Err(format!("{machine} did not answer in time"))
+            lock(shared).pending.remove(&cmd);
+            Err(format!("{machine} {NO_ANSWER}"))
         }
         Err(RecvTimeoutError::Disconnected) => Err(format!("{machine} disconnected before answering.")),
     };
     if let Err(e) = &out {
-        log::line("network", format!("{machine}: command {id} {name} failed: {e}"));
+        log::line("network", format!("{machine}: command {cmd} {name} failed: {e}"));
     }
     out
+}
+
+/// What the old main needs once its assistant became the main: where the
+/// new main is, the entry the old main made for itself, and who followed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Promotion {
+    pub host: String,
+    pub port: u16,
+    pub me: PairedAssistant,
+    pub moved: Vec<String>,
+    pub left_behind: Vec<String>,
+}
+
+/// Clears `handover` when the handover ends, however it ends.
+struct HandoverTurn<'a>(&'a Arc<Mutex<Server>>);
+
+impl Drop for HandoverTurn<'_> {
+    fn drop(&mut self) {
+        lock(self.0).handover = false;
+    }
+}
+
+impl ServerHandle {
+    /// Makes the assistant `id` the main: closes pairing, sends it the paired
+    /// list (sealed under its token) with this main's own new entry, and once
+    /// it answers with its port, sends `move` to every other connected
+    /// assistant that can follow and waits for those connections to close.
+    /// The caller then saves this Maya as an assistant of `host:port`.
+    pub fn promote(&self, id: &str) -> Result<Promotion, String> {
+        self.promote_with_timeout(id, PROMOTE_TIMEOUT)
+    }
+
+    pub fn promote_with_timeout(&self, id: &str, timeout: Duration) -> Result<Promotion, String> {
+        let (label, host, token, list, me) = {
+            let mut s = lock(&self.shared);
+            if s.handover {
+                return Err("A handover is already running.".into());
+            }
+            let label = s.label(id);
+            let entry = s.paired.iter().find(|p| p.id == id).cloned().ok_or_else(|| format!("{label} is no longer paired."))?;
+            if !s.conns.contains_key(id) {
+                return Err(format!("{label} is not connected."));
+            }
+            if !s.peers.get(id).is_some_and(|p| p.caps.iter().any(|c| c == CAP_LEAD)) {
+                return Err(format!("{label} cannot become a main."));
+            }
+            s.handover = true;
+            s.pairing = None;
+            let me = super::promote::own_entry(&self.ctx.main_name);
+            let list = super::promote::handover_list(&s.paired, id, &me);
+            (label, entry.address, entry.token, list, me)
+        };
+        let _turn = HandoverTurn(&self.shared);
+        self.ctx.announce();
+        log::line("network", format!("{label}: handing over the main role ({} assistants)", list.len()));
+        let sealed = super::promote::seal_list(&token, &list);
+        let data = send_command_to(&self.shared, id, CommandKind::Promote { sealed }, timeout).map_err(|e| {
+            if e.ends_with(NO_ANSWER) {
+                format!("{label} did not answer; it may have become a main on its own. Check it before trying again.")
+            } else {
+                format!("{label} could not become the main: {}.", e.trim_end_matches('.'))
+            }
+        })?;
+        let port = data.as_ref().and_then(|d| d.get("port")).and_then(Value::as_u64).and_then(|p| u16::try_from(p).ok()).ok_or_else(|| format!("{label} could not become the main: it did not say its port."))?;
+        let (mut moved, mut left_behind, mut moving) = (vec![], vec![], vec![]);
+        {
+            let s = lock(&self.shared);
+            for (other, conn) in s.conns.iter().filter(|(other, _)| other.as_str() != id) {
+                let follows = s.peers.get(other).is_some_and(|p| p.caps.iter().any(|c| c == CAP_FOLLOW));
+                if follows && conn.tx.send(Down::Move { host: host.clone(), port }).is_ok() {
+                    moved.push(s.label(other));
+                    moving.push(other.clone());
+                } else {
+                    left_behind.push(s.label(other));
+                }
+            }
+        }
+        // `move` ends each connection once written; the server must not stop before.
+        let end = Instant::now() + MOVE_WAIT;
+        while Instant::now() < end && moving.iter().any(|m| lock(&self.shared).conns.contains_key(m)) {
+            std::thread::sleep(TICK);
+        }
+        moved.sort();
+        left_behind.sort();
+        log::line("network", format!("{label} is the main now at {host}:{port}; moved {}", if moved.is_empty() { "nobody".to_string() } else { moved.join(", ") }));
+        Ok(Promotion { host, port, me, moved, left_behind })
+    }
 }
 
 #[cfg(test)]
@@ -1140,6 +1249,93 @@ mod tests {
 
     fn hello(ws: &mut Client, name: &str, id: Option<&str>) {
         send(ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), id: id.map(str::to_string), caps: vec![] });
+    }
+
+    fn hello_caps(ws: &mut Client, name: &str, id: Option<&str>, caps: &[&str]) {
+        send(ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), id: id.map(str::to_string), caps: caps.iter().map(|c| c.to_string()).collect() });
+    }
+
+    /// Pairs, then reconnects with caps; returns the open socket, id and token.
+    fn pair_with_caps(handle: &ServerHandle, port: u16, name: &str, caps: &[&str]) -> (Client, String, String) {
+        let (ws, id, token) = pair_client(handle, port, name);
+        drop(ws);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        let mut ws = connect(port);
+        hello_caps(&mut ws, name, Some(&id), caps);
+        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
+        answer(&mut ws, &token, &nonce);
+        (ws, id, token)
+    }
+
+    #[test]
+    fn caps_show_as_can_lead_and_can_follow_while_connected() {
+        let (handle, port) = test_server();
+        let (ws, id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        let a = handle.status().assistants.into_iter().find(|a| a.id == id).unwrap();
+        assert!(a.can_lead && a.can_follow);
+        let json = serde_json::to_value(&a).unwrap();
+        assert_eq!((json["canLead"].as_bool(), json["canFollow"].as_bool()), (Some(true), Some(true)));
+        drop(ws);
+        wait_until(|| !handle.status().assistants[0].connected);
+        let a = &handle.status().assistants[0];
+        assert!(!a.can_lead && !a.can_follow, "a disconnected Maya can do nothing");
+        handle.stop();
+    }
+
+    #[test]
+    fn promote_hands_the_sealed_list_over_moves_followers_and_names_the_rest() {
+        let (handle, port) = test_server();
+        let (mut g, g_id, g_token) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        let (mut b, b_id, b_token) = pair_with_caps(&handle, port, "mini", &["follow"]);
+        let (_old, old_id, _) = pair_with_caps(&handle, port, "old", &[]);
+        handle.open_pairing(crate::store::now_ms());
+        let h = handle.clone();
+        let t = std::thread::spawn(move || h.promote(&g_id));
+        let Down::Command { id: cmd, kind: CommandKind::Promote { sealed } } = recv(&mut g) else { panic!("expected promote") };
+        assert!(handle.status().code.is_none(), "pairing closes for the handover");
+        let list = crate::net::promote::open_list(&g_token, &sealed).unwrap();
+        assert!(list.iter().any(|p| p.id == b_id && p.token == b_token), "B keeps its token");
+        assert!(list.iter().any(|p| p.id == old_id));
+        assert!(!list.iter().any(|p| p.token == g_token), "the new main is not in its own list");
+        let me = list.last().unwrap().clone();
+        send(&mut g, &Up::Result { id: cmd, ok: true, error: None, data: Some(serde_json::json!({ "port": 5001 })) });
+        assert_eq!(recv(&mut b), Down::Move { host: "127.0.0.1".into(), port: 5001 });
+        let out = t.join().unwrap().unwrap();
+        assert_eq!((out.host.as_str(), out.port), ("127.0.0.1", 5001));
+        assert_eq!(out.me, me);
+        assert_eq!(out.moved, ["mini"]);
+        assert_eq!(out.left_behind, ["old"], "a Maya without follow is not moved");
+        assert!(!handle.status().assistants.iter().any(|a| a.id == b_id && a.connected), "a moved connection is closed");
+        handle.stop();
+    }
+
+    #[test]
+    fn promote_refuses_a_second_handover_and_one_that_cannot_lead() {
+        let (handle, port) = test_server();
+        let (mut g, g_id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        let (_c, c_id, _) = pair_with_caps(&handle, port, "cli", &["follow"]);
+        assert_eq!(handle.promote(&c_id).unwrap_err(), "cli cannot become a main.");
+        let h = handle.clone();
+        let first = std::thread::spawn(move || h.promote(&g_id));
+        let Down::Command { id: cmd, .. } = recv(&mut g) else { panic!("expected promote") };
+        assert_eq!(handle.promote(&c_id).unwrap_err(), "A handover is already running.");
+        send(&mut g, &Up::Result { id: cmd, ok: false, error: Some("Could not listen on port 4127: in use".into()), data: None });
+        assert_eq!(first.join().unwrap().unwrap_err(), "laptop could not become the main: Could not listen on port 4127: in use.");
+        assert!(handle.status().assistants.iter().all(|a| a.connected), "a failed handover moves nobody");
+        handle.stop();
+    }
+
+    #[test]
+    fn a_promote_nobody_answers_says_so_and_moves_nobody() {
+        let (handle, port) = test_server();
+        let (mut g, g_id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        let (_b, _, _) = pair_with_caps(&handle, port, "mini", &["follow"]);
+        let err = handle.promote_with_timeout(&g_id, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(err, "laptop did not answer; it may have become a main on its own. Check it before trying again.");
+        assert!(matches!(recv(&mut g), Down::Command { kind: CommandKind::Promote { .. }, .. }));
+        assert!(handle.status().assistants.iter().all(|a| a.connected));
+        handle.stop();
     }
 
     /// Pairs a new assistant; returns its open socket, id and token.
