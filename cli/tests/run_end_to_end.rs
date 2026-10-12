@@ -59,7 +59,7 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     let maya_dir = claude_dir.join("maya");
 
     // 1. Pair.
-    let (code, _) = handle.open_pairing(maya_core::now_ms());
+    let (code, _) = handle.open_pairing(maya_core::now_ms()).unwrap();
     // The label is trimmed before it is sent and stored.
     assert_eq!(commands::pair(&claude_dir, "127.0.0.1", port, Some(" box "), &code), Ok(("Yhi".to_string(), "box".to_string())));
     assert_eq!(recorder.paired.load(Ordering::SeqCst), 1);
@@ -118,7 +118,7 @@ fn run_stops_with_two_when_the_config_on_disk_stops_being_an_assistants() {
     let (dir, store) = maya_core::actions::test_support::store_with_session("s1", std::process::id() as i32);
     drop(store);
     let claude_dir = dir.path().to_path_buf();
-    let (code, _) = handle.open_pairing(maya_core::now_ms());
+    let (code, _) = handle.open_pairing(maya_core::now_ms()).unwrap();
     commands::pair(&claude_dir, "127.0.0.1", handle.port(), Some("box"), &code).unwrap();
 
     let stop = Arc::new(AtomicBool::new(false));

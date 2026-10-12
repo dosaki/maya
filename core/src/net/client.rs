@@ -450,6 +450,8 @@ fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, t
                     Err(e) => log::line("network", format!("main: ignored a message: {e}")),
                 }
             }
+            // The old main may close first once it has seen the answer.
+            Ok(Message::Close(_)) if leaving.load(Ordering::SeqCst) => return Ok(()),
             Ok(Message::Close(_)) => return Err("The main Maya closed the connection.".into()),
             Ok(_) => last_read = Instant::now(),
             Err(e) if is_timeout(&e) => {
@@ -457,6 +459,7 @@ fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, t
                     return Err("The main Maya stopped answering.".into());
                 }
             }
+            Err(_) if leaving.load(Ordering::SeqCst) => return Ok(()),
             Err(e) => return Err(format!("Lost the connection to the main Maya: {e}")),
         }
     }

@@ -347,9 +347,13 @@ pub struct ServerHandle {
 
 impl ServerHandle {
     /// Opens a fresh pairing window (a new code even when one is open).
-    pub fn open_pairing(&self, now_ms: u64) -> (String, u64) {
+    pub fn open_pairing(&self, now_ms: u64) -> Result<(String, u64), String> {
         let (code, expires, status) = {
             let mut s = lock(&self.shared);
+            if s.handover {
+                log::line("network", "pairing stays closed during a handover");
+                return Err("A handover is already running.".into());
+            }
             let w = PairingWindow::new(now_ms);
             let out = (w.code.clone(), w.expires_at_ms);
             s.pairing = Some(w);
@@ -357,7 +361,7 @@ impl ServerHandle {
         };
         log::line("network", "pairing open for five minutes");
         self.ctx.notify.status_changed(status);
-        (code, expires)
+        Ok((code, expires))
     }
 
     /// Forgets an assistant: it is told `bye removed`, its cards go, and its
@@ -1016,6 +1020,7 @@ pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
 
 /// The end of the error when an assistant does not answer a command in time.
 pub(crate) const NO_ANSWER: &str = "did not answer in time";
+const LEFT_BEFORE_ANSWER: &str = "disconnected before answering.";
 /// How long the new main has to answer `promote`.
 const PROMOTE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the old main waits for moved connections to close.
@@ -1050,13 +1055,13 @@ pub fn send_command_to(shared: &Arc<Mutex<Server>>, id: &str, kind: CommandKind,
     };
     log::line("network", format!("{machine}: command {cmd} {name}"));
     let out = match rx.recv_timeout(timeout) {
-        Ok(Err(e)) if e == DISCONNECTED => Err(format!("{machine} disconnected before answering.")),
+        Ok(Err(e)) if e == DISCONNECTED => Err(format!("{machine} {LEFT_BEFORE_ANSWER}")),
         Ok(r) => r,
         Err(RecvTimeoutError::Timeout) => {
             lock(shared).pending.remove(&cmd);
             Err(format!("{machine} {NO_ANSWER}"))
         }
-        Err(RecvTimeoutError::Disconnected) => Err(format!("{machine} disconnected before answering.")),
+        Err(RecvTimeoutError::Disconnected) => Err(format!("{machine} {LEFT_BEFORE_ANSWER}")),
     };
     if let Err(e) = &out {
         log::line("network", format!("{machine}: command {cmd} {name} failed: {e}"));
@@ -1119,7 +1124,8 @@ impl ServerHandle {
         log::line("network", format!("{label}: handing over the main role ({} assistants)", list.len()));
         let sealed = super::promote::seal_list(&token, &list);
         let data = send_command_to(&self.shared, id, CommandKind::Promote { sealed }, timeout).map_err(|e| {
-            if e.ends_with(NO_ANSWER) {
+            // A dropped connection leaves the same doubt as silence: G may already be a main.
+            if e.ends_with(NO_ANSWER) || e.ends_with(LEFT_BEFORE_ANSWER) {
                 format!("{label} did not answer; it may have become a main on its own. Check it before trying again.")
             } else {
                 format!("{label} could not become the main: {}.", e.trim_end_matches('.'))
@@ -1289,7 +1295,7 @@ mod tests {
         let (mut g, g_id, g_token) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
         let (mut b, b_id, b_token) = pair_with_caps(&handle, port, "mini", &["follow"]);
         let (_old, old_id, _) = pair_with_caps(&handle, port, "old", &[]);
-        handle.open_pairing(crate::store::now_ms());
+        handle.open_pairing(crate::store::now_ms()).unwrap();
         let h = handle.clone();
         let t = std::thread::spawn(move || h.promote(&g_id));
         let Down::Command { id: cmd, kind: CommandKind::Promote { sealed } } = recv(&mut g) else { panic!("expected promote") };
@@ -1338,9 +1344,36 @@ mod tests {
         handle.stop();
     }
 
+    #[test]
+    fn a_promote_whose_assistant_disconnects_reads_like_one_nobody_answers() {
+        let (handle, port) = test_server();
+        let (mut g, g_id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        let h = handle.clone();
+        let t = std::thread::spawn(move || h.promote_with_timeout(&g_id, Duration::from_secs(5)));
+        assert!(matches!(recv(&mut g), Down::Command { kind: CommandKind::Promote { .. }, .. }));
+        drop(g);
+        assert_eq!(t.join().unwrap().unwrap_err(), "laptop did not answer; it may have become a main on its own. Check it before trying again.");
+        handle.stop();
+    }
+
+    #[test]
+    fn pairing_stays_closed_during_a_handover() {
+        let (handle, port) = test_server();
+        let (mut g, g_id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        let h = handle.clone();
+        let t = std::thread::spawn(move || h.promote(&g_id));
+        let Down::Command { id: cmd, .. } = recv(&mut g) else { panic!("expected promote") };
+        assert_eq!(handle.open_pairing(crate::store::now_ms()).unwrap_err(), "A handover is already running.");
+        assert!(handle.status().code.is_none());
+        send(&mut g, &Up::Result { id: cmd, ok: false, error: Some("no".into()), data: None });
+        t.join().unwrap().unwrap_err();
+        assert!(handle.open_pairing(crate::store::now_ms()).is_ok(), "pairing opens again once the handover ended");
+        handle.stop();
+    }
+
     /// Pairs a new assistant; returns its open socket, id and token.
     pub(crate) fn pair_client(handle: &ServerHandle, port: u16, name: &str) -> (Client, String, String) {
-        let (code, _) = handle.open_pairing(crate::store::now_ms());
+        let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
         let mut ws = connect(port);
         hello(&mut ws, name, None);
         let nonce = crate::net::protocol::new_nonce();
@@ -1396,7 +1429,7 @@ mod tests {
     #[test]
     fn pairs_snapshots_and_round_trips_a_command() {
         let (handle, port) = test_server();
-        let (code, _) = handle.open_pairing(crate::store::now_ms());
+        let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
         let mut ws = connect(port);
         send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), id: None, caps: vec![] });
         send(&mut ws, &Up::Pair { code, nonce: "n".into() });
@@ -1475,7 +1508,7 @@ mod tests {
             send(&mut w, &Up::Pair { code: "999999x".into(), nonce: "n".into() });
             assert!(matches!(recv(&mut w), Down::Bye { .. }));
         }
-        let (code, _) = handle.open_pairing(crate::store::now_ms());
+        let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
         let mut w = connect(port);
         hello(&mut w, "x", None);
         send(&mut w, &Up::Pair { code, nonce: "n".into() });
@@ -1668,7 +1701,7 @@ mod tests {
     fn an_assistant_gone_right_after_sending_pair_leaves_no_entry() {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
-        let (code, _) = handle.open_pairing(now_ms());
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
         let mut ws = connect(port);
         // `hello` and `pair` in one write, then the socket goes.
         ws.write(Message::text(encode(&Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "ghost".into(), hostname: "h".into(), platform: "macos".into(), id: None, caps: vec![] }))).unwrap();
@@ -1768,7 +1801,7 @@ mod tests {
         send(&mut ws, &Up::Board { cards: vec![card("r3", "z")], dirs: vec![], agents: None });
         wait_until(|| note(&handle).is_some_and(|n| !n.contains(UNREADABLE_BOARD)));
         // The same version says nothing.
-        let (code, _) = handle.open_pairing(now_ms());
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
         let mut same = connect(port);
         send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), id: None, caps: vec![] });
         send(&mut same, &Up::Pair { code, nonce: "n".into() });
@@ -2104,7 +2137,7 @@ mod tests {
         let (handle, port) = test_server_with(counter.clone());
         counter.fail_saves.store(true, Ordering::SeqCst);
         // On the wire: `paired`, then `bye` instead of `welcome`.
-        let (code, _) = handle.open_pairing(now_ms());
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
         let mut ws = connect(port);
         hello(&mut ws, "desk", None);
         send(&mut ws, &Up::Pair { code, nonce: "n".into() });
@@ -2114,7 +2147,7 @@ mod tests {
         assert!(handle.status().assistants.is_empty(), "no entry on the main");
         assert!(counter.saved.lock().unwrap().is_empty());
         // The real client reports it and keeps no credentials.
-        let (code, _) = handle.open_pairing(now_ms());
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
         let notify = Arc::new(FakeClientNotify::default());
         let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "desk".into(), ..Default::default() };
         let out = client::run_once(&config, Arc::new(FakeExec::default()), notify.clone(), &AtomicBool::new(false), Some(&code));
@@ -2130,7 +2163,7 @@ mod tests {
         drop(first);
         wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
         counter.fail_saves.store(true, Ordering::SeqCst);
-        let (code, _) = handle.open_pairing(now_ms());
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
         let mut ws = connect(port);
         hello(&mut ws, "renamed", None);
         send(&mut ws, &Up::Pair { code, nonce: "n".into() });
@@ -2171,7 +2204,7 @@ mod tests {
         let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "Gnowee".into(), ..Default::default() };
         // Pairing on its own connection, ended once the credentials are kept.
         let pair = |notify: Arc<FakeClientNotify>| {
-            let (code, _) = handle.open_pairing(now_ms());
+            let (code, _) = handle.open_pairing(now_ms()).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
             let (c, e, n, s) = (config.clone(), exec.clone(), notify.clone(), stop.clone());
             let t = std::thread::spawn(move || client::run_once(&c, e, n, &s, Some(&code)));
@@ -2212,7 +2245,7 @@ mod tests {
         // No pairing window is open, so any code is wrong.
         let err = run(config.clone(), Some("123456".into())).join().unwrap().unwrap_err();
         assert_eq!(err, "Wrong or expired pairing code.");
-        let (code, _) = handle.open_pairing(now_ms());
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
         let t = run(config.clone(), Some(code));
         wait_until(|| handle.boards().iter().any(|b| b.machine == "laptop" && b.cards.len() == 1 && b.dirs == ["proj"]));
         assert_eq!(notify.main.lock().unwrap().clone(), Some(crate::net::local_hostname()));
@@ -2260,7 +2293,7 @@ mod tests {
         let (handle, port) = test_server();
         let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), ..Default::default() };
         for round in 0..25 {
-            let (code, _) = handle.open_pairing(now_ms());
+            let (code, _) = handle.open_pairing(now_ms()).unwrap();
             let (go, gate) = channel();
             let exec = Arc::new(GatedExec { gate: Mutex::new(gate), holding: AtomicBool::new(false) });
             let notify = Arc::new(FakeClientNotify::default());
