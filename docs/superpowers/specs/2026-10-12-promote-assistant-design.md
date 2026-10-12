@@ -48,18 +48,20 @@ promotes, and **B** any other assistant of M.
 - The desktop app sends `follow` and `lead`, the phone `follow` and `lead`,
   `maya-cli` `follow`.
 - The main keeps each connected assistant's caps; `AssistantStatus` gains
-  `canLead`.
+  `canLead` and `canFollow` (false while it is not connected).
 
 ### The handover
 
-1. **Confirm on M.** Make main on G opens a dialog: "Make <G> the main
+1. **Confirm on M.** Make main on G opens a confirmation under G's row
+   (inline, as the Network section has no dialogs): "Make <G> the main
    Maya? Every connected Maya will assist <G>, and so will this <Mac|PC|
    phone>." It then lists, when there are any:
    - connected Mayas without `follow`: "<name> cannot follow and stays
      with no main; pair it with <G> afterwards.";
    - paired Mayas that are offline: "<name> is offline; when it is back,
      set its Host to <G's address>. It does not need to pair again."
-   Buttons: Make main, Cancel.
+   Buttons: Make main, Cancel. The lines are worked out on the page
+   (`src/promote.ts`) from the network status.
 2. **M builds the list.** It closes the pairing window. The list is every
    paired entry except G, plus a new entry for M itself: a new id and
    token, M's name, hostname and platform, its address left empty (G
@@ -86,7 +88,8 @@ promotes, and **B** any other assistant of M.
    2), with no paired list, stops its server and starts its client. On
    the desktop the existing assistant rules apply: notifications and
    speech are suppressed, and "Listen for 'Maya'" is off and disabled.
-   On the phone the Network screen shows Listening (below).
+   It also turns "Listen for 'Maya'" off, as pairing does. On the phone
+   the Network screen shows Listening (below).
    - If M's save fails, M stays main with its paired list and server,
      shows "Could not save this Maya as an assistant: <error>.", and the
      assistants already moved to G stay with G.
@@ -131,8 +134,10 @@ promotes, and **B** any other assistant of M.
 *On G (desktop):*
 
 - The Network section shows the main's view by itself: "Act as main
-  Maya" ticked, the paired list, port and name. Notifications, speech
-  and "Listen for 'Maya'" follow the saved role, so they come back.
+  Maya" ticked, the paired list, port and name. Notifications and speech
+  follow the saved role, so they come back. "Listen for 'Maya'" is
+  enabled again but stays off (pairing turned it off) until the user
+  turns it on.
 - The Debug tab logs, under `network`, "promoted to main by <M>; <n>
   assistants handed over".
 
@@ -169,11 +174,13 @@ Additive; the protocol stays at version 1.
 
 - `core/src/net/protocol.rs`: `caps` on `Hello`, `Down::Move`,
   `CommandKind::Promote`, `seal` and `open`.
-- `core/src/net/promote.rs` (new, pure): the handover list, who follows,
-  who stays behind and who is offline (for the dialog), and the config
-  rewrites `as_main(config, list)` and `as_assistant_of(config, host,
-  port, entry)`.
-- `core/src/net/server.rs`: caps per connection, `canLead` in the status,
+- `core/src/net/promote.rs` (new, pure): M's own entry, the handover
+  list, sealing it, and the config rewrites `as_main(config, list)` and
+  `as_assistant_of(config, host, port, entry)`.
+- `src/promote.ts` (new, pure): the confirmation's lines, shared by the
+  desktop and the phone.
+- `core/src/net/server.rs`: caps per connection, `canLead` and
+  `canFollow` in the status, `move` ending a connection as `bye` does,
   `ServerHandle::promote(id, now)` for steps 2–4, returning what M saves
   in step 5; one handover at a time.
 - `core/src/net/client.rs`: `Promote` is caught before the executor and
@@ -189,7 +196,7 @@ Additive; the protocol stays at version 1.
   Listening status), an executor with an empty board, `promoted` and
   `moved`; `mobile/src/commands.rs`: `network_promote` and `listen_stop`.
 - `cli/`: `moved` saves the config; caps `follow`.
-- `src/settings.ts` (Make main, the dialog, `canLead`) and
+- `src/settings.ts` (Make main, the confirmation, `canLead`) and
   `src/mobile/network.ts` (Make main, the Listening screen).
 - `docs/DEVELOPING.md` and the README's network section.
 - Crate: `chacha20poly1305`.
@@ -201,7 +208,8 @@ Additive; the protocol stays at version 1.
     refused;
   - the handover list leaves G out and adds M's entry with a new id and
     token;
-  - followers, those left behind and the offline ones for the dialog;
+  - the confirmation's lines: those left behind and the offline ones
+    (vitest);
   - `as_main` and `as_assistant_of`;
   - a `hello` without `caps` decodes with none; `move` and `promote`
     encode and decode.
@@ -218,7 +226,7 @@ Additive; the protocol stays at version 1.
   goes to Listening; that client promotes the phone back, and the phone
   runs its server with the list.
 - vitest: Make main only for connected assistants with `lead`; the
-  dialog's lines; the phone's Listening screen and Stop listening.
+  confirmation; the phone's Listening screen and Stop listening.
 - By hand, with the user: the Mac, the laptop and the phone. Promote the
   laptop; see every session on the laptop's board; promote the phone
   from the laptop; promote the Mac from the phone.
