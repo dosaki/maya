@@ -417,6 +417,8 @@ impl ClientNotify for HubClientNotify {
     /// itself once the answer is out, so it is dropped here, not stopped.
     fn promoted(&self, list: Vec<PairedAssistant>) -> Result<u16, String> {
         let h = self.hub.upgrade().ok_or("the app is gone")?;
+        let handed = list.len().saturating_sub(1);
+        let by = h.link.lock().unwrap().main_name.clone().unwrap_or_else(|| "the main Maya".into());
         let before = h.settings.lock().unwrap().config.clone();
         h.update_config(|c| promote::as_main(c, list))?;
         if let Err(e) = h.start_server() {
@@ -425,7 +427,7 @@ impl ClientNotify for HubClientNotify {
         }
         h.client.lock().unwrap().take();
         *h.link.lock().unwrap() = AssistantLink::default();
-        log::line("network", "promoted to main");
+        log::line("network", format!("promoted to main by {by}; {handed} assistants handed over"));
         let port = h.handle().map(|s| s.port()).ok_or("The server is stopped.")?;
         h.sink.network(&h.status());
         Ok(port)
