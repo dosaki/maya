@@ -545,6 +545,17 @@ fn network_remove_assistant(app: AppHandle, state: TauriState<AppState>, id: Str
     Ok(network_status_of(&state))
 }
 
+/// Makes a connected assistant the main, moves the others to it, then saves
+/// this Maya as its assistant, which stops the server and starts the client.
+#[tauri::command(async)]
+fn network_promote(app: AppHandle, state: TauriState<AppState>, id: String) -> Result<NetworkStatus, String> {
+    let server = state.network.lock().unwrap().server.clone().ok_or("Turn on \"Act as main Maya\" first.")?;
+    let out = server.promote(&id)?;
+    update_config(&app, |c| net::promote::as_assistant_of(c, &out.host, out.port, &out.me)).map_err(|e| format!("Could not save this Maya as an assistant: {}.", e.trim_end_matches('.')))?;
+    log::line("network", format!("now an assistant of {}:{}", out.host, out.port));
+    Ok(network_status_of(&state))
+}
+
 /// Starts the main's server on the configured port, replacing any running
 /// one; with `show_code` (the role just turned on) it opens pairing at once.
 fn start_main(app: &AppHandle, show_code: bool) {
@@ -1140,6 +1151,7 @@ pub fn run() {
             network_status,
             network_pairing_code,
             network_remove_assistant,
+            network_promote,
             network_pair,
             list_machines
         ])

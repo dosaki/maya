@@ -7,10 +7,11 @@
 
 use crate::actions;
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
-use crate::net::protocol::CommandKind;
+use crate::net::promote;
+use crate::net::protocol::{CommandKind, CAP_FOLLOW, CAP_LEAD};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
 use crate::net::AssistantLink;
-use crate::config::NetworkRole;
+use crate::config::{self, NetworkRole};
 use crate::log;
 use crate::model::Card;
 use crate::store::now_ms;
@@ -119,6 +120,58 @@ impl ClientNotify for TauriClientNotify {
             l.error = Some(REMOVED.into());
             l.retrying = false;
         });
+    }
+
+    fn caps(&self) -> Vec<String> {
+        vec![CAP_FOLLOW.into(), CAP_LEAD.into()]
+    }
+
+    /// Starts this Maya's server with the list, then saves the config as a
+    /// main without `apply_config_change`: that would stop this very client
+    /// before its answer is out. The client ends by itself once it is.
+    /// Nothing is saved when the server cannot start, and the server stops
+    /// again when the save fails, so either way this Maya stays an assistant.
+    fn promoted(&self, list: Vec<config::PairedAssistant>) -> Result<u16, String> {
+        let state = self.app.state::<AppState>();
+        let (mut after, path) = {
+            let store = state.store.lock().unwrap();
+            (store.config.clone(), store.config_path())
+        };
+        let handed = list.len().saturating_sub(1);
+        promote::as_main(&mut after, list);
+        let handle = start_with(Arc::new(crate::TauriNetNotify { app: self.app.clone() }), Arc::new(Mutex::new(after.network.clone())), after.listen_port())?;
+        if let Err(e) = config::save(&path, &after) {
+            handle.stop();
+            return Err(format!("Could not save the settings: {e}"));
+        }
+        let port = handle.port();
+        state.store.lock().unwrap().config.network = after.network.clone();
+        let by = {
+            let mut net = state.network.lock().unwrap();
+            let by = net.status.assistant.main_name.take().unwrap_or_else(|| "the main Maya".into());
+            if let Some(old) = net.server.replace(handle) {
+                old.stop();
+            }
+            net.status.main_error = None;
+            net.status.assistant = Default::default();
+            // Dropped, not stopped: stopping would end the connection before the answer is written.
+            net.client.take();
+            by
+        };
+        log::line("network", format!("promoted to main by {by}; {handed} assistants handed over"));
+        let _ = self.app.emit("network", crate::network_status_of(&state));
+        crate::refresh_and_emit(&self.app);
+        Ok(port)
+    }
+
+    /// Saves the new main's host and port. The config change restarts the
+    /// client against it (`RestartAssistant`), which stops this one.
+    fn moved(&self, host: &str, port: u16) -> Result<(), String> {
+        crate::update_config(&self.app, |c| {
+            c.network.main_host = host.into();
+            c.network.main_port = port;
+        })
+        .map(|_| ())
     }
 }
 
