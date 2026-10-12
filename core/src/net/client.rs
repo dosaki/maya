@@ -53,6 +53,10 @@ pub const WRONG_CODE: &str = "Wrong or expired pairing code.";
 pub const NOT_PAIRED: &str = "Not paired with a main Maya yet; pair in Settings.";
 pub const MAIN_UNPROVEN: &str = "The main Maya failed to prove it holds the pairing token.";
 pub const PAIRING_UNPROVEN: &str = "The main Maya failed to prove it knows the pairing code.";
+/// Why a connection ended when the main moved; `reconnect` tries the new host at once.
+pub const MOVED: &str = "The main Maya moved to another machine.";
+pub const CANNOT_LEAD: &str = "This Maya cannot become a main.";
+pub const CANNOT_FOLLOW: &str = "This Maya cannot follow the main to another machine.";
 /// How long the client waits before trying again after `MAIN_UNPROVEN`.
 const UNPROVEN_WAIT_MS: u64 = 30_000;
 
@@ -78,6 +82,22 @@ pub trait ClientNotify: Send + Sync {
     fn connected(&self, main_name: &str);
     fn disconnected(&self, error: &str);
     fn removed(&self);
+    /// What this Maya can do, sent in `hello` (`CAP_FOLLOW`, `CAP_LEAD`).
+    fn caps(&self) -> Vec<String> {
+        vec![]
+    }
+    /// The main handed this Maya its paired list: become the main with it.
+    /// `Ok(port)` once its server listens; on `Err` nothing changed. Runs on
+    /// a command thread; the client ends by itself once the answer is out,
+    /// so this must not stop or join the client.
+    fn promoted(&self, _assistants: Vec<crate::config::PairedAssistant>) -> Result<u16, String> {
+        Err(CANNOT_LEAD.into())
+    }
+    /// The main is now at `host:port`: save it (the id and token stay).
+    /// Runs on the connection thread.
+    fn moved(&self, _host: &str, _port: u16) -> Result<(), String> {
+        Err(CANNOT_FOLLOW.into())
+    }
 }
 
 /// 1, 2, 4, 8 and 16 seconds, then every 30.
@@ -291,7 +311,7 @@ fn finish(ws: &mut Ws) {
 /// link drops (`Err`) or `stop` is set (`Ok`). The notifier hears of every
 /// failure except one after a stop.
 pub fn run_once(config: &NetworkConfig, exec: Arc<dyn Executor>, notify: Arc<dyn ClientNotify>, stop: &AtomicBool, code: Option<&str>) -> Result<(), String> {
-    match connection(config, &exec, &*notify, stop, code) {
+    match connection(config, &exec, &notify, stop, code) {
         Ok(()) => Ok(()),
         Err(_) if stopped(stop) => Ok(()),
         Err(e) => {
@@ -305,16 +325,16 @@ pub fn run_once(config: &NetworkConfig, exec: Arc<dyn Executor>, notify: Arc<dyn
     }
 }
 
-fn connection(config: &NetworkConfig, exec: &Arc<dyn Executor>, notify: &dyn ClientNotify, stop: &AtomicBool, code: Option<&str>) -> Result<(), String> {
+fn connection(config: &NetworkConfig, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, stop: &AtomicBool, code: Option<&str>) -> Result<(), String> {
     if code.is_none() && (config.assistant_id.is_empty() || config.token.is_empty()) {
         return Err(NOT_PAIRED.into());
     }
     let deadline = Instant::now() + SILENCE;
     let mut ws = connect(config, stop, deadline)?;
-    let out = handshake(&mut ws, config, notify, stop, code, deadline).and_then(|main| {
+    let out = handshake(&mut ws, config, &**notify, stop, code, deadline).and_then(|main| {
         log::line("network", format!("connected to {main}"));
         notify.connected(&main);
-        pump(&mut ws, exec, stop)
+        pump(&mut ws, exec, notify, &config.token, stop)
     });
     finish(&mut ws);
     out
@@ -324,7 +344,7 @@ fn connection(config: &NetworkConfig, exec: &Arc<dyn Executor>, notify: &dyn Cli
 fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, code: Option<&str>, deadline: Instant) -> Result<String, String> {
     let hostname = super::local_hostname();
     let id = if code.is_some() { None } else { Some(config.assistant_id.clone()) };
-    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), id, caps: vec![] };
+    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), id, caps: notify.caps() };
     send_up(ws, &hello)?;
     let code = code.map(str::trim);
     // The nonce this side sent with `pair` or `auth`; the main must answer it
@@ -382,8 +402,10 @@ fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, sto
 }
 
 /// Runs a welcomed connection until it drops or `stop` is set.
-fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, stop: &AtomicBool) -> Result<(), String> {
+fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, token: &str, stop: &AtomicBool) -> Result<(), String> {
     let (tx, rx) = channel::<Up>();
+    // Set once this Maya has become the main: the client ends after it has written its answer.
+    let leaving = Arc::new(AtomicBool::new(false));
     let mut last_read = Instant::now();
     let mut last_ping = Instant::now();
     // When the last board went out, and what it said.
@@ -394,8 +416,15 @@ fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, stop: &AtomicBool) -> Result<(), 
         if stopped(stop) {
             return Ok(());
         }
+        // Read before draining, so a promote answer queued just before the
+        // flag was set is written before the connection ends.
+        let leave = leaving.load(Ordering::SeqCst);
         while let Ok(up) = rx.try_recv() {
             send_up(ws, &up)?;
+        }
+        if leave {
+            log::line("network", "this Maya is the main now; the client ends");
+            return Ok(());
         }
         board_wanted |= exec.board_requested();
         let since = last_board.as_ref().map(|(t, _)| t.elapsed());
@@ -417,7 +446,7 @@ fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, stop: &AtomicBool) -> Result<(), 
             Ok(Message::Text(t)) => {
                 last_read = Instant::now();
                 match decode_down(&t) {
-                    Ok(down) => handle(down, exec, &tx)?,
+                    Ok(down) => handle(down, exec, notify, token, &tx, &leaving)?,
                     Err(e) => log::line("network", format!("main: ignored a message: {e}")),
                 }
             }
@@ -433,8 +462,28 @@ fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, stop: &AtomicBool) -> Result<(), 
     }
 }
 
-fn handle(down: Down, exec: &Arc<dyn Executor>, tx: &Sender<Up>) -> Result<(), String> {
+fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, token: &str, tx: &Sender<Up>, leaving: &Arc<AtomicBool>) -> Result<(), String> {
     match down {
+        Down::Command { id, kind: CommandKind::Promote { sealed } } => {
+            log::line("network", format!("command {id} promote"));
+            let (notify, out, leaving, token) = (notify.clone(), tx.clone(), leaving.clone(), token.to_string());
+            // On its own thread, as every command: becoming the main starts a server.
+            let spawned = std::thread::Builder::new().name("net-promote".into()).spawn(move || {
+                match super::promote::open_list(&token, &sealed).and_then(|list| notify.promoted(list)) {
+                    Ok(port) => {
+                        let _ = out.send(Up::Result { id, ok: true, error: None, data: Some(serde_json::json!({ "port": port })) });
+                        leaving.store(true, Ordering::SeqCst);
+                    }
+                    Err(e) => {
+                        log::line("network", format!("command {id} promote failed: {e}"));
+                        let _ = out.send(Up::Result { id, ok: false, error: Some(e), data: None });
+                    }
+                }
+            });
+            if let Err(e) = spawned {
+                let _ = tx.send(Up::Result { id, ok: false, error: Some(format!("no thread for the command: {e}")), data: None });
+            }
+        }
         Down::Command { id, kind } => {
             let name = super::server::kind_name(&kind);
             log::line("network", format!("command {id} {name}"));
@@ -455,7 +504,12 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, tx: &Sender<Up>) -> Result<(), S
         }
         Down::Bye { reason } => return Err(bye_message(&reason)),
         Down::Pong => {}
-        Down::Move { .. } => log::line("network", "main: ignored move"),
+        Down::Move { host, port } => {
+            let host = clean(&host);
+            log::line("network", format!("the main moved to {host}:{port}"));
+            notify.moved(&host, port).map_err(|e| format!("Could not follow the main Maya to {host}: {e}"))?;
+            return Err(MOVED.into());
+        }
         Down::Challenge { .. } | Down::Welcome { .. } | Down::Paired { .. } => log::line("network", "main: ignored a handshake message after welcome"),
     }
     Ok(())
@@ -514,6 +568,16 @@ pub fn pair_after_stopping<T>(running: Option<ClientHandle>, pair: impl FnOnce()
     pair()
 }
 
+/// How long `reconnect` waits after a failure: none after a move, 30 s
+/// after a main that could not prove the token, else the backoff.
+fn retry_wait_ms(error: &str, attempt: u32) -> u64 {
+    match error {
+        MOVED => 0,
+        MAIN_UNPROVEN => UNPROVEN_WAIT_MS,
+        _ => backoff_ms(attempt),
+    }
+}
+
 /// Reconnects until `stop`, reading the config afresh each attempt.
 pub fn reconnect(config_of: &dyn Fn() -> NetworkConfig, exec: Arc<dyn Executor>, notify: Arc<dyn ClientNotify>, stop: &AtomicBool) {
     let mut attempt = 0u32;
@@ -533,8 +597,13 @@ pub fn reconnect(config_of: &dyn Fn() -> NetworkConfig, exec: Arc<dyn Executor>,
                 }
                 // Whatever answered at the main's address could not prove it
                 // holds the token: do not hammer it.
-                let wait = if e == MAIN_UNPROVEN { UNPROVEN_WAIT_MS } else { backoff_ms(attempt) };
-                attempt = attempt.saturating_add(1);
+                if e == MOVED {
+                    attempt = 0;
+                }
+                let wait = retry_wait_ms(&e, attempt);
+                if e != MOVED {
+                    attempt = attempt.saturating_add(1);
+                }
                 log::line("network", format!("{e} Retrying in {} s.", wait / 1_000));
                 let end = Instant::now() + Duration::from_millis(wait);
                 while Instant::now() < end && !stopped(stop) {
@@ -584,6 +653,13 @@ impl ClientNotify for PairNotify {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_retries_at_once() {
+        assert_eq!(retry_wait_ms(MOVED, 4), 0);
+        assert_eq!(retry_wait_ms(MAIN_UNPROVEN, 0), 30_000);
+        assert_eq!(retry_wait_ms("Lost the connection", 2), 4_000);
+    }
 
     #[test]
     fn backoff_doubles_to_sixteen_seconds_then_every_thirty() {

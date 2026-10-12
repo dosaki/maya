@@ -1904,6 +1904,120 @@ mod tests {
         }
     }
 
+    /// A client-side notifier that records `moved` and answers `promoted`.
+    #[derive(Default)]
+    struct Leader {
+        caps: Vec<String>,
+        moved: Mutex<Option<(String, u16)>>,
+        promoted: Mutex<Option<Vec<crate::config::PairedAssistant>>>,
+        promote_result: Mutex<Option<Result<u16, String>>>,
+        disconnects: Mutex<Vec<String>>,
+    }
+
+    impl client::ClientNotify for Leader {
+        fn paired(&self, _: &str, _: &str) {}
+        fn connected(&self, _: &str) {}
+        fn disconnected(&self, e: &str) {
+            self.disconnects.lock().unwrap().push(e.into());
+        }
+        fn removed(&self) {}
+        fn caps(&self) -> Vec<String> {
+            self.caps.clone()
+        }
+        fn promoted(&self, list: Vec<crate::config::PairedAssistant>) -> Result<u16, String> {
+            *self.promoted.lock().unwrap() = Some(list);
+            self.promote_result.lock().unwrap().clone().unwrap_or(Ok(6000))
+        }
+        fn moved(&self, host: &str, port: u16) -> Result<(), String> {
+            *self.moved.lock().unwrap() = Some((host.into(), port));
+            Ok(())
+        }
+    }
+
+    struct NoSessions;
+    impl client::Executor for NoSessions {
+        fn execute(&self, _: CommandKind) -> Result<Option<Value>, String> {
+            Err("no".into())
+        }
+        fn board(&self) -> (Vec<Card>, Vec<String>) {
+            (vec![], vec![])
+        }
+    }
+
+    fn assistant_config(port: u16, id: &str, token: &str) -> NetworkConfig {
+        NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, assistant_id: id.into(), token: token.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn a_client_says_its_caps_opens_promote_answers_with_its_port_and_ends() {
+        let (handle, port) = test_server();
+        let (ws, id, token) = pair_client(&handle, port, "laptop");
+        drop(ws);
+        wait_until(|| !handle.status().assistants[0].connected);
+        let notify = Arc::new(Leader { caps: vec!["follow".into(), "lead".into()], ..Default::default() });
+        let (config, n, stop) = (assistant_config(port, &id, &token), notify.clone(), Arc::new(AtomicBool::new(false)));
+        let s = stop.clone();
+        let run = std::thread::spawn(move || client::run_once(&config, Arc::new(NoSessions), n, &s, None));
+        wait_until(|| handle.status().assistants[0].can_lead);
+        let out = handle.promote(&id).unwrap();
+        assert_eq!(out.port, 6000, "the port the new main gave");
+        assert_eq!(notify.promoted.lock().unwrap().as_ref().unwrap().last().unwrap(), &out.me);
+        assert_eq!(run.join().unwrap(), Ok(()), "a promoted client ends without an error");
+        assert!(notify.disconnects.lock().unwrap().is_empty());
+        handle.stop();
+    }
+
+    #[test]
+    fn a_client_that_cannot_become_the_main_says_why_and_stays() {
+        let (handle, port) = test_server();
+        let (ws, id, token) = pair_client(&handle, port, "laptop");
+        drop(ws);
+        wait_until(|| !handle.status().assistants[0].connected);
+        let notify = Arc::new(Leader { caps: vec!["follow".into(), "lead".into()], promote_result: Mutex::new(Some(Err("Could not listen on port 6000: in use".into()))), ..Default::default() });
+        let (config, n, stop) = (NetworkConfig { name: "laptop".into(), ..assistant_config(port, &id, &token) }, notify.clone(), Arc::new(AtomicBool::new(false)));
+        let s = stop.clone();
+        let run = std::thread::spawn(move || client::run_once(&config, Arc::new(NoSessions), n, &s, None));
+        wait_until(|| handle.status().assistants[0].can_lead);
+        assert_eq!(handle.promote(&id).unwrap_err(), "laptop could not become the main: Could not listen on port 6000: in use.");
+        assert!(handle.status().assistants[0].connected, "still an assistant of this main");
+        stop.store(true, Ordering::SeqCst);
+        let _ = run.join();
+        handle.stop();
+    }
+
+    #[test]
+    fn a_client_told_to_move_saves_the_new_host_and_reconnects_at_once() {
+        let (handle, port) = test_server();
+        let (ws, id, token) = pair_client(&handle, port, "mini");
+        drop(ws);
+        wait_until(|| !handle.status().assistants[0].connected);
+        let notify = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+        let (config, n, stop) = (assistant_config(port, &id, &token), notify.clone(), Arc::new(AtomicBool::new(false)));
+        let s = stop.clone();
+        let run = std::thread::spawn(move || client::run_once(&config, Arc::new(NoSessions), n, &s, None));
+        wait_until(|| handle.status().assistants[0].connected);
+        lock(&handle.shared).conns.get(&id).unwrap().tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001 }).unwrap();
+        assert_eq!(run.join().unwrap(), Err(client::MOVED.into()));
+        assert_eq!(*notify.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001)));
+        handle.stop();
+    }
+
+    #[test]
+    fn an_older_client_without_caps_cannot_be_promoted() {
+        let (handle, port) = test_server();
+        let (ws, id, token) = pair_client(&handle, port, "old");
+        drop(ws);
+        wait_until(|| !handle.status().assistants[0].connected);
+        let (config, stop) = (assistant_config(port, &id, &token), Arc::new(AtomicBool::new(false)));
+        let s = stop.clone();
+        let run = std::thread::spawn(move || client::run_once(&config, Arc::new(NoSessions), Arc::new(Leader::default()), &s, None));
+        wait_until(|| handle.status().assistants[0].connected);
+        assert!(!handle.status().assistants[0].can_lead && !handle.status().assistants[0].can_follow);
+        stop.store(true, Ordering::SeqCst);
+        let _ = run.join();
+        handle.stop();
+    }
+
     /// A stranger at the main's address: answers one connection with
     /// `welcome` (after a challenge when `challenge`) carrying `proof`, then
     /// sends a command. Returns its port.
