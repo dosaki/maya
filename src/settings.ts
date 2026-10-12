@@ -7,6 +7,7 @@ import { builtinVoiceName, recognizerOptions, secretStore, thisComputerLower } f
 import type { Harness } from "./types";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
+import { promoteLines } from "./promote";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
@@ -28,6 +29,10 @@ export interface AssistantStatus {
   lastSeen: number | null;
   /** A different Maya version, or a board this Maya could not read. */
   note?: string | null;
+  /** Connected and able to become the main (`lead`). */
+  canLead?: boolean;
+  /** Connected and able to follow a new main (`follow`); false for an older Maya. */
+  canFollow?: boolean;
 }
 
 export interface AssistantLink {
@@ -48,6 +53,16 @@ export interface NetworkStatus {
   mainError?: string | null;
   /** This machine's IPv4 addresses, for an assistant to type as the main's host. */
   addresses?: string[];
+}
+
+/**
+ * The role the form shows after a `network` event. Previewing Assistant
+ * (picked, not yet paired) survives an event that still reports the live
+ * role; a live role change, from a promotion or another machine, wins.
+ */
+export function nextNetworkRole(prev: NetworkStatus | undefined, selected: NetworkRole | undefined, payload: NetworkStatus): NetworkRole {
+  const previewing = selected === "assistant" && prev?.role !== "assistant" && payload.role !== "assistant";
+  return previewing ? "assistant" : payload.role;
 }
 
 const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } };
@@ -90,6 +105,10 @@ export interface SettingsModel {
   network?: NetworkStatus;
   /** The Network select's current value; can diverge from `network.role` while previewing "Assistant" before Pair succeeds. */
   networkRole?: NetworkRole;
+  /** The assistant whose Make main confirmation is open. */
+  networkPromote?: string | null;
+  /** A handover is running; it can take up to 30 s. */
+  networkPromoting?: boolean;
   /** This Maya's listening port as a main. */
   networkPort?: number;
   /** The assistant's target: the main's host/address. */
@@ -160,6 +179,9 @@ export interface SettingsHandlers {
   /** Opens pairing (mints a code) or, if one is already open, regenerates it. */
   onRegenerate(): void;
   onRemoveAssistant(id: string): void;
+  onMakeMain(id: string): void;
+  onPromote(id: string): void;
+  onPromoteCancel(): void;
   onPair(host: string, port: number, name: string, code: string): void;
 }
 
@@ -727,6 +749,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     roleSel.append(o);
   }
   roleSel.value = netRole;
+  roleSel.disabled = !!model.networkPromoting;
   roleSel.addEventListener("change", () => h.onRole(roleSel.value === "main" || roleSel.value === "assistant" ? roleSel.value : "off"));
   roleLabel.append(roleSel);
   network.append(roleLabel);
@@ -741,6 +764,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     nameInput.name = "networkName";
     nameInput.placeholder = "blank uses this computer's hostname";
     nameInput.value = netName;
+    nameInput.disabled = !!model.networkPromoting;
     nameInput.addEventListener("input", () => { model.networkName = nameInput.value; });
     nameInput.addEventListener("change", () => h.onName(nameInput.value.trim()));
     nameLabel.append(nameInput);
@@ -762,6 +786,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     portInput.name = "networkPort";
     portInput.placeholder = "4127";
     portInput.value = netPort ? String(netPort) : "";
+    portInput.disabled = !!model.networkPromoting;
     const readPort = () => {
       const n = Number(portInput.value);
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
@@ -788,6 +813,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     regen.type = "button";
     regen.dataset.action = "regenerate-code";
     regen.textContent = net.code && nowMs <= net.code.expiresAt ? "Regenerate" : "Show pairing code";
+    // Reopening pairing mid-handover would let a new assistant pair with a main about to stop.
+    regen.disabled = !!model.networkPromoting;
     regen.addEventListener("click", () => h.onRegenerate());
     network.append(regen);
 
@@ -810,9 +837,44 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       rm.dataset.action = "remove-assistant";
       rm.dataset.id = a.id;
       rm.textContent = "Remove";
+      rm.disabled = !!model.networkPromoting;
       rm.addEventListener("click", () => h.onRemoveAssistant(a.id));
       row.append(info, rm);
+      if (a.connected && a.canLead) {
+        const mk = document.createElement("button");
+        mk.type = "button";
+        mk.dataset.action = "make-main";
+        mk.dataset.id = a.id;
+        mk.textContent = "Make main";
+        mk.disabled = !!model.networkPromoting;
+        mk.addEventListener("click", () => h.onMakeMain(a.id));
+        row.append(mk);
+      }
       list.append(row);
+      if (model.networkPromote === a.id) {
+        const confirm = document.createElement("div");
+        confirm.className = "settings__confirm";
+        confirm.dataset.for = "promote-confirm";
+        for (const line of promoteLines(net.assistants, a.id, thisComputerLower())) {
+          const p = document.createElement("p");
+          p.textContent = line;
+          confirm.append(p);
+        }
+        const yes = document.createElement("button");
+        yes.type = "button";
+        yes.dataset.action = "promote-confirm";
+        yes.textContent = model.networkPromoting ? "Handing over…" : "Make main";
+        yes.disabled = !!model.networkPromoting;
+        yes.addEventListener("click", () => h.onPromote(a.id));
+        const no = document.createElement("button");
+        no.type = "button";
+        no.dataset.action = "promote-cancel";
+        no.textContent = "Cancel";
+        no.disabled = !!model.networkPromoting;
+        no.addEventListener("click", () => h.onPromoteCancel());
+        confirm.append(yes, no);
+        list.append(confirm);
+      }
     }
     network.append(list);
   } else if (netRole === "assistant") {
@@ -826,6 +888,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     hostInput.name = "networkHost";
     hostInput.placeholder = "e.g. 192.168.1.42 or maya-mini.local";
     hostInput.value = netMainHost;
+    hostInput.disabled = !!model.networkPromoting;
     hostInput.addEventListener("input", () => { model.networkMainHost = hostInput.value; });
     hostInput.addEventListener("change", () => h.onMainHost(hostInput.value.trim()));
     hostLabel.append(hostInput);
@@ -838,6 +901,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     mainPortInput.name = "networkMainPort";
     mainPortInput.placeholder = "4127";
     mainPortInput.value = netMainPort ? String(netMainPort) : "";
+    mainPortInput.disabled = !!model.networkPromoting;
     const readMainPort = () => {
       const n = Number(mainPortInput.value);
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
@@ -1096,6 +1160,29 @@ export async function initSettings(): Promise<void> {
     },
     onRegenerate: () => void run(async () => { model.network = await invoke<NetworkStatus>("network_pairing_code"); }),
     onRemoveAssistant: (id) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_assistant", { id }); }),
+    onMakeMain: (id) => {
+      model.networkPromote = id;
+      paint();
+    },
+    onPromoteCancel: () => {
+      model.networkPromote = null;
+      paint();
+    },
+    onPromote: (id) => {
+      if (model.networkPromoting) return;
+      model.networkPromoting = true;
+      paint();
+      void run(async () => {
+        try {
+          model.network = await invoke<NetworkStatus>("network_promote", { id });
+          model.networkRole = model.network.role;
+          model.networkPromote = null;
+          refetchAndPaint();
+        } finally {
+          model.networkPromoting = false;
+        }
+      });
+    },
     onPair: (host, port, name, code) => {
       // One Pair at a time: a second would pair twice with one code.
       if (model.networkPairing) return;
@@ -1166,9 +1253,13 @@ export async function initSettings(): Promise<void> {
     if (JSON.stringify(model.network) === JSON.stringify(e.payload)) return;
     // Previewing "Assistant" before Pair succeeds is local only; an
     // unrelated event must not snap the form back to the saved role.
-    const previewingAssistant = model.networkRole === "assistant" && e.payload.role !== "assistant";
+    const role = nextNetworkRole(model.network, model.networkRole, e.payload);
+    // A promotion, or a move made from another machine, changes the role or
+    // the main's name; the Host and Port fields come from the config.
+    const moved = model.network?.role !== e.payload.role || model.network?.assistant?.mainName !== e.payload.assistant?.mainName;
     model.network = e.payload;
-    if (!previewingAssistant) model.networkRole = e.payload.role;
+    model.networkRole = role;
+    if (moved) refetchAndPaint();
     if (!panel.hidden) paint();
     else stale = true;
   });

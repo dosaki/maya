@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { pairingRepaintDue, renderSettings, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { nextNetworkRole, pairingRepaintDue, renderSettings, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -61,6 +61,9 @@ const handlers = () => ({
   onName: vi.fn(),
   onRegenerate: vi.fn(),
   onRemoveAssistant: vi.fn(),
+  onMakeMain: vi.fn(),
+  onPromote: vi.fn(),
+  onPromoteCancel: vi.fn(),
   onPair: vi.fn(),
 });
 
@@ -718,5 +721,64 @@ describe("Network settings", () => {
     expect(preview.querySelector<HTMLInputElement>("input[name=listen]")!.disabled).toBe(false);
     expect(preview.querySelector<HTMLInputElement>("input[name=listen]")!.checked).toBe(true);
     expect(preview.textContent).not.toContain("The main Maya notifies and listens for this machine.");
+  });
+});
+
+describe("Make main", () => {
+  const laptop = { id: "g", name: "laptop", hostname: "laptop", platform: "macos", address: "192.168.55.70", connected: true, lastSeen: null, canLead: true, canFollow: true };
+  const cli = { ...laptop, id: "c", name: "cli", canLead: false };
+  const nas = { ...laptop, id: "n", name: "nas", connected: false, canLead: false, canFollow: false };
+  const network = { role: "main" as const, code: null, assistants: [laptop, cli, nas], assistant: { connected: false, mainName: null, error: null } };
+
+  it("shows only for a connected assistant that can lead", () => {
+    const h = handlers();
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network }, h);
+    const buttons = [...el.querySelectorAll<HTMLButtonElement>("button[data-action=make-main]")];
+    expect(buttons.map((b) => b.dataset.id)).toEqual(["g"]);
+    buttons[0].click();
+    expect(h.onMakeMain).toHaveBeenCalledWith("g");
+    expect(el.querySelector("[data-for=promote-confirm]")).toBeNull();
+  });
+
+  it("confirms with who stays behind before handing over", () => {
+    const h = handlers();
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network, networkPromote: "g" }, h);
+    const confirm = el.querySelector<HTMLElement>("[data-for=promote-confirm]")!;
+    expect(confirm.textContent).toContain("Make laptop the main Maya? Every connected Maya will assist laptop");
+    expect(confirm.textContent).toContain("nas is offline; when it is back, set its Host to 192.168.55.70.");
+    confirm.querySelector<HTMLButtonElement>("button[data-action=promote-confirm]")!.click();
+    expect(h.onPromote).toHaveBeenCalledWith("g");
+    confirm.querySelector<HTMLButtonElement>("button[data-action=promote-cancel]")!.click();
+    expect(h.onPromoteCancel).toHaveBeenCalled();
+  });
+
+  it("disables the buttons while the handover runs", () => {
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network, networkPromote: "g", networkPromoting: true }, handlers());
+    expect(el.querySelector<HTMLButtonElement>("button[data-action=promote-confirm]")!.disabled).toBe(true);
+    expect(el.querySelector<HTMLButtonElement>("button[data-action=promote-confirm]")!.textContent).toBe("Handing over…");
+    expect([...el.querySelectorAll<HTMLButtonElement>("button[data-action=remove-assistant]")].every((b) => b.disabled)).toBe(true);
+    expect(el.querySelector<HTMLButtonElement>("button[data-action=regenerate-code]")!.disabled).toBe(true);
+    expect(el.querySelector<HTMLSelectElement>("select[name=networkRole]")!.disabled).toBe(true);
+    expect(el.querySelector<HTMLInputElement>("input[name=networkPort]")!.disabled).toBe(true);
+    expect(el.querySelector<HTMLInputElement>("input[name=networkName]")!.disabled).toBe(true);
+  });
+
+  it("disables the assistant's fields while a handover runs", () => {
+    const el = renderSettings({ ...voiceBase, networkRole: "assistant", network: { ...network, role: "assistant" }, networkPaired: true, networkPromoting: true }, handlers());
+    expect(el.querySelector<HTMLInputElement>("input[name=networkHost]")!.disabled).toBe(true);
+    expect(el.querySelector<HTMLInputElement>("input[name=networkMainPort]")!.disabled).toBe(true);
+  });
+});
+
+describe("nextNetworkRole", () => {
+  const live = (role: "off" | "main" | "assistant") => ({ role, code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
+  it("keeps an Assistant preview on a main", () => {
+    expect(nextNetworkRole(live("main"), "assistant", live("main"))).toBe("assistant");
+  });
+  it("follows a live assistant that became the main", () => {
+    expect(nextNetworkRole(live("assistant"), "assistant", live("main"))).toBe("main");
+  });
+  it("follows a main that became an assistant", () => {
+    expect(nextNetworkRole(live("main"), "main", live("assistant"))).toBe("assistant");
   });
 });

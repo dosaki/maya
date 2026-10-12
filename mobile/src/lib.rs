@@ -85,6 +85,8 @@ pub fn run() {
             commands::network_status,
             commands::network_pairing_code,
             commands::network_remove_assistant,
+            commands::network_promote,
+            commands::listen_stop,
             commands::get_config,
             commands::set_config,
             commands::log_lines,
@@ -123,6 +125,10 @@ pub fn run() {
                 std::thread::spawn(move || {
                     let _ = hub.start_server();
                 });
+            }
+            let was_assistant = hub.settings.lock().unwrap().config.network.role == NetworkRole::Assistant;
+            if was_assistant {
+                hub.start_client();
             }
             Ok(())
         })

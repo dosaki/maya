@@ -174,8 +174,8 @@ mod tests {
     fn machines_of_keeps_the_status_display_names() {
         let status = NetworkStatus {
             assistants: vec![
-                AssistantStatus { id: "a".into(), name: "laptop (10.0.0.2)".into(), hostname: "laptop".into(), platform: "macos".into(), address: "10.0.0.2".into(), connected: true, last_seen: None, note: None },
-                AssistantStatus { id: "b".into(), name: "laptop (10.0.0.3)".into(), hostname: "laptop".into(), platform: "linux".into(), address: "10.0.0.3".into(), connected: false, last_seen: Some(1), note: None },
+                AssistantStatus { id: "a".into(), name: "laptop (10.0.0.2)".into(), hostname: "laptop".into(), platform: "macos".into(), address: "10.0.0.2".into(), connected: true, last_seen: None, note: None, can_lead: false, can_follow: false },
+                AssistantStatus { id: "b".into(), name: "laptop (10.0.0.3)".into(), hostname: "laptop".into(), platform: "linux".into(), address: "10.0.0.3".into(), connected: false, last_seen: Some(1), note: None, can_lead: false, can_follow: false },
             ],
             ..Default::default()
         };

@@ -8,10 +8,11 @@ use maya_core::config::{self, Config, NetworkRole, PairedAssistant};
 use maya_core::log;
 use maya_core::model::Card;
 use maya_core::net::merge::{self, RemoteBoard};
-use maya_core::net::protocol::CommandKind;
+use maya_core::net::client::{reconnect, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
+use maya_core::net::protocol::{CommandKind, CAP_FOLLOW, CAP_LEAD};
 use maya_core::net::routing::ROUTE_TIMEOUT;
 use maya_core::net::server::{send_command_with, start_with, Notify, ServerHandle};
-use maya_core::net::{self, NetworkStatus};
+use maya_core::net::{self, promote, AssistantLink, NetworkStatus};
 use maya_core::notify::Notifier;
 use maya_core::store::now_ms;
 use serde_json::Value;
@@ -55,12 +56,17 @@ pub struct Hub {
     /// Serializes `refresh`, so a stale snapshot never overtakes a newer one.
     /// Lock order: `refresh` first, alone (its callers hold no other lock);
     /// then `server`, then the server's own mutex, then `settings`;
-    /// `notifier` and `posted` are taken alone.
+    /// `notifier`, `posted`, `client` and `link` are taken alone, never
+    /// while holding another hub lock.
     refresh: Mutex<()>,
     pub settings: Mutex<Settings>,
     pub server: Mutex<Option<ServerHandle>>,
     /// Why the server is not running (the port is taken…); `None` once it runs.
     pub main_error: Mutex<Option<String>>,
+    /// The client that listens to the main while this phone is an assistant.
+    pub client: Mutex<Option<ClientHandle>>,
+    /// How that client stands with the main.
+    pub link: Mutex<AssistantLink>,
     pub notifier: Mutex<Notifier>,
     pub posted: Mutex<Posted>,
     pub alerts: Arc<dyn Alerts>,
@@ -77,7 +83,7 @@ impl Hub {
 
     /// `new` with the clock boards are merged at.
     pub fn with_clock(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>, now: impl Fn() -> u64 + Send + Sync + 'static) -> Arc<Hub> {
-        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), refresh: Mutex::new(()), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now) })
+        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), client: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now) })
     }
 
     fn handle(&self) -> Option<ServerHandle> {
@@ -140,6 +146,9 @@ impl Hub {
     /// The status as the Network screen shows it: the server's, or the
     /// paired list offline with why the server is down.
     pub fn status(&self) -> NetworkStatus {
+        if self.client.lock().unwrap().is_some() {
+            return NetworkStatus { role: NetworkRole::Assistant, assistant: self.link.lock().unwrap().clone(), ..Default::default() };
+        }
         match self.handle() {
             Some(s) => s.status(),
             None => {
@@ -161,7 +170,12 @@ impl Hub {
     }
 
     fn save_assistants(&self, f: impl FnOnce(&mut Vec<PairedAssistant>)) -> Result<(), String> {
-        self.update_config(|c| f(&mut c.network.assistants)).map(|_| ()).map_err(|e| {
+        let mut skipped = false;
+        let saved = self.update_config(|c| skipped = !change_paired(c, f)).map(|_| ());
+        if skipped {
+            log::line("network", "not saving the paired assistants: this phone is an assistant now");
+        }
+        saved.map_err(|e| {
             log::line("network", format!("could not save the paired assistants: {e}"));
             format!("Could not save the paired assistants: {e}")
         })
@@ -215,12 +229,60 @@ impl Hub {
         self.sink.network(&self.status());
     }
 
+    /// Listens to the main in the config: an assistant with no sessions, so
+    /// that main can make this phone the main again. The keep-awake service runs meanwhile.
+    pub fn start_client(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let handle = ClientHandle::spawn(move |stop| {
+            let notify: Arc<dyn ClientNotify> = Arc::new(HubClientNotify { hub: weak.clone(), stop: stop.clone() });
+            let config_of = move || weak.upgrade().map(|h| h.settings.lock().unwrap().config.network.clone()).unwrap_or_default();
+            reconnect(&config_of, Arc::new(NoSessions), notify, &stop);
+        });
+        *self.link.lock().unwrap() = AssistantLink { retrying: true, ..Default::default() };
+        if let Some(old) = self.client.lock().unwrap().replace(handle) {
+            old.stop();
+        }
+        self.sink.service_start("Reconnecting…");
+        self.sink.network(&self.status());
+    }
+
+    /// Stops listening: the role goes Off and the link is forgotten.
+    pub fn stop_listening(&self) -> Result<NetworkStatus, String> {
+        // Saved first: if the save fails, the phone keeps listening as before.
+        self.update_config(|c| {
+            c.network.role = NetworkRole::Off;
+            c.network.main_host.clear();
+            c.network.main_port = 0;
+            c.network.assistant_id.clear();
+            c.network.token.clear();
+        })?;
+        let client = self.client.lock().unwrap().take();
+        if let Some(c) = client {
+            c.stop();
+            self.sink.service_stop();
+        }
+        *self.link.lock().unwrap() = AssistantLink::default();
+        let status = self.status();
+        self.sink.network(&status);
+        Ok(status)
+    }
+
+    /// Makes a connected assistant the main, then listens to it.
+    pub fn promote(self: &Arc<Self>, id: &str) -> Result<NetworkStatus, String> {
+        let server = self.handle().ok_or("Start the server first.")?;
+        let out = server.promote(id)?;
+        self.update_config(|c| promote::as_assistant_of(c, &out.host, out.port, &out.me)).map_err(|e| format!("Could not save this Maya as an assistant: {}.", e.trim_end_matches('.')))?;
+        self.stop_server();
+        self.start_client();
+        Ok(self.status())
+    }
+
     /// Opens pairing, or regenerates the code when it is already open.
     pub fn pairing_code(&self) -> Result<NetworkStatus, String> {
         let Some(server) = self.handle() else {
             return Err(self.main_error.lock().unwrap().clone().unwrap_or_else(|| "Start the server first.".into()));
         };
-        server.open_pairing(now_ms());
+        server.open_pairing(now_ms())?;
         Ok(server.status())
     }
 
@@ -248,6 +310,17 @@ impl Hub {
         let shared = self.handle().map(|s| s.shared.clone()).ok_or("The server is stopped.")?;
         send_command_with(&shared, machine, kind, ROUTE_TIMEOUT)
     }
+}
+
+/// Changes the paired list with `f`, unless the config says assistant: an
+/// assistant has no list, and a late save from the server that just handed
+/// its role away would put the old one back. Whether `f` ran.
+fn change_paired(c: &mut Config, f: impl FnOnce(&mut Vec<PairedAssistant>)) -> bool {
+    if c.network.role == NetworkRole::Assistant {
+        return false;
+    }
+    f(&mut c.network.assistants);
+    true
 }
 
 /// The server's line to the hub. `paired` and `paired_list_changed` run
@@ -291,5 +364,122 @@ impl Notify for HubNotify {
     fn paired_list_changed(&self, assistants: &[PairedAssistant]) -> Result<(), String> {
         let Some(h) = self.0.upgrade() else { return Err("the app is gone".into()) };
         h.save_assistants(|list| *list = assistants.to_vec())
+    }
+}
+
+/// The phone while it listens: no sessions, so every command but
+/// `promote` (which the client opens itself) is refused.
+pub(crate) struct NoSessions;
+
+impl Executor for NoSessions {
+    fn execute(&self, _: CommandKind) -> Result<Option<Value>, String> {
+        Err("This phone runs no sessions.".into())
+    }
+    fn board(&self) -> (Vec<Card>, Vec<String>) {
+        (vec![], vec![])
+    }
+}
+
+/// The client's line to the hub.
+struct HubClientNotify {
+    hub: Weak<Hub>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HubClientNotify {
+    fn set(&self, f: impl FnOnce(&mut AssistantLink)) {
+        if self.stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Some(h) = self.hub.upgrade() else { return };
+        let line = {
+            let mut l = h.link.lock().unwrap();
+            f(&mut l);
+            match (&l.main_name, l.connected) {
+                (Some(m), true) => format!("Listening to {m}"),
+                _ => "Reconnecting…".to_string(),
+            }
+        };
+        h.alerts.service_line(&line);
+        h.sink.network(&h.status());
+    }
+}
+
+impl ClientNotify for HubClientNotify {
+    fn paired(&self, _: &str, _: &str) {}
+    fn connected(&self, main_name: &str) {
+        let name = main_name.to_string();
+        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false });
+    }
+    fn disconnected(&self, error: &str) {
+        let retrying = error != NOT_PAIRED && error != REMOVED;
+        self.set(|l| {
+            l.connected = false;
+            l.error = Some(error.to_string());
+            l.retrying = retrying;
+        });
+    }
+    fn removed(&self) {
+        self.set(|l| {
+            l.connected = false;
+            l.error = Some(REMOVED.into());
+            l.retrying = false;
+        });
+    }
+    fn caps(&self) -> Vec<String> {
+        vec![CAP_FOLLOW.into(), CAP_LEAD.into()]
+    }
+    /// Saves the config as a main with the list and starts the server; if
+    /// it cannot listen, the old config goes back. The client ends by
+    /// itself once the answer is out, so it is dropped here, not stopped.
+    fn promoted(&self, list: Vec<PairedAssistant>) -> Result<u16, String> {
+        let h = self.hub.upgrade().ok_or("the app is gone")?;
+        let handed = list.len().saturating_sub(1);
+        let by = h.link.lock().unwrap().main_name.clone().unwrap_or_else(|| "the main Maya".into());
+        let before = h.settings.lock().unwrap().config.clone();
+        h.update_config(|c| promote::as_main(c, list))?;
+        if let Err(e) = h.start_server() {
+            let _ = h.update_config(|c| *c = before);
+            return Err(e);
+        }
+        h.client.lock().unwrap().take();
+        *h.link.lock().unwrap() = AssistantLink::default();
+        log::line("network", format!("promoted to main by {by}; {handed} assistants handed over"));
+        let port = h.handle().map(|s| s.port()).ok_or("The server is stopped.")?;
+        h.sink.network(&h.status());
+        Ok(port)
+    }
+    fn moved(&self, host: &str, port: u16) -> Result<(), String> {
+        let h = self.hub.upgrade().ok_or("the app is gone")?;
+        h.update_config(|c| {
+            c.network.main_host = host.into();
+            c.network.main_port = port;
+        })
+        .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maya_core::net::client::Executor;
+
+    #[test]
+    fn a_late_paired_list_change_leaves_an_assistant_config_empty() {
+        let late = PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "10.0.0.5".into(), last_seen: None };
+        let mut config = Config::default();
+        config.network.role = NetworkRole::Assistant;
+        assert!(!change_paired(&mut config, |l| *l = vec![late.clone()]));
+        assert!(config.network.assistants.is_empty());
+        config.network.role = NetworkRole::Main;
+        assert!(change_paired(&mut config, |l| *l = vec![late]));
+        assert_eq!(config.network.assistants.len(), 1);
+    }
+
+    #[test]
+    fn a_listening_phone_has_no_sessions_and_runs_no_commands() {
+        let e = NoSessions;
+        assert_eq!(e.board(), (vec![], vec![]));
+        assert_eq!(e.execute(CommandKind::Compact { session: "s".into() }).unwrap_err(), "This phone runs no sessions.");
     }
 }

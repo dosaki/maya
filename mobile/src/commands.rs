@@ -171,6 +171,16 @@ pub fn network_remove_assistant(hub: H, id: String) -> Result<NetworkStatus, Str
     hub.remove_assistant(&id)
 }
 
+#[tauri::command(async)]
+pub fn network_promote(hub: H, id: String) -> Result<NetworkStatus, String> {
+    hub.promote(&id)
+}
+
+#[tauri::command(async)]
+pub fn listen_stop(hub: H) -> Result<NetworkStatus, String> {
+    hub.stop_listening()
+}
+
 #[tauri::command]
 pub fn get_config(hub: H) -> Config {
     hub.settings.lock().unwrap().config.clone()
