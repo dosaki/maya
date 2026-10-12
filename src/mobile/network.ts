@@ -5,6 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "../format";
+import { promoteLines } from "../promote";
 import type { NetworkStatus } from "../settings";
 import { showToast } from "../toast";
 
@@ -20,6 +21,8 @@ export interface NetworkModel {
   notificationsAllowed: boolean;
   busy: boolean;
   error: string | null;
+  /** The assistant whose Make main confirmation is open. */
+  promote: string | null;
 }
 
 export interface NetworkHandlers {
@@ -30,6 +33,10 @@ export interface NetworkHandlers {
   onRemove(id: string): void;
   onSwitch(which: "awaiting" | "completed", on: boolean): void;
   onBattery(): void;
+  onMakeMain(id: string): void;
+  onPromote(id: string): void;
+  onPromoteCancel(): void;
+  onStopListening(): void;
 }
 
 const PLATFORM_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
@@ -67,6 +74,7 @@ function minutesLeft(expiresAt: number, nowMs: number): number {
 export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = el("div", "settings__body network");
   const running = m.status.role === "main";
+  const listening = m.status.role === "assistant";
 
   const phone = section("This phone");
   const name = el("label", "", "Name ");
@@ -82,8 +90,15 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
   port.append(portInput);
   const row = el("div", "network__row");
   row.append(button("Save", "save", () => h.onSave(nameInput.value, Number(portInput.value) || 0)));
-  row.append(running ? button("Stop server", "stop", h.onStop) : button("Start server", "start", h.onStart, true));
+  if (!listening) row.append(running ? button("Stop server", "stop", h.onStop) : button("Start server", "start", h.onStart, true));
   phone.append(name, port, row);
+  if (listening) {
+    const link = m.status.assistant;
+    const line = link.connected && link.mainName ? `Listening to ${link.mainName}` : "Reconnecting…";
+    phone.append(el("p", "network__listening", line));
+    if (!link.connected && link.error) phone.append(el("p", "settings__hint", link.error));
+    phone.append(button("Stop listening", "stop-listening", h.onStopListening));
+  }
   if (m.status.mainError) phone.append(el("p", "settings__error", m.status.mainError));
   if (m.error) phone.append(el("p", "settings__error", m.error));
   root.append(phone);
@@ -101,10 +116,10 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
   }
 
   const assistants = section("Assistants");
-  if (m.status.assistants.length === 0) {
+  if (!listening && m.status.assistants.length === 0) {
     assistants.append(el("p", "", "No assistants paired yet."));
   }
-  for (const a of m.status.assistants) {
+  for (const a of listening ? [] : m.status.assistants) {
     const r = el("div", "network__assistant");
     const text = el("div", "network__assistant-text");
     text.append(el("div", "network__assistant-name", a.name));
@@ -114,10 +129,18 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
     if (a.note) text.append(el("div", "network__assistant-meta", a.note));
     const rm = button("Remove", "remove-assistant", () => h.onRemove(a.id));
     rm.dataset.id = a.id;
-    r.append(text, rm);
+    r.append(text);
+    if (a.connected && a.canLead) r.append(button("Make main", "make-main", () => h.onMakeMain(a.id)));
+    r.append(rm);
     assistants.append(r);
+    if (m.promote === a.id && a.connected && a.canLead) {
+      const c = el("div", "network__confirm");
+      for (const line of promoteLines(m.status.assistants, a.id, "this phone")) c.append(el("p", "", line));
+      c.append(button(m.busy ? "Handing over…" : "Make main", "promote-confirm", () => h.onPromote(a.id), true), button("Cancel", "promote-cancel", h.onPromoteCancel));
+      assistants.append(c);
+    }
   }
-  root.append(assistants);
+  if (!listening) root.append(assistants);
 
   const notifications = section("Notifications");
   for (const [which, label, on, nameAttr] of [["awaiting", "Notify on Awaiting Decision", m.notifyAwaiting, "notifyAwaiting"], ["completed", "Notify on Completed", m.notifyCompleted, "notifyCompleted"]] as const) {
@@ -199,6 +222,7 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     notificationsAllowed: true,
     busy: false,
     error: null,
+    promote: null,
   };
   const render = () => {
     const edits = carryEdits(pane, model);
@@ -262,6 +286,13 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
       if (which === "awaiting") c.notifyOnAwaiting = on;
       else c.notifyOnCompleted = on;
     })),
+    onMakeMain: (id) => { model.promote = id; paint(); },
+    onPromoteCancel: () => { model.promote = null; paint(); },
+    onPromote: (id) => void busy(async () => {
+      setStatus(await invoke<NetworkStatus>("network_promote", { id }));
+      model.promote = null;
+    }),
+    onStopListening: () => void busy(async () => setStatus(await invoke<NetworkStatus>("listen_stop"))),
     onBattery: () => void invoke("request_battery_exemption").catch((e) => showToast(String(e))),
   };
   void listen<NetworkStatus>("network", (e) => setStatus(e.payload));

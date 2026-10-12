@@ -25,10 +25,46 @@ const running: NetworkStatus = {
   assistant: { connected: false, mainName: null, error: null },
   mainError: null,
 };
-const base: NetworkModel = { status: running, name: "Pixel 8", port: 4127, notifyAwaiting: true, notifyCompleted: false, addresses: ["192.168.1.20"], notificationsAllowed: true, busy: false, error: null };
-const handlers = () => ({ onSave: vi.fn(), onStart: vi.fn(), onStop: vi.fn(), onCode: vi.fn(), onRemove: vi.fn(), onSwitch: vi.fn(), onBattery: vi.fn() });
+const base: NetworkModel = { status: running, name: "Pixel 8", port: 4127, notifyAwaiting: true, notifyCompleted: false, addresses: ["192.168.1.20"], notificationsAllowed: true, busy: false, error: null, promote: null };
+const handlers = () => ({ onSave: vi.fn(), onStart: vi.fn(), onStop: vi.fn(), onCode: vi.fn(), onRemove: vi.fn(), onSwitch: vi.fn(), onBattery: vi.fn(), onMakeMain: vi.fn(), onPromote: vi.fn(), onPromoteCancel: vi.fn(), onStopListening: vi.fn() });
 
 describe("renderNetwork", () => {
+  it("shows Listening with Stop listening while the phone assists a main", () => {
+    const h = handlers();
+    const listening: NetworkModel = { ...base, status: { role: "assistant", code: null, assistants: [], assistant: { connected: true, mainName: "laptop", error: null } } };
+    const el = renderNetwork(listening, h, NOW);
+    expect(el.textContent).toContain("Listening to laptop");
+    expect(el.querySelector("button[data-action=start]")).toBeNull();
+    expect(el.querySelector(".network__code")).toBeNull();
+    el.querySelector<HTMLButtonElement>("button[data-action=stop-listening]")!.click();
+    expect(h.onStopListening).toHaveBeenCalled();
+  });
+
+  it("says Reconnecting with the last error while it cannot reach the main", () => {
+    const lost: NetworkModel = { ...base, status: { role: "assistant", code: null, assistants: [], assistant: { connected: false, mainName: null, error: "The main Maya stopped answering.", retrying: true } } };
+    const text = renderNetwork(lost, handlers(), NOW).textContent;
+    expect(text).toContain("Reconnecting…");
+    expect(text).toContain("The main Maya stopped answering.");
+  });
+
+  it("offers Make main for a connected assistant that can lead and confirms with the lines", () => {
+    const h = handlers();
+    const laptop = { id: "g", name: "laptop", hostname: "h", platform: "macos", address: "192.168.55.70", connected: true, lastSeen: null, canLead: true, canFollow: true };
+    const cli = { ...laptop, id: "c", name: "cli", canLead: false };
+    const m: NetworkModel = { ...base, status: { ...running, assistants: [laptop, cli] }, promote: "g" };
+    const el = renderNetwork(m, h, NOW);
+    expect([...el.querySelectorAll<HTMLButtonElement>("button[data-action=make-main]")].length).toBe(1);
+    expect(el.textContent).toContain("Make laptop the main Maya? Every connected Maya will assist laptop, and so will this phone.");
+    el.querySelector<HTMLButtonElement>("button[data-action=promote-confirm]")!.click();
+    expect(h.onPromote).toHaveBeenCalledWith("g");
+  });
+
+  it("shows no confirmation for an assistant that is no longer connected", () => {
+    const gone = { id: "g", name: "laptop", hostname: "h", platform: "macos", address: "192.168.55.70", connected: false, lastSeen: null, canLead: true, canFollow: true };
+    const m: NetworkModel = { ...base, status: { ...running, assistants: [gone] }, promote: "g" };
+    expect(renderNetwork(m, handlers(), NOW).querySelector("button[data-action=promote-confirm]")).toBeNull();
+  });
+
   it("shows the code, when it expires, and the phone's addresses while the server runs", () => {
     const el = renderNetwork(base, handlers(), NOW);
     expect(el.querySelector(".network__code")!.textContent).toBe("483 921");

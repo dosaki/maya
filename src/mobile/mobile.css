@@ -40,6 +40,9 @@
 .network__assistant { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .network__assistant-name { flex: 1; min-width: 0; }
 .network__assistant-meta { color: var(--muted); font-size: 12px; }
+.network__confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.network__confirm p { flex-basis: 100%; margin: 0; font-size: 13px; }
+.network__listening { margin: 0; font-weight: 600; }
 
 /* The Network tab fits a 320 px screen: one column below the desktop's
    380 px minimum, and each field's label above a full-width input. */
