@@ -170,7 +170,12 @@ impl Hub {
     }
 
     fn save_assistants(&self, f: impl FnOnce(&mut Vec<PairedAssistant>)) -> Result<(), String> {
-        self.update_config(|c| f(&mut c.network.assistants)).map(|_| ()).map_err(|e| {
+        let mut skipped = false;
+        let saved = self.update_config(|c| skipped = !change_paired(c, f)).map(|_| ());
+        if skipped {
+            log::line("network", "not saving the paired assistants: this phone is an assistant now");
+        }
+        saved.map_err(|e| {
             log::line("network", format!("could not save the paired assistants: {e}"));
             format!("Could not save the paired assistants: {e}")
         })
@@ -276,7 +281,7 @@ impl Hub {
         let Some(server) = self.handle() else {
             return Err(self.main_error.lock().unwrap().clone().unwrap_or_else(|| "Start the server first.".into()));
         };
-        server.open_pairing(now_ms());
+        server.open_pairing(now_ms())?;
         Ok(server.status())
     }
 
@@ -304,6 +309,17 @@ impl Hub {
         let shared = self.handle().map(|s| s.shared.clone()).ok_or("The server is stopped.")?;
         send_command_with(&shared, machine, kind, ROUTE_TIMEOUT)
     }
+}
+
+/// Changes the paired list with `f`, unless the config says assistant: an
+/// assistant has no list, and a late save from the server that just handed
+/// its role away would put the old one back. Whether `f` ran.
+fn change_paired(c: &mut Config, f: impl FnOnce(&mut Vec<PairedAssistant>)) -> bool {
+    if c.network.role == NetworkRole::Assistant {
+        return false;
+    }
+    f(&mut c.network.assistants);
+    true
 }
 
 /// The server's line to the hub. `paired` and `paired_list_changed` run
@@ -446,6 +462,18 @@ impl ClientNotify for HubClientNotify {
 mod tests {
     use super::*;
     use maya_core::net::client::Executor;
+
+    #[test]
+    fn a_late_paired_list_change_leaves_an_assistant_config_empty() {
+        let late = PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "10.0.0.5".into(), last_seen: None };
+        let mut config = Config::default();
+        config.network.role = NetworkRole::Assistant;
+        assert!(!change_paired(&mut config, |l| *l = vec![late.clone()]));
+        assert!(config.network.assistants.is_empty());
+        config.network.role = NetworkRole::Main;
+        assert!(change_paired(&mut config, |l| *l = vec![late]));
+        assert_eq!(config.network.assistants.len(), 1);
+    }
 
     #[test]
     fn a_listening_phone_has_no_sessions_and_runs_no_commands() {

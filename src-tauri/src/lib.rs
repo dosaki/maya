@@ -150,8 +150,14 @@ impl TauriNetNotify {
 }
 
 /// Changes the paired list with `f` and saves the config to `path`; the
-/// config in memory changes only once the save succeeded.
+/// config in memory changes only once the save succeeded. An assistant has
+/// no paired list: a late save from the server this Maya just handed its
+/// role away from would put the old list back, so it is skipped.
 fn save_paired(path: &std::path::Path, config: &mut Config, f: impl FnOnce(&mut Vec<config::PairedAssistant>)) -> Result<(), String> {
+    if config.network.role == config::NetworkRole::Assistant {
+        log::line("network", "not saving the paired assistants: this Maya is an assistant now");
+        return Ok(());
+    }
     let mut next = config.clone();
     f(&mut next.network.assistants);
     if let Err(e) = config::save(path, &next) {
@@ -523,7 +529,7 @@ fn network_pairing_code(state: TauriState<AppState>) -> Result<NetworkStatus, St
             _ => "Turn on \"Act as main Maya\" first.".into(),
         });
     };
-    server.open_pairing(now_ms());
+    server.open_pairing(now_ms())?;
     Ok(server.status())
 }
 
@@ -585,7 +591,7 @@ fn start_main(app: &AppHandle, show_code: bool) {
             if show_code {
                 let server = app.state::<AppState>().network.lock().unwrap().server.clone();
                 if let Some(server) = server {
-                    server.open_pairing(now_ms());
+                    let _ = server.open_pairing(now_ms());
                 }
             }
         }
@@ -1295,6 +1301,20 @@ mod route_tests {
         assert_eq!(save_paired(&path, &mut config, |l| l.retain(|a| a.id != "a1")), Ok(()));
         assert_eq!(config.network.assistants.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["b2"]);
         assert_eq!(config::load(&path).network.assistants.len(), 1, "and it is on disk");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_late_paired_list_save_leaves_an_assistant_config_alone() {
+        let dir = std::env::temp_dir().join(format!("maya-save-paired-late-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("maya/config.json");
+        let mut config = Config::default();
+        config.network.role = config::NetworkRole::Assistant;
+        let late = config::PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "10.0.0.5".into(), last_seen: None };
+        assert_eq!(save_paired(&path, &mut config, |l| *l = vec![late]), Ok(()));
+        assert!(config.network.assistants.is_empty());
+        assert!(!path.exists(), "nothing is written");
         std::fs::remove_dir_all(&dir).ok();
     }
 
