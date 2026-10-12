@@ -324,7 +324,7 @@ fn connection(config: &NetworkConfig, exec: &Arc<dyn Executor>, notify: &dyn Cli
 fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, code: Option<&str>, deadline: Instant) -> Result<String, String> {
     let hostname = super::local_hostname();
     let id = if code.is_some() { None } else { Some(config.assistant_id.clone()) };
-    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), id };
+    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), id, caps: vec![] };
     send_up(ws, &hello)?;
     let code = code.map(str::trim);
     // The nonce this side sent with `pair` or `auth`; the main must answer it
@@ -455,6 +455,7 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, tx: &Sender<Up>) -> Result<(), S
         }
         Down::Bye { reason } => return Err(bye_message(&reason)),
         Down::Pong => {}
+        Down::Move { .. } => log::line("network", "main: ignored move"),
         Down::Challenge { .. } | Down::Welcome { .. } | Down::Paired { .. } => log::line("network", "main: ignored a handshake message after welcome"),
     }
     Ok(())

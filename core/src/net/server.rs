@@ -595,11 +595,12 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
             return None;
         }
     };
-    let Up::Hello { protocol, app, name, hostname, platform, id } = hello else {
+    let Up::Hello { protocol, app, name, hostname, platform, id, caps } = hello else {
         log::line("network", format!("{ip}: first message was not a hello"));
         bye(ws, "protocol");
         return None;
     };
+    let _ = caps; // Task 3 uses it.
     if protocol != PROTOCOL {
         log::line("network", format!("{ip}: protocol {protocol}, expected {PROTOCOL}"));
         bye(ws, "protocol");
@@ -1003,6 +1004,7 @@ pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::Resume { .. } => "resume",
         CommandKind::ListResumable { .. } => "list_resumable",
         CommandKind::History { .. } => "history",
+        CommandKind::Promote { .. } => "promote",
     }
 }
 
@@ -1137,7 +1139,7 @@ mod tests {
     }
 
     fn hello(ws: &mut Client, name: &str, id: Option<&str>) {
-        send(ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), id: id.map(str::to_string) });
+        send(ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), id: id.map(str::to_string), caps: vec![] });
     }
 
     /// Pairs a new assistant; returns its open socket, id and token.
@@ -1200,7 +1202,7 @@ mod tests {
         let (handle, port) = test_server();
         let (code, _) = handle.open_pairing(crate::store::now_ms());
         let mut ws = connect(port);
-        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), id: None });
+        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), id: None, caps: vec![] });
         send(&mut ws, &Up::Pair { code, nonce: "n".into() });
         let Down::Paired { id, token } = recv(&mut ws) else { panic!("expected paired") };
         assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
@@ -1217,7 +1219,7 @@ mod tests {
         // Reconnect with the token: challenge-response, no code.
         drop(ws);
         let mut ws = connect(port);
-        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), id: Some(id.clone()) });
+        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), id: Some(id.clone()), caps: vec![] });
         let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
         answer(&mut ws, &token, &nonce);
         handle.stop();
@@ -1227,10 +1229,10 @@ mod tests {
     fn a_wrong_mac_or_code_is_refused_and_a_command_to_a_disconnected_assistant_fails_fast() {
         let (handle, port) = test_server();
         let mut ws = connect(port);
-        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "x".into(), hostname: "h".into(), platform: "macos".into(), id: Some("nobody".into()) });
+        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "x".into(), hostname: "h".into(), platform: "macos".into(), id: Some("nobody".into()), caps: vec![] });
         assert!(matches!(recv(&mut ws), Down::Bye { .. }), "unknown assistant");
         let mut ws = connect(port);
-        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "x".into(), hostname: "h".into(), platform: "macos".into(), id: None });
+        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "x".into(), hostname: "h".into(), platform: "macos".into(), id: None, caps: vec![] });
         send(&mut ws, &Up::Pair { code: "000000".into(), nonce: "n".into() });
         assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason.contains("pairing code")));
         let err = send_command_with(&handle.shared, "ghost", CommandKind::Compact { session: "r".into() }, Duration::from_millis(300)).unwrap_err();
@@ -1473,7 +1475,7 @@ mod tests {
         let (code, _) = handle.open_pairing(now_ms());
         let mut ws = connect(port);
         // `hello` and `pair` in one write, then the socket goes.
-        ws.write(Message::text(encode(&Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "ghost".into(), hostname: "h".into(), platform: "macos".into(), id: None }))).unwrap();
+        ws.write(Message::text(encode(&Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "ghost".into(), hostname: "h".into(), platform: "macos".into(), id: None, caps: vec![] }))).unwrap();
         ws.write(Message::text(encode(&Up::Pair { code, nonce: "n".into() }))).unwrap();
         ws.flush().unwrap();
         reset(ws);
@@ -1572,7 +1574,7 @@ mod tests {
         // The same version says nothing.
         let (code, _) = handle.open_pairing(now_ms());
         let mut same = connect(port);
-        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), id: None });
+        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), id: None, caps: vec![] });
         send(&mut same, &Up::Pair { code, nonce: "n".into() });
         let Down::Paired { id: twin, .. } = recv(&mut same) else { panic!("expected paired") };
         assert!(matches!(recv(&mut same), Down::Welcome { .. }));

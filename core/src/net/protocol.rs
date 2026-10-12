@@ -18,6 +18,11 @@ pub const LOCKOUT_MS: u64 = 5 * 60_000;
 pub const LOCKOUT_AFTER: u32 = 3;
 /// Larger frames are refused unparsed (a board with attachments stays well under).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+/// A Maya with this cap follows the main to a new host on `move`.
+pub const CAP_FOLLOW: &str = "follow";
+/// A Maya with this cap can become a main when sent `promote`.
+pub const CAP_LEAD: &str = "lead";
+pub const UNSEALABLE: &str = "The handover could not be opened.";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -34,7 +39,18 @@ pub struct Attachment {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Up {
-    Hello { protocol: u32, app: String, name: String, hostname: String, platform: String, #[serde(default)] id: Option<String> },
+    Hello {
+        protocol: u32,
+        app: String,
+        name: String,
+        hostname: String,
+        platform: String,
+        #[serde(default)]
+        id: Option<String>,
+        /// What this Maya can do (`CAP_FOLLOW`, `CAP_LEAD`); an older Maya sends none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        caps: Vec<String>,
+    },
     /// The code the user typed, and a nonce the main must answer in
     /// `welcome` to prove it knows the code too.
     Pair { code: String, #[serde(default)] nonce: String },
@@ -71,6 +87,9 @@ pub enum Down {
     Paired { id: String, token: String },
     Bye { reason: String },
     Command { id: u64, #[serde(flatten)] kind: CommandKind },
+    /// The main is now at `host:port`: save it and reconnect there with the
+    /// same id and token. The main closes the connection after it.
+    Move { host: String, port: u16 },
     Pong,
 }
 
@@ -89,6 +108,8 @@ pub enum CommandKind {
     Resume { dir: String, session: String, #[serde(default)] agent: crate::model::Harness },
     ListResumable { dir: String, #[serde(default)] agent: crate::model::Harness },
     History { session: String },
+    /// Become the main with the paired list sealed under this assistant's token (`seal`).
+    Promote { sealed: String },
 }
 
 pub fn encode<T: Serialize>(m: &T) -> String {
@@ -143,6 +164,45 @@ pub fn mac_matches(token: &str, nonce: &str, given: &str) -> bool {
     let mut m = Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("hmac accepts any key length");
     m.update(nonce.as_bytes());
     m.verify_slice(&given).is_ok()
+}
+
+/// HKDF-SHA256 (RFC 5869) of the token with an empty salt and the info
+/// `maya promote v1`: the key only this token's holders can derive.
+fn promote_key(token: &str) -> [u8; 32] {
+    let mut extract = Hmac::<Sha256>::new_from_slice(&[0u8; 32]).expect("hmac accepts any key length");
+    extract.update(token.as_bytes());
+    let prk = extract.finalize().into_bytes();
+    let mut expand = Hmac::<Sha256>::new_from_slice(&prk).expect("hmac accepts any key length");
+    expand.update(b"maya promote v1");
+    expand.update(&[1u8]);
+    let okm = expand.finalize().into_bytes();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&okm[..32]);
+    key
+}
+
+/// Seals `plaintext` for whoever holds `token`: base64 of a random 12-byte
+/// nonce followed by the ChaCha20-Poly1305 ciphertext.
+pub fn seal(token: &str, plaintext: &[u8]) -> String {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    let cipher = chacha20poly1305::ChaCha20Poly1305::new_from_slice(&promote_key(token)).expect("a 32-byte key");
+    let nonce: [u8; 12] = random(12).try_into().unwrap();
+    let mut out = nonce.to_vec();
+    out.extend(cipher.encrypt(&nonce.into(), plaintext).expect("encrypting in memory does not fail"));
+    base64::engine::general_purpose::STANDARD.encode(out)
+}
+
+/// Opens a `seal`; any other token, or any changed byte, is `UNSEALABLE`.
+pub fn open(token: &str, sealed: &str) -> Result<Vec<u8>, String> {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    let bytes = base64::engine::general_purpose::STANDARD.decode(sealed.trim()).map_err(|_| UNSEALABLE.to_string())?;
+    if bytes.len() < 12 {
+        return Err(UNSEALABLE.into());
+    }
+    let (nonce, body) = bytes.split_at(12);
+    let nonce: [u8; 12] = nonce.try_into().unwrap();
+    let cipher = chacha20poly1305::ChaCha20Poly1305::new_from_slice(&promote_key(token)).expect("a 32-byte key");
+    cipher.decrypt(&nonce.into(), body).map_err(|_| UNSEALABLE.to_string())
 }
 
 /// Nonces the main has issued; each answers once. The real replay guard is
@@ -212,7 +272,7 @@ mod tests {
 
     #[test]
     fn messages_round_trip_with_a_type_tag() {
-        let up = Up::Hello { protocol: PROTOCOL, app: "0.1.0".into(), name: "laptop".into(), hostname: "tiagos-mbp".into(), platform: "macos".into(), id: None };
+        let up = Up::Hello { protocol: PROTOCOL, app: "0.1.0".into(), name: "laptop".into(), hostname: "tiagos-mbp".into(), platform: "macos".into(), id: None, caps: vec![] };
         let s = encode(&up);
         assert!(s.contains("\"type\":\"hello\""), "{s}");
         assert_eq!(decode_up(&s).unwrap(), up);
@@ -327,5 +387,44 @@ mod tests {
         assert_ne!(new_token(), new_token());
         assert!(base64::engine::general_purpose::STANDARD.decode(new_token()).unwrap().len() == 32);
         assert!(base64::engine::general_purpose::STANDARD.decode(new_nonce()).unwrap().len() == 16);
+    }
+
+    #[test]
+    fn a_hello_without_caps_has_none_and_caps_round_trip() {
+        let old = r#"{"type":"hello","protocol":1,"app":"0.15.0","name":"n","hostname":"h","platform":"macos"}"#;
+        let Up::Hello { caps, .. } = decode_up(old).unwrap() else { panic!() };
+        assert!(caps.is_empty());
+        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), id: None, caps: vec![CAP_FOLLOW.into(), CAP_LEAD.into()] };
+        let s = encode(&hello);
+        assert!(s.contains(r#""caps":["follow","lead"]"#), "{s}");
+        assert_eq!(decode_up(&s).unwrap(), hello);
+    }
+
+    #[test]
+    fn move_and_promote_encode_and_decode() {
+        let mv = Down::Move { host: "192.168.55.70".into(), port: 4127 };
+        let s = encode(&mv);
+        assert!(s.contains(r#""type":"move""#) && s.contains(r#""host":"192.168.55.70""#) && s.contains(r#""port":4127"#), "{s}");
+        assert_eq!(decode_down(&s).unwrap(), mv);
+        let p = Down::Command { id: 3, kind: CommandKind::Promote { sealed: "abc".into() } };
+        let s = encode(&p);
+        assert!(s.contains(r#""kind":"promote""#) && s.contains(r#""sealed":"abc""#), "{s}");
+        assert_eq!(decode_down(&s).unwrap(), p);
+    }
+
+    #[test]
+    fn a_seal_opens_only_with_its_token_and_unchanged() {
+        let token = new_token();
+        let sealed = seal(&token, b"{\"assistants\":[]}");
+        assert_eq!(open(&token, &sealed).unwrap(), b"{\"assistants\":[]}");
+        assert_eq!(open(&new_token(), &sealed).unwrap_err(), UNSEALABLE);
+        let mut bytes = base64::engine::general_purpose::STANDARD.decode(&sealed).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        let tampered = base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(open(&token, &tampered).unwrap_err(), UNSEALABLE);
+        assert_eq!(open(&token, "not base64!").unwrap_err(), UNSEALABLE);
+        assert_eq!(open(&token, "AAAA").unwrap_err(), UNSEALABLE, "shorter than a nonce");
+        assert_ne!(seal(&token, b"x"), seal(&token, b"x"), "each seal has a fresh nonce");
     }
 }

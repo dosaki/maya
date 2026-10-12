@@ -72,6 +72,8 @@ impl Executor for CliExecutor {
             CommandKind::Resume { dir, session, agent } => done(actions::resume_session(&l, agent, &dir, &session)),
             CommandKind::ListResumable { dir, agent } => data(actions::list_resumable_sessions(&l, agent, &dir)),
             CommandKind::History { session } => data(actions::session_history(&l, &session)),
+            // The client opens a handover itself (`client::handle`); it never reaches an executor.
+            CommandKind::Promote { .. } => Err("This Maya cannot become a main.".into()),
         }
     }
 
