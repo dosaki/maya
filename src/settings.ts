@@ -81,6 +81,8 @@ export interface SettingsModel {
   elevenKeySet: boolean;
   elevenVoices: ElevenVoice[];
   elevenVoiceId: string;
+  /** How loud Maya speaks, in percent; absent reads as 100. */
+  voiceVolume?: number;
   error: string | null;
   listen: boolean;
   microphone: string;
@@ -158,6 +160,7 @@ export interface SettingsHandlers {
   onElevenKey(key: string): void;
   onElevenVoice(voiceId: string): void;
   onTryVoice(): void;
+  onVoiceVolume(percent: number): void;
   onListen(on: boolean): void;
   onMicrophone(name: string): void;
   onAgent(agent: Harness): void;
@@ -204,6 +207,7 @@ interface ConfigJson {
   speakNotifications: boolean;
   voiceProvider: VoiceProvider;
   elevenlabsVoiceId?: string | null;
+  voiceVolume?: number;
   listen: boolean;
   microphone?: string | null;
   agent?: Harness | null;
@@ -731,6 +735,27 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     notifications.append(voiceLabel);
   }
 
+  // The number follows the drag; the volume is saved once the slider is let go.
+  const volumeLabel = document.createElement("label");
+  volumeLabel.textContent = "Voice volume ";
+  const volume = document.createElement("input");
+  volume.type = "range";
+  volume.name = "voiceVolume";
+  volume.min = "10";
+  volume.max = "100";
+  volume.step = "5";
+  volume.value = String(model.voiceVolume ?? 100);
+  const volumeShown = document.createElement("span");
+  volumeShown.dataset.for = "voice-volume";
+  volumeShown.textContent = `${volume.value}%`;
+  volume.addEventListener("input", () => { volumeShown.textContent = `${volume.value}%`; });
+  volume.addEventListener("change", () => h.onVoiceVolume(Number(volume.value)));
+  const volumeControl = document.createElement("span");
+  volumeControl.className = "settings__range";
+  volumeControl.append(volume, volumeShown);
+  volumeLabel.append(volumeControl);
+  notifications.append(volumeLabel);
+
   const tryBtn = document.createElement("button");
   tryBtn.type = "button";
   tryBtn.dataset.action = "try-voice";
@@ -1053,6 +1078,7 @@ export async function initSettings(): Promise<void> {
     model.speakNotifications = c.speakNotifications;
     model.voiceProvider = c.voiceProvider;
     model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
+    model.voiceVolume = c.voiceVolume ?? 100;
     model.listen = c.listen;
     model.microphone = c.microphone ?? "";
     model.agent = c.agent ?? null;
@@ -1116,6 +1142,7 @@ export async function initSettings(): Promise<void> {
     onElevenKey: (key) => void run(async () => { await invoke("set_elevenlabs_key", { key }); await loadVoices(); }),
     onElevenVoice: (voiceId) => void run(() => saveConfig({ elevenlabsVoiceId: voiceId || null })),
     onTryVoice: () => void run(() => invoke("try_voice")),
+    onVoiceVolume: (percent) => void run(() => saveConfig({ voiceVolume: percent })),
     onListen: (on) => void run(async () => { await invoke("voice_listen", { on }); model.listen = on; }),
     onMicrophone: (name) => void run(() => saveConfig({ microphone: name || null })),
     onAgent: (agent) => void run(() => saveConfig({ agent, agentModel: "" })),

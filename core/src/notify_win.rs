@@ -87,12 +87,16 @@ fn make_voice() -> windows::core::Result<windows::Win32::Media::Speech::ISpVoice
 }
 
 /// Speaks `line` with the built-in voice and returns once it is said.
-pub fn say(line: &str) {
+pub fn say(line: &str, volume: u8) {
     use windows::core::HSTRING;
     use windows::Win32::Media::Speech::SPF_IS_NOT_XML;
     VOICE.with(|cell| {
         let voice = cell.get_or_init(|| make_voice().inspect_err(|e| crate::log::line("speech", format!("no Windows voice: {e}"))).ok());
         if let Some(v) = voice {
+            // SAFETY: a live voice; SAPI's volume runs 0..100.
+            if let Err(e) = unsafe { v.SetVolume(u16::from(volume.min(100))) } {
+                crate::log::line("speech", format!("could not set the volume: {e}"));
+            }
             // SAFETY: a live voice and a string that outlives the call; without
             // SPF_ASYNC, Speak returns when the line has been spoken.
             if let Err(e) = unsafe { v.Speak(&HSTRING::from(line), SPF_IS_NOT_XML.0 as u32, None) } {

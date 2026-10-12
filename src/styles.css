@@ -70,6 +70,9 @@ body { margin: 0; background: var(--bg); }
 .settings[hidden], .pane[hidden], .toast[hidden] { display: none; }
 .settings__body { display: flex; flex-direction: column; gap: 10px; }
 .settings label { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.settings__range { display: flex; align-items: center; gap: 8px; width: 240px; max-width: 60%; }
+.settings__range input[type=range] { flex: 1; min-width: 0; }
+.settings__range span { min-width: 3.5em; text-align: right; font-variant-numeric: tabular-nums; }
 .settings input { width: 70px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
 .settings textarea { font: inherit; width: 100%; max-width: 640px; resize: vertical; }
 .settings__status { color: var(--muted); font-size: 12.5px; }

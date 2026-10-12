@@ -142,10 +142,10 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
     // History first, so a page that refetches it on this event sees the line.
     remember(app, "maya", text);
     emit_voice(app);
-    let (muted, eleven) = {
+    let (muted, eleven, volume) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
-        (store.config.muted, eleven_wanted(&store.config, store.claude_dir()))
+        (store.config.muted, eleven_wanted(&store.config, store.claude_dir()), store.config.voice_loudness())
     };
     // Muted, the reply is only shown in the voice panel.
     if muted {
@@ -153,7 +153,7 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
     }
     let eleven = eleven_settings(eleven);
     // No lock is held here: the speech hook takes the voice lock.
-    let _ = notify::speak_and_wait(notify::Utterance::new(text.to_string(), eleven));
+    let _ = notify::speak_and_wait(notify::Utterance { volume, ..notify::Utterance::new(text.to_string(), eleven) });
     is_current(app, generation)
 }
 
