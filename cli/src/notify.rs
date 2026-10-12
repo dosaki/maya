@@ -46,4 +46,43 @@ impl ClientNotify for CliNotify {
         self.removed.store(true, Ordering::SeqCst);
         self.stop.store(true, Ordering::SeqCst);
     }
+
+    fn caps(&self) -> Vec<String> {
+        vec![maya_core::net::protocol::CAP_FOLLOW.into()]
+    }
+
+    /// Rewrites the main's host and port in `config.json`; `run` reads it
+    /// again for the next connection, which `reconnect` makes at once.
+    fn moved(&self, host: &str, port: u16) -> Result<(), String> {
+        let path = self.maya_dir.join("config.json");
+        let mut c = maya_core::config::load(&path);
+        c.network.main_host = host.into();
+        c.network.main_port = port;
+        maya_core::config::save(&path, &c).map_err(|e| format!("could not save config.json: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maya_core::config::{self, Config, NetworkRole};
+
+    #[test]
+    fn a_move_saves_the_new_host_and_keeps_the_id_and_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut c = Config::default();
+        c.network.role = NetworkRole::Assistant;
+        c.network.main_host = "10.0.0.2".into();
+        c.network.assistant_id = "id".into();
+        c.network.token = "tok".into();
+        config::save(&path, &c).unwrap();
+        let n = CliNotify::new(dir.path().to_path_buf(), Arc::new(AtomicBool::new(false)));
+        assert_eq!(n.caps(), ["follow"]);
+        n.moved("10.0.0.9", 5001).unwrap();
+        let after = config::load(&path);
+        assert_eq!((after.network.main_host.as_str(), after.network.main_port), ("10.0.0.9", 5001));
+        assert_eq!((after.network.assistant_id.as_str(), after.network.token.as_str()), ("id", "tok"));
+        assert_eq!(after.network.role, NetworkRole::Assistant);
+    }
 }
