@@ -260,3 +260,110 @@ fn a_refresh_with_no_new_frame_drops_an_expired_assistant_and_clears_its_notific
     assert_eq!(alerts.cleared.lock().unwrap().as_slice(), [posted]);
     hub.stop_server();
 }
+
+fn new_hub(port: u16) -> (Arc<Hub>, Arc<Page>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let maya_dir = dir.path().join("maya");
+    let mut config = Config::default();
+    config.network.port = port;
+    config.network.name = "Pixel".into();
+    config.network.role = NetworkRole::Main;
+    let settings = Settings { path: maya_dir.join("config.json"), config };
+    let page = Arc::new(Page::default());
+    let hub = Hub::new(maya_dir, settings, Arc::new(Recording::default()), page.clone());
+    (hub, page, dir)
+}
+
+/// A desktop-like assistant: its client becomes a main on `promote`.
+struct Lead {
+    config: Arc<Mutex<NetworkConfig>>,
+    server: Mutex<Option<maya_core::net::server::ServerHandle>>,
+}
+
+impl ClientNotify for Lead {
+    fn paired(&self, _: &str, _: &str) {}
+    fn connected(&self, _: &str) {}
+    fn disconnected(&self, _: &str) {}
+    fn removed(&self) {}
+    fn caps(&self) -> Vec<String> {
+        vec!["follow".into(), "lead".into()]
+    }
+    fn promoted(&self, list: Vec<maya_core::config::PairedAssistant>) -> Result<u16, String> {
+        let mut c = Config::default();
+        c.network = self.config.lock().unwrap().clone();
+        maya_core::net::promote::as_main(&mut c, list);
+        let h = maya_core::net::server::start_with(Arc::new(NoNotify), Arc::new(Mutex::new(c.network.clone())), 0)?;
+        *self.config.lock().unwrap() = c.network;
+        let port = h.port();
+        *self.server.lock().unwrap() = Some(h);
+        Ok(port)
+    }
+}
+
+struct NoNotify;
+impl maya_core::net::server::Notify for NoNotify {
+    fn board_changed(&self) {}
+    fn board_seeded(&self, _: &[Card]) {}
+    fn status_changed(&self, _: NetworkStatus) {}
+    fn paired(&self, _: &maya_core::config::PairedAssistant) -> Result<(), String> {
+        Ok(())
+    }
+    fn paired_list_changed(&self, _: &[maya_core::config::PairedAssistant]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn the_phone_hands_the_main_role_over_listens_and_is_made_the_main_again() {
+    let (hub, page, _dir) = new_hub(free_port());
+    hub.start_server().unwrap();
+    let port = hub.settings.lock().unwrap().config.listen_port();
+    let code = hub.pairing_code().unwrap().code.unwrap().code;
+    let exec: Arc<dyn Executor> = Arc::new(FakeAssistant { cards: Mutex::new(vec![]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) });
+    let (_, id, token) = pair_with(exec.clone(), "127.0.0.1", port, "laptop", &code).unwrap();
+    let config = Arc::new(Mutex::new(NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), assistant_id: id.clone(), token, port: free_port(), ..Default::default() }));
+    let lead = Arc::new(Lead { config: config.clone(), server: Mutex::new(None) });
+    let stop = Arc::new(AtomicBool::new(false));
+    let (n, s, cfg) = (lead.clone(), stop.clone(), config.clone());
+    let laptop = std::thread::spawn(move || maya_core::net::client::reconnect(&move || cfg.lock().unwrap().clone(), exec, n, &s));
+    wait_until("the laptop can lead", || hub.status().assistants.iter().any(|a| a.id == id && a.can_lead));
+
+    // The phone makes the laptop the main and listens to it.
+    let status = hub.promote(&id).unwrap();
+    assert_eq!(status.role, NetworkRole::Assistant);
+    laptop.join().unwrap();
+    let new_main = lead.server.lock().unwrap().clone().unwrap();
+    wait_until("the phone listens to the laptop", || hub.status().assistant.connected);
+    let phone = new_main.status().assistants.into_iter().find(|a| a.connected).unwrap();
+    assert!(phone.can_lead, "the phone can be made the main again");
+    assert!(hub.cards().is_empty());
+    assert!(page.statuses.lock().unwrap().iter().any(|s| s.role == NetworkRole::Assistant));
+
+    // The laptop makes the phone the main again.
+    let back = new_main.promote(&phone.id).unwrap();
+    wait_until("the phone runs its server", || hub.status().role == NetworkRole::Main);
+    assert_eq!(back.port, hub.settings.lock().unwrap().config.listen_port());
+    assert!(hub.client.lock().unwrap().is_none());
+    new_main.stop();
+    hub.stop_server();
+}
+
+#[test]
+fn stop_listening_turns_the_phone_off_and_forgets_its_link() {
+    let (hub, _page, _dir) = new_hub(free_port());
+    hub.update_config(|c| {
+        c.network.role = NetworkRole::Assistant;
+        c.network.main_host = "127.0.0.1".into();
+        c.network.main_port = free_port();
+        c.network.assistant_id = "id".into();
+        c.network.token = "tok".into();
+    })
+    .unwrap();
+    hub.start_client();
+    let status = hub.stop_listening().unwrap();
+    assert_eq!(status.role, NetworkRole::Off);
+    let c = hub.settings.lock().unwrap().config.network.clone();
+    assert_eq!(c.role, NetworkRole::Off);
+    assert!(c.assistant_id.is_empty() && c.token.is_empty() && c.main_host.is_empty());
+    assert!(hub.client.lock().unwrap().is_none());
+}
