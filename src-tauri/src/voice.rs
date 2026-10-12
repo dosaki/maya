@@ -143,6 +143,28 @@ pub fn player_command(path: &str) -> Option<(&'static str, Vec<String>)> {
     None
 }
 
+/// The volume for an audio player, on its own scale; none at full volume:
+/// `afplay -v` takes 1.0 as normal, PulseAudio's `paplay --volume` 65536 as
+/// 100%, `ffplay -volume` 0..100.
+#[cfg(any(test, unix))]
+pub fn player_volume_args(bin: &str, volume: u8) -> Vec<String> {
+    if volume >= 100 {
+        return vec![];
+    }
+    match bin {
+        "afplay" => vec!["-v".into(), format!("{:.2}", f32::from(volume) / 100.0)],
+        "paplay" => vec![format!("--volume={}", u32::from(volume) * 65536 / 100)],
+        "ffplay" => vec!["-volume".into(), volume.to_string()],
+        _ => vec![],
+    }
+}
+
+/// The MCI command that sets the voice's volume, out of 1000.
+#[cfg(any(test, windows))]
+fn mci_volume_command(volume: u8) -> String {
+    format!("setaudio maya_voice volume to {}", u32::from(volume.min(100)) * 10)
+}
+
 /// Stores the API key in GNOME Keyring (replacing any previous one). The
 /// key goes through stdin, never the command line.
 #[cfg(target_os = "linux")]
@@ -251,7 +273,7 @@ pub fn synthesize(key: &str, voice_id: &str, text: &str, path: &Path) -> Result<
 
 /// Plays an audio file through MCI, waiting for it to finish.
 #[cfg(windows)]
-pub fn play(path: &Path) -> Result<(), String> {
+pub fn play(path: &Path, volume: u8) -> Result<(), String> {
     use windows_sys::Win32::Media::Multimedia::mciSendStringW;
     let send = |cmd: String| -> Result<(), String> {
         let w = wide(&cmd);
@@ -262,6 +284,9 @@ pub fn play(path: &Path) -> Result<(), String> {
         }
     };
     send(format!("open \"{}\" type mpegvideo alias maya_voice", path.display()))?;
+    if let Err(e) = send(mci_volume_command(volume)) {
+        crate::log::line("voice", format!("could not set the volume: {e}"));
+    }
     let played = send("play maya_voice wait".into());
     let _ = send("close maya_voice".into());
     played
@@ -269,8 +294,8 @@ pub fn play(path: &Path) -> Result<(), String> {
 
 /// Plays an audio file with the system player, waiting for it to finish.
 #[cfg(target_os = "macos")]
-pub fn play(path: &Path) -> Result<(), String> {
-    let ok = maya_core::command("afplay").arg(path).stdin(Stdio::null()).status().map_err(|e| format!("could not run afplay: {e}"))?;
+pub fn play(path: &Path, volume: u8) -> Result<(), String> {
+    let ok = maya_core::command("afplay").args(player_volume_args("afplay", volume)).arg(path).stdin(Stdio::null()).status().map_err(|e| format!("could not run afplay: {e}"))?;
     if ok.success() {
         Ok(())
     } else {
@@ -280,9 +305,9 @@ pub fn play(path: &Path) -> Result<(), String> {
 
 /// Plays an audio file with the first player found, waiting for it to finish.
 #[cfg(target_os = "linux")]
-pub fn play(path: &Path) -> Result<(), String> {
+pub fn play(path: &Path, volume: u8) -> Result<(), String> {
     let (bin, args) = player_command(&std::env::var("PATH").unwrap_or_default()).ok_or("No audio player found: install pulseaudio-utils.")?;
-    let ok = maya_core::command(bin).args(args).arg(path).stdin(Stdio::null()).status().map_err(|e| format!("could not run {bin}: {e}"))?;
+    let ok = maya_core::command(bin).args(args).args(player_volume_args(bin, volume)).arg(path).stdin(Stdio::null()).status().map_err(|e| format!("could not run {bin}: {e}"))?;
     if ok.success() {
         Ok(())
     } else {
@@ -291,12 +316,12 @@ pub fn play(path: &Path) -> Result<(), String> {
 }
 
 /// Speaks `text` with ElevenLabs, from the cache when possible.
-pub fn speak(maya_dir: &Path, key: &str, voice_id: &str, text: &str) -> Result<(), String> {
+pub fn speak(maya_dir: &Path, key: &str, voice_id: &str, text: &str, volume: u8) -> Result<(), String> {
     let path = cache_path(maya_dir, voice_id, text);
     if !path.is_file() {
         synthesize(key, voice_id, text, &path)?;
     }
-    play(&path)
+    play(&path, volume)
 }
 
 #[cfg(test)]
@@ -351,6 +376,25 @@ mod tests {
         assert!(!use_elevenlabs(VoiceProvider::Elevenlabs, true, None));
         assert!(!use_elevenlabs(VoiceProvider::Elevenlabs, true, Some("  ")));
         assert!(use_elevenlabs(VoiceProvider::Elevenlabs, true, Some("v")));
+    }
+
+    #[test]
+    fn players_are_told_the_volume_their_own_way() {
+        for bin in ["afplay", "paplay", "ffplay"] {
+            assert!(player_volume_args(bin, 100).is_empty(), "{bin} at full volume plays as before");
+        }
+        assert_eq!(player_volume_args("afplay", 80), ["-v", "0.80"]);
+        // PulseAudio's 100% is 65536.
+        assert_eq!(player_volume_args("paplay", 80), ["--volume=52428"]);
+        assert_eq!(player_volume_args("paplay", 10), ["--volume=6553"]);
+        assert_eq!(player_volume_args("ffplay", 80), ["-volume", "80"]);
+        assert!(player_volume_args("aplay", 50).is_empty());
+    }
+
+    #[test]
+    fn mci_is_told_the_volume_out_of_a_thousand() {
+        assert_eq!(mci_volume_command(80), "setaudio maya_voice volume to 800");
+        assert_eq!(mci_volume_command(100), "setaudio maya_voice volume to 1000");
     }
 
     #[test]

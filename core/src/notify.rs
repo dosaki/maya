@@ -112,11 +112,13 @@ pub struct Utterance {
     pub fallback: bool,
     /// Told once the line has been spoken, with the ElevenLabs error if any.
     pub done: Option<mpsc::Sender<Result<(), String>>>,
+    /// How loud, in percent (`Config::voice_volume`).
+    pub volume: u8,
 }
 
 impl Utterance {
     pub fn new(text: String, eleven: Option<(std::path::PathBuf, String, String)>) -> Utterance {
-        Utterance { text, eleven, fallback: true, done: None }
+        Utterance { text, eleven, fallback: true, done: None, volume: 100 }
     }
 }
 
@@ -214,7 +216,7 @@ pub fn focus_status() -> Option<bool> {
 static SPEECH: OnceLock<Mutex<mpsc::Sender<Utterance>>> = OnceLock::new();
 
 /// Speaks `text` with ElevenLabs: `(maya_dir, key, voice_id, text)`.
-pub type ElevenSpeaker = fn(&std::path::Path, &str, &str, &str) -> Result<(), String>;
+pub type ElevenSpeaker = fn(&std::path::Path, &str, &str, &str, u8) -> Result<(), String>;
 
 static ELEVEN_SPEAKER: OnceLock<ElevenSpeaker> = OnceLock::new();
 
@@ -226,35 +228,44 @@ pub fn set_eleven_speaker(speak: ElevenSpeaker) {
 
 /// Speaks with the built-in female voice.
 #[cfg(windows)]
-fn say_builtin(line: &str) {
-    crate::notify_win::say(line)
+fn say_builtin(line: &str, volume: u8) {
+    crate::notify_win::say(line, volume)
 }
 
 /// Speaks with the built-in female voice.
 #[cfg(target_os = "macos")]
-fn say_builtin(line: &str) {
+fn say_builtin(line: &str, volume: u8) {
     let mut cmd = Command::new("say");
     if let Some(v) = voice() {
         cmd.args(["-v", &v]);
     }
-    let _ = cmd.arg(line).status();
+    let _ = cmd.arg(say_text(line, volume)).status();
+}
+
+/// The line for `say`, led by its `volm` embedded command below full volume.
+#[cfg(any(test, target_os = "macos"))]
+fn say_text(line: &str, volume: u8) -> String {
+    if volume >= 100 {
+        return line.to_string();
+    }
+    format!("[[volm {:.2}]] {line}", f32::from(volume) / 100.0)
 }
 
 /// The phone app does not speak.
 #[cfg(target_os = "android")]
-fn say_builtin(_line: &str) {}
+fn say_builtin(_line: &str, _volume: u8) {}
 
 /// Speaks one line with its chosen voice. An ElevenLabs failure falls back to
 /// the built-in voice unless the utterance says not to.
 fn speak_line(u: &Utterance) -> Result<(), String> {
     if let (Some((dir, key, voice_id)), Some(speak)) = (&u.eleven, ELEVEN_SPEAKER.get()) {
-        match speak(dir, key, voice_id, &u.text) {
+        match speak(dir, key, voice_id, &u.text, u.volume) {
             Ok(()) => return Ok(()),
             Err(e) if !u.fallback => return Err(e),
             Err(_) => {}
         }
     }
-    say_builtin(&u.text);
+    say_builtin(&u.text, u.volume);
     Ok(())
 }
 
@@ -397,6 +408,21 @@ pub fn speech_command(path: &str) -> Option<(&'static str, Vec<String>)> {
     crate::launch::find_on_path(path, "espeak-ng").map(|_| ("espeak-ng", Vec::new()))
 }
 
+/// The volume for a Linux synthesiser, on its own scale; none at full
+/// volume: speech-dispatcher's `-i` runs -100..100 with 0 its normal level,
+/// eSpeak NG's `-a` amplitude 0..200 with 100 its default.
+#[cfg(any(test, target_os = "linux"))]
+pub fn volume_args(bin: &str, volume: u8) -> Vec<String> {
+    if volume >= 100 {
+        return vec![];
+    }
+    match bin {
+        "spd-say" => vec!["-i".into(), (i32::from(volume) - 100).to_string()],
+        "espeak-ng" => vec!["-a".into(), volume.to_string()],
+        _ => vec![],
+    }
+}
+
 /// Maya's icon for banners: inside the AppImage (`$APPDIR`) or where the
 /// .deb installs it; None when the file is not there.
 #[cfg(target_os = "linux")]
@@ -482,10 +508,11 @@ pub(crate) fn speak_within(bin: &Path, args: &[String], line: &str, base: std::t
 /// Speaks with speech-dispatcher or eSpeak NG, whichever is installed;
 /// without either, logs once and stays silent.
 #[cfg(target_os = "linux")]
-fn say_builtin(line: &str) {
+fn say_builtin(line: &str, volume: u8) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     match speech_command(&std::env::var("PATH").unwrap_or_default()) {
-        Some((bin, args)) => {
+        Some((bin, mut args)) => {
+            args.extend(volume_args(bin, volume));
             speak_within(Path::new(bin), &args, line, SPEECH_BASE);
         }
         None => WARNED.call_once(|| crate::log::line("notify", "no speech synthesiser: install speech-dispatcher or espeak-ng")),
@@ -515,6 +542,30 @@ pub fn notify(card: &Card, sound: bool) {
 mod tests {
     use super::*;
     use crate::model::{AwaitKind, Awaiting, Card, Harness, State};
+
+    #[test]
+    fn an_utterance_speaks_at_full_volume_unless_told() {
+        assert_eq!(Utterance::new("x".into(), None).volume, 100);
+    }
+
+    #[test]
+    fn say_is_told_the_volume_by_an_embedded_command() {
+        assert_eq!(say_text("hexgrid needs a decision", 100), "hexgrid needs a decision", "full volume speaks as before");
+        assert_eq!(say_text("hexgrid needs a decision", 80), "[[volm 0.80]] hexgrid needs a decision");
+        assert_eq!(say_text("x", 10), "[[volm 0.10]] x");
+    }
+
+    #[test]
+    fn linux_synthesisers_are_told_the_volume_their_own_way() {
+        assert!(volume_args("spd-say", 100).is_empty(), "full volume speaks as before");
+        assert!(volume_args("espeak-ng", 100).is_empty());
+        // speech-dispatcher's scale is -100..100 with 0 its normal level.
+        assert_eq!(volume_args("spd-say", 80), ["-i", "-20"]);
+        assert_eq!(volume_args("spd-say", 10), ["-i", "-90"]);
+        // eSpeak NG's amplitude is 0..200 with 100 its default.
+        assert_eq!(volume_args("espeak-ng", 80), ["-a", "80"]);
+        assert!(volume_args("something-else", 50).is_empty());
+    }
 
     fn card(id: &str, state: State, since: u64, detail: &str) -> Card {
         Card {

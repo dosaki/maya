@@ -44,6 +44,7 @@ const handlers = () => ({
   onElevenKey: vi.fn(),
   onElevenVoice: vi.fn(),
   onTryVoice: vi.fn(),
+  onVoiceVolume: vi.fn(),
   onListen: vi.fn(),
   onMicrophone: vi.fn(),
   onAgent: vi.fn(),
@@ -398,6 +399,29 @@ describe("renderSettings", () => {
     expect(other[0].dataset.model).toBe("tiny.en");
     other[0].click();
     expect(h.onRemoveModel).toHaveBeenCalledWith("tiny.en");
+  });
+});
+
+describe("Voice volume", () => {
+  it("shows the saved volume and saves a new one when the slider is let go", () => {
+    const h = handlers();
+    const el = renderSettings({ ...voiceBase, voiceVolume: 80 }, h);
+    const slider = el.querySelector<HTMLInputElement>("input[name=voiceVolume]")!;
+    expect(slider.type).toBe("range");
+    expect([slider.min, slider.max, slider.step, slider.value]).toEqual(["10", "100", "5", "80"]);
+    const shown = el.querySelector("[data-for=voice-volume]")!;
+    expect(shown.textContent).toBe("80%");
+    slider.value = "55";
+    slider.dispatchEvent(new Event("input"));
+    expect(shown.textContent).toBe("55%");
+    expect(h.onVoiceVolume).not.toHaveBeenCalled();
+    slider.dispatchEvent(new Event("change"));
+    expect(h.onVoiceVolume).toHaveBeenCalledWith(55);
+  });
+
+  it("is at full volume when the config has none", () => {
+    const el = renderSettings(voiceBase, handlers());
+    expect(el.querySelector<HTMLInputElement>("input[name=voiceVolume]")!.value).toBe("100");
   });
 });
 

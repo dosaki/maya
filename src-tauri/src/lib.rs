@@ -415,13 +415,13 @@ fn announcement(speak_notifications: bool, muted: bool, focus: bool) -> (bool, b
 }
 
 fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify, speak, muted, eleven_voice, assistant) = {
+    let (cards, wants_notify, speak, muted, eleven_voice, assistant, volume) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
         let cards = local_cards(&mut store);
         let c = &store.config;
         let eleven = if c.speak_notifications && !c.muted { eleven_wanted(c, store.claude_dir()) } else { None };
-        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant)
+        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant, c.voice_volume())
     };
     // Due names are typed into the terminals with no lock held.
     actions::run_due_renames(&local(&app.state::<AppState>()));
@@ -455,14 +455,14 @@ fn refresh_and_emit(app: &AppHandle) {
             notify::notify(c, banner_sound);
             if speak {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(notify::Utterance::new(line, eleven.clone()));
+                    notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, eleven.clone()) });
                 }
             }
         }
         if speak {
             for c in &finished {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(notify::Utterance::new(line, eleven.clone()));
+                    notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, eleven.clone()) });
                 }
             }
         }
@@ -955,15 +955,15 @@ fn list_elevenlabs_voices() -> Result<Vec<voice::Voice>, String> {
 /// Speaks a sample line with the current voice settings.
 #[tauri::command(async)]
 fn try_voice(state: TauriState<AppState>) -> Result<(), String> {
-    let eleven = {
+    let (eleven, volume) = {
         let store = state.store.lock().unwrap();
-        eleven_wanted(&store.config, store.claude_dir())
+        (eleven_wanted(&store.config, store.claude_dir()), store.config.voice_volume())
     };
     let eleven = eleven_settings(eleven);
     // Through the one speech queue, so listening pauses and she does not
     // wake herself on "Maya here".
     let line = "Maya here. hexgrid needs a decision".to_string();
-    notify::speak_and_wait(notify::Utterance { fallback: false, ..notify::Utterance::new(line, eleven) })
+    notify::speak_and_wait(notify::Utterance { fallback: false, volume, ..notify::Utterance::new(line, eleven) })
 }
 
 /// Mutes or unmutes Maya: muted, she makes no sound but still notifies.

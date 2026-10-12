@@ -213,6 +213,10 @@ resume or start a session, open or review a pull request.
   not even her replies (they show in the voice panel), and banners come
   without a sound. Notifications, the badge and the Dock bounce stay.
   Click it again to unmute; Maya remembers it across restarts.
+- **Volume.** "Voice volume" in Settings sets how loud she speaks, from
+  10% to 100%, for the built-in voice and ElevenLabs alike; "Try the
+  voice" plays it at that volume. The notification sound keeps the
+  system's volume.
 - **Off by default.** Turn on "Listen for 'Maya'" in Settings. A microphone
   appears in the top bar; clicking it opens the voice panel with the
   conversation and a Yes / No for the current read-back. macOS asks for

@@ -73,6 +73,9 @@ pub struct Config {
     /// Which voice speaks: the built-in one or ElevenLabs.
     #[serde(default)]
     pub voice_provider: VoiceProvider,
+    /// How loud Maya speaks, in percent; read through `voice_volume()`.
+    #[serde(default = "default_voice_volume")]
+    pub voice_volume: u8,
     /// The ElevenLabs voice to use; the key itself lives in the Keychain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elevenlabs_voice_id: Option<String>,
@@ -139,6 +142,13 @@ fn default_true() -> bool {
     true
 }
 
+/// The quietest the voice goes: at 0 a line would still play, in silence.
+pub const MIN_VOICE_VOLUME: u8 = 10;
+
+fn default_voice_volume() -> u8 {
+    100
+}
+
 fn default_whisper_model() -> String {
     DEFAULT_MODEL.into()
 }
@@ -153,6 +163,7 @@ impl Default for Config {
             speak_notifications: true,
             muted: false,
             voice_provider: Default::default(),
+            voice_volume: default_voice_volume(),
             elevenlabs_voice_id: None,
             clones_dir: None,
             listen: false,
@@ -169,6 +180,11 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The voice volume in percent, kept within `MIN_VOICE_VOLUME`..=100.
+    pub fn voice_volume(&self) -> u8 {
+        self.voice_volume.clamp(MIN_VOICE_VOLUME, 100)
+    }
+
     pub fn completed_timeout_ms(&self) -> u64 {
         self.completed_timeout_minutes * 60_000
     }
@@ -446,6 +462,19 @@ mod tests {
         save(&p, &Config { completed_timeout_minutes: 5, projects_dir: None, ..Default::default() }).unwrap();
         assert!(std::fs::read_to_string(&p).unwrap().contains("completedTimeoutMinutes"));
         assert_eq!(load(&p).completed_timeout_minutes, 5);
+    }
+
+    #[test]
+    fn voice_volume_defaults_to_full_and_stays_in_range() {
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 30}"#).unwrap();
+        assert_eq!(c.voice_volume(), 100, "a config from before the slider speaks as loud as before");
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 30, "voiceVolume": 60}"#).unwrap();
+        assert_eq!(c.voice_volume(), 60);
+        assert_eq!(serde_json::to_value(&c).unwrap()["voiceVolume"], 60);
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 30, "voiceVolume": 3}"#).unwrap();
+        assert_eq!(c.voice_volume(), MIN_VOICE_VOLUME, "never so quiet that a line plays in silence");
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 30, "voiceVolume": 200}"#).unwrap();
+        assert_eq!(c.voice_volume(), 100);
     }
 
     #[test]
