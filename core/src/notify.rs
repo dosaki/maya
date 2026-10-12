@@ -112,7 +112,7 @@ pub struct Utterance {
     pub fallback: bool,
     /// Told once the line has been spoken, with the ElevenLabs error if any.
     pub done: Option<mpsc::Sender<Result<(), String>>>,
-    /// How loud, in percent (`Config::voice_volume`).
+    /// How loud, in percent of the engine's own full volume (`Config::voice_loudness`).
     pub volume: u8,
 }
 

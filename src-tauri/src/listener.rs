@@ -145,7 +145,7 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
     let (muted, eleven, volume) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
-        (store.config.muted, eleven_wanted(&store.config, store.claude_dir()), store.config.voice_volume())
+        (store.config.muted, eleven_wanted(&store.config, store.claude_dir()), store.config.voice_loudness())
     };
     // Muted, the reply is only shown in the voice panel.
     if muted {

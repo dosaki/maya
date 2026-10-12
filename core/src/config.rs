@@ -144,6 +144,9 @@ fn default_true() -> bool {
 
 /// The quietest the voice goes: at 0 a line would still play, in silence.
 pub const MIN_VOICE_VOLUME: u8 = 10;
+/// The engines' own volume, in percent, that the slider's 100% plays at:
+/// their full volume was too loud.
+pub const FULL_VOICE_LOUDNESS: u8 = 60;
 
 fn default_voice_volume() -> u8 {
     100
@@ -183,6 +186,12 @@ impl Config {
     /// The voice volume in percent, kept within `MIN_VOICE_VOLUME`..=100.
     pub fn voice_volume(&self) -> u8 {
         self.voice_volume.clamp(MIN_VOICE_VOLUME, 100)
+    }
+
+    /// What the voice engines are told, in percent of their own full
+    /// volume: the slider's value scaled so that 100% is `FULL_VOICE_LOUDNESS`.
+    pub fn voice_loudness(&self) -> u8 {
+        (u16::from(self.voice_volume()) * u16::from(FULL_VOICE_LOUDNESS) / 100) as u8
     }
 
     pub fn completed_timeout_ms(&self) -> u64 {
@@ -475,6 +484,16 @@ mod tests {
         assert_eq!(c.voice_volume(), MIN_VOICE_VOLUME, "never so quiet that a line plays in silence");
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 30, "voiceVolume": 200}"#).unwrap();
         assert_eq!(c.voice_volume(), 100);
+    }
+
+    #[test]
+    fn the_slider_full_volume_is_sixty_percent_of_the_engines() {
+        let at = |v: u8| Config { voice_volume: v, ..Config::default() }.voice_loudness();
+        assert_eq!(Config::default().voice_loudness(), 60, "100% on the slider is what 60% used to be");
+        assert_eq!(at(100), 60);
+        assert_eq!(at(50), 30);
+        assert_eq!(at(10), 6);
+        assert_eq!(at(0), 6, "clamped to the slider's minimum first");
     }
 
     #[test]

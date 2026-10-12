@@ -421,7 +421,7 @@ fn refresh_and_emit(app: &AppHandle) {
         let cards = local_cards(&mut store);
         let c = &store.config;
         let eleven = if c.speak_notifications && !c.muted { eleven_wanted(c, store.claude_dir()) } else { None };
-        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant, c.voice_volume())
+        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant, c.voice_loudness())
     };
     // Due names are typed into the terminals with no lock held.
     actions::run_due_renames(&local(&app.state::<AppState>()));
@@ -957,12 +957,12 @@ fn list_elevenlabs_voices() -> Result<Vec<voice::Voice>, String> {
 fn try_voice(state: TauriState<AppState>) -> Result<(), String> {
     let (eleven, volume) = {
         let store = state.store.lock().unwrap();
-        (eleven_wanted(&store.config, store.claude_dir()), store.config.voice_volume())
+        (eleven_wanted(&store.config, store.claude_dir()), store.config.voice_loudness())
     };
     let eleven = eleven_settings(eleven);
     // Through the one speech queue, so listening pauses and she does not
     // wake herself on "Maya here".
-    let line = "Maya here. hexgrid needs a decision".to_string();
+    let line = "Maya here. Is my voice ok?".to_string();
     notify::speak_and_wait(notify::Utterance { fallback: false, volume, ..notify::Utterance::new(line, eleven) })
 }
 
