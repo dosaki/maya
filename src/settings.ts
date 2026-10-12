@@ -55,6 +55,16 @@ export interface NetworkStatus {
   addresses?: string[];
 }
 
+/**
+ * The role the form shows after a `network` event. Previewing Assistant
+ * (picked, not yet paired) survives an event that still reports the live
+ * role; a live role change, from a promotion or another machine, wins.
+ */
+export function nextNetworkRole(prev: NetworkStatus | undefined, selected: NetworkRole | undefined, payload: NetworkStatus): NetworkRole {
+  const previewing = selected === "assistant" && prev?.role !== "assistant" && payload.role !== "assistant";
+  return previewing ? "assistant" : payload.role;
+}
+
 const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } };
 
 export interface SettingsModel {
@@ -739,6 +749,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     roleSel.append(o);
   }
   roleSel.value = netRole;
+  roleSel.disabled = !!model.networkPromoting;
   roleSel.addEventListener("change", () => h.onRole(roleSel.value === "main" || roleSel.value === "assistant" ? roleSel.value : "off"));
   roleLabel.append(roleSel);
   network.append(roleLabel);
@@ -753,6 +764,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     nameInput.name = "networkName";
     nameInput.placeholder = "blank uses this computer's hostname";
     nameInput.value = netName;
+    nameInput.disabled = !!model.networkPromoting;
     nameInput.addEventListener("input", () => { model.networkName = nameInput.value; });
     nameInput.addEventListener("change", () => h.onName(nameInput.value.trim()));
     nameLabel.append(nameInput);
@@ -774,6 +786,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     portInput.name = "networkPort";
     portInput.placeholder = "4127";
     portInput.value = netPort ? String(netPort) : "";
+    portInput.disabled = !!model.networkPromoting;
     const readPort = () => {
       const n = Number(portInput.value);
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
@@ -875,6 +888,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     hostInput.name = "networkHost";
     hostInput.placeholder = "e.g. 192.168.1.42 or maya-mini.local";
     hostInput.value = netMainHost;
+    hostInput.disabled = !!model.networkPromoting;
     hostInput.addEventListener("input", () => { model.networkMainHost = hostInput.value; });
     hostInput.addEventListener("change", () => h.onMainHost(hostInput.value.trim()));
     hostLabel.append(hostInput);
@@ -887,6 +901,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     mainPortInput.name = "networkMainPort";
     mainPortInput.placeholder = "4127";
     mainPortInput.value = netMainPort ? String(netMainPort) : "";
+    mainPortInput.disabled = !!model.networkPromoting;
     const readMainPort = () => {
       const n = Number(mainPortInput.value);
       return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
@@ -1238,13 +1253,13 @@ export async function initSettings(): Promise<void> {
     if (JSON.stringify(model.network) === JSON.stringify(e.payload)) return;
     // Previewing "Assistant" before Pair succeeds is local only; an
     // unrelated event must not snap the form back to the saved role.
-    const previewingAssistant = model.networkRole === "assistant" && e.payload.role !== "assistant";
+    const role = nextNetworkRole(model.network, model.networkRole, e.payload);
     // A promotion, or a move made from another machine, changes the role or
     // the main's name; the Host and Port fields come from the config.
     const moved = model.network?.role !== e.payload.role || model.network?.assistant?.mainName !== e.payload.assistant?.mainName;
     model.network = e.payload;
+    model.networkRole = role;
     if (moved) refetchAndPaint();
-    if (!previewingAssistant) model.networkRole = e.payload.role;
     if (!panel.hidden) paint();
     else stale = true;
   });

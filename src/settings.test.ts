@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { pairingRepaintDue, renderSettings, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { nextNetworkRole, pairingRepaintDue, renderSettings, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -758,5 +758,27 @@ describe("Make main", () => {
     expect(el.querySelector<HTMLButtonElement>("button[data-action=promote-confirm]")!.textContent).toBe("Handing over…");
     expect([...el.querySelectorAll<HTMLButtonElement>("button[data-action=remove-assistant]")].every((b) => b.disabled)).toBe(true);
     expect(el.querySelector<HTMLButtonElement>("button[data-action=regenerate-code]")!.disabled).toBe(true);
+    expect(el.querySelector<HTMLSelectElement>("select[name=networkRole]")!.disabled).toBe(true);
+    expect(el.querySelector<HTMLInputElement>("input[name=networkPort]")!.disabled).toBe(true);
+    expect(el.querySelector<HTMLInputElement>("input[name=networkName]")!.disabled).toBe(true);
+  });
+
+  it("disables the assistant's fields while a handover runs", () => {
+    const el = renderSettings({ ...voiceBase, networkRole: "assistant", network: { ...network, role: "assistant" }, networkPaired: true, networkPromoting: true }, handlers());
+    expect(el.querySelector<HTMLInputElement>("input[name=networkHost]")!.disabled).toBe(true);
+    expect(el.querySelector<HTMLInputElement>("input[name=networkMainPort]")!.disabled).toBe(true);
+  });
+});
+
+describe("nextNetworkRole", () => {
+  const live = (role: "off" | "main" | "assistant") => ({ role, code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } });
+  it("keeps an Assistant preview on a main", () => {
+    expect(nextNetworkRole(live("main"), "assistant", live("main"))).toBe("assistant");
+  });
+  it("follows a live assistant that became the main", () => {
+    expect(nextNetworkRole(live("assistant"), "assistant", live("main"))).toBe("main");
+  });
+  it("follows a main that became an assistant", () => {
+    expect(nextNetworkRole(live("main"), "main", live("assistant"))).toBe("assistant");
   });
 });
