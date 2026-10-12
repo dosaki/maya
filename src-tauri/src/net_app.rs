@@ -236,6 +236,6 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
         CommandKind::ListResumable { dir, agent } => to_data(actions::list_resumable_sessions(&l, agent, &dir)?),
         CommandKind::History { session } => to_data(actions::session_history(&l, &session)?),
         // The client opens a handover itself (`client::handle`); it never reaches an executor.
-        CommandKind::Promote { .. } => Err("This Maya cannot become a main.".into()),
+        CommandKind::Promote { .. } => Err(maya_core::net::client::CANNOT_LEAD.into()),
     }
 }
