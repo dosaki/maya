@@ -2278,4 +2278,106 @@ mod tests {
         }
         handle.stop();
     }
+
+    /// A Maya that plays either side: its client hands `promoted` a real
+    /// server, and `moved` rewrites the config `reconnect` reads.
+    struct Mobile {
+        config: Arc<Mutex<NetworkConfig>>,
+        server: Mutex<Option<ServerHandle>>,
+        counter: Arc<Counter>,
+        /// Fails `promoted` as a taken port would.
+        port_taken: bool,
+    }
+
+    impl client::ClientNotify for Mobile {
+        fn paired(&self, _: &str, _: &str) {}
+        fn connected(&self, _: &str) {}
+        fn disconnected(&self, _: &str) {}
+        fn removed(&self) {}
+        fn caps(&self) -> Vec<String> {
+            vec!["follow".into(), "lead".into()]
+        }
+        fn promoted(&self, list: Vec<crate::config::PairedAssistant>) -> Result<u16, String> {
+            if self.port_taken {
+                return Err("Could not listen on port 4127: Address already in use. Choose another port.".into());
+            }
+            let mut c = crate::config::Config::default();
+            c.network = self.config.lock().unwrap().clone();
+            crate::net::promote::as_main(&mut c, list);
+            let view = Arc::new(Mutex::new(c.network.clone()));
+            let handle = start_with(self.counter.clone(), view, 0)?;
+            let _ = self.counter.server.set(handle.shared.clone());
+            *self.config.lock().unwrap() = c.network;
+            let port = handle.port();
+            *self.server.lock().unwrap() = Some(handle);
+            Ok(port)
+        }
+        fn moved(&self, host: &str, port: u16) -> Result<(), String> {
+            let mut c = self.config.lock().unwrap();
+            c.main_host = host.into();
+            c.main_port = port;
+            Ok(())
+        }
+    }
+
+    /// Pairs a `Mobile` with `handle` and runs its client until `stop`.
+    fn run_mobile(handle: &ServerHandle, port: u16, name: &str, port_taken: bool) -> (Arc<Mobile>, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let (ws, id, token) = pair_client(handle, port, name);
+        drop(ws);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        let config = Arc::new(Mutex::new(NetworkConfig { name: name.into(), ..assistant_config(port, &id, &token) }));
+        let m = Arc::new(Mobile { config: config.clone(), server: Mutex::new(None), counter: Arc::new(Counter::default()), port_taken });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (n, s) = (m.clone(), stop.clone());
+        let t = std::thread::spawn(move || client::reconnect(&move || config.lock().unwrap().clone(), Arc::new(NoSessions), n, &s));
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        (m, stop, t)
+    }
+
+    #[test]
+    fn a_promoted_assistant_becomes_the_main_and_everyone_follows_it_with_their_old_tokens() {
+        let (handle, port) = test_server();
+        let (g, g_stop, g_thread) = run_mobile(&handle, port, "laptop", false);
+        let (b, b_stop, b_thread) = run_mobile(&handle, port, "mini", false);
+        let g_id = g.config.lock().unwrap().assistant_id.clone();
+        let out = handle.promote(&g_id).unwrap();
+        g_thread.join().unwrap();
+        let new_main = g.server.lock().unwrap().clone().expect("the laptop runs a server");
+        assert_eq!(out.port, new_main.port());
+        assert_eq!(out.moved, ["mini"]);
+        // B reconnects to the laptop by itself, with the token it always had.
+        wait_until(|| new_main.status().assistants.iter().any(|a| a.name == "mini" && a.connected));
+        assert_eq!(b.config.lock().unwrap().main_port, out.port);
+        // The old main joins as an assistant with the entry it made.
+        let mut old = crate::config::Config::default();
+        crate::net::promote::as_assistant_of(&mut old, &out.host, out.port, &out.me);
+        handle.stop();
+        let (m_stop, m_cfg) = (Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(old.network)));
+        let s = m_stop.clone();
+        let m_thread = std::thread::spawn(move || client::reconnect(&move || m_cfg.lock().unwrap().clone(), Arc::new(NoSessions), Arc::new(Leader::default()), &s));
+        wait_until(|| new_main.status().assistants.iter().any(|a| a.id == out.me.id && a.connected));
+        assert!(g.counter.announced.lock().unwrap().is_empty(), "nothing on the first boards is announced");
+        for s in [&b_stop, &m_stop, &g_stop] {
+            s.store(true, Ordering::SeqCst);
+        }
+        let _ = (b_thread.join(), m_thread.join());
+        new_main.stop();
+    }
+
+    #[test]
+    fn an_assistant_whose_port_is_taken_stays_an_assistant_and_nobody_moves() {
+        let (handle, port) = test_server();
+        let (g, g_stop, g_thread) = run_mobile(&handle, port, "laptop", true);
+        let (_b, b_stop, b_thread) = run_mobile(&handle, port, "mini", false);
+        let g_id = g.config.lock().unwrap().assistant_id.clone();
+        let err = handle.promote(&g_id).unwrap_err();
+        assert!(err.starts_with("laptop could not become the main: Could not listen on port 4127"), "{err}");
+        assert!(g.server.lock().unwrap().is_none());
+        assert!(handle.status().assistants.iter().all(|a| a.connected), "both still assist this main");
+        for s in [&g_stop, &b_stop] {
+            s.store(true, Ordering::SeqCst);
+        }
+        let _ = (g_thread.join(), b_thread.join());
+        handle.stop();
+    }
 }
