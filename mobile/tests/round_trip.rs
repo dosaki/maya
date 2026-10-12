@@ -367,3 +367,24 @@ fn stop_listening_turns_the_phone_off_and_forgets_its_link() {
     assert!(c.assistant_id.is_empty() && c.token.is_empty() && c.main_host.is_empty());
     assert!(hub.client.lock().unwrap().is_none());
 }
+
+#[test]
+fn stop_listening_that_cannot_save_keeps_the_phone_listening() {
+    let (hub, _page, dir) = new_hub(free_port());
+    hub.update_config(|c| {
+        c.network.role = NetworkRole::Assistant;
+        c.network.main_host = "127.0.0.1".into();
+        c.network.main_port = free_port();
+        c.network.assistant_id = "id".into();
+        c.network.token = "tok".into();
+    })
+    .unwrap();
+    hub.start_client();
+    // A directory where the config file should be: every save fails.
+    hub.settings.lock().unwrap().path = dir.path().to_path_buf();
+    assert!(hub.stop_listening().is_err());
+    assert!(hub.client.lock().unwrap().is_some(), "still listening");
+    assert_eq!(hub.status().role, NetworkRole::Assistant);
+    assert_eq!(hub.settings.lock().unwrap().config.network.token, "tok");
+    hub.client.lock().unwrap().take().unwrap().stop();
+}

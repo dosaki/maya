@@ -28,7 +28,7 @@ use crate::config::{NetworkConfig, NetworkRole, PairedAssistant};
 use crate::log;
 use crate::store::now_ms;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -136,11 +136,14 @@ pub struct Server {
     peers: HashMap<String, Peer>,
     /// A handover to a new main is running; no second one may start.
     handover: bool,
+    /// Pairings recorded but not yet registered as connections: a handover
+    /// would hand them over without moving them, so it waits for none.
+    pairings_in_flight: HashSet<String>,
 }
 
 impl Server {
     fn new(paired: Vec<PairedAssistant>) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new(), handover: false }
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new() }
     }
 
     fn next(&mut self) -> u64 {
@@ -169,6 +172,7 @@ impl Server {
         let Some(i) = again else {
             let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token(), address: address.into(), last_seen: None };
             self.paired.push(a.clone());
+            self.pairings_in_flight.insert(a.id.clone());
             return (a, None);
         };
         let previous = self.paired[i].clone();
@@ -178,6 +182,7 @@ impl Server {
         p.platform = platform.into();
         p.token = new_token();
         let a = p.clone();
+        self.pairings_in_flight.insert(a.id.clone());
         self.by_id.remove(&a.id);
         self.peers.remove(&a.id);
         self.sync_boards();
@@ -187,6 +192,7 @@ impl Server {
     /// Takes back a pairing the assistant never completed: a new entry goes,
     /// an existing one gets its old token and names back.
     fn undo_pairing(&mut self, id: &str, previous: Option<PairedAssistant>) {
+        self.pairings_in_flight.remove(id);
         match previous {
             Some(p) => {
                 if let Some(e) = self.paired.iter_mut().find(|e| e.id == id) {
@@ -637,6 +643,8 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
     // could not be saved.
     let registered: Result<(u64, String), Option<String>> = {
         let mut s = lock(&ctx.shared);
+        // Registered or refused below: either way no longer in flight.
+        s.pairings_in_flight.remove(&id);
         if s.is_paired(&id) {
             // The entry follows the machine: its address, and the names it just gave.
             let now = now_ms();
@@ -1113,6 +1121,9 @@ impl ServerHandle {
             if !s.peers.get(id).is_some_and(|p| p.caps.iter().any(|c| c == CAP_LEAD)) {
                 return Err(format!("{label} cannot become a main."));
             }
+            if !s.pairings_in_flight.is_empty() {
+                return Err("A Maya is pairing right now; try again in a moment.".into());
+            }
             s.handover = true;
             s.pairing = None;
             let me = super::promote::own_entry(&self.ctx.main_name);
@@ -1368,6 +1379,21 @@ mod tests {
         send(&mut g, &Up::Result { id: cmd, ok: false, error: Some("no".into()), data: None });
         t.join().unwrap().unwrap_err();
         assert!(handle.open_pairing(crate::store::now_ms()).is_ok(), "pairing opens again once the handover ended");
+        handle.stop();
+    }
+
+    #[test]
+    fn a_handover_waits_for_a_pairing_that_is_still_in_flight() {
+        let (handle, port) = test_server();
+        let (_g, g_id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        assert!(lock(&handle.shared).pairings_in_flight.is_empty(), "a finished pairing is no longer in flight");
+        // A machine past `record_pairing` but not yet registered: it would be
+        // handed over without being moved.
+        let (entry, previous) = lock(&handle.shared).record_pairing("10.0.0.9", "mini", "h", "macos");
+        assert_eq!(handle.promote(&g_id).unwrap_err(), "A Maya is pairing right now; try again in a moment.");
+        assert!(!lock(&handle.shared).handover, "a refused handover leaves no turn behind");
+        lock(&handle.shared).undo_pairing(&entry.id, previous);
+        assert!(lock(&handle.shared).pairings_in_flight.is_empty());
         handle.stop();
     }
 

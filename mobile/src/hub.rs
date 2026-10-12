@@ -248,12 +248,7 @@ impl Hub {
 
     /// Stops listening: the role goes Off and the link is forgotten.
     pub fn stop_listening(&self) -> Result<NetworkStatus, String> {
-        let client = self.client.lock().unwrap().take();
-        if let Some(c) = client {
-            c.stop();
-            self.sink.service_stop();
-        }
-        *self.link.lock().unwrap() = AssistantLink::default();
+        // Saved first: if the save fails, the phone keeps listening as before.
         self.update_config(|c| {
             c.network.role = NetworkRole::Off;
             c.network.main_host.clear();
@@ -261,6 +256,12 @@ impl Hub {
             c.network.assistant_id.clear();
             c.network.token.clear();
         })?;
+        let client = self.client.lock().unwrap().take();
+        if let Some(c) = client {
+            c.stop();
+            self.sink.service_stop();
+        }
+        *self.link.lock().unwrap() = AssistantLink::default();
         let status = self.status();
         self.sink.network(&status);
         Ok(status)
