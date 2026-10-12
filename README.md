@@ -287,6 +287,10 @@ quiet.
   place in the list with a new token. So does another machine that later
   gets a disconnected assistant's address (from the router, say) and
   pairs: it takes over that entry.
+- **Make main.** On the main, Settings › Network › Make main beside a
+  connected assistant hands it the role. Every connected Maya follows the
+  new main with no new pairing; an assistant that is offline at that
+  moment needs its Host set to the new main's address.
 - **Versions.** Run the same Maya on every machine. The main notes an
   assistant that runs another version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder

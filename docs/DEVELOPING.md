@@ -245,7 +245,9 @@ built once (`pnpm tauri build --bundles appimage`):
 The phone app is a second Tauri crate, `mobile/`, that depends on
 `maya_core` and reuses the frontend's board, card, modal and dialogs from
 `mobile/web/index.html` through `src/mobile/main.ts`. It is only ever a
-main: it runs no sessions, so it needs no sidecar and no `jq`.
+main, or, after it handed the main role to an assistant, a listener with
+no sessions that the new main can make the main again. It runs no
+sessions, so it needs no sidecar and no `jq`.
 
 Requirements: `rustup` (Homebrew's `rust` has no Android targets), Java 17
 or later (CI uses 21), and the Android SDK command-line tools (`brew
@@ -374,8 +376,9 @@ Three workflows in `.github/workflows/`:
   with `protocol.rs` (message types, encode/decode, pairing and HMAC),
   `server.rs` (the main: listener, threads per assistant, pairing,
   command dispatch), `client.rs` (the assistant: connection, backoff,
-  board sending), and `merge.rs` (merging local and remote cards, stale
-  and expiry rules, routing).
+  board sending), `merge.rs` (merging local and remote cards, stale
+  and expiry rules, routing), and `promote.rs` (handing the main role to
+  an assistant: the list, its seal, the config rewrites).
 - `src-tauri/src/` — `lib.rs` (Tauri commands), `net_app.rs` (the network's
   Tauri side: starting server and client, command execution),
   `terminal_app.rs` (opening Terminal windows), `terminal_win.rs` and

@@ -1,7 +1,7 @@
 # Promote an assistant to main — design
 
 Date: 2026-10-12
-Status: draft for review
+Status: implemented
 Builds on: `2026-09-30-maya-remote-assistants-design.md`,
 `2026-10-07-maya-android-companion-design.md`
 
