@@ -31,6 +31,7 @@ pub mod terminal;
 pub mod terminal_tmux;
 pub mod transcript;
 pub mod tty;
+pub mod update;
 pub mod watcher;
 #[cfg(windows)]
 pub mod notify_win;
