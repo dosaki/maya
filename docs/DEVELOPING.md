@@ -424,8 +424,9 @@ The desktop app updates itself from `latest.json`, which every release
 publishes beside its assets (`scripts/updater-manifest.sh`, tested by
 `scripts/test-updater-manifest.sh` in CI). `src-tauri/src/updater.rs`
 checks it through `tauri-plugin-updater` on macOS, Windows and the
-AppImage, and through `maya_core::update` on a `.deb` and the phone, which
-only show a Download link. `src/update.ts` is the bar on the board and the
+AppImage, and through `maya_core::update` on a `.deb`, an MSI install and
+the phone, which only show a Download link. Which one is Tauri's stamped
+bundle type (`tauri::utils::platform::bundle_type()`). `src/update.ts` is the bar on the board and the
 checks (at start, then every 6 hours); a debug build never checks.
 
 Each update is signed with the key in the `TAURI_SIGNING_PRIVATE_KEY` and

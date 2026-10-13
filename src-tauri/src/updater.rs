@@ -1,14 +1,14 @@
 //! Updating Maya from the release feed: Tauri's updater where it can
 //! replace the app (macOS, Windows, the AppImage), the core's notice where
-//! it cannot (a `.deb`). The page asks `update_kind` once, then
+//! it cannot (a `.deb`, an MSI install). The page asks `update_kind` once, then
 //! `update_check` at start and every 6 hours.
 
-use std::ffi::OsStr;
 use std::sync::Mutex;
 
 use maya_core::log;
 use maya_core::update::{self, UpdateInfo};
 use serde::Serialize;
+use tauri::utils::config::BundleType;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
@@ -22,21 +22,22 @@ struct Progress {
     total: u64,
 }
 
-/// How this install updates: `off` in a debug build, `notice` on Linux
-/// outside an AppImage (the AppImage runtime sets `$APPIMAGE`), `self`
-/// otherwise.
-pub fn kind_for(debug: bool, linux: bool, appimage: Option<&OsStr>) -> &'static str {
-    if debug {
-        "off"
-    } else if linux && appimage.is_none_or(|p| p.is_empty()) {
-        "notice"
-    } else {
-        "self"
+/// How this install updates: `off` in a debug build; `self` from the
+/// macOS app, the NSIS install and the AppImage, which Tauri's updater
+/// replaces; `notice` otherwise. An MSI install gets the notice because
+/// the feed's Windows update is the NSIS installer, which would put a
+/// second copy beside it. `bundle` is what Tauri stamped into the build
+/// (`None` on macOS, which it does not stamp, and in an unbundled binary).
+pub fn kind_for(debug: bool, os: &str, bundle: Option<BundleType>) -> &'static str {
+    match (debug, os, bundle) {
+        (true, _, _) => "off",
+        (_, "macos", _) | (_, "windows", Some(BundleType::Nsis)) | (_, "linux", Some(BundleType::AppImage)) => "self",
+        _ => "notice",
     }
 }
 
 fn kind() -> &'static str {
-    kind_for(cfg!(debug_assertions), cfg!(target_os = "linux"), std::env::var_os("APPIMAGE").as_deref())
+    kind_for(cfg!(debug_assertions), std::env::consts::OS, tauri::utils::platform::bundle_type())
 }
 
 #[tauri::command]
@@ -98,23 +99,33 @@ pub async fn update_install(app: AppHandle, pending: State<'_, Pending>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::kind_for;
-    use std::ffi::OsStr;
+    use tauri::utils::config::BundleType;
 
     #[test]
     fn a_debug_build_never_updates() {
-        assert_eq!(kind_for(true, false, None), "off");
-        assert_eq!(kind_for(true, true, Some(OsStr::new("/home/u/.local/bin/maya-app"))), "off");
+        assert_eq!(kind_for(true, "macos", None), "off");
+        assert_eq!(kind_for(true, "linux", Some(BundleType::AppImage)), "off");
+    }
+
+    #[test]
+    fn macos_updates_itself() {
+        assert_eq!(kind_for(false, "macos", None), "self");
     }
 
     #[test]
     fn linux_updates_itself_only_from_an_appimage() {
-        assert_eq!(kind_for(false, true, Some(OsStr::new("/home/u/.local/bin/maya-app"))), "self");
-        assert_eq!(kind_for(false, true, None), "notice");
-        assert_eq!(kind_for(false, true, Some(OsStr::new(""))), "notice");
+        assert_eq!(kind_for(false, "linux", Some(BundleType::AppImage)), "self");
+        assert_eq!(kind_for(false, "linux", Some(BundleType::Deb)), "notice");
+        assert_eq!(kind_for(false, "linux", Some(BundleType::Rpm)), "notice");
+        assert_eq!(kind_for(false, "linux", None), "notice");
     }
 
     #[test]
-    fn macos_and_windows_update_themselves() {
-        assert_eq!(kind_for(false, false, None), "self");
+    fn windows_updates_itself_only_from_the_nsis_install() {
+        // The feed's Windows update is the NSIS installer, which beside an
+        // MSI install would put a second copy.
+        assert_eq!(kind_for(false, "windows", Some(BundleType::Nsis)), "self");
+        assert_eq!(kind_for(false, "windows", Some(BundleType::Msi)), "notice");
+        assert_eq!(kind_for(false, "windows", None), "notice");
     }
 }

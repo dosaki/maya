@@ -36,8 +36,11 @@ the same bar with Download, which opens the new APK.
   A file the updater downloads has no quarantine flag.
 - Sessions run in Terminal, Windows Terminal or tmux, not inside Maya, so
   relaunching Maya does not end them.
-- The AppImage runtime sets `$APPIMAGE` to the AppImage's path; a `.deb`
-  install has no such variable.
+- Tauri stamps the bundle type into Linux and Windows builds
+  (`tauri::utils::platform::bundle_type()`: AppImage, Deb, Rpm, Nsis,
+  Msi); macOS builds are not stamped. (`$APPIMAGE` alone is not enough: a
+  `.deb` Maya started from a shell that inherited it would look like an
+  AppImage.)
 - `maya_core` already depends on `ureq` (for OpenCode), so the core can
   fetch a JSON file without a new dependency.
 
@@ -59,7 +62,7 @@ the same bar with Download, which opens the new APK.
   failed download or a bad signature leaves the running app as it is and
   shows the error in the bar, and in `maya.log`.
 
-### The phone and a `.deb` install
+### The phone, a `.deb` and an MSI install
 
 The same checks and the same bar, but the action is **Download**: on the
 phone it opens the release's APK (`Maya_<version>.apk`), on a `.deb`
@@ -73,9 +76,10 @@ nothing to its assistants.
 ### Out of scope
 
 - The CLI (`maya-cli`).
-- MSI installs: the update arrives as the NSIS installer, which would
-  install a second copy beside an MSI one. `install.ps1` installs with
-  NSIS; the README says that an MSI install updates by hand.
+- Installing updates into an MSI install: the update arrives as the NSIS
+  installer, which would install a second copy beside an MSI one, so an
+  MSI install gets the Download notice like a `.deb`. `install.ps1`
+  installs with NSIS.
 - 0.17.0 and earlier have no updater: the first version with it is
   installed by hand once.
 
@@ -102,7 +106,7 @@ in Tauri's static-manifest format:
 }
 ```
 
-The phone and a `.deb` install read only `version` from the same file, so
+The phone, a `.deb` and an MSI install read only `version` from the same file, so
 there is one source and no GitHub API rate limit.
 
 ## The signing key
@@ -163,7 +167,9 @@ Rust behind three commands registered in `lib.rs`, so the page needs no JS
 plugin packages and no new capability permissions:
 
 - `update_kind() -> "self" | "notice" | "off"`: `off` in a debug build;
-  `notice` on Linux when `$APPIMAGE` is unset; `self` otherwise.
+  `self` on macOS, from the NSIS install and from the AppImage (by
+  `bundle_type()`); `notice` otherwise (a `.deb`, an `.rpm`, an MSI
+  install, an unbundled binary).
 - `update_check() -> Option<{ version, notes }>`: through the updater
   plugin for `self`, through `maya_core::update` for `notice`.
 - `update_install()`: downloads and installs the update the last check
