@@ -75,6 +75,8 @@ pub fn run() {
             commands::close_session,
             commands::save_attachment,
             commands::open_url,
+            commands::update_kind,
+            commands::update_check,
             commands::open_pr,
             commands::list_machines,
             commands::list_project_dirs,

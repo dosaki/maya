@@ -104,6 +104,22 @@ pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     open_web(&app, &url)
 }
 
+/// The phone cannot install an APK by itself, so it only ever says that a
+/// new version is out. A debug build never checks.
+#[tauri::command]
+pub fn update_kind() -> String {
+    if cfg!(debug_assertions) { "off" } else { "notice" }.to_string()
+}
+
+/// The newer release, if any, linking to its APK.
+#[tauri::command(async)]
+pub fn update_check() -> Result<Option<maya_core::update::UpdateInfo>, String> {
+    if cfg!(debug_assertions) {
+        return Ok(None);
+    }
+    maya_core::update::notice(env!("CARGO_PKG_VERSION"), maya_core::update::apk_url)
+}
+
 /// The session's pull request, from the assistant's card, never from the page.
 #[tauri::command(async)]
 pub fn open_pr(app: AppHandle, hub: H, session_id: String) -> Result<(), String> {
@@ -286,4 +302,8 @@ mod tests {
         assert!(data::<Vec<Turn>>(Some(serde_json::json!([]))).unwrap().is_empty());
     }
 
+    #[test]
+    fn the_phone_only_ever_shows_a_notice() {
+        assert_eq!(super::update_kind(), if cfg!(debug_assertions) { "off" } else { "notice" });
+    }
 }
