@@ -58,6 +58,20 @@ pub fn send_keys_args(target: &str, text: &str) -> Vec<Vec<String>> {
     out
 }
 
+/// The tmux commands that type `line` of a reply, then `enter` (one of
+/// `answer::NEW_LINE` and `answer::SEND`) as its exact bytes, in one
+/// command so the escape and what follows it reach the pane together.
+pub fn reply_line_args(target: &str, line: &str, enter: &str) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    if !line.is_empty() {
+        let mut literal = line.to_string();
+        escape_trailing_semicolon(&mut literal);
+        out.push(["send-keys", "-t", target, "-l", "--", &literal].iter().map(|s| s.to_string()).collect());
+    }
+    out.push(["send-keys", "-t", target, "-H"].iter().map(|s| s.to_string()).chain(enter.bytes().map(|b| format!("{b:02x}"))).collect());
+    out
+}
+
 /// `tmux list-panes -a -F '#{pane_tty}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_name}'`
 pub const LIST_PANES_FORMAT: &str = "#{pane_tty}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_name}";
 
@@ -106,10 +120,11 @@ impl Terminal for Tmux {
     /// The pane is looked up once. Past that, a failed `send-keys` may follow
     /// keys that went in (a line's text and its Enter are separate commands),
     /// so it counts as partly typed and the reply is not sent again.
-    fn type_lines(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
+    fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
         let (target, _) = self.pane(tty).ok_or((0, NOT_IN_TMUX.to_string()))?;
         for (i, line) in lines.iter().enumerate() {
-            for args in send_keys_args(&target, line) {
+            let enter = if i + 1 < lines.len() { crate::answer::NEW_LINE } else { crate::answer::SEND };
+            for args in reply_line_args(&target, line, enter) {
                 self.run(&args).map_err(|e| (i + 1, e))?;
             }
         }
@@ -161,6 +176,15 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_line_is_typed_literally_then_its_enter_as_exact_bytes() {
+        assert_eq!(
+            reply_line_args("t", "push it;", crate::answer::NEW_LINE),
+            vec![v(&["send-keys", "-t", "t", "-l", "--", "push it\\;"]), v(&["send-keys", "-t", "t", "-H", "1b", "0d"])]
+        );
+        assert_eq!(reply_line_args("t", "", crate::answer::SEND), vec![v(&["send-keys", "-t", "t", "-H", "1b", "5b", "31", "33", "75"])], "a blank line is only its Enter");
+    }
+
+    #[test]
     fn send_keys_escapes_a_literal_ending_in_a_semicolon_so_tmux_does_not_split_on_it() {
         assert_eq!(send_keys_args("t", "a;")[0], v(&["send-keys", "-t", "t", "-l", "--", "a\\;"]));
     }
@@ -208,7 +232,7 @@ mod tests {
     fn tmux_failing_on_enter(dir: &Path) -> Tmux {
         use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("tmux");
-        std::fs::write(&bin, "#!/bin/sh\ncase \"$1\" in\n  list-panes) printf '/dev/pts/3\\ts:0.0\\ts\\n' ;;\n  send-keys) for a; do [ \"$a\" = Enter ] && exit 1; done ;;\nesac\n").unwrap();
+        std::fs::write(&bin, "#!/bin/sh\ncase \"$1\" in\n  list-panes) printf '/dev/pts/3\\ts:0.0\\ts\\n' ;;\n  send-keys) for a; do [ \"$a\" = -H ] && exit 1; done ;;\nesac\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         Tmux { binary: bin }
     }
@@ -218,8 +242,8 @@ mod tests {
     fn a_reply_whose_text_went_in_before_a_failure_counts_as_partly_typed() {
         let dir = tempfile::tempdir().unwrap();
         let t = tmux_failing_on_enter(dir.path());
-        let (typed, _) = t.type_lines("/dev/pts/3", &["approved".to_string()]).unwrap_err();
+        let (typed, _) = t.type_reply("/dev/pts/3", &["approved".to_string()]).unwrap_err();
         assert!(typed > 0, "the text was sent before Enter failed, so it must not be resent through the inbox");
-        assert_eq!(t.type_lines("/dev/pts/9", &["approved".to_string()]), Err((0, NOT_IN_TMUX.to_string())), "no pane: nothing went in");
+        assert_eq!(t.type_reply("/dev/pts/9", &["approved".to_string()]), Err((0, NOT_IN_TMUX.to_string())), "no pane: nothing went in");
     }
 }

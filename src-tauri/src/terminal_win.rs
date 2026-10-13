@@ -129,6 +129,13 @@ impl Terminal for WindowsTerminal {
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
         win_console::type_line(pid_of(tty)?, text)
     }
+    /// The whole reply in one write. A write that failed partway may have
+    /// typed some lines, so only one that typed nothing counts as none.
+    fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
+        let pid = pid_of(tty).map_err(|e| (0, e))?;
+        let keys = win_console::keys_for(&maya_core::answer::reply_keys(lines));
+        win_console::type_keys(pid, &keys).map_err(|(some, e)| (if some { lines.len() } else { 0 }, e))
+    }
     fn focus(&self, tty: &str) -> Result<(), String> {
         focus_pid(pid_of(tty)? as i32)
     }

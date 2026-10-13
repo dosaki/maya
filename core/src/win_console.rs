@@ -37,7 +37,8 @@ pub enum Key {
 }
 
 /// `text` as key presses: the escape sequences Maya's answers use (Down
-/// `ESC [ B`, Shift+Tab `ESC [ Z`) become those keys, the rest is typed.
+/// `ESC [ B`, Shift+Tab `ESC [ Z`) and a carriage return become those
+/// keys, the rest is typed.
 pub fn keys_for(text: &str) -> Vec<Key> {
     let mut out = Vec::new();
     let mut rest = text;
@@ -47,6 +48,9 @@ pub fn keys_for(text: &str) -> Vec<Key> {
             rest = r;
         } else if let Some(r) = rest.strip_prefix("\x1b[Z") {
             out.push(Key::BackTab);
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix('\r') {
+            out.push(Key::Enter);
             rest = r;
         } else {
             let mut buf = [0u16; 2];
@@ -101,7 +105,14 @@ fn attached<T>(pid: u32, f: impl FnOnce() -> Result<T, String>) -> Result<T, Str
 pub fn type_line(pid: u32, text: &str) -> Result<(), String> {
     let mut keys = keys_for(text);
     keys.push(Key::Enter);
-    let recs = records(&keys);
+    type_keys(pid, &keys).map_err(|(_, e)| e)
+}
+
+/// Types `keys` into `pid`'s console in one write. On failure, whether
+/// any of them went in first, and why.
+pub fn type_keys(pid: u32, keys: &[Key]) -> Result<(), (bool, String)> {
+    let recs = records(keys);
+    let mut done = 0usize;
     attached(pid, || {
         let name: Vec<u16> = "CONIN$\0".encode_utf16().collect();
         // SAFETY: a NUL-terminated name; the handle is closed below.
@@ -109,7 +120,6 @@ pub fn type_line(pid: u32, text: &str) -> Result<(), String> {
         if input == INVALID_HANDLE_VALUE {
             return Err(format!("Could not open the console's input: {}.", std::io::Error::last_os_error()));
         }
-        let mut done = 0usize;
         let mut result = Ok(());
         while done < recs.len() {
             let mut n = 0u32;
@@ -124,6 +134,7 @@ pub fn type_line(pid: u32, text: &str) -> Result<(), String> {
         unsafe { CloseHandle(input) };
         result
     })
+    .map_err(|e| (done > 0, e))
 }
 
 /// The processes attached to `pid`'s console other than `pid` and Maya,
@@ -190,6 +201,13 @@ mod tests {
         assert_eq!(keys_for("\x1b[Z"), [Key::BackTab]);
         // Text outside the BMP is two units; a lone ESC is typed as is.
         assert_eq!(keys_for("\u{1f600}\x1b"), [Key::Unit(0xd83d), Key::Unit(0xde00), Key::Unit(0x1b)]);
+    }
+
+    #[test]
+    fn a_reply_is_typed_with_alt_enter_between_lines_and_a_csi_u_enter_after() {
+        let keys = keys_for(&crate::answer::reply_keys(&["a".into(), "b".into()]));
+        let u = |c: char| Key::Unit(c as u16);
+        assert_eq!(keys, [u('a'), u('\x1b'), Key::Enter, u('b'), u('\x1b'), u('['), u('1'), u('3'), u('u')]);
     }
 
     #[test]

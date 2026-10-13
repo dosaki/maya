@@ -43,10 +43,19 @@ return "not found""#,
     )
 }
 
-/// Types each of `lines` (plus Enter) into the Terminal tab on `tty` in one
-/// script, so the reply goes in as one burst.
-pub fn applescript_type_lines(tty: &str, lines: &[String]) -> String {
-    let typed: Vec<String> = lines.iter().map(|l| format!("do script \"{}\" in t", applescript_string(l))).collect();
+/// Types a reply's `lines` into the Terminal tab on `tty` in one script, so
+/// the reply goes in as one burst. `do script` always ends with its own
+/// carriage return, so each line ends in ESC to make that Alt+Enter
+/// (`answer::NEW_LINE`), and the last in `ESC [ I`, the report of the
+/// terminal gaining focus, so the carriage return after it reaches Claude
+/// Code on its own and sends the reply.
+pub fn applescript_type_reply(tty: &str, lines: &[String]) -> String {
+    let last = lines.len().saturating_sub(1);
+    let typed: Vec<String> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| format!("do script (\"{}\" & (character id 27){}) in t", applescript_string(l), if i < last { "" } else { " & \"[I\"" }))
+        .collect();
     format!(
         r#"tell application "Terminal"
   repeat with w in windows
@@ -94,8 +103,8 @@ impl Terminal for TerminalApp {
     }
     /// One script for the whole reply. A script that ran but failed may have
     /// typed some lines, so only a missing tab or osascript counts as none.
-    fn type_lines(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
-        let out = Command::new("osascript").arg("-e").arg(applescript_type_lines(tty, lines)).output().map_err(|e| (0, format!("could not run osascript: {e}")))?;
+    fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
+        let out = Command::new("osascript").arg("-e").arg(applescript_type_reply(tty, lines)).output().map_err(|e| (0, format!("could not run osascript: {e}")))?;
         if !out.status.success() {
             return Err((lines.len(), format!("osascript failed: {}", String::from_utf8_lossy(&out.stderr).trim())));
         }
@@ -133,9 +142,12 @@ mod tests {
 
     #[test]
     fn a_reply_is_typed_into_the_tab_in_one_script() {
-        let s = applescript_type_lines("/dev/ttys021", &["push it\\".to_string(), "say \"hi\"".to_string()]);
+        let s = applescript_type_reply("/dev/ttys021", &["push it\\ ".to_string(), "say \"hi\"".to_string()]);
         assert!(s.contains("if tty of t is \"/dev/ttys021\""));
-        assert!(s.contains("do script \"push it\\\\\" in t\n        do script \"say \\\"hi\\\"\" in t\n        return \"ok\""), "{s}");
+        assert!(
+            s.contains("do script (\"push it\\\\ \" & (character id 27)) in t\n        do script (\"say \\\"hi\\\"\" & (character id 27) & \"[I\") in t\n        return \"ok\""),
+            "{s}"
+        );
         assert!(s.ends_with("return \"not found\""));
     }
 }

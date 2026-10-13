@@ -127,23 +127,24 @@ fn typeable(text: &str) -> String {
     out
 }
 
-/// The lines to type for a reply to Claude Code, each followed by Enter.
-/// Every line but the last ends in `\`, Claude Code's continuation, so its
-/// Enter adds a line instead of sending; the last line's Enter sends. A
-/// last line that itself ends in `\` gets a space, so its Enter still sends.
+/// Alt+Enter, which adds a line to Claude Code's input.
+pub const NEW_LINE: &str = "\x1b\r";
+
+/// Enter in its CSI u form, which sends Claude Code's input.
+pub const SEND: &str = "\x1b[13u";
+
+/// The lines of a reply to Claude Code, to type with `NEW_LINE` between
+/// them and `SEND` after the last (see `Terminal::type_reply`). Claude Code
+/// turns `\` then any Enter into a new line and drops the `\`, so a line
+/// that ends in `\` gets a space.
 pub fn reply_lines(text: &str) -> Vec<String> {
     let text = typeable(text);
-    let lines: Vec<&str> = text.trim_matches('\n').split('\n').collect();
-    let last = lines.len() - 1;
-    lines
-        .iter()
-        .enumerate()
-        .map(|(i, l)| match (i < last, l.ends_with('\\')) {
-            (true, _) => format!("{l}\\"),
-            (false, true) => format!("{l} "),
-            (false, false) => l.to_string(),
-        })
-        .collect()
+    text.trim_matches('\n').split('\n').map(|l| if l.ends_with('\\') { format!("{l} ") } else { l.to_string() }).collect()
+}
+
+/// A reply's lines as the keys that type and send it.
+pub fn reply_keys(lines: &[String]) -> String {
+    lines.join(NEW_LINE) + SEND
 }
 
 /// The picker must be on screen before any key is sent; PreToolUse fires just before it renders.
@@ -331,28 +332,37 @@ mod tests {
     }
 
     #[test]
-    fn reply_lines_continue_every_line_but_the_last() {
+    fn reply_lines_split_on_newlines() {
         assert_eq!(reply_lines("go on"), vec!["go on"]);
-        assert_eq!(reply_lines("a\nb\nc"), vec!["a\\", "b\\", "c"]);
+        assert_eq!(reply_lines("a\nb\nc"), vec!["a", "b", "c"]);
     }
 
     #[test]
     fn reply_lines_keep_blank_lines_and_drop_carriage_returns_and_outer_newlines() {
-        assert_eq!(reply_lines("a\n\nb"), vec!["a\\", "\\", "b"]);
-        assert_eq!(reply_lines("a\r\nb\r\n"), vec!["a\\", "b"]);
+        assert_eq!(reply_lines("a\n\nb"), vec!["a", "", "b"]);
+        assert_eq!(reply_lines("a\r\nb\r\n"), vec!["a", "b"]);
         assert_eq!(reply_lines("\n\nhi\n"), vec!["hi"]);
     }
 
     #[test]
-    fn reply_lines_still_send_when_the_last_line_ends_in_a_backslash() {
+    fn reply_lines_keep_a_backslash_at_the_end_of_any_line() {
         assert_eq!(reply_lines("see C:\\"), vec!["see C:\\ "]);
-        // A middle line ending in `\` gets the continuation after it; the live check confirms what Claude Code makes of `\\`.
-        assert_eq!(reply_lines("a\\\nb"), vec!["a\\\\", "b"]);
+        assert_eq!(reply_lines("a\\\nb"), vec!["a\\ ", "b"]);
+    }
+
+    #[test]
+    fn reply_keys_put_alt_enter_between_lines_and_send_with_a_csi_u_enter() {
+        let keys = reply_keys(&reply_lines("a\n\nb"));
+        assert_eq!(keys, "a\x1b\r\x1b\rb\x1b[13u");
+        // Every Enter follows an escape, so none is a bare carriage return
+        // that Claude Code could read as text inside a long line.
+        assert!(!keys.replace(NEW_LINE, "").contains('\r'));
+        assert_eq!(reply_keys(&reply_lines("go on")), "go on\x1b[13u");
     }
 
     #[test]
     fn reply_lines_type_tabs_as_spaces_and_drop_control_keys() {
-        assert_eq!(reply_lines("fn a() {\n\treturn 1;\n}"), vec!["fn a() {\\", "    return 1;\\", "}"]);
+        assert_eq!(reply_lines("fn a() {\n\treturn 1;\n}"), vec!["fn a() {", "    return 1;", "}"]);
         // Coloured output pasted from a terminal: the colour codes go, the text stays.
         assert_eq!(reply_lines("\x1b[31merror\x1b[0m: boom"), vec!["error: boom"]);
         // Shift+Tab and Down as escape sequences, a bare Esc, a bell and DEL.
