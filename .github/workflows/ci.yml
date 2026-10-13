@@ -27,6 +27,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: sh scripts/release-version.sh
+      - name: Check the updater manifest script
+        run: sh scripts/test-updater-manifest.sh
 
   build:
     name: Build

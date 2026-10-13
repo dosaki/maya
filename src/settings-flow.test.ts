@@ -665,4 +665,41 @@ describe("settings flow", () => {
     onProgress({ payload: { id: "some-other-model", received: 10, total: 100 } });
     expect(document.querySelector("progress[name=modelDownload]")).toBeNull();
   });
+
+  it("Check for updates reports up to date, a newer version, or the error", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "" };
+    let check: () => Promise<unknown> = () => Promise.resolve(null);
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      if (cmd === "update_kind") return Promise.resolve("self");
+      if (cmd === "update_check") return check();
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    document.body.innerHTML = '<div id="update-bar" hidden></div><div id="settings" class="settings pane"></div>';
+    const { updates } = await import("./update");
+    await updates.init();
+    await initSettings();
+    await flush();
+    const press = () => document.querySelector<HTMLButtonElement>("[data-action=check-updates]")!.click();
+    const status = () => document.querySelector(".settings__update-status")?.textContent;
+
+    press();
+    await flush();
+    expect(status()).toBe("Up to date.");
+
+    check = () => Promise.resolve({ version: "0.19.0", download: "https://github.com/dosaki/maya/releases/tag/v0.19.0" });
+    press();
+    await flush();
+    expect(status()).toBe("Maya 0.19.0 is ready: see the bar above.");
+
+    check = () => Promise.reject("could not check for updates: offline");
+    press();
+    await flush();
+    expect(status()).toBe("could not check for updates: offline");
+  });
 });

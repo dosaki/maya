@@ -347,7 +347,7 @@ Three workflows in `.github/workflows/`:
   again without the tests (the pull request ran them; the Linux smoke
   test still runs), signing the macOS apps when this push releases, and
   then, only once every platform has built, a `release` job that
-  publishes `v<version>` with all the artifacts. It releases when
+  publishes `v<version>` with all the artifacts, the `.sig` files and `latest.json`. It releases when
   `scripts/release-version.sh` finds no release for the version yet; a
   push whose version is released only builds, and a `docs` commit skips
   the run.
@@ -417,6 +417,25 @@ a release only builds; a mismatch between `src-tauri/tauri.conf.json`,
 a pull request's too (see [CI](#ci)); `pnpm version:set` keeps all of
 them in step, the phone app's included. Pull requests bump the version themselves: see the rule in
 [CLAUDE.md](../CLAUDE.md).
+
+## Updates
+
+The desktop app updates itself from `latest.json`, which every release
+publishes beside its assets (`scripts/updater-manifest.sh`, tested by
+`scripts/test-updater-manifest.sh` in CI). `src-tauri/src/updater.rs`
+checks it through `tauri-plugin-updater` on macOS, Windows and the
+AppImage, and through `maya_core::update` on a `.deb`, an MSI install and
+the phone, which only show a Download link. Which one is Tauri's stamped
+bundle type (`tauri::utils::platform::bundle_type()`). `src/update.ts` is the bar on the board and the
+checks (at start, then every 6 hours); a debug build never checks.
+
+Each update is signed with the key in the `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, and the app checks it against
+`plugins.updater.pubkey` in `src-tauri/tauri.conf.json`. A release build
+turns on `createUpdaterArtifacts` and writes the `.sig` files; a pull
+request's does not. A release with any platform's `.sig` missing fails.
+Losing the private key means every installed Maya must be reinstalled by
+hand once with a new one.
 
 ## Signing
 

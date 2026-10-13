@@ -9,6 +9,7 @@ import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
 import { promoteLines } from "./promote";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
+import { updates } from "./update";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -103,6 +104,10 @@ export interface SettingsModel {
   downloading: { id: string; received: number; total: number } | null;
   /** The app version, shown under Maya; unset until Tauri answers. */
   version?: string;
+  /** This install can check for updates (`update_kind` is not `off`). */
+  updatesOn?: boolean;
+  /** The outcome of the last Check for updates; unset before one. */
+  updateStatus?: string;
   /** The live status from `network_status`/the `network` event. */
   network?: NetworkStatus;
   /** The Network select's current value; can diverge from `network.role` while previewing "Assistant" before Pair succeeds. */
@@ -156,6 +161,7 @@ export interface SettingsHandlers {
   onClonesDir(path: string): void;
   onSpeak(enabled: boolean): void;
   onFullDiskAccess?(): void;
+  onCheckUpdates?(): void;
   onVoiceProvider(provider: VoiceProvider): void;
   onElevenKey(key: string): void;
   onElevenVoice(voiceId: string): void;
@@ -408,6 +414,20 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const version = document.createElement("div");
     version.className = "settings__hint settings__version";
     version.textContent = `Maya ${model.version}`;
+    if (model.updatesOn && h.onCheckUpdates) {
+      const check = document.createElement("button");
+      check.type = "button";
+      check.dataset.action = "check-updates";
+      check.textContent = "Check for updates";
+      check.addEventListener("click", () => h.onCheckUpdates?.());
+      version.append(" ", check);
+      if (model.updateStatus) {
+        const status = document.createElement("span");
+        status.className = "settings__update-status";
+        status.textContent = model.updateStatus;
+        version.append(" ", status);
+      }
+    }
     maya.append(version);
   }
 
@@ -1128,6 +1148,21 @@ export async function initSettings(): Promise<void> {
   };
 
   const handlers: SettingsHandlers = {
+    onCheckUpdates: () => {
+      model.updateStatus = "Checking…";
+      paint();
+      updates
+        .check(true)
+        .then((info) => {
+          model.updateStatus = info ? `Maya ${info.version} is ${updates.kind() === "self" ? "ready" : "out"}: see the bar above.` : "Up to date.";
+        })
+        .catch((e) => {
+          model.updateStatus = String(e);
+        })
+        .finally(() => {
+          if (!panel.hidden) paint();
+        });
+    },
     onCodexInstall: () => void run(async () => { model.codexHookInstalled = await invoke<boolean>("install_codex_hook"); }),
     onCodexRemove: () => void run(async () => { model.codexHookInstalled = await invoke<boolean>("remove_codex_hook"); }),
     onInstall: () => void run(async () => { model.hookInstalled = await invoke<boolean>("install_hook"); }),
@@ -1328,6 +1363,8 @@ export async function initSettings(): Promise<void> {
     const [installed, config, codexInstalled] = await Promise.all([invoke<boolean>("hook_status"), invoke<ConfigJson>("get_config"), codexStatus]);
     model.focusVisible = await focusVisible;
     model.version = await version;
+    await updates.ready();
+    model.updatesOn = updates.kind() !== "off";
     model.hookInstalled = installed;
     model.codexHookInstalled = codexInstalled;
     applyConfig(config);

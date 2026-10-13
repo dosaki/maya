@@ -18,6 +18,7 @@ import { initMute } from "./mute";
 import { initVoice } from "./voice";
 import { initDebug } from "./debug";
 import { maybeShowFirstRun } from "./firstrun";
+import { updates } from "./update";
 
 let cards: Card[] = [];
 const guard = makeClickGuard();
@@ -150,6 +151,7 @@ async function answer(card: Card, questionIndex: number, optionIndex: number, bu
 
 async function start(): Promise<void> {
   void initSettings();
+  void updates.init();
   void initMute();
   void initVoice();
   void initDebug();

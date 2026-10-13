@@ -15,6 +15,7 @@ pub mod terminal_app;
 pub mod terminal_linux;
 #[cfg(windows)]
 pub mod terminal_win;
+pub mod updater;
 pub mod voice;
 pub mod wake;
 
@@ -1103,7 +1104,9 @@ pub fn run() {
     store.compact_events();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()) })
+        .manage(updater::Pending::default())
         .invoke_handler(tauri::generate_handler![
             set_muted,
             focus_visible,
@@ -1159,7 +1162,10 @@ pub fn run() {
             network_remove_assistant,
             network_promote,
             network_pair,
-            list_machines
+            list_machines,
+            updater::update_kind,
+            updater::update_check,
+            updater::update_install
         ])
         .setup(move |app| {
             let log_path = dir.join("maya").join("maya.log");

@@ -55,6 +55,7 @@ jobs:
     if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: maya-*
@@ -67,9 +68,11 @@ jobs:
         run: |
           set -euo pipefail
           ls -la dist
+          sh scripts/updater-manifest.sh "$VERSION" dist > latest.json
+          mv latest.json dist/latest.json
           gh release create "v${VERSION}" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Maya v${VERSION}" \
             --generate-notes \
-            --notes "Built from ${GITHUB_SHA} on main. macOS builds are not notarised: install with the one-line installer in the README, which clears the quarantine flag, or right-click the app and choose Open the first time. Windows installers are not signed: SmartScreen asks once, choose More info, then Run anyway. The Android APK is debug-signed unless the release keystore secrets are set; allow installs from your browser to install it. Without the release keystore secrets, each release's APK is signed with a new key, so installing a newer one over an older one means uninstalling first, which forgets the pairings; setting the `ANDROID_*` secrets gives in-place updates."
+            --notes "Built from ${GITHUB_SHA} on main. macOS builds are not notarised: install with the one-line installer in the README, which clears the quarantine flag, or right-click the app and choose Open the first time. Windows installers are not signed: SmartScreen asks once, choose More info, then Run anyway. The Android APK is debug-signed unless the release keystore secrets are set; allow installs from your browser to install it. Without the release keystore secrets, each release's APK is signed with a new key, so installing a newer one over an older one means uninstalling first, which forgets the pairings; setting the `ANDROID_*` secrets gives in-place updates. From 0.18.0 the desktop app updates itself: a bar on the board offers each new release. An .msi or .deb install updates by hand."
