@@ -237,9 +237,9 @@ fn poll_reviews(app: &AppHandle) {
 }
 
 /// Banners (and the spoken line) for assigned PRs that were just approved
-/// or had changes requested, under the same rules as a session's ask:
-/// quiet under a Focus mode, silent when muted, and left to the main when
-/// this Maya is an assistant.
+/// or had changes requested, under the same rules as a session's ask: under
+/// a Focus mode the banner is left to macOS and nothing is said, muted it is
+/// silent, and an assistant leaves it to its main.
 fn announce_pr_reviews(app: &AppHandle, decided: &[reviews::ReviewPr]) {
     if decided.is_empty() {
         return;
@@ -257,7 +257,6 @@ fn announce_pr_reviews(app: &AppHandle, decided: &[reviews::ReviewPr]) {
     let focus = notify::focus_active();
     if focus {
         log::line("app", "focus mode is on: pull request announcements stay silent");
-        return;
     }
     let (speak, banner_sound) = announcement(speak, muted, focus);
     let eleven = if speak { eleven_settings(eleven_voice) } else { None };

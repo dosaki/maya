@@ -49,9 +49,9 @@ pub struct ReviewPr {
 /// to them; each with the reviews needed for `ReviewMark`.
 pub const QUERY: &str = r#"query {
   viewer { login }
-  requested: search(query: "is:pr is:open review-requested:@me", type: ISSUE, first: 50) { nodes { ...pr } }
-  reviewed: search(query: "is:pr is:open reviewed-by:@me -author:@me", type: ISSUE, first: 50) { nodes { ...pr } }
-  assigned: search(query: "is:pr is:open assignee:@me", type: ISSUE, first: 50) { nodes { ...pr } }
+  requested: search(query: "is:pr is:open review-requested:@me sort:updated-desc", type: ISSUE, first: 50) { nodes { ...pr } }
+  reviewed: search(query: "is:pr is:open reviewed-by:@me -author:@me sort:updated-desc", type: ISSUE, first: 50) { nodes { ...pr } }
+  assigned: search(query: "is:pr is:open assignee:@me sort:updated-desc", type: ISSUE, first: 50) { nodes { ...pr } }
 }
 fragment pr on PullRequest {
   number title url isDraft updatedAt
@@ -127,15 +127,22 @@ fn parse_node(p: &serde_json::Value, reason: Reason, login: &str) -> Option<Revi
 /// `gh api graphql` output of `QUERY` as one list of review PRs.
 pub fn parse_graphql(json: &str) -> Result<Vec<ReviewPr>, String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("gh output was not JSON: {e}"))?;
-    if let Some(msg) = v["errors"].as_array().and_then(|e| e.first()).and_then(|e| e["message"].as_str()) {
-        return Err(format!("GitHub said: {msg}"));
-    }
+    let error = v["errors"].as_array().and_then(|e| e.first()).and_then(|e| e["message"].as_str()).map(|m| format!("GitHub said: {m}"));
     let data = &v["data"];
-    let login = data["viewer"]["login"].as_str().ok_or("gh output had no viewer")?;
+    // An org the token cannot reach adds an error but keeps the rest.
+    let Some(login) = data["viewer"]["login"].as_str() else {
+        return Err(error.unwrap_or_else(|| "gh output had no viewer".into()));
+    };
+    if let Some(e) = &error {
+        crate::log::line("app", format!("pull requests: partial results: {e}"));
+    }
     let list = |key: &str, reason: Reason| -> Vec<ReviewPr> {
         data[key]["nodes"].as_array().map(|a| a.iter().filter_map(|p| parse_node(p, reason, login)).collect()).unwrap_or_default()
     };
-    let review = merge(list("requested", Reason::Review), list("reviewed", Reason::Review));
+    // A pending request after a review means the author asked again: the
+    // old verdict is not this round's, so the PR is to review.
+    let requested: Vec<ReviewPr> = list("requested", Reason::Review).into_iter().map(|p| ReviewPr { my_review: None, ..p }).collect();
+    let review = merge(requested, list("reviewed", Reason::Review));
     Ok(merge(review, list("assigned", Reason::Assigned)))
 }
 
@@ -165,10 +172,12 @@ pub fn fetch() -> Result<Vec<ReviewPr>, String> {
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("could not run gh: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("gh failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    // gh exits non-zero on any GraphQL error, partial results included.
+    match parse_graphql(&String::from_utf8_lossy(&out.stdout)) {
+        Ok(prs) => Ok(prs),
+        Err(_) if !out.status.success() => Err(format!("gh failed: {}", String::from_utf8_lossy(&out.stderr).trim())),
+        Err(e) => Err(e),
     }
-    parse_graphql(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// Remembers the review state of each assigned PR so a turn to approved or
@@ -382,10 +391,30 @@ mod tests {
     }
 
     #[test]
+    fn a_pending_request_means_to_review_whatever_the_user_said_before() {
+        let again = node(8, "Org/x", "jane", "2026-09-28T10:00:00Z", &review("me", "CHANGES_REQUESTED"), &review("me", "CHANGES_REQUESTED"));
+        let prs = parse_graphql(&response(&[again.clone()], &[again], &[])).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].my_review, None, "the author asked again: the old verdict is not this round's review");
+    }
+
+    #[test]
+    fn partial_results_are_kept_when_github_also_reports_an_error() {
+        let ok = node(1, "o/r", "jane", "", "", "");
+        let json = response(&[ok], &[], &[]).replacen("{\"data\"", "{\"errors\":[{\"message\":\"SAML enforcement\"}],\"data\"", 1);
+        assert_eq!(parse_graphql(&json).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_searches_keep_the_most_recently_updated() {
+        assert_eq!(QUERY.matches("sort:updated-desc").count(), 3);
+    }
+
+    #[test]
     fn the_users_review_prefers_a_verdict_over_a_comment_and_ignores_others() {
         let v = |opinionated: &str, latest: &str| {
             let n = node(1, "o/r", "jane", "", opinionated, latest);
-            parse_graphql(&response(&[n], &[], &[])).unwrap()[0].my_review
+            parse_graphql(&response(&[], &[n], &[])).unwrap()[0].my_review
         };
         assert_eq!(v(&review("Me", "APPROVED"), &review("Me", "COMMENTED")), Some(ReviewMark::Approved));
         assert_eq!(v(&review("Me", "CHANGES_REQUESTED"), &review("Me", "CHANGES_REQUESTED")), Some(ReviewMark::ChangesRequested));

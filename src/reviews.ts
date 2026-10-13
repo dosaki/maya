@@ -173,7 +173,9 @@ export function renderReviews(
   const inTab = state.prs.filter((p) => p.reasons.includes(tab));
   const prs = applyFilters(inTab, filters, tab);
   if (prs.length === 0) {
-    root.append(el("div", "reviews__empty", inTab.length === 0 ? "Nothing here." : "No pull requests match these filters."));
+    const defaults = DEFAULT_FILTERS[tab];
+    const unfiltered = filters.state === defaults.state && filters.repo === defaults.repo;
+    root.append(el("div", "reviews__empty", inTab.length === 0 ? "Nothing here." : unfiltered && tab === "review" ? "Nothing waiting on you." : "No pull requests match these filters."));
     return root;
   }
   const list = el("div", "reviews__list");

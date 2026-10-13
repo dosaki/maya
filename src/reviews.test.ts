@@ -190,6 +190,9 @@ describe("makeReviewsView", () => {
     choose(select(host, "state"), "commented");
     expect(shown(host)).toEqual([]);
     expect(host.querySelector(".reviews__empty")?.textContent).toBe("No pull requests match these filters.");
+    const done = document.createElement("div");
+    makeReviewsView(done).update(state([pr({ myReview: "approved" })]), NOW);
+    expect(done.querySelector(".reviews__empty")?.textContent).toBe("Nothing waiting on you.");
     const lone = document.createElement("div");
     makeReviewsView(lone).update(state([pr()]), NOW);
     subTab(lone, "assigned").click();
