@@ -3,7 +3,7 @@
 //! whatever comes back before acting on it.
 
 use crate::model::Card;
-use crate::reviews::{MyReview, ReviewPr};
+use crate::reviews::{ReviewMark, ReviewPr};
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -45,7 +45,7 @@ pub fn board_summary(cards: &[Card]) -> String {
 }
 
 /// One line per pull request on the Pull Requests tab:
-/// `repo#number | title | by author [| draft] [| assigned to you] [| you approved]`.
+/// `repo#number | title | by author [| draft] [| assigned to you [| approved by x]] [| you approved]`.
 pub fn pr_summary(prs: &[ReviewPr]) -> String {
     prs.iter()
         .map(|p| {
@@ -55,11 +55,18 @@ pub fn pr_summary(prs: &[ReviewPr]) -> String {
             }
             if p.reasons.contains(&crate::reviews::Reason::Assigned) {
                 line.push_str(" | assigned to you");
+                let by = p.pr_reviewers.join(", ");
+                match p.pr_review {
+                    Some(ReviewMark::Approved) => line.push_str(&format!(" | approved by {by}")),
+                    Some(ReviewMark::Commented) => line.push_str(&format!(" | commented on by {by}")),
+                    Some(ReviewMark::ChangesRequested) => line.push_str(&format!(" | changes requested by {by}")),
+                    None => {}
+                }
             }
             match p.my_review {
-                Some(MyReview::Approved) => line.push_str(" | you approved"),
-                Some(MyReview::Commented) => line.push_str(" | you commented"),
-                Some(MyReview::ChangesRequested) => line.push_str(" | you requested changes"),
+                Some(ReviewMark::Approved) => line.push_str(" | you approved"),
+                Some(ReviewMark::Commented) => line.push_str(" | you commented"),
+                Some(ReviewMark::ChangesRequested) => line.push_str(" | you requested changes"),
                 None => {}
             }
             line
@@ -433,19 +440,21 @@ mod tests {
     }
 
     fn pr(repo: &str, number: u64, title: &str, author: &str, draft: bool) -> crate::reviews::ReviewPr {
-        crate::reviews::ReviewPr { number, repo: repo.into(), title: title.into(), author: author.into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: draft, updated_at: "2026-09-30T07:00:00Z".into(), reasons: vec![], my_review: None }
+        crate::reviews::ReviewPr { number, repo: repo.into(), title: title.into(), author: author.into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: draft, updated_at: "2026-09-30T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] }
     }
 
     #[test]
     fn pull_requests_are_listed_one_per_line_and_reach_the_prompt() {
         let mut approved = pr("dosaki/bedrock", 7, "Notes", "jane", false);
-        approved.my_review = Some(MyReview::ChangesRequested);
+        approved.my_review = Some(ReviewMark::ChangesRequested);
         approved.reasons = vec![crate::reviews::Reason::Review, crate::reviews::Reason::Assigned];
+        approved.pr_review = Some(ReviewMark::Approved);
+        approved.pr_reviewers = vec!["al".into(), "bo".into()];
         let prs = [pr("dosaki/collector", 14, "Add ERD overlay", "alex", false), pr("dosaki/maya", 3, "Voice assistant", "tiago", true), approved];
         let s = pr_summary(&prs);
         assert!(s.contains("dosaki/collector#14 | Add ERD overlay | by alex\n"), "{s}");
         assert!(s.contains("dosaki/maya#3 | Voice assistant | by tiago | draft\n"), "{s}");
-        assert!(s.contains("dosaki/bedrock#7 | Notes | by jane | assigned to you | you requested changes"), "{s}");
+        assert!(s.contains("dosaki/bedrock#7 | Notes | by jane | assigned to you | approved by al, bo | you requested changes"), "{s}");
         let p = user_prompt("what's waiting", "hexgrid | …", &s, &[]);
         assert!(p.contains("Pull requests for you to review or assigned to you ("), "{p}");
         assert!(p.contains("dosaki/collector#14"), "{p}");

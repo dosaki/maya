@@ -1,6 +1,6 @@
 import { formatAge } from "./format";
 import { iconButton } from "./icons";
-import { STATE_LABEL, type Card, type ReviewPr, type ReviewState } from "./types";
+import { STATE_LABEL, type Card, type ReviewMark, type ReviewPr, type ReviewState } from "./types";
 
 export type ReviewAction = { kind: "open-pr" | "review"; repo: string; number: number } | { kind: "terminal"; repo: string; number: number; pid: number };
 
@@ -34,16 +34,17 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return n;
 }
 
-const MY_REVIEW: Record<NonNullable<ReviewPr["myReview"]>, { modifier: string; label: string }> = {
-  approved: { modifier: "approved", label: "You approved" },
-  commented: { modifier: "commented", label: "You commented" },
-  changesRequested: { modifier: "changes", label: "You requested changes" },
+/** The dot's colour, and its label for the user's own review and for other reviewers'. */
+const MARK: Record<ReviewMark, { modifier: string; mine: string; theirs: string }> = {
+  approved: { modifier: "approved", mine: "You approved", theirs: "Approved" },
+  commented: { modifier: "commented", mine: "You commented", theirs: "Commented" },
+  changesRequested: { modifier: "changes", mine: "You requested changes", theirs: "Changes requested" },
 };
 
 /** The pane's sub-tabs: why a PR is on the list. */
 export type ReviewTab = ReviewPr["reasons"][number];
 
-export type StateFilter = "all" | "toReview" | NonNullable<ReviewPr["myReview"]>;
+export type StateFilter = "all" | "toReview" | ReviewMark;
 
 export interface ReviewFilters {
   state: StateFilter;
@@ -69,10 +70,26 @@ const DEFAULT_FILTERS: Record<ReviewTab, ReviewFilters> = { review: { state: "to
 
 const TAB_KEY = "maya.reviewsTab";
 
-export function applyFilters(prs: ReviewPr[], f: ReviewFilters): ReviewPr[] {
-  return prs.filter(
-    (p) => (f.repo === null || p.repo === f.repo) && (f.state === "all" || (f.state === "toReview" ? p.myReview === null : p.myReview === f.state)),
-  );
+/** The review a sub-tab goes by: the user's own under Review Requested, the PR's under Assignee. */
+export function markFor(pr: ReviewPr, tab: ReviewTab): ReviewMark | null {
+  return tab === "assigned" ? pr.prReview : pr.myReview;
+}
+
+export function applyFilters(prs: ReviewPr[], f: ReviewFilters, tab: ReviewTab = "review"): ReviewPr[] {
+  return prs.filter((p) => {
+    const mark = markFor(p, tab);
+    return (f.repo === null || p.repo === f.repo) && (f.state === "all" || (f.state === "toReview" ? mark === null : mark === f.state));
+  });
+}
+
+/** True when `pr` waits on the user from `tab`: a review to give, or an assigned PR others approved or sent back. */
+function waitsOnUser(pr: ReviewPr, tab: ReviewTab): boolean {
+  if (!pr.reasons.includes(tab)) return false;
+  return tab === "review" ? pr.myReview === null : pr.prReview === "approved" || pr.prReview === "changesRequested";
+}
+
+export function tabCount(prs: ReviewPr[], tab: ReviewTab): number {
+  return prs.filter((p) => waitsOnUser(p, tab)).length;
 }
 
 /** One option per repository in `prs`, sorted, named by the short name unless two share it. */
@@ -83,19 +100,21 @@ export function repoOptions(prs: ReviewPr[]): { value: string; label: string }[]
   return repos.map((r) => ({ value: r, label: label(r) })).sort((a, b) => a.label.localeCompare(b.label));
 }
 
-/** The PRs still waiting on the user: the ones they have not reviewed. */
+/** The PRs waiting on the user from either sub-tab, each counted once. */
 export function waitingCount(prs: ReviewPr[]): number {
-  return prs.filter((p) => p.myReview === null).length;
+  return prs.filter((p) => waitsOnUser(p, "review") || waitsOnUser(p, "assigned")).length;
 }
 
-export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | null = null): HTMLElement {
+export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | null = null, tab: ReviewTab = "review"): HTMLElement {
   const root = el("article", "pr");
   root.dataset.repo = pr.repo;
   root.dataset.number = String(pr.number);
   const head = el("header", "pr__head");
   const name = el("span", "pr__name");
-  if (pr.myReview) {
-    const { modifier, label } = MY_REVIEW[pr.myReview];
+  const mark = markFor(pr, tab);
+  if (mark) {
+    const { modifier, mine, theirs } = MARK[mark];
+    const label = tab === "assigned" ? (pr.prReviewers.length > 0 ? `${theirs} by ${pr.prReviewers.join(", ")}` : theirs) : mine;
     const dot = el("span", `pr__dot pr__dot--${modifier}`);
     dot.title = label;
     dot.setAttribute("role", "img");
@@ -152,13 +171,13 @@ export function renderReviews(
     return root;
   }
   const inTab = state.prs.filter((p) => p.reasons.includes(tab));
-  const prs = applyFilters(inTab, filters);
+  const prs = applyFilters(inTab, filters, tab);
   if (prs.length === 0) {
     root.append(el("div", "reviews__empty", inTab.length === 0 ? "Nothing here." : "No pull requests match these filters."));
     return root;
   }
   const list = el("div", "reviews__list");
-  for (const pr of prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir)));
+  for (const pr of prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir), tab));
   root.append(list);
   return root;
 }
@@ -252,7 +271,7 @@ export function makeReviewsView(host: HTMLElement) {
       const t = b.dataset.reviewTab as ReviewTab;
       b.classList.toggle("tab--active", t === tab);
       b.setAttribute("aria-selected", String(t === tab));
-      const n = waitingCount(state.prs.filter((p) => p.reasons.includes(t)));
+      const n = tabCount(state.prs, t);
       b.querySelector(".tab__count")!.textContent = n > 0 ? String(n) : "";
     }
     body.replaceChildren(renderReviews(state, nowMs, ctx, tab, f));

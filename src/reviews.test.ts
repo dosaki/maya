@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyFilters, makeReviewsView, relatedSession, renderReviews, repoOptions, reviewActionFor, waitingCount } from "./reviews";
+import { applyFilters, makeReviewsView, tabCount, relatedSession, renderReviews, repoOptions, reviewActionFor, waitingCount } from "./reviews";
 import type { Card, ReviewPr } from "./types";
 
 const NOW = Date.parse("2026-09-29T10:00:00Z");
@@ -13,6 +13,8 @@ const pr = (over: Partial<ReviewPr> = {}): ReviewPr => ({
   updatedAt: "2026-09-29T08:00:00Z",
   reasons: ["review"],
   myReview: null,
+  prReview: null,
+  prReviewers: [],
   ...over,
 });
 
@@ -132,7 +134,7 @@ describe("makeReviewsView", () => {
   const prs = [
     pr({ number: 1, repo: "Org/bedrock" }),
     pr({ number: 2, repo: "Org/plugins", myReview: "approved" }),
-    pr({ number: 3, repo: "Org/assigned", reasons: ["assigned"], myReview: "commented" }),
+    pr({ number: 3, repo: "Org/assigned", reasons: ["assigned"], myReview: "commented", prReview: "approved", prReviewers: ["jane"] }),
     pr({ number: 4, repo: "Org/assigned", reasons: ["assigned"] }),
   ];
   const setup = () => {
@@ -158,6 +160,8 @@ describe("makeReviewsView", () => {
     expect(shown(host)).toEqual([1]);
     expect(subTab(host, "review").textContent).toBe("Review Requested1");
     expect(subTab(host, "assigned").textContent).toBe("Assignee1");
+    subTab(host, "assigned").click();
+    expect(host.querySelector<HTMLElement>(".pr[data-number='3'] .pr__dot")?.title).toBe("Approved by jane");
   });
 
   it("shows every state under Assignee, with repositories from that sub-tab only", () => {
@@ -221,9 +225,40 @@ describe("makeReviewsView", () => {
   });
 });
 
-describe("waitingCount", () => {
-  it("counts only the PRs the user has not reviewed", () => {
-    expect(waitingCount([pr(), pr({ number: 2, myReview: "approved" }), pr({ number: 3, myReview: "commented" }), pr({ number: 4, reasons: ["assigned"] })])).toBe(2);
+describe("counts", () => {
+  const prs = [
+    pr({ number: 1 }),
+    pr({ number: 2, myReview: "approved" }),
+    pr({ number: 3, reasons: ["assigned"], prReview: "approved" }),
+    pr({ number: 4, reasons: ["assigned"], prReview: "commented" }),
+    pr({ number: 5, reasons: ["assigned"], prReview: "changesRequested" }),
+    pr({ number: 6, reasons: ["assigned"] }),
+    pr({ number: 7, reasons: ["review", "assigned"], prReview: "approved" }),
+  ];
+
+  it("count, per sub-tab, what waits on the user: reviews to give, and assigned PRs decided by others", () => {
+    expect(tabCount(prs, "review")).toBe(2);
+    expect(tabCount(prs, "assigned")).toBe(3);
+  });
+
+  it("count each PR once for the Pull Requests tab", () => {
+    expect(waitingCount(prs)).toBe(4);
+  });
+});
+
+describe("the Assignee sub-tab", () => {
+  it("shows and filters by the PR's review state, naming the reviewers", () => {
+    const assigned = [
+      pr({ number: 3, reasons: ["assigned"], myReview: "commented", prReview: "approved", prReviewers: ["jane", "bob"] }),
+      pr({ number: 4, reasons: ["assigned"], prReview: "changesRequested", prReviewers: ["al"] }),
+      pr({ number: 5, reasons: ["assigned"] }),
+    ];
+    const el = renderReviews({ prs: assigned, error: null, fetchedAt: NOW }, NOW, undefined, "assigned");
+    const dots = [...el.querySelectorAll<HTMLElement>(".pr")].map((c) => c.querySelector<HTMLElement>(".pr__dot")?.title ?? null);
+    expect(dots).toEqual(["Approved by jane, bob", "Changes requested by al", null]);
+    expect(applyFilters(assigned, { state: "approved", repo: null }, "assigned").map((p) => p.number)).toEqual([3]);
+    expect(applyFilters(assigned, { state: "toReview", repo: null }, "assigned").map((p) => p.number)).toEqual([5]);
+    expect(applyFilters(assigned, { state: "commented", repo: null }, "assigned").map((p) => p.number)).toEqual([]); // the user's own comment does not count here
   });
 });
 

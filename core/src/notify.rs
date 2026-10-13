@@ -60,7 +60,7 @@ impl Notifier {
 }
 
 /// The session name as speech: dashes and hashes become spaces.
-fn spoken_name(name: &str) -> String {
+pub(crate) fn spoken_name(name: &str) -> String {
     let spaced: String = name.chars().map(|c| if c == '-' || c == '_' || c == '#' { ' ' } else { c }).collect();
     spaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -359,14 +359,20 @@ pub fn subtitle_for(card: &Card) -> String {
     }
 }
 
-#[cfg(windows)]
+/// A session's banner: its name, the project and what it waits on.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub fn notify(card: &Card, sound: bool) {
-    crate::notify_win::show_toast(&card.name, &subtitle_for(card), &body_for(card), sound);
+    banner(&card.name, &subtitle_for(card), &body_for(card), sound);
+}
+
+#[cfg(windows)]
+pub fn banner(title: &str, subtitle: &str, body: &str, sound: bool) {
+    crate::notify_win::show_toast(title, subtitle, body, sound);
 }
 
 #[cfg(target_os = "macos")]
-pub fn notify(card: &Card, sound: bool) {
-    let _ = Command::new("osascript").arg("-e").arg(applescript_notify(&card.name, &subtitle_for(card), &body_for(card), sound)).output();
+pub fn banner(title: &str, subtitle: &str, body: &str, sound: bool) {
+    let _ = Command::new("osascript").arg("-e").arg(applescript_notify(title, subtitle, body, sound)).output();
 }
 
 /// `notify-send`'s arguments for a banner from Maya: the app name, the
@@ -522,10 +528,10 @@ fn say_builtin(line: &str, volume: u8) {
 /// A GNOME banner through `notify-send`, with the freedesktop "message"
 /// sound unless the line is being spoken instead.
 #[cfg(target_os = "linux")]
-pub fn notify(card: &Card, sound: bool) {
+pub fn banner(title: &str, subtitle: &str, body: &str, sound: bool) {
     static MISSING: std::sync::Once = std::sync::Once::new();
     let icon = app_icon_path();
-    if let Err(e) = Command::new("notify-send").args(notify_send_args(icon.as_deref(), &card.name, &subtitle_for(card), &body_for(card))).stdin(Stdio::null()).output() {
+    if let Err(e) = Command::new("notify-send").args(notify_send_args(icon.as_deref(), title, subtitle, body)).stdin(Stdio::null()).output() {
         crate::log::missing_once(&MISSING, &e, "notify", "notify-send is not installed, so no banners: install libnotify-bin");
     }
     if sound {

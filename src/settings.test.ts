@@ -207,6 +207,18 @@ describe("renderSettings", () => {
     expect(renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: false, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h).querySelector<HTMLInputElement>("input[name=notify]")!.checked).toBe(false);
   });
 
+  it("has a PR review notification toggle, on unless the config says off", () => {
+    const h = { ...handlers(), onNotifyPrReview: vi.fn() };
+    const model = { hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null };
+    const box = renderSettings(model, h).querySelector<HTMLInputElement>("input[name=notifyPrReview]")!;
+    expect(box.checked).toBe(true);
+    expect(box.closest("label")?.textContent).toContain("assigned to me is approved or needs changes");
+    box.checked = false;
+    box.dispatchEvent(new Event("change"));
+    expect(h.onNotifyPrReview).toHaveBeenCalledWith(false);
+    expect(renderSettings({ ...model, notifyOnPrReview: false }, h).querySelector<HTMLInputElement>("input[name=notifyPrReview]")!.checked).toBe(false);
+  });
+
   it("offers ElevenLabs as a voice, revealing key, voice list and Try when chosen", () => {
     const h = handlers();
     const builtin = renderSettings({ ...voiceBase, voiceProvider: "builtin" }, h);

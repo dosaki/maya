@@ -21,7 +21,7 @@ the right terminal first.
 - Tells you when a session needs you
   - Using built-in notifications, and/or a voice and/or a Dock badge
   - Keeps quiet under a Focus mode, or when you mute her from the top bar
-- Lists the pull requests that ask for your review and the ones assigned to you, with a dot for your own review (green approved, blue commented, red changes requested), and reviews them in one click
+- Lists the pull requests that ask for your review and the ones assigned to you, filtered by state and repository, with a dot for the review (green approved, blue commented, red changes requested): yours on review requests, the reviewers' on PRs assigned to you; reviews them in one click, and tells you when a PR assigned to you is approved or needs changes
 - Does what you tell her by voice, through the agent you choose: "Maya, tell <session> to do <thing>"
 - Resumes old sessions of any of them, and reviews pull requests with the agent you chose, on a prompt you can edit in Settings
 - Shows the sessions of all your machines on one board.

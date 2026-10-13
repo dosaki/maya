@@ -78,8 +78,14 @@ export interface ReviewPr {
   updatedAt: string;
   reasons: ("review" | "assigned")[];
   /** The user's own review; null when not reviewed yet, or their own PR. */
-  myReview: "approved" | "commented" | "changesRequested" | null;
+  myReview: ReviewMark | null;
+  /** What other people (not bots, nor the author) decided on it; null before any review. */
+  prReview: ReviewMark | null;
+  /** Who gave `prReview`. */
+  prReviewers: string[];
 }
+
+export type ReviewMark = "approved" | "commented" | "changesRequested";
 
 export interface ReviewState {
   prs: ReviewPr[];

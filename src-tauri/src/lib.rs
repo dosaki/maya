@@ -130,6 +130,7 @@ pub struct AppState {
     pub store: Mutex<Store>,
     pub notifier: Mutex<notify::Notifier>,
     pub reviews: Mutex<ReviewState>,
+    pub pr_notifier: Mutex<reviews::PrNotifier>,
     pub voice: Mutex<VoiceState>,
     /// Lock order: `network`, then the server's own mutex, then `store`.
     pub network: Mutex<net::NetworkState>,
@@ -213,10 +214,12 @@ pub struct ReviewState {
 fn poll_reviews(app: &AppHandle) {
     let result = reviews::fetch();
     let state = app.state::<AppState>();
+    let mut decided = Vec::new();
     let snapshot = {
         let mut r = state.reviews.lock().unwrap();
         match result {
             Ok(prs) => {
+                decided = state.pr_notifier.lock().unwrap().take_changes(&prs);
                 r.prs = prs;
                 r.error = None;
                 r.fetched_at = Some(now_ms());
@@ -228,7 +231,46 @@ fn poll_reviews(app: &AppHandle) {
         }
         r.clone()
     };
+    // Announced with no lock held: the banner and the voice take a moment.
+    announce_pr_reviews(app, &decided);
     let _ = app.emit("reviews", &snapshot);
+}
+
+/// Banners (and the spoken line) for assigned PRs that were just approved
+/// or had changes requested, under the same rules as a session's ask:
+/// quiet under a Focus mode, silent when muted, and left to the main when
+/// this Maya is an assistant.
+fn announce_pr_reviews(app: &AppHandle, decided: &[reviews::ReviewPr]) {
+    if decided.is_empty() {
+        return;
+    }
+    let (wanted, speak, muted, eleven_voice, assistant, volume) = {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        let c = &store.config;
+        let eleven = if c.speak_notifications && !c.muted { eleven_wanted(c, store.claude_dir()) } else { None };
+        (c.notify_on_pr_review, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant, c.voice_loudness())
+    };
+    if !wanted || assistant {
+        return;
+    }
+    let focus = notify::focus_active();
+    if focus {
+        log::line("app", "focus mode is on: pull request announcements stay silent");
+        return;
+    }
+    let (speak, banner_sound) = announcement(speak, muted, focus);
+    let eleven = if speak { eleven_settings(eleven_voice) } else { None };
+    for pr in decided {
+        let (title, subtitle, body) = reviews::pr_banner(pr);
+        log::line("app", format!("pull request {title}: {subtitle}"));
+        notify::banner(&title, &subtitle, &body, banner_sound);
+        if speak {
+            if let Some(line) = reviews::pr_spoken_line(pr) {
+                notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, eleven.clone()) });
+            }
+        }
+    }
 }
 
 /// The lines kept for the Debug tab, oldest first.
@@ -1105,7 +1147,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()) })
         .manage(updater::Pending::default())
         .invoke_handler(tauri::generate_handler![
             set_muted,

@@ -62,6 +62,10 @@ pub struct Config {
     /// phone; the desktop announces finished turns under `notify_on_awaiting`.
     #[serde(default = "default_true")]
     pub notify_on_completed: bool,
+    /// Post a notification when a PR assigned to the user is approved or
+    /// has changes requested.
+    #[serde(default = "default_true")]
+    pub notify_on_pr_review: bool,
     /// Speak "<name> needs a decision" / "<name> is finished" with the system
     /// voice instead of playing the notification sound.
     #[serde(default = "default_true")]
@@ -163,6 +167,7 @@ impl Default for Config {
             projects_dir: None,
             notify_on_awaiting: true,
             notify_on_completed: true,
+            notify_on_pr_review: true,
             speak_notifications: true,
             muted: false,
             voice_provider: Default::default(),
@@ -518,6 +523,15 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "network": {"assistants": [{"id": "x", "name": "laptop", "hostname": "h", "platform": "macos", "token": "t"}]}}"#).unwrap();
         assert_eq!(c.network.assistants[0].address, "");
         assert_eq!(c.network.assistants[0].last_seen, None);
+    }
+
+    #[test]
+    fn notify_on_pr_review_defaults_on_and_reads_from_older_files() {
+        assert!(Config::default().notify_on_pr_review);
+        let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 30}"#).unwrap();
+        assert!(older.notify_on_pr_review, "a file written before the field reads as on");
+        let text = serde_json::to_string(&Config { notify_on_pr_review: false, ..Config::default() }).unwrap();
+        assert!(text.contains(r#""notifyOnPrReview":false"#));
     }
 
     #[test]

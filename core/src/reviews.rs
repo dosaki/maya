@@ -12,10 +12,10 @@ pub enum Reason {
     Assigned,
 }
 
-/// The user's own review of a PR: a standing verdict, else a comment.
+/// Where a review stands: a standing verdict, else a comment.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum MyReview {
+pub enum ReviewMark {
     Approved,
     Commented,
     ChangesRequested,
@@ -35,13 +35,18 @@ pub struct ReviewPr {
     /// ISO 8601, as GitHub gives it; sorts lexically.
     pub updated_at: String,
     pub reasons: Vec<Reason>,
-    /// None when the user has not reviewed it, or wrote it.
-    pub my_review: Option<MyReview>,
+    /// The user's own review; None when they have not reviewed it, or wrote it.
+    pub my_review: Option<ReviewMark>,
+    /// What the other reviewers (people, not bots, nor the author) decided:
+    /// changes requested by anyone wins, then an approval, then a comment.
+    pub pr_review: Option<ReviewMark>,
+    /// Who gave `pr_review`.
+    pub pr_reviewers: Vec<String>,
 }
 
 /// Three searches in one call: PRs asking for the user's review, open PRs
 /// they reviewed (GitHub drops the request once they do), and PRs assigned
-/// to them; each with the reviews needed for `MyReview`.
+/// to them; each with the reviews needed for `ReviewMark`.
 pub const QUERY: &str = r#"query {
   viewer { login }
   requested: search(query: "is:pr is:open review-requested:@me", type: ISSUE, first: 50) { nodes { ...pr } }
@@ -52,8 +57,8 @@ fragment pr on PullRequest {
   number title url isDraft updatedAt
   repository { nameWithOwner }
   author { login }
-  latestOpinionatedReviews(first: 100) { nodes { state author { login } } }
-  latestReviews(first: 100) { nodes { state author { login } } }
+  latestOpinionatedReviews(first: 100) { nodes { state author { __typename login } } }
+  latestReviews(first: 100) { nodes { state author { __typename login } } }
 }"#;
 
 /// The state of `login`'s review in a `{nodes: [{state, author}]}` list.
@@ -61,19 +66,49 @@ fn review_state<'a>(reviews: &'a serde_json::Value, login: &str) -> Option<&'a s
     reviews["nodes"].as_array()?.iter().find(|r| r["author"]["login"].as_str().is_some_and(|l| l.eq_ignore_ascii_case(login)))?["state"].as_str()
 }
 
-fn my_review(p: &serde_json::Value, login: &str) -> Option<MyReview> {
+fn my_review(p: &serde_json::Value, login: &str) -> Option<ReviewMark> {
     if p["author"]["login"].as_str().is_some_and(|a| a.eq_ignore_ascii_case(login)) {
         return None;
     }
     match review_state(&p["latestOpinionatedReviews"], login) {
-        Some("APPROVED") => return Some(MyReview::Approved),
-        Some("CHANGES_REQUESTED") => return Some(MyReview::ChangesRequested),
+        Some("APPROVED") => return Some(ReviewMark::Approved),
+        Some("CHANGES_REQUESTED") => return Some(ReviewMark::ChangesRequested),
         _ => {}
     }
-    (review_state(&p["latestReviews"], login) == Some("COMMENTED")).then_some(MyReview::Commented)
+    (review_state(&p["latestReviews"], login) == Some("COMMENTED")).then_some(ReviewMark::Commented)
+}
+
+/// The PR's review state from people other than the user and the author.
+fn pr_review(p: &serde_json::Value, login: &str) -> (Option<ReviewMark>, Vec<String>) {
+    let author = p["author"]["login"].as_str().unwrap_or("");
+    let by = |key: &str, state: &str| -> Vec<String> {
+        p[key]["nodes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|r| r["state"] == state && r["author"]["__typename"] != "Bot")
+                    .filter_map(|r| r["author"]["login"].as_str())
+                    .filter(|l| !l.eq_ignore_ascii_case(login) && !l.eq_ignore_ascii_case(author) && !l.ends_with("[bot]"))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for (mark, key, state) in [
+        (ReviewMark::ChangesRequested, "latestOpinionatedReviews", "CHANGES_REQUESTED"),
+        (ReviewMark::Approved, "latestOpinionatedReviews", "APPROVED"),
+        (ReviewMark::Commented, "latestReviews", "COMMENTED"),
+    ] {
+        let who = by(key, state);
+        if !who.is_empty() {
+            return (Some(mark), who);
+        }
+    }
+    (None, vec![])
 }
 
 fn parse_node(p: &serde_json::Value, reason: Reason, login: &str) -> Option<ReviewPr> {
+    let (pr_review, pr_reviewers) = pr_review(p, login);
     Some(ReviewPr {
         number: p["number"].as_u64()?,
         repo: p["repository"]["nameWithOwner"].as_str()?.to_string(),
@@ -84,6 +119,8 @@ fn parse_node(p: &serde_json::Value, reason: Reason, login: &str) -> Option<Revi
         updated_at: p["updatedAt"].as_str().unwrap_or("").to_string(),
         reasons: vec![reason],
         my_review: my_review(p, login),
+        pr_review,
+        pr_reviewers,
     })
 }
 
@@ -132,6 +169,56 @@ pub fn fetch() -> Result<Vec<ReviewPr>, String> {
         return Err(format!("gh failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     parse_graphql(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Remembers the review state of each assigned PR so a turn to approved or
+/// changes requested is announced once. The first poll only primes it:
+/// what was already decided when Maya starts is not news.
+#[derive(Default)]
+pub struct PrNotifier {
+    last: std::collections::HashMap<String, Option<ReviewMark>>,
+    primed: bool,
+}
+
+impl PrNotifier {
+    /// The assigned PRs that became approved or changes requested since the last call.
+    pub fn take_changes(&mut self, prs: &[ReviewPr]) -> Vec<ReviewPr> {
+        let mut out = Vec::new();
+        for p in prs.iter().filter(|p| p.reasons.contains(&Reason::Assigned)) {
+            let before = self.last.insert(p.url.clone(), p.pr_review).flatten();
+            if self.primed && matches!(p.pr_review, Some(ReviewMark::Approved | ReviewMark::ChangesRequested)) && p.pr_review != before {
+                out.push(p.clone());
+            }
+        }
+        self.primed = true;
+        out
+    }
+}
+
+fn short_title(pr: &ReviewPr) -> String {
+    format!("{} #{}", pr.repo.rsplit('/').next().unwrap_or(&pr.repo), pr.number)
+}
+
+/// A PR review banner: `repo #n`, `Approved by jane`, the PR's title.
+pub fn pr_banner(pr: &ReviewPr) -> (String, String, String) {
+    let what = match pr.pr_review {
+        Some(ReviewMark::Approved) => "Approved",
+        Some(ReviewMark::ChangesRequested) => "Changes requested",
+        Some(ReviewMark::Commented) => "Commented",
+        None => "Reviewed",
+    };
+    let subtitle = if pr.pr_reviewers.is_empty() { what.to_string() } else { format!("{what} by {}", pr.pr_reviewers.join(", ")) };
+    (short_title(pr), subtitle, pr.title.trim().to_string())
+}
+
+/// What Maya says when an assigned PR is approved or needs changes.
+pub fn pr_spoken_line(pr: &ReviewPr) -> Option<String> {
+    let name = crate::notify::spoken_name(&short_title(pr));
+    match pr.pr_review {
+        Some(ReviewMark::Approved) => Some(format!("{name} was approved")),
+        Some(ReviewMark::ChangesRequested) => Some(format!("{name} needs changes")),
+        _ => None,
+    }
 }
 
 /// True when a git remote URL (SSH or HTTPS) points at `owner/name` on GitHub.
@@ -253,7 +340,11 @@ mod tests {
     }
 
     fn review(login: &str, state: &str) -> String {
-        format!(r#"{{"state":"{state}","author":{{"login":"{login}"}}}}"#)
+        format!(r#"{{"state":"{state}","author":{{"__typename":"User","login":"{login}"}}}}"#)
+    }
+
+    fn bot(login: &str, state: &str) -> String {
+        format!(r#"{{"state":"{state}","author":{{"__typename":"Bot","login":"{login}"}}}}"#)
     }
 
     fn response(requested: &[String], reviewed: &[String], assigned: &[String]) -> String {
@@ -287,7 +378,7 @@ mod tests {
         let done = node(9, "Org/x", "jane", "2026-09-28T10:00:00Z", &review("me", "APPROVED"), &review("me", "APPROVED"));
         let prs = parse_graphql(&response(&[], &[done], &[])).unwrap();
         assert_eq!(prs[0].reasons, vec![Reason::Review]);
-        assert_eq!(prs[0].my_review, Some(MyReview::Approved), "logins match case-insensitively");
+        assert_eq!(prs[0].my_review, Some(ReviewMark::Approved), "logins match case-insensitively");
     }
 
     #[test]
@@ -296,11 +387,11 @@ mod tests {
             let n = node(1, "o/r", "jane", "", opinionated, latest);
             parse_graphql(&response(&[n], &[], &[])).unwrap()[0].my_review
         };
-        assert_eq!(v(&review("Me", "APPROVED"), &review("Me", "COMMENTED")), Some(MyReview::Approved));
-        assert_eq!(v(&review("Me", "CHANGES_REQUESTED"), &review("Me", "CHANGES_REQUESTED")), Some(MyReview::ChangesRequested));
-        assert_eq!(v("", &review("Me", "COMMENTED")), Some(MyReview::Commented));
+        assert_eq!(v(&review("Me", "APPROVED"), &review("Me", "COMMENTED")), Some(ReviewMark::Approved));
+        assert_eq!(v(&review("Me", "CHANGES_REQUESTED"), &review("Me", "CHANGES_REQUESTED")), Some(ReviewMark::ChangesRequested));
+        assert_eq!(v("", &review("Me", "COMMENTED")), Some(ReviewMark::Commented));
         assert_eq!(v(&review("Me", "DISMISSED"), &review("Me", "DISMISSED")), None, "a dismissed verdict is no review");
-        assert_eq!(v(&review("Me", "DISMISSED"), &review("Me", "COMMENTED")), Some(MyReview::Commented));
+        assert_eq!(v(&review("Me", "DISMISSED"), &review("Me", "COMMENTED")), Some(ReviewMark::Commented));
         let others = format!("{},{}", review("copilot-pull-request-reviewer", "COMMENTED"), review("bob", "APPROVED"));
         assert_eq!(v(&review("bob", "APPROVED"), &others), None, "someone else's review is not the user's");
     }
@@ -376,8 +467,67 @@ mod tests {
         assert_eq!(session_name("Org/bedrock", 451), "review bedrock #451");
     }
 
+    /// The PR's review state as seen by viewer `Me` on a PR by `author`.
+    fn pr_state(author: &str, opinionated: &[String], latest: &[String]) -> (Option<ReviewMark>, Vec<String>) {
+        let n = node(1, "o/r", author, "", &opinionated.join(","), &latest.join(","));
+        let p = parse_graphql(&response(&[], &[], &[n])).unwrap().remove(0);
+        (p.pr_review, p.pr_reviewers)
+    }
+
+    #[test]
+    fn the_prs_review_state_comes_from_other_people_changes_first() {
+        let none: Vec<String> = vec![];
+        assert_eq!(pr_state("me", &[review("jane", "APPROVED")], &[review("jane", "APPROVED")]), (Some(ReviewMark::Approved), vec!["jane".into()]));
+        let split = [review("jane", "APPROVED"), review("bob", "CHANGES_REQUESTED"), review("al", "CHANGES_REQUESTED")];
+        assert_eq!(pr_state("me", &split, &split), (Some(ReviewMark::ChangesRequested), vec!["bob".into(), "al".into()]), "changes requested wins");
+        assert_eq!(pr_state("me", &[], &[review("jane", "COMMENTED")]), (Some(ReviewMark::Commented), vec!["jane".into()]));
+        assert_eq!(pr_state("me", &[review("jane", "DISMISSED")], &[review("jane", "DISMISSED")]), (None, vec![]), "a dismissed verdict counts for nothing");
+        assert_eq!(pr_state("me", &none, &none), (None, vec![]));
+    }
+
+    #[test]
+    fn the_prs_review_state_leaves_out_bots_the_user_and_the_author() {
+        let bots = [bot("copilot-pull-request-reviewer", "COMMENTED"), bot("dependabot", "APPROVED")];
+        assert_eq!(pr_state("me", &bots, &bots), (None, vec![]), "Copilot comments on every PR");
+        let mine = [review("Me", "APPROVED")];
+        assert_eq!(pr_state("jane", &mine, &mine), (None, vec![]), "the user's own review is my_review, not the PR's");
+        assert_eq!(pr_state("jane", &[], &[review("jane", "COMMENTED")]), (None, vec![]), "the author replying to threads is not a review");
+    }
+
+    fn assigned(number: u64, mark: Option<ReviewMark>) -> ReviewPr {
+        ReviewPr { number, url: format!("https://github.com/o/r/pull/{number}"), reasons: vec![Reason::Assigned], pr_review: mark, ..pr() }
+    }
+
+    #[test]
+    fn the_notifier_announces_an_assigned_pr_turning_approved_or_changes_requested_once() {
+        use ReviewMark::*;
+        let mut n = PrNotifier::default();
+        let nums = |v: Vec<ReviewPr>| v.iter().map(|p| p.number).collect::<Vec<_>>();
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(Approved)), assigned(2, None)])), Vec::<u64>::new(), "the first poll only primes");
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(Approved)), assigned(2, None)])), Vec::<u64>::new(), "no change, no news");
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(Approved)), assigned(2, Some(Commented))])), Vec::<u64>::new(), "a comment is not announced");
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(ChangesRequested)), assigned(2, Some(Approved))])), vec![1, 2]);
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(ChangesRequested)), assigned(2, Some(Approved))])), Vec::<u64>::new(), "once each");
+        assert_eq!(nums(n.take_changes(&[assigned(2, Some(Approved))])), Vec::<u64>::new());
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(ChangesRequested)), assigned(2, Some(Approved))])), Vec::<u64>::new(), "a PR that left the list and came back unchanged is not news");
+        assert_eq!(nums(n.take_changes(&[assigned(3, Some(Approved))])), vec![3], "newly assigned and already approved is news");
+        let requested_only = ReviewPr { reasons: vec![Reason::Review], ..assigned(4, Some(Approved)) };
+        assert_eq!(nums(n.take_changes(&[requested_only])), Vec::<u64>::new(), "only assigned PRs are announced");
+    }
+
+    #[test]
+    fn a_pr_review_banner_and_line_name_the_pr_and_the_reviewers() {
+        let p = ReviewPr { pr_review: Some(ReviewMark::Approved), pr_reviewers: vec!["jane".into()], ..pr() };
+        assert_eq!(pr_banner(&p), ("bedrock #451".into(), "Approved by jane".into(), "docs: notes".into()));
+        assert_eq!(pr_spoken_line(&p).as_deref(), Some("bedrock 451 was approved"));
+        let p = ReviewPr { pr_review: Some(ReviewMark::ChangesRequested), pr_reviewers: vec!["bob".into(), "al".into()], ..pr() };
+        assert_eq!(pr_banner(&p).1, "Changes requested by bob, al");
+        assert_eq!(pr_spoken_line(&p).as_deref(), Some("bedrock 451 needs changes"));
+        assert_eq!(pr_spoken_line(&ReviewPr { pr_review: Some(ReviewMark::Commented), ..pr() }), None);
+    }
+
     fn pr() -> ReviewPr {
-        ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None }
+        ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None, pr_review: None, pr_reviewers: vec![] }
     }
 
     #[test]
