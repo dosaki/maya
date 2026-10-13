@@ -75,6 +75,8 @@ export interface SettingsModel {
   projectsDir: string;
   clonesDir: string;
   notifyOnAwaiting: boolean;
+  /** Banner when a PR assigned to the user is approved or needs changes; absent reads as on. */
+  notifyOnPrReview?: boolean;
   speakNotifications: boolean;
   /** False when Maya cannot tell whether a Focus mode is on (macOS without Full Disk Access). */
   focusVisible?: boolean;
@@ -158,6 +160,7 @@ export interface SettingsHandlers {
   onTimeout(minutes: number): void;
   onProjectsDir(path: string): void;
   onNotify(enabled: boolean): void;
+  onNotifyPrReview?(enabled: boolean): void;
   onClonesDir(path: string): void;
   onSpeak(enabled: boolean): void;
   onFullDiskAccess?(): void;
@@ -210,6 +213,7 @@ interface ConfigJson {
   projectsDir?: string | null;
   clonesDir?: string | null;
   notifyOnAwaiting: boolean;
+  notifyOnPrReview?: boolean;
   speakNotifications: boolean;
   voiceProvider: VoiceProvider;
   elevenlabsVoiceId?: string | null;
@@ -539,6 +543,16 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   notifyBox.addEventListener("change", () => h.onNotify(notifyBox.checked));
   notifyLabel.append(notifyBox, document.createTextNode(" Notify me when a session awaits a decision"));
   notifications.append(notifyLabel);
+
+  const prLabel = document.createElement("label");
+  prLabel.className = "settings__check";
+  const prBox = document.createElement("input");
+  prBox.type = "checkbox";
+  prBox.name = "notifyPrReview";
+  prBox.checked = model.notifyOnPrReview !== false;
+  prBox.addEventListener("change", () => h.onNotifyPrReview?.(prBox.checked));
+  prLabel.append(prBox, document.createTextNode(" Notify me when a PR assigned to me is approved or needs changes"));
+  notifications.append(prLabel);
 
   const speakLabel = document.createElement("label");
   speakLabel.className = "settings__check";
@@ -1095,6 +1109,7 @@ export async function initSettings(): Promise<void> {
     model.projectsDir = c.projectsDir ?? "";
     model.clonesDir = c.clonesDir ?? "";
     model.notifyOnAwaiting = c.notifyOnAwaiting;
+    model.notifyOnPrReview = c.notifyOnPrReview !== false;
     model.speakNotifications = c.speakNotifications;
     model.voiceProvider = c.voiceProvider;
     model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
@@ -1170,6 +1185,7 @@ export async function initSettings(): Promise<void> {
     onTimeout: (minutes) => void run(() => saveConfig({ completedTimeoutMinutes: minutes })),
     onProjectsDir: (path) => void run(() => saveConfig({ projectsDir: path || null })),
     onNotify: (enabled) => void run(() => saveConfig({ notifyOnAwaiting: enabled })),
+    onNotifyPrReview: (enabled) => void run(() => saveConfig({ notifyOnPrReview: enabled })),
     onClonesDir: (path) => void run(() => saveConfig({ clonesDir: path || null })),
     onSpeak: (enabled) => void run(() => saveConfig({ speakNotifications: enabled })),
     onFullDiskAccess: () => void run(() => invoke<void>("open_full_disk_access")),

@@ -1,6 +1,6 @@
 import { formatAge } from "./format";
 import { iconButton } from "./icons";
-import { STATE_LABEL, type Card, type ReviewPr, type ReviewState } from "./types";
+import { STATE_LABEL, type Card, type ReviewMark, type ReviewPr, type ReviewState } from "./types";
 
 export type ReviewAction = { kind: "open-pr" | "review"; repo: string; number: number } | { kind: "terminal"; repo: string; number: number; pid: number };
 
@@ -34,18 +34,97 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return n;
 }
 
-const REASON_LABEL: Record<ReviewPr["reasons"][number], string> = { review: "review requested", assigned: "assigned" };
+/** The dot's colour, and its label for the user's own review and for other reviewers'. */
+const MARK: Record<ReviewMark, { modifier: string; mine: string; theirs: string }> = {
+  approved: { modifier: "approved", mine: "You approved", theirs: "Approved" },
+  commented: { modifier: "commented", mine: "You commented", theirs: "Commented" },
+  changesRequested: { modifier: "changes", mine: "You requested changes", theirs: "Changes requested" },
+};
 
-export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | null = null): HTMLElement {
+/** The pane's sub-tabs: why a PR is on the list. */
+export type ReviewTab = ReviewPr["reasons"][number];
+
+export type StateFilter = "all" | "toReview" | ReviewMark;
+
+export interface ReviewFilters {
+  state: StateFilter;
+  /** `owner/name`, or null for every repository. */
+  repo: string | null;
+}
+
+const SUB_TABS: { tab: ReviewTab; label: string }[] = [
+  { tab: "review", label: "Review Requested" },
+  { tab: "assigned", label: "Assignee" },
+];
+
+const STATE_OPTIONS: { value: StateFilter; label: string }[] = [
+  { value: "all", label: "All States" },
+  { value: "approved", label: "Approved" },
+  { value: "commented", label: "Commented" },
+  { value: "changesRequested", label: "Changes requested" },
+  { value: "toReview", label: "To review" },
+];
+
+/** Review Requested opens on what is left to review; Assignee on everything. */
+const DEFAULT_FILTERS: Record<ReviewTab, ReviewFilters> = { review: { state: "toReview", repo: null }, assigned: { state: "all", repo: null } };
+
+const TAB_KEY = "maya.reviewsTab";
+
+/** The review a sub-tab goes by: the user's own under Review Requested, the PR's under Assignee. */
+export function markFor(pr: ReviewPr, tab: ReviewTab): ReviewMark | null {
+  return tab === "assigned" ? pr.prReview : pr.myReview;
+}
+
+export function applyFilters(prs: ReviewPr[], f: ReviewFilters, tab: ReviewTab = "review"): ReviewPr[] {
+  return prs.filter((p) => {
+    const mark = markFor(p, tab);
+    return (f.repo === null || p.repo === f.repo) && (f.state === "all" || (f.state === "toReview" ? mark === null : mark === f.state));
+  });
+}
+
+/** True when `pr` waits on the user from `tab`: a review to give, or an assigned PR others approved or sent back. */
+function waitsOnUser(pr: ReviewPr, tab: ReviewTab): boolean {
+  if (!pr.reasons.includes(tab)) return false;
+  return tab === "review" ? pr.myReview === null : pr.prReview === "approved" || pr.prReview === "changesRequested";
+}
+
+export function tabCount(prs: ReviewPr[], tab: ReviewTab): number {
+  return prs.filter((p) => waitsOnUser(p, tab)).length;
+}
+
+/** One option per repository in `prs`, sorted, named by the short name unless two share it. */
+export function repoOptions(prs: ReviewPr[]): { value: string; label: string }[] {
+  const repos = [...new Set(prs.map((p) => p.repo))].sort((a, b) => a.localeCompare(b));
+  const short = (r: string) => r.split("/").pop() ?? r;
+  const label = (r: string) => (repos.filter((o) => short(o) === short(r)).length > 1 ? r : short(r));
+  return repos.map((r) => ({ value: r, label: label(r) })).sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** The PRs waiting on the user from either sub-tab, each counted once. */
+export function waitingCount(prs: ReviewPr[]): number {
+  return prs.filter((p) => waitsOnUser(p, "review") || waitsOnUser(p, "assigned")).length;
+}
+
+export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | null = null, tab: ReviewTab = "review"): HTMLElement {
   const root = el("article", "pr");
   root.dataset.repo = pr.repo;
   root.dataset.number = String(pr.number);
   const head = el("header", "pr__head");
-  head.append(el("span", "pr__repo", `${pr.repo.split("/").pop() ?? pr.repo} #${pr.number}`));
+  const name = el("span", "pr__name");
+  const mark = markFor(pr, tab);
+  if (mark) {
+    const { modifier, mine, theirs } = MARK[mark];
+    const label = tab === "assigned" ? (pr.prReviewers.length > 0 ? `${theirs} by ${pr.prReviewers.join(", ")}` : theirs) : mine;
+    const dot = el("span", `pr__dot pr__dot--${modifier}`);
+    dot.title = label;
+    dot.setAttribute("role", "img");
+    dot.setAttribute("aria-label", label);
+    name.append(dot);
+  }
+  name.append(el("span", "pr__repo", `${pr.repo.split("/").pop() ?? pr.repo} #${pr.number}`));
   const chips = el("span", "pr__chips");
   if (pr.isDraft) chips.append(el("span", "pr__chip pr__chip--draft", "draft"));
-  for (const r of pr.reasons) chips.append(el("span", "pr__chip", REASON_LABEL[r] ?? r));
-  head.append(chips);
+  head.append(name, chips);
   root.append(head, el("div", "pr__title", pr.title));
   const updated = Date.parse(pr.updatedAt);
   root.append(el("div", "pr__meta", `${pr.author} · updated ${Number.isFinite(updated) ? formatAge(updated, nowMs) : "?"} ago · ${pr.repo}`));
@@ -74,17 +153,140 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
   return root;
 }
 
-export function renderReviews(state: ReviewState, nowMs: number, ctx: ReviewContext = { cards: [], clonesDir: null }): HTMLElement {
+/**
+ * The cards of one sub-tab under its filters: the error from the last fetch
+ * if it failed, then the cards or a line saying why there are none.
+ */
+export function renderReviews(
+  state: ReviewState,
+  nowMs: number,
+  ctx: ReviewContext = { cards: [], clonesDir: null },
+  tab: ReviewTab = "review",
+  filters: ReviewFilters = { state: "all", repo: null },
+): HTMLElement {
   const root = el("section", "reviews");
   if (state.error) root.append(el("div", "reviews__error", `GitHub check failed: ${state.error}`));
   if (state.prs.length === 0) {
     root.append(el("div", "reviews__empty", state.fetchedAt === null ? "Checking GitHub…" : "Nothing waiting on you."));
     return root;
   }
+  const inTab = state.prs.filter((p) => p.reasons.includes(tab));
+  const prs = applyFilters(inTab, filters, tab);
+  if (prs.length === 0) {
+    const defaults = DEFAULT_FILTERS[tab];
+    const unfiltered = filters.state === defaults.state && filters.repo === defaults.repo;
+    root.append(el("div", "reviews__empty", inTab.length === 0 ? "Nothing here." : unfiltered && tab === "review" ? "Nothing waiting on you." : "No pull requests match these filters."));
+    return root;
+  }
   const list = el("div", "reviews__list");
-  for (const pr of state.prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir)));
+  for (const pr of prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir), tab));
   root.append(list);
   return root;
+}
+
+function storedTab(): ReviewTab {
+  try {
+    return localStorage.getItem(TAB_KEY) === "assigned" ? "assigned" : "review";
+  } catch {
+    return "review";
+  }
+}
+
+function fillSelect(sel: HTMLSelectElement, options: { value: string; label: string }[]): void {
+  sel.replaceChildren(
+    ...options.map(({ value, label }) => {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = label;
+      return o;
+    }),
+  );
+}
+
+/**
+ * The Pull Requests pane in `host`: the sub-tabs and the State and
+ * Repository filters, built once so an open dropdown survives the repaints,
+ * over the list that `update` redraws. Each sub-tab keeps its own filters
+ * for the life of the window; only the sub-tab is remembered across starts.
+ */
+export function makeReviewsView(host: HTMLElement) {
+  let tab = storedTab();
+  const filters: Record<ReviewTab, ReviewFilters> = { review: { ...DEFAULT_FILTERS.review }, assigned: { ...DEFAULT_FILTERS.assigned } };
+  let state: ReviewState = { prs: [], error: null, fetchedAt: null };
+  let nowMs = Date.now();
+  let ctx: ReviewContext = { cards: [], clonesDir: null };
+  let repoKey: string | null = null;
+
+  const bar = el("div", "reviews__bar");
+  const tabs = el("div", "reviews__tabs");
+  tabs.setAttribute("role", "tablist");
+  const tabButtons = SUB_TABS.map(({ tab: t, label }) => {
+    const b = el("button", "tab", label);
+    b.type = "button";
+    b.setAttribute("role", "tab");
+    b.dataset.reviewTab = t;
+    b.append(el("span", "tab__count"));
+    b.addEventListener("click", () => {
+      tab = t;
+      try {
+        localStorage.setItem(TAB_KEY, t);
+      } catch {
+        /* private mode: nothing to remember */
+      }
+      paint();
+    });
+    return b;
+  });
+  tabs.append(...tabButtons);
+  const stateSel = el("select", "reviews__filter");
+  stateSel.name = "state";
+  stateSel.setAttribute("aria-label", "State");
+  fillSelect(stateSel, STATE_OPTIONS);
+  stateSel.addEventListener("change", () => {
+    filters[tab].state = stateSel.value as StateFilter;
+    paint();
+  });
+  const repoSel = el("select", "reviews__filter");
+  repoSel.name = "repo";
+  repoSel.setAttribute("aria-label", "Repository");
+  repoSel.addEventListener("change", () => {
+    filters[tab].repo = repoSel.value || null;
+    paint();
+  });
+  bar.append(tabs, el("span", "tabs__spacer"), stateSel, repoSel);
+  const body = el("div", "reviews__body");
+  host.replaceChildren(bar, body);
+
+  function paint(): void {
+    const inTab = state.prs.filter((p) => p.reasons.includes(tab));
+    const repos = repoOptions(inTab);
+    const f = filters[tab];
+    if (f.repo !== null && !repos.some((r) => r.value === f.repo)) f.repo = null;
+    const key = `${tab}\n${repos.map((r) => `${r.value}=${r.label}`).join("\n")}`;
+    if (key !== repoKey) {
+      fillSelect(repoSel, [{ value: "", label: "All Repositories" }, ...repos]);
+      repoKey = key;
+    }
+    repoSel.value = f.repo ?? "";
+    stateSel.value = f.state;
+    for (const b of tabButtons) {
+      const t = b.dataset.reviewTab as ReviewTab;
+      b.classList.toggle("tab--active", t === tab);
+      b.setAttribute("aria-selected", String(t === tab));
+      const n = tabCount(state.prs, t);
+      b.querySelector(".tab__count")!.textContent = n > 0 ? String(n) : "";
+    }
+    body.replaceChildren(renderReviews(state, nowMs, ctx, tab, f));
+  }
+
+  return {
+    update(next: ReviewState, now: number, context: ReviewContext = { cards: [], clonesDir: null }): void {
+      state = next;
+      nowMs = now;
+      ctx = context;
+      paint();
+    },
+  };
 }
 
 /** What a click in the Pull Requests pane means: one of the two buttons, or nothing. */
