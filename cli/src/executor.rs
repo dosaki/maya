@@ -135,6 +135,9 @@ mod tests {
         fn type_line(&self, _: &str, _: &str) -> Result<(), String> {
             unreachable!()
         }
+        fn type_reply(&self, _: &str, _: &[String]) -> Result<(), (usize, String)> {
+            unreachable!()
+        }
         fn focus(&self, _: &str) -> Result<(), String> {
             unreachable!()
         }

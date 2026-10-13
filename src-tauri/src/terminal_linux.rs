@@ -138,6 +138,10 @@ impl Terminal for LinuxTerminal {
         self.tmux.type_line(tty, text)
     }
 
+    fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
+        self.tmux.type_reply(tty, lines)
+    }
+
     fn focus(&self, tty: &str) -> Result<(), String> {
         let label = self.tmux.name_for_tty(tty).ok_or(NOT_IN_TMUX)?;
         if self.activate(&label) {

@@ -396,8 +396,10 @@ write and drives them through their own interfaces.
   as the fallback (a turn that ends in a question is "Awaiting Decision").
 - **Replies** are typed into the session's terminal, so the agent takes
   them as yours: a Claude Code session can be approved from Maya or the
-  phone. A multi-line reply to Claude Code is typed line by line with its
-  `\` continuation. When Maya cannot type into a Claude Code session (one
+  phone. A multi-line reply to Claude Code is typed line by line, with
+  Alt+Enter between the lines and Enter sent as an escape sequence, so
+  Claude Code never mistakes a long line's Enter for text. When Maya
+  cannot type into a Claude Code session (one
   in iTerm, VS Code or Ghostty, or over SSH outside tmux) it posts the
   reply to the session's inbox instead (a Unix socket on macOS and Linux,
   a named pipe on Windows), where Claude takes it as a message from

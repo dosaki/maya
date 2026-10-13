@@ -130,7 +130,7 @@ enum TypeFail {
 /// no other typed action lands inside the reply.
 fn type_reply(l: &Local, tty: &str, lines: &[String]) -> Result<(), TypeFail> {
     let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
-    l.terminal.type_lines(tty, lines).map_err(|(typed, e)| if typed == 0 { TypeFail::NotReached(e) } else { TypeFail::Partial(e) })
+    l.terminal.type_reply(tty, lines).map_err(|(typed, e)| if typed == 0 { TypeFail::NotReached(e) } else { TypeFail::Partial(e) })
 }
 
 /// Sends `text` to the session as the user: typed into its terminal, or a
@@ -175,7 +175,7 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<Route, Stri
     let lines = answer::reply_lines(text);
     // Cleaned of control codes, it may hold nothing: a bare Enter would send
     // whatever already sits in Claude's input.
-    if lines.iter().all(|l| l.trim_end_matches('\\').trim().is_empty()) {
+    if lines.iter().all(|l| l.trim().is_empty()) {
         return Err("Message is empty.".into());
     }
     if lines.len() > answer::TYPED_MAX_LINES {
@@ -1612,7 +1612,7 @@ mod tests {
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
         assert_eq!(send_reply(&l, "s1", "push it\n\nthanks"), Ok(Route::Typed));
-        assert_eq!(typed(&fake), vec!["push it\\", "\\", "thanks"]);
+        assert_eq!(typed(&fake), vec!["push it", "", "thanks"]);
         assert!(fake.calls.lock().unwrap().iter().all(|c| matches!(c, Call::Type { tty, .. } if tty == "/dev/pts/3")));
     }
 
@@ -1641,7 +1641,7 @@ mod tests {
         let fake = FakeTerminal { fail_after: Some(1), ..Default::default() };
         let l = Local { store: &store, terminal: &fake };
         assert_eq!(send_reply(&l, "s1", "one\ntwo"), Err("Part of the reply was typed into the terminal; check it there.".into()));
-        assert_eq!(typed(&fake), vec!["one\\"]);
+        assert_eq!(typed(&fake), vec!["one"]);
     }
 
     #[test]

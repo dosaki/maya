@@ -8,15 +8,14 @@ pub trait Terminal: Send + Sync {
     fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String>;
     /// Types `text` then Enter into the terminal hosting `tty`.
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String>;
-    /// Types each of `lines`, each then Enter, into the terminal hosting
-    /// `tty`, as close together as the terminal allows. On failure, how many
+    /// Types `lines` (from `answer::reply_lines`) into the Claude Code
+    /// session on `tty` as one message, `answer::NEW_LINE` between them,
+    /// then sends it with `answer::SEND`, as close together as the terminal
+    /// allows. A bare carriage return will not do for either: Claude Code
+    /// reads one that arrives with 64 or more other characters as text, so
+    /// the reply would keep its line breaks unsent. On failure, how many
     /// lines went in first (0: nothing reached the terminal) and why.
-    fn type_lines(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
-        for (i, line) in lines.iter().enumerate() {
-            self.type_line(tty, line).map_err(|e| (i, e))?;
-        }
-        Ok(())
-    }
+    fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)>;
     /// Brings the terminal hosting `tty` forward; Err says what to do instead.
     fn focus(&self, tty: &str) -> Result<(), String>;
     /// The terminal's own name for the pane hosting `tty`, if it has one.
@@ -85,6 +84,13 @@ pub mod test_support {
                 return Err(format!("{tty} is gone"));
             }
             self.calls.lock().unwrap().push(Call::Type { tty: tty.into(), text: text.into() });
+            Ok(())
+        }
+        /// Records each line as typed, without the keys between them.
+        fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
+            for (i, line) in lines.iter().enumerate() {
+                self.type_line(tty, line).map_err(|e| (i, e))?;
+            }
             Ok(())
         }
         fn focus(&self, tty: &str) -> Result<(), String> {
