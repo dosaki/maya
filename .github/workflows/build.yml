@@ -31,6 +31,10 @@ on:
         required: false
       ANDROID_KEY_PASSWORD:
         required: false
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
 
 permissions:
   contents: read
@@ -127,14 +131,26 @@ jobs:
           pnpm test
           sh scripts/test-ear.sh
           cargo test --workspace
+      # A release also writes the AppImage's updater signature (the .deb
+      # cannot update itself, so it has none); a pull request does not.
       - name: Build the bundles
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: |
           set -euo pipefail
           version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          pnpm tauri build --bundles deb,appimage
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            pnpm tauri build --bundles deb,appimage --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          else
+            pnpm tauri build --bundles deb,appimage
+          fi
           mkdir -p release
           cp target/release/bundle/deb/*.deb "release/Maya_${version}_${{ matrix.deb }}.deb"
           cp target/release/bundle/appimage/*.AppImage "release/Maya_${version}_${{ matrix.deb }}.AppImage"
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            cp target/release/bundle/appimage/*.AppImage.sig "release/Maya_${version}_${{ matrix.deb }}.AppImage.sig"
+          fi
           chmod +x release/*.AppImage
           ls -la release
       # The AppImage, run from a path with a space in it and a fresh HOME,
@@ -200,13 +216,23 @@ jobs:
           pnpm test
           cargo test -p maya-core -p maya-hook -p maya-ear -p maya
       - name: Build the installers
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: |
           set -euo pipefail
           version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          pnpm tauri build --bundles nsis,msi
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            pnpm tauri build --bundles nsis,msi --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          else
+            pnpm tauri build --bundles nsis,msi
+          fi
           mkdir -p release
           cp target/release/bundle/nsis/*-setup.exe "release/Maya_${version}_x64-setup.exe"
           cp target/release/bundle/msi/*.msi "release/Maya_${version}_x64.msi"
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            cp target/release/bundle/nsis/*-setup.exe.sig "release/Maya_${version}_x64-setup.exe.sig"
+          fi
           ls -la release
       - uses: actions/upload-artifact@v4
         with:
@@ -296,7 +322,16 @@ jobs:
           echo "signing as $APPLE_SIGNING_IDENTITY"
 
       - name: Build
-        run: pnpm tauri build --target ${{ matrix.target }} --bundles app,dmg
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.sign }}" = "true" ]; then
+            pnpm tauri build --target ${{ matrix.target }} --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          else
+            pnpm tauri build --target ${{ matrix.target }} --bundles app,dmg
+          fi
       - name: Package
         run: |
           set -euo pipefail
@@ -309,7 +344,15 @@ jobs:
           fi
           cp "target/$target/release/maya-cli" "release/maya-macos-${{ matrix.cli }}"
           bundle="target/$target/release/bundle"
-          tar -C "$bundle/macos" -czf "release/Maya_${version}_${{ matrix.arch }}.app.tar.gz" Maya.app
+          # A release ships Tauri's own tarball, since its updater
+          # signature covers those exact bytes; it holds Maya.app at its
+          # top, as install.sh expects. A pull request tars the app itself.
+          if [ -f "$bundle/macos/Maya.app.tar.gz.sig" ]; then
+            cp "$bundle/macos/Maya.app.tar.gz" "release/Maya_${version}_${{ matrix.arch }}.app.tar.gz"
+            cp "$bundle/macos/Maya.app.tar.gz.sig" "release/Maya_${version}_${{ matrix.arch }}.app.tar.gz.sig"
+          else
+            tar -C "$bundle/macos" -czf "release/Maya_${version}_${{ matrix.arch }}.app.tar.gz" Maya.app
+          fi
           cp "$bundle"/dmg/*.dmg "release/Maya_${version}_${{ matrix.arch }}.dmg"
           ls -la release
       - uses: actions/upload-artifact@v4
