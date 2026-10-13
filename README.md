@@ -87,7 +87,10 @@ Maya, in PowerShell:
 irm https://raw.githubusercontent.com/dosaki/maya/main/install.ps1 | iex
 ```
 
-Run the same command again to update Maya.
+From 0.18.0, Maya updates itself: a bar on the board offers each new
+release, and Settings has Check for updates. Running the same command
+again also updates Maya, and is the only way for an `.msi` or `.deb`
+install.
 
 ## First run
 

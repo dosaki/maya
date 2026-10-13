@@ -1,7 +1,7 @@
 # Auto-update — design
 
 Date: 2026-10-13
-Status: approved
+Status: implemented
 
 ## Purpose
 
