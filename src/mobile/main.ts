@@ -17,6 +17,7 @@ import { closeResume, openResume } from "../resume";
 import { makeTabs } from "../tabs";
 import { showToast } from "../toast";
 import type { Card, CardState } from "../types";
+import { updates } from "../update";
 import { makeCardHistory } from "./card-history";
 import { initNetwork, type NetworkStatus } from "./network";
 import { watchTaps } from "./notify-tap";
@@ -168,6 +169,7 @@ function openFromTap(sessionId: string): void {
 }
 
 async function start(): Promise<void> {
+  void updates.init();
   void initDebug();
   // The column strip sits above the panes but belongs to the board: it goes when another pane shows.
   tabs = makeTabs((tab) => {
