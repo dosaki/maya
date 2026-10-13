@@ -77,6 +77,8 @@ export interface ReviewPr {
   isDraft: boolean;
   updatedAt: string;
   reasons: ("review" | "assigned")[];
+  /** The user's own review; null when not reviewed yet, or their own PR. */
+  myReview: "approved" | "commented" | "changesRequested" | null;
 }
 
 export interface ReviewState {

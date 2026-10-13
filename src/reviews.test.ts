@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { relatedSession, renderReviews, reviewActionFor } from "./reviews";
+import { relatedSession, renderReviews, reviewActionFor, waitingCount } from "./reviews";
 import type { Card, ReviewPr } from "./types";
 
 const NOW = Date.parse("2026-09-29T10:00:00Z");
@@ -12,6 +12,7 @@ const pr = (over: Partial<ReviewPr> = {}): ReviewPr => ({
   isDraft: false,
   updatedAt: "2026-09-29T08:00:00Z",
   reasons: ["review"],
+  myReview: null,
   ...over,
 });
 
@@ -39,8 +40,8 @@ describe("relatedSession", () => {
 });
 
 describe("renderReviews", () => {
-  it("renders a card per PR with repo, number, title, author, age and reason chips", () => {
-    const el = renderReviews({ prs: [pr(), pr({ number: 3, repo: "Org/plugins", isDraft: true, reasons: ["review", "assigned"], updatedAt: "2026-09-28T10:00:00Z" })], error: null, fetchedAt: NOW }, NOW);
+  it("renders a card per PR with repo, number, title, author, age and a draft chip", () => {
+    const el = renderReviews({ prs: [pr(), pr({ number: 3, repo: "Org/plugins", isDraft: true, updatedAt: "2026-09-28T10:00:00Z" })], error: null, fetchedAt: NOW }, NOW);
     const cards = el.querySelectorAll(".pr");
     expect(cards.length).toBe(2);
     const first = cards[0] as HTMLElement;
@@ -50,11 +51,36 @@ describe("renderReviews", () => {
     expect(first.querySelector(".pr__title")?.textContent).toBe("docs: expand upgrade notes");
     expect(first.querySelector(".pr__meta")?.textContent).toContain("jane");
     expect(first.querySelector(".pr__meta")?.textContent).toContain("2h");
-    expect([...first.querySelectorAll(".pr__chip")].map((c) => c.textContent)).toEqual(["review requested"]);
-    const second = cards[1];
-    expect([...second.querySelectorAll(".pr__chip")].map((c) => c.textContent)).toEqual(["draft", "review requested", "assigned"]);
+    expect(first.querySelectorAll(".pr__chip").length).toBe(0);
+    expect([...cards[1].querySelectorAll(".pr__chip")].map((c) => c.textContent)).toEqual(["draft"]);
     expect(first.querySelector("button[data-action=open-pr]")?.textContent).toBe("Open");
     expect(first.querySelector("button[data-action=review]")?.textContent).toBe("Review");
+  });
+
+  it("splits the PRs into Review requested and Assigned, a PR in both showing in both", () => {
+    const prs = [pr({ number: 1 }), pr({ number: 2, reasons: ["review", "assigned"] }), pr({ number: 3, reasons: ["assigned"] })];
+    const el = renderReviews({ prs, error: null, fetchedAt: NOW }, NOW);
+    const groups = [...el.querySelectorAll(".reviews__group")];
+    expect(groups.map((g) => g.querySelector(".reviews__heading")?.textContent)).toEqual(["Review requested2", "Assigned2"]);
+    expect(groups.map((g) => [...g.querySelectorAll<HTMLElement>(".pr")].map((c) => c.dataset.number))).toEqual([["1", "2"], ["2", "3"]]);
+  });
+
+  it("says when one section is empty", () => {
+    const el = renderReviews({ prs: [pr()], error: null, fetchedAt: NOW }, NOW);
+    const [review, assigned] = el.querySelectorAll(".reviews__group");
+    expect(review.querySelector(".reviews__none")).toBeNull();
+    expect(assigned.querySelector(".reviews__none")?.textContent).toBe("Nothing here.");
+  });
+
+  it("marks the user's own review with a coloured dot, and none when not reviewed", () => {
+    const dot = (myReview: ReviewPr["myReview"]) => renderReviews({ prs: [pr({ myReview })], error: null, fetchedAt: NOW }, NOW).querySelector<HTMLElement>(".pr__dot");
+    expect(dot(null)).toBeNull();
+    expect(dot("approved")?.className).toBe("pr__dot pr__dot--approved");
+    expect(dot("approved")?.title).toBe("You approved");
+    expect(dot("commented")?.className).toBe("pr__dot pr__dot--commented");
+    expect(dot("commented")?.getAttribute("aria-label")).toBe("You commented");
+    expect(dot("changesRequested")?.className).toBe("pr__dot pr__dot--changes");
+    expect(dot("changesRequested")?.title).toBe("You requested changes");
   });
 
   it("shows a Terminal button when a session is related, with its name and state", () => {
@@ -84,6 +110,12 @@ describe("renderReviews", () => {
     const failed = renderReviews({ prs: [pr()], error: "gh failed: no token", fetchedAt: NOW }, NOW);
     expect(failed.querySelector(".reviews__error")?.textContent).toContain("no token");
     expect(failed.querySelectorAll(".pr").length).toBe(1);
+  });
+});
+
+describe("waitingCount", () => {
+  it("counts only the PRs the user has not reviewed", () => {
+    expect(waitingCount([pr(), pr({ number: 2, myReview: "approved" }), pr({ number: 3, myReview: "commented" }), pr({ number: 4, reasons: ["assigned"] })])).toBe(2);
   });
 });
 

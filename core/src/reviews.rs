@@ -12,6 +12,15 @@ pub enum Reason {
     Assigned,
 }
 
+/// The user's own review of a PR: a standing verdict, else a comment.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MyReview {
+    Approved,
+    Commented,
+    ChangesRequested,
+}
+
 /// A pull request waiting on the user.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -26,29 +35,71 @@ pub struct ReviewPr {
     /// ISO 8601, as GitHub gives it; sorts lexically.
     pub updated_at: String,
     pub reasons: Vec<Reason>,
+    /// None when the user has not reviewed it, or wrote it.
+    pub my_review: Option<MyReview>,
 }
 
-pub const SEARCH_FIELDS: &str = "number,title,repository,url,author,updatedAt,isDraft";
+/// Three searches in one call: PRs asking for the user's review, open PRs
+/// they reviewed (GitHub drops the request once they do), and PRs assigned
+/// to them; each with the reviews needed for `MyReview`.
+pub const QUERY: &str = r#"query {
+  viewer { login }
+  requested: search(query: "is:pr is:open review-requested:@me", type: ISSUE, first: 50) { nodes { ...pr } }
+  reviewed: search(query: "is:pr is:open reviewed-by:@me -author:@me", type: ISSUE, first: 50) { nodes { ...pr } }
+  assigned: search(query: "is:pr is:open assignee:@me", type: ISSUE, first: 50) { nodes { ...pr } }
+}
+fragment pr on PullRequest {
+  number title url isDraft updatedAt
+  repository { nameWithOwner }
+  author { login }
+  latestOpinionatedReviews(first: 100) { nodes { state author { login } } }
+  latestReviews(first: 100) { nodes { state author { login } } }
+}"#;
 
-/// `gh search prs --json` output as review PRs, all tagged with `reason`.
-pub fn parse_search(json: &str, reason: Reason) -> Result<Vec<ReviewPr>, String> {
+/// The state of `login`'s review in a `{nodes: [{state, author}]}` list.
+fn review_state<'a>(reviews: &'a serde_json::Value, login: &str) -> Option<&'a str> {
+    reviews["nodes"].as_array()?.iter().find(|r| r["author"]["login"].as_str().is_some_and(|l| l.eq_ignore_ascii_case(login)))?["state"].as_str()
+}
+
+fn my_review(p: &serde_json::Value, login: &str) -> Option<MyReview> {
+    if p["author"]["login"].as_str().is_some_and(|a| a.eq_ignore_ascii_case(login)) {
+        return None;
+    }
+    match review_state(&p["latestOpinionatedReviews"], login) {
+        Some("APPROVED") => return Some(MyReview::Approved),
+        Some("CHANGES_REQUESTED") => return Some(MyReview::ChangesRequested),
+        _ => {}
+    }
+    (review_state(&p["latestReviews"], login) == Some("COMMENTED")).then_some(MyReview::Commented)
+}
+
+fn parse_node(p: &serde_json::Value, reason: Reason, login: &str) -> Option<ReviewPr> {
+    Some(ReviewPr {
+        number: p["number"].as_u64()?,
+        repo: p["repository"]["nameWithOwner"].as_str()?.to_string(),
+        title: p["title"].as_str().unwrap_or("").to_string(),
+        author: p["author"]["login"].as_str().unwrap_or("").to_string(),
+        url: p["url"].as_str()?.to_string(),
+        is_draft: p["isDraft"].as_bool().unwrap_or(false),
+        updated_at: p["updatedAt"].as_str().unwrap_or("").to_string(),
+        reasons: vec![reason],
+        my_review: my_review(p, login),
+    })
+}
+
+/// `gh api graphql` output of `QUERY` as one list of review PRs.
+pub fn parse_graphql(json: &str) -> Result<Vec<ReviewPr>, String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("gh output was not JSON: {e}"))?;
-    let arr = v.as_array().ok_or("gh output was not a list")?;
-    Ok(arr
-        .iter()
-        .filter_map(|p| {
-            Some(ReviewPr {
-                number: p["number"].as_u64()?,
-                repo: p["repository"]["nameWithOwner"].as_str()?.to_string(),
-                title: p["title"].as_str().unwrap_or("").to_string(),
-                author: p["author"]["login"].as_str().unwrap_or("").to_string(),
-                url: p["url"].as_str()?.to_string(),
-                is_draft: p["isDraft"].as_bool().unwrap_or(false),
-                updated_at: p["updatedAt"].as_str().unwrap_or("").to_string(),
-                reasons: vec![reason],
-            })
-        })
-        .collect())
+    if let Some(msg) = v["errors"].as_array().and_then(|e| e.first()).and_then(|e| e["message"].as_str()) {
+        return Err(format!("GitHub said: {msg}"));
+    }
+    let data = &v["data"];
+    let login = data["viewer"]["login"].as_str().ok_or("gh output had no viewer")?;
+    let list = |key: &str, reason: Reason| -> Vec<ReviewPr> {
+        data[key]["nodes"].as_array().map(|a| a.iter().filter_map(|p| parse_node(p, reason, login)).collect()).unwrap_or_default()
+    };
+    let review = merge(list("requested", Reason::Review), list("reviewed", Reason::Review));
+    Ok(merge(review, list("assigned", Reason::Assigned)))
 }
 
 /// One list from two, de-duplicated by URL with reasons combined, newest first.
@@ -70,21 +121,17 @@ pub fn merge(a: Vec<ReviewPr>, b: Vec<ReviewPr>) -> Vec<ReviewPr> {
     out
 }
 
-fn search(flag: &str, reason: Reason) -> Result<Vec<ReviewPr>, String> {
+/// Open PRs where the user is a requested reviewer, has reviewed, or is an assignee.
+pub fn fetch() -> Result<Vec<ReviewPr>, String> {
     let out = crate::gh()
-        .args(["search", "prs", flag, "--state=open", "--limit", "50", "--json", SEARCH_FIELDS])
+        .args(["api", "graphql", "-f", &format!("query={QUERY}")])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("could not run gh: {e}"))?;
     if !out.status.success() {
         return Err(format!("gh failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
-    parse_search(&String::from_utf8_lossy(&out.stdout), reason)
-}
-
-/// Open PRs where the user is a requested reviewer or an assignee.
-pub fn fetch() -> Result<Vec<ReviewPr>, String> {
-    Ok(merge(search("--review-requested=@me", Reason::Review)?, search("--assignee=@me", Reason::Assigned)?))
+    parse_graphql(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// True when a git remote URL (SSH or HTTPS) points at `owner/name` on GitHub.
@@ -199,29 +246,71 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    const ONE: &str = r#"[{"number":451,"title":"docs: notes","repository":{"nameWithOwner":"Org/bedrock"},"url":"https://github.com/Org/bedrock/pull/451","author":{"login":"jane"},"updatedAt":"2026-09-28T10:00:00Z","isDraft":false}]"#;
-    const TWO: &str = r#"[{"number":3,"title":"feat: x","repository":{"nameWithOwner":"Org/plugins"},"url":"https://github.com/Org/plugins/pull/3","author":{"login":"bob"},"updatedAt":"2026-09-29T09:00:00Z","isDraft":true},{"number":451,"title":"docs: notes","repository":{"nameWithOwner":"Org/bedrock"},"url":"https://github.com/Org/bedrock/pull/451","author":{"login":"jane"},"updatedAt":"2026-09-28T10:00:00Z","isDraft":false}]"#;
+    fn node(number: u64, repo: &str, author: &str, updated: &str, opinionated: &str, latest: &str) -> String {
+        format!(
+            r#"{{"number":{number},"title":"t{number}","url":"https://github.com/{repo}/pull/{number}","isDraft":false,"updatedAt":"{updated}","repository":{{"nameWithOwner":"{repo}"}},"author":{{"login":"{author}"}},"latestOpinionatedReviews":{{"nodes":[{opinionated}]}},"latestReviews":{{"nodes":[{latest}]}}}}"#
+        )
+    }
 
-    #[test]
-    fn parses_gh_search_output_and_tags_the_reason() {
-        let prs = parse_search(ONE, Reason::Review).unwrap();
-        assert_eq!(prs.len(), 1);
-        let p = &prs[0];
-        assert_eq!((p.number, p.repo.as_str(), p.title.as_str(), p.author.as_str(), p.is_draft), (451, "Org/bedrock", "docs: notes", "jane", false));
-        assert_eq!(p.url, "https://github.com/Org/bedrock/pull/451");
-        assert_eq!(p.updated_at, "2026-09-28T10:00:00Z");
-        assert_eq!(p.reasons, vec![Reason::Review]);
-        assert!(parse_search("not json", Reason::Review).is_err());
+    fn review(login: &str, state: &str) -> String {
+        format!(r#"{{"state":"{state}","author":{{"login":"{login}"}}}}"#)
+    }
+
+    fn response(requested: &[String], reviewed: &[String], assigned: &[String]) -> String {
+        format!(
+            r#"{{"data":{{"viewer":{{"login":"Me"}},"requested":{{"nodes":[{}]}},"reviewed":{{"nodes":[{}]}},"assigned":{{"nodes":[{}]}}}}}}"#,
+            requested.join(","),
+            reviewed.join(","),
+            assigned.join(",")
+        )
     }
 
     #[test]
-    fn merge_dedupes_by_url_combines_reasons_and_sorts_newest_first() {
-        let review = parse_search(ONE, Reason::Review).unwrap();
-        let assigned = parse_search(TWO, Reason::Assigned).unwrap();
-        let all = merge(review, assigned);
-        assert_eq!(all.iter().map(|p| p.number).collect::<Vec<_>>(), vec![3, 451]);
-        assert_eq!(all[1].reasons, vec![Reason::Review, Reason::Assigned]);
-        assert_eq!(all[0].reasons, vec![Reason::Assigned]);
+    fn parses_the_graphql_searches_into_one_list_with_reasons_newest_first() {
+        let pending = node(451, "Org/bedrock", "jane", "2026-09-28T10:00:00Z", "", "");
+        let both = node(3, "Org/plugins", "bob", "2026-09-29T09:00:00Z", "", "");
+        let json = response(&[pending.clone(), both.clone()], &[], &[both]);
+        let prs = parse_graphql(&json).unwrap();
+        assert_eq!(prs.iter().map(|p| p.number).collect::<Vec<_>>(), vec![3, 451]);
+        let p = &prs[1];
+        assert_eq!((p.number, p.repo.as_str(), p.title.as_str(), p.author.as_str(), p.is_draft), (451, "Org/bedrock", "t451", "jane", false));
+        assert_eq!(p.url, "https://github.com/Org/bedrock/pull/451");
+        assert_eq!(p.reasons, vec![Reason::Review]);
+        assert_eq!(p.my_review, None, "not reviewed yet");
+        assert_eq!(prs[0].reasons, vec![Reason::Review, Reason::Assigned]);
+        assert!(parse_graphql("not json").is_err());
+        assert!(parse_graphql(r#"{"errors":[{"message":"bad query"}]}"#).unwrap_err().contains("bad query"));
+    }
+
+    #[test]
+    fn a_pr_the_user_reviewed_stays_under_review_requested() {
+        let done = node(9, "Org/x", "jane", "2026-09-28T10:00:00Z", &review("me", "APPROVED"), &review("me", "APPROVED"));
+        let prs = parse_graphql(&response(&[], &[done], &[])).unwrap();
+        assert_eq!(prs[0].reasons, vec![Reason::Review]);
+        assert_eq!(prs[0].my_review, Some(MyReview::Approved), "logins match case-insensitively");
+    }
+
+    #[test]
+    fn the_users_review_prefers_a_verdict_over_a_comment_and_ignores_others() {
+        let v = |opinionated: &str, latest: &str| {
+            let n = node(1, "o/r", "jane", "", opinionated, latest);
+            parse_graphql(&response(&[n], &[], &[])).unwrap()[0].my_review
+        };
+        assert_eq!(v(&review("Me", "APPROVED"), &review("Me", "COMMENTED")), Some(MyReview::Approved));
+        assert_eq!(v(&review("Me", "CHANGES_REQUESTED"), &review("Me", "CHANGES_REQUESTED")), Some(MyReview::ChangesRequested));
+        assert_eq!(v("", &review("Me", "COMMENTED")), Some(MyReview::Commented));
+        assert_eq!(v(&review("Me", "DISMISSED"), &review("Me", "DISMISSED")), None, "a dismissed verdict is no review");
+        assert_eq!(v(&review("Me", "DISMISSED"), &review("Me", "COMMENTED")), Some(MyReview::Commented));
+        let others = format!("{},{}", review("copilot-pull-request-reviewer", "COMMENTED"), review("bob", "APPROVED"));
+        assert_eq!(v(&review("bob", "APPROVED"), &others), None, "someone else's review is not the user's");
+    }
+
+    #[test]
+    fn the_users_own_pr_has_no_review_state() {
+        let own = node(5, "o/r", "me", "", "", &review("Me", "COMMENTED"));
+        let prs = parse_graphql(&response(&[], &[], &[own])).unwrap();
+        assert_eq!(prs[0].reasons, vec![Reason::Assigned]);
+        assert_eq!(prs[0].my_review, None, "replying on your own PR is not reviewing it");
     }
 
     #[test]
@@ -288,7 +377,7 @@ mod tests {
     }
 
     fn pr() -> ReviewPr {
-        ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review] }
+        ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None }
     }
 
     #[test]

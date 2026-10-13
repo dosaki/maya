@@ -9,7 +9,7 @@ import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
-import { renderReviews, reviewActionFor } from "./reviews";
+import { renderReviews, reviewActionFor, waitingCount } from "./reviews";
 import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
@@ -36,7 +36,7 @@ function paintReviews(): void {
   const host = document.getElementById("reviews");
   if (!host) return;
   host.replaceChildren(renderReviews(reviews, Date.now(), { cards, clonesDir }));
-  tabs?.setCount(reviews.prs.length);
+  tabs?.setCount(waitingCount(reviews.prs));
 }
 
 async function reviewAction(target: Element): Promise<void> {

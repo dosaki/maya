@@ -3,7 +3,7 @@
 //! whatever comes back before acting on it.
 
 use crate::model::Card;
-use crate::reviews::ReviewPr;
+use crate::reviews::{MyReview, ReviewPr};
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -44,13 +44,23 @@ pub fn board_summary(cards: &[Card]) -> String {
         .join("\n")
 }
 
-/// One line per pull request waiting for review: `repo#number | title | by author [| draft]`.
+/// One line per pull request on the Pull Requests tab:
+/// `repo#number | title | by author [| draft] [| assigned to you] [| you approved]`.
 pub fn pr_summary(prs: &[ReviewPr]) -> String {
     prs.iter()
         .map(|p| {
             let mut line = format!("{}#{} | {} | by {}", p.repo, p.number, p.title.trim(), p.author);
             if p.is_draft {
                 line.push_str(" | draft");
+            }
+            if p.reasons.contains(&crate::reviews::Reason::Assigned) {
+                line.push_str(" | assigned to you");
+            }
+            match p.my_review {
+                Some(MyReview::Approved) => line.push_str(" | you approved"),
+                Some(MyReview::Commented) => line.push_str(" | you commented"),
+                Some(MyReview::ChangesRequested) => line.push_str(" | you requested changes"),
+                None => {}
             }
             line
         })
@@ -87,9 +97,9 @@ pub fn user_prompt(command: &str, summary: &str, prs: &str, history: &[(String, 
     p.push_str("Board (name | harness | state | id | project | machine | asks [numbered options]):\n");
     p.push_str(summary);
     if prs.trim().is_empty() {
-        p.push_str("\n\nPull requests waiting for your review: none");
+        p.push_str("\n\nPull requests for you to review or assigned to you: none");
     } else {
-        p.push_str("\n\nPull requests waiting for your review (repo#number | title | author):\n");
+        p.push_str("\n\nPull requests for you to review or assigned to you (repo#number | title | author | notes; no \"you ...\" note means you have not reviewed it):\n");
         p.push_str(prs);
     }
     p.push_str("\n\nCommand: ");
@@ -423,20 +433,24 @@ mod tests {
     }
 
     fn pr(repo: &str, number: u64, title: &str, author: &str, draft: bool) -> crate::reviews::ReviewPr {
-        crate::reviews::ReviewPr { number, repo: repo.into(), title: title.into(), author: author.into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: draft, updated_at: "2026-09-30T07:00:00Z".into(), reasons: vec![] }
+        crate::reviews::ReviewPr { number, repo: repo.into(), title: title.into(), author: author.into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: draft, updated_at: "2026-09-30T07:00:00Z".into(), reasons: vec![], my_review: None }
     }
 
     #[test]
     fn pull_requests_are_listed_one_per_line_and_reach_the_prompt() {
-        let prs = [pr("dosaki/collector", 14, "Add ERD overlay", "alex", false), pr("dosaki/maya", 3, "Voice assistant", "tiago", true)];
+        let mut approved = pr("dosaki/bedrock", 7, "Notes", "jane", false);
+        approved.my_review = Some(MyReview::ChangesRequested);
+        approved.reasons = vec![crate::reviews::Reason::Review, crate::reviews::Reason::Assigned];
+        let prs = [pr("dosaki/collector", 14, "Add ERD overlay", "alex", false), pr("dosaki/maya", 3, "Voice assistant", "tiago", true), approved];
         let s = pr_summary(&prs);
         assert!(s.contains("dosaki/collector#14 | Add ERD overlay | by alex\n"), "{s}");
-        assert!(s.contains("dosaki/maya#3 | Voice assistant | by tiago | draft"), "{s}");
+        assert!(s.contains("dosaki/maya#3 | Voice assistant | by tiago | draft\n"), "{s}");
+        assert!(s.contains("dosaki/bedrock#7 | Notes | by jane | assigned to you | you requested changes"), "{s}");
         let p = user_prompt("what's waiting", "hexgrid | …", &s, &[]);
-        assert!(p.contains("Pull requests waiting for your review"), "{p}");
+        assert!(p.contains("Pull requests for you to review or assigned to you ("), "{p}");
         assert!(p.contains("dosaki/collector#14"), "{p}");
         let none = user_prompt("what's waiting", "hexgrid | …", "", &[]);
-        assert!(none.contains("Pull requests waiting for your review: none"), "{none}");
+        assert!(none.contains("Pull requests for you to review or assigned to you: none"), "{none}");
         assert!(system_prompt().contains("\"kind\":\"review\""));
         assert!(system_prompt().contains("\"kind\":\"open\""));
     }

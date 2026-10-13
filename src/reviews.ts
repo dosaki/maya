@@ -34,18 +34,40 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return n;
 }
 
-const REASON_LABEL: Record<ReviewPr["reasons"][number], string> = { review: "review requested", assigned: "assigned" };
+const MY_REVIEW: Record<NonNullable<ReviewPr["myReview"]>, { modifier: string; label: string }> = {
+  approved: { modifier: "approved", label: "You approved" },
+  commented: { modifier: "commented", label: "You commented" },
+  changesRequested: { modifier: "changes", label: "You requested changes" },
+};
+
+const SECTIONS: { reason: ReviewPr["reasons"][number]; title: string }[] = [
+  { reason: "review", title: "Review requested" },
+  { reason: "assigned", title: "Assigned" },
+];
+
+/** The PRs still waiting on the user: the ones they have not reviewed. */
+export function waitingCount(prs: ReviewPr[]): number {
+  return prs.filter((p) => p.myReview === null).length;
+}
 
 export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | null = null): HTMLElement {
   const root = el("article", "pr");
   root.dataset.repo = pr.repo;
   root.dataset.number = String(pr.number);
   const head = el("header", "pr__head");
-  head.append(el("span", "pr__repo", `${pr.repo.split("/").pop() ?? pr.repo} #${pr.number}`));
+  const name = el("span", "pr__name");
+  if (pr.myReview) {
+    const { modifier, label } = MY_REVIEW[pr.myReview];
+    const dot = el("span", `pr__dot pr__dot--${modifier}`);
+    dot.title = label;
+    dot.setAttribute("role", "img");
+    dot.setAttribute("aria-label", label);
+    name.append(dot);
+  }
+  name.append(el("span", "pr__repo", `${pr.repo.split("/").pop() ?? pr.repo} #${pr.number}`));
   const chips = el("span", "pr__chips");
   if (pr.isDraft) chips.append(el("span", "pr__chip pr__chip--draft", "draft"));
-  for (const r of pr.reasons) chips.append(el("span", "pr__chip", REASON_LABEL[r] ?? r));
-  head.append(chips);
+  head.append(name, chips);
   root.append(head, el("div", "pr__title", pr.title));
   const updated = Date.parse(pr.updatedAt);
   root.append(el("div", "pr__meta", `${pr.author} · updated ${Number.isFinite(updated) ? formatAge(updated, nowMs) : "?"} ago · ${pr.repo}`));
@@ -81,9 +103,21 @@ export function renderReviews(state: ReviewState, nowMs: number, ctx: ReviewCont
     root.append(el("div", "reviews__empty", state.fetchedAt === null ? "Checking GitHub…" : "Nothing waiting on you."));
     return root;
   }
-  const list = el("div", "reviews__list");
-  for (const pr of state.prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir)));
-  root.append(list);
+  for (const { reason, title } of SECTIONS) {
+    const prs = state.prs.filter((p) => p.reasons.includes(reason));
+    const group = el("div", "reviews__group");
+    const heading = el("h2", "reviews__heading", title);
+    heading.append(el("span", "reviews__count", String(prs.length)));
+    group.append(heading);
+    if (prs.length === 0) {
+      group.append(el("div", "reviews__none", "Nothing here."));
+    } else {
+      const list = el("div", "reviews__list");
+      for (const pr of prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir)));
+      group.append(list);
+    }
+    root.append(group);
+  }
   return root;
 }
 
