@@ -40,10 +40,48 @@ const MY_REVIEW: Record<NonNullable<ReviewPr["myReview"]>, { modifier: string; l
   changesRequested: { modifier: "changes", label: "You requested changes" },
 };
 
-const SECTIONS: { reason: ReviewPr["reasons"][number]; title: string }[] = [
-  { reason: "review", title: "Review requested" },
-  { reason: "assigned", title: "Assigned" },
+/** The pane's sub-tabs: why a PR is on the list. */
+export type ReviewTab = ReviewPr["reasons"][number];
+
+export type StateFilter = "all" | "toReview" | NonNullable<ReviewPr["myReview"]>;
+
+export interface ReviewFilters {
+  state: StateFilter;
+  /** `owner/name`, or null for every repository. */
+  repo: string | null;
+}
+
+const SUB_TABS: { tab: ReviewTab; label: string }[] = [
+  { tab: "review", label: "Review Requested" },
+  { tab: "assigned", label: "Assignee" },
 ];
+
+const STATE_OPTIONS: { value: StateFilter; label: string }[] = [
+  { value: "all", label: "All States" },
+  { value: "approved", label: "Approved" },
+  { value: "commented", label: "Commented" },
+  { value: "changesRequested", label: "Changes requested" },
+  { value: "toReview", label: "To review" },
+];
+
+/** Review Requested opens on what is left to review; Assignee on everything. */
+const DEFAULT_FILTERS: Record<ReviewTab, ReviewFilters> = { review: { state: "toReview", repo: null }, assigned: { state: "all", repo: null } };
+
+const TAB_KEY = "maya.reviewsTab";
+
+export function applyFilters(prs: ReviewPr[], f: ReviewFilters): ReviewPr[] {
+  return prs.filter(
+    (p) => (f.repo === null || p.repo === f.repo) && (f.state === "all" || (f.state === "toReview" ? p.myReview === null : p.myReview === f.state)),
+  );
+}
+
+/** One option per repository in `prs`, sorted, named by the short name unless two share it. */
+export function repoOptions(prs: ReviewPr[]): { value: string; label: string }[] {
+  const repos = [...new Set(prs.map((p) => p.repo))].sort((a, b) => a.localeCompare(b));
+  const short = (r: string) => r.split("/").pop() ?? r;
+  const label = (r: string) => (repos.filter((o) => short(o) === short(r)).length > 1 ? r : short(r));
+  return repos.map((r) => ({ value: r, label: label(r) })).sort((a, b) => a.label.localeCompare(b.label));
+}
 
 /** The PRs still waiting on the user: the ones they have not reviewed. */
 export function waitingCount(prs: ReviewPr[]): number {
@@ -96,29 +134,138 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
   return root;
 }
 
-export function renderReviews(state: ReviewState, nowMs: number, ctx: ReviewContext = { cards: [], clonesDir: null }): HTMLElement {
+/**
+ * The cards of one sub-tab under its filters: the error from the last fetch
+ * if it failed, then the cards or a line saying why there are none.
+ */
+export function renderReviews(
+  state: ReviewState,
+  nowMs: number,
+  ctx: ReviewContext = { cards: [], clonesDir: null },
+  tab: ReviewTab = "review",
+  filters: ReviewFilters = { state: "all", repo: null },
+): HTMLElement {
   const root = el("section", "reviews");
   if (state.error) root.append(el("div", "reviews__error", `GitHub check failed: ${state.error}`));
   if (state.prs.length === 0) {
     root.append(el("div", "reviews__empty", state.fetchedAt === null ? "Checking GitHub…" : "Nothing waiting on you."));
     return root;
   }
-  for (const { reason, title } of SECTIONS) {
-    const prs = state.prs.filter((p) => p.reasons.includes(reason));
-    const group = el("div", "reviews__group");
-    const heading = el("h2", "reviews__heading", title);
-    heading.append(el("span", "reviews__count", String(prs.length)));
-    group.append(heading);
-    if (prs.length === 0) {
-      group.append(el("div", "reviews__none", "Nothing here."));
-    } else {
-      const list = el("div", "reviews__list");
-      for (const pr of prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir)));
-      group.append(list);
-    }
-    root.append(group);
+  const inTab = state.prs.filter((p) => p.reasons.includes(tab));
+  const prs = applyFilters(inTab, filters);
+  if (prs.length === 0) {
+    root.append(el("div", "reviews__empty", inTab.length === 0 ? "Nothing here." : "No pull requests match these filters."));
+    return root;
   }
+  const list = el("div", "reviews__list");
+  for (const pr of prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir)));
+  root.append(list);
   return root;
+}
+
+function storedTab(): ReviewTab {
+  try {
+    return localStorage.getItem(TAB_KEY) === "assigned" ? "assigned" : "review";
+  } catch {
+    return "review";
+  }
+}
+
+function fillSelect(sel: HTMLSelectElement, options: { value: string; label: string }[]): void {
+  sel.replaceChildren(
+    ...options.map(({ value, label }) => {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = label;
+      return o;
+    }),
+  );
+}
+
+/**
+ * The Pull Requests pane in `host`: the sub-tabs and the State and
+ * Repository filters, built once so an open dropdown survives the repaints,
+ * over the list that `update` redraws. Each sub-tab keeps its own filters
+ * for the life of the window; only the sub-tab is remembered across starts.
+ */
+export function makeReviewsView(host: HTMLElement) {
+  let tab = storedTab();
+  const filters: Record<ReviewTab, ReviewFilters> = { review: { ...DEFAULT_FILTERS.review }, assigned: { ...DEFAULT_FILTERS.assigned } };
+  let state: ReviewState = { prs: [], error: null, fetchedAt: null };
+  let nowMs = Date.now();
+  let ctx: ReviewContext = { cards: [], clonesDir: null };
+  let repoKey: string | null = null;
+
+  const bar = el("div", "reviews__bar");
+  const tabs = el("div", "reviews__tabs");
+  tabs.setAttribute("role", "tablist");
+  const tabButtons = SUB_TABS.map(({ tab: t, label }) => {
+    const b = el("button", "tab", label);
+    b.type = "button";
+    b.setAttribute("role", "tab");
+    b.dataset.reviewTab = t;
+    b.append(el("span", "tab__count"));
+    b.addEventListener("click", () => {
+      tab = t;
+      try {
+        localStorage.setItem(TAB_KEY, t);
+      } catch {
+        /* private mode: nothing to remember */
+      }
+      paint();
+    });
+    return b;
+  });
+  tabs.append(...tabButtons);
+  const stateSel = el("select", "reviews__filter");
+  stateSel.name = "state";
+  stateSel.setAttribute("aria-label", "State");
+  fillSelect(stateSel, STATE_OPTIONS);
+  stateSel.addEventListener("change", () => {
+    filters[tab].state = stateSel.value as StateFilter;
+    paint();
+  });
+  const repoSel = el("select", "reviews__filter");
+  repoSel.name = "repo";
+  repoSel.setAttribute("aria-label", "Repository");
+  repoSel.addEventListener("change", () => {
+    filters[tab].repo = repoSel.value || null;
+    paint();
+  });
+  bar.append(tabs, el("span", "tabs__spacer"), stateSel, repoSel);
+  const body = el("div", "reviews__body");
+  host.replaceChildren(bar, body);
+
+  function paint(): void {
+    const inTab = state.prs.filter((p) => p.reasons.includes(tab));
+    const repos = repoOptions(inTab);
+    const f = filters[tab];
+    if (f.repo !== null && !repos.some((r) => r.value === f.repo)) f.repo = null;
+    const key = `${tab}\n${repos.map((r) => `${r.value}=${r.label}`).join("\n")}`;
+    if (key !== repoKey) {
+      fillSelect(repoSel, [{ value: "", label: "All Repositories" }, ...repos]);
+      repoKey = key;
+    }
+    repoSel.value = f.repo ?? "";
+    stateSel.value = f.state;
+    for (const b of tabButtons) {
+      const t = b.dataset.reviewTab as ReviewTab;
+      b.classList.toggle("tab--active", t === tab);
+      b.setAttribute("aria-selected", String(t === tab));
+      const n = waitingCount(state.prs.filter((p) => p.reasons.includes(t)));
+      b.querySelector(".tab__count")!.textContent = n > 0 ? String(n) : "";
+    }
+    body.replaceChildren(renderReviews(state, nowMs, ctx, tab, f));
+  }
+
+  return {
+    update(next: ReviewState, now: number, context: ReviewContext = { cards: [], clonesDir: null }): void {
+      state = next;
+      nowMs = now;
+      ctx = context;
+      paint();
+    },
+  };
 }
 
 /** What a click in the Pull Requests pane means: one of the two buttons, or nothing. */

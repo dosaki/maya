@@ -9,7 +9,7 @@ import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
-import { renderReviews, reviewActionFor, waitingCount } from "./reviews";
+import { makeReviewsView, reviewActionFor, waitingCount } from "./reviews";
 import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
@@ -31,11 +31,13 @@ let pointer: { x: number; y: number } | null = null;
 let reviews: ReviewState = { prs: [], error: null, fetchedAt: null };
 let clonesDir: string | null = null;
 let tabs: ReturnType<typeof makeTabs> | null = null;
+let reviewsView: ReturnType<typeof makeReviewsView> | null = null;
 
 function paintReviews(): void {
   const host = document.getElementById("reviews");
   if (!host) return;
-  host.replaceChildren(renderReviews(reviews, Date.now(), { cards, clonesDir }));
+  reviewsView ??= makeReviewsView(host);
+  reviewsView.update(reviews, Date.now(), { cards, clonesDir });
   tabs?.setCount(waitingCount(reviews.prs));
 }
 
