@@ -806,3 +806,19 @@ describe("nextNetworkRole", () => {
     expect(nextNetworkRole(live("main"), "main", live("assistant"))).toBe("assistant");
   });
 });
+
+describe("check for updates", () => {
+  it("offers the button beside the version only where Maya can update", () => {
+    const h = { ...handlers(), onCheckUpdates: vi.fn() };
+    const off = renderSettings({ ...voiceBase, version: "0.18.0" }, h);
+    expect(off.querySelector("[data-action=check-updates]")).toBeNull();
+    const on = renderSettings({ ...voiceBase, version: "0.18.0", updatesOn: true }, h);
+    on.querySelector<HTMLButtonElement>("[data-action=check-updates]")!.click();
+    expect(h.onCheckUpdates).toHaveBeenCalled();
+  });
+
+  it("shows the outcome of the last check", () => {
+    const el = renderSettings({ ...voiceBase, version: "0.18.0", updatesOn: true, updateStatus: "Up to date." }, { ...handlers(), onCheckUpdates: vi.fn() });
+    expect(el.querySelector(".settings__update-status")?.textContent).toBe("Up to date.");
+  });
+});
