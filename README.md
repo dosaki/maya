@@ -176,10 +176,10 @@ on the Play Store). The phone runs no agents. It is either the **main**,
 with your computers paired to it, or it **joins** a computer that is
 already the main and shows that main's whole board.
 
-Without the release keystore secrets, each release's APK is signed with a
-new key, so installing a newer one over an older one means uninstalling
-first, which forgets the pairings; setting the `ANDROID_*` secrets gives
-in-place updates.
+Every APK after 0.21.0 is signed with the same key, so a new one installs
+over the one before and keeps the pairings. 0.21.0 and earlier were each
+signed with a new key: moving from one of those means uninstalling first,
+once, which forgets the pairings.
 
 1. Open Maya and press **Start**. It asks to post notifications; allow it.
    The Network tab shows a six-digit pairing code and the phone's Wi‑Fi

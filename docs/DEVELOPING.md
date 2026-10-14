@@ -309,10 +309,12 @@ What is where:
   writes them to `mobile/gen/android/keystore.properties` (ignored by
   git), which `build.gradle.kts` reads; put the same file there to sign a
   local build.
-  Without the release keystore secrets, each release's APK is signed with
-  a new key, so installing a newer one over an older one means
-  uninstalling first, which forgets the pairings; setting the `ANDROID_*`
-  secrets gives in-place updates.
+  The secrets are set from the release after 0.21.0, so every release
+  APK since is signed with the same key and installs over the one before.
+  Keep a copy of the keystore and its password outside GitHub: secrets
+  cannot be read back, and a new key means every phone uninstalls once
+  more, which forgets the pairings. 0.21.0 and earlier had no secrets, so
+  each was signed with a new debug key.
 
 ## The CLI
 
