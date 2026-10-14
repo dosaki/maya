@@ -66,6 +66,10 @@ const handlers = () => ({
   onMakeMain: vi.fn(),
   onPromote: vi.fn(),
   onPromoteCancel: vi.fn(),
+  onNewKeyAsk: vi.fn(),
+  onNewKey: vi.fn(),
+  onNewKeyCancel: vi.fn(),
+  onForgetMain: vi.fn(),
   onPair: vi.fn(),
 });
 
@@ -852,5 +856,46 @@ describe("the mirror switch", () => {
     boxes[0].checked = false;
     boxes[0].dispatchEvent(new Event("change"));
     expect(h.onMirror).toHaveBeenCalledWith("p", false);
+  });
+});
+
+describe("secure pairing in Settings › Network", () => {
+  const main = (extra: object = {}) => ({ role: "main" as const, code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, ...extra });
+
+  it("says the code is used up on a main", () => {
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network: main({ codeUsedUp: true }) }, handlers());
+    expect(el.textContent).toContain("Code used up after 3 wrong tries — Regenerate.");
+    const fresh = renderSettings({ ...voiceBase, networkRole: "main", network: main() }, handlers());
+    expect(fresh.textContent).not.toContain("Code used up");
+  });
+
+  it("tells an updated Maya to pair again", () => {
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network: main({ pairAgain: true }) }, handlers());
+    expect(el.querySelector("[data-for=pair-again-note]")?.textContent).toBe("This Maya was updated to secure pairing — pair again.");
+  });
+
+  it("offers New key, which asks before it drops every pairing", () => {
+    const h = handlers();
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network: main() }, h);
+    el.querySelector<HTMLButtonElement>("button[data-action=new-key]")!.click();
+    expect(h.onNewKeyAsk).toHaveBeenCalled();
+    expect(h.onNewKey).not.toHaveBeenCalled();
+    const asking = renderSettings({ ...voiceBase, networkRole: "main", network: main(), networkNewKeyConfirm: true }, h);
+    expect(asking.textContent).toContain("Drop every pairing and make a new key?");
+    asking.querySelector<HTMLButtonElement>("button[data-action=new-key-confirm]")!.click();
+    expect(h.onNewKey).toHaveBeenCalled();
+    asking.querySelector<HTMLButtonElement>("button[data-action=new-key-cancel]")!.click();
+    expect(h.onNewKeyCancel).toHaveBeenCalled();
+    const off = renderSettings({ ...voiceBase }, h);
+    expect(off.querySelector("button[data-action=new-key]")).toBeNull();
+  });
+
+  it("offers Forget main on a paired assistant only", () => {
+    const h = handlers();
+    const paired = renderSettings({ ...voiceBase, networkRole: "assistant", networkPaired: true, networkMainHost: "desk.local" }, h);
+    paired.querySelector<HTMLButtonElement>("button[data-action=forget-main]")!.click();
+    expect(h.onForgetMain).toHaveBeenCalled();
+    const fresh = renderSettings({ ...voiceBase, networkRole: "assistant" }, h);
+    expect(fresh.querySelector("button[data-action=forget-main]")).toBeNull();
   });
 });

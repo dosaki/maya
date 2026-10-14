@@ -26,7 +26,7 @@ const running: NetworkStatus = {
   mainError: null,
 };
 const base: NetworkModel = { mainHost: "", mainPort: 0, status: running, name: "Pixel 8", port: 4127, notifyAwaiting: true, notifyCompleted: false, addresses: ["192.168.1.20"], notificationsAllowed: true, busy: false, error: null, promote: null };
-const handlers = () => ({ onSave: vi.fn(), onStart: vi.fn(), onStop: vi.fn(), onCode: vi.fn(), onRemove: vi.fn(), onSwitch: vi.fn(), onBattery: vi.fn(), onMakeMain: vi.fn(), onPromote: vi.fn(), onPromoteCancel: vi.fn(), onStopListening: vi.fn(), onJoin: vi.fn(), onMirror: vi.fn() });
+const handlers = () => ({ onSave: vi.fn(), onStart: vi.fn(), onStop: vi.fn(), onCode: vi.fn(), onRemove: vi.fn(), onSwitch: vi.fn(), onBattery: vi.fn(), onMakeMain: vi.fn(), onPromote: vi.fn(), onPromoteCancel: vi.fn(), onNewKeyAsk: vi.fn(), onNewKey: vi.fn(), onNewKeyCancel: vi.fn(), onStopListening: vi.fn(), onJoin: vi.fn(), onMirror: vi.fn() });
 
 describe("renderNetwork", () => {
   it("shows Connected to with the main's address and Leave while the phone has joined a main", () => {
@@ -216,5 +216,23 @@ describe("initNetwork", () => {
     recheck();
     await settle();
     expect(pane.textContent).toContain("Notifications are off for Maya in Android settings.");
+  });
+});
+
+describe("secure pairing on the phone", () => {
+  it("says the code is used up, and that an updated phone must pair again", () => {
+    const el = renderNetwork({ ...base, status: { ...running, code: null, codeUsedUp: true, pairAgain: true } }, handlers(), NOW);
+    expect(el.textContent).toContain("Code used up after 3 wrong tries — Regenerate.");
+    expect(el.textContent).toContain("This Maya was updated to secure pairing — pair again.");
+  });
+
+  it("offers New key, which asks before it drops every pairing", () => {
+    const h = handlers();
+    renderNetwork(base, h, NOW).querySelector<HTMLButtonElement>("button[data-action=new-key]")!.click();
+    expect(h.onNewKeyAsk).toHaveBeenCalled();
+    const asking = renderNetwork({ ...base, newKey: true }, h, NOW);
+    expect(asking.textContent).toContain("Drop every pairing and make a new key?");
+    asking.querySelector<HTMLButtonElement>("button[data-action=new-key-confirm]")!.click();
+    expect(h.onNewKey).toHaveBeenCalled();
   });
 });

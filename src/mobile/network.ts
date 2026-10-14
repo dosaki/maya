@@ -26,6 +26,8 @@ export interface NetworkModel {
   error: string | null;
   /** The assistant whose Make main confirmation is open. */
   promote: string | null;
+  /** New key's confirmation is open. */
+  newKey?: boolean;
 }
 
 export interface NetworkHandlers {
@@ -39,6 +41,9 @@ export interface NetworkHandlers {
   onMakeMain(id: string): void;
   onPromote(id: string): void;
   onPromoteCancel(): void;
+  onNewKeyAsk(): void;
+  onNewKey(): void;
+  onNewKeyCancel(): void;
   onStopListening(): void;
   onJoin(host: string, port: number, code: string): void;
   onMirror(id: string, on: boolean): void;
@@ -127,6 +132,7 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
     if (!link.connected && link.error) phone.append(el("p", "settings__hint", link.error));
     phone.append(button("Leave", "leave", h.onStopListening));
   }
+  if (m.status.pairAgain) phone.append(el("p", "settings__hint", "This Maya was updated to secure pairing — pair again."));
   if (m.status.mainError) phone.append(el("p", "settings__error", m.status.mainError));
   if (m.error) phone.append(el("p", "settings__error", m.error));
   root.append(phone);
@@ -138,6 +144,8 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
     if (code && nowMs <= code.expiresAt) {
       pairing.append(el("div", "network__code", formatCode(code.code)));
       pairing.append(el("p", "settings__code-expiry", `expires in ${minutesLeft(code.expiresAt, nowMs)} min`));
+    } else if (m.status.codeUsedUp) {
+      pairing.append(el("p", "settings__hint", "Code used up after 3 wrong tries — Regenerate."));
     }
     pairing.append(button(code && nowMs <= code.expiresAt ? "Regenerate" : "Show pairing code", "regenerate-code", h.onCode));
     pairing.append(el("p", "network__addresses", m.addresses.length > 0 ? `Assistants reach this phone at ${m.addresses.join(", ")}, port ${m.port}.` : "Connect the phone to Wi‑Fi to see its address."));
@@ -181,6 +189,19 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
     }
   }
   if (!listening) root.append(assistants);
+
+  if (running || listening) {
+    const key = section("Key");
+    if (m.newKey) {
+      const c = el("div", "network__confirm");
+      c.append(el("p", "", "Drop every pairing and make a new key?"));
+      c.append(button(m.busy ? "Working…" : "Drop and make a new key", "new-key-confirm", h.onNewKey, true), button("Cancel", "new-key-cancel", h.onNewKeyCancel));
+      key.append(c);
+    } else {
+      key.append(button("New key", "new-key", h.onNewKeyAsk));
+    }
+    root.append(key);
+  }
 
   const notifications = section("Notifications");
   for (const [which, label, on, nameAttr] of [["awaiting", "Notify on Awaiting Decision", m.notifyAwaiting, "notifyAwaiting"], ["completed", "Notify on Completed", m.notifyCompleted, "notifyCompleted"]] as const) {
@@ -262,6 +283,7 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     busy: false,
     error: null,
     promote: null,
+    newKey: false,
   };
   const render = () => {
     const edits = carryEdits(pane, model);
@@ -339,6 +361,13 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     onPromote: (id) => void busy(async () => {
       setStatus(await invoke<NetworkStatus>("network_promote", { id }));
       model.promote = null;
+    }),
+    onNewKeyAsk: () => { model.newKey = true; paint(); },
+    onNewKeyCancel: () => { model.newKey = false; paint(); },
+    onNewKey: () => void busy(async () => {
+      model.newKey = false;
+      setStatus(await invoke<NetworkStatus>("network_new_key"));
+      await loadConfig();
     }),
     onStopListening: () => void busy(async () => {
       setStatus(await invoke<NetworkStatus>("listen_stop"));
