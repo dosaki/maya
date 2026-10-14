@@ -7,6 +7,7 @@ use crate::alerts::{self, Action, Alerts, Posted, Switches};
 use maya_core::config::{self, Config, NetworkRole, PairedAssistant};
 use maya_core::log;
 use maya_core::model::Card;
+use maya_core::net::identity::{self, Keypair};
 use maya_core::net::merge::{self, RemoteBoard};
 use maya_core::net::client::{check_pair_args, pair_with, reconnect, ClientHandle, ClientNotify, Executor, RequestLane, NOT_PAIRED, REMOVED, REQUEST_TIMEOUT};
 use maya_core::net::protocol::{CommandKind, Request, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, DEFAULT_PORT};
@@ -88,6 +89,8 @@ pub struct Hub {
     pub mirror: Mutex<MirrorView>,
     /// Where the page's commands go while joined.
     pub lane: Arc<RequestLane>,
+    /// This phone's key pair, read from `identity.key` once and kept.
+    identity: Mutex<Option<Arc<Keypair>>>,
     /// The first mirror of the current link was seeded into the notifier.
     /// A reconnect keeps it, so an ask that began while away still notifies.
     mirror_seeded: AtomicBool,
@@ -107,7 +110,7 @@ impl Hub {
 
     /// `new` with the clock boards are merged at.
     pub fn with_clock(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>, now: impl Fn() -> u64 + Send + Sync + 'static) -> Arc<Hub> {
-        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), client: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), lane: Arc::new(RequestLane::default()), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now) })
+        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), client: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now) })
     }
 
     fn handle(&self) -> Option<ServerHandle> {
@@ -201,15 +204,53 @@ impl Hub {
     /// paired list offline with why the server is down.
     pub fn status(&self) -> NetworkStatus {
         if self.client.lock().unwrap().is_some() {
-            return NetworkStatus { role: NetworkRole::Assistant, assistant: self.link.lock().unwrap().clone(), ..Default::default() };
+            return self.with_pair_again(NetworkStatus { role: NetworkRole::Assistant, assistant: self.link.lock().unwrap().clone(), ..Default::default() });
         }
         match self.handle() {
-            Some(s) => s.status(),
+            Some(s) => self.with_pair_again(s.status()),
             None => {
                 let paired = self.settings.lock().unwrap().config.network.assistants.clone();
-                NetworkStatus { role: NetworkRole::Off, code: None, assistants: net::paired_offline(&paired), main_error: self.main_error.lock().unwrap().clone(), ..Default::default() }
+                self.with_pair_again(NetworkStatus { role: NetworkRole::Off, code: None, assistants: net::paired_offline(&paired), main_error: self.main_error.lock().unwrap().clone(), ..Default::default() })
             }
         }
+    }
+
+    /// The core never fills `pair_again`; it is the config's, so every
+    /// status that reaches the page goes through here.
+    fn with_pair_again(&self, mut status: NetworkStatus) -> NetworkStatus {
+        status.pair_again = self.settings.lock().unwrap().config.network.pair_again;
+        status
+    }
+
+    /// This phone's key pair, from `identity.key` beside its config.
+    pub fn identity(&self) -> Result<Arc<Keypair>, String> {
+        let mut held = self.identity.lock().unwrap();
+        if let Some(k) = held.as_ref() {
+            return Ok(k.clone());
+        }
+        let k = Arc::new(identity::load_or_create(&self.maya_dir.join(identity::FILE))?);
+        *held = Some(k.clone());
+        Ok(k)
+    }
+
+    /// Drops every pairing and makes a fresh key: the server and the link
+    /// stop and the role goes Off.
+    pub fn new_key(&self) -> Result<NetworkStatus, String> {
+        self.stop_server();
+        self.stop_client();
+        self.update_config(|c| {
+            c.network.role = NetworkRole::Off;
+            c.network.assistants.clear();
+            c.network.main_key.clear();
+            c.network.main_host.clear();
+            c.network.main_port = 0;
+            c.network.pair_again = false;
+        })?;
+        let k = identity::replace(&self.maya_dir.join(identity::FILE))?;
+        *self.identity.lock().unwrap() = Some(Arc::new(k));
+        let status = self.status();
+        self.sink.network(&status);
+        Ok(status)
     }
 
     /// Changes the config with `f` and saves it; the config in memory
@@ -245,19 +286,28 @@ impl Hub {
             (s.config.listen_port(), s.config.network.clone())
         };
         let notify: Arc<dyn Notify> = Arc::new(HubNotify(Arc::downgrade(self)));
-        let mut started = start_with(notify.clone(), Arc::new(Mutex::new(view.clone())), port);
+        let key = match self.identity() {
+            Ok(k) => k,
+            Err(e) => {
+                *self.main_error.lock().unwrap() = Some(e.clone());
+                log::line("network", format!("server not started: {e}"));
+                self.sink.network(&self.status());
+                return Err(e);
+            }
+        };
+        let mut started = start_with(notify.clone(), Arc::new(Mutex::new(view.clone())), port, key.clone());
         for _ in 0..5 {
             if started.is_ok() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(150));
-            started = start_with(notify.clone(), Arc::new(Mutex::new(view.clone())), port);
+            started = start_with(notify.clone(), Arc::new(Mutex::new(view.clone())), port, key.clone());
         }
         match started {
             Ok(handle) => {
                 // The user pressed Make main on this phone, so the entry it hands itself may mirror.
                 handle.set_own_mirror(true);
-                let status = handle.status();
+                let status = self.with_pair_again(handle.status());
                 *self.server.lock().unwrap() = Some(handle);
                 *self.main_error.lock().unwrap() = None;
                 log::line("network", format!("server listening on port {port}"));
@@ -298,11 +348,19 @@ impl Hub {
         *self.link.lock().unwrap() = AssistantLink { retrying: true, ..Default::default() };
         self.mirror_seeded.store(false, Ordering::SeqCst);
         *self.mirror.lock().unwrap() = MirrorView::default();
+        let key = match self.identity() {
+            Ok(k) => k,
+            Err(e) => {
+                self.link.lock().unwrap().error = Some(e);
+                self.sink.network(&self.status());
+                return;
+            }
+        };
         let weak = Arc::downgrade(self);
         let handle = ClientHandle::spawn(move |stop| {
             let notify: Arc<dyn ClientNotify> = Arc::new(HubClientNotify { hub: weak.clone(), stop: stop.clone() });
             let config_of = move || weak.upgrade().map(|h| h.settings.lock().unwrap().config.network.clone()).unwrap_or_default();
-            reconnect(&config_of, Arc::new(NoSessions), notify, &stop);
+            reconnect(&config_of, key, Arc::new(NoSessions), notify, &stop);
         });
         *self.client.lock().unwrap() = Some(handle);
         // A mirror that landed before the handle was in shows now.
@@ -318,8 +376,7 @@ impl Hub {
             c.network.role = NetworkRole::Off;
             c.network.main_host.clear();
             c.network.main_port = 0;
-            c.network.assistant_id.clear();
-            c.network.token.clear();
+            c.network.main_key.clear();
         })?;
         self.stop_client();
         let status = self.status();
@@ -340,14 +397,14 @@ impl Hub {
         let was_joined = self.joined();
         self.stop_server();
         self.stop_client();
-        let paired = pair_with(Arc::new(NoSessions), &host, port, &name, &code, phone_caps()).and_then(|(main, id, token)| {
+        let paired = pair_with(Arc::new(NoSessions), self.identity()?, &host, port, &name, &code, phone_caps()).and_then(|(main, main_key)| {
             self.update_config(|c| {
                 c.network.role = NetworkRole::Assistant;
                 c.network.main_host = host.clone();
                 c.network.main_port = port;
                 c.network.name = name.clone();
-                c.network.assistant_id = id;
-                c.network.token = token;
+                c.network.main_key = main_key;
+                c.network.pair_again = false;
             })
             .map(|_| main)
         });
@@ -388,7 +445,7 @@ impl Hub {
     pub fn promote(self: &Arc<Self>, id: &str) -> Result<NetworkStatus, String> {
         let server = self.handle().ok_or("Start the server first.")?;
         let out = server.promote(id)?;
-        self.update_config(|c| promote::as_assistant_of(c, &out.host, out.port, &out.me)).map_err(|e| format!("Could not save this Maya as an assistant: {}.", e.trim_end_matches('.')))?;
+        self.update_config(|c| promote::as_assistant_of(c, &out.host, out.port, &out.main_key)).map_err(|e| format!("Could not save this Maya as an assistant: {}.", e.trim_end_matches('.')))?;
         self.stop_server();
         self.start_client();
         Ok(self.status())
@@ -504,12 +561,13 @@ impl Notify for HubNotify {
         self.with(|h| {
             let connected = status.assistants.iter().filter(|a| a.connected).count();
             h.alerts.service_line(&alerts::service_line(status.assistants.len(), connected));
-            h.sink.network(&status);
+            h.sink.network(&h.with_pair_again(status));
         });
     }
 
     fn paired(&self, assistant: &PairedAssistant) -> Result<(), String> {
         let Some(h) = self.0.upgrade() else { return Err("the app is gone".into()) };
+        h.update_config(|c| c.network.pair_again = false)?;
         h.save_assistants(|list| match list.iter_mut().find(|a| a.id == assistant.id) {
             Some(a) => *a = assistant.clone(),
             None => list.push(assistant.clone()),
@@ -571,7 +629,7 @@ impl HubClientNotify {
 }
 
 impl ClientNotify for HubClientNotify {
-    fn paired(&self, _: &str, _: &str) {}
+    fn paired(&self, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
         self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None });
@@ -653,11 +711,12 @@ impl ClientNotify for HubClientNotify {
         h.sink.network(&h.status());
         Ok(port)
     }
-    fn moved(&self, host: &str, port: u16) -> Result<(), String> {
+    fn moved(&self, host: &str, port: u16, key: &str) -> Result<(), String> {
         let h = self.hub.upgrade().ok_or("the app is gone")?;
         h.update_config(|c| {
             c.network.main_host = host.into();
             c.network.main_port = port;
+            c.network.main_key = key.into();
         })
         .map(|_| ())
     }
@@ -670,7 +729,7 @@ mod tests {
 
     #[test]
     fn a_late_paired_list_change_leaves_an_assistant_config_empty() {
-        let late = PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false };
+        let late = PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false };
         let mut config = Config::default();
         config.network.role = NetworkRole::Assistant;
         assert!(!change_paired(&mut config, |l| *l = vec![late.clone()]));

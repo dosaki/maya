@@ -86,6 +86,7 @@ pub fn run() {
             commands::start_session,
             commands::network_status,
             commands::network_pair,
+            commands::network_new_key,
             commands::network_pairing_code,
             commands::network_remove_assistant,
             commands::network_promote,
