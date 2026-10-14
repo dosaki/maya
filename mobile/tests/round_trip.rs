@@ -11,7 +11,7 @@ use maya_core::net::{MirrorAccess, NetworkStatus};
 use maya_mobile_lib::alerts::{Alerts, Post};
 use maya_mobile_lib::hub::{Hub, Settings, Sink};
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -115,8 +115,18 @@ fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+/// A free port below the ephemeral range. One picked by binding port 0
+/// comes from the range outgoing connections use, so a parallel test's
+/// client could take it before the hub binds it ("Address already in use").
 fn free_port() -> u16 {
-    std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let base = 20_000 + std::process::id() % 1_000 * 20;
+    loop {
+        let port = (base + NEXT.fetch_add(1, Ordering::SeqCst) % 9_000) as u16;
+        if std::net::TcpListener::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 #[test]
