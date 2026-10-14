@@ -234,10 +234,10 @@ impl Hub {
     }
 
     /// Drops every pairing and makes a fresh key: the server and the link
-    /// stop and the role goes Off.
+    /// stop and the role goes Off. Nothing stops or changes unless both the
+    /// config and the key file are written.
     pub fn new_key(&self) -> Result<NetworkStatus, String> {
-        self.stop_server();
-        self.stop_client();
+        let before = self.settings.lock().unwrap().config.clone();
         self.update_config(|c| {
             c.network.role = NetworkRole::Off;
             c.network.assistants.clear();
@@ -246,8 +246,18 @@ impl Hub {
             c.network.main_port = 0;
             c.network.pair_again = false;
         })?;
-        let k = identity::replace(&self.maya_dir.join(identity::FILE))?;
-        *self.identity.lock().unwrap() = Some(Arc::new(k));
+        let mut held = self.identity.lock().unwrap();
+        match identity::replace(&self.maya_dir.join(identity::FILE)) {
+            Ok(k) => *held = Some(Arc::new(k)),
+            Err(e) => {
+                drop(held);
+                let _ = self.update_config(|c| *c = before);
+                return Err(e);
+            }
+        }
+        drop(held);
+        self.stop_server();
+        self.stop_client();
         let status = self.status();
         self.sink.network(&status);
         Ok(status)
@@ -264,9 +274,17 @@ impl Hub {
         Ok(next)
     }
 
-    fn save_assistants(&self, f: impl FnOnce(&mut Vec<PairedAssistant>)) -> Result<(), String> {
+    /// Saves the paired list changed by `f`; a new pairing (`new`) also
+    /// clears `pair_again`, in the same write.
+    fn save_assistants(&self, new: bool, f: impl FnOnce(&mut Vec<PairedAssistant>)) -> Result<(), String> {
         let mut skipped = false;
-        let saved = self.update_config(|c| skipped = !change_paired(c, f)).map(|_| ());
+        let saved = self.update_config(|c| {
+            skipped = !change_paired(c, f);
+            if new {
+                c.network.pair_again = false;
+            }
+        })
+        .map(|_| ());
         if skipped {
             log::line("network", "not saving the paired assistants: this phone is an assistant now");
         }
@@ -393,11 +411,12 @@ impl Hub {
             "" => self.settings.lock().unwrap().config.network.name.clone(),
             n => n.to_string(),
         };
+        let identity = self.identity()?;
         let was_main = self.handle().is_some();
         let was_joined = self.joined();
         self.stop_server();
         self.stop_client();
-        let paired = pair_with(Arc::new(NoSessions), self.identity()?, &host, port, &name, &code, phone_caps()).and_then(|(main, main_key)| {
+        let paired = pair_with(Arc::new(NoSessions), identity, &host, port, &name, &code, phone_caps()).and_then(|(main, main_key)| {
             self.update_config(|c| {
                 c.network.role = NetworkRole::Assistant;
                 c.network.main_host = host.clone();
@@ -465,7 +484,7 @@ impl Hub {
         match self.handle() {
             Some(s) => s.remove_assistant(id)?,
             None => {
-                self.save_assistants(|list| list.retain(|a| a.id != id))?;
+                self.save_assistants(false, |list| list.retain(|a| a.id != id))?;
                 log::line("network", format!("{id}: removed"));
             }
         }
@@ -490,7 +509,7 @@ impl Hub {
     pub fn set_mirror(&self, id: &str, on: bool) -> Result<NetworkStatus, String> {
         match self.handle() {
             Some(s) => s.set_mirror(id, on)?,
-            None => self.save_assistants(|list| {
+            None => self.save_assistants(false, |list| {
                 if let Some(a) = list.iter_mut().find(|a| a.id == id) {
                     a.mirror = on;
                 }
@@ -567,8 +586,7 @@ impl Notify for HubNotify {
 
     fn paired(&self, assistant: &PairedAssistant) -> Result<(), String> {
         let Some(h) = self.0.upgrade() else { return Err("the app is gone".into()) };
-        h.update_config(|c| c.network.pair_again = false)?;
-        h.save_assistants(|list| match list.iter_mut().find(|a| a.id == assistant.id) {
+        h.save_assistants(true, |list| match list.iter_mut().find(|a| a.id == assistant.id) {
             Some(a) => *a = assistant.clone(),
             None => list.push(assistant.clone()),
         })
@@ -576,7 +594,7 @@ impl Notify for HubNotify {
 
     fn paired_list_changed(&self, assistants: &[PairedAssistant]) -> Result<(), String> {
         let Some(h) = self.0.upgrade() else { return Err("the app is gone".into()) };
-        h.save_assistants(|list| *list = assistants.to_vec())
+        h.save_assistants(false, |list| *list = assistants.to_vec())
     }
 }
 

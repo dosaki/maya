@@ -683,3 +683,52 @@ fn every_status_the_page_gets_carries_pair_again() {
     hub.update_config(|c| c.network.pair_again = true).unwrap();
     assert!(!hub.new_key().unwrap().pair_again, "New key clears it");
 }
+
+#[test]
+fn a_new_key_that_cannot_save_the_config_changes_and_stops_nothing() {
+    let (hub, _page, dir) = new_hub(free_port());
+    hub.start_server().unwrap();
+    let key = hub.identity().unwrap().public;
+    let on_disk = std::fs::read(dir.path().join("maya").join(maya_core::net::identity::FILE)).unwrap();
+    // A directory where the config file should be: every save fails.
+    hub.settings.lock().unwrap().path = dir.path().to_path_buf();
+    assert!(hub.new_key().is_err());
+    assert_eq!(hub.status().role, NetworkRole::Main, "still the main");
+    assert!(hub.server.lock().unwrap().is_some(), "the server still runs");
+    assert_eq!(hub.identity().unwrap().public, key);
+    assert_eq!(std::fs::read(dir.path().join("maya").join(maya_core::net::identity::FILE)).unwrap(), on_disk);
+    hub.stop_server();
+}
+
+#[test]
+fn a_new_key_that_cannot_write_the_key_file_restores_the_config() {
+    let (hub, _page, dir) = new_hub(free_port());
+    hub.update_config(|c| c.network.main_key = "a2V5".into()).unwrap();
+    hub.start_server().unwrap();
+    let key = hub.identity().unwrap().public;
+    // Replacing the key renames a file over this path; a directory there makes that fail.
+    let path = dir.path().join("maya").join(maya_core::net::identity::FILE);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir_all(path.join("x")).unwrap();
+    assert!(hub.new_key().is_err());
+    let c = hub.settings.lock().unwrap().config.network.clone();
+    assert_eq!((c.role, c.main_key.as_str()), (NetworkRole::Main, "a2V5"));
+    assert!(hub.server.lock().unwrap().is_some(), "the server still runs");
+    assert_eq!(hub.identity().unwrap().public, key, "the cached key is unchanged");
+    hub.stop_server();
+}
+
+#[test]
+fn a_join_with_an_unreadable_key_file_fails_before_it_changes_anything() {
+    let (main, port, _) = desk();
+    let (hub, _page, dir) = new_hub(free_port());
+    hub.update_config(|c| c.network.main_key = "a2V5".into()).unwrap();
+    let path = dir.path().join("maya").join(maya_core::net::identity::FILE);
+    std::fs::create_dir_all(&path).unwrap();
+    let code = main.open_pairing(maya_core::store::now_ms()).unwrap().0;
+    assert!(hub.join("127.0.0.1", port, "Pixel", &code).is_err());
+    let c = hub.settings.lock().unwrap().config.network.clone();
+    assert_eq!((c.role, c.main_key.as_str()), (NetworkRole::Main, "a2V5"));
+    assert!(main.status().assistants.is_empty(), "no pairing was attempted");
+    main.stop();
+}
