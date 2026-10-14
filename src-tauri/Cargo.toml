@@ -27,7 +27,6 @@ notify = { workspace = true }
 libc = { workspace = true }
 dirs = { workspace = true }
 tungstenite = { workspace = true }
-hmac = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 
