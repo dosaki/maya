@@ -139,7 +139,7 @@ pub fn synthesize(key: &str, voice_id: &str, text: &str, path: &Path) -> Result<
 pub fn play(path: &Path, volume: u8) -> Result<(), String> {
     use windows_sys::Win32::Media::Multimedia::mciSendStringW;
     let send = |cmd: String| -> Result<(), String> {
-        let w = wide(&cmd);
+        let w = crate::keystore::wide(&cmd);
         // SAFETY: a NUL-terminated command; no return buffer or window.
         match unsafe { mciSendStringW(w.as_ptr(), std::ptr::null_mut(), 0, std::ptr::null_mut()) } {
             0 => Ok(()),

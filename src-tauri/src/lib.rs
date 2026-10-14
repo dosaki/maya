@@ -188,6 +188,8 @@ impl Notify for TauriNetNotify {
     }
 
     fn status_changed(&self, status: NetworkStatus) {
+        let mut status = status;
+        status.pair_again = self.app.state::<AppState>().store.lock().unwrap().config.network.pair_again;
         let _ = self.app.emit("network", &status);
     }
 
@@ -632,7 +634,7 @@ fn network_promote(app: AppHandle, state: TauriState<AppState>, id: String) -> R
 
 /// Drops every pairing and makes a fresh key pair: for a key that may have
 /// leaked. The role goes Off; the user turns Main or Assistant on again.
-#[tauri::command]
+#[tauri::command(async)]
 fn network_new_key(app: AppHandle, state: TauriState<AppState>) -> Result<NetworkStatus, String> {
     // The pairings go first: if the new key cannot be stored, the old key
     // stays and nothing is half-changed but the (already dropped) pairings.
@@ -652,7 +654,7 @@ fn network_new_key(app: AppHandle, state: TauriState<AppState>) -> Result<Networ
 }
 
 /// Forgets the main: its key, host and port go and the role goes Off.
-#[tauri::command]
+#[tauri::command(async)]
 fn network_forget_main(app: AppHandle, state: TauriState<AppState>) -> Result<NetworkStatus, String> {
     update_config(&app, |c| {
         c.network.role = config::NetworkRole::Off;
@@ -685,14 +687,18 @@ fn start_main(app: &AppHandle, show_code: bool) {
     stop_main(app);
     let port = app.state::<AppState>().store.lock().unwrap().config.listen_port();
     // A server just stopped lets go of the port within a tick; retry briefly.
-    let mut started = net_app::start_server(app.clone(), port);
-    for _ in 0..5 {
-        if started.is_ok() {
-            break;
+    // The key store is read once, not at every retry.
+    let started = net_app::identity(app).and_then(|id| {
+        let mut started = net_app::start_server(app.clone(), port, id.clone());
+        for _ in 0..5 {
+            if started.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+            started = net_app::start_server(app.clone(), port, id.clone());
         }
-        std::thread::sleep(Duration::from_millis(150));
-        started = net_app::start_server(app.clone(), port);
-    }
+        started
+    });
     match started {
         Ok(handle) => {
             // Another start may have finished meanwhile; the displaced server stops.
@@ -1134,8 +1140,8 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
     let before = {
         let mut store = state.store.lock().unwrap();
         let before = store.config.clone();
-        // The paired list belongs to the server and the assistant's id and
-        // token to pairing; a page holding an older config must not undo them.
+        // The paired list belongs to the server and the main's key and
+        // "pair again" to pairing; a page holding an older config must not undo them.
         config.network.assistants = before.network.assistants.clone();
         config.network.main_key = before.network.main_key.clone();
         config.network.pair_again = before.network.pair_again;
@@ -1401,6 +1407,25 @@ mod route_tests {
         assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
         assert_eq!(pr_link(&card("/Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
         assert_eq!(pr_link(&Card { pr: None, ..card("") }).unwrap_err(), "No pull request is known for this session yet.");
+    }
+
+    #[test]
+    fn a_new_pairing_is_saved_with_pair_again_cleared() {
+        let dir = std::env::temp_dir().join(format!("maya-save-network-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("maya/config.json");
+        let mut config = Config::default();
+        config.network.pair_again = true;
+        let a = config::PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false };
+        let saved_ok = save_network(&path, &mut config, |n| {
+            n.pair_again = false;
+            n.assistants.push(a);
+        });
+        assert_eq!(saved_ok, Ok(()));
+        assert!(!config.network.pair_again && config.network.assistants.len() == 1);
+        let saved = config::load(&path);
+        assert!(!saved.network.pair_again && saved.network.assistants.len() == 1, "both are on disk");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

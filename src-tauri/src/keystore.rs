@@ -31,7 +31,10 @@ const ERR_SEC_ITEM_NOT_FOUND: i32 = 44;
 pub fn store(item: &Item, secret: &str) -> Result<(), String> {
     use std::io::Write;
     let secret = secret.trim();
-    if secret.is_empty() || secret.contains(char::is_whitespace) || secret.contains('"') {
+    if secret.is_empty() {
+        return Err("The key is empty.".into());
+    }
+    if secret.contains(char::is_whitespace) || secret.contains('"') {
         return Err("The secret cannot be stored as given.".into());
     }
     let mut child = maya_core::command("security")
@@ -75,7 +78,7 @@ pub fn store(item: &Item, secret: &str) -> Result<(), String> {
     use windows_sys::Win32::Security::Credentials::{CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC};
     let secret = secret.trim();
     if secret.is_empty() {
-        return Err("The secret is empty.".into());
+        return Err("The key is empty.".into());
     }
     let mut target = wide(item.service);
     let mut user = wide(item.account);
@@ -120,17 +123,19 @@ pub fn load(item: &Item) -> Result<Option<String>, String> {
 }
 
 #[cfg(windows)]
-fn wide(s: &str) -> Vec<u16> {
+pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
 /// `secret-tool` arguments that store a secret (read from stdin) in GNOME
-/// Keyring, and that print it.
+/// Keyring, that print it, and that list the item's attributes whether or
+/// not the keyring is unlocked.
 #[cfg(any(test, target_os = "linux"))]
-fn secret_tool_args(item: &Item) -> (Vec<String>, Vec<String>) {
+fn secret_tool_args(item: &Item) -> (Vec<String>, Vec<String>, Vec<String>) {
     let store = ["store", "--label", item.label, "service", "maya", "account", item.linux_account].map(String::from).to_vec();
     let lookup = ["lookup", "service", "maya", "account", item.linux_account].map(String::from).to_vec();
-    (store, lookup)
+    let search = ["search", "--all", "service", "maya", "account", item.linux_account].map(String::from).to_vec();
+    (store, lookup, search)
 }
 
 /// Stores the secret in GNOME Keyring (replacing any previous one). The
@@ -140,7 +145,7 @@ pub fn store(item: &Item, secret: &str) -> Result<(), String> {
     use std::io::Write;
     let secret = secret.trim();
     if secret.is_empty() {
-        return Err("The secret is empty.".into());
+        return Err("The key is empty.".into());
     }
     let mut child = maya_core::command("secret-tool")
         .args(secret_tool_args(item).0)
@@ -173,7 +178,19 @@ pub fn load(item: &Item) -> Result<Option<String>, String> {
     }
     let err = String::from_utf8_lossy(&out.stderr);
     if err.trim().is_empty() {
-        Ok(None)
+        // `lookup` exits 1 and says nothing both for an absent item and for
+        // an unlock prompt the user dismissed: `search` tells them apart.
+        let found = maya_core::command("secret-tool")
+            .args(secret_tool_args(item).2)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|e| format!("could not run secret-tool (install libsecret-tools): {e}"))?;
+        if found.stdout.iter().any(|b| !b.is_ascii_whitespace()) {
+            Err("GNOME Keyring holds the item but did not unlock it".into())
+        } else {
+            Ok(None)
+        }
     } else {
         Err(format!("GNOME Keyring: {}", err.trim()))
     }
@@ -185,10 +202,12 @@ mod tests {
 
     #[test]
     fn secret_tool_args_name_the_maya_service_and_account() {
-        let (store, lookup) = secret_tool_args(&ELEVENLABS);
+        let (store, lookup, search) = secret_tool_args(&ELEVENLABS);
         assert_eq!(store, ["store", "--label", "Maya ElevenLabs", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec());
         assert_eq!(lookup, ["lookup", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec());
-        let (store, lookup) = secret_tool_args(&NETWORK_KEY);
+        assert_eq!(search, ["search", "--all", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec());
+        let (store, lookup, search) = secret_tool_args(&NETWORK_KEY);
+        assert_eq!(search.last().unwrap(), "network-key");
         assert_eq!(store[2], "Maya network key");
         assert_eq!(lookup.last().unwrap(), "network-key");
     }

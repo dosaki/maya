@@ -54,9 +54,8 @@ pub fn identity(app: &AppHandle) -> Result<Arc<Keypair>, String> {
 }
 
 /// Starts the server with the Tauri adapter and the store's paired list.
-pub fn start_server(app: AppHandle, port: u16) -> Result<ServerHandle, String> {
+pub fn start_server(app: AppHandle, port: u16, id: Arc<Keypair>) -> Result<ServerHandle, String> {
     let view = app.state::<AppState>().store.lock().unwrap().config.network.clone();
-    let id = identity(&app)?;
     start_with(Arc::new(crate::TauriNetNotify { app }), Arc::new(Mutex::new(view)), port, id)
 }
 
@@ -140,8 +139,9 @@ impl ClientNotify for TauriClientNotify {
     }
     fn disconnected(&self, error: &str) {
         log::line("network", format!("disconnected: {error}"));
-        // `reconnect` tries again after every failure but these two.
-        let retrying = error != NOT_PAIRED && error != REMOVED;
+        // `reconnect` tries again after every failure but these two, and
+        // the key store failing before it starts is final too.
+        let retrying = error != NOT_PAIRED && error != REMOVED && !error.starts_with(KEY_STORE);
         self.set(|l| {
             l.connected = false;
             l.error = Some(error.to_string());
