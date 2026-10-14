@@ -41,6 +41,19 @@ pub fn identity_from(load: impl FnOnce() -> Result<Option<String>, String>, stor
     }
 }
 
+/// A new key pair for New key: `clear` drops the pairings, then the key is
+/// saved with `store`. A failed `clear` changes nothing; a failed `store`
+/// keeps the old key and `restore` puts the pairings back.
+pub fn new_key_with(clear: impl FnOnce() -> Result<(), String>, store: impl FnOnce(&str) -> Result<(), String>, restore: impl FnOnce()) -> Result<Keypair, String> {
+    clear()?;
+    let k = Keypair::generate();
+    if let Err(e) = store(&k.to_secret()) {
+        restore();
+        return Err(format!("{KEY_STORE}{e}"));
+    }
+    Ok(k)
+}
+
 /// This Maya's key pair, read once and kept for the app's life.
 pub fn identity(app: &AppHandle) -> Result<Arc<Keypair>, String> {
     let state = app.state::<AppState>();
@@ -337,5 +350,28 @@ mod tests {
         assert!(out.unwrap_err().starts_with("Could not reach the key store: "));
         let out = identity_from(|| Err("the keyring is locked".into()), |_| panic!("never overwritten"));
         assert_eq!(out.unwrap_err(), "Could not reach the key store: the keyring is locked");
+    }
+
+    #[test]
+    fn a_new_key_is_kept_only_once_stored_and_a_failed_store_puts_the_pairings_back() {
+        let stored = RefCell::new(None);
+        let made = new_key_with(
+            || Ok(()),
+            |s| {
+                *stored.borrow_mut() = Some(s.to_string());
+                Ok(())
+            },
+            || panic!("nothing to put back"),
+        )
+        .unwrap();
+        assert_eq!(Keypair::from_secret(stored.borrow().as_ref().unwrap()).unwrap().public, made.public);
+
+        let restored = RefCell::new(false);
+        let out = new_key_with(|| Ok(()), |_| Err("the keyring is locked".into()), || *restored.borrow_mut() = true);
+        assert_eq!(out.unwrap_err(), "Could not reach the key store: the keyring is locked");
+        assert!(*restored.borrow(), "the pairings come back");
+
+        let out = new_key_with(|| Err("Could not save the settings.".into()), |_| panic!("no key made"), || panic!("nothing changed"));
+        assert_eq!(out.unwrap_err(), "Could not save the settings.");
     }
 }

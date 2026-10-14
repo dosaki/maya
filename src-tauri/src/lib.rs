@@ -636,18 +636,26 @@ fn network_promote(app: AppHandle, state: TauriState<AppState>, id: String) -> R
 /// leaked. The role goes Off; the user turns Main or Assistant on again.
 #[tauri::command(async)]
 fn network_new_key(app: AppHandle, state: TauriState<AppState>) -> Result<NetworkStatus, String> {
-    // The pairings go first: if the new key cannot be stored, the old key
-    // stays and nothing is half-changed but the (already dropped) pairings.
-    update_config(&app, |c| {
-        c.network.role = config::NetworkRole::Off;
-        c.network.assistants.clear();
-        c.network.main_key.clear();
-        c.network.main_host.clear();
-        c.network.main_port = 0;
-        c.network.pair_again = false;
-    })?;
-    let k = maya_core::net::identity::Keypair::generate();
-    keystore::store(&keystore::NETWORK_KEY, &k.to_secret()).map_err(|e| format!("Could not reach the key store: {e}"))?;
+    // The pairings go first; if the new key cannot be stored, they come
+    // back and the old key stays, so nothing changes.
+    let before = state.store.lock().unwrap().config.clone();
+    let k = net_app::new_key_with(
+        || {
+            update_config(&app, |c| {
+                c.network.role = config::NetworkRole::Off;
+                c.network.assistants.clear();
+                c.network.main_key.clear();
+                c.network.main_host.clear();
+                c.network.main_port = 0;
+                c.network.pair_again = false;
+            })
+            .map(|_| ())
+        },
+        |secret| keystore::store(&keystore::NETWORK_KEY, secret),
+        || {
+            let _ = update_config(&app, |c| *c = before);
+        },
+    )?;
     *state.identity.lock().unwrap() = Some(std::sync::Arc::new(k));
     log::line("network", "new key made; every pairing dropped");
     Ok(network_status_of(&state))

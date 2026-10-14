@@ -270,7 +270,7 @@ pub fn network_pair(hub: H, host: String, port: u16, name: String, code: String)
 }
 
 /// Drops every pairing and makes this phone a new key pair.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn network_new_key(hub: H) -> Result<NetworkStatus, String> {
     hub.new_key()
 }

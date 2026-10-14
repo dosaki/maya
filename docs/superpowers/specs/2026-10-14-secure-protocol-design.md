@@ -258,7 +258,7 @@ a forwarded port carries the connection until one exists.
   "no key", so a dismissed unlock prompt never replaces the key.
 - `maya pair --new-key` keeps the old key and pairing unless the new
   pairing, its config and its key file are all saved; New key on the phone
-  changes nothing if a step fails.
+  and the desktop changes nothing if a step fails.
 - `maya run` refuses to start with a pairing but no `identity.key`.
 - An assistant that is offline during Make main pins the old main's key,
   so it pairs again with the new main when it is back; the confirmation
