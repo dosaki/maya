@@ -276,7 +276,8 @@ The APK lands in `mobile/gen/android/app/build/outputs/apk/universal/`.
 `adb logcat -s RustStdoutStderr:V` shows what the Rust side prints to
 stdout and stderr, panics included; Maya's own log is `maya/maya.log` in
 the app's data directory, which `adb shell run-as com.dosaki.maya.mobile`
-reaches on a debug build. On the emulator the phone's address is not
+reaches on a debug build. Its network
+key is `maya/identity.key` in the same directory. On the emulator the phone's address is not
 reachable from the Mac: `adb forward tcp:4127 tcp:4127` and pair the
 desktop with `127.0.0.1`.
 
@@ -378,7 +379,9 @@ Three workflows in `.github/workflows/`:
   server client, over `ureq`), `reviews.rs` and `pr.rs`
   (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
   `interpreter.rs`, `log.rs` (the Debug tab and `maya.log`), and `net/`
-  with `protocol.rs` (message types, encode/decode, pairing and HMAC),
+  with `protocol.rs` (message types, encode/decode, the pairing window),
+  `identity.rs` (this Maya's key pair), `secure.rs` (SPAKE2 pairing, the
+  Noise handshakes and the encrypted `Channel`),
   `server.rs` (the main: listener, threads per assistant, pairing,
   command dispatch), `client.rs` (the assistant: connection, backoff,
   board sending), `merge.rs` (merging local and remote cards, stale
@@ -388,7 +391,7 @@ Three workflows in `.github/workflows/`:
   Tauri side: starting server and client, command execution),
   `terminal_app.rs` (opening Terminal windows), `terminal_win.rs` and
   `terminal_linux.rs` (their Windows and Linux counterparts), `focus.rs` and `dock.rs`
-  (AppKit), `voice.rs` (ElevenLabs), and `ear.rs`, `wake.rs`,
+  (AppKit), `keystore.rs` (the OS key store), `voice.rs` (ElevenLabs), and `ear.rs`, `wake.rs`,
   `listener.rs`, `models.rs` (the voice assistant).
 - `cli/src/` — `main.rs` and `args.rs` (subcommand parsing), `commands.rs`
   (`pair`, `status`, `hooks`, `config`, `start`), `run_cmd.rs` (`run`, the headless

@@ -281,15 +281,22 @@ quiet.
   <main>", "Reconnecting…" (with the last error under it) or the error.
   On macOS 15 and later, macOS asks once whether Maya may reach devices on
   the local network: allow it.
-- **Trust.** Pairing sends the code, in plain text, to the host you typed.
-  Whatever answers there must send back proof that it received that code;
-  a host that is not a Maya main fails the handshake and the assistant
-  keeps nothing. That proof does not show the answer came from your main:
-  on a network you do not trust, an impostor that controls the typed host
-  could read the code and pair in its place, so pair on a network you
-  trust. (A password-authenticated key exchange would close this gap; this
-  version does not have one.) After pairing, each side proves it holds the
-  token on every connection; an assistant never obeys a main that cannot.
+- **Trust.** Pairing runs SPAKE2 over the six-digit code: whatever answers
+  at the host you typed learns nothing about the code unless it is the Maya
+  showing it, and a code allows three tries before it is used up. Each
+  Maya then pins the other's public key; a machine is known by its key,
+  not its address.
+- **Encrypted.** Every frame between two Mayas is encrypted and
+  authenticated (Noise, ChaCha20-Poly1305). A changed, replayed or injected
+  frame closes the connection. The desktop app keeps its private key in
+  the Keychain, Credential Manager or GNOME Keyring; the CLI and the phone
+  in an owner-only `identity.key` beside their config. Any program running
+  as you can read the CLI's file, and on macOS the Keychain item too
+  (through `security`), so keep a leaked machine's key out with Remove on
+  the main, or New key on the machine itself.
+- **Outside the LAN.** Maya does not open anything to the internet. Reach
+  a main from outside through a VPN such as Tailscale or WireGuard and
+  pair with its address there.
 - **Versions.** Both machines need 0.11.0 or later to show Kiro sessions:
   a main on an older release cannot read a card from an agent it does not
   know, and keeps that machine's last board with an unreadable-board note.
@@ -312,8 +319,6 @@ quiet.
 - **What travels.** Session ids, conversation text, option numbers, folder
   names and attachments (up to 20 MB). Commands run on the assistant; the
   main never touches the assistant's files.
-- **Plain text on the LAN.** Traffic is not encrypted in this version; all
-  data is plain text.
 - **Remote cards.** On the main, an assistant's sessions sit in the same
   columns as local ones, with a remote glyph (its tooltip names the
   machine and its address) and the machine's name under the session name
@@ -346,7 +351,8 @@ too, with no desktop and no app: the `maya` command line tool.
   app uses, so Awaiting Decision and Completed are exact.
 - **Pair.** `./maya pair <main host> --code <code> --name <label>`, with the
   code from the main's Settings › Network (`--name` is optional; the
-  machine's hostname is used when it is left out).
+  machine's hostname is used when it is left out). `--new-key` pairs with a
+  new key; the old key and pairing stay unless the new ones are all saved.
 - **Projects.** `./maya config projects-dir <path>` sets the folder whose
   subfolders the main offers for start and resume (`~` works). Until it is
   set, `maya run` warns at start and starting or resuming from the main

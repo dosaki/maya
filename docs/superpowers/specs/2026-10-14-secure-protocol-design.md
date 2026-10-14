@@ -1,7 +1,7 @@
 # A secure protocol between Mayas — design
 
 Date: 2026-10-14
-Status: draft for review
+Status: implemented
 Builds on: `2026-09-30-maya-remote-assistants-design.md`,
 `2026-10-12-promote-assistant-design.md`,
 `2026-10-14-phone-joins-a-main-design.md`
@@ -224,6 +224,42 @@ a forwarded port carries the connection until one exists.
 - RustCrypto's `spake2`, also used by `magic-wormhole.rs`. To our knowledge
   neither crate has had an independent audit; that residual risk is far
   smaller than writing the cryptography ourselves.
+
+## Changes from this design
+
+- The CLI's and the phone's private key is in `identity.key` beside their
+  config, not in `config.json`, so it never reaches a page that reads or
+  saves the config.
+- A protocol 1 Maya reaching a protocol 2 main reads the main's existing
+  `bye { reason: "protocol" }`: "The main Maya runs a different version of
+  Maya."
+- A protocol 1 main ignores binary frames and says nothing, so a protocol 2
+  Maya reaching one shows "The main Maya did not answer. If it runs an
+  older Maya, update it." ("The main runs an older Maya. Update it." shows
+  when a main does speak plain text.)
+- New key sets the role to Off as well as dropping the pairings.
+- Keychain writes go through `security -i` on stdin, so a secret never
+  appears on a command line. A Keychain item that `security` wrote is
+  readable by any process that runs `security` as the user: the key store
+  keeps the key out of files an agent might `cat`, not away from a process
+  determined to read it.
+- The main confirms a pairing with a sealed frame holding `paired`, which
+  the joiner opens before it trusts the main's key (a security review found
+  the plain confirmation byte let `pair()` return an unconfirmed key).
+- Each sealed message's plaintext starts with a flag byte (`0x01` more,
+  `0x00` last), so frame boundaries are authenticated: two frames merged
+  into one, or one frame cut in two, no longer open.
+- Handshake and connection deadlines are checked on every read, and
+  WebSocket pings never count as liveness, so a peer sending pings cannot
+  hold a handshake slot or a connection open.
+- A refusal's reason text is never shown: known reasons map to fixed
+  sentences, any other to "The main Maya refused the connection."
+- On Linux, a key the keyring holds but would not unlock is an error, not
+  "no key", so a dismissed unlock prompt never replaces the key.
+- `maya pair --new-key` keeps the old key and pairing unless the new
+  pairing, its config and its key file are all saved; New key on the phone
+  changes nothing if a step fails.
+- `maya run` refuses to start with a pairing but no `identity.key`.
 
 ## Testing
 
