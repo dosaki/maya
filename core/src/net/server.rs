@@ -22,7 +22,9 @@
 //! in the app's lib.rs), and nothing takes the server's mutex while holding `store`.
 
 use super::merge::{display_names, RemoteBoard};
-use super::protocol::{decode_up, encode, mac, mac_matches, new_id, new_nonce, new_token, Attempts, CommandKind, Down, NonceLog, PairingWindow, Request, Up, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, MAX_FRAME, PROTOCOL};
+use super::identity::{encode_key, Keypair};
+use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, MAX_FRAME, PROTOCOL};
+use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use super::{AssistantStatus, NetworkStatus, PairingCode};
 use crate::config::{NetworkConfig, NetworkRole, PairedAssistant};
@@ -141,7 +143,8 @@ pub struct Server {
     pending: HashMap<u64, Pending>,
     next_id: u64,
     attempts: Attempts,
-    nonces: NonceLog,
+    /// The last code took its three tries without a pairing.
+    code_used_up: bool,
     paired: Vec<PairedAssistant>,
     peers: HashMap<String, Peer>,
     /// A handover to a new main is running; no second one may start.
@@ -165,7 +168,7 @@ struct MirrorBoard {
 
 impl Server {
     fn new(paired: Vec<PairedAssistant>, main_name: String) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, main_name }
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, main_name }
     }
 
     /// The entry `id` lets its Maya mirror.
@@ -207,15 +210,14 @@ impl Server {
         self.paired.iter().zip(display_names(&entries).into_iter().skip(1)).map(|(p, label)| (p.id.clone(), label)).collect()
     }
 
-    /// Records a pairing from `address`. A disconnected entry already paired
-    /// from that address is the same machine pairing again: it keeps its id,
-    /// gets a new token and the names just given, and its old board goes.
-    /// Otherwise the pairing is a new entry. Returns the entry, and what it
-    /// was before when it already existed (for `undo_pairing`).
-    fn record_pairing(&mut self, address: &str, name: &str, hostname: &str, platform: &str, mirror: bool) -> (PairedAssistant, Option<PairedAssistant>) {
-        let again = self.paired.iter().position(|p| p.address == address && !self.conns.contains_key(&p.id));
+    /// Records a pairing by the Maya with `key`. An entry with that key is
+    /// the same machine pairing again: it keeps its id, takes the names
+    /// just given, and its old board goes. Otherwise it is a new entry.
+    /// Returns the entry, and what it was before (for `undo_pairing`).
+    fn record_pairing(&mut self, key: &str, address: &str, name: &str, hostname: &str, platform: &str, mirror: bool) -> (PairedAssistant, Option<PairedAssistant>) {
+        let again = self.paired.iter().position(|p| p.key == key);
         let Some(i) = again else {
-            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token(), address: address.into(), last_seen: None, mirror };
+            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), key: key.into(), address: address.into(), last_seen: None, mirror };
             self.paired.push(a.clone());
             self.pairings_in_flight.insert(a.id.clone());
             return (a, None);
@@ -225,8 +227,8 @@ impl Server {
         p.name = name.into();
         p.hostname = hostname.into();
         p.platform = platform.into();
+        p.address = address.into();
         p.mirror = mirror;
-        p.token = new_token();
         let a = p.clone();
         self.pairings_in_flight.insert(a.id.clone());
         self.by_id.remove(&a.id);
@@ -236,7 +238,7 @@ impl Server {
     }
 
     /// Takes back a pairing the assistant never completed: a new entry goes,
-    /// an existing one gets its old token and names back.
+    /// an existing one gets its old names back.
     fn undo_pairing(&mut self, id: &str, previous: Option<PairedAssistant>) {
         self.pairings_in_flight.remove(id);
         match previous {
@@ -323,7 +325,7 @@ impl Server {
                 AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected, last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note), can_lead: can(CAP_LEAD), can_follow: can(CAP_FOLLOW), mirror: p.mirror, wants_mirror: can(CAP_MIRROR) }
             })
             .collect();
-        NetworkStatus { role: NetworkRole::Main, code, assistants, addresses: super::local_addresses(), ..Default::default() }
+        NetworkStatus { role: NetworkRole::Main, code, assistants, addresses: super::local_addresses(), code_used_up: self.code_used_up, ..Default::default() }
     }
 }
 
@@ -339,6 +341,8 @@ struct Ctx {
     main_name: String,
     /// The entry this main makes for itself at a handover may mirror.
     own_mirror: AtomicBool,
+    /// This main's key pair: assistants pin its public half.
+    identity: Arc<Keypair>,
     live: AtomicUsize,
     /// Connections accepted and not yet through `welcome`.
     pre_auth: Mutex<HandshakeSlots>,
@@ -410,6 +414,7 @@ impl ServerHandle {
             }
             let w = PairingWindow::new(now_ms);
             let out = (w.code.clone(), w.expires_at_ms);
+            s.code_used_up = false;
             s.pairing = Some(w);
             (out.0, out.1, s.status(now_ms))
         };
@@ -419,7 +424,7 @@ impl ServerHandle {
     }
 
     /// Forgets an assistant: it is told `bye removed`, its cards go, and its
-    /// token no longer opens a connection. The shorter list is saved first;
+    /// key no longer opens a connection. The shorter list is saved first;
     /// if that fails nothing changes and the error comes back.
     pub fn remove_assistant(&self, id: &str) -> Result<(), String> {
         let (label, status) = {
@@ -444,6 +449,11 @@ impl ServerHandle {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// This main's public key, as its assistants pin it.
+    pub fn public_key(&self) -> [u8; 32] {
+        self.ctx.identity.public
     }
 
     pub fn status(&self) -> NetworkStatus {
@@ -513,7 +523,7 @@ pub fn main_name_of(c: &NetworkConfig) -> String {
     if n.is_empty() { super::local_hostname() } else { n.to_string() }
 }
 
-pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>>, port: u16) -> Result<ServerHandle, String> {
+pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>>, port: u16, identity: Arc<Keypair>) -> Result<ServerHandle, String> {
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("Could not listen on port {port}: {e}. Choose another port."))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -523,7 +533,7 @@ pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>
     };
     let shared = Arc::new(Mutex::new(Server::new(paired, main_name.clone())));
     let stop = Arc::new(AtomicBool::new(false));
-    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name, own_mirror: AtomicBool::new(false), live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()) });
+    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name, own_mirror: AtomicBool::new(false), identity, live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()) });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
     log::line("network", format!("listening on port {port}"));
@@ -565,8 +575,9 @@ fn accept_loop(listener: TcpListener, ctx: Arc<Ctx>) {
 }
 
 type Ws = WebSocket<TcpStream>;
+type Chan = Channel<TcpStream>;
 
-/// A connection that got through `hello` and pairing or authentication.
+/// A connection that got through its handshake and `hello`.
 struct Link {
     id: String,
     serial: u64,
@@ -590,6 +601,34 @@ impl Drop for PreAuth<'_> {
     }
 }
 
+/// One try at the open code for a pairing that is starting from `ip`, or
+/// the reason to refuse it.
+fn take_try(ctx: &Ctx, ip: &str) -> Result<String, String> {
+    let mut s = lock(&ctx.shared);
+    let now = now_ms();
+    if s.attempts.locked(ip, now) {
+        return Err("too many attempts".into());
+    }
+    s.pairing.as_mut().and_then(|w| w.take_try(now).then(|| w.code.clone())).ok_or_else(|| secure::WRONG_CODE_REASON.into())
+}
+
+/// A pairing that took a try did not reach `welcome`: the address counts a
+/// failure, and the code goes once its tries are gone. A code another
+/// pairing already used is left alone.
+fn pairing_failed(ctx: &Ctx, ip: &str) {
+    {
+        let mut s = lock(&ctx.shared);
+        let Some(tries_left) = s.pairing.as_ref().map(|w| w.tries_left) else { return };
+        s.attempts.failed(ip, now_ms());
+        if tries_left == 0 {
+            s.pairing = None;
+            s.code_used_up = true;
+            log::line("network", "pairing code used up after 3 wrong tries");
+        }
+    }
+    ctx.announce();
+}
+
 fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
     let pre_auth = PreAuth(ctx, addr.ip());
     let deadline = Instant::now() + PRE_AUTH_DEADLINE;
@@ -605,18 +644,44 @@ fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
             return;
         }
     };
-    let admitted = admit(ctx, &mut ws, addr, deadline);
+    let ip = addr.ip().to_string();
+    let mut took_try = false;
+    let shook = secure::accept(&mut ws, &ctx.identity, deadline, &|| ctx.stopped(), &mut || {
+        let code = take_try(ctx, &ip);
+        took_try = code.is_ok();
+        code
+    });
+    let (noise, accepted) = match shook {
+        Ok(done) => done,
+        Err(f) => {
+            if f == Fail::OldPeer {
+                // A protocol 1 Maya reads this as "runs a different version".
+                let _ = ws.send(Message::text(encode(&Down::Bye { reason: "protocol".into() })));
+            }
+            if took_try {
+                pairing_failed(ctx, &ip);
+            }
+            log::line("network", format!("{ip}: handshake failed: {f:?}"));
+            finish_ws(&mut ws);
+            return;
+        }
+    };
+    let mut ch = Channel::new(ws, noise);
+    let admitted = admit(ctx, &mut ch, addr, &accepted, deadline);
+    if admitted.is_none() && took_try {
+        pairing_failed(ctx, &ip);
+    }
     drop(pre_auth);
     let Some(link) = admitted else {
-        finish(&mut ws);
+        finish_ws(&mut ch.ws);
         return;
     };
-    let reason = pump(ctx, &mut ws, &link);
+    let reason = pump(ctx, &mut ch, &link);
     // Forgotten before the close completes: an assistant that waits for its
     // close to be answered (a client stopped for "Pair again") finds the
     // main already counting it as gone.
     leave(ctx, &link, &reason);
-    finish(&mut ws);
+    finish_ws(&mut ch.ws);
 }
 
 fn upgrade(ctx: &Ctx, stream: TcpStream, deadline: Instant) -> Result<Ws, String> {
@@ -636,60 +701,50 @@ fn upgrade(ctx: &Ctx, stream: TcpStream, deadline: Instant) -> Result<Ws, String
     }
 }
 
-fn is_timeout(e: &tungstenite::Error) -> bool {
-    matches!(e, tungstenite::Error::Io(io) if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
+fn send_down(ch: &mut Chan, down: &Down) -> Result<(), String> {
+    ch.send(&encode(down)).map_err(|e| format!("write failed: {e}"))
 }
 
-fn send_down(ws: &mut Ws, down: &Down) -> Result<(), String> {
-    ws.send(Message::text(encode(down))).map_err(|e| format!("write failed: {e}"))
-}
-
-/// Logs a frame that is neither text nor a control frame, and skips it.
-fn skip_frame(who: &str, m: &Message) {
-    match m {
-        Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Close(_) => {}
-        Message::Binary(b) => log::line("network", format!("{who}: ignored a binary frame ({} bytes)", b.len())),
-        Message::Frame(_) => log::line("network", format!("{who}: ignored a raw frame")),
-    }
-}
-
-fn bye(ws: &mut Ws, reason: &str) {
-    let _ = send_down(ws, &Down::Bye { reason: reason.into() });
+fn bye(ch: &mut Chan, reason: &str) {
+    let _ = send_down(ch, &Down::Bye { reason: reason.into() });
 }
 
 /// Closes the WebSocket and waits up to a second for the peer to agree, so
 /// a `bye` just sent is read before the socket goes.
-fn finish(ws: &mut Ws) {
+fn finish_ws(ws: &mut Ws) {
     let _ = ws.close(None);
     let end = Instant::now() + Duration::from_secs(1);
     while Instant::now() < end {
         match ws.read() {
             Ok(_) => {}
-            Err(e) if is_timeout(&e) => {}
+            Err(e) if secure::is_timeout(&e) => {}
             Err(_) => break,
         }
     }
 }
 
-/// The next frame that parses, by `deadline`; garbage is logged and skipped.
-fn read_up(ctx: &Ctx, ws: &mut Ws, who: &str, deadline: Instant) -> Result<Up, String> {
+/// The next message that parses, by `deadline`; garbage is logged and skipped.
+fn read_up(ctx: &Ctx, ch: &mut Chan, who: &str, deadline: Instant) -> Result<Up, String> {
     loop {
         if ctx.stopped() {
             return Err("the main stopped".into());
         }
-        match ws.read() {
-            Ok(Message::Text(t)) => match decode_up(&t) {
+        // Checked on every frame, not only on a quiet read, so pings cannot hold it open.
+        if Instant::now() > deadline {
+            return Err("no answer within 10 s of connecting".into());
+        }
+        match ch.read() {
+            Ok(Got::Text(t)) => match decode_up(&t) {
                 Ok(up) => return Ok(up),
                 Err(e) => log::line("network", format!("{who}: ignored a message: {e}")),
             },
-            Ok(Message::Close(_)) => return Err("closed".into()),
-            Ok(other) => skip_frame(who, &other),
-            Err(e) if is_timeout(&e) => {
-                if Instant::now() > deadline {
-                    return Err("no answer within 10 s of connecting".into());
-                }
+            Ok(Got::Closed) => return Err("closed".into()),
+            Ok(Got::Control | Got::Idle) => {}
+            Err(ChannelError::Forged) => {
+                log::line("network", format!("{who}: {}", secure::FORGED));
+                return Err(secure::FORGED.into());
             }
-            Err(e) => return Err(e.to_string()),
+            Err(ChannelError::Io(e)) => return Err(e),
         }
     }
 }
@@ -699,23 +754,23 @@ fn clean(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(64).collect()
 }
 
-fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<Link> {
+fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted, deadline: Instant) -> Option<Link> {
     let ip = addr.ip().to_string();
-    let hello = match read_up(ctx, ws, &ip, deadline) {
+    let hello = match read_up(ctx, ch, &ip, deadline) {
         Ok(up) => up,
         Err(e) => {
             log::line("network", format!("{ip}: no hello: {e}"));
             return None;
         }
     };
-    let Up::Hello { protocol, app, name, hostname, platform, id, caps } = hello else {
+    let Up::Hello { protocol, app, name, hostname, platform, caps } = hello else {
         log::line("network", format!("{ip}: first message was not a hello"));
-        bye(ws, "protocol");
+        bye(ch, "protocol");
         return None;
     };
     if protocol != PROTOCOL {
         log::line("network", format!("{ip}: protocol {protocol}, expected {PROTOCOL}"));
-        bye(ws, "protocol");
+        bye(ch, "protocol");
         return None;
     }
     let (hostname, platform, app) = (clean(&hostname), clean(&platform), clean(&app));
@@ -723,18 +778,20 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         log::line("network", format!("{ip}: runs Maya {app}; this Mac runs {}", env!("CARGO_PKG_VERSION")));
     }
     let name = Some(clean(&name)).filter(|n| !n.is_empty()).or_else(|| Some(hostname.clone()).filter(|h| !h.is_empty())).unwrap_or_else(|| "assistant".into());
-    // `proof` answers the assistant's own nonce: under the token when it
-    // authenticates, under the pairing code when it pairs.
     let wants_mirror = caps.iter().any(|c| c == CAP_MIRROR);
-    let (id, proof, pairing) = match id {
-        Some(id) => {
-            let proof = authenticate(ctx, ws, &id, &name, deadline)?;
-            (id, proof, None)
-        }
-        None => {
-            let (p, proof) = pair(ctx, ws, &ip, &name, &hostname, &platform, wants_mirror, deadline)?;
-            (p.entry.id.clone(), proof, Some(p))
-        }
+    let key = encode_key(&accepted.key);
+    let (id, pairing) = if accepted.paired {
+        let p = pair(ctx, ch, &key, &ip, &name, &hostname, &platform, wants_mirror)?;
+        (p.entry.id.clone(), Some(p))
+    } else {
+        let known = lock(&ctx.shared).paired.iter().find(|p| p.key == key).map(|p| p.id.clone());
+        let Some(id) = known else {
+            // A key this main does not know: removed, or paired with another main.
+            log::line("network", format!("{name}: unknown key; told it was removed"));
+            bye(ch, "removed");
+            return None;
+        };
+        (id, None)
     };
     let (tx, rx) = channel();
     // `Err(None)`: no longer paired; `Err(Some(e))`: a fresh pairing that
@@ -781,24 +838,25 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
     let (serial, label, offer) = match registered {
         Ok(r) => r,
         Err(None) => {
-            bye(ws, "removed");
+            bye(ch, "removed");
             return None;
         }
         Err(Some(e)) => {
             if let Some(p) = pairing {
                 p.undo(ctx, &format!("could not save it: {e}"));
             }
-            bye(ws, PAIRING_NOT_SAVED);
+            bye(ch, PAIRING_NOT_SAVED);
             return None;
         }
     };
     let link = Link { id, serial, label, rx, first_board: std::cell::Cell::new(true), wants_mirror, mirror_sent: std::cell::Cell::new(0), mirror_at: std::cell::Cell::new(None) };
-    // Authenticated: boards and results may now be large.
-    ws.set_config(|c| {
-        c.max_message_size = Some(MAX_FRAME);
-        c.max_frame_size = Some(MAX_FRAME);
+    // Authenticated: boards and results may now be large. Sealing adds a
+    // little to each frame, which `open_frame` caps at `MAX_FRAME`.
+    ch.ws.set_config(|c| {
+        c.max_message_size = Some(MAX_FRAME + MAX_FRAME / 1024);
+        c.max_frame_size = Some(MAX_FRAME + MAX_FRAME / 1024);
     });
-    if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone(), mac: proof, mirror: offer }) {
+    if let Err(e) = send_down(ch, &Down::Welcome { name: ctx.main_name.clone(), mirror: offer }) {
         // Undone first, so the list `leave` saves no longer holds the
         // pairing it takes back.
         if let Some(p) = pairing {
@@ -813,38 +871,9 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
     Some(link)
 }
 
-/// Challenge-response for a paired assistant; returns the main's proof for
-/// `welcome`: the MAC of the nonce the assistant sent with its answer.
-fn authenticate(ctx: &Ctx, ws: &mut Ws, id: &str, name: &str, deadline: Instant) -> Option<String> {
-    let token = lock(&ctx.shared).paired.iter().find(|p| p.id == id).map(|p| p.token.clone());
-    let Some(token) = token else {
-        // Unknown ids are removed ones (or paired with another main): pairing again is the fix.
-        log::line("network", format!("{name}: unknown assistant; told it was removed"));
-        bye(ws, "removed");
-        return None;
-    };
-    let nonce = new_nonce();
-    send_down(ws, &Down::Challenge { nonce: nonce.clone() }).ok()?;
-    let (ok, theirs) = match read_up(ctx, ws, name, deadline) {
-        Ok(Up::Auth { mac, nonce: theirs }) => (mac_matches(&token, &nonce, &mac) && !theirs.is_empty() && lock(&ctx.shared).nonces.first_use(&nonce, now_ms()), theirs),
-        Ok(_) => (false, String::new()),
-        Err(e) => {
-            log::line("network", format!("{name}: no answer to the challenge: {e}"));
-            return None;
-        }
-    };
-    if !ok {
-        log::line("network", format!("{name}: authentication failed"));
-        bye(ws, "authentication failed");
-        return None;
-    }
-    Some(mac(&token, &theirs))
-}
-
-/// A pairing recorded but not yet saved: it is saved once `paired` is out,
-/// just before `welcome`, and undone if `paired` cannot be sent, the save
-/// fails, or `welcome` cannot be sent, so an assistant that never got its
-/// token (or was told the main could not keep it) leaves no entry behind.
+/// A pairing recorded but not yet saved: it is saved just before `welcome`,
+/// and undone if the save fails or `welcome` cannot be sent, so a Maya that
+/// was never welcomed leaves no entry behind.
 struct NewPairing {
     entry: PairedAssistant,
     previous: Option<PairedAssistant>,
@@ -858,53 +887,27 @@ impl NewPairing {
     }
 }
 
-/// Pairs a new assistant, or the same machine again; returns the pairing
-/// and the main's proof for `welcome`: the MAC, under the code, of the
-/// nonce the assistant sent with it.
-fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: &str, mirror: bool, deadline: Instant) -> Option<(NewPairing, String)> {
-    let (code, nonce) = match read_up(ctx, ws, ip, deadline) {
-        Ok(Up::Pair { code, nonce }) => (code, nonce),
-        Ok(_) => {
-            bye(ws, "protocol");
-            return None;
-        }
-        Err(e) => {
-            log::line("network", format!("{ip}: no pairing code: {e}"));
-            return None;
-        }
-    };
-    let now = now_ms();
+/// Records the pairing of a Maya that proved the code, unless the code
+/// was used in the meantime (one code, one machine).
+#[allow(clippy::too_many_arguments)]
+fn pair(ctx: &Ctx, ch: &mut Chan, key: &str, ip: &str, name: &str, hostname: &str, platform: &str, mirror: bool) -> Option<NewPairing> {
     let outcome = {
         let mut s = lock(&ctx.shared);
-        if s.attempts.locked(ip, now) {
-            Err("too many attempts")
-        } else if !s.pairing.as_ref().is_some_and(|w| w.accepts(&code, now)) {
-            s.attempts.failed(ip, now);
-            Err("wrong or expired pairing code")
+        if s.pairing.is_none() {
+            None
         } else {
-            let pairing = s.record_pairing(ip, name, hostname, platform, mirror);
-            // One code, one assistant.
+            let pairing = s.record_pairing(key, ip, name, hostname, platform, mirror);
             s.pairing = None;
-            Ok(pairing)
+            Some(pairing)
         }
     };
-    match outcome {
-        Err(reason) => {
-            log::line("network", format!("{ip}: pairing refused: {reason}"));
-            bye(ws, reason);
-            None
-        }
-        Ok((entry, previous)) => {
-            let again = previous.is_some();
-            let pairing = NewPairing { entry, previous };
-            if let Err(e) = send_down(ws, &Down::Paired { id: pairing.entry.id.clone(), token: pairing.entry.token.clone() }) {
-                pairing.undo(ctx, &e);
-                return None;
-            }
-            log::line("network", format!("{name}: {} from {ip}", if again { "paired again (same entry, new key)" } else { "paired" }));
-            Some((pairing, mac(code.trim(), &nonce)))
-        }
-    }
+    let Some((entry, previous)) = outcome else {
+        log::line("network", format!("{ip}: pairing refused: the code was used meanwhile"));
+        bye(ch, secure::WRONG_CODE_REASON);
+        return None;
+    };
+    log::line("network", format!("{name}: {} from {ip}", if previous.is_some() { "paired again (same key)" } else { "paired" }));
+    Some(NewPairing { entry, previous })
 }
 
 /// Why a connection ends when the main no longer counts it: a newer
@@ -914,13 +917,13 @@ const NOT_CURRENT: &str = "replaced by a newer connection";
 /// Writes the frames queued for this connection, up to a `bye` or `move`. `Some(why)`
 /// when the connection ends: the `bye` went out, a write failed, or the
 /// sender is gone (a newer connection replaced this one).
-fn send_queued(ws: &mut Ws, link: &Link) -> Option<String> {
+fn send_queued(ch: &mut Chan, link: &Link) -> Option<String> {
     loop {
         match link.rx.try_recv() {
             Ok(down) => {
                 let last = matches!(down, Down::Bye { .. } | Down::Move { .. });
                 let why = if matches!(down, Down::Move { .. }) { "moved" } else { "removed" };
-                if let Err(e) = send_down(ws, &down) {
+                if let Err(e) = send_down(ch, &down) {
                     return Some(e);
                 }
                 if last {
@@ -963,30 +966,34 @@ fn mirror_due(ctx: &Ctx, link: &Link) -> Option<Down> {
 }
 
 /// Runs a registered connection until it closes; returns why.
-fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
+fn pump(ctx: &Ctx, ch: &mut Chan, link: &Link) -> String {
     let mut deadline = Instant::now() + SILENCE;
     loop {
         if ctx.stopped() {
             return "the main stopped".into();
         }
-        if let Some(why) = send_queued(ws, link) {
+        // Checked on every turn, so pings cannot keep a silent peer connected.
+        if Instant::now() > deadline {
+            return "silent for 15 s".into();
+        }
+        if let Some(why) = send_queued(ch, link) {
             return why;
         }
         if let Some(mirror) = mirror_due(ctx, link) {
-            if let Err(e) = send_down(ws, &mirror) {
+            if let Err(e) = send_down(ch, &mirror) {
                 return e;
             }
         }
-        match ws.read() {
-            Ok(Message::Text(t)) => {
+        match ch.read() {
+            Ok(Got::Text(t)) => {
                 deadline = Instant::now() + SILENCE;
                 match decode_up(&t) {
-                    Ok(up) => match handle(ctx, ws, link, up) {
+                    Ok(up) => match handle(ctx, ch, link, up) {
                         Ok(()) => {}
                         // Removed while this frame was in flight: the `bye`
                         // `remove_assistant` queued (under the same lock
                         // `handle` checked) goes out before the close.
-                        Err(e) if e == NOT_CURRENT => return send_queued(ws, link).unwrap_or(e),
+                        Err(e) if e == NOT_CURRENT => return send_queued(ch, link).unwrap_or(e),
                         Err(e) => return e,
                     },
                     Err(e) if unreadable_board(&t) => {
@@ -998,22 +1005,19 @@ fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
                     Err(e) => log::line("network", format!("{}: ignored a message: {e}", link.label)),
                 }
             }
-            Ok(Message::Close(_)) => return "closed by the assistant".into(),
-            Ok(other) => {
-                deadline = Instant::now() + SILENCE;
-                skip_frame(&link.label, &other);
+            Ok(Got::Closed) => return "closed by the assistant".into(),
+            // Unauthenticated, so never proof the assistant is alive.
+            Ok(Got::Control | Got::Idle) => {}
+            Err(ChannelError::Forged) => {
+                log::line("network", format!("{}: {}", link.label, secure::FORGED));
+                return secure::FORGED.into();
             }
-            Err(e) if is_timeout(&e) => {
-                if Instant::now() > deadline {
-                    return "silent for 15 s".into();
-                }
-            }
-            Err(e) => return e.to_string(),
+            Err(ChannelError::Io(e)) => return e,
         }
     }
 }
 
-fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
+fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
     match up {
         Up::Board { cards, dirs, agents } => {
             // The first board of a connection is seeded, not announced, only
@@ -1062,7 +1066,7 @@ fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
         }
         Up::Ping => {
             lock(&ctx.shared).touch(&link.id);
-            send_down(ws, &Down::Pong)?;
+            send_down(ch, &Down::Pong)?;
         }
         Up::Request { id, machine, request } => {
             let (allowed, tx) = {
@@ -1080,7 +1084,7 @@ fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
                 None
             };
             if let Some(error) = refusal {
-                send_down(ws, &Down::Response { id, ok: false, error: Some(error), data: None })?;
+                send_down(ch, &Down::Response { id, ok: false, error: Some(error), data: None })?;
                 return Ok(());
             }
             // The main's own name, like none, means the main.
@@ -1097,10 +1101,10 @@ fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
                 let _ = tx.send(down);
             });
             if let Err(e) = spawned {
-                send_down(ws, &Down::Response { id, ok: false, error: Some(format!("no thread for the request: {e}")), data: None })?;
+                send_down(ch, &Down::Response { id, ok: false, error: Some(format!("no thread for the request: {e}")), data: None })?;
             }
         }
-        Up::Hello { .. } | Up::Pair { .. } | Up::Auth { .. } => log::line("network", format!("{}: ignored a handshake message after welcome", link.label)),
+        Up::Hello { .. } => log::line("network", format!("{}: ignored a hello after welcome", link.label)),
     }
     Ok(())
 }
@@ -1247,12 +1251,13 @@ pub fn send_command_to(shared: &Arc<Mutex<Server>>, id: &str, kind: CommandKind,
 }
 
 /// What the old main needs once its assistant became the main: where the
-/// new main is, the entry the old main made for itself, and who followed.
+/// new main is, its key, and who followed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Promotion {
     pub host: String,
     pub port: u16,
-    pub me: PairedAssistant,
+    /// The new main's public key, for the old main to pin.
+    pub main_key: String,
     pub moved: Vec<String>,
     pub left_behind: Vec<String>,
 }
@@ -1268,7 +1273,7 @@ impl Drop for HandoverTurn<'_> {
 
 impl ServerHandle {
     /// Makes the assistant `id` the main: closes pairing, sends it the paired
-    /// list (sealed under its token) with this main's own new entry, and once
+    /// list with this main's own new entry, and once
     /// it answers with its port, sends `move` to every other connected
     /// assistant that can follow and waits for those connections to close.
     /// The caller then saves this Maya as an assistant of `host:port`.
@@ -1277,13 +1282,16 @@ impl ServerHandle {
     }
 
     pub fn promote_with_timeout(&self, id: &str, timeout: Duration) -> Result<Promotion, String> {
-        let (label, host, token, list, me) = {
+        let (label, host, main_key, list) = {
             let mut s = lock(&self.shared);
             if s.handover {
                 return Err("A handover is already running.".into());
             }
             let label = s.label(id);
             let entry = s.paired.iter().find(|p| p.id == id).cloned().ok_or_else(|| format!("{label} is no longer paired."))?;
+            if crate::net::identity::decode_key(&entry.key).is_err() {
+                return Err(format!("{label} has no key; pair it again."));
+            }
             if !s.conns.contains_key(id) {
                 return Err(format!("{label} is not connected."));
             }
@@ -1295,15 +1303,14 @@ impl ServerHandle {
             }
             s.handover = true;
             s.pairing = None;
-            let me = super::promote::own_entry(&self.ctx.main_name, self.ctx.own_mirror.load(Ordering::SeqCst));
+            let me = super::promote::own_entry(&self.ctx.main_name, self.ctx.own_mirror.load(Ordering::SeqCst), &self.ctx.identity.public_b64());
             let list = super::promote::handover_list(&s.paired, id, &me);
-            (label, entry.address, entry.token, list, me)
+            (label, entry.address, entry.key, list)
         };
         let _turn = HandoverTurn(&self.shared);
         self.ctx.announce();
         log::line("network", format!("{label}: handing over the main role ({} assistants)", list.len()));
-        let sealed = super::promote::seal_list(&token, &list);
-        let data = send_command_to(&self.shared, id, CommandKind::Promote { sealed }, timeout).map_err(|e| {
+        let data = send_command_to(&self.shared, id, CommandKind::Promote { list }, timeout).map_err(|e| {
             // A dropped connection leaves the same doubt as silence: G may already be a main.
             if e.ends_with(NO_ANSWER) || e.ends_with(LEFT_BEFORE_ANSWER) {
                 format!("{label} did not answer; it may have become a main on its own. Check it before trying again.")
@@ -1317,7 +1324,7 @@ impl ServerHandle {
             let s = lock(&self.shared);
             for (other, conn) in s.conns.iter().filter(|(other, _)| other.as_str() != id) {
                 let follows = s.peers.get(other).is_some_and(|p| p.caps.iter().any(|c| c == CAP_FOLLOW));
-                if follows && conn.tx.send(Down::Move { host: host.clone(), port }).is_ok() {
+                if follows && conn.tx.send(Down::Move { host: host.clone(), port, key: main_key.clone() }).is_ok() {
                     moved.push(s.label(other));
                     moving.push(other.clone());
                 } else {
@@ -1333,7 +1340,7 @@ impl ServerHandle {
         moved.sort();
         left_behind.sort();
         log::line("network", format!("{label} is the main now at {host}:{port}; moved {}", if moved.is_empty() { "nobody".to_string() } else { moved.join(", ") }));
-        Ok(Promotion { host, port, me, moved, left_behind })
+        Ok(Promotion { host, port, main_key, moved, left_behind })
     }
 }
 
@@ -1344,7 +1351,9 @@ mod tests {
     use crate::model::{Card, Harness, State};
     use crate::net::client;
     use std::sync::atomic::AtomicBool;
-    use crate::net::protocol::{decode_down, encode, mac, CommandKind, Down, Request, Up, PROTOCOL};
+    use crate::net::identity::Keypair;
+    use crate::net::protocol::{decode_down, encode, CommandKind, Down, Request, Up, PROTOCOL};
+    use crate::net::secure::{self, Channel, Got};
     use std::net::TcpStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1352,7 +1361,8 @@ mod tests {
     use tungstenite::stream::MaybeTlsStream;
     use tungstenite::{Message, WebSocket};
 
-    pub(crate) type Client = WebSocket<MaybeTlsStream<TcpStream>>;
+    pub(crate) type Client = Channel<MaybeTlsStream<TcpStream>>;
+    pub(crate) type RawWs = WebSocket<MaybeTlsStream<TcpStream>>;
 
     /// Counts what the server tells the app, and announces what the app
     /// would: the notifier runs over the merged boards on every change.
@@ -1435,7 +1445,7 @@ mod tests {
     }
 
     pub(crate) fn test_server_with(counter: Arc<Counter>) -> (ServerHandle, u16) {
-        let handle = start_with(counter.clone(), Arc::new(Mutex::new(NetworkConfig::default())), 0).unwrap();
+        let handle = start_with(counter.clone(), Arc::new(Mutex::new(NetworkConfig::default())), 0, Arc::new(Keypair::generate())).unwrap();
         let _ = counter.server.set(handle.shared.clone());
         let port = handle.port();
         (handle, port)
@@ -1445,24 +1455,84 @@ mod tests {
         test_server_with(Arc::new(Counter::default()))
     }
 
-    fn hello(ws: &mut Client, name: &str, id: Option<&str>) {
-        send(ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), id: id.map(str::to_string), caps: vec![] });
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(5)
     }
 
-    fn hello_caps(ws: &mut Client, name: &str, id: Option<&str>, caps: &[&str]) {
-        send(ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), id: id.map(str::to_string), caps: caps.iter().map(|c| c.to_string()).collect() });
+    /// A WebSocket to the test main, with a 5 s read timeout.
+    pub(crate) fn connect(port: u16) -> RawWs {
+        let (ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}/")).unwrap();
+        if let MaybeTlsStream::Plain(s) = ws.get_ref() {
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        }
+        ws
     }
 
-    /// Pairs, then reconnects with caps; returns the open socket, id and token.
-    fn pair_with_caps(handle: &ServerHandle, port: u16, name: &str, caps: &[&str]) -> (Client, String, String) {
-        let (ws, id, token) = pair_client(handle, port, name);
-        drop(ws);
-        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+    pub(crate) fn hello_up(name: &str, caps: &[&str]) -> Up {
+        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect() }
+    }
+
+    /// Pairs a new Maya (key `me`) whose `hello` carries `caps`; returns its
+    /// open channel, its entry id and the welcome's mirror offer.
+    pub(crate) fn pair_as(handle: &ServerHandle, port: u16, me: &Keypair, name: &str, caps: &[&str]) -> (Client, String, Option<bool>) {
+        let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
         let mut ws = connect(port);
-        hello_caps(&mut ws, name, Some(&id), caps);
-        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
-        answer(&mut ws, &token, &nonce);
-        (ws, id, token)
+        let (noise, main_key) = secure::pair(&mut ws, me, &code, soon(), &|| false).unwrap();
+        assert_eq!(main_key, handle.public_key(), "the joiner learns the main's key");
+        let mut ch = Channel::new(ws, noise);
+        send(&mut ch, &hello_up(name, caps));
+        let Down::Welcome { mirror, .. } = recv(&mut ch) else { panic!("expected welcome") };
+        let key = crate::net::identity::encode_key(&me.public);
+        let id = lock(&handle.shared).paired.iter().find(|p| p.key == key).map(|p| p.id.clone()).expect("an entry with this key");
+        (ch, id, mirror)
+    }
+
+    /// Pairs a new Maya with a fresh key; returns its channel, id, key and offer.
+    pub(crate) fn pair_client_caps(handle: &ServerHandle, port: u16, name: &str, caps: &[&str]) -> (Client, String, Keypair, Option<bool>) {
+        let me = Keypair::generate();
+        let (ch, id, offer) = pair_as(handle, port, &me, name, caps);
+        (ch, id, me, offer)
+    }
+
+    pub(crate) fn pair_client(handle: &ServerHandle, port: u16, name: &str) -> (Client, String, Keypair) {
+        let (ch, id, me, _) = pair_client_caps(handle, port, name, &[]);
+        (ch, id, me)
+    }
+
+    /// Connects a paired Maya with its key and says `hello`; returns the
+    /// channel before `welcome` is read.
+    pub(crate) fn connect_as(handle: &ServerHandle, port: u16, me: &Keypair, name: &str, caps: &[&str]) -> Client {
+        let mut ws = connect(port);
+        let noise = secure::connect(&mut ws, me, &handle.public_key(), soon(), &|| false).unwrap();
+        let mut ch = Channel::new(ws, noise);
+        send(&mut ch, &hello_up(name, caps));
+        ch
+    }
+
+    /// Pairs, then reconnects with caps; returns the welcomed channel, id and key.
+    fn pair_with_caps(handle: &ServerHandle, port: u16, name: &str, caps: &[&str]) -> (Client, String, Keypair) {
+        let (ch, id, me) = pair_client(handle, port, name);
+        drop(ch);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        let mut ch = connect_as(handle, port, &me, name, caps);
+        assert!(matches!(recv(&mut ch), Down::Welcome { .. }));
+        (ch, id, me)
+    }
+
+    pub(crate) fn send(ch: &mut Client, up: &Up) {
+        ch.send(&encode(up)).unwrap();
+    }
+
+    pub(crate) fn recv(ch: &mut Client) -> Down {
+        let end = soon();
+        loop {
+            match ch.read().unwrap() {
+                Got::Text(t) => return decode_down(&t).unwrap(),
+                Got::Closed => panic!("closed"),
+                _ if Instant::now() > end => panic!("nothing within 5 s"),
+                _ => {}
+            }
+        }
     }
 
     #[test]
@@ -1486,7 +1556,7 @@ mod tests {
     #[test]
     fn an_assistant_named_like_the_main_carries_its_address_so_requests_reach_it() {
         let counter = Arc::new(Counter::default());
-        let handle = start_with(counter.clone(), Arc::new(Mutex::new(NetworkConfig { name: "desk".into(), ..Default::default() })), 0).unwrap();
+        let handle = start_with(counter.clone(), Arc::new(Mutex::new(NetworkConfig { name: "desk".into(), ..Default::default() })), 0, Arc::new(Keypair::generate())).unwrap();
         let _ = counter.server.set(handle.shared.clone());
         let port = handle.port();
         let (mut phone, _, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
@@ -1548,14 +1618,12 @@ mod tests {
     fn a_maya_that_reconnects_without_the_mirror_cap_gets_no_board_and_no_requests() {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
-        let (ws, id, token, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        let (ws, id, key, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
         drop(ws);
         wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
         assert!(handle.status().assistants.iter().any(|a| a.id == id && a.mirror), "the permission is still saved");
-        let mut ws = connect(port);
-        hello_caps(&mut ws, "Pixel", Some(&id), &[]);
-        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
-        answer(&mut ws, &token, &nonce);
+        let mut ws = connect_as(&handle, port, &key, "Pixel", &[]);
+        assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
         send(&mut ws, &Up::Request { id: 1, machine: None, request: Request::ListDirs });
         let Down::Response { id: 1, ok: false, error: Some(e), .. } = recv(&mut ws) else { panic!("expected a refusal") };
         assert!(e.ends_with("has not allowed this Maya to control its sessions."), "{e}");
@@ -1582,7 +1650,7 @@ mod tests {
         assert!(matches!(recv(&mut phone), Down::Response { id: 3, ok: true, .. }));
         let seen: Vec<Option<String>> = counter.requests.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
         assert_eq!(seen, [None, None, Some("laptop".to_string())], "the main's own name means the main");
-        send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::Promote { sealed: "x".into() }) });
+        send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::Promote { list: vec![] }) });
         assert_eq!(recv(&mut phone), Down::Response { id: 4, ok: false, error: Some("That cannot be requested.".into()), data: None });
         handle.stop();
     }
@@ -1591,14 +1659,13 @@ mod tests {
     fn a_phone_main_hands_over_an_entry_for_itself_that_may_mirror() {
         let (handle, port) = test_server();
         handle.set_own_mirror(true);
-        let (mut g, g_id, g_token) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        let (mut g, g_id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
         let h = handle.clone();
         let t = std::thread::spawn(move || h.promote(&g_id));
-        let Down::Command { id: cmd, kind: CommandKind::Promote { sealed } } = recv(&mut g) else { panic!("expected promote") };
-        let list = crate::net::promote::open_list(&g_token, &sealed).unwrap();
+        let Down::Command { id: cmd, kind: CommandKind::Promote { list } } = recv(&mut g) else { panic!("expected promote") };
         assert!(list.last().unwrap().mirror);
         send(&mut g, &Up::Result { id: cmd, ok: true, error: None, data: Some(serde_json::json!({ "port": 5001 })) });
-        assert!(t.join().unwrap().unwrap().me.mirror);
+        assert!(t.join().unwrap().is_ok());
         handle.stop();
     }
 
@@ -1619,29 +1686,41 @@ mod tests {
     }
 
     #[test]
-    fn promote_hands_the_sealed_list_over_moves_followers_and_names_the_rest() {
+    fn promote_hands_the_keys_over_moves_followers_with_the_new_key_and_names_the_rest() {
         let (handle, port) = test_server();
-        let (mut g, g_id, g_token) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
-        let (mut b, b_id, b_token) = pair_with_caps(&handle, port, "mini", &["follow"]);
+        let (mut g, g_id, g_key) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        let (mut b, b_id, b_key) = pair_with_caps(&handle, port, "mini", &["follow"]);
         let (_old, old_id, _) = pair_with_caps(&handle, port, "old", &[]);
         handle.open_pairing(crate::store::now_ms()).unwrap();
         let h = handle.clone();
         let t = std::thread::spawn(move || h.promote(&g_id));
-        let Down::Command { id: cmd, kind: CommandKind::Promote { sealed } } = recv(&mut g) else { panic!("expected promote") };
+        let Down::Command { id: cmd, kind: CommandKind::Promote { list } } = recv(&mut g) else { panic!("expected promote") };
         assert!(handle.status().code.is_none(), "pairing closes for the handover");
-        let list = crate::net::promote::open_list(&g_token, &sealed).unwrap();
-        assert!(list.iter().any(|p| p.id == b_id && p.token == b_token), "B keeps its token");
+        let key_of = |k: &Keypair| crate::net::identity::encode_key(&k.public);
+        assert!(list.iter().all(|p| !p.key.is_empty()), "every entry carries its key");
+        assert!(!encode(&list).contains("token"), "nothing secret is handed over");
+        assert!(list.iter().any(|p| p.id == b_id && p.key == key_of(&b_key)), "B keeps its key");
         assert!(list.iter().any(|p| p.id == old_id));
-        assert!(!list.iter().any(|p| p.token == g_token), "the new main is not in its own list");
-        let me = list.last().unwrap().clone();
+        assert!(!list.iter().any(|p| p.key == key_of(&g_key)), "the new main is not in its own list");
+        assert_eq!(list.last().unwrap().key, crate::net::identity::encode_key(&handle.public_key()), "the old main connects with its own key");
         send(&mut g, &Up::Result { id: cmd, ok: true, error: None, data: Some(serde_json::json!({ "port": 5001 })) });
-        assert_eq!(recv(&mut b), Down::Move { host: "127.0.0.1".into(), port: 5001 });
+        assert_eq!(recv(&mut b), Down::Move { host: "127.0.0.1".into(), port: 5001, key: key_of(&g_key) });
         let out = t.join().unwrap().unwrap();
         assert_eq!((out.host.as_str(), out.port), ("127.0.0.1", 5001));
-        assert_eq!(out.me, me);
+        assert_eq!(out.main_key, key_of(&g_key), "the old main pins the new main's key");
         assert_eq!(out.moved, ["mini"]);
         assert_eq!(out.left_behind, ["old"], "a Maya without follow is not moved");
         assert!(!handle.status().assistants.iter().any(|a| a.id == b_id && a.connected), "a moved connection is closed");
+        handle.stop();
+    }
+
+    #[test]
+    fn promote_refuses_an_entry_without_a_key() {
+        let (handle, port) = test_server();
+        let (_g, g_id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        handle.shared.lock().unwrap().paired.iter_mut().for_each(|p| p.key.clear());
+        assert_eq!(handle.promote(&g_id).unwrap_err(), "laptop has no key; pair it again.");
+        assert!(!lock(&handle.shared).handover);
         handle.stop();
     }
 
@@ -1707,62 +1786,12 @@ mod tests {
         assert!(lock(&handle.shared).pairings_in_flight.is_empty(), "a finished pairing is no longer in flight");
         // A machine past `record_pairing` but not yet registered: it would be
         // handed over without being moved.
-        let (entry, previous) = lock(&handle.shared).record_pairing("10.0.0.9", "mini", "h", "macos", false);
+        let (entry, previous) = lock(&handle.shared).record_pairing("a2V5", "10.0.0.9", "mini", "h", "macos", false);
         assert_eq!(handle.promote(&g_id).unwrap_err(), "A Maya is pairing right now; try again in a moment.");
         assert!(!lock(&handle.shared).handover, "a refused handover leaves no turn behind");
         lock(&handle.shared).undo_pairing(&entry.id, previous);
         assert!(lock(&handle.shared).pairings_in_flight.is_empty());
         handle.stop();
-    }
-
-    /// Pairs a new assistant whose `hello` carries `caps`; returns its open
-    /// socket, id, token and the welcome's mirror offer.
-    pub(crate) fn pair_client_caps(handle: &ServerHandle, port: u16, name: &str, caps: &[&str]) -> (Client, String, String, Option<bool>) {
-        let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
-        let mut ws = connect(port);
-        hello_caps(&mut ws, name, None, caps);
-        let nonce = crate::net::protocol::new_nonce();
-        send(&mut ws, &Up::Pair { code: code.clone(), nonce: nonce.clone() });
-        let Down::Paired { id, token } = recv(&mut ws) else { panic!("expected paired") };
-        let Down::Welcome { mac: proof, mirror, .. } = recv(&mut ws) else { panic!("expected welcome") };
-        assert!(crate::net::protocol::mac_matches(&code, &nonce, &proof), "the main proves it knows the code");
-        (ws, id, token, mirror)
-    }
-
-    /// Pairs a new assistant; returns its open socket, id and token.
-    pub(crate) fn pair_client(handle: &ServerHandle, port: u16, name: &str) -> (Client, String, String) {
-        let (ws, id, token, _) = pair_client_caps(handle, port, name, &[]);
-        (ws, id, token)
-    }
-
-    /// Answers the main's challenge with a nonce of this side's own, and
-    /// checks the `welcome` proves the main holds the same token.
-    pub(crate) fn answer(ws: &mut Client, token: &str, nonce: &str) {
-        let ours = crate::net::protocol::new_nonce();
-        send(ws, &Up::Auth { mac: mac(token, nonce), nonce: ours.clone() });
-        let Down::Welcome { mac: proof, .. } = recv(ws) else { panic!("expected welcome") };
-        assert!(crate::net::protocol::mac_matches(token, &ours, &proof), "the main proves it holds the token");
-    }
-
-    pub(crate) fn connect(port: u16) -> Client {
-        let (ws, _) = tungstenite::connect(format!("ws://127.0.0.1:{port}/")).unwrap();
-        if let MaybeTlsStream::Plain(s) = ws.get_ref() {
-            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        }
-        ws
-    }
-
-    pub(crate) fn send(ws: &mut Client, up: &Up) {
-        ws.send(Message::text(encode(up))).unwrap();
-    }
-
-    pub(crate) fn recv(ws: &mut Client) -> Down {
-        loop {
-            match ws.read().unwrap() {
-                Message::Text(t) => return decode_down(&t).unwrap(),
-                _ => continue,
-            }
-        }
     }
 
     pub(crate) fn wait_until(mut f: impl FnMut() -> bool) {
@@ -1780,12 +1809,7 @@ mod tests {
     #[test]
     fn pairs_snapshots_and_round_trips_a_command() {
         let (handle, port) = test_server();
-        let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
-        let mut ws = connect(port);
-        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), id: None, caps: vec![] });
-        send(&mut ws, &Up::Pair { code, nonce: "n".into() });
-        let Down::Paired { id, token } = recv(&mut ws) else { panic!("expected paired") };
-        assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
+        let (mut ws, id, key) = pair_client(&handle, port, "laptop");
         send(&mut ws, &Up::Board { cards: vec![card("r1", "remote")], dirs: vec!["proj".into()], agents: Some(vec![crate::agents::claude()]) });
         wait_until(|| handle.shared.lock().unwrap().boards.iter().any(|b| b.machine == "laptop" && b.cards.len() == 1));
         assert_eq!(handle.boards().iter().find(|b| b.machine == "laptop").unwrap().agents.as_ref().unwrap().len(), 1);
@@ -1796,86 +1820,156 @@ mod tests {
         assert_eq!(kind, CommandKind::Compact { session: "r1".into() });
         send(&mut ws, &Up::Result { id: cmd, ok: true, error: None, data: None });
         assert!(t.join().unwrap().is_ok());
-        // Reconnect with the token: challenge-response, no code.
+        // Reconnect with the key: IK, no code, the same entry.
         drop(ws);
-        let mut ws = connect(port);
-        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), id: Some(id.clone()), caps: vec![] });
-        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
-        answer(&mut ws, &token, &nonce);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        let mut ws = connect_as(&handle, port, &key, "laptop", &[]);
+        assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
+        assert_eq!(handle.status().assistants.len(), 1);
         handle.stop();
     }
 
     #[test]
-    fn a_wrong_mac_or_code_is_refused_and_a_command_to_a_disconnected_assistant_fails_fast() {
+    fn an_unknown_key_is_told_it_was_removed_and_a_wrong_code_is_refused() {
         let (handle, port) = test_server();
-        let mut ws = connect(port);
-        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "x".into(), hostname: "h".into(), platform: "macos".into(), id: Some("nobody".into()), caps: vec![] });
-        assert!(matches!(recv(&mut ws), Down::Bye { .. }), "unknown assistant");
-        let mut ws = connect(port);
-        send(&mut ws, &Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "x".into(), hostname: "h".into(), platform: "macos".into(), id: None, caps: vec![] });
-        send(&mut ws, &Up::Pair { code: "000000".into(), nonce: "n".into() });
-        assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason.contains("pairing code")));
+        let mut ws = connect_as(&handle, port, &Keypair::generate(), "x", &[]);
+        assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == "removed"), "unknown key");
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
+        let wrong = if code == "000000" { "111111" } else { "000000" };
+        let mut raw = connect(port);
+        assert_eq!(secure::pair(&mut raw, &Keypair::generate(), wrong, soon(), &|| false).unwrap_err(), secure::Fail::Refused(secure::WRONG_CODE_REASON.into()));
         let err = send_command_with(&handle.shared, "ghost", CommandKind::Compact { session: "r".into() }, Duration::from_millis(300)).unwrap_err();
         assert!(err.contains("not connected"), "{err}");
         handle.stop();
     }
 
+    /// One pairing attempt with `code`; true when it was welcomed.
+    fn try_code(port: u16, code: &str) -> bool {
+        let mut raw = connect(port);
+        let Ok((noise, _)) = secure::pair(&mut raw, &Keypair::generate(), code, soon(), &|| false) else { return false };
+        let mut ch = Channel::new(raw, noise);
+        send(&mut ch, &hello_up("guesser", &[]));
+        let end = soon();
+        loop {
+            match ch.read() {
+                Ok(Got::Text(t)) => return matches!(decode_down(&t), Ok(Down::Welcome { .. })),
+                Ok(Got::Idle) if Instant::now() < end => {}
+                _ => return false,
+            }
+        }
+    }
+
     #[test]
-    fn garbage_disconnects_wrong_macs_lockouts_removal_and_stop() {
+    fn a_code_is_used_up_after_three_wrong_tries_from_any_address() {
+        let (handle, port) = test_server();
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
+        let wrong = if code == "000000" { "111111" } else { "000000" };
+        for _ in 0..3 {
+            assert!(!try_code(port, wrong));
+        }
+        wait_until(|| handle.status().code_used_up);
+        assert!(handle.status().code.is_none());
+        assert!(!try_code(port, &code), "the right code no longer works");
+        handle.open_pairing(now_ms()).unwrap();
+        assert!(!handle.status().code_used_up, "a new code clears it");
+        handle.stop();
+    }
+
+    #[test]
+    fn an_abandoned_pairing_uses_a_try() {
+        let (handle, port) = test_server();
+        handle.open_pairing(now_ms()).unwrap();
+        for _ in 0..3 {
+            let mut raw = connect(port);
+            // SPAKE2's first message, then gone.
+            let (_, ours) = spake2::Spake2::<spake2::Ed25519Group>::start_a(&spake2::Password::new(b"123456"), &spake2::Identity::new(b"maya-join"), &spake2::Identity::new(b"maya-main"));
+            let mut first = vec![secure::MODE_PAIR];
+            first.extend(ours);
+            raw.send(Message::binary(first)).unwrap();
+            let _ = raw.read();
+            drop(raw);
+        }
+        wait_until(|| handle.status().code_used_up);
+        handle.stop();
+    }
+
+    #[test]
+    fn two_joiners_with_the_right_code_pair_one_machine() {
+        let (handle, port) = test_server();
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
+        let mut a = connect(port);
+        let mut b = connect(port);
+        let (na, _) = secure::pair(&mut a, &Keypair::generate(), &code, soon(), &|| false).unwrap();
+        let (nb, _) = secure::pair(&mut b, &Keypair::generate(), &code, soon(), &|| false).unwrap();
+        let (mut a, mut b) = (Channel::new(a, na), Channel::new(b, nb));
+        send(&mut a, &hello_up("first", &[]));
+        assert!(matches!(recv(&mut a), Down::Welcome { .. }));
+        send(&mut b, &hello_up("second", &[]));
+        assert!(matches!(recv(&mut b), Down::Bye { reason } if reason == secure::WRONG_CODE_REASON));
+        assert_eq!(handle.status().assistants.len(), 1);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_protocol_1_maya_is_answered_in_plain_text_that_it_can_show() {
+        let (handle, port) = test_server();
+        let mut raw = connect(port);
+        raw.send(Message::text(r#"{"type":"hello","protocol":1,"app":"0.21.0","name":"old","hostname":"h","platform":"macos"}"#)).unwrap();
+        let reason = loop {
+            match raw.read().unwrap() {
+                Message::Text(t) => break decode_down(&t).unwrap(),
+                _ => continue,
+            }
+        };
+        assert_eq!(reason, Down::Bye { reason: "protocol".into() });
+        handle.stop();
+    }
+
+    #[test]
+    fn garbage_disconnects_lockouts_removal_and_stop() {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
-        let (mut ws, id, token) = pair_client(&handle, port, "desk");
+        let (mut ws, id, key) = pair_client(&handle, port, "desk");
         // Saved once `welcome` is out, which the client may read first.
         wait_until(|| counter.paired.load(Ordering::SeqCst) == 1);
         assert!(handle.status().code.is_none(), "a code pairs one assistant");
-        // Garbage is skipped; the next good frame still lands.
-        ws.send(Message::text("not json")).unwrap();
-        ws.send(Message::text(r#"{"type":"dance"}"#)).unwrap();
-        ws.send(Message::binary(vec![1, 2, 3])).unwrap();
+        // Sealed garbage is skipped; the next good message still lands.
+        ws.send("not json").unwrap();
+        ws.send(r#"{"type":"dance"}"#).unwrap();
         send(&mut ws, &Up::Ping);
         assert_eq!(recv(&mut ws), Down::Pong);
         send(&mut ws, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![], agents: None });
         wait_until(|| handle.boards().iter().any(|b| b.machine == "desk" && b.connected));
         assert!(counter.boards.load(Ordering::SeqCst) >= 1);
-        // A command in flight fails when its assistant goes away, and the board greys.
+        // A command in flight fails when its assistant goes away, and the
+        // board greys: a frame that is not sealed ends the connection.
         let shared = handle.shared.clone();
         let t = std::thread::spawn(move || send_command_with(&shared, "desk", CommandKind::Compact { session: "r1".into() }, Duration::from_secs(5)));
         assert!(matches!(recv(&mut ws), Down::Command { .. }));
-        drop(ws);
+        ws.ws.send(Message::binary(vec![1, 2, 3])).unwrap();
         let err = t.join().unwrap().unwrap_err();
         assert_eq!(err, "desk disconnected before answering.");
         wait_until(|| handle.boards().iter().any(|b| b.machine == "desk" && !b.connected));
         assert!(!handle.status().assistants[0].connected);
-        // A wrong MAC is refused.
-        let mut bad = connect(port);
-        hello(&mut bad, "desk", Some(&id));
-        let Down::Challenge { .. } = recv(&mut bad) else { panic!("expected challenge") };
-        send(&mut bad, &Up::Auth { mac: "00".repeat(32), nonce: crate::net::protocol::new_nonce() });
-        assert!(matches!(recv(&mut bad), Down::Bye { reason } if reason == "authentication failed"));
-        // Three wrong codes lock the address out, even with the right code after.
+        drop(ws);
+        // Three wrong tries lock the address out, even with a new code after.
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
+        let wrong = if code == "000000" { "111111" } else { "000000" };
         for _ in 0..3 {
-            let mut w = connect(port);
-            hello(&mut w, "x", None);
-            send(&mut w, &Up::Pair { code: "999999x".into(), nonce: "n".into() });
-            assert!(matches!(recv(&mut w), Down::Bye { .. }));
+            assert!(!try_code(port, wrong));
         }
-        let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
-        let mut w = connect(port);
-        hello(&mut w, "x", None);
-        send(&mut w, &Up::Pair { code, nonce: "n".into() });
-        assert!(matches!(recv(&mut w), Down::Bye { reason } if reason == "too many attempts"));
-        // Removal says bye, drops the cards, and the token no longer opens a connection.
-        let mut ws = connect(port);
-        hello(&mut ws, "desk", Some(&id));
-        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
-        answer(&mut ws, &token, &nonce);
+        wait_until(|| handle.status().code_used_up);
+        let (new_code, _) = handle.open_pairing(now_ms()).unwrap();
+        assert_eq!(secure::pair(&mut connect(port), &Keypair::generate(), &new_code, soon(), &|| false).unwrap_err(), secure::Fail::Refused("too many attempts".into()));
+        // Removal says bye, drops the cards, and the key no longer opens a connection.
+        let mut ws = connect_as(&handle, port, &key, "desk", &[]);
+        assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
         handle.remove_assistant(&id).unwrap();
         assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == "removed"));
         assert!(handle.boards().is_empty());
         assert!(handle.status().assistants.is_empty());
         assert!(counter.saved.lock().unwrap().is_empty(), "the removal is saved");
-        let mut again = connect(port);
-        hello(&mut again, "desk", Some(&id));
+        let mut again = connect_as(&handle, port, &key, "desk", &[]);
         assert!(matches!(recv(&mut again), Down::Bye { reason } if reason == "removed"));
         // Stop closes live connections and frees the port.
         let (mut live, _, _) = {
@@ -1888,10 +1982,9 @@ mod tests {
         };
         let closed = loop {
             match live.read() {
-                Ok(Message::Close(_)) => break true,
+                Ok(Got::Closed) | Err(_) => break true,
+                Ok(Got::Idle) => break false,
                 Ok(_) => continue,
-                Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break false,
-                Err(_) => break true,
             }
         };
         assert!(closed, "the connection closes when the server stops");
@@ -1900,75 +1993,59 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_pairing_again_from_its_address_keeps_its_entry_with_a_new_token() {
-        let (handle, port) = test_server();
-        let (mut old, old_id, old_token) = pair_client(&handle, port, "laptop");
-        send(&mut old, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![], agents: None });
-        wait_until(|| handle.boards().iter().any(|b| b.machine == "laptop" && b.address == "127.0.0.1"));
-        drop(old);
-        wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
-        // Its config was reset: it pairs again from the same address.
-        let (mut new, new_id, new_token) = pair_client(&handle, port, "laptop");
-        assert_eq!(new_id, old_id, "the same machine keeps its entry");
-        assert_ne!(new_token, old_token, "with a new token");
-        let status = handle.status();
-        assert_eq!(status.assistants.len(), 1);
-        assert_eq!((status.assistants[0].name.as_str(), status.assistants[0].address.as_str()), ("laptop", "127.0.0.1"));
-        assert!(handle.boards().iter().all(|b| !b.cards.iter().any(|c| c.session_id == "r1")), "the old snapshot is dropped at once");
-        send(&mut new, &Up::Board { cards: vec![card("r2", "x")], dirs: vec![], agents: None });
-        wait_until(|| handle.boards().iter().any(|b| b.machine == "laptop" && b.connected && b.cards[0].session_id == "r2"));
-        let shared = handle.shared.clone();
-        let t = std::thread::spawn(move || send_command_with(&shared, "laptop", CommandKind::Compact { session: "r2".into() }, Duration::from_secs(5)));
-        let Down::Command { id, .. } = recv(&mut new) else { panic!("expected command") };
-        send(&mut new, &Up::Result { id, ok: true, error: None, data: None });
-        assert!(t.join().unwrap().is_ok());
-        // The old token no longer opens a connection.
-        let mut stale = connect(port);
-        hello(&mut stale, "laptop", Some(&old_id));
-        let Down::Challenge { nonce } = recv(&mut stale) else { panic!("expected challenge") };
-        send(&mut stale, &Up::Auth { mac: mac(&old_token, &nonce), nonce: crate::net::protocol::new_nonce() });
-        assert!(matches!(recv(&mut stale), Down::Bye { reason } if reason == "authentication failed"));
-        // While it is connected, another pairing from its address is another machine.
-        let (_twin, twin_id, _) = pair_client(&handle, port, "desk");
-        assert_ne!(twin_id, new_id);
-        assert_eq!(handle.status().assistants.len(), 2);
+    fn a_maya_pairing_again_with_its_key_keeps_its_entry() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let me = Keypair::generate();
+        let (ws, first, _) = pair_as(&handle, port, &me, "desk", &[]);
+        drop(ws);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.connected));
+        let (_ws, again, _) = pair_as(&handle, port, &me, "desk2", &[]);
+        assert_eq!(again, first, "the same key: the same entry");
+        assert_eq!(handle.status().assistants.len(), 1);
+        assert_eq!(handle.status().assistants[0].name, "desk2", "names follow the machine");
         handle.stop();
     }
 
     #[test]
-    fn pairings_are_told_apart_by_address_and_equal_names_carry_it() {
+    fn two_mayas_at_one_address_are_two_entries_and_equal_names_carry_it() {
+        let (handle, port) = test_server();
+        let (_a, a, _) = pair_client(&handle, port, "laptop");
+        let (_b, b, _) = pair_client(&handle, port, "laptop");
+        assert_ne!(a, b);
+        let names: Vec<String> = handle.status().assistants.iter().map(|s| s.name.clone()).collect();
+        assert!(names.iter().all(|n| n.contains("127.0.0.1")), "{names:?}");
+        handle.stop();
+    }
+
+    #[test]
+    fn a_pairing_finds_the_machine_by_its_key_and_an_undo_gives_the_entry_back() {
         let mut s = Server::new(vec![], "desk".into());
-        let (first, previous) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
+        let (first, previous) = s.record_pairing("a2V5", "192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
         assert!(previous.is_none());
         s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, received_at: 0, connected: false });
-        let (second, previous) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
-        assert_eq!(previous.as_ref(), Some(&first), "the same address, disconnected: the same machine");
+        // The same key from another address: the same machine, at its new address.
+        let (second, previous) = s.record_pairing("a2V5", "192.168.55.80", "Gnowee", "TKC-0176", "macos", false);
+        assert_eq!(previous.as_ref(), Some(&first));
         assert_eq!(second.id, first.id);
-        assert_ne!(second.token, first.token);
+        assert_eq!(second.address, "192.168.55.80");
         assert_eq!(s.paired.len(), 1);
         assert!(s.by_id.is_empty(), "its old board is dropped");
-        // Another address with the same name is another machine.
-        let (other, previous) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos", false);
+        // Another key from the same address is another machine.
+        let (other, previous) = s.record_pairing("b3RoZXI=", "192.168.55.80", "Gnowee", "TKC-0199", "macos", false);
         assert!(previous.is_none());
         assert_ne!(other.id, first.id);
-        let names: Vec<(String, String)> = s.status(0).assistants.into_iter().map(|a| (a.name, a.address)).collect();
-        assert_eq!(names, [("Gnowee (192.168.55.70)".to_string(), "192.168.55.70".to_string()), ("Gnowee (192.168.55.71)".to_string(), "192.168.55.71".to_string())]);
-        // A connected entry is never taken over by a new pairing.
-        s.conns.insert(other.id.clone(), Conn { tx: channel().0, serial: 1 });
-        let (third, previous) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos", false);
-        assert!(previous.is_none());
-        assert_eq!(s.paired.len(), 3);
-        assert_ne!(third.id, other.id);
-        // Authentication brings the entry up to date: a new address, a new name.
-        s.refresh_entry(&first.id, "192.168.55.80", "Gnowee", "TKC-0176", "macos", 7);
-        assert_eq!((s.paired[0].address.as_str(), s.paired[0].last_seen), ("192.168.55.80", Some(7)));
-        // A pairing the assistant never completed is taken back.
-        s.undo_pairing(&third.id, None);
-        assert_eq!(s.paired.len(), 2);
-        let (again, previous) = s.record_pairing("192.168.55.80", "Renamed", "TKC-0176", "macos", false);
+        let names: Vec<String> = s.status(0).assistants.into_iter().map(|a| a.name).collect();
+        assert_eq!(names, ["Gnowee (192.168.55.80)", "Gnowee (192.168.55.80)"]);
+        // A connection brings the entry up to date: a new address, a new name.
+        s.refresh_entry(&first.id, "192.168.55.81", "Gnowee", "TKC-0176", "macos", 7);
+        assert_eq!((s.paired[0].address.as_str(), s.paired[0].last_seen), ("192.168.55.81", Some(7)));
+        // A pairing the Maya never completed is taken back.
+        s.undo_pairing(&other.id, None);
+        assert_eq!(s.paired.len(), 1);
+        let (again, previous) = s.record_pairing("a2V5", "192.168.55.90", "Renamed", "TKC-0176", "macos", false);
         s.undo_pairing(&again.id, previous);
-        assert_eq!(s.paired[0].name, "Gnowee", "an entry paired again gets its old self back");
-        assert_eq!(s.paired[0].token, second.token);
+        assert_eq!((s.paired[0].name.as_str(), s.paired[0].address.as_str()), ("Gnowee", "192.168.55.81"), "an entry paired again gets its old self back");
     }
 
     #[test]
@@ -1976,7 +2053,7 @@ mod tests {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
         let state = |id: &str, state: State, since: u64| Card { state, state_since: since, ..card(id, "x") };
-        let (mut ws, id, token) = pair_client(&handle, port, "desk");
+        let (mut ws, _, key) = pair_client(&handle, port, "desk");
         // Open when it paired: an ask and a finished turn. Nothing is announced.
         send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 100), state("r2", State::Completed, 100)], dirs: vec![], agents: None });
         wait_until(|| handle.boards().iter().any(|b| b.cards.len() == 2));
@@ -1987,10 +2064,8 @@ mod tests {
         // It drops; while it is away r1 asks something new and r2 finishes again.
         drop(ws);
         wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
-        let mut ws = connect(port);
-        hello(&mut ws, "desk", Some(&id));
-        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
-        answer(&mut ws, &token, &nonce);
+        let mut ws = connect_as(&handle, port, &key, "desk", &[]);
+        assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
         // The main still holds its board, so the reconnect's first board is news.
         send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 300), state("r2", State::Completed, 300), state("r3", State::Awaiting, 200)], dirs: vec![], agents: None });
         wait_until(|| counter.announced.lock().unwrap().len() == 3);
@@ -2002,19 +2077,17 @@ mod tests {
     fn a_main_started_afresh_is_quiet_about_a_known_assistants_first_board() {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
-        let (ws, id, token) = pair_client(&handle, port, "desk");
+        let (ws, _, key) = pair_client(&handle, port, "desk");
         drop(ws);
         wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
         handle.stop();
-        // A new run of the main: the assistant is paired but no board is held yet.
+        // A new run of the main, with its key: the assistant is paired but no board is held yet.
         let saved = handle.shared.lock().unwrap().paired.clone();
         let counter = Arc::new(Counter::default());
-        let restarted = start_with(counter.clone(), Arc::new(Mutex::new(NetworkConfig { assistants: saved, ..Default::default() })), 0).unwrap();
+        let restarted = start_with(counter.clone(), Arc::new(Mutex::new(NetworkConfig { assistants: saved, ..Default::default() })), 0, handle.ctx.identity.clone()).unwrap();
         let _ = counter.server.set(restarted.shared.clone());
-        let mut ws = connect(restarted.port());
-        hello(&mut ws, "desk", Some(&id));
-        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
-        answer(&mut ws, &token, &nonce);
+        let mut ws = connect_as(&restarted, restarted.port(), &key, "desk", &[]);
+        assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
         send(&mut ws, &Up::Board { cards: vec![Card { state: State::Awaiting, state_since: 100, ..card("r1", "x") }], dirs: vec![], agents: None });
         wait_until(|| restarted.boards().iter().any(|b| b.cards.len() == 1));
         send(&mut ws, &Up::Board { cards: vec![Card { state: State::Awaiting, state_since: 100, ..card("r1", "x") }, Card { state: State::Awaiting, state_since: 200, ..card("r2", "x") }], dirs: vec![], agents: None });
@@ -2028,7 +2101,7 @@ mod tests {
     fn reset(ws: Client) {
         use std::os::windows::io::AsRawSocket;
         use windows_sys::Win32::Networking::WinSock::{setsockopt, LINGER, SOL_SOCKET, SO_LINGER};
-        let MaybeTlsStream::Plain(s) = ws.get_ref() else { panic!("plain socket") };
+        let MaybeTlsStream::Plain(s) = ws.ws.get_ref() else { panic!("plain socket") };
         let linger = LINGER { l_onoff: 1, l_linger: 0 };
         // SAFETY: a valid socket, and a linger struct of the size given.
         let rc = unsafe { setsockopt(s.as_raw_socket() as usize, SOL_SOCKET, SO_LINGER, &linger as *const _ as *const u8, std::mem::size_of::<LINGER>() as i32) };
@@ -2040,7 +2113,7 @@ mod tests {
     #[cfg(unix)]
     fn reset(ws: Client) {
         use std::os::fd::AsRawFd;
-        let MaybeTlsStream::Plain(s) = ws.get_ref() else { panic!("plain socket") };
+        let MaybeTlsStream::Plain(s) = ws.ws.get_ref() else { panic!("plain socket") };
         let linger = libc::linger { l_onoff: 1, l_linger: 0 };
         // SAFETY: a valid socket, and a linger struct of the size given.
         let rc = unsafe { libc::setsockopt(s.as_raw_fd(), libc::SOL_SOCKET, libc::SO_LINGER, &linger as *const _ as *const libc::c_void, std::mem::size_of::<libc::linger>() as libc::socklen_t) };
@@ -2049,24 +2122,26 @@ mod tests {
     }
 
     #[test]
-    fn an_assistant_gone_right_after_sending_pair_leaves_no_entry() {
+    fn an_assistant_gone_right_after_its_hello_leaves_no_entry() {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
         let (code, _) = handle.open_pairing(now_ms()).unwrap();
-        let mut ws = connect(port);
-        // `hello` and `pair` in one write, then the socket goes.
-        ws.write(Message::text(encode(&Up::Hello { protocol: PROTOCOL, app: "t".into(), name: "ghost".into(), hostname: "h".into(), platform: "macos".into(), id: None, caps: vec![] }))).unwrap();
-        ws.write(Message::text(encode(&Up::Pair { code, nonce: "n".into() }))).unwrap();
-        ws.flush().unwrap();
-        reset(ws);
+        let mut raw = connect(port);
+        let (noise, _) = secure::pair(&mut raw, &Keypair::generate(), &code, soon(), &|| false).unwrap();
+        let mut ch = Channel::new(raw, noise);
+        // `hello`, then the socket goes.
+        ch.write(&encode(&hello_up("ghost", &[]))).unwrap();
+        ch.flush().unwrap();
+        reset(ch);
         wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
         assert!(handle.status().assistants.is_empty(), "no paired entry is left behind");
-        assert_eq!(counter.paired.load(Ordering::SeqCst), 0, "nothing was saved");
+        // Saved just before `welcome`, then taken back when `welcome` could not be sent.
+        assert!(counter.saved.lock().unwrap().is_empty(), "the saved list does not keep it");
         // On Windows a reset can discard what the main had not read yet, so
-        // the main may never see `pair` and the code stays open: as safe,
-        // but only Unix delivers the buffered `pair` before the reset.
+        // the main may never see `hello` and the code stays open: as safe,
+        // but only Unix delivers the buffered `hello` before the reset.
         if cfg!(unix) {
-            assert!(handle.status().code.is_none(), "the main read the code and paired, then took the pairing back");
+            assert!(handle.status().code.is_none(), "the main read the hello and paired, then took the pairing back");
         }
         handle.stop();
     }
@@ -2075,20 +2150,18 @@ mod tests {
     fn the_paired_list_is_saved_under_the_server_lock_so_no_older_snapshot_wins() {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
-        let reconnect = |id: &str, token: &str| {
-            let mut ws = connect(port);
-            hello(&mut ws, "desk", Some(id));
-            let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
-            answer(&mut ws, token, &nonce);
+        let reconnect = |key: &Keypair| {
+            let mut ws = connect_as(&handle, port, key, "desk", &[]);
+            assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
             ws
         };
         // Every kind of save: a pairing, a disconnect, a connect, a removal.
-        let (desk, id, token) = pair_client(&handle, port, "desk");
+        let (desk, id, key) = pair_client(&handle, port, "desk");
         let (_twin, twin, _) = pair_client(&handle, port, "twin");
         wait_until(|| counter.paired.load(Ordering::SeqCst) == 2);
         drop(desk);
         wait_until(|| counter.saved.lock().unwrap().iter().any(|a| a.id == id && a.last_seen.is_some()) && !handle.status().assistants[0].connected);
-        let desk = reconnect(&id, &token);
+        let desk = reconnect(&key);
         handle.remove_assistant(&twin).unwrap();
         drop(desk);
         wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
@@ -2111,7 +2184,7 @@ mod tests {
         let saved = counter.saved.lock().unwrap().clone();
         assert_eq!(handle.status().assistants[0].last_seen, saved[0].last_seen);
         handle.stop();
-        let restarted = start_with(Arc::new(Counter::default()), Arc::new(Mutex::new(NetworkConfig { assistants: saved.clone(), ..Default::default() })), 0).unwrap();
+        let restarted = start_with(Arc::new(Counter::default()), Arc::new(Mutex::new(NetworkConfig { assistants: saved.clone(), ..Default::default() })), 0, Arc::new(Keypair::generate())).unwrap();
         let status = restarted.status();
         assert!(!status.assistants[0].connected);
         assert_eq!(status.assistants[0].last_seen, saved[0].last_seen, "a restarted main still says when it last saw it");
@@ -2132,7 +2205,7 @@ mod tests {
         // unknown harness is readable since 0.11.0: it decodes to Other.)
         let mut future = serde_json::to_value(Up::Board { cards: vec![card("r2", "y")], dirs: vec![], agents: None }).unwrap();
         future["cards"][0]["state"] = "future-state".into();
-        ws.send(Message::text(future.to_string())).unwrap();
+        ws.send(&future.to_string()).unwrap();
         wait_until(|| note(&handle).is_some_and(|n| n.ends_with(UNREADABLE_BOARD)));
         assert_eq!(note(&handle).unwrap(), format!("runs Maya t; this Mac runs {ours}; {UNREADABLE_BOARD}"));
         assert_eq!(handle.boards()[0].cards[0].session_id, "r1", "the last good board stays");
@@ -2142,7 +2215,7 @@ mod tests {
             s.by_id.get_mut(&id).unwrap().received_at = 1;
             s.sync_boards();
         }
-        ws.send(Message::text(future.to_string())).unwrap();
+        ws.send(&future.to_string()).unwrap();
         wait_until(|| handle.boards()[0].received_at > 1);
         let cards = super::super::merge::merged(vec![], &handle.boards(), now_ms());
         assert_eq!(cards.len(), 1);
@@ -2153,11 +2226,13 @@ mod tests {
         wait_until(|| note(&handle).is_some_and(|n| !n.contains(UNREADABLE_BOARD)));
         // The same version says nothing.
         let (code, _) = handle.open_pairing(now_ms()).unwrap();
-        let mut same = connect(port);
-        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), id: None, caps: vec![] });
-        send(&mut same, &Up::Pair { code, nonce: "n".into() });
-        let Down::Paired { id: twin, .. } = recv(&mut same) else { panic!("expected paired") };
+        let twin_key = Keypair::generate();
+        let mut raw = connect(port);
+        let (noise, _) = secure::pair(&mut raw, &twin_key, &code, soon(), &|| false).unwrap();
+        let mut same = Channel::new(raw, noise);
+        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![] });
         assert!(matches!(recv(&mut same), Down::Welcome { .. }));
+        let twin = lock(&handle.shared).paired.iter().find(|p| p.key == crate::net::identity::encode_key(&twin_key.public)).unwrap().id.clone();
         assert_eq!(handle.status().assistants.iter().find(|a| a.id == twin).unwrap().note, None);
         handle.stop();
     }
@@ -2172,7 +2247,7 @@ mod tests {
     #[test]
     fn strangers_in_their_handshake_cannot_take_every_slot() {
         let (handle, port) = test_server();
-        let (desk, id, token) = pair_client(&handle, port, "desk");
+        let (desk, _, key) = pair_client(&handle, port, "desk");
         let in_handshake = |handle: &ServerHandle| handle.ctx.pre_auth.lock().unwrap().total;
         wait_until(|| in_handshake(&handle) == 0);
         // Two sockets from this address that never even start the WebSocket handshake.
@@ -2182,13 +2257,11 @@ mod tests {
         assert!(handle.status().assistants[0].connected, "an assistant through welcome holds no slot");
         drop(strangers);
         wait_until(|| in_handshake(&handle) == 0);
-        // The assistant reconnects with its token, and is through welcome.
+        // The assistant reconnects with its key, and is through welcome.
         drop(desk);
         wait_until(|| !handle.status().assistants[0].connected);
-        let mut ws = connect(port);
-        hello(&mut ws, "desk", Some(&id));
-        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
-        answer(&mut ws, &token, &nonce);
+        let mut ws = connect_as(&handle, port, &key, "desk", &[]);
+        assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
         wait_until(|| in_handshake(&handle) == 0);
         assert_eq!(handle.ctx.live.load(Ordering::SeqCst), 1);
         handle.stop();
@@ -2221,7 +2294,7 @@ mod tests {
     fn a_busy_port_is_an_error_that_names_the_port() {
         let taken = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
         let port = taken.local_addr().unwrap().port();
-        let Err(err) = start_with(Arc::new(Counter::default()), Arc::new(Mutex::new(NetworkConfig::default())), port) else { panic!("the port is taken") };
+        let Err(err) = start_with(Arc::new(Counter::default()), Arc::new(Mutex::new(NetworkConfig::default())), port, Arc::new(Keypair::generate())) else { panic!("the port is taken") };
         assert!(err.starts_with(&format!("Could not listen on port {port}: ")) && err.ends_with("Choose another port."), "{err}");
     }
 
@@ -2268,14 +2341,15 @@ mod tests {
     #[derive(Default)]
     struct FakeClientNotify {
         main: Mutex<Option<String>>,
-        creds: Mutex<Option<(String, String)>>,
+        /// The main's key, as pairing learned it.
+        key: Mutex<Option<String>>,
         errors: Mutex<Vec<String>>,
         removed: AtomicUsize,
     }
 
     impl client::ClientNotify for FakeClientNotify {
-        fn paired(&self, id: &str, token: &str) {
-            *self.creds.lock().unwrap() = Some((id.into(), token.into()));
+        fn paired(&self, main_key: &str) {
+            *self.key.lock().unwrap() = Some(main_key.into());
         }
         fn connected(&self, main_name: &str) {
             *self.main.lock().unwrap() = Some(main_name.into());
@@ -2292,14 +2366,14 @@ mod tests {
     #[derive(Default)]
     struct Leader {
         caps: Vec<String>,
-        moved: Mutex<Option<(String, u16)>>,
+        moved: Mutex<Option<(String, u16, String)>>,
         promoted: Mutex<Option<Vec<crate::config::PairedAssistant>>>,
         promote_result: Mutex<Option<Result<u16, String>>>,
         disconnects: Mutex<Vec<String>>,
     }
 
     impl client::ClientNotify for Leader {
-        fn paired(&self, _: &str, _: &str) {}
+        fn paired(&self, _: &str) {}
         fn connected(&self, _: &str) {}
         fn disconnected(&self, e: &str) {
             self.disconnects.lock().unwrap().push(e.into());
@@ -2312,8 +2386,8 @@ mod tests {
             *self.promoted.lock().unwrap() = Some(list);
             self.promote_result.lock().unwrap().clone().unwrap_or(Ok(6000))
         }
-        fn moved(&self, host: &str, port: u16) -> Result<(), String> {
-            *self.moved.lock().unwrap() = Some((host.into(), port));
+        fn moved(&self, host: &str, port: u16, key: &str) -> Result<(), String> {
+            *self.moved.lock().unwrap() = Some((host.into(), port, key.into()));
             Ok(())
         }
     }
@@ -2328,24 +2402,25 @@ mod tests {
         }
     }
 
-    fn assistant_config(port: u16, id: &str, token: &str) -> NetworkConfig {
-        NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, assistant_id: id.into(), token: token.into(), ..Default::default() }
+    fn assistant_config(port: u16, main: &ServerHandle) -> NetworkConfig {
+        NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, main_key: crate::net::identity::encode_key(&main.public_key()), ..Default::default() }
     }
 
     #[test]
     fn a_client_says_its_caps_opens_promote_answers_with_its_port_and_ends() {
         let (handle, port) = test_server();
-        let (ws, id, token) = pair_client(&handle, port, "laptop");
+        let (ws, id, key) = pair_client(&handle, port, "laptop");
         drop(ws);
         wait_until(|| !handle.status().assistants[0].connected);
         let notify = Arc::new(Leader { caps: vec!["follow".into(), "lead".into()], ..Default::default() });
-        let (config, n, stop) = (assistant_config(port, &id, &token), notify.clone(), Arc::new(AtomicBool::new(false)));
+        let (config, n, stop, k) = (assistant_config(port, &handle), notify.clone(), Arc::new(AtomicBool::new(false)), key.clone());
         let s = stop.clone();
-        let run = std::thread::spawn(move || client::run_once(&config, Arc::new(NoSessions), n, &s, None));
+        let run = std::thread::spawn(move || client::run_once(&config, &k, Arc::new(NoSessions), n, &s, None));
         wait_until(|| handle.status().assistants[0].can_lead);
         let out = handle.promote(&id).unwrap();
         assert_eq!(out.port, 6000, "the port the new main gave");
-        assert_eq!(notify.promoted.lock().unwrap().as_ref().unwrap().last().unwrap(), &out.me);
+        assert_eq!(out.main_key, crate::net::identity::encode_key(&key.public), "the promoted Maya's own key");
+        assert_eq!(notify.promoted.lock().unwrap().as_ref().unwrap().last().unwrap().key, crate::net::identity::encode_key(&handle.public_key()));
         assert_eq!(run.join().unwrap(), Ok(()), "a promoted client ends without an error");
         assert!(notify.disconnects.lock().unwrap().is_empty());
         handle.stop();
@@ -2354,13 +2429,13 @@ mod tests {
     #[test]
     fn a_client_that_cannot_become_the_main_says_why_and_stays() {
         let (handle, port) = test_server();
-        let (ws, id, token) = pair_client(&handle, port, "laptop");
+        let (ws, id, key) = pair_client(&handle, port, "laptop");
         drop(ws);
         wait_until(|| !handle.status().assistants[0].connected);
         let notify = Arc::new(Leader { caps: vec!["follow".into(), "lead".into()], promote_result: Mutex::new(Some(Err("Could not listen on port 6000: in use".into()))), ..Default::default() });
-        let (config, n, stop) = (NetworkConfig { name: "laptop".into(), ..assistant_config(port, &id, &token) }, notify.clone(), Arc::new(AtomicBool::new(false)));
+        let (config, n, stop) = (NetworkConfig { name: "laptop".into(), ..assistant_config(port, &handle) }, notify.clone(), Arc::new(AtomicBool::new(false)));
         let s = stop.clone();
-        let run = std::thread::spawn(move || client::run_once(&config, Arc::new(NoSessions), n, &s, None));
+        let run = std::thread::spawn(move || client::run_once(&config, &key, Arc::new(NoSessions), n, &s, None));
         wait_until(|| handle.status().assistants[0].can_lead);
         assert_eq!(handle.promote(&id).unwrap_err(), "laptop could not become the main: Could not listen on port 6000: in use.");
         assert!(handle.status().assistants[0].connected, "still an assistant of this main");
@@ -2372,29 +2447,30 @@ mod tests {
     #[test]
     fn a_client_told_to_move_saves_the_new_host_and_reconnects_at_once() {
         let (handle, port) = test_server();
-        let (ws, id, token) = pair_client(&handle, port, "mini");
+        let (ws, id, key) = pair_client(&handle, port, "mini");
         drop(ws);
         wait_until(|| !handle.status().assistants[0].connected);
         let notify = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
-        let (config, n, stop) = (assistant_config(port, &id, &token), notify.clone(), Arc::new(AtomicBool::new(false)));
+        let (config, n, stop) = (assistant_config(port, &handle), notify.clone(), Arc::new(AtomicBool::new(false)));
         let s = stop.clone();
-        let run = std::thread::spawn(move || client::run_once(&config, Arc::new(NoSessions), n, &s, None));
+        let run = std::thread::spawn(move || client::run_once(&config, &key, Arc::new(NoSessions), n, &s, None));
         wait_until(|| handle.status().assistants[0].connected);
-        lock(&handle.shared).conns.get(&id).unwrap().tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001 }).unwrap();
+        let new_key = Keypair::generate().public_b64();
+        lock(&handle.shared).conns.get(&id).unwrap().tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: new_key.clone() }).unwrap();
         assert_eq!(run.join().unwrap(), Err(client::MOVED.into()));
-        assert_eq!(*notify.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001)));
+        assert_eq!(*notify.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001, new_key)));
         handle.stop();
     }
 
     #[test]
     fn an_older_client_without_caps_cannot_be_promoted() {
         let (handle, port) = test_server();
-        let (ws, id, token) = pair_client(&handle, port, "old");
+        let (ws, _, key) = pair_client(&handle, port, "old");
         drop(ws);
         wait_until(|| !handle.status().assistants[0].connected);
-        let (config, stop) = (assistant_config(port, &id, &token), Arc::new(AtomicBool::new(false)));
+        let (config, stop) = (assistant_config(port, &handle), Arc::new(AtomicBool::new(false)));
         let s = stop.clone();
-        let run = std::thread::spawn(move || client::run_once(&config, Arc::new(NoSessions), Arc::new(Leader::default()), &s, None));
+        let run = std::thread::spawn(move || client::run_once(&config, &key, Arc::new(NoSessions), Arc::new(Leader::default()), &s, None));
         wait_until(|| handle.status().assistants[0].connected);
         assert!(!handle.status().assistants[0].can_lead && !handle.status().assistants[0].can_follow);
         stop.store(true, Ordering::SeqCst);
@@ -2402,84 +2478,94 @@ mod tests {
         handle.stop();
     }
 
-    /// A stranger at the main's address: answers one connection with
-    /// `welcome` (after a challenge when `challenge`) carrying `proof`, then
-    /// sends a command. Returns its port.
-    fn fake_main(challenge: bool, proof: &'static str) -> u16 {
+    /// A stranger at the main's address: takes the first frame, answers it
+    /// with `answer`, then sends a plain-text command. Returns its port.
+    fn fake_main(answer: fn(&mut WebSocket<TcpStream>)) -> u16 {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut ws = tungstenite::accept(stream).unwrap();
-            let read = |ws: &mut WebSocket<TcpStream>| loop {
-                if let Message::Text(t) = ws.read().unwrap() {
-                    return crate::net::protocol::decode_up(&t).unwrap();
-                }
-            };
-            assert!(matches!(read(&mut ws), Up::Hello { .. }));
-            if challenge {
-                ws.send(Message::text(encode(&Down::Challenge { nonce: "n".into() }))).unwrap();
-                assert!(matches!(read(&mut ws), Up::Auth { .. }));
-            }
-            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into(), mirror: None })));
+            let _ = ws.read();
+            answer(&mut ws);
             let _ = ws.send(Message::text(encode(&Down::Command { id: 1, kind: CommandKind::Compact { session: "r1".into() } })));
             let _ = ws.read();
         });
         port
     }
 
-    /// A stranger that takes any pairing code: answers `pair` with an id and
-    /// a token, then `welcome` carrying `proof`. Returns its port.
-    fn fake_pairing_main(proof: &'static str) -> u16 {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let mut ws = tungstenite::accept(stream).unwrap();
-            let read = |ws: &mut WebSocket<TcpStream>| loop {
-                if let Message::Text(t) = ws.read().unwrap() {
-                    return crate::net::protocol::decode_up(&t).unwrap();
-                }
-            };
-            assert!(matches!(read(&mut ws), Up::Hello { .. }));
-            assert!(matches!(read(&mut ws), Up::Pair { nonce, .. } if !nonce.is_empty()), "the assistant sends a nonce with its code");
-            let _ = ws.send(Message::text(encode(&Down::Paired { id: "evil-id".into(), token: "evil-token".into() })));
-            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into(), mirror: None })));
+    #[test]
+    fn the_client_keeps_nothing_from_a_main_that_does_not_know_the_code() {
+        // It answers SPAKE2 with its own guess, then garbage where the
+        // handshake goes on.
+        let port = fake_main(|ws| {
+            let (_, ours) = spake2::Spake2::<spake2::Ed25519Group>::start_b(&spake2::Password::new(b"999999"), &spake2::Identity::new(b"maya-join"), &spake2::Identity::new(b"maya-main"));
+            let mut b = vec![secure::KIND_MESSAGE];
+            b.extend(ours);
+            let _ = ws.send(Message::binary(b));
             let _ = ws.read();
+            let mut garbage = vec![secure::KIND_MESSAGE];
+            garbage.extend([7u8; 96]);
+            let _ = ws.send(Message::binary(garbage));
         });
-        port
+        let exec = Arc::new(FakeExec::default());
+        let notify = Arc::new(FakeClientNotify::default());
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, ..Default::default() };
+        let out = client::run_once(&config, &Keypair::generate(), exec.clone(), notify.clone(), &AtomicBool::new(false), Some("123456"));
+        assert_eq!(out, Err(client::PAIRING_FAILED.to_string()));
+        assert!(notify.key.lock().unwrap().is_none(), "nothing is saved");
+        assert!(notify.main.lock().unwrap().is_none(), "never reported as connected");
+        assert!(exec.kinds.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn the_client_keeps_no_credentials_from_a_main_that_cannot_prove_it_knows_the_code() {
-        for proof in ["00", ""] {
-            let port = fake_pairing_main(proof);
-            let exec = Arc::new(FakeExec::default());
-            let notify = Arc::new(FakeClientNotify::default());
-            let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, ..Default::default() };
-            let out = client::run_once(&config, exec.clone(), notify.clone(), &AtomicBool::new(false), Some("123456"));
-            assert_eq!(out, Err(client::PAIRING_UNPROVEN.to_string()), "proof {proof:?}");
-            assert!(notify.creds.lock().unwrap().is_none(), "nothing is saved");
-            assert!(notify.main.lock().unwrap().is_none(), "never reported as connected");
-            assert_eq!(*notify.errors.lock().unwrap(), [client::PAIRING_UNPROVEN]);
-        }
+    fn the_client_refuses_a_main_that_does_not_hold_the_pinned_key() {
+        let port = fake_main(|ws| {
+            let mut garbage = vec![secure::KIND_MESSAGE];
+            garbage.extend([7u8; 48]);
+            let _ = ws.send(Message::binary(garbage));
+        });
+        let exec = Arc::new(FakeExec::default());
+        let notify = Arc::new(FakeClientNotify::default());
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, main_key: crate::net::identity::encode_key(&Keypair::generate().public), ..Default::default() };
+        let out = client::run_once(&config, &Keypair::generate(), exec.clone(), notify.clone(), &AtomicBool::new(false), None);
+        assert_eq!(out, Err(client::KEY_CHANGED.to_string()));
+        assert!(exec.kinds.lock().unwrap().is_empty(), "no command from an impostor runs");
+        assert!(notify.main.lock().unwrap().is_none());
+        assert_eq!(*notify.errors.lock().unwrap(), [client::KEY_CHANGED]);
     }
 
     #[test]
-    fn the_client_refuses_a_main_that_cannot_prove_it_holds_the_token() {
-        for (challenge, proof) in [(true, "00"), (true, ""), (false, "")] {
-            let port = fake_main(challenge, proof);
-            let exec = Arc::new(FakeExec::default());
-            let notify = Arc::new(FakeClientNotify::default());
-            let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, assistant_id: "a1".into(), token: crate::net::protocol::new_token(), ..Default::default() };
-            let out = client::run_once(&config, exec.clone(), notify.clone(), &AtomicBool::new(false), None);
-            assert_eq!(out, Err(client::MAIN_UNPROVEN.to_string()), "challenge {challenge}, proof {proof:?}");
-            assert!(exec.kinds.lock().unwrap().is_empty(), "no command from an unproven main runs");
-            assert!(notify.main.lock().unwrap().is_none(), "never reported as connected");
-            assert_eq!(*notify.errors.lock().unwrap(), [client::MAIN_UNPROVEN]);
-        }
+    fn the_client_says_the_main_is_older_when_it_speaks_plain_text() {
+        let port = fake_main(|ws| {
+            let _ = ws.send(Message::text(r#"{"type":"challenge","nonce":"n"}"#));
+        });
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, main_key: crate::net::identity::encode_key(&Keypair::generate().public), ..Default::default() };
+        let out = client::run_once(&config, &Keypair::generate(), Arc::new(FakeExec::default()), Arc::new(FakeClientNotify::default()), &AtomicBool::new(false), None);
+        assert_eq!(out, Err(client::OLD_MAIN.to_string()));
+    }
+
+    #[test]
+    fn a_move_with_a_bad_key_is_not_followed() {
+        let (handle, port) = test_server();
+        let me = Keypair::generate();
+        let (ws, id, _) = pair_as(&handle, port, &me, "laptop", &["follow"]);
+        drop(ws);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.connected));
+        let leader = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = assistant_config(port, &handle);
+        let (l, s, k) = (leader.clone(), stop.clone(), me.clone());
+        let run = std::thread::spawn(move || client::run_once(&config, &k, Arc::new(FakeExec::default()), l, &s, None));
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        let tx = handle.shared.lock().unwrap().conns.get(&id).unwrap().tx.clone();
+        tx.send(Down::Move { host: "10.0.0.9".into(), port: 4127, key: "not a key".into() }).unwrap();
+        let out = run.join().unwrap();
+        assert!(out.unwrap_err().starts_with("Could not follow the main Maya to 10.0.0.9"));
+        assert!(leader.moved.lock().unwrap().is_none(), "the old main is kept");
+        stop.store(true, Ordering::SeqCst);
+        handle.stop();
     }
 
     #[test]
@@ -2487,42 +2573,44 @@ mod tests {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
         counter.fail_saves.store(true, Ordering::SeqCst);
-        // On the wire: `paired`, then `bye` instead of `welcome`.
+        // On the wire: the handshake, then `bye` instead of `welcome`.
         let (code, _) = handle.open_pairing(now_ms()).unwrap();
-        let mut ws = connect(port);
-        hello(&mut ws, "desk", None);
-        send(&mut ws, &Up::Pair { code, nonce: "n".into() });
-        assert!(matches!(recv(&mut ws), Down::Paired { .. }));
+        let mut raw = connect(port);
+        let (noise, _) = secure::pair(&mut raw, &Keypair::generate(), &code, soon(), &|| false).unwrap();
+        let mut ws = Channel::new(raw, noise);
+        send(&mut ws, &hello_up("desk", &[]));
         assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == PAIRING_NOT_SAVED));
         wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
         assert!(handle.status().assistants.is_empty(), "no entry on the main");
         assert!(counter.saved.lock().unwrap().is_empty());
-        // The real client reports it and keeps no credentials.
+        // The real client reports it and keeps no key.
         let (code, _) = handle.open_pairing(now_ms()).unwrap();
         let notify = Arc::new(FakeClientNotify::default());
         let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "desk".into(), ..Default::default() };
-        let out = client::run_once(&config, Arc::new(FakeExec::default()), notify.clone(), &AtomicBool::new(false), Some(&code));
+        let out = client::run_once(&config, &Keypair::generate(), Arc::new(FakeExec::default()), notify.clone(), &AtomicBool::new(false), Some(&code));
         assert_eq!(out, Err("The main could not save the pairing.".to_string()));
-        assert!(notify.creds.lock().unwrap().is_none(), "nothing is stored on the assistant");
+        assert!(notify.key.lock().unwrap().is_none(), "nothing is stored on the assistant");
         assert!(notify.main.lock().unwrap().is_none(), "never reported as connected");
         wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
         assert!(handle.status().assistants.is_empty());
-        // A machine pairing again whose save fails keeps its old entry and key.
+        // A machine pairing again whose save fails keeps its old entry.
         counter.fail_saves.store(false, Ordering::SeqCst);
-        let (first, id, token) = pair_client(&handle, port, "desk");
+        let me = Keypair::generate();
+        let (first, id, _) = pair_as(&handle, port, &me, "desk", &[]);
         wait_until(|| counter.paired.load(Ordering::SeqCst) == 1);
         drop(first);
         wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
         counter.fail_saves.store(true, Ordering::SeqCst);
         let (code, _) = handle.open_pairing(now_ms()).unwrap();
-        let mut ws = connect(port);
-        hello(&mut ws, "renamed", None);
-        send(&mut ws, &Up::Pair { code, nonce: "n".into() });
-        assert!(matches!(recv(&mut ws), Down::Paired { id: again, .. } if again == id));
+        let mut raw = connect(port);
+        let (noise, _) = secure::pair(&mut raw, &me, &code, soon(), &|| false).unwrap();
+        let mut ws = Channel::new(raw, noise);
+        send(&mut ws, &hello_up("renamed", &[]));
         assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == PAIRING_NOT_SAVED));
         wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
         let kept = handle.shared.lock().unwrap().paired.clone();
-        assert_eq!(kept.iter().map(|a| (a.id.as_str(), a.name.as_str(), a.token.as_str())).collect::<Vec<_>>(), [(id.as_str(), "desk", token.as_str())]);
+        let key = crate::net::identity::encode_key(&me.public);
+        assert_eq!(kept.iter().map(|a| (a.id.as_str(), a.name.as_str(), a.key.as_str())).collect::<Vec<_>>(), [(id.as_str(), "desk", key.as_str())]);
         handle.stop();
     }
 
@@ -2552,30 +2640,33 @@ mod tests {
     fn pair_again_stops_the_running_client_first_and_keeps_the_entry() {
         let (handle, port) = test_server();
         let exec = Arc::new(FakeExec::default());
+        let me = Keypair::generate();
         let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "Gnowee".into(), ..Default::default() };
-        // Pairing on its own connection, ended once the credentials are kept.
+        let entry_of = |handle: &ServerHandle| lock(&handle.shared).paired.iter().find(|p| p.key == me.public_b64()).map(|p| p.id.clone());
+        // Pairing on its own connection, ended once the main's key is kept.
         let pair = |notify: Arc<FakeClientNotify>| {
             let (code, _) = handle.open_pairing(now_ms()).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
-            let (c, e, n, s) = (config.clone(), exec.clone(), notify.clone(), stop.clone());
-            let t = std::thread::spawn(move || client::run_once(&c, e, n, &s, Some(&code)));
-            wait_until(|| notify.creds.lock().unwrap().is_some());
+            let (c, k, e, n, s) = (config.clone(), me.clone(), exec.clone(), notify.clone(), stop.clone());
+            let t = std::thread::spawn(move || client::run_once(&c, &k, e, n, &s, Some(&code)));
+            wait_until(|| notify.key.lock().unwrap().is_some());
             stop.store(true, Ordering::SeqCst);
             assert_eq!(t.join().unwrap(), Ok(()));
-            notify.creds.lock().unwrap().clone().unwrap()
+            notify.key.lock().unwrap().clone().unwrap()
         };
-        let (id, token) = pair(Arc::new(FakeClientNotify::default()));
-        // The client runs with those credentials and is connected as that entry.
-        let linked = NetworkConfig { assistant_id: id.clone(), token: token.clone(), ..config.clone() };
-        let (e, n) = (exec.clone(), Arc::new(FakeClientNotify::default()));
+        let main_key = pair(Arc::new(FakeClientNotify::default()));
+        assert_eq!(main_key, crate::net::identity::encode_key(&handle.public_key()));
+        let id = entry_of(&handle).expect("paired");
+        // The client runs with that key pinned and is connected as that entry.
+        let linked = NetworkConfig { main_key, ..config.clone() };
+        let (k, e, n) = (me.clone(), exec.clone(), Arc::new(FakeClientNotify::default()));
         let running = client::ClientHandle::spawn(move |stop| {
-            let _ = client::run_once(&linked, e, n, &stop, None);
+            let _ = client::run_once(&linked, &k, e, n, &stop, None);
         });
         wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
-        // "Pair again": the running client is stopped and gone before the pair is sent.
-        let (again, new_token) = client::pair_after_stopping(Some(running), || Ok::<_, String>(pair(Arc::new(FakeClientNotify::default())))).unwrap();
-        assert_eq!(again, id, "the same machine keeps its entry");
-        assert_ne!(new_token, token);
+        // "Pair again": the running client is stopped and gone before the pairing starts.
+        client::pair_after_stopping(Some(running), || Ok::<_, String>(pair(Arc::new(FakeClientNotify::default())))).unwrap();
+        assert_eq!(entry_of(&handle), Some(id), "the same machine keeps its entry");
         let status = handle.status();
         assert_eq!(status.assistants.len(), 1, "no twin");
         assert_eq!(status.assistants[0].name, "Gnowee");
@@ -2589,9 +2680,10 @@ mod tests {
         let notify = Arc::new(FakeClientNotify::default());
         let stop = Arc::new(AtomicBool::new(false));
         let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), ..Default::default() };
+        let me = Keypair::generate();
         let run = |config: NetworkConfig, code: Option<String>| {
-            let (e, n, s) = (exec.clone(), notify.clone(), stop.clone());
-            std::thread::spawn(move || client::run_once(&config, e, n, &s, code.as_deref()))
+            let (k, e, n, s) = (me.clone(), exec.clone(), notify.clone(), stop.clone());
+            std::thread::spawn(move || client::run_once(&config, &k, e, n, &s, code.as_deref()))
         };
         // No pairing window is open, so any code is wrong.
         let err = run(config.clone(), Some("123456".into())).join().unwrap().unwrap_err();
@@ -2604,7 +2696,8 @@ mod tests {
         named.name = "  desk  ".into();
         assert_eq!(main_name_of(&named), "desk", "a configured name is what assistants see");
         assert_eq!(main_name_of(&NetworkConfig::default()), crate::net::local_hostname());
-        let (id, token) = notify.creds.lock().unwrap().clone().expect("the client was paired");
+        let main_key = notify.key.lock().unwrap().clone().expect("the client was paired");
+        let id = lock(&handle.shared).paired.iter().find(|p| p.key == me.public_b64()).unwrap().id.clone();
         // A command from the main runs on the client's executor and its result comes back.
         let out = send_command_with(&handle.shared, "laptop", CommandKind::Compact { session: "r1".into() }, Duration::from_secs(5));
         assert_eq!(out, Ok(None));
@@ -2612,9 +2705,9 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
         assert_eq!(t.join().unwrap(), Ok(()), "a stop ends the connection cleanly");
         wait_until(|| handle.status().assistants.iter().all(|a| !a.connected));
-        // With the token it reconnects by challenge-response; removal ends it for good.
+        // With the main's key pinned it reconnects by IK; removal ends it for good.
         stop.store(false, Ordering::SeqCst);
-        let t = run(NetworkConfig { assistant_id: id.clone(), token, ..config }, None);
+        let t = run(NetworkConfig { main_key, ..config }, None);
         wait_until(|| handle.status().assistants.iter().any(|a| a.connected));
         handle.remove_assistant(&id).unwrap();
         assert_eq!(t.join().unwrap().unwrap_err(), client::REMOVED);
@@ -2648,11 +2741,13 @@ mod tests {
             let (go, gate) = channel();
             let exec = Arc::new(GatedExec { gate: Mutex::new(gate), holding: AtomicBool::new(false) });
             let notify = Arc::new(FakeClientNotify::default());
-            let (c, e, n) = (config.clone(), exec.clone(), notify.clone());
-            let t = std::thread::spawn(move || client::run_once(&c, e, n, &AtomicBool::new(false), Some(&code)));
+            let me = Keypair::generate();
+            let (c, k, e, n) = (config.clone(), me.clone(), exec.clone(), notify.clone());
+            let t = std::thread::spawn(move || client::run_once(&c, &k, e, n, &AtomicBool::new(false), Some(&code)));
             // Welcomed, its first board not yet sent.
             wait_until(|| exec.holding.load(Ordering::SeqCst));
-            let (id, _) = notify.creds.lock().unwrap().clone().expect("the client was paired");
+            assert!(notify.key.lock().unwrap().is_some(), "the client was paired");
+            let id = lock(&handle.shared).paired.iter().find(|p| p.key == me.public_b64()).unwrap().id.clone();
             handle.remove_assistant(&id).unwrap();
             // The board reaches a main that no longer counts the connection.
             go.send(()).unwrap();
@@ -2667,6 +2762,8 @@ mod tests {
     /// server, and `moved` rewrites the config `reconnect` reads.
     struct Mobile {
         config: Arc<Mutex<NetworkConfig>>,
+        /// Its key pair, for its client and, once promoted, its server.
+        identity: Arc<Keypair>,
         server: Mutex<Option<ServerHandle>>,
         counter: Arc<Counter>,
         /// Fails `promoted` as a taken port would.
@@ -2674,7 +2771,7 @@ mod tests {
     }
 
     impl client::ClientNotify for Mobile {
-        fn paired(&self, _: &str, _: &str) {}
+        fn paired(&self, _: &str) {}
         fn connected(&self, _: &str) {}
         fn disconnected(&self, _: &str) {}
         fn removed(&self) {}
@@ -2689,57 +2786,63 @@ mod tests {
             c.network = self.config.lock().unwrap().clone();
             crate::net::promote::as_main(&mut c, list);
             let view = Arc::new(Mutex::new(c.network.clone()));
-            let handle = start_with(self.counter.clone(), view, 0)?;
+            let handle = start_with(self.counter.clone(), view, 0, self.identity.clone())?;
             let _ = self.counter.server.set(handle.shared.clone());
             *self.config.lock().unwrap() = c.network;
             let port = handle.port();
             *self.server.lock().unwrap() = Some(handle);
             Ok(port)
         }
-        fn moved(&self, host: &str, port: u16) -> Result<(), String> {
+        fn moved(&self, host: &str, port: u16, key: &str) -> Result<(), String> {
             let mut c = self.config.lock().unwrap();
             c.main_host = host.into();
             c.main_port = port;
+            c.main_key = key.into();
             Ok(())
         }
     }
 
-    /// Pairs a `Mobile` with `handle` and runs its client until `stop`.
-    fn run_mobile(handle: &ServerHandle, port: u16, name: &str, port_taken: bool) -> (Arc<Mobile>, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
-        let (ws, id, token) = pair_client(handle, port, name);
+    /// Pairs a `Mobile` with `handle` and runs its client until `stop`;
+    /// returns it, its entry id, its stop flag and its thread.
+    fn run_mobile(handle: &ServerHandle, port: u16, name: &str, port_taken: bool) -> (Arc<Mobile>, String, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let (ws, id, key) = pair_client(handle, port, name);
         drop(ws);
         wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
-        let config = Arc::new(Mutex::new(NetworkConfig { name: name.into(), ..assistant_config(port, &id, &token) }));
-        let m = Arc::new(Mobile { config: config.clone(), server: Mutex::new(None), counter: Arc::new(Counter::default()), port_taken });
+        let config = Arc::new(Mutex::new(NetworkConfig { name: name.into(), ..assistant_config(port, handle) }));
+        let identity = Arc::new(key);
+        let m = Arc::new(Mobile { config: config.clone(), identity: identity.clone(), server: Mutex::new(None), counter: Arc::new(Counter::default()), port_taken });
         let stop = Arc::new(AtomicBool::new(false));
         let (n, s) = (m.clone(), stop.clone());
-        let t = std::thread::spawn(move || client::reconnect(&move || config.lock().unwrap().clone(), Arc::new(NoSessions), n, &s));
+        let t = std::thread::spawn(move || client::reconnect(&move || config.lock().unwrap().clone(), identity, Arc::new(NoSessions), n, &s));
         wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
-        (m, stop, t)
+        (m, id, stop, t)
     }
 
     #[test]
-    fn a_promoted_assistant_becomes_the_main_and_everyone_follows_it_with_their_old_tokens() {
+    fn a_promoted_assistant_becomes_the_main_and_everyone_follows_it_with_their_own_keys() {
         let (handle, port) = test_server();
-        let (g, g_stop, g_thread) = run_mobile(&handle, port, "laptop", false);
-        let (b, b_stop, b_thread) = run_mobile(&handle, port, "mini", false);
-        let g_id = g.config.lock().unwrap().assistant_id.clone();
+        let (g, g_id, g_stop, g_thread) = run_mobile(&handle, port, "laptop", false);
+        let (b, _, b_stop, b_thread) = run_mobile(&handle, port, "mini", false);
         let out = handle.promote(&g_id).unwrap();
         g_thread.join().unwrap();
         let new_main = g.server.lock().unwrap().clone().expect("the laptop runs a server");
         assert_eq!(out.port, new_main.port());
         assert_eq!(out.moved, ["mini"]);
-        // B reconnects to the laptop by itself, with the token it always had.
+        assert_eq!(out.main_key, crate::net::identity::encode_key(&new_main.public_key()), "the new main serves with the key it paired with");
+        // B reconnects to the laptop by itself, with the key it always had, pinning the laptop's.
         wait_until(|| new_main.status().assistants.iter().any(|a| a.name == "mini" && a.connected));
         assert_eq!(b.config.lock().unwrap().main_port, out.port);
-        // The old main joins as an assistant with the entry it made.
+        assert_eq!(b.config.lock().unwrap().main_key, out.main_key);
+        // The old main joins as an assistant with its own key.
         let mut old = crate::config::Config::default();
-        crate::net::promote::as_assistant_of(&mut old, &out.host, out.port, &out.me);
+        crate::net::promote::as_assistant_of(&mut old, &out.host, out.port, &out.main_key);
+        let old_key = handle.ctx.identity.clone();
+        let me = lock(&new_main.shared).paired.iter().find(|p| p.key == old_key.public_b64()).map(|p| p.id.clone()).expect("the old main's entry");
         handle.stop();
         let (m_stop, m_cfg) = (Arc::new(AtomicBool::new(false)), Arc::new(Mutex::new(old.network)));
         let s = m_stop.clone();
-        let m_thread = std::thread::spawn(move || client::reconnect(&move || m_cfg.lock().unwrap().clone(), Arc::new(NoSessions), Arc::new(Leader::default()), &s));
-        wait_until(|| new_main.status().assistants.iter().any(|a| a.id == out.me.id && a.connected));
+        let m_thread = std::thread::spawn(move || client::reconnect(&move || m_cfg.lock().unwrap().clone(), old_key, Arc::new(NoSessions), Arc::new(Leader::default()), &s));
+        wait_until(|| new_main.status().assistants.iter().any(|a| a.id == me && a.connected));
         assert!(g.counter.announced.lock().unwrap().is_empty(), "nothing on the first boards is announced");
         for s in [&b_stop, &m_stop, &g_stop] {
             s.store(true, Ordering::SeqCst);
@@ -2751,9 +2854,8 @@ mod tests {
     #[test]
     fn an_assistant_whose_port_is_taken_stays_an_assistant_and_nobody_moves() {
         let (handle, port) = test_server();
-        let (g, g_stop, g_thread) = run_mobile(&handle, port, "laptop", true);
-        let (_b, b_stop, b_thread) = run_mobile(&handle, port, "mini", false);
-        let g_id = g.config.lock().unwrap().assistant_id.clone();
+        let (g, g_id, g_stop, g_thread) = run_mobile(&handle, port, "laptop", true);
+        let (_b, _, b_stop, b_thread) = run_mobile(&handle, port, "mini", false);
         let err = handle.promote(&g_id).unwrap_err();
         assert!(err.starts_with("laptop could not become the main: Could not listen on port 4127"), "{err}");
         assert!(g.server.lock().unwrap().is_none());
@@ -2773,7 +2875,7 @@ mod tests {
     }
 
     impl client::ClientNotify for Mirrorer {
-        fn paired(&self, _: &str, _: &str) {}
+        fn paired(&self, _: &str) {}
         fn connected(&self, _: &str) {}
         fn disconnected(&self, _: &str) {}
         fn removed(&self) {}
@@ -2794,12 +2896,14 @@ mod tests {
     /// Pairs a mirroring client with `handle` and runs it until `stop`.
     fn run_mirrorer(handle: &ServerHandle, port: u16) -> (Arc<Mirrorer>, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
         let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
-        let (_, id, token) = client::pair_with(Arc::new(NoSessions), "127.0.0.1", port, "Pixel", &code, vec!["mirror".into()]).unwrap();
+        let me = Arc::new(Keypair::generate());
+        let (_, main_key) = client::pair_with(Arc::new(NoSessions), me.clone(), "127.0.0.1", port, "Pixel", &code, vec!["mirror".into()]).unwrap();
+        assert_eq!(main_key, crate::net::identity::encode_key(&handle.public_key()));
         let m = Arc::new(Mirrorer::default());
         let stop = Arc::new(AtomicBool::new(false));
-        let config = assistant_config(port, &id, &token);
+        let config = assistant_config(port, handle);
         let (n, s) = (m.clone(), stop.clone());
-        let t = std::thread::spawn(move || client::reconnect(&move || config.clone(), Arc::new(NoSessions), n, &s));
+        let t = std::thread::spawn(move || client::reconnect(&move || config.clone(), me, Arc::new(NoSessions), n, &s));
         wait_until(|| m.offers.lock().unwrap().as_slice() == [Some(true)]);
         (m, stop, t)
     }

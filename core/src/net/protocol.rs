@@ -1,21 +1,20 @@
-//! The wire protocol between a main Maya and its assistants: JSON text
-//! frames with a `type`, plus the pairing code and the HMAC handshake.
+//! The wire protocol between a main Maya and its assistants: JSON messages
+//! with a `type`, each sealed in a `secure::Channel`, plus the pairing code.
 
 use crate::launch::LaunchOptions;
 use crate::model::Card;
 use base64::Engine;
-use hmac::{Hmac, KeyInit, Mac};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::Sha256;
 use std::collections::HashMap;
 
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 pub const DEFAULT_PORT: u16 = 4127;
 pub const CODE_TTL_MS: u64 = 5 * 60_000;
 pub const LOCKOUT_MS: u64 = 5 * 60_000;
 pub const LOCKOUT_AFTER: u32 = 3;
+pub const PAIR_TRIES: u32 = 3;
 /// Larger frames are refused unparsed (a board with attachments stays well under).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// A Maya with this cap follows the main to a new host on `move`.
@@ -24,7 +23,6 @@ pub const CAP_FOLLOW: &str = "follow";
 pub const CAP_LEAD: &str = "lead";
 /// A Maya with this cap wants the main's board (`mirror`) and sends `request`s.
 pub const CAP_MIRROR: &str = "mirror";
-pub const UNSEALABLE: &str = "The handover could not be opened.";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -47,18 +45,10 @@ pub enum Up {
         name: String,
         hostname: String,
         platform: String,
-        #[serde(default)]
-        id: Option<String>,
         /// What this Maya can do (`CAP_FOLLOW`, `CAP_LEAD`); an older Maya sends none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         caps: Vec<String>,
     },
-    /// The code the user typed, and a nonce the main must answer in
-    /// `welcome` to prove it knows the code too.
-    Pair { code: String, #[serde(default)] nonce: String },
-    /// The answer to the main's challenge, and this assistant's own nonce
-    /// for the main to answer in `welcome`.
-    Auth { mac: String, nonce: String },
     Board {
         cards: Vec<Card>,
         dirs: Vec<String>,
@@ -85,19 +75,14 @@ fn known_agents<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<cra
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Down {
-    Challenge { nonce: String },
-    /// `mac` is `mac(token, nonce)` for the assistant's `auth` nonce: the
-    /// main's proof that it holds the token. Right after pairing it is
-    /// `mac(code, nonce)` for the `pair` nonce: proof it knows the code.
     /// `mirror` answers a Maya that asked with `CAP_MIRROR`: whether the main
-    /// will mirror to it. Absent for anyone else, and from an older main.
-    Welcome { name: String, #[serde(default)] mac: String, #[serde(default, skip_serializing_if = "Option::is_none")] mirror: Option<bool> },
-    Paired { id: String, token: String },
+    /// will mirror to it. Absent for anyone else.
+    Welcome { name: String, #[serde(default, skip_serializing_if = "Option::is_none")] mirror: Option<bool> },
     Bye { reason: String },
     Command { id: u64, #[serde(flatten)] kind: CommandKind },
-    /// The main is now at `host:port`: save it and reconnect there with the
-    /// same id and token. The main closes the connection after it.
-    Move { host: String, port: u16 },
+    /// The main is now at `host:port` with the public key `key`: pin it and
+    /// reconnect there. The main closes the connection after it.
+    Move { host: String, port: u16, key: String },
     /// The main's board for a mirroring Maya; `allowed: false` (and nothing
     /// else) once the main's switch for it is off.
     Mirror { allowed: bool, #[serde(default)] cards: Vec<Card>, #[serde(default)] machines: Vec<crate::net::routing::MachineInfo> },
@@ -131,8 +116,8 @@ pub enum CommandKind {
     Resume { dir: String, session: String, #[serde(default)] agent: crate::model::Harness },
     ListResumable { dir: String, #[serde(default)] agent: crate::model::Harness },
     History { session: String },
-    /// Become the main with the paired list sealed under this assistant's token (`seal`).
-    Promote { sealed: String },
+    /// Become the main with this paired list (public keys only).
+    Promote { list: Vec<crate::config::PairedAssistant> },
 }
 
 pub fn encode<T: Serialize>(m: &T) -> String {
@@ -160,103 +145,32 @@ pub(crate) fn random(n: usize) -> Vec<u8> {
     b
 }
 
-pub fn new_token() -> String {
-    base64::engine::general_purpose::STANDARD.encode(random(32))
-}
-
-pub fn new_nonce() -> String {
-    base64::engine::general_purpose::STANDARD.encode(random(16))
-}
-
 pub fn new_id() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random(12))
 }
 
-/// Hex HMAC-SHA256 of `nonce` under `token`.
-pub fn mac(token: &str, nonce: &str) -> String {
-    let mut m = Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("hmac accepts any key length");
-    m.update(nonce.as_bytes());
-    m.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Constant-time check of a MAC the other side sent.
-pub fn mac_matches(token: &str, nonce: &str, given: &str) -> bool {
-    let Ok(given) = (0..given.len()).step_by(2).map(|i| u8::from_str_radix(given.get(i..i + 2).unwrap_or("zz"), 16)).collect::<Result<Vec<u8>, _>>() else {
-        return false;
-    };
-    let mut m = Hmac::<Sha256>::new_from_slice(token.as_bytes()).expect("hmac accepts any key length");
-    m.update(nonce.as_bytes());
-    m.verify_slice(&given).is_ok()
-}
-
-/// HKDF-SHA256 (RFC 5869) of the token with an empty salt and the info
-/// `maya promote v1`: the key only this token's holders can derive.
-fn promote_key(token: &str) -> [u8; 32] {
-    let mut extract = Hmac::<Sha256>::new_from_slice(&[0u8; 32]).expect("hmac accepts any key length");
-    extract.update(token.as_bytes());
-    let prk = extract.finalize().into_bytes();
-    let mut expand = Hmac::<Sha256>::new_from_slice(&prk).expect("hmac accepts any key length");
-    expand.update(b"maya promote v1");
-    expand.update(&[1u8]);
-    let okm = expand.finalize().into_bytes();
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&okm[..32]);
-    key
-}
-
-/// Seals `plaintext` for whoever holds `token`: base64 of a random 12-byte
-/// nonce followed by the ChaCha20-Poly1305 ciphertext.
-pub fn seal(token: &str, plaintext: &[u8]) -> String {
-    use chacha20poly1305::aead::{Aead, KeyInit};
-    let cipher = chacha20poly1305::ChaCha20Poly1305::new_from_slice(&promote_key(token)).expect("a 32-byte key");
-    let nonce: [u8; 12] = random(12).try_into().unwrap();
-    let mut out = nonce.to_vec();
-    out.extend(cipher.encrypt(&nonce.into(), plaintext).expect("encrypting in memory does not fail"));
-    base64::engine::general_purpose::STANDARD.encode(out)
-}
-
-/// Opens a `seal`; any other token, or any changed byte, is `UNSEALABLE`.
-pub fn open(token: &str, sealed: &str) -> Result<Vec<u8>, String> {
-    use chacha20poly1305::aead::{Aead, KeyInit};
-    let bytes = base64::engine::general_purpose::STANDARD.decode(sealed.trim()).map_err(|_| UNSEALABLE.to_string())?;
-    if bytes.len() < 12 {
-        return Err(UNSEALABLE.into());
-    }
-    let (nonce, body) = bytes.split_at(12);
-    let nonce: [u8; 12] = nonce.try_into().unwrap();
-    let cipher = chacha20poly1305::ChaCha20Poly1305::new_from_slice(&promote_key(token)).expect("a 32-byte key");
-    cipher.decrypt(&nonce.into(), body).map_err(|_| UNSEALABLE.to_string())
-}
-
-/// Nonces the main has issued; each answers once. The real replay guard is
-/// that every challenge carries a fresh random nonce; this log is belt and
-/// braces against a nonce ever being accepted twice.
-#[derive(Default)]
-pub struct NonceLog {
-    used: HashMap<String, u64>,
-}
-
-impl NonceLog {
-    pub fn first_use(&mut self, nonce: &str, now_ms: u64) -> bool {
-        self.used.retain(|_, t| now_ms.saturating_sub(*t) < 10 * 60_000);
-        self.used.insert(nonce.to_string(), now_ms).is_none()
-    }
-}
-
-/// The six-digit code shown on the main while pairing is open.
+/// The six-digit code shown on the main while pairing is open; it allows
+/// `PAIR_TRIES` pairings that start, from any address.
 pub struct PairingWindow {
     pub code: String,
     pub expires_at_ms: u64,
+    pub tries_left: u32,
 }
 
 impl PairingWindow {
     pub fn new(now_ms: u64) -> PairingWindow {
         let n = u32::from_le_bytes(random(4).try_into().unwrap()) % 1_000_000;
-        PairingWindow { code: format!("{n:06}"), expires_at_ms: now_ms + CODE_TTL_MS }
+        PairingWindow { code: format!("{n:06}"), expires_at_ms: now_ms + CODE_TTL_MS, tries_left: PAIR_TRIES }
     }
 
-    pub fn accepts(&self, code: &str, now_ms: u64) -> bool {
-        now_ms <= self.expires_at_ms && code.trim() == self.code
+    /// Takes one try for a pairing that is starting; false once the code
+    /// expired or its tries are gone.
+    pub fn take_try(&mut self, now_ms: u64) -> bool {
+        if now_ms > self.expires_at_ms || self.tries_left == 0 {
+            return false;
+        }
+        self.tries_left -= 1;
+        true
     }
 }
 
@@ -297,10 +211,10 @@ mod tests {
         let mirror = Down::Mirror { allowed: true, cards: vec![], machines: vec![MachineInfo { name: "desk".into(), hostname: "desk".into(), platform: "macos".into(), connected: true }] };
         assert_eq!(decode_down(&encode(&mirror)).unwrap(), mirror);
         assert_eq!(decode_down(r#"{"type":"mirror","allowed":false}"#).unwrap(), Down::Mirror { allowed: false, cards: vec![], machines: vec![] });
-        let offered = Down::Welcome { name: "desk".into(), mac: "cd".into(), mirror: Some(true) };
+        let offered = Down::Welcome { name: "desk".into(), mirror: Some(true) };
         assert_eq!(decode_down(&encode(&offered)).unwrap(), offered);
-        assert!(!encode(&Down::Welcome { name: "desk".into(), mac: "cd".into(), mirror: None }).contains("mirror"), "no offer, no field");
-        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk","mac":"cd"}"#).unwrap(), Down::Welcome { name: "desk".into(), mac: "cd".into(), mirror: None });
+        assert!(!encode(&Down::Welcome { name: "desk".into(), mirror: None }).contains("mirror"), "no offer, no field");
+        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk"}"#).unwrap(), Down::Welcome { name: "desk".into(), mirror: None });
     }
 
     #[test]
@@ -313,7 +227,7 @@ mod tests {
 
     #[test]
     fn messages_round_trip_with_a_type_tag() {
-        let up = Up::Hello { protocol: PROTOCOL, app: "0.1.0".into(), name: "laptop".into(), hostname: "tiagos-mbp".into(), platform: "macos".into(), id: None, caps: vec![] };
+        let up = Up::Hello { protocol: PROTOCOL, app: "0.1.0".into(), name: "laptop".into(), hostname: "tiagos-mbp".into(), platform: "macos".into(), caps: vec![] };
         let s = encode(&up);
         assert!(s.contains("\"type\":\"hello\""), "{s}");
         assert_eq!(decode_up(&s).unwrap(), up);
@@ -327,20 +241,8 @@ mod tests {
         let s = encode(&slash);
         assert!(s.contains("\"kind\":\"slash\"") && s.contains("\"text\":\"/review\""), "{s}");
         assert_eq!(decode_down(&s).unwrap(), slash);
-        // The handshake is mutual: `auth` carries the assistant's nonce and `welcome` the main's proof.
-        let auth = Up::Auth { mac: "ab".into(), nonce: "n1".into() };
-        let s = encode(&auth);
-        assert!(s.contains("\"type\":\"auth\"") && s.contains("\"nonce\":\"n1\""), "{s}");
-        assert_eq!(decode_up(&s).unwrap(), auth);
-        let welcome = Down::Welcome { name: "desk".into(), mac: "cd".into(), mirror: None };
+        let welcome = Down::Welcome { name: "desk".into(), mirror: None };
         assert_eq!(decode_down(&encode(&welcome)).unwrap(), welcome);
-        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk"}"#).unwrap(), Down::Welcome { name: "desk".into(), mac: String::new(), mirror: None }, "a welcome without a proof still decodes; the assistant refuses it");
-        // Pairing is mutual too: `pair` carries a nonce the main answers in `welcome`.
-        let pair = Up::Pair { code: "123456".into(), nonce: "n2".into() };
-        let s = encode(&pair);
-        assert!(s.contains("\"type\":\"pair\"") && s.contains("\"code\":\"123456\"") && s.contains("\"nonce\":\"n2\""), "{s}");
-        assert_eq!(decode_up(&s).unwrap(), pair);
-        assert!(decode_up(r#"{"type":"auth","mac":"ab"}"#).is_err(), "an auth without the assistant's nonce is refused");
     }
 
     #[test]
@@ -384,28 +286,17 @@ mod tests {
     }
 
     #[test]
-    fn pairing_codes_are_six_digits_and_expire() {
-        let w = PairingWindow::new(1_000);
+    fn pairing_codes_are_six_digits_with_three_tries_until_they_expire() {
+        let mut w = PairingWindow::new(1_000);
         assert_eq!(w.code.len(), 6);
         assert!(w.code.chars().all(|c| c.is_ascii_digit()));
-        assert!(w.accepts(&w.code, 1_000 + CODE_TTL_MS));
-        assert!(!w.accepts(&w.code, 1_000 + CODE_TTL_MS + 1));
-        assert!(!w.accepts("000000", 1_000) || w.code == "000000");
-        assert!(w.accepts(&format!(" {} ", w.code), 2_000), "whitespace is ignored");
-    }
-
-    #[test]
-    fn mac_rejects_wrong_token_and_reused_nonce() {
-        let token = new_token();
-        let nonce = new_nonce();
-        let good = mac(&token, &nonce);
-        assert!(mac_matches(&token, &nonce, &good));
-        assert!(!mac_matches(&new_token(), &nonce, &good));
-        assert!(!mac_matches(&token, &new_nonce(), &good));
-        assert!(!mac_matches(&token, &nonce, ""));
-        let mut seen = NonceLog::default();
-        assert!(seen.first_use(&nonce, 1_000));
-        assert!(!seen.first_use(&nonce, 2_000), "a nonce answers once");
+        assert!(w.take_try(1_000 + CODE_TTL_MS));
+        assert!(w.take_try(2_000));
+        assert!(w.take_try(2_000));
+        assert!(!w.take_try(2_000), "three tries, then none");
+        let mut late = PairingWindow::new(1_000);
+        assert!(!late.take_try(1_000 + CODE_TTL_MS + 1), "expired");
+        assert_eq!(late.tries_left, PAIR_TRIES, "an expired code takes no try");
     }
 
     #[test]
@@ -424,48 +315,26 @@ mod tests {
     }
 
     #[test]
-    fn tokens_and_nonces_are_random_and_long_enough() {
-        assert_ne!(new_token(), new_token());
-        assert!(base64::engine::general_purpose::STANDARD.decode(new_token()).unwrap().len() == 32);
-        assert!(base64::engine::general_purpose::STANDARD.decode(new_nonce()).unwrap().len() == 16);
-    }
-
-    #[test]
     fn a_hello_without_caps_has_none_and_caps_round_trip() {
-        let old = r#"{"type":"hello","protocol":1,"app":"0.15.0","name":"n","hostname":"h","platform":"macos"}"#;
+        let old = r#"{"type":"hello","protocol":2,"app":"0.15.0","name":"n","hostname":"h","platform":"macos"}"#;
         let Up::Hello { caps, .. } = decode_up(old).unwrap() else { panic!() };
         assert!(caps.is_empty());
-        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), id: None, caps: vec![CAP_FOLLOW.into(), CAP_LEAD.into()] };
+        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![CAP_FOLLOW.into(), CAP_LEAD.into()] };
         let s = encode(&hello);
         assert!(s.contains(r#""caps":["follow","lead"]"#), "{s}");
         assert_eq!(decode_up(&s).unwrap(), hello);
     }
 
     #[test]
-    fn move_and_promote_encode_and_decode() {
-        let mv = Down::Move { host: "192.168.55.70".into(), port: 4127 };
+    fn move_carries_the_new_main_s_key_and_promote_carries_the_list() {
+        let mv = Down::Move { host: "192.168.55.70".into(), port: 4127, key: "a2V5".into() };
         let s = encode(&mv);
-        assert!(s.contains(r#""type":"move""#) && s.contains(r#""host":"192.168.55.70""#) && s.contains(r#""port":4127"#), "{s}");
+        assert!(s.contains(r#""type":"move""#) && s.contains(r#""key":"a2V5""#), "{s}");
         assert_eq!(decode_down(&s).unwrap(), mv);
-        let p = Down::Command { id: 3, kind: CommandKind::Promote { sealed: "abc".into() } };
+        let entry = crate::config::PairedAssistant { id: "a1".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), key: "a2V5".into(), address: String::new(), last_seen: None, mirror: false };
+        let p = Down::Command { id: 3, kind: CommandKind::Promote { list: vec![entry] } };
         let s = encode(&p);
-        assert!(s.contains(r#""kind":"promote""#) && s.contains(r#""sealed":"abc""#), "{s}");
+        assert!(s.contains(r#""kind":"promote""#) && s.contains(r#""key":"a2V5""#) && !s.contains("token"), "{s}");
         assert_eq!(decode_down(&s).unwrap(), p);
-    }
-
-    #[test]
-    fn a_seal_opens_only_with_its_token_and_unchanged() {
-        let token = new_token();
-        let sealed = seal(&token, b"{\"assistants\":[]}");
-        assert_eq!(open(&token, &sealed).unwrap(), b"{\"assistants\":[]}");
-        assert_eq!(open(&new_token(), &sealed).unwrap_err(), UNSEALABLE);
-        let mut bytes = base64::engine::general_purpose::STANDARD.decode(&sealed).unwrap();
-        let last = bytes.len() - 1;
-        bytes[last] ^= 1;
-        let tampered = base64::engine::general_purpose::STANDARD.encode(bytes);
-        assert_eq!(open(&token, &tampered).unwrap_err(), UNSEALABLE);
-        assert_eq!(open(&token, "not base64!").unwrap_err(), UNSEALABLE);
-        assert_eq!(open(&token, "AAAA").unwrap_err(), UNSEALABLE, "shorter than a nonce");
-        assert_ne!(seal(&token, b"x"), seal(&token, b"x"), "each seal has a fresh nonce");
     }
 }

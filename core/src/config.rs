@@ -11,7 +11,7 @@ pub enum NetworkRole {
     Assistant,
 }
 
-/// An assistant the main has paired with; the token is what it must prove it holds.
+/// A Maya the main has paired with; `key` is who it is.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PairedAssistant {
@@ -19,9 +19,11 @@ pub struct PairedAssistant {
     pub name: String,
     pub hostname: String,
     pub platform: String,
-    pub token: String,
-    /// The peer's IP address as the main saw it at pairing or at its last
-    /// authentication; what tells two machines apart (names are labels).
+    /// Its public key (base64), pinned at pairing; empty for a protocol 1
+    /// entry, which `drop_insecure_pairings` removes.
+    #[serde(default)]
+    pub key: String,
+    /// The peer's IP address as the main last saw it; shown, not trusted.
     #[serde(default)]
     pub address: String,
     /// When it last connected or disconnected (epoch millis), so a main
@@ -44,12 +46,25 @@ pub struct NetworkConfig {
     pub main_port: u16,
     /// The assistant's display name; blank means the hostname.
     pub name: String,
-    /// Minted by the main at pairing.
-    pub assistant_id: String,
-    /// The assistant's token, from pairing.
-    pub token: String,
+    /// The main's public key (base64), pinned at pairing; empty until then.
+    pub main_key: String,
+    /// Protocol 1 pairings were dropped on update: Settings says to pair again.
+    pub pair_again: bool,
     /// The main's paired assistants.
     pub assistants: Vec<PairedAssistant>,
+}
+
+impl NetworkConfig {
+    /// Protocol 1 pairings (tokens, no keys) cannot connect any more: they
+    /// go, and Settings tells the user to pair again.
+    pub fn drop_insecure_pairings(&mut self) {
+        let before = self.assistants.len();
+        self.assistants.retain(|a| !a.key.is_empty());
+        let stale_link = self.role == NetworkRole::Assistant && self.main_key.is_empty() && !self.main_host.trim().is_empty();
+        if self.assistants.len() != before || stale_link {
+            self.pair_again = true;
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -225,6 +240,7 @@ impl Config {
                 self.agent_model = m;
             }
         }
+        self.network.drop_insecure_pairings();
         self
     }
 
@@ -284,7 +300,7 @@ impl Config {
     }
 }
 
-/// Writes the config readable by its owner only: it holds the network token.
+/// Writes the config readable by its owner only.
 pub fn save(path: &Path, config: &Config) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -521,8 +537,8 @@ mod tests {
         let mut c = Config::default();
         c.network.role = NetworkRole::Assistant;
         c.network.main_host = "10.0.0.2".into();
-        c.network.token = "abc".into();
-        c.network.assistants.push(PairedAssistant { id: "x".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "192.168.55.70".into(), last_seen: Some(1_700_000_000_000), mirror: false });
+        c.network.main_key = "abc".into();
+        c.network.assistants.push(PairedAssistant { id: "x".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "192.168.55.70".into(), last_seen: Some(1_700_000_000_000), mirror: false });
         let text = serde_json::to_string(&c).unwrap();
         assert!(text.contains("\"role\":\"assistant\"") && text.contains("\"mainHost\":\"10.0.0.2\"") && text.contains("\"assistants\":[{"), "{text}");
         assert!(text.contains("\"address\":\"192.168.55.70\"") && text.contains("\"lastSeen\":1700000000000"), "{text}");
@@ -534,6 +550,18 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "network": {"assistants": [{"id": "x", "name": "laptop", "hostname": "h", "platform": "macos", "token": "t"}]}}"#).unwrap();
         assert_eq!(c.network.assistants[0].address, "");
         assert_eq!(c.network.assistants[0].last_seen, None);
+    }
+
+    #[test]
+    fn protocol_1_pairings_are_dropped_and_the_user_told_to_pair_again() {
+        let old = r#"{"completedTimeoutMinutes":5,"network":{"role":"main","assistants":[{"id":"x","name":"laptop","hostname":"h","platform":"macos","token":"t"},{"id":"y","name":"mini","hostname":"h","platform":"macos","key":"a2V5"}]}}"#;
+        let c = serde_json::from_str::<Config>(old).unwrap().migrate();
+        assert_eq!(c.network.assistants.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["y"]);
+        assert!(c.network.pair_again);
+        let old_link = r#"{"completedTimeoutMinutes":5,"network":{"role":"assistant","mainHost":"desk.local","assistantId":"a","token":"t"}}"#;
+        assert!(serde_json::from_str::<Config>(old_link).unwrap().migrate().network.pair_again);
+        let fresh = Config::default().migrate();
+        assert!(!fresh.network.pair_again, "nothing was paired, nothing to say");
     }
 
     #[test]
