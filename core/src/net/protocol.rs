@@ -154,7 +154,7 @@ pub fn decode_down(s: &str) -> Result<Down, String> {
     decode(s)
 }
 
-fn random(n: usize) -> Vec<u8> {
+pub(crate) fn random(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
     rand::rng().fill_bytes(&mut b);
     b
