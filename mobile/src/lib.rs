@@ -1,7 +1,7 @@
-//! Maya for Android: a main Maya with no sessions of its own. The server,
-//! pairing, merging and routing are `maya_core`'s; this crate is the Tauri
-//! commands the page calls, each routed to an assistant, and the Android
-//! glue: the foreground service and the notifications.
+//! Maya for Android: a main Maya with no sessions of its own, or a phone
+//! that joins a main and mirrors its board. The server, pairing, merging
+//! and routing are `maya_core`'s; this crate is the Tauri commands the page
+//! calls, and the Android glue: the foreground service and the notifications.
 
 pub mod alerts;
 pub mod android;
@@ -85,6 +85,7 @@ pub fn run() {
             commands::resume_session,
             commands::start_session,
             commands::network_status,
+            commands::network_pair,
             commands::network_pairing_code,
             commands::network_remove_assistant,
             commands::network_promote,

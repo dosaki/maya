@@ -6,7 +6,8 @@ use maya_core::model::{AwaitKind, Awaiting, Card, Harness, State};
 use maya_core::net::client::{pair_with, reconnect, run_once, ClientNotify, Executor, RequestLane};
 use maya_core::net::protocol::{CommandKind, Request};
 use maya_core::net::routing::MachineInfo;
-use maya_core::net::NetworkStatus;
+use maya_core::net::server::{start_with, ServerHandle};
+use maya_core::net::{MirrorAccess, NetworkStatus};
 use maya_mobile_lib::alerts::{Alerts, Post};
 use maya_mobile_lib::hub::{Hub, Settings, Sink};
 use serde_json::Value;
@@ -262,7 +263,7 @@ fn a_refresh_with_no_new_frame_drops_an_expired_assistant_and_clears_its_notific
     hub.stop_server();
 }
 
-fn new_hub(port: u16) -> (Arc<Hub>, Arc<Page>, tempfile::TempDir) {
+fn new_hub_recording(port: u16) -> (Arc<Hub>, Arc<Page>, Arc<Recording>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let maya_dir = dir.path().join("maya");
     let mut config = Config::default();
@@ -271,7 +272,13 @@ fn new_hub(port: u16) -> (Arc<Hub>, Arc<Page>, tempfile::TempDir) {
     config.network.role = NetworkRole::Main;
     let settings = Settings { path: maya_dir.join("config.json"), config };
     let page = Arc::new(Page::default());
-    let hub = Hub::new(maya_dir, settings, Arc::new(Recording::default()), page.clone());
+    let alerts = Arc::new(Recording::default());
+    let hub = Hub::new(maya_dir, settings, alerts.clone(), page.clone());
+    (hub, page, alerts, dir)
+}
+
+fn new_hub(port: u16) -> (Arc<Hub>, Arc<Page>, tempfile::TempDir) {
+    let (hub, page, _, dir) = new_hub_recording(port);
     (hub, page, dir)
 }
 
@@ -335,6 +342,7 @@ fn the_phone_hands_the_main_role_over_listens_and_is_made_the_main_again() {
     laptop.join().unwrap();
     let new_main = lead.server.lock().unwrap().clone().unwrap();
     wait_until("the phone listens to the laptop", || hub.status().assistant.connected);
+    wait_until("the laptop offers its board", || hub.status().assistant.mirror == Some(MirrorAccess::Allowed));
     let phone = new_main.status().assistants.into_iter().find(|a| a.connected).unwrap();
     assert!(phone.can_lead, "the phone can be made the main again");
     assert!(hub.cards().is_empty());
@@ -460,4 +468,91 @@ fn a_phone_main_mirrors_its_board_and_forwards_a_mirroring_maya_s_reply() {
     stop.store(true, Ordering::SeqCst);
     let _ = (laptop_thread.join(), pthread.join());
     hub.stop_server();
+}
+
+/// A core main that records the requests it is asked.
+#[derive(Default)]
+struct MainNotify {
+    requests: Mutex<Vec<(Option<String>, Request)>>,
+}
+
+impl maya_core::net::server::Notify for MainNotify {
+    fn board_changed(&self) {}
+    fn board_seeded(&self, _: &[Card]) {}
+    fn status_changed(&self, _: NetworkStatus) {}
+    fn paired(&self, _: &maya_core::config::PairedAssistant) -> Result<(), String> {
+        Ok(())
+    }
+    fn paired_list_changed(&self, _: &[maya_core::config::PairedAssistant]) -> Result<(), String> {
+        Ok(())
+    }
+    fn request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
+        self.requests.lock().unwrap().push((machine.map(str::to_string), request));
+        Ok(None)
+    }
+}
+
+fn desk() -> (ServerHandle, u16, Arc<MainNotify>) {
+    let notify = Arc::new(MainNotify::default());
+    let config = NetworkConfig { name: "desk".into(), ..Default::default() };
+    let handle = start_with(notify.clone(), Arc::new(Mutex::new(config)), 0).unwrap();
+    let port = handle.port();
+    (handle, port, notify)
+}
+
+#[test]
+fn the_phone_joins_a_main_mirrors_it_quietly_acts_through_it_and_leaves() {
+    let (main, port, notify) = desk();
+    let (hub, _page, alerts, _dir) = new_hub_recording(free_port());
+    let code = main.open_pairing(maya_core::store::now_ms()).unwrap().0;
+    let status = hub.join("127.0.0.1", port, "Pixel", &code).unwrap();
+    assert_eq!(status.role, NetworkRole::Assistant);
+    wait_until("the offer", || hub.status().assistant.mirror == Some(MirrorAccess::Allowed));
+    let phone_id = main.status().assistants[0].id.clone();
+    assert!(main.status().assistants[0].mirror);
+
+    // What already waits is on the board but not announced.
+    main.mirror(vec![card("s1", State::Awaiting, 1_000)]);
+    wait_until("the mirrored card", || hub.cards().iter().any(|c| c.session_id == "s1" && c.machine.as_deref() == Some("desk")));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(alerts.posts.lock().unwrap().is_empty(), "the first mirror after a connect is seeded, not announced");
+    // A new ask is.
+    main.mirror(vec![card("s1", State::Awaiting, 1_000), card("s2", State::Awaiting, 2_000)]);
+    wait_until("one notification", || alerts.posts.lock().unwrap().len() == 1);
+    assert_eq!(alerts.posts.lock().unwrap()[0].title, "s2 on desk needs a decision");
+    assert_eq!(hub.mirror.lock().unwrap().machines[0].name, "desk");
+
+    // A command goes to the main.
+    hub.send("s1", |session| CommandKind::Compact { session }).unwrap();
+    assert!(matches!(&notify.requests.lock().unwrap()[0], (None, Request::Command(CommandKind::Compact { session })) if session == "s1"));
+
+    // The switch off empties the board; on brings it back.
+    main.set_mirror(&phone_id, false).unwrap();
+    wait_until("the refusal", || hub.cards().is_empty() && hub.status().assistant.mirror == Some(MirrorAccess::Refused));
+    main.set_mirror(&phone_id, true).unwrap();
+    main.mirror(vec![card("s1", State::Idle, 3_000)]);
+    wait_until("the board again", || hub.cards().iter().any(|c| c.session_id == "s1"));
+
+    // The main goes away: the cards stay, greyed.
+    main.stop();
+    wait_until("stale cards", || !hub.cards().is_empty() && hub.cards().iter().all(|c| c.stale));
+
+    let status = hub.stop_listening().unwrap();
+    assert_eq!(status.role, NetworkRole::Off);
+    assert!(hub.cards().is_empty());
+}
+
+#[test]
+fn a_join_with_a_wrong_code_puts_a_main_phone_s_server_back() {
+    let (main, port, _) = desk();
+    let (hub, _page, _dir) = new_hub(free_port());
+    hub.start_server().unwrap();
+    // No pairing window is open on the main: any code is wrong.
+    let err = hub.join("127.0.0.1", port, "Pixel", "123456").unwrap_err();
+    assert_eq!(err, "Wrong or expired pairing code.");
+    assert_eq!(hub.status().role, NetworkRole::Main);
+    assert!(hub.client.lock().unwrap().is_none());
+    assert_eq!(hub.join("", port, "Pixel", "123456").unwrap_err(), "Type the main Maya's host name or address.");
+    hub.stop_server();
+    main.stop();
 }

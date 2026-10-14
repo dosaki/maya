@@ -7,7 +7,7 @@ use super::NetworkStatus;
 use crate::agents::{self, AgentInfo};
 use crate::model::Harness;
 use base64::Engine;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// How long a main waits for a command's result from an assistant.
@@ -29,7 +29,7 @@ pub struct MachineInfo {
 
 /// The agents a machine can start, and whether its Maya takes a session
 /// name (an older one ignores names).
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentsReply {
     pub agents: Vec<AgentInfo>,

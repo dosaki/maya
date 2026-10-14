@@ -8,15 +8,17 @@ use maya_core::config::{self, Config, NetworkRole, PairedAssistant};
 use maya_core::log;
 use maya_core::model::Card;
 use maya_core::net::merge::{self, RemoteBoard};
-use maya_core::net::client::{reconnect, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
-use maya_core::net::protocol::{CommandKind, Request, CAP_FOLLOW, CAP_LEAD};
+use maya_core::net::client::{check_pair_args, pair_with, reconnect, ClientHandle, ClientNotify, Executor, RequestLane, NOT_PAIRED, REMOVED, REQUEST_TIMEOUT};
+use maya_core::net::protocol::{CommandKind, Request, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, DEFAULT_PORT};
+use maya_core::net::routing::MachineInfo;
 use maya_core::net::routing::{agents_reply, target_of, Target, ROUTE_TIMEOUT};
 use maya_core::net::server::{send_command_with, start_with, Notify, ServerHandle};
-use maya_core::net::{self, promote, AssistantLink, NetworkStatus};
+use maya_core::net::{self, promote, AssistantLink, MirrorAccess, NetworkStatus};
 use maya_core::notify::Notifier;
 use maya_core::store::now_ms;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -50,14 +52,29 @@ pub fn load_settings(maya_dir: &Path, model: &str) -> Settings {
     Settings { path, config }
 }
 
+/// The main's board while this phone has joined it.
+#[derive(Default, Clone)]
+pub struct MirrorView {
+    pub cards: Vec<Card>,
+    pub machines: Vec<MachineInfo>,
+}
+
+/// What this phone says it can do: follow a moved main, become the main,
+/// and mirror the main's board.
+fn phone_caps() -> Vec<String> {
+    vec![CAP_FOLLOW.into(), CAP_LEAD.into(), CAP_MIRROR.into()]
+}
+
 pub struct Hub {
     /// `<app data dir>/maya`: the config, the log and saved attachments.
     pub maya_dir: PathBuf,
     /// Serializes `refresh`, so a stale snapshot never overtakes a newer one.
     /// Lock order: `refresh` first, alone (its callers hold no other lock);
     /// then `server`, then the server's own mutex, then `settings`;
-    /// `notifier`, `posted`, `client` and `link` are taken alone, never
-    /// while holding another hub lock.
+    /// `notifier`, `posted`, `client`, `link` and `mirror` are taken alone,
+    /// never while holding another hub lock. `stop_client` joins the client
+    /// thread, which may be in a callback that calls `refresh`, so it holds
+    /// no hub lock while it joins. `lane` has its own lock, never held here.
     refresh: Mutex<()>,
     pub settings: Mutex<Settings>,
     pub server: Mutex<Option<ServerHandle>>,
@@ -67,6 +84,12 @@ pub struct Hub {
     pub client: Mutex<Option<ClientHandle>>,
     /// How that client stands with the main.
     pub link: Mutex<AssistantLink>,
+    /// The joined main's last board; empty otherwise.
+    pub mirror: Mutex<MirrorView>,
+    /// Where the page's commands go while joined.
+    pub lane: Arc<RequestLane>,
+    /// The first mirror since the last connect was seeded into the notifier.
+    mirror_seeded: AtomicBool,
     pub notifier: Mutex<Notifier>,
     pub posted: Mutex<Posted>,
     pub alerts: Arc<dyn Alerts>,
@@ -83,7 +106,7 @@ impl Hub {
 
     /// `new` with the clock boards are merged at.
     pub fn with_clock(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>, now: impl Fn() -> u64 + Send + Sync + 'static) -> Arc<Hub> {
-        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), client: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now) })
+        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), client: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), lane: Arc::new(RequestLane::default()), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now) })
     }
 
     fn handle(&self) -> Option<ServerHandle> {
@@ -95,9 +118,28 @@ impl Hub {
         self.handle().map(|s| s.boards()).unwrap_or_default()
     }
 
-    /// The board: every connected assistant's cards, no local ones.
+    /// The board: the joined main's mirror (greyed while the link is down),
+    /// or every connected assistant's cards; never local ones.
     pub fn cards(&self) -> Vec<Card> {
+        if self.joined() {
+            let connected = self.link.lock().unwrap().connected;
+            let mut cards = self.mirror.lock().unwrap().cards.clone();
+            for c in &mut cards {
+                c.stale |= !connected;
+            }
+            return cards;
+        }
         merge::merged(vec![], &self.boards(), (self.now)())
+    }
+
+    /// This phone listens to a main (joined, or after handing its role away).
+    pub fn joined(&self) -> bool {
+        self.client.lock().unwrap().is_some()
+    }
+
+    /// Sends a request to the joined main and waits for its answer.
+    pub fn request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
+        self.lane.request(machine.map(str::to_string), request, REQUEST_TIMEOUT)
     }
 
     /// The session whose notification has this id, if its card is on the board.
@@ -235,8 +277,8 @@ impl Hub {
         self.sink.network(&self.status());
     }
 
-    /// Listens to the main in the config: an assistant with no sessions, so
-    /// that main can make this phone the main again. The keep-awake service runs meanwhile.
+    /// Listens to the main in the config and mirrors its board; the keep-awake
+    /// service runs meanwhile. That main can make this phone the main.
     pub fn start_client(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         let handle = ClientHandle::spawn(move |stop| {
@@ -262,15 +304,62 @@ impl Hub {
             c.network.assistant_id.clear();
             c.network.token.clear();
         })?;
-        let client = self.client.lock().unwrap().take();
-        if let Some(c) = client {
-            c.stop();
-            self.sink.service_stop();
-        }
-        *self.link.lock().unwrap() = AssistantLink::default();
+        self.stop_client();
         let status = self.status();
         self.sink.network(&status);
         Ok(status)
+    }
+
+    /// Pairs with a running main and listens to it. A phone that was the
+    /// main stops its server first and gets it back if the pairing fails.
+    pub fn join(self: &Arc<Self>, host: &str, port: u16, name: &str, code: &str) -> Result<NetworkStatus, String> {
+        let (host, code) = check_pair_args(host, code)?;
+        let port = if port == 0 { DEFAULT_PORT } else { port };
+        let name = match name.trim() {
+            "" => self.settings.lock().unwrap().config.network.name.clone(),
+            n => n.to_string(),
+        };
+        let was_main = self.handle().is_some();
+        self.stop_server();
+        self.stop_client();
+        let paired = pair_with(Arc::new(NoSessions), &host, port, &name, &code, phone_caps()).and_then(|(main, id, token)| {
+            self.update_config(|c| {
+                c.network.role = NetworkRole::Assistant;
+                c.network.main_host = host.clone();
+                c.network.main_port = port;
+                c.network.name = name.clone();
+                c.network.assistant_id = id;
+                c.network.token = token;
+            })
+            .map(|_| main)
+        });
+        match paired {
+            Ok(main) => {
+                log::line("network", format!("joined {main}"));
+                self.start_client();
+                Ok(self.status())
+            }
+            Err(e) => {
+                if was_main {
+                    let _ = self.start_server();
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Stops listening to the main without changing the config; the board
+    /// and the link are forgotten. Holds no hub lock while it joins the
+    /// client thread, which may be inside a callback that refreshes.
+    pub fn stop_client(&self) {
+        let client = self.client.lock().unwrap().take();
+        if let Some(c) = client {
+            c.stop_and_join();
+            self.sink.service_stop();
+        }
+        *self.link.lock().unwrap() = AssistantLink::default();
+        *self.mirror.lock().unwrap() = MirrorView::default();
+        self.refresh();
     }
 
     /// Makes a connected assistant the main, then listens to it.
@@ -334,12 +423,18 @@ impl Hub {
     /// Sends a session command to the machine that lists the session. There
     /// are no local sessions: a session nobody lists is no longer running.
     pub fn send(&self, session_id: &str, kind: impl FnOnce(String) -> CommandKind) -> Result<Option<Value>, String> {
+        if self.joined() {
+            return self.request(None, Request::Command(kind(session_id.to_string())));
+        }
         let machine = merge::route(&[], &self.boards(), session_id, (self.now)()).ok_or("Session is no longer running.")?;
         self.send_to(&machine, kind(session_id.to_string()))
     }
 
     /// Sends a command to a machine by its label (start, resume, listings).
     pub fn send_to(&self, machine: &str, kind: CommandKind) -> Result<Option<Value>, String> {
+        if self.joined() {
+            return self.request(Some(machine), Request::Command(kind));
+        }
         let shared = self.handle().map(|s| s.shared.clone()).ok_or("The server is stopped.")?;
         send_command_with(&shared, machine, kind, ROUTE_TIMEOUT)
     }
@@ -421,12 +516,22 @@ impl Executor for NoSessions {
 /// The client's line to the hub.
 struct HubClientNotify {
     hub: Weak<Hub>,
-    stop: Arc<std::sync::atomic::AtomicBool>,
+    stop: Arc<AtomicBool>,
 }
 
 impl HubClientNotify {
+    /// Repaints the board, so its cards grey or come back with the link.
+    fn refresh(&self) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(h) = self.hub.upgrade() {
+            h.refresh();
+        }
+    }
+
     fn set(&self, f: impl FnOnce(&mut AssistantLink)) {
-        if self.stop.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.stop.load(Ordering::SeqCst) {
             return;
         }
         let Some(h) = self.hub.upgrade() else { return };
@@ -434,7 +539,7 @@ impl HubClientNotify {
             let mut l = h.link.lock().unwrap();
             f(&mut l);
             match (&l.main_name, l.connected) {
-                (Some(m), true) => format!("Listening to {m}"),
+                (Some(m), true) => format!("Connected to {m}"),
                 _ => "Reconnecting…".to_string(),
             }
         };
@@ -448,6 +553,7 @@ impl ClientNotify for HubClientNotify {
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
         self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None });
+        self.refresh();
     }
     fn disconnected(&self, error: &str) {
         let retrying = error != NOT_PAIRED && error != REMOVED;
@@ -456,6 +562,7 @@ impl ClientNotify for HubClientNotify {
             l.error = Some(error.to_string());
             l.retrying = retrying;
         });
+        self.refresh();
     }
     fn removed(&self) {
         self.set(|l| {
@@ -463,9 +570,46 @@ impl ClientNotify for HubClientNotify {
             l.error = Some(REMOVED.into());
             l.retrying = false;
         });
+        self.refresh();
     }
     fn caps(&self) -> Vec<String> {
-        vec![CAP_FOLLOW.into(), CAP_LEAD.into()]
+        phone_caps()
+    }
+    fn mirror_offer(&self, offered: Option<bool>) {
+        let Some(h) = self.hub.upgrade() else { return };
+        h.mirror_seeded.store(false, Ordering::SeqCst);
+        let access = match offered {
+            Some(true) => MirrorAccess::Allowed,
+            Some(false) => MirrorAccess::Refused,
+            None => MirrorAccess::Unsupported,
+        };
+        if access != MirrorAccess::Allowed {
+            *h.mirror.lock().unwrap() = MirrorView::default();
+        }
+        self.set(|l| l.mirror = Some(access));
+        h.refresh();
+    }
+    fn mirrored(&self, allowed: bool, cards: Vec<Card>, machines: Vec<MachineInfo>) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(h) = self.hub.upgrade() else { return };
+        if !allowed {
+            *h.mirror.lock().unwrap() = MirrorView::default();
+            self.set(|l| l.mirror = Some(MirrorAccess::Refused));
+            h.refresh();
+            return;
+        }
+        // What already waits when the link comes up is not news.
+        if !h.mirror_seeded.swap(true, Ordering::SeqCst) {
+            h.notifier.lock().unwrap().seed(&cards);
+        }
+        *h.mirror.lock().unwrap() = MirrorView { cards, machines };
+        self.set(|l| l.mirror = Some(MirrorAccess::Allowed));
+        h.refresh();
+    }
+    fn lane(&self) -> Option<Arc<RequestLane>> {
+        self.hub.upgrade().map(|h| h.lane.clone())
     }
     /// Saves the config as a main with the list and starts the server; if
     /// it cannot listen, the old config goes back. The client ends by
@@ -481,6 +625,7 @@ impl ClientNotify for HubClientNotify {
             return Err(e);
         }
         h.client.lock().unwrap().take();
+        *h.mirror.lock().unwrap() = MirrorView::default();
         *h.link.lock().unwrap() = AssistantLink::default();
         log::line("network", format!("promoted to main by {by}; {handed} assistants handed over"));
         let port = h.handle().map(|s| s.port()).ok_or("The server is stopped.")?;

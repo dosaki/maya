@@ -10,7 +10,7 @@ use maya_core::config::{Config, NetworkRole};
 use maya_core::launch::LaunchOptions;
 use maya_core::model::{Card, Harness};
 use maya_core::net::merge;
-use maya_core::net::protocol::CommandKind;
+use maya_core::net::protocol::{CommandKind, Request};
 use maya_core::net::routing::{agents_reply, check_remote_agent, machines_of, remote_attachments, AgentsReply, MachineInfo};
 use maya_core::net::NetworkStatus;
 use maya_core::resume::ResumableSession;
@@ -130,18 +130,31 @@ pub fn open_pr(app: AppHandle, hub: H, session_id: String) -> Result<(), String>
 
 #[tauri::command]
 pub fn list_machines(hub: H) -> Vec<MachineInfo> {
+    if hub.joined() {
+        return hub.mirror.lock().unwrap().machines.clone();
+    }
     machines_of(&hub.status())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_project_dirs(hub: H, machine: Option<String>) -> Result<Vec<String>, String> {
     let machine = machine_arg(machine)?;
+    if hub.joined() {
+        return data(hub.request(Some(&machine), Request::ListDirs)?);
+    }
     Ok(merge::dirs_of(&hub.boards(), &machine))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_agents(hub: H, machine: Option<String>) -> AgentsReply {
-    let remote: Option<Vec<AgentInfo>> = machine.as_deref().filter(|m| !m.is_empty()).and_then(|m| merge::agents_of(&hub.boards(), m));
+    let machine = machine.filter(|m| !m.is_empty());
+    if hub.joined() {
+        return hub.request(machine.as_deref(), Request::ListAgents).and_then(data).unwrap_or_else(|e| {
+            log::line("network", format!("could not list the agents: {e}"));
+            agents_reply(false, None, Vec::new)
+        });
+    }
+    let remote: Option<Vec<AgentInfo>> = machine.as_deref().and_then(|m| merge::agents_of(&hub.boards(), m));
     agents_reply(false, remote, Vec::new)
 }
 
@@ -149,7 +162,9 @@ pub fn list_agents(hub: H, machine: Option<String>) -> AgentsReply {
 pub fn list_resumable_sessions(hub: H, dir: String, machine: Option<String>, agent: Option<Harness>) -> Result<Vec<ResumableSession>, String> {
     let machine = machine_arg(machine)?;
     let agent = agent.unwrap_or_default();
-    check_remote_agent(agent, &merge::agents_of(&hub.boards(), &machine), &machine)?;
+    if !hub.joined() {
+        check_remote_agent(agent, &merge::agents_of(&hub.boards(), &machine), &machine)?;
+    }
     data(hub.send_to(&machine, CommandKind::ListResumable { dir, agent })?)
 }
 
@@ -157,7 +172,9 @@ pub fn list_resumable_sessions(hub: H, dir: String, machine: Option<String>, age
 pub fn resume_session(hub: H, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<(), String> {
     let machine = machine_arg(machine)?;
     let agent = agent.unwrap_or_default();
-    check_remote_agent(agent, &merge::agents_of(&hub.boards(), &machine), &machine)?;
+    if !hub.joined() {
+        check_remote_agent(agent, &merge::agents_of(&hub.boards(), &machine), &machine)?;
+    }
     hub.send_to(&machine, CommandKind::Resume { dir, session: session_id, agent }).map(|_| ())
 }
 
@@ -168,7 +185,9 @@ pub fn start_session(hub: H, dir: Option<String>, prompt: String, options: Launc
         return Err("Type a prompt first.".into());
     }
     options.validate_shape()?;
-    check_remote_agent(options.agent, &merge::agents_of(&hub.boards(), &machine), &machine)?;
+    if !hub.joined() {
+        check_remote_agent(options.agent, &merge::agents_of(&hub.boards(), &machine), &machine)?;
+    }
     data(hub.send_to(&machine, CommandKind::Start { dir, prompt, options })?)
 }
 
@@ -244,9 +263,16 @@ pub fn log_path(hub: H) -> String {
     hub.maya_dir.join("maya.log").to_string_lossy().into_owned()
 }
 
+/// Pairs this phone with a running main and listens to it.
+#[tauri::command(async)]
+pub fn network_pair(hub: H, host: String, port: u16, name: String, code: String) -> Result<NetworkStatus, String> {
+    hub.join(&host, port, &name, &code)
+}
+
 /// Starts the server, remembers that it should run, and opens pairing.
 #[tauri::command(async)]
 pub fn server_start(hub: H) -> Result<NetworkStatus, String> {
+    hub.stop_client();
     hub.update_config(|c| c.network.role = NetworkRole::Main)?;
     hub.start_server()?;
     hub.pairing_code()
