@@ -150,38 +150,54 @@ pub fn open_frame(noise: &mut TransportState, frame: &[u8]) -> Result<String, Ch
 pub struct Channel<S> {
     pub ws: WebSocket<S>,
     noise: TransportState,
+    /// A read failed: nothing after it is trusted, nor sent.
+    dead: bool,
 }
 
 impl<S: Read + Write> Channel<S> {
     pub fn new(ws: WebSocket<S>, noise: TransportState) -> Channel<S> {
-        Channel { ws, noise }
+        Channel { ws, noise, dead: false }
     }
 
     pub fn send(&mut self, text: &str) -> Result<(), String> {
-        let frame = seal_frame(&mut self.noise, text.as_bytes())?;
+        let frame = self.seal(text)?;
         self.ws.send(Message::binary(frame)).map_err(|e| e.to_string())
     }
 
     /// Queues a frame without flushing; `flush` sends what is queued.
     pub fn write(&mut self, text: &str) -> Result<(), String> {
-        let frame = seal_frame(&mut self.noise, text.as_bytes())?;
+        let frame = self.seal(text)?;
         self.ws.write(Message::binary(frame)).map_err(|e| e.to_string())
+    }
+
+    fn seal(&mut self, text: &str) -> Result<Vec<u8>, String> {
+        if self.dead {
+            return Err(FORGED.into());
+        }
+        seal_frame(&mut self.noise, text.as_bytes())
     }
 
     pub fn flush(&mut self) -> Result<(), String> {
         self.ws.flush().map_err(|e| e.to_string())
     }
 
-    /// One read. A text frame after the handshake is never genuine.
+    /// One read. A text frame after the handshake is never genuine. After
+    /// a failed read the channel is dead: every read is `Forged`, since a
+    /// genuine frame after a forged one would still open.
     pub fn read(&mut self) -> Result<Got, ChannelError> {
-        match self.ws.read() {
+        if self.dead {
+            return Err(ChannelError::Forged);
+        }
+        let got = match self.ws.read() {
             Ok(Message::Binary(b)) => open_frame(&mut self.noise, &b).map(Got::Text),
             Ok(Message::Text(_)) => Err(ChannelError::Forged),
             Ok(Message::Close(_)) => Ok(Got::Closed),
             Ok(_) => Ok(Got::Control),
             Err(e) if is_timeout(&e) => Ok(Got::Idle),
             Err(e) => Err(ChannelError::Io(e.to_string())),
-        }
+        };
+        self.dead = got.is_err();
+        got
     }
 }
 
@@ -572,6 +588,32 @@ mod handshake_tests {
             }
         };
         assert_eq!(got, Err(ChannelError::Forged));
+    }
+
+    #[test]
+    fn after_a_forged_frame_the_channel_is_dead() {
+        let (mut j, m) = ws_pair();
+        let main = Keypair::generate();
+        let t = main_side(m, main.clone(), Err("not pairing".into()));
+        let jt = connect(&mut j, &Keypair::generate(), &main.public, soon(), &|| false).unwrap();
+        let (mut m, out) = t.join().unwrap();
+        let mut mt = out.unwrap().0;
+        m.send(Message::binary(vec![0xFF, 0xFF, 1, 2, 3])).unwrap();
+        m.send(Message::binary(seal_frame(&mut mt, b"genuine").unwrap())).unwrap();
+        let mut jc = Channel::new(j, jt);
+        let mut next = || {
+            let end = soon();
+            loop {
+                match jc.read() {
+                    Ok(Got::Idle) if Instant::now() < end => {}
+                    other => break other,
+                }
+            }
+        };
+        assert_eq!(next(), Err(ChannelError::Forged));
+        assert_eq!(next(), Err(ChannelError::Forged), "the genuine frame after it does not open");
+        assert!(jc.send("hello").is_err());
+        assert!(jc.write("hello").is_err());
     }
 
     #[test]
