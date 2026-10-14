@@ -139,9 +139,10 @@ The installer puts the AppImage in `~/.local/bin/maya-app` (set
 `.deb` from the release (`sudo apt install ./Maya_<version>_amd64.deb`, or `_arm64.deb`)
 pulls in the dependencies itself.
 
-Install `libsecret-tools` too: the desktop app keeps its network key in
-GNOME Keyring through `secret-tool`, and without it the network does not
-start ("Could not reach the key store"). For the ElevenLabs voice, also
+With the AppImage, install `libsecret-tools` too (the `.deb` pulls it
+in): the desktop app keeps its network key in GNOME Keyring through
+`secret-tool`, and without it the network does not start ("Could not
+reach the key store"). For the ElevenLabs voice, also
 install `pulseaudio-utils` (for `paplay`; `ffplay` works too). Sessions
 open in GNOME Terminal, Ptyxis or any `x-terminal-emulator`.
 
