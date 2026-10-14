@@ -244,9 +244,12 @@ built once (`pnpm tauri build --bundles appimage`):
 
 The phone app is a second Tauri crate, `mobile/`, that depends on
 `maya_core` and reuses the frontend's board, card, modal and dialogs from
-`mobile/web/index.html` through `src/mobile/main.ts`. It is only ever a
-main, or, after it handed the main role to an assistant, a listener with
-no sessions that the new main can make the main again. It runs no
+`mobile/web/index.html` through `src/mobile/main.ts`. It is a
+main, or it joins a main (with a pairing code, or by handing its own main
+role to an assistant) and mirrors that main's board: the main sends it
+`mirror` frames and answers its `request`s, as long as the main's "Sees
+and controls all sessions" switch for it is on. A main can make a joined
+phone the main again. It runs no
 sessions, so it needs no sidecar and no `jq`.
 
 Requirements: `rustup` (Homebrew's `rust` has no Android targets), Java 17

@@ -1,7 +1,7 @@
 # The phone joins a main — design
 
 Date: 2026-10-14
-Status: approved design, not implemented
+Status: implemented
 Builds on: `2026-09-30-maya-remote-assistants-design.md`,
 `2026-10-07-maya-android-companion-design.md`,
 `2026-10-12-promote-assistant-design.md`
