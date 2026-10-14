@@ -34,6 +34,10 @@ export interface AssistantStatus {
   canLead?: boolean;
   /** Connected and able to follow a new main (`follow`); false for an older Maya. */
   canFollow?: boolean;
+  /** The main lets it see and control every session. */
+  mirror?: boolean;
+  /** Connected and asked to mirror: its switch shows. */
+  wantsMirror?: boolean;
 }
 
 export interface AssistantLink {
@@ -42,6 +46,8 @@ export interface AssistantLink {
   error: string | null;
   /** The client waits to try again; `error` is then the last failure. */
   retrying?: boolean;
+  /** What the main said about mirroring at the last connect. */
+  mirror?: "allowed" | "refused" | "unsupported" | null;
 }
 
 /** The live `network_status`/`network` event payload. */
@@ -192,6 +198,7 @@ export interface SettingsHandlers {
   onRegenerate(): void;
   onRemoveAssistant(id: string): void;
   onMakeMain(id: string): void;
+  onMirror(id: string, on: boolean): void;
   onPromote(id: string): void;
   onPromoteCancel(): void;
   onPair(host: string, port: number, name: string, code: string): void;
@@ -883,7 +890,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       const row = document.createElement("div");
       row.className = "settings__assistant";
       const info = document.createElement("span");
-      info.textContent = `${a.name} (${[a.platform, a.address].filter(Boolean).join(", ")}) — ${a.connected ? "Connected" : a.lastSeen !== null ? `Last seen ${formatAge(a.lastSeen, nowMs)} ago` : "Never connected"}`;
+      info.textContent = `${a.name} (${[a.platform === "android" ? "Android" : a.platform, a.address].filter(Boolean).join(", ")}) — ${a.connected ? "Connected" : a.lastSeen !== null ? `Last seen ${formatAge(a.lastSeen, nowMs)} ago` : "Never connected"}`;
       if (a.note) {
         const note = document.createElement("div");
         note.className = "settings__hint";
@@ -908,6 +915,19 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
         mk.disabled = !!model.networkPromoting;
         mk.addEventListener("click", () => h.onMakeMain(a.id));
         row.append(mk);
+      }
+      if (a.wantsMirror || a.mirror) {
+        const sw = document.createElement("label");
+        sw.className = "settings__switch";
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.dataset.action = "mirror";
+        box.dataset.id = a.id;
+        box.checked = !!a.mirror;
+        box.disabled = !!model.networkPromoting;
+        box.addEventListener("change", () => h.onMirror(a.id, box.checked));
+        sw.append(box, document.createTextNode(" Sees and controls all sessions"));
+        row.append(sw);
       }
       list.append(row);
       if (model.networkPromote === a.id) {
@@ -1237,6 +1257,7 @@ export async function initSettings(): Promise<void> {
       paint();
     },
     onRegenerate: () => void run(async () => { model.network = await invoke<NetworkStatus>("network_pairing_code"); }),
+    onMirror: (id, on) => void run(async () => { model.network = await invoke<NetworkStatus>("network_set_mirror", { id, on }); }),
     onRemoveAssistant: (id) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_assistant", { id }); }),
     onMakeMain: (id) => {
       model.networkPromote = id;
