@@ -21,8 +21,8 @@ describe("the setup overlay", () => {
   });
 
   it("starts with the name and port typed, and explains itself differently the first time", () => {
-    const h = { onStart: vi.fn() };
-    const first = renderSetup({ firstRun: true, name: "Pixel 8", port: 4127, error: null, busy: false }, h);
+    const h = { onStart: vi.fn(), onJoin: vi.fn(), onMode: vi.fn() };
+    const first = renderSetup({ firstRun: true, mode: "main", refused: null, name: "Pixel 8", port: 4127, error: null, busy: false }, h);
     expect(first.textContent).toContain("pair them with the code");
     expect(first.querySelector<HTMLInputElement>("input[name=name]")!.value).toBe("Pixel 8");
     first.querySelector<HTMLInputElement>("input[name=port]")!.value = "4200";
@@ -31,14 +31,42 @@ describe("the setup overlay", () => {
   });
 
   it("says the server is stopped with a Start button and the error, and no fields", () => {
-    const h = { onStart: vi.fn() };
-    const stopped = renderSetup({ firstRun: false, name: "Pixel 8", port: 4127, error: "Could not listen on port 4127", busy: false }, h);
+    const h = { onStart: vi.fn(), onJoin: vi.fn(), onMode: vi.fn() };
+    const stopped = renderSetup({ firstRun: false, mode: "main", refused: null, name: "Pixel 8", port: 4127, error: "Could not listen on port 4127", busy: false }, h);
     expect(stopped.querySelector("h2")!.textContent).toBe("The server is stopped.");
     expect(stopped.textContent).toContain("Could not listen on port 4127");
     expect(stopped.querySelector("input")).toBeNull();
     stopped.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
     expect(h.onStart).toHaveBeenCalledWith("Pixel 8", 4127);
-    const busy = renderSetup({ firstRun: false, name: "Pixel 8", port: 4127, error: null, busy: true }, h);
+    const busy = renderSetup({ firstRun: false, mode: "main", refused: null, name: "Pixel 8", port: 4127, error: null, busy: true }, h);
     expect(busy.querySelector<HTMLButtonElement>("button[data-action=start]")!.disabled).toBe(true);
+  });
+
+  it("shows a joined phone's board, or why the main shares nothing", () => {
+    const joined: NetworkStatus = { ...off, role: "assistant", assistant: { connected: true, mainName: "desk", error: null, mirror: "allowed" } };
+    expect(isFirstRun(joined)).toBe(false);
+    expect(setupView(joined, false)).toBe("none");
+    expect(setupView({ ...joined, assistant: { ...joined.assistant, mirror: "refused" } }, false)).toBe("board");
+    expect(setupView({ ...joined, assistant: { ...joined.assistant, mirror: "unsupported" } }, false)).toBe("board");
+    const h = { onStart: vi.fn(), onJoin: vi.fn(), onMode: vi.fn() };
+    const refused = renderSetup({ firstRun: false, mode: "main", name: "Pixel 8", port: 4127, error: null, busy: false, refused: { main: "desk", older: false } }, h);
+    expect(refused.textContent).toContain(`desk has not allowed this phone to see its sessions. Turn on "Sees and controls all sessions" for Pixel 8 in desk's Settings → Network.`);
+    expect(refused.querySelector("button")).toBeNull();
+    const older = renderSetup({ firstRun: false, mode: "main", name: "Pixel 8", port: 4127, error: null, busy: false, refused: { main: "desk", older: true } }, h);
+    expect(older.textContent).toContain("desk runs an older Maya that cannot share its sessions. Update it.");
+  });
+
+  it("offers Be the main or Join a main on the first run, and joins with what was typed", () => {
+    const h = { onStart: vi.fn(), onJoin: vi.fn(), onMode: vi.fn() };
+    const first = renderSetup({ firstRun: true, mode: "main", name: "Pixel 8", port: 4127, error: null, busy: false, refused: null }, h);
+    first.querySelector<HTMLButtonElement>("button[data-action=mode-join]")!.click();
+    expect(h.onMode).toHaveBeenCalledWith("join");
+    const join = renderSetup({ firstRun: true, mode: "join", name: "Pixel 8", port: 4127, error: "Wrong or expired pairing code.", busy: false, refused: null }, h);
+    expect(join.querySelector("button[data-action=start]")).toBeNull();
+    expect(join.textContent).toContain("Wrong or expired pairing code.");
+    join.querySelector<HTMLInputElement>("input[name=host]")!.value = "192.168.1.10";
+    join.querySelector<HTMLInputElement>("input[name=code]")!.value = "483921";
+    join.querySelector<HTMLButtonElement>("button[data-action=join]")!.click();
+    expect(h.onJoin).toHaveBeenCalledWith("Pixel 8", "192.168.1.10", 4127, "483921");
   });
 });
