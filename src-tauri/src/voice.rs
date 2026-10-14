@@ -17,117 +17,16 @@ pub struct Voice {
     pub name: String,
 }
 
-#[cfg(any(target_os = "macos", windows))]
-const KEYCHAIN_SERVICE: &str = "maya-elevenlabs";
-#[cfg(any(target_os = "macos", windows))]
-const KEYCHAIN_ACCOUNT: &str = "api-key";
 pub const MODEL_ID: &str = "eleven_multilingual_v2";
 
-/// Stores the API key in Credential Manager (replacing any previous one).
-#[cfg(windows)]
+/// Stores the API key in the OS key store (replacing any previous one).
 pub fn store_key(key: &str) -> Result<(), String> {
-    store_credential(KEYCHAIN_SERVICE, key)
+    crate::keystore::store(&crate::keystore::ELEVENLABS, key)
 }
 
 /// The stored API key, if any.
-#[cfg(windows)]
 pub fn load_key() -> Option<String> {
-    load_credential(KEYCHAIN_SERVICE)
-}
-
-#[cfg(windows)]
-fn store_credential(service: &str, key: &str) -> Result<(), String> {
-    use windows_sys::Win32::Security::Credentials::{CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC};
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("The key is empty.".into());
-    }
-    let mut target = wide(service);
-    let mut user = wide(KEYCHAIN_ACCOUNT);
-    let mut blob = key.as_bytes().to_vec();
-    let mut cred: CREDENTIALW = unsafe { std::mem::zeroed() };
-    cred.Type = CRED_TYPE_GENERIC;
-    cred.TargetName = target.as_mut_ptr();
-    cred.UserName = user.as_mut_ptr();
-    cred.CredentialBlobSize = blob.len() as u32;
-    cred.CredentialBlob = blob.as_mut_ptr();
-    cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
-    // SAFETY: the credential's strings and blob outlive the call.
-    if unsafe { CredWriteW(&cred, 0) } != 0 {
-        Ok(())
-    } else {
-        Err(format!("Credential Manager refused the key: {}", std::io::Error::last_os_error()))
-    }
-}
-
-#[cfg(windows)]
-fn load_credential(service: &str) -> Option<String> {
-    use windows_sys::Win32::Security::Credentials::{CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC};
-    let target = wide(service);
-    let mut cred: *mut CREDENTIALW = std::ptr::null_mut();
-    // SAFETY: CredReadW allocates the credential, which is read then freed.
-    unsafe {
-        if CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut cred) == 0 || cred.is_null() {
-            return None;
-        }
-        let c = &*cred;
-        let bytes = std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize).to_vec();
-        CredFree(cred as *const _);
-        let key = String::from_utf8(bytes).ok()?.trim().to_string();
-        (!key.is_empty()).then_some(key)
-    }
-}
-
-#[cfg(windows)]
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain([0]).collect()
-}
-
-/// Stores the API key in the login Keychain (replacing any previous one).
-#[cfg(target_os = "macos")]
-pub fn store_key(key: &str) -> Result<(), String> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("The key is empty.".into());
-    }
-    let out = maya_core::command("security")
-        .args(["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w", key])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("could not run security: {e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!("Keychain refused the key: {}", String::from_utf8_lossy(&out.stderr).trim()))
-    }
-}
-
-/// The stored API key, if any.
-#[cfg(target_os = "macos")]
-pub fn load_key() -> Option<String> {
-    let out = maya_core::command("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let key = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!key.is_empty()).then_some(key)
-}
-
-/// `secret-tool` arguments that store the key (read from stdin) in GNOME Keyring.
-#[cfg(any(test, target_os = "linux"))]
-pub fn secret_tool_store_args() -> Vec<String> {
-    ["store", "--label", "Maya ElevenLabs", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec()
-}
-
-/// `secret-tool` arguments that print the stored key.
-#[cfg(any(test, target_os = "linux"))]
-pub fn secret_tool_lookup_args() -> Vec<String> {
-    ["lookup", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec()
+    crate::keystore::load(&crate::keystore::ELEVENLABS).ok().flatten()
 }
 
 /// The first audio player on `path` and its arguments before the file:
@@ -163,42 +62,6 @@ pub fn player_volume_args(bin: &str, volume: u8) -> Vec<String> {
 #[cfg(any(test, windows))]
 fn mci_volume_command(volume: u8) -> String {
     format!("setaudio maya_voice volume to {}", u32::from(volume.min(100)) * 10)
-}
-
-/// Stores the API key in GNOME Keyring (replacing any previous one). The
-/// key goes through stdin, never the command line.
-#[cfg(target_os = "linux")]
-pub fn store_key(key: &str) -> Result<(), String> {
-    use std::io::Write;
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("The key is empty.".into());
-    }
-    let mut child = maya_core::command("secret-tool")
-        .args(secret_tool_store_args())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("could not run secret-tool (install libsecret-tools): {e}"))?;
-    child.stdin.take().ok_or("no stdin for secret-tool")?.write_all(key.as_bytes()).map_err(|e| e.to_string())?;
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(format!("GNOME Keyring refused the key: {}", String::from_utf8_lossy(&out.stderr).trim()))
-    }
-}
-
-/// The stored API key, if any.
-#[cfg(target_os = "linux")]
-pub fn load_key() -> Option<String> {
-    let out = maya_core::command("secret-tool").args(secret_tool_lookup_args()).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let key = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!key.is_empty()).then_some(key)
 }
 
 /// True when the provider is ElevenLabs, a key is stored and a voice chosen.
@@ -328,21 +191,6 @@ pub fn speak(maya_dir: &Path, key: &str, voice_id: &str, text: &str, volume: u8)
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
-    #[test]
-    fn credential_manager_round_trips_and_replaces_the_key() {
-        use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
-        let service = format!("maya-test-{}", std::process::id());
-        assert_eq!(load_credential(&service), None);
-        store_credential(&service, "  first-key
-").unwrap();
-        assert_eq!(load_credential(&service).as_deref(), Some("first-key"));
-        store_credential(&service, "second").unwrap();
-        assert_eq!(load_credential(&service).as_deref(), Some("second"));
-        assert!(store_credential(&service, "  ").unwrap_err().contains("empty"));
-        unsafe { CredDeleteW(wide(&service).as_ptr(), CRED_TYPE_GENERIC, 0) };
-        assert_eq!(load_credential(&service), None);
-    }
     use std::path::Path;
 
     #[test]
@@ -395,12 +243,6 @@ mod tests {
     fn mci_is_told_the_volume_out_of_a_thousand() {
         assert_eq!(mci_volume_command(80), "setaudio maya_voice volume to 800");
         assert_eq!(mci_volume_command(100), "setaudio maya_voice volume to 1000");
-    }
-
-    #[test]
-    fn secret_tool_args_name_the_maya_service_and_account() {
-        assert_eq!(secret_tool_store_args(), ["store", "--label", "Maya ElevenLabs", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec());
-        assert_eq!(secret_tool_lookup_args(), ["lookup", "service", "maya", "account", "elevenlabs"].map(String::from).to_vec());
     }
 
     #[cfg(unix)]

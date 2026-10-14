@@ -18,16 +18,46 @@ use crate::log;
 use crate::model::Card;
 use crate::store::now_ms;
 use crate::AppState;
+use maya_core::net::identity::Keypair;
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
+const KEY_STORE: &str = "Could not reach the key store: ";
+
+/// The key pair from `load`, or a new one saved with `store` when none is
+/// stored. A value that is not a key, or a store that cannot be read, is an
+/// error: a new key would silently drop every pairing.
+pub fn identity_from(load: impl FnOnce() -> Result<Option<String>, String>, store: impl FnOnce(&str) -> Result<(), String>) -> Result<Keypair, String> {
+    match load().map_err(|e| format!("{KEY_STORE}{e}"))? {
+        Some(secret) => Keypair::from_secret(&secret).map_err(|e| format!("{KEY_STORE}{e}")),
+        None => {
+            let k = Keypair::generate();
+            store(&k.to_secret()).map_err(|e| format!("{KEY_STORE}{e}"))?;
+            Ok(k)
+        }
+    }
+}
+
+/// This Maya's key pair, read once and kept for the app's life.
+pub fn identity(app: &AppHandle) -> Result<Arc<Keypair>, String> {
+    let state = app.state::<AppState>();
+    let mut held = state.identity.lock().unwrap();
+    if let Some(k) = held.as_ref() {
+        return Ok(k.clone());
+    }
+    let k = Arc::new(identity_from(|| crate::keystore::load(&crate::keystore::NETWORK_KEY), |s| crate::keystore::store(&crate::keystore::NETWORK_KEY, s))?);
+    *held = Some(k.clone());
+    Ok(k)
+}
+
 /// Starts the server with the Tauri adapter and the store's paired list.
 pub fn start_server(app: AppHandle, port: u16) -> Result<ServerHandle, String> {
     let view = app.state::<AppState>().store.lock().unwrap().config.network.clone();
-    start_with(Arc::new(crate::TauriNetNotify { app }), Arc::new(Mutex::new(view)), port)
+    let id = identity(&app)?;
+    start_with(Arc::new(crate::TauriNetNotify { app }), Arc::new(Mutex::new(view)), port, id)
 }
 
 /// `send_command_with` against the running server; an error when this Maya is not the main.
@@ -44,7 +74,10 @@ pub fn start(app: AppHandle) -> ClientHandle {
     let notify_app = app.clone();
     let mut handle = ClientHandle::spawn(move |stop| {
         let notify: Arc<dyn ClientNotify> = Arc::new(TauriClientNotify { app: notify_app, stop: stop.clone() });
-        reconnect(&move || app.state::<AppState>().store.lock().unwrap().config.network.clone(), exec, notify, &stop)
+        match identity(&app) {
+            Ok(id) => reconnect(&move || app.state::<AppState>().store.lock().unwrap().config.network.clone(), id, exec, notify, &stop),
+            Err(e) => notify.disconnected(&e),
+        }
     });
     handle.board_due = board_due;
     handle
@@ -58,20 +91,20 @@ pub fn push_board(app: &AppHandle) {
 }
 
 /// Pairs with the main at `host:port` using its six-digit code, stores the
-/// id and token and the link in the config (which starts the client), and
+/// main's key and the link in the config (which starts the client), and
 /// returns the main's name. One blocking connection, at most `SILENCE` long
 /// once connected.
 pub fn pair(app: &AppHandle, host: &str, port: u16, name: &str, code: &str) -> Result<String, String> {
     // The connection ends at `welcome`, so no command reaches this executor.
     let exec: Arc<dyn Executor> = Arc::new(TauriExecutor { app: app.clone(), board_due: Arc::new(AtomicBool::new(false)) });
-    let (main, id, token) = pair_with(exec, host, port, name, code, vec![])?;
+    let (main, main_key) = pair_with(exec, identity(app)?, host, port, name, code, vec![])?;
     crate::update_config(app, |c| {
         c.network.role = NetworkRole::Assistant;
         c.network.main_host = host.trim().into();
         c.network.main_port = port;
         c.network.name = name.trim().into();
-        c.network.assistant_id = id;
-        c.network.token = token;
+        c.network.main_key = main_key;
+        c.network.pair_again = false;
         c.listen = false;
     })?;
     log::line("network", format!("paired with {main}"));
@@ -100,7 +133,7 @@ impl TauriClientNotify {
 }
 
 impl ClientNotify for TauriClientNotify {
-    fn paired(&self, _: &str, _: &str) {}
+    fn paired(&self, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
         self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None });
@@ -141,7 +174,7 @@ impl ClientNotify for TauriClientNotify {
         };
         let handed = list.len().saturating_sub(1);
         promote::as_main(&mut after, list);
-        let handle = start_with(Arc::new(crate::TauriNetNotify { app: self.app.clone() }), Arc::new(Mutex::new(after.network.clone())), after.listen_port())?;
+        let handle = start_with(Arc::new(crate::TauriNetNotify { app: self.app.clone() }), Arc::new(Mutex::new(after.network.clone())), after.listen_port(), identity(&self.app)?)?;
         if let Err(e) = config::save(&path, &after) {
             handle.stop();
             return Err(format!("Could not save the settings: {e}"));
@@ -168,10 +201,11 @@ impl ClientNotify for TauriClientNotify {
 
     /// Saves the new main's host and port. The config change restarts the
     /// client against it (`RestartAssistant`), which stops this one.
-    fn moved(&self, host: &str, port: u16) -> Result<(), String> {
+    fn moved(&self, host: &str, port: u16, key: &str) -> Result<(), String> {
         crate::update_config(&self.app, |c| {
             c.network.main_host = host.into();
             c.network.main_port = port;
+            c.network.main_key = key.into();
         })
         .map(|_| ())
     }
@@ -272,5 +306,36 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
         CommandKind::History { session } => to_data(actions::session_history(&l, &session)?),
         // The client opens a handover itself (`client::handle`); it never reaches an executor.
         CommandKind::Promote { .. } => Err(maya_core::net::client::CANNOT_LEAD.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn a_stored_key_is_used_and_none_stored_makes_and_stores_one() {
+        let k = Keypair::generate();
+        let got = identity_from(|| Ok(Some(k.to_secret())), |_| panic!("not stored again")).unwrap();
+        assert_eq!(got.public, k.public);
+        let stored = RefCell::new(None);
+        let made = identity_from(
+            || Ok(None),
+            |s| {
+                *stored.borrow_mut() = Some(s.to_string());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(Keypair::from_secret(stored.borrow().as_ref().unwrap()).unwrap().public, made.public);
+    }
+
+    #[test]
+    fn a_garbled_stored_key_is_an_error_not_a_new_key() {
+        let out = identity_from(|| Ok(Some("garbage".into())), |_| panic!("never overwritten"));
+        assert!(out.unwrap_err().starts_with("Could not reach the key store: "));
+        let out = identity_from(|| Err("the keyring is locked".into()), |_| panic!("never overwritten"));
+        assert_eq!(out.unwrap_err(), "Could not reach the key store: the keyring is locked");
     }
 }
