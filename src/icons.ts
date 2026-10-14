@@ -3,6 +3,7 @@ import compact from "./assets/icons/compact.svg?raw";
 import remote from "./assets/icons/remote.svg?raw";
 import reply from "./assets/icons/reply.svg?raw";
 import resume from "./assets/icons/resume.svg?raw";
+import search from "./assets/icons/search.svg?raw";
 import terminal from "./assets/icons/terminal.svg?raw";
 
 /**
@@ -10,7 +11,7 @@ import terminal from "./assets/icons/terminal.svg?raw";
  * edited in Inkscape. Draw strokes and fills with `currentColor` so the
  * icon takes the button's text colour.
  */
-const FILES = { terminal, reply, compact, resume, remote, close } as const;
+const FILES = { terminal, reply, compact, resume, remote, close, search } as const;
 
 export type IconName = keyof typeof FILES;
 
