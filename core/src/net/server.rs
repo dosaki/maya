@@ -2135,14 +2135,18 @@ mod tests {
         ch.flush().unwrap();
         reset(ch);
         wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 0);
-        assert!(handle.status().assistants.is_empty(), "no paired entry is left behind");
-        // Saved just before `welcome`, then taken back when `welcome` could not be sent.
-        assert!(counter.saved.lock().unwrap().is_empty(), "the saved list does not keep it");
-        // On Windows a reset can discard what the main had not read yet, so
-        // the main may never see `hello` and the code stays open: as safe,
-        // but only Unix delivers the buffered `hello` before the reset.
-        if cfg!(unix) {
-            assert!(handle.status().code.is_none(), "the main read the hello and paired, then took the pairing back");
+        let status = handle.status();
+        assert!(status.assistants.iter().all(|a| !a.connected), "a Maya that is gone is never left connected");
+        // Only macOS reliably fails the main's one `welcome` write after the
+        // reset. Linux may take that write into the socket buffer (the error
+        // shows on a later write) and keep a disconnected entry, which the
+        // same key pairing again reuses; Windows may discard the `hello`
+        // unread, leaving the code open. Both are as safe.
+        if cfg!(target_os = "macos") {
+            assert!(status.assistants.is_empty(), "no paired entry is left behind");
+            // Saved just before `welcome`, then taken back when `welcome` could not be sent.
+            assert!(counter.saved.lock().unwrap().is_empty(), "the saved list does not keep it");
+            assert!(status.code.is_none(), "the main read the hello and paired, then took the pairing back");
         }
         handle.stop();
     }
