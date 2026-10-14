@@ -17,6 +17,8 @@ pub const LOCKOUT_AFTER: u32 = 3;
 pub const PAIR_TRIES: u32 = 3;
 /// Larger frames are refused unparsed (a board with attachments stays well under).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+/// Frames before `welcome` are small; a stranger cannot make a Maya buffer more.
+pub const PRE_AUTH_FRAME: usize = 64 * 1024;
 /// A Maya with this cap follows the main to a new host on `move`.
 pub const CAP_FOLLOW: &str = "follow";
 /// A Maya with this cap can become a main when sent `promote`.

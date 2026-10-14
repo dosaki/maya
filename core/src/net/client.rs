@@ -16,7 +16,7 @@
 //! `store` one at a time, never one while holding the other.
 
 use super::identity::{decode_key, encode_key, Keypair};
-use super::protocol::{decode_down, encode, Attachment, CommandKind, Down, Request, Up, DEFAULT_PORT, MAX_FRAME, PROTOCOL};
+use super::protocol::{decode_down, encode, Attachment, CommandKind, Down, Request, Up, DEFAULT_PORT, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
 use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use crate::config::{NetworkConfig, NetworkRole};
@@ -383,10 +383,8 @@ fn connect(config: &NetworkConfig, stop: &AtomicBool, deadline: Instant) -> Resu
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_nodelay(true);
     let url = if host.contains(':') && !host.starts_with('[') { format!("ws://[{host}]:{port}/") } else { format!("ws://{host}:{port}/") };
-    // Commands carry attachments inline: allow what the protocol allows,
-    // and the little sealing adds (`open_frame` caps the text at `MAX_FRAME`).
-    let limit = MAX_FRAME + MAX_FRAME / 1024;
-    let ws_config = WebSocketConfig::default().max_message_size(Some(limit)).max_frame_size(Some(limit));
+    // Small until `welcome`, so whatever answers cannot make this Maya buffer more.
+    let ws_config = WebSocketConfig::default().max_message_size(Some(PRE_AUTH_FRAME)).max_frame_size(Some(PRE_AUTH_FRAME));
     let mut attempt = tungstenite::client::client_with_config(url, stream, Some(ws_config));
     loop {
         match attempt {
@@ -504,6 +502,13 @@ fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, s
     loop {
         match read_down(ch, stop, deadline)? {
             Down::Welcome { name, mirror } => {
+                // Commands carry attachments inline: allow what the protocol
+                // allows, and the little sealing adds (`open_frame` caps the
+                // text at `MAX_FRAME`).
+                ch.ws.set_config(|c| {
+                    c.max_message_size = Some(MAX_FRAME + MAX_FRAME / 1024);
+                    c.max_frame_size = Some(MAX_FRAME + MAX_FRAME / 1024);
+                });
                 if let Some(key) = learned {
                     notify.paired(&encode_key(&key));
                 }
@@ -789,6 +794,28 @@ impl ClientNotify for PairNotify {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frames_from_the_main_are_small_until_welcome() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let main = std::thread::spawn(move || {
+            let mut ws = tungstenite::accept(listener.accept().unwrap().0).unwrap();
+            ws.send(tungstenite::Message::binary(vec![0u8; PRE_AUTH_FRAME + 1])).unwrap();
+            ws
+        });
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, ..Default::default() };
+        let mut ws = connect(&config, &AtomicBool::new(false), Instant::now() + Duration::from_secs(5)).unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        let err = loop {
+            match ws.read() {
+                Err(e) if secure::is_timeout(&e) && Instant::now() < end => {}
+                other => break other,
+            }
+        };
+        assert!(matches!(err, Err(tungstenite::Error::Capacity(_))), "{:?}", err.map(|m| m.len()));
+        drop(main.join());
+    }
 
     #[test]
     fn a_move_retries_at_once() {

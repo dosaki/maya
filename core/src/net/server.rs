@@ -23,7 +23,7 @@
 
 use super::merge::{display_names, RemoteBoard};
 use super::identity::{encode_key, Keypair};
-use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, MAX_FRAME, PROTOCOL};
+use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
 use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use super::{AssistantStatus, NetworkStatus, PairingCode};
@@ -48,8 +48,6 @@ const TICK: Duration = Duration::from_millis(100);
 const MIRROR_GAP: Duration = Duration::from_millis(300);
 /// A peer silent this long is dropped (assistants ping every 10 s).
 const SILENCE: Duration = Duration::from_secs(15);
-/// Frames before `welcome` are small; a stranger cannot make the main buffer more.
-const PRE_AUTH_FRAME: usize = 64 * 1024;
 /// Connections beyond this are closed at once.
 const MAX_CONNECTIONS: usize = 32;
 /// Connections not yet through `welcome` beyond this are closed at once, so
@@ -662,6 +660,7 @@ fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
                 pairing_failed(ctx, &ip);
             }
             log::line("network", format!("{ip}: handshake failed: {f:?}"));
+            drop(pre_auth);
             finish_ws(&mut ws);
             return;
         }
