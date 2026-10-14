@@ -88,7 +88,8 @@ pub struct Hub {
     pub mirror: Mutex<MirrorView>,
     /// Where the page's commands go while joined.
     pub lane: Arc<RequestLane>,
-    /// The first mirror since the last connect was seeded into the notifier.
+    /// The first mirror of the current link was seeded into the notifier.
+    /// A reconnect keeps it, so an ask that began while away still notifies.
     mirror_seeded: AtomicBool,
     pub notifier: Mutex<Notifier>,
     pub posted: Mutex<Posted>,
@@ -139,6 +140,13 @@ impl Hub {
 
     /// Sends a request to the joined main and waits for its answer.
     pub fn request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
+        {
+            let link = self.link.lock().unwrap();
+            if link.mirror == Some(MirrorAccess::Unsupported) {
+                let main = link.main_name.clone().unwrap_or_else(|| "The main Maya".into());
+                return Err(format!("{main} runs an older Maya that cannot share its sessions. Update it."));
+            }
+        }
         self.lane.request(machine.map(str::to_string), request, REQUEST_TIMEOUT)
     }
 
@@ -287,6 +295,9 @@ impl Hub {
             reconnect(&config_of, Arc::new(NoSessions), notify, &stop);
         });
         *self.link.lock().unwrap() = AssistantLink { retrying: true, ..Default::default() };
+        // A new link seeds the notifier afresh and shows none of the last one's cards.
+        self.mirror_seeded.store(false, Ordering::SeqCst);
+        *self.mirror.lock().unwrap() = MirrorView::default();
         if let Some(old) = self.client.lock().unwrap().replace(handle) {
             old.stop();
         }
@@ -582,7 +593,6 @@ impl ClientNotify for HubClientNotify {
     }
     fn mirror_offer(&self, offered: Option<bool>) {
         let Some(h) = self.hub.upgrade() else { return };
-        h.mirror_seeded.store(false, Ordering::SeqCst);
         let access = match offered {
             Some(true) => MirrorAccess::Allowed,
             Some(false) => MirrorAccess::Refused,

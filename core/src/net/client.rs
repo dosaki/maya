@@ -11,7 +11,8 @@
 //! connection thread within a tick (within the connect timeout while a TCP
 //! connect is in flight).
 //!
-//! Locks: none of its own. The app's adapters (`net_app`) take `network` or
+//! Locks: the `RequestLane` holds a mutex briefly, never across a send that
+//! blocks or a callback. The app's adapters (`net_app`) take `network` or
 //! `store` one at a time, never one while holding the other.
 
 use super::protocol::{decode_down, encode, mac, mac_matches, new_nonce, Attachment, CommandKind, Down, Request, Up, DEFAULT_PORT, MAX_FRAME, PROTOCOL};

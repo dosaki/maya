@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { NetworkStatus } from "./network";
-import { isFirstRun, renderSetup, setupView } from "./setup";
+import { isFirstRun, renderSetup, setupView, type SetupModel } from "./setup";
 
 const off: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, mainError: null };
 const paired = [{ id: "a", name: "x", hostname: "x", platform: "macos", address: "", connected: false, lastSeen: null, note: null }];
@@ -22,7 +22,7 @@ describe("the setup overlay", () => {
 
   it("starts with the name and port typed, and explains itself differently the first time", () => {
     const h = { onStart: vi.fn(), onJoin: vi.fn(), onMode: vi.fn() };
-    const first = renderSetup({ firstRun: true, mode: "main", refused: null, name: "Pixel 8", port: 4127, error: null, busy: false }, h);
+    const first = renderSetup({ host: "", joinPort: 4127, code: "", firstRun: true, mode: "main", refused: null, name: "Pixel 8", port: 4127, error: null, busy: false }, h);
     expect(first.textContent).toContain("pair them with the code");
     expect(first.querySelector<HTMLInputElement>("input[name=name]")!.value).toBe("Pixel 8");
     first.querySelector<HTMLInputElement>("input[name=port]")!.value = "4200";
@@ -32,13 +32,13 @@ describe("the setup overlay", () => {
 
   it("says the server is stopped with a Start button and the error, and no fields", () => {
     const h = { onStart: vi.fn(), onJoin: vi.fn(), onMode: vi.fn() };
-    const stopped = renderSetup({ firstRun: false, mode: "main", refused: null, name: "Pixel 8", port: 4127, error: "Could not listen on port 4127", busy: false }, h);
+    const stopped = renderSetup({ host: "", joinPort: 4127, code: "", firstRun: false, mode: "main", refused: null, name: "Pixel 8", port: 4127, error: "Could not listen on port 4127", busy: false }, h);
     expect(stopped.querySelector("h2")!.textContent).toBe("The server is stopped.");
     expect(stopped.textContent).toContain("Could not listen on port 4127");
     expect(stopped.querySelector("input")).toBeNull();
     stopped.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
     expect(h.onStart).toHaveBeenCalledWith("Pixel 8", 4127);
-    const busy = renderSetup({ firstRun: false, mode: "main", refused: null, name: "Pixel 8", port: 4127, error: null, busy: true }, h);
+    const busy = renderSetup({ host: "", joinPort: 4127, code: "", firstRun: false, mode: "main", refused: null, name: "Pixel 8", port: 4127, error: null, busy: true }, h);
     expect(busy.querySelector<HTMLButtonElement>("button[data-action=start]")!.disabled).toBe(true);
   });
 
@@ -49,24 +49,46 @@ describe("the setup overlay", () => {
     expect(setupView({ ...joined, assistant: { ...joined.assistant, mirror: "refused" } }, false)).toBe("board");
     expect(setupView({ ...joined, assistant: { ...joined.assistant, mirror: "unsupported" } }, false)).toBe("board");
     const h = { onStart: vi.fn(), onJoin: vi.fn(), onMode: vi.fn() };
-    const refused = renderSetup({ firstRun: false, mode: "main", name: "Pixel 8", port: 4127, error: null, busy: false, refused: { main: "desk", older: false } }, h);
+    const refused = renderSetup({ host: "", joinPort: 4127, code: "", firstRun: false, mode: "main", name: "Pixel 8", port: 4127, error: null, busy: false, refused: { main: "desk", older: false } }, h);
     expect(refused.textContent).toContain(`desk has not allowed this phone to see its sessions. Turn on "Sees and controls all sessions" for Pixel 8 in desk's Settings → Network.`);
     expect(refused.querySelector("button")).toBeNull();
-    const older = renderSetup({ firstRun: false, mode: "main", name: "Pixel 8", port: 4127, error: null, busy: false, refused: { main: "desk", older: true } }, h);
+    const older = renderSetup({ host: "", joinPort: 4127, code: "", firstRun: false, mode: "main", name: "Pixel 8", port: 4127, error: null, busy: false, refused: { main: "desk", older: true } }, h);
     expect(older.textContent).toContain("desk runs an older Maya that cannot share its sessions. Update it.");
   });
 
   it("offers Be the main or Join a main on the first run, and joins with what was typed", () => {
     const h = { onStart: vi.fn(), onJoin: vi.fn(), onMode: vi.fn() };
-    const first = renderSetup({ firstRun: true, mode: "main", name: "Pixel 8", port: 4127, error: null, busy: false, refused: null }, h);
+    const first = renderSetup({ host: "", joinPort: 4127, code: "", firstRun: true, mode: "main", name: "Pixel 8", port: 4127, error: null, busy: false, refused: null }, h);
     first.querySelector<HTMLButtonElement>("button[data-action=mode-join]")!.click();
     expect(h.onMode).toHaveBeenCalledWith("join");
-    const join = renderSetup({ firstRun: true, mode: "join", name: "Pixel 8", port: 4127, error: "Wrong or expired pairing code.", busy: false, refused: null }, h);
+    const join = renderSetup({ host: "", joinPort: 4127, code: "", firstRun: true, mode: "join", name: "Pixel 8", port: 4127, error: "Wrong or expired pairing code.", busy: false, refused: null }, h);
     expect(join.querySelector("button[data-action=start]")).toBeNull();
     expect(join.textContent).toContain("Wrong or expired pairing code.");
     join.querySelector<HTMLInputElement>("input[name=host]")!.value = "192.168.1.10";
     join.querySelector<HTMLInputElement>("input[name=code]")!.value = "483921";
     join.querySelector<HTMLButtonElement>("button[data-action=join]")!.click();
     expect(h.onJoin).toHaveBeenCalledWith("Pixel 8", "192.168.1.10", 4127, "483921");
+  });
+
+  it("renders the join form from the model, and keeps what is typed across a repaint", () => {
+    const h = { onStart: vi.fn(), onJoin: vi.fn(), onMode: vi.fn() };
+    const model: SetupModel = { firstRun: true, mode: "join", name: "Pixel 8", port: 4127, host: "192.168.1.10", joinPort: 4200, code: "483921", error: null, busy: false, refused: null };
+    const join = renderSetup(model, h);
+    expect(join.querySelector<HTMLInputElement>("input[name=host]")!.value).toBe("192.168.1.10");
+    expect(join.querySelector<HTMLInputElement>("input[name=joinPort]")!.value).toBe("4200");
+    expect(join.querySelector<HTMLInputElement>("input[name=code]")!.value).toBe("483921");
+    // Typing writes to the model, so the card rebuilt after an error shows it again.
+    const typed = (card: HTMLElement, name: string, value: string) => {
+      const input = card.querySelector<HTMLInputElement>(`input[name=${name}]`)!;
+      input.value = value;
+      input.dispatchEvent(new Event("input"));
+    };
+    typed(join, "host", "10.0.0.2");
+    typed(join, "name", "Fold");
+    model.error = "Wrong or expired pairing code.";
+    expect(model.host).toBe("10.0.0.2");
+    const repaint = renderSetup(model, h);
+    expect(repaint.querySelector<HTMLInputElement>("input[name=host]")!.value).toBe("10.0.0.2");
+    expect(repaint.querySelector<HTMLInputElement>("input[name=name]")!.value).toBe("Fold");
   });
 });

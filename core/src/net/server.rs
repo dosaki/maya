@@ -149,7 +149,7 @@ pub struct Server {
     /// Pairings recorded but not yet registered as connections: a handover
     /// would hand them over without moving them, so it waits for none.
     pairings_in_flight: HashSet<String>,
-    /// The main's last board for mirroring Mayas, newest first by serial.
+    /// The main's last board for mirroring Mayas: one board and the serial it was taken at.
     mirror: Option<MirrorBoard>,
     mirror_serial: u64,
 }
@@ -1410,8 +1410,9 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(800));
                 }
             }
+            let answer = serde_json::json!(format!("{request:?}"));
             self.requests.lock().unwrap().push((machine.map(str::to_string), request));
-            Ok(Some(serde_json::json!("done")))
+            Ok(Some(answer))
         }
     }
 
@@ -1516,6 +1517,28 @@ mod tests {
     }
 
     #[test]
+    fn a_maya_that_reconnects_without_the_mirror_cap_gets_no_board_and_no_requests() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (ws, id, token, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        drop(ws);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        assert!(handle.status().assistants.iter().any(|a| a.id == id && a.mirror), "the permission is still saved");
+        let mut ws = connect(port);
+        hello_caps(&mut ws, "Pixel", Some(&id), &[]);
+        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
+        answer(&mut ws, &token, &nonce);
+        send(&mut ws, &Up::Request { id: 1, machine: None, request: Request::ListDirs });
+        let Down::Response { id: 1, ok: false, error: Some(e), .. } = recv(&mut ws) else { panic!("expected a refusal") };
+        assert!(e.ends_with("has not allowed this Maya to control its sessions."), "{e}");
+        assert!(counter.requests.lock().unwrap().is_empty());
+        handle.mirror(vec![card("l1", "local")]);
+        send(&mut ws, &Up::Ping);
+        assert_eq!(recv(&mut ws), Down::Pong, "no board came before the pong");
+        handle.stop();
+    }
+
+    #[test]
     fn an_allowed_maya_s_requests_reach_the_app_off_the_connection_thread() {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
@@ -1524,7 +1547,7 @@ mod tests {
         send(&mut phone, &Up::Request { id: 1, machine: None, request: Request::Command(CommandKind::Compact { session: "slow".into() }) });
         send(&mut phone, &Up::Ping);
         assert_eq!(recv(&mut phone), Down::Pong, "a slow request does not hold up the connection");
-        assert_eq!(recv(&mut phone), Down::Response { id: 1, ok: true, error: None, data: Some(serde_json::json!("done")) });
+        assert_eq!(recv(&mut phone), Down::Response { id: 1, ok: true, error: None, data: Some(serde_json::json!(format!("{:?}", Request::Command(CommandKind::Compact { session: "slow".into() })))) });
         send(&mut phone, &Up::Request { id: 2, machine: Some(main.clone()), request: Request::ListDirs });
         assert!(matches!(recv(&mut phone), Down::Response { id: 2, ok: true, .. }));
         send(&mut phone, &Up::Request { id: 3, machine: Some("laptop".into()), request: Request::ListAgents });
@@ -2766,8 +2789,9 @@ mod tests {
             std::thread::spawn(move || l.request(None, Request::Command(CommandKind::Compact { session: "slow".into() }), Duration::from_secs(5)))
         };
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(lane.request(Some("laptop".into()), Request::ListAgents, Duration::from_secs(5)), Ok(Some(serde_json::json!("done"))));
-        assert_eq!(slow.join().unwrap(), Ok(Some(serde_json::json!("done"))), "each answer reaches its own caller");
+        assert_eq!(lane.request(Some("laptop".into()), Request::ListAgents, Duration::from_secs(5)), Ok(Some(serde_json::json!(format!("{:?}", Request::ListAgents)))));
+        let slow_answer = format!("{:?}", Request::Command(CommandKind::Compact { session: "slow".into() }));
+        assert_eq!(slow.join().unwrap(), Ok(Some(serde_json::json!(slow_answer))), "each answer reaches its own caller");
         stop.store(true, Ordering::SeqCst);
         t.join().unwrap();
         assert_eq!(lane.request(None, Request::ListDirs, Duration::from_secs(1)).unwrap_err(), client::NOT_CONNECTED);

@@ -474,16 +474,24 @@ fn a_phone_main_mirrors_its_board_and_forwards_a_mirroring_maya_s_reply() {
 #[derive(Default)]
 struct MainNotify {
     requests: Mutex<Vec<(Option<String>, Request)>>,
+    /// The paired list as the main would have saved it.
+    saved: Mutex<Vec<maya_core::config::PairedAssistant>>,
 }
 
 impl maya_core::net::server::Notify for MainNotify {
     fn board_changed(&self) {}
     fn board_seeded(&self, _: &[Card]) {}
     fn status_changed(&self, _: NetworkStatus) {}
-    fn paired(&self, _: &maya_core::config::PairedAssistant) -> Result<(), String> {
+    fn paired(&self, a: &maya_core::config::PairedAssistant) -> Result<(), String> {
+        let mut saved = self.saved.lock().unwrap();
+        match saved.iter_mut().find(|s| s.id == a.id) {
+            Some(s) => *s = a.clone(),
+            None => saved.push(a.clone()),
+        }
         Ok(())
     }
-    fn paired_list_changed(&self, _: &[maya_core::config::PairedAssistant]) -> Result<(), String> {
+    fn paired_list_changed(&self, list: &[maya_core::config::PairedAssistant]) -> Result<(), String> {
+        *self.saved.lock().unwrap() = list.to_vec();
         Ok(())
     }
     fn request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
@@ -543,6 +551,47 @@ fn the_phone_joins_a_main_mirrors_it_quietly_acts_through_it_and_leaves() {
 }
 
 #[test]
+fn a_reconnect_announces_the_asks_that_began_while_away() {
+    let (main, port, notify) = desk();
+    let (hub, _page, alerts, _dir) = new_hub_recording(free_port());
+    let code = main.open_pairing(maya_core::store::now_ms()).unwrap().0;
+    hub.join("127.0.0.1", port, "Pixel", &code).unwrap();
+    wait_until("the offer", || hub.status().assistant.mirror == Some(MirrorAccess::Allowed));
+    main.mirror(vec![card("s1", State::Awaiting, 1_000)]);
+    wait_until("the mirrored card", || hub.cards().iter().any(|c| c.session_id == "s1"));
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(alerts.posts.lock().unwrap().is_empty());
+
+    // The main goes away and comes back on the same port with the phone's pairing.
+    let saved = notify.saved.lock().unwrap().clone();
+    main.stop();
+    wait_until("the link drops", || !hub.status().assistant.connected);
+    let config = NetworkConfig { name: "desk".into(), assistants: saved, ..Default::default() };
+    let config = Arc::new(Mutex::new(config));
+    let started = std::time::Instant::now();
+    let main = loop {
+        match start_with(Arc::new(MainNotify::default()), config.clone(), port) {
+            Ok(m) => break m,
+            Err(e) => {
+                assert!(started.elapsed() < Duration::from_secs(10), "the port did not come back: {e}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    };
+    wait_until("the phone is back", || hub.status().assistant.connected && hub.status().assistant.mirror == Some(MirrorAccess::Allowed));
+    // s1 still waits (same since); s2 began while the phone was away.
+    main.mirror(vec![card("s1", State::Awaiting, 1_000), card("s2", State::Awaiting, 2_000)]);
+    wait_until("the new ask", || alerts.posts.lock().unwrap().len() == 1);
+    std::thread::sleep(Duration::from_millis(300));
+    let posts = alerts.posts.lock().unwrap();
+    assert_eq!(posts.len(), 1, "only the ask that began while away is announced");
+    assert_eq!(posts[0].title, "s2 on desk needs a decision");
+    drop(posts);
+    hub.stop_listening().unwrap();
+    main.stop();
+}
+
+#[test]
 fn a_join_with_a_wrong_code_puts_a_main_phone_s_server_back() {
     let (main, port, _) = desk();
     let (hub, _page, _dir) = new_hub(free_port());
@@ -574,4 +623,14 @@ fn a_join_with_a_wrong_code_reconnects_a_phone_that_was_joined() {
     hub.stop_listening().unwrap();
     a.stop();
     b.stop();
+}
+
+#[test]
+fn a_request_to_an_older_main_fails_at_once() {
+    let (hub, _page, _dir) = new_hub(free_port());
+    *hub.link.lock().unwrap() = maya_core::net::AssistantLink { mirror: Some(MirrorAccess::Unsupported), main_name: Some("Studio".into()), ..Default::default() };
+    let started = std::time::Instant::now();
+    let err = hub.request(None, Request::ListDirs).unwrap_err();
+    assert_eq!(err, "Studio runs an older Maya that cannot share its sessions. Update it.");
+    assert!(started.elapsed() < Duration::from_secs(1));
 }

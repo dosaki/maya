@@ -15,7 +15,12 @@ export interface SetupModel {
   /** Joined, but the main shares no sessions: whose, and whether it is too old to. */
   refused: { main: string; older: boolean } | null;
   name: string;
+  /** The port of the server this phone runs. */
   port: number;
+  /** What the join form holds, kept across repaints so an error does not lose it. */
+  host: string;
+  joinPort: number;
+  code: string;
   error: string | null;
   busy: boolean;
 }
@@ -44,13 +49,14 @@ export function refusedLine(main: string, phone: string, older: boolean): string
 
 const JOIN_HINT = "Open Settings → Network on the main, choose Show pairing code, and type the code it shows.";
 
-function field(label: string, name: string, value: string, type = "text"): { label: HTMLLabelElement; input: HTMLInputElement } {
+function field(label: string, name: string, value: string, type: string, onInput: (value: string) => void): { label: HTMLLabelElement; input: HTMLInputElement } {
   const l = document.createElement("label");
   l.textContent = label;
   const input = document.createElement("input");
   input.name = name;
   input.type = type;
   input.value = value;
+  input.addEventListener("input", () => onInput(input.value));
   l.append(input);
   return { label: l, input };
 }
@@ -111,10 +117,10 @@ export function renderSetup(
   }
   if (m.firstRun && m.mode === "join") {
     blurb.textContent = "Join a Maya that is already the main, to see and answer every session it shows.";
-    const name = field("Name", "name", m.name);
-    const host = field("Host", "host", "");
-    const port = field("Port", "joinPort", String(m.port), "number");
-    const code = field("Pairing code", "code", "");
+    const name = field("Name", "name", m.name, "text", (v) => { m.name = v; });
+    const host = field("Host", "host", m.host, "text", (v) => { m.host = v; });
+    const port = field("Port", "joinPort", String(m.joinPort), "number", (v) => { m.joinPort = Number(v) || 0; });
+    const code = field("Pairing code", "code", m.code, "text", (v) => { m.code = v; });
     code.input.inputMode = "numeric";
     const hint = document.createElement("p");
     hint.textContent = JOIN_HINT;
@@ -132,8 +138,8 @@ export function renderSetup(
   const start = primary(m.busy ? "Starting…" : "Start", "start");
   start.disabled = m.busy;
   if (m.firstRun) {
-    const name = field("Name", "name", m.name);
-    const port = field("Port", "port", String(m.port), "number");
+    const name = field("Name", "name", m.name, "text", (v) => { m.name = v; });
+    const port = field("Port", "port", String(m.port), "number", (v) => { m.port = Number(v) || 0; });
     start.addEventListener("click", () => h.onStart(name.input.value, Number(port.input.value) || 0));
     card.append(name.label, port.label);
   } else {
@@ -155,7 +161,7 @@ export interface SetupHooks {
 export function initSetup(hooks: SetupHooks): void {
   const host = document.getElementById("setup");
   if (!host) return;
-  const model: SetupModel = { firstRun: true, mode: "main", refused: null, name: "", port: 4127, error: null, busy: false };
+  const model: SetupModel = { firstRun: true, mode: "main", refused: null, name: "", port: 4127, host: "", joinPort: 4127, code: "", error: null, busy: false };
   let ran = false;
   let last: NetworkStatus | null = null;
   const show = () => {
