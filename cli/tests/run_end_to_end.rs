@@ -8,6 +8,7 @@ use maya_cli::{commands, run_cmd, status_file};
 use maya_core::config::{NetworkConfig, PairedAssistant};
 use maya_core::model::Card;
 use maya_core::net::protocol::CommandKind;
+use maya_core::net::identity::Keypair;
 use maya_core::net::server::{send_command_with, start_with, Notify};
 use maya_core::net::NetworkStatus;
 use maya_core::terminal::{Call, FakeTerminal};
@@ -48,7 +49,7 @@ fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
 #[test]
 fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     let recorder = Arc::new(Recorder::default());
-    let handle = start_with(recorder.clone(), Arc::new(Mutex::new(NetworkConfig { name: "Yhi".into(), ..Default::default() })), 0).unwrap();
+    let handle = start_with(recorder.clone(), Arc::new(Mutex::new(NetworkConfig { name: "Yhi".into(), ..Default::default() })), 0, Arc::new(Keypair::generate())).unwrap();
     let port = handle.port();
 
     // A registry session owned by this (live) process, on /dev/pts/3.
@@ -61,10 +62,10 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     // 1. Pair.
     let (code, _) = handle.open_pairing(maya_core::now_ms()).unwrap();
     // The label is trimmed before it is sent and stored.
-    assert_eq!(commands::pair(&claude_dir, "127.0.0.1", port, Some(" box "), &code), Ok(("Yhi".to_string(), "box".to_string())));
+    assert_eq!(commands::pair(&claude_dir, "127.0.0.1", port, Some(" box "), &code, false), Ok(("Yhi".to_string(), "box".to_string())));
     assert_eq!(recorder.paired.load(Ordering::SeqCst), 1);
     let saved = maya_core::config::load(&maya_dir.join("config.json"));
-    assert!(!saved.network.token.is_empty(), "the config on disk holds the token");
+    assert!(!saved.network.main_key.is_empty(), "the config on disk holds the main's key");
     assert_eq!(saved.network.name, "box");
 
     // 2. Run, with a fake terminal and a stop flag standing in for a signal.
@@ -88,7 +89,7 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     assert_eq!(run_cmd::run_with(&claude_dir, Arc::new(FakeTerminal::default()), Arc::new(AtomicBool::new(false))), 2);
     assert_eq!(status_file::read(&maya_dir).map(|s| s.connected), Some(true));
     // Nor can pairing swap the credentials under it.
-    assert_eq!(commands::pair(&claude_dir, "127.0.0.1", port, Some("box"), "123456"), Err((2, format!("stop `maya run` first (pid {})", std::process::id()))));
+    assert_eq!(commands::pair(&claude_dir, "127.0.0.1", port, Some("box"), "123456", false), Err((2, format!("stop `maya run` first (pid {})", std::process::id()))));
 
     // 4. A command from the main is typed through the terminal.
     assert_eq!(send_command_with(&handle.shared, "box", CommandKind::Compact { session: "s1".into() }, Duration::from_secs(5)), Ok(None));
@@ -114,12 +115,12 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
 
 #[test]
 fn run_stops_with_two_when_the_config_on_disk_stops_being_an_assistants() {
-    let handle = start_with(Arc::new(Recorder::default()), Arc::new(Mutex::new(NetworkConfig { name: "Yhi".into(), ..Default::default() })), 0).unwrap();
+    let handle = start_with(Arc::new(Recorder::default()), Arc::new(Mutex::new(NetworkConfig { name: "Yhi".into(), ..Default::default() })), 0, Arc::new(Keypair::generate())).unwrap();
     let (dir, store) = maya_core::actions::test_support::store_with_session("s1", std::process::id() as i32);
     drop(store);
     let claude_dir = dir.path().to_path_buf();
     let (code, _) = handle.open_pairing(maya_core::now_ms()).unwrap();
-    commands::pair(&claude_dir, "127.0.0.1", handle.port(), Some("box"), &code).unwrap();
+    commands::pair(&claude_dir, "127.0.0.1", handle.port(), Some("box"), &code, false).unwrap();
 
     let stop = Arc::new(AtomicBool::new(false));
     let runner = {

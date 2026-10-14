@@ -31,7 +31,7 @@ impl CliNotify {
 }
 
 impl ClientNotify for CliNotify {
-    fn paired(&self, _id: &str, _token: &str) {}
+    fn paired(&self, _main_key: &str) {}
 
     fn connected(&self, main_name: &str) {
         self.write(true, Some(main_name), None);
@@ -53,11 +53,12 @@ impl ClientNotify for CliNotify {
 
     /// Rewrites the main's host and port in `config.json`; `run` reads it
     /// again for the next connection, which `reconnect` makes at once.
-    fn moved(&self, host: &str, port: u16) -> Result<(), String> {
+    fn moved(&self, host: &str, port: u16, key: &str) -> Result<(), String> {
         let path = self.maya_dir.join("config.json");
         let mut c = maya_core::config::load(&path);
         c.network.main_host = host.into();
         c.network.main_port = port;
+        c.network.main_key = key.into();
         maya_core::config::save(&path, &c).map_err(|e| format!("could not save config.json: {e}"))
     }
 }
@@ -68,21 +69,20 @@ mod tests {
     use maya_core::config::{self, Config, NetworkRole};
 
     #[test]
-    fn a_move_saves_the_new_host_and_keeps_the_id_and_token() {
+    fn a_move_saves_the_new_host_and_saves_the_new_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mut c = Config::default();
         c.network.role = NetworkRole::Assistant;
         c.network.main_host = "10.0.0.2".into();
-        c.network.assistant_id = "id".into();
-        c.network.token = "tok".into();
+        c.network.main_key = "old".into();
         config::save(&path, &c).unwrap();
         let n = CliNotify::new(dir.path().to_path_buf(), Arc::new(AtomicBool::new(false)));
         assert_eq!(n.caps(), ["follow"]);
-        n.moved("10.0.0.9", 5001).unwrap();
+        n.moved("10.0.0.9", 5001, "new").unwrap();
         let after = config::load(&path);
         assert_eq!((after.network.main_host.as_str(), after.network.main_port), ("10.0.0.9", 5001));
-        assert_eq!((after.network.assistant_id.as_str(), after.network.token.as_str()), ("id", "tok"));
+        assert_eq!(after.network.main_key, "new");
         assert_eq!(after.network.role, NetworkRole::Assistant);
     }
 }

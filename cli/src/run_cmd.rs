@@ -15,6 +15,7 @@ use crate::status_file::{self, RunStatus};
 use crate::tmux::Tmux;
 use maya_core::config::{Config, NetworkConfig, NetworkRole};
 use maya_core::net::client::{self, ClientNotify};
+use maya_core::net::identity;
 use maya_core::store::Store;
 use maya_core::terminal::Terminal;
 use maya_core::{actions, hook_install, log, now_ms, watcher};
@@ -32,7 +33,7 @@ pub fn preflight(config: &Config, lock_path: &Path, existing: Option<&RunStatus>
     match config.network.role {
         NetworkRole::Main => return Err((2, "the CLI is assistant-only".into())),
         NetworkRole::Off => return Err((2, "run `maya pair` first".into())),
-        NetworkRole::Assistant if config.network.token.is_empty() || config.network.assistant_id.is_empty() => return Err((2, "run `maya pair` first".into())),
+        NetworkRole::Assistant if config.network.main_key.is_empty() => return Err((2, "run `maya pair` first".into())),
         NetworkRole::Assistant => {}
     }
     match RunLock::try_take(lock_path) {
@@ -108,22 +109,20 @@ fn install_signal_handlers(stop: Arc<AtomicBool>) {
 fn reload_network(store: &Mutex<Store>, path: &Path) -> NetworkConfig {
     let mut s = store.lock().unwrap();
     match std::fs::read_to_string(path) {
-        Ok(t) => match serde_json::from_str::<Config>(&t) {
+        Ok(t) => match serde_json::from_str::<Config>(&t).map(Config::migrate) {
             Ok(c) => s.config = c,
             Err(e) => log::line("cli", format!("config.json unreadable, keeping the last good one: {e}")),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             log::line("cli", "config.json is gone; treating this as unpaired");
             s.config.network.role = NetworkRole::Off;
-            s.config.network.token.clear();
-            s.config.network.assistant_id.clear();
+            s.config.network.main_key.clear();
         }
         Err(e) => log::line("cli", format!("config.json unreadable, keeping the last good one: {e}")),
     }
     let mut n = s.config.network.clone();
     if n.role != NetworkRole::Assistant {
-        n.token.clear();
-        n.assistant_id.clear();
+        n.main_key.clear();
     }
     n
 }
@@ -167,6 +166,14 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
         Err((code, msg)) => {
             eprintln!("{msg}");
             return code;
+        }
+    };
+    // Before anything is started: a bad key file stops the run with the config untouched.
+    let identity = match identity::load_or_create(&maya_dir.join(identity::FILE)) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
         }
     };
     // Only once no other run holds the lock: it would be rewriting events.jsonl under that run.
@@ -213,7 +220,7 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
         let (s, path) = (store.clone(), config_path.clone());
         move || reload_network(&s, &path)
     };
-    client::reconnect(&config_of, exec, notify.clone() as Arc<dyn ClientNotify>, &stop);
+    client::reconnect(&config_of, Arc::new(identity), exec, notify.clone() as Arc<dyn ClientNotify>, &stop);
 
     let by_signal = stop.load(Ordering::SeqCst) && !notify.removed.load(Ordering::SeqCst);
     let changed = config_changed.load(Ordering::SeqCst);
@@ -242,8 +249,7 @@ mod tests {
         c.network.role = NetworkRole::Main;
         assert_eq!(preflight(&c, &lock, None).err(), Some((2, "the CLI is assistant-only".into())));
         c.network.role = NetworkRole::Assistant;
-        c.network.token = "t".into();
-        c.network.assistant_id = "a".into();
+        c.network.main_key = "a2V5".into();
         assert!(preflight(&c, &lock, None).is_ok());
     }
 
@@ -253,8 +259,7 @@ mod tests {
         let lock = run_lock::path(d.path());
         let mut c = Config::default();
         c.network.role = NetworkRole::Assistant;
-        c.network.token = "t".into();
-        c.network.assistant_id = "a".into();
+        c.network.main_key = "a2V5".into();
         let twin = RunStatus { pid: 99, ..Default::default() };
         // A status file with no run holding the lock is left by a dead run.
         let held = preflight(&c, &lock, Some(&twin)).expect("a stale status file does not block");
@@ -270,17 +275,16 @@ mod tests {
         let path = {
             let mut s = store.lock().unwrap();
             s.config.network.role = NetworkRole::Assistant;
-            s.config.network.token = "t".into();
-            s.config.network.assistant_id = "a".into();
+            s.config.network.main_key = "a2V5".into();
             s.config_path()
         };
         std::fs::write(&path, "{").unwrap();
         let n = reload_network(&store, &path);
-        assert_eq!((n.role, n.token.as_str(), n.assistant_id.as_str()), (NetworkRole::Assistant, "t", "a"));
+        assert_eq!((n.role, n.main_key.as_str()), (NetworkRole::Assistant, "a2V5"));
         // A config that parses and is no longer an assistant's clears them.
-        std::fs::write(&path, r#"{"completedTimeoutMinutes":10,"network":{"role":"off","token":"t","assistantId":"a"}}"#).unwrap();
+        std::fs::write(&path, r#"{"completedTimeoutMinutes":10,"network":{"role":"off","mainKey":"a2V5"}}"#).unwrap();
         let n = reload_network(&store, &path);
-        assert_eq!((n.token.as_str(), n.assistant_id.as_str()), ("", ""));
+        assert_eq!(n.main_key, "");
         assert_eq!(store.lock().unwrap().config.network.role, NetworkRole::Off);
         drop(dir);
     }
@@ -291,13 +295,12 @@ mod tests {
         let path = {
             let mut s = store.lock().unwrap();
             s.config.network.role = NetworkRole::Assistant;
-            s.config.network.token = "t".into();
-            s.config.network.assistant_id = "a".into();
+            s.config.network.main_key = "a2V5".into();
             s.config_path()
         };
         std::fs::remove_file(&path).unwrap();
         let n = reload_network(&store, &path);
-        assert_eq!((n.role, n.token.as_str(), n.assistant_id.as_str()), (NetworkRole::Off, "", ""));
+        assert_eq!((n.role, n.main_key.as_str()), (NetworkRole::Off, ""));
         drop(dir);
     }
 
@@ -331,7 +334,7 @@ mod tests {
     fn the_watcher_reloads_a_changed_config_and_sees_a_role_that_is_no_longer_an_assistants() {
         let (dir, store) = maya_core::actions::test_support::store_with_session("s1", 4242);
         let path = store.lock().unwrap().config_path();
-        let assistant = r#"{"completedTimeoutMinutes":10,"network":{"role":"assistant","token":"t","assistantId":"a"}}"#;
+        let assistant = r#"{"completedTimeoutMinutes":10,"network":{"role":"assistant","mainKey":"a2V5"}}"#;
         std::fs::write(&path, assistant).unwrap();
         let mut seen = None;
         assert!(config_still_assistant(&store, &path, &mut seen));

@@ -11,6 +11,7 @@ use maya_core::config::{self, NetworkRole};
 use maya_core::hook_install;
 use maya_core::launch::LaunchOptions;
 use maya_core::net::client::{self, Executor, WRONG_CODE};
+use maya_core::net::identity::{self, Keypair};
 use maya_core::registry::pid_alive;
 use maya_core::store::Store;
 use maya_core::terminal::Terminal;
@@ -41,11 +42,11 @@ pub fn paired_message(main: &str, label: &str) -> String {
 }
 
 /// Pairs with a main Maya at `host:port` using its six-digit `code`, stores
-/// the assistant id and token and the link in the config, and returns the
+/// the main's key and the link in the config, and returns the
 /// main's name and the label this machine paired under. Errors carry the exit code: 2 while a `maya run` holds
 /// the run lock (pairing would swap the credentials under it), else 1.
 /// The lock is held while pairing, so no run starts halfway through.
-pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: &str) -> Result<(String, String), (i32, String)> {
+pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: &str, new_key: bool) -> Result<(String, String), (i32, String)> {
     let maya_dir = claude_dir.join("maya");
     let _lock = match RunLock::try_take(&run_lock::path(&maya_dir)) {
         Ok(Some(lock)) => lock,
@@ -61,16 +62,23 @@ pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: 
     let name = name.map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(maya_core::net::local_hostname);
     let store = Arc::new(Mutex::new(Store::new(claude_dir.to_path_buf())));
     let exec: Arc<dyn Executor> = Arc::new(CliExecutor::new(store.clone(), Arc::new(Tmux::default())));
-    let (main, id, token) = client::pair_with(exec, host, port, &name, code, vec![]).map_err(|e| (1, e))?;
+    // The key file is read before anything changes, so a bad one leaves the config alone. A new key
+    // is only written once the pairing worked: a failed `--new-key` keeps the old key and pairing.
+    let key_path = maya_dir.join(identity::FILE);
+    let identity = if new_key { Keypair::generate() } else { identity::load_or_create(&key_path).map_err(|e| (1, e))? };
+    let (main, main_key) = client::pair_with(exec, Arc::new(identity.clone()), host, port, &name, code, vec![]).map_err(|e| (1, e))?;
     let mut s = store.lock().unwrap();
     s.config.network.role = NetworkRole::Assistant;
     s.config.network.main_host = host.trim().into();
     s.config.network.main_port = port;
     s.config.network.name = name.clone();
-    s.config.network.assistant_id = id;
-    s.config.network.token = token;
+    s.config.network.main_key = main_key;
+    s.config.network.pair_again = false;
     s.config.listen = false;
     config::save(&s.config_path(), &s.config).map_err(|e| (1, e))?;
+    if new_key {
+        identity::save(&key_path, &identity).map_err(|e| (1, e))?;
+    }
     Ok((main, name))
 }
 
@@ -191,7 +199,7 @@ mod tests {
         // a child another test is spawning can hold a just-dropped lock.
         for code in ["12345", "1234567", "12a456", "", "１２３４５６"] {
             let dir = claude_dir_with(NetworkRole::Off);
-            assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), code), Err((1, WRONG_CODE.to_string())), "{code:?}");
+            assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), code, false), Err((1, WRONG_CODE.to_string())), "{code:?}");
         }
     }
 
@@ -200,11 +208,22 @@ mod tests {
         let dir = claude_dir_with(NetworkRole::Off);
         let maya_dir = dir.path().join("maya");
         let _run = RunLock::try_take(&run_lock::path(&maya_dir)).unwrap().unwrap();
-        assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456"), Err((2, "stop `maya run` first".to_string())));
+        assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456", false), Err((2, "stop `maya run` first".to_string())));
         let me = std::process::id();
         status_file::write(&maya_dir, &RunStatus { pid: me, connected: true, ..Default::default() }).unwrap();
-        assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456"), Err((2, format!("stop `maya run` first (pid {me})"))));
+        assert_eq!(pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456", false), Err((2, format!("stop `maya run` first (pid {me})"))));
         assert_eq!(config::load(&dir.path().join("maya/config.json")).network.role, NetworkRole::Off);
+    }
+
+    #[test]
+    fn a_failed_pairing_with_a_new_key_keeps_the_old_key_and_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("maya").join(identity::FILE);
+        let old = identity::load_or_create(&key_path).unwrap();
+        let before = std::fs::read(dir.path().join("maya").join("config.json")).ok();
+        assert!(pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456", true).is_err());
+        assert_eq!(identity::load_or_create(&key_path).unwrap().public, old.public);
+        assert_eq!(std::fs::read(dir.path().join("maya").join("config.json")).ok(), before);
     }
 
     #[test]
@@ -213,7 +232,7 @@ mod tests {
         // Even with a live pid (this process): only the lock counts.
         status_file::write(&dir.path().join("maya"), &RunStatus { pid: std::process::id(), ..Default::default() }).unwrap();
         // Past the check: it tries the main, which is not there.
-        let (code, err) = pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456").unwrap_err();
+        let (code, err) = pair(dir.path(), "127.0.0.1", 1, Some("box"), "123456", false).unwrap_err();
         assert_eq!(code, 1);
         assert!(err.starts_with("Could not reach"), "{err}");
     }

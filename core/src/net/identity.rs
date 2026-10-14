@@ -78,11 +78,16 @@ pub fn load_or_create(path: &Path) -> Result<Keypair, String> {
 /// A fresh key pair, saved over `path`.
 pub fn replace(path: &Path) -> Result<Keypair, String> {
     let k = Keypair::generate();
+    save(path, &k)?;
+    Ok(k)
+}
+
+/// `key` saved over `path`, owner-only.
+pub fn save(path: &Path, key: &Keypair) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    crate::config::write_private(path, k.to_secret().as_bytes()).map_err(|e| format!("Could not save {}: {e}", path.display()))?;
-    Ok(k)
+    crate::config::write_private(path, key.to_secret().as_bytes()).map_err(|e| format!("Could not save {}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -129,6 +134,18 @@ mod tests {
         let fresh = replace(&path).unwrap();
         assert_ne!(fresh.public, first.public);
         assert_eq!(load_or_create(&path).unwrap().public, fresh.public);
+    }
+
+    #[test]
+    fn a_given_key_is_saved_over_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("maya").join(FILE);
+        let old = load_or_create(&path).unwrap();
+        let fresh = Keypair::generate();
+        save(&path, &fresh).unwrap();
+        let loaded = load_or_create(&path).unwrap();
+        assert_eq!(loaded.public, fresh.public);
+        assert_ne!(loaded.public, old.public);
     }
 
     #[test]

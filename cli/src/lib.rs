@@ -26,7 +26,7 @@ pub fn run(args: Vec<String>) -> i32 {
             println!("maya {}", env!("CARGO_PKG_VERSION"));
             0
         }
-        Ok(args::Cmd::Pair { host, port, code, name }) => match commands::pair(&claude_dir, &host, port, name.as_deref(), &code) {
+        Ok(args::Cmd::Pair { host, port, code, name, new_key }) => match commands::pair(&claude_dir, &host, port, name.as_deref(), &code, new_key) {
             Ok((main, label)) => report(Ok(commands::paired_message(&main, &label))),
             Err((code, e)) => {
                 eprintln!("{e}");
