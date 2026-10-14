@@ -8,7 +8,9 @@
 use crate::actions;
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
 use crate::net::promote;
-use crate::net::protocol::{CommandKind, CAP_FOLLOW, CAP_LEAD};
+use crate::net::merge;
+use crate::net::protocol::{CommandKind, Request, CAP_FOLLOW, CAP_LEAD};
+use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, target_of, Target, ROUTE_TIMEOUT};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
 use crate::net::AssistantLink;
 use crate::config::{self, NetworkRole};
@@ -202,6 +204,39 @@ impl Executor for TauriExecutor {
 
     fn agents(&self) -> Option<Vec<maya_core::agents::AgentInfo>> {
         Some(maya_core::agents::snapshot())
+    }
+}
+
+/// Answers a mirroring Maya's request as this Maya's own page would:
+/// a session's command goes to whichever machine lists it, a machine's
+/// command to the machine named (`None` is this Mac), and the listings
+/// come from the same places the page reads.
+pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
+    let state = app.state::<AppState>();
+    match request {
+        Request::ListDirs => match machine {
+            Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
+            None => to_data(actions::list_project_dirs(&crate::local(&state))?),
+        },
+        Request::ListAgents => match machine {
+            Some(m) => to_data(agents_reply(false, merge::agents_of(&crate::remote_boards(&state), m), Vec::new)),
+            None => to_data(agents_reply(true, None, maya_core::agents::current)),
+        },
+        Request::Command(kind) => match target_of(&kind) {
+            Target::Session(session) => match crate::remote_machine_of(&state, &session) {
+                Some(m) => send_command(app, &m, kind, ROUTE_TIMEOUT),
+                None => execute(app, kind),
+            },
+            Target::Machine => match machine {
+                Some(m) => {
+                    if let Some(agent) = agent_of(&kind) {
+                        check_remote_agent(agent, &merge::agents_of(&crate::remote_boards(&state), m), m)?;
+                    }
+                    send_command(app, m, kind, ROUTE_TIMEOUT)
+                }
+                None => execute(app, kind),
+            },
+        },
     }
 }
 

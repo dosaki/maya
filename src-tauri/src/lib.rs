@@ -99,7 +99,7 @@ use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 /// A remote session's machine, when this Maya is the main and the session
 /// belongs to one of its connected assistants; else `None` for a local one.
 /// A live local session with the id wins, as it does on the board.
-fn remote_machine_of(state: &AppState, session_id: &str) -> Option<String> {
+pub(crate) fn remote_machine_of(state: &AppState, session_id: &str) -> Option<String> {
     let local_ids = state.store.lock().unwrap().live_session_ids();
     merge::route(&local_ids, &remote_boards(state), session_id, now_ms())
 }
@@ -194,10 +194,14 @@ impl Notify for TauriNetNotify {
     fn paired_list_changed(&self, assistants: &[config::PairedAssistant]) -> Result<(), String> {
         self.save_assistants(|list| *list = assistants.to_vec())
     }
+
+    fn request(&self, machine: Option<&str>, request: net::protocol::Request) -> Result<Option<serde_json::Value>, String> {
+        net_app::serve_request(&self.app, machine, request)
+    }
 }
 
 /// The assistants' last snapshots when this Maya is the main; else none.
-fn remote_boards(state: &AppState) -> Vec<merge::RemoteBoard> {
+pub(crate) fn remote_boards(state: &AppState) -> Vec<merge::RemoteBoard> {
     let server = state.network.lock().unwrap().server.clone();
     server.map(|s| s.boards()).unwrap_or_default()
 }
@@ -510,6 +514,11 @@ fn refresh_and_emit(app: &AppHandle) {
         }
     }
     let _ = app.emit("sessions", &cards);
+    // Mirroring Mayas see what this page shows.
+    let server = app.state::<AppState>().network.lock().unwrap().server.clone();
+    if let Some(s) = server {
+        s.mirror(cards.clone());
+    }
     if assistant {
         net_app::push_board(app);
     }
@@ -601,6 +610,22 @@ fn network_promote(app: AppHandle, state: TauriState<AppState>, id: String) -> R
     let out = server.promote(&id)?;
     update_config(&app, |c| net::promote::as_assistant_of(c, &out.host, out.port, &out.me)).map_err(|e| format!("Could not save this Maya as an assistant: {}.", e.trim_end_matches('.')))?;
     log::line("network", format!("now an assistant of {}:{}", out.host, out.port));
+    Ok(network_status_of(&state))
+}
+
+/// Lets a paired Maya see and control every session, or stops it. With the
+/// server down only the saved list changes.
+#[tauri::command]
+fn network_set_mirror(app: AppHandle, state: TauriState<AppState>, id: String, on: bool) -> Result<NetworkStatus, String> {
+    let server = state.network.lock().unwrap().server.clone();
+    match server {
+        Some(s) => s.set_mirror(&id, on)?,
+        None => TauriNetNotify { app: app.clone() }.save_assistants(|list| {
+            if let Some(a) = list.iter_mut().find(|a| a.id == id) {
+                a.mirror = on;
+            }
+        })?,
+    }
     Ok(network_status_of(&state))
 }
 
@@ -1196,6 +1221,7 @@ pub fn run() {
             network_pairing_code,
             network_remove_assistant,
             network_promote,
+            network_set_mirror,
             network_pair,
             list_machines,
             updater::update_kind,
