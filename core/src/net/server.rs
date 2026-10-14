@@ -2323,8 +2323,8 @@ mod tests {
 
     /// The client's executor: records each command and serves one card.
     #[derive(Default)]
-    struct FakeExec {
-        kinds: Mutex<Vec<CommandKind>>,
+    pub(crate) struct FakeExec {
+        pub(crate) kinds: Mutex<Vec<CommandKind>>,
     }
 
     impl client::Executor for FakeExec {
@@ -2339,7 +2339,7 @@ mod tests {
 
     /// What the client tells the app.
     #[derive(Default)]
-    struct FakeClientNotify {
+    pub(crate) struct FakeClientNotify {
         main: Mutex<Option<String>>,
         /// The main's key, as pairing learned it.
         key: Mutex<Option<String>>,
@@ -2402,7 +2402,7 @@ mod tests {
         }
     }
 
-    fn assistant_config(port: u16, main: &ServerHandle) -> NetworkConfig {
+    pub(crate) fn assistant_config(port: u16, main: &ServerHandle) -> NetworkConfig {
         NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, main_key: crate::net::identity::encode_key(&main.public_key()), ..Default::default() }
     }
 
@@ -2943,5 +2943,9 @@ mod tests {
         assert!(began.elapsed() < Duration::from_secs(5), "not left to time out");
         stop.store(true, Ordering::SeqCst);
         t.join().unwrap();
+    }
+
+    mod tamper {
+        include!("tamper_tests.rs");
     }
 }
