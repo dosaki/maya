@@ -170,7 +170,7 @@ impl Server {
     fn record_pairing(&mut self, address: &str, name: &str, hostname: &str, platform: &str) -> (PairedAssistant, Option<PairedAssistant>) {
         let again = self.paired.iter().position(|p| p.address == address && !self.conns.contains_key(&p.id));
         let Some(i) = again else {
-            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token(), address: address.into(), last_seen: None };
+            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token(), address: address.into(), last_seen: None, mirror: false };
             self.paired.push(a.clone());
             self.pairings_in_flight.insert(a.id.clone());
             return (a, None);
@@ -274,7 +274,7 @@ impl Server {
                 let peer = self.peers.get(&p.id);
                 let connected = self.conns.contains_key(&p.id);
                 let can = |cap: &str| connected && peer.is_some_and(|x| x.caps.iter().any(|c| c == cap));
-                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected, last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note), can_lead: can(CAP_LEAD), can_follow: can(CAP_FOLLOW) }
+                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected, last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note), can_lead: can(CAP_LEAD), can_follow: can(CAP_FOLLOW), mirror: false, wants_mirror: false }
             })
             .collect();
         NetworkStatus { role: NetworkRole::Main, code, assistants, addresses: super::local_addresses(), ..Default::default() }
@@ -699,7 +699,7 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
         c.max_message_size = Some(MAX_FRAME);
         c.max_frame_size = Some(MAX_FRAME);
     });
-    if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone(), mac: proof }) {
+    if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone(), mac: proof, mirror: None }) {
         // Undone first, so the list `leave` saves no longer holds the
         // pairing it takes back.
         if let Some(p) = pairing {
@@ -931,6 +931,7 @@ fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
             lock(&ctx.shared).touch(&link.id);
             send_down(ws, &Down::Pong)?;
         }
+        Up::Request { id, .. } => send_down(ws, &Down::Response { id, ok: false, error: Some("This Maya cannot answer requests.".into()), data: None })?,
         Up::Hello { .. } | Up::Pair { .. } | Up::Auth { .. } => log::line("network", format!("{}: ignored a handshake message after welcome", link.label)),
     }
     Ok(())
@@ -1126,7 +1127,7 @@ impl ServerHandle {
             }
             s.handover = true;
             s.pairing = None;
-            let me = super::promote::own_entry(&self.ctx.main_name);
+            let me = super::promote::own_entry(&self.ctx.main_name, false);
             let list = super::promote::handover_list(&s.paired, id, &me);
             (label, entry.address, entry.token, list, me)
         };
@@ -2097,7 +2098,7 @@ mod tests {
                 ws.send(Message::text(encode(&Down::Challenge { nonce: "n".into() }))).unwrap();
                 assert!(matches!(read(&mut ws), Up::Auth { .. }));
             }
-            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into() })));
+            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into(), mirror: None })));
             let _ = ws.send(Message::text(encode(&Down::Command { id: 1, kind: CommandKind::Compact { session: "r1".into() } })));
             let _ = ws.read();
         });
@@ -2121,7 +2122,7 @@ mod tests {
             assert!(matches!(read(&mut ws), Up::Hello { .. }));
             assert!(matches!(read(&mut ws), Up::Pair { nonce, .. } if !nonce.is_empty()), "the assistant sends a nonce with its code");
             let _ = ws.send(Message::text(encode(&Down::Paired { id: "evil-id".into(), token: "evil-token".into() })));
-            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into() })));
+            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into(), mirror: None })));
             let _ = ws.read();
         });
         port

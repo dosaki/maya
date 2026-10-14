@@ -28,6 +28,10 @@ pub struct PairedAssistant {
     /// restarted since still says when it last saw it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<u64>,
+    /// May see and control every session in the pool: set at pairing when
+    /// the Maya asked (`CAP_MIRROR`), and by the main's switch.
+    #[serde(default)]
+    pub mirror: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
@@ -312,6 +316,13 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_paired_entry_saved_before_mirroring_existed_may_not_mirror() {
+        let old = r#"{"id":"a","name":"laptop","hostname":"h","platform":"macos","token":"t"}"#;
+        let a: PairedAssistant = serde_json::from_str(old).unwrap();
+        assert!(!a.mirror);
+    }
+
     #[cfg(unix)]
     #[test]
     fn save_leaves_the_config_readable_by_its_owner_only() {
@@ -511,7 +522,7 @@ mod tests {
         c.network.role = NetworkRole::Assistant;
         c.network.main_host = "10.0.0.2".into();
         c.network.token = "abc".into();
-        c.network.assistants.push(PairedAssistant { id: "x".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "192.168.55.70".into(), last_seen: Some(1_700_000_000_000) });
+        c.network.assistants.push(PairedAssistant { id: "x".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "192.168.55.70".into(), last_seen: Some(1_700_000_000_000), mirror: false });
         let text = serde_json::to_string(&c).unwrap();
         assert!(text.contains("\"role\":\"assistant\"") && text.contains("\"mainHost\":\"10.0.0.2\"") && text.contains("\"assistants\":[{"), "{text}");
         assert!(text.contains("\"address\":\"192.168.55.70\"") && text.contains("\"lastSeen\":1700000000000"), "{text}");

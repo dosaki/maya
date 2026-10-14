@@ -409,7 +409,7 @@ impl ClientNotify for HubClientNotify {
     fn paired(&self, _: &str, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
-        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false });
+        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None });
     }
     fn disconnected(&self, error: &str) {
         let retrying = error != NOT_PAIRED && error != REMOVED;
@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn a_late_paired_list_change_leaves_an_assistant_config_empty() {
-        let late = PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "10.0.0.5".into(), last_seen: None };
+        let late = PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false };
         let mut config = Config::default();
         config.network.role = NetworkRole::Assistant;
         assert!(!change_paired(&mut config, |l| *l = vec![late.clone()]));

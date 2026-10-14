@@ -370,7 +370,7 @@ fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, sto
                 }
                 creds = Some((id, token));
             }
-            Down::Welcome { name, mac: proof } => {
+            Down::Welcome { name, mac: proof, .. } => {
                 let proven = |key: &str| ours.as_ref().is_some_and(|n| mac_matches(key, n, &proof));
                 match code {
                     Some(code) => {
@@ -513,6 +513,7 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
             notify.moved(&host, port).map_err(|e| format!("Could not follow the main Maya to {host}: {e}"))?;
             return Err(MOVED.into());
         }
+        Down::Mirror { .. } | Down::Response { .. } => log::line("network", "main: ignored a mirror message"),
         Down::Challenge { .. } | Down::Welcome { .. } | Down::Paired { .. } => log::line("network", "main: ignored a handshake message after welcome"),
     }
     Ok(())

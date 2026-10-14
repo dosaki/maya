@@ -18,7 +18,7 @@ const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
 /// What the Machine pickers show: each paired assistant's display name,
 /// host and platform, and whether it is connected now.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineInfo {
     pub name: String,
@@ -88,6 +88,32 @@ pub fn machines_of(status: &NetworkStatus) -> Vec<MachineInfo> {
 }
 
 
+/// Where a command goes: the machine that lists its session, or the
+/// machine the caller names (start, resume and the listings).
+#[derive(Debug, PartialEq)]
+pub enum Target {
+    Session(String),
+    Machine,
+}
+
+pub fn target_of(kind: &super::protocol::CommandKind) -> Target {
+    use super::protocol::CommandKind::*;
+    match kind {
+        Reply { session, .. } | Answer { session, .. } | Compact { session } | Close { session } | Rename { session, .. } | SetOption { session, .. } | CycleMode { session } | Slash { session, .. } | History { session } => Target::Session(session.clone()),
+        Start { .. } | Resume { .. } | ListResumable { .. } | Promote { .. } => Target::Machine,
+    }
+}
+
+/// The agent a command starts or lists, for `check_remote_agent`.
+pub fn agent_of(kind: &super::protocol::CommandKind) -> Option<Harness> {
+    use super::protocol::CommandKind::*;
+    match kind {
+        Start { options, .. } => Some(options.agent),
+        Resume { agent, .. } | ListResumable { agent, .. } => Some(*agent),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +121,19 @@ mod tests {
     use crate::model::Harness;
     use crate::net::{AssistantStatus, NetworkStatus};
     use base64::Engine;
+
+    #[test]
+    fn a_command_names_its_session_or_needs_a_machine_and_some_name_an_agent() {
+        use crate::net::protocol::CommandKind;
+        use crate::launch::LaunchOptions;
+        assert_eq!(target_of(&CommandKind::Reply { session: "s1".into(), text: "hi".into(), attachments: vec![] }), Target::Session("s1".into()));
+        assert_eq!(target_of(&CommandKind::History { session: "s2".into() }), Target::Session("s2".into()));
+        assert_eq!(target_of(&CommandKind::ListResumable { dir: "/d".into(), agent: Harness::Codex }), Target::Machine);
+        assert_eq!(agent_of(&CommandKind::ListResumable { dir: "/d".into(), agent: Harness::Codex }), Some(Harness::Codex));
+        let options = LaunchOptions { agent: Harness::Kiro, ..Default::default() };
+        assert_eq!(agent_of(&CommandKind::Start { dir: None, prompt: "go".into(), options }), Some(Harness::Kiro));
+        assert_eq!(agent_of(&CommandKind::Compact { session: "s1".into() }), None);
+    }
 
     #[test]
     fn remote_attachments_encodes_a_small_file() {
@@ -174,8 +213,8 @@ mod tests {
     fn machines_of_keeps_the_status_display_names() {
         let status = NetworkStatus {
             assistants: vec![
-                AssistantStatus { id: "a".into(), name: "laptop (10.0.0.2)".into(), hostname: "laptop".into(), platform: "macos".into(), address: "10.0.0.2".into(), connected: true, last_seen: None, note: None, can_lead: false, can_follow: false },
-                AssistantStatus { id: "b".into(), name: "laptop (10.0.0.3)".into(), hostname: "laptop".into(), platform: "linux".into(), address: "10.0.0.3".into(), connected: false, last_seen: Some(1), note: None, can_lead: false, can_follow: false },
+                AssistantStatus { id: "a".into(), name: "laptop (10.0.0.2)".into(), hostname: "laptop".into(), platform: "macos".into(), address: "10.0.0.2".into(), connected: true, last_seen: None, note: None, can_lead: false, can_follow: false, mirror: false, wants_mirror: false },
+                AssistantStatus { id: "b".into(), name: "laptop (10.0.0.3)".into(), hostname: "laptop".into(), platform: "linux".into(), address: "10.0.0.3".into(), connected: false, last_seen: Some(1), note: None, can_lead: false, can_follow: false, mirror: false, wants_mirror: false },
             ],
             ..Default::default()
         };

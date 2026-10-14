@@ -13,9 +13,10 @@ struct Handover {
 
 /// The entry the old main makes for itself in the list it hands over: it
 /// connects to the new main with this id and token. Its address is filled
-/// in by the new main at its first authentication.
-pub fn own_entry(main_name: &str) -> PairedAssistant {
-    PairedAssistant { id: new_id(), name: main_name.into(), hostname: super::local_hostname(), platform: std::env::consts::OS.into(), token: new_token(), address: String::new(), last_seen: None }
+/// in by the new main at its first authentication. `mirror` is true for a
+/// phone: the user pressed Make main on it.
+pub fn own_entry(main_name: &str, mirror: bool) -> PairedAssistant {
+    PairedAssistant { id: new_id(), name: main_name.into(), hostname: super::local_hostname(), platform: std::env::consts::OS.into(), token: new_token(), address: String::new(), last_seen: None, mirror }
 }
 
 /// Every paired assistant but the one promoted, then the old main's own entry.
@@ -64,19 +65,25 @@ mod tests {
     use super::*;
 
     fn entry(id: &str, name: &str) -> PairedAssistant {
-        PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), token: format!("t-{id}"), address: "10.0.0.9".into(), last_seen: Some(5) }
+        PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), token: format!("t-{id}"), address: "10.0.0.9".into(), last_seen: Some(5), mirror: false }
+    }
+
+    #[test]
+    fn only_a_phone_s_own_entry_may_mirror() {
+        assert!(own_entry("Pixel", true).mirror);
+        assert!(!own_entry("desk", false).mirror);
     }
 
     #[test]
     fn the_list_leaves_the_new_main_out_and_adds_the_old_one() {
-        let me = own_entry("desk");
+        let me = own_entry("desk", false);
         let list = handover_list(&[entry("g", "laptop"), entry("b", "mini")], "g", &me);
         assert_eq!(list.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["b", me.id.as_str()]);
         assert_eq!(list[0], entry("b", "mini"), "the others go as they are, token included");
         assert_eq!(me.name, "desk");
         assert!(me.address.is_empty() && me.last_seen.is_none());
         assert!(!me.id.is_empty() && !me.token.is_empty());
-        assert_ne!(own_entry("desk").token, me.token, "a fresh token each time");
+        assert_ne!(own_entry("desk", false).token, me.token, "a fresh token each time");
     }
 
     #[test]
@@ -111,7 +118,7 @@ mod tests {
         c.network.role = NetworkRole::Main;
         c.network.assistants = vec![entry("g", "laptop")];
         c.listen = true;
-        let me = own_entry("desk");
+        let me = own_entry("desk", false);
         as_assistant_of(&mut c, "10.0.0.9", 5000, &me);
         assert_eq!(c.network.role, NetworkRole::Assistant);
         assert_eq!((c.network.main_host.as_str(), c.network.main_port), ("10.0.0.9", 5000));
