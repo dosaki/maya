@@ -2,7 +2,8 @@ import { renderCard } from "./card";
 import { iconElement } from "./icons";
 import { COLUMNS, type Card } from "./types";
 
-export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) => number): HTMLElement {
+/** `emptyText` fills a column with no cards: "No matches" while a search narrows the board. */
+export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) => number, emptyText = "Nothing here"): HTMLElement {
   const board = document.createElement("main");
   board.className = "board";
   for (const col of COLUMNS) {
@@ -43,7 +44,7 @@ export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) =>
     if (inCol.length === 0) {
       const empty = document.createElement("div");
       empty.className = "column__empty";
-      empty.textContent = "Nothing here";
+      empty.textContent = emptyText;
       list.append(empty);
     }
     for (const c of inCol) list.append(renderCard(c, nowMs, nextFor?.(c) ?? 0));

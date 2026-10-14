@@ -10,6 +10,7 @@ import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
 import { makeReviewsView, reviewActionFor, waitingCount } from "./reviews";
+import { filterCards, makeSessionSearch } from "./search";
 import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
@@ -32,6 +33,7 @@ let reviews: ReviewState = { prs: [], error: null, fetchedAt: null };
 let clonesDir: string | null = null;
 let tabs: ReturnType<typeof makeTabs> | null = null;
 let reviewsView: ReturnType<typeof makeReviewsView> | null = null;
+let search: ReturnType<typeof makeSessionSearch> | null = null;
 
 function paintReviews(): void {
   const host = document.getElementById("reviews");
@@ -77,7 +79,10 @@ function paint(): void {
   const host = document.getElementById("board");
   if (!host) return;
   const before = targetUnderPointer();
-  swapBoard(host, renderBoard(cards, Date.now(), (c) => progress.next(c)));
+  const query = search?.query() ?? "";
+  const shown = filterCards(cards, query);
+  swapBoard(host, renderBoard(shown, Date.now(), (c) => progress.next(c), query.trim() ? "No matches" : undefined));
+  search?.setCount(shown.length, cards.length);
   guard.markPaint(Date.now(), { movedUnderPointer: targetUnderPointer() !== before });
   // Option buttons rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay(cards, Date.now());
@@ -158,7 +163,19 @@ async function start(): Promise<void> {
   void initVoice();
   void initDebug();
   void maybeShowFirstRun();
-  tabs = makeTabs();
+  const searchHost = document.getElementById("session-search");
+  if (searchHost) search = makeSessionSearch(searchHost, () => paint());
+  // The search box belongs to Sessions but sits outside the board pane.
+  tabs = makeTabs((tab) => {
+    if (searchHost) searchHost.hidden = tab !== "sessions";
+  });
+  // Cmd+F (Ctrl+F) finds a session, unless a dialog is open over the board.
+  window.addEventListener("keydown", (ev) => {
+    if (ev.key.toLowerCase() === "f" && (ev.metaKey || ev.ctrlKey) && !ev.shiftKey && !ev.altKey && tabs?.current() === "sessions" && !document.getElementById("modal-host")?.childElementCount) {
+      ev.preventDefault();
+      search?.focus();
+    }
+  });
   document.getElementById("reviews")?.addEventListener("click", (ev) => void reviewAction(ev.target as Element));
   await listen<ReviewState>("reviews", (e) => {
     reviews = e.payload;
