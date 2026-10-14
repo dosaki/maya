@@ -150,6 +150,16 @@ fn config_still_assistant(store: &Mutex<Store>, path: &Path, seen: &mut ConfigSt
     store.lock().unwrap().config.network.role == NetworkRole::Assistant
 }
 
+/// The key of a paired machine. Only `maya pair` makes one: a missing file would mean a new key
+/// the main does not know.
+fn load_identity(maya_dir: &Path) -> Result<identity::Keypair, String> {
+    let path = maya_dir.join(identity::FILE);
+    if !path.exists() {
+        return Err(format!("{} is missing; run `maya pair` again", identity::FILE));
+    }
+    identity::load_or_create(&path)
+}
+
 pub fn run(claude_dir: &Path) -> i32 {
     let stop = Arc::new(AtomicBool::new(false));
     install_signal_handlers(stop.clone());
@@ -169,7 +179,7 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
         }
     };
     // Before anything is started: a bad key file stops the run with the config untouched.
-    let identity = match identity::load_or_create(&maya_dir.join(identity::FILE)) {
+    let identity = match load_identity(&maya_dir) {
         Ok(k) => k,
         Err(e) => {
             eprintln!("{e}");
@@ -251,6 +261,15 @@ mod tests {
         c.network.role = NetworkRole::Assistant;
         c.network.main_key = "a2V5".into();
         assert!(preflight(&c, &lock, None).is_ok());
+    }
+
+    #[test]
+    fn a_paired_machine_without_its_key_file_is_not_given_a_new_key() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(load_identity(d.path()).err(), Some("identity.key is missing; run `maya pair` again".to_string()));
+        assert!(!d.path().join(identity::FILE).exists(), "nothing was made");
+        let made = identity::load_or_create(&d.path().join(identity::FILE)).unwrap();
+        assert_eq!(load_identity(d.path()).unwrap().public, made.public);
     }
 
     #[test]

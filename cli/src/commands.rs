@@ -68,6 +68,7 @@ pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: 
     let identity = if new_key { Keypair::generate() } else { identity::load_or_create(&key_path).map_err(|e| (1, e))? };
     let (main, main_key) = client::pair_with(exec, Arc::new(identity.clone()), host, port, &name, code, vec![]).map_err(|e| (1, e))?;
     let mut s = store.lock().unwrap();
+    let previous = s.config.clone();
     s.config.network.role = NetworkRole::Assistant;
     s.config.network.main_host = host.trim().into();
     s.config.network.main_port = port;
@@ -75,9 +76,22 @@ pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: 
     s.config.network.main_key = main_key;
     s.config.network.pair_again = false;
     s.config.listen = false;
-    config::save(&s.config_path(), &s.config).map_err(|e| (1, e))?;
-    if new_key {
-        identity::save(&key_path, &identity).map_err(|e| (1, e))?;
+    if !new_key {
+        config::save(&s.config_path(), &s.config).map_err(|e| (1, e))?;
+        return Ok((main, name));
+    }
+    // The new key and the new pairing change together: the key waits in a sibling file while the
+    // config is saved, then replaces the old one; if that fails the old config comes back.
+    let staged = key_path.with_extension("key.new");
+    identity::save(&staged, &identity).map_err(|e| (1, e))?;
+    if let Err(e) = config::save(&s.config_path(), &s.config) {
+        let _ = std::fs::remove_file(&staged);
+        return Err((1, e));
+    }
+    if let Err(e) = std::fs::rename(&staged, &key_path) {
+        let _ = std::fs::remove_file(&staged);
+        let _ = config::save(&s.config_path(), &previous);
+        return Err((1, format!("Could not save {}: {e}", key_path.display())));
     }
     Ok((main, name))
 }
