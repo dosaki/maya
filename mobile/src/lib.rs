@@ -88,6 +88,7 @@ pub fn run() {
             commands::network_pairing_code,
             commands::network_remove_assistant,
             commands::network_promote,
+            commands::network_set_mirror,
             commands::listen_stop,
             commands::get_config,
             commands::set_config,

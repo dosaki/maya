@@ -3,8 +3,9 @@
 
 use maya_core::config::{Config, NetworkConfig, NetworkRole};
 use maya_core::model::{AwaitKind, Awaiting, Card, Harness, State};
-use maya_core::net::client::{pair_with, run_once, ClientNotify, Executor};
-use maya_core::net::protocol::CommandKind;
+use maya_core::net::client::{pair_with, reconnect, run_once, ClientNotify, Executor, RequestLane};
+use maya_core::net::protocol::{CommandKind, Request};
+use maya_core::net::routing::MachineInfo;
 use maya_core::net::NetworkStatus;
 use maya_mobile_lib::alerts::{Alerts, Post};
 use maya_mobile_lib::hub::{Hub, Settings, Sink};
@@ -387,4 +388,76 @@ fn stop_listening_that_cannot_save_keeps_the_phone_listening() {
     assert_eq!(hub.status().role, NetworkRole::Assistant);
     assert_eq!(hub.settings.lock().unwrap().config.network.token, "tok");
     hub.client.lock().unwrap().take().unwrap().stop();
+}
+
+/// A second phone, as a core client that mirrors.
+#[derive(Default)]
+struct Mirrorer {
+    lane: Arc<RequestLane>,
+    mirrors: Mutex<Vec<(bool, Vec<Card>)>>,
+}
+
+impl ClientNotify for Mirrorer {
+    fn paired(&self, _: &str, _: &str) {}
+    fn connected(&self, _: &str) {}
+    fn disconnected(&self, _: &str) {}
+    fn removed(&self) {}
+    fn caps(&self) -> Vec<String> {
+        vec!["mirror".into()]
+    }
+    fn mirrored(&self, allowed: bool, cards: Vec<Card>, _: Vec<MachineInfo>) {
+        self.mirrors.lock().unwrap().push((allowed, cards));
+    }
+    fn lane(&self) -> Option<Arc<RequestLane>> {
+        Some(self.lane.clone())
+    }
+}
+
+struct NoExec;
+impl Executor for NoExec {
+    fn execute(&self, _: CommandKind) -> Result<Option<Value>, String> {
+        Err("no".into())
+    }
+    fn board(&self) -> (Vec<Card>, Vec<String>) {
+        (vec![], vec![])
+    }
+}
+
+#[test]
+fn a_phone_main_mirrors_its_board_and_forwards_a_mirroring_maya_s_reply() {
+    let (hub, _page, _dir) = new_hub(free_port());
+    hub.start_server().unwrap();
+    let port = hub.settings.lock().unwrap().config.listen_port();
+    // The laptop, with one session.
+    let code = hub.pairing_code().unwrap().code.unwrap().code;
+    let laptop = Arc::new(FakeAssistant { cards: Mutex::new(vec![card("s1", State::Idle, 1_000)]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) });
+    let (_, id, token) = pair_with(laptop.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
+    let link = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), assistant_id: id, token, ..Default::default() };
+    let stop = Arc::new(AtomicBool::new(false));
+    let laptop_thread = {
+        let (laptop, stop) = (laptop.clone(), stop.clone());
+        std::thread::spawn(move || run_once(&link, laptop, Arc::new(Quiet), &stop, None))
+    };
+    wait_until("the laptop's board", || hub.cards().iter().any(|c| c.session_id == "s1"));
+    // A second phone joins and mirrors.
+    let code = hub.pairing_code().unwrap().code.unwrap().code;
+    let (_, pid, ptoken) = pair_with(Arc::new(FakeAssistant { cards: Mutex::new(vec![]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) }), "127.0.0.1", port, "Fold", &code, vec!["mirror".into()]).unwrap();
+    let m = Arc::new(Mirrorer::default());
+    let pcfg = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "Fold".into(), assistant_id: pid.clone(), token: ptoken, ..Default::default() };
+    let pthread = {
+        let (m, stop) = (m.clone(), stop.clone());
+        std::thread::spawn(move || reconnect(&move || pcfg.clone(), Arc::new(NoExec), m, &stop))
+    };
+    wait_until("the mirror", || m.mirrors.lock().unwrap().iter().any(|(ok, cards)| *ok && cards.iter().any(|c| c.session_id == "s1" && c.machine.as_deref() == Some("laptop"))));
+    m.lane.request(None, Request::Command(CommandKind::Reply { session: "s1".into(), text: "from the fold".into(), attachments: vec![] }), Duration::from_secs(5)).unwrap();
+    wait_until("the forwarded reply", || laptop.ran.lock().unwrap().iter().any(|k| matches!(k, CommandKind::Reply { text, .. } if text == "from the fold")));
+    let err = m.lane.request(Some("Pixel".into()), Request::Command(CommandKind::ListResumable { dir: "/d".into(), agent: Harness::ClaudeCode }), Duration::from_secs(5)).unwrap_err();
+    assert_eq!(err, "This phone runs no sessions.", "the phone main's own name means the phone");
+    // The switch off: the second phone is told and refused.
+    hub.set_mirror(&pid, false).unwrap();
+    wait_until("the refusal", || m.mirrors.lock().unwrap().iter().any(|(ok, _)| !ok));
+    assert!(m.lane.request(None, Request::ListDirs, Duration::from_secs(5)).unwrap_err().ends_with("has not allowed this Maya to control its sessions."));
+    stop.store(true, Ordering::SeqCst);
+    let _ = (laptop_thread.join(), pthread.join());
+    hub.stop_server();
 }

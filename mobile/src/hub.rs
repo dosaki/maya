@@ -9,8 +9,8 @@ use maya_core::log;
 use maya_core::model::Card;
 use maya_core::net::merge::{self, RemoteBoard};
 use maya_core::net::client::{reconnect, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
-use maya_core::net::protocol::{CommandKind, CAP_FOLLOW, CAP_LEAD};
-use maya_core::net::routing::ROUTE_TIMEOUT;
+use maya_core::net::protocol::{CommandKind, Request, CAP_FOLLOW, CAP_LEAD};
+use maya_core::net::routing::{agents_reply, target_of, Target, ROUTE_TIMEOUT};
 use maya_core::net::server::{send_command_with, start_with, Notify, ServerHandle};
 use maya_core::net::{self, promote, AssistantLink, NetworkStatus};
 use maya_core::notify::Notifier;
@@ -125,6 +125,10 @@ impl Hub {
     pub fn refresh(&self) {
         let _serial = self.refresh.lock().unwrap();
         let cards = self.cards();
+        // A Maya that mirrors this phone sees what the page shows.
+        if let Some(s) = self.handle() {
+            s.mirror(cards.clone());
+        }
         let (fresh, finished) = {
             let mut n = self.notifier.lock().unwrap();
             (n.take_new(&cards), n.take_finished(&cards))
@@ -201,6 +205,8 @@ impl Hub {
         }
         match started {
             Ok(handle) => {
+                // The user pressed Make main on this phone, so the entry it hands itself may mirror.
+                handle.set_own_mirror(true);
                 let status = handle.status();
                 *self.server.lock().unwrap() = Some(handle);
                 *self.main_error.lock().unwrap() = None;
@@ -298,6 +304,33 @@ impl Hub {
         Ok(self.status())
     }
 
+    /// A mirroring Maya's request, as a main: every session and machine is
+    /// an assistant's; this phone itself runs nothing.
+    pub fn serve_request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
+        let to_data = |v: serde_json::Result<Value>| v.map(Some).map_err(|e| e.to_string());
+        match request {
+            Request::ListDirs => to_data(serde_json::to_value(machine.map(|m| merge::dirs_of(&self.boards(), m)).unwrap_or_default())),
+            Request::ListAgents => to_data(serde_json::to_value(agents_reply(false, machine.and_then(|m| merge::agents_of(&self.boards(), m)), Vec::new))),
+            Request::Command(kind) => match target_of(&kind) {
+                Target::Session(session) => self.send(&session, |_| kind),
+                Target::Machine => self.send_to(machine.ok_or("This phone runs no sessions.")?, kind),
+            },
+        }
+    }
+
+    /// Lets a paired Maya see and control every session, or stops it.
+    pub fn set_mirror(&self, id: &str, on: bool) -> Result<NetworkStatus, String> {
+        match self.handle() {
+            Some(s) => s.set_mirror(id, on)?,
+            None => self.save_assistants(|list| {
+                if let Some(a) = list.iter_mut().find(|a| a.id == id) {
+                    a.mirror = on;
+                }
+            })?,
+        }
+        Ok(self.status())
+    }
+
     /// Sends a session command to the machine that lists the session. There
     /// are no local sessions: a session nobody lists is no longer running.
     pub fn send(&self, session_id: &str, kind: impl FnOnce(String) -> CommandKind) -> Result<Option<Value>, String> {
@@ -337,6 +370,11 @@ impl HubNotify {
 }
 
 impl Notify for HubNotify {
+    fn request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
+        let Some(h) = self.0.upgrade() else { return Err("the app is gone".into()) };
+        h.serve_request(machine, request)
+    }
+
     fn board_changed(&self) {
         self.with(|h| h.refresh());
     }

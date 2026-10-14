@@ -193,6 +193,11 @@ pub fn network_promote(hub: H, id: String) -> Result<NetworkStatus, String> {
 }
 
 #[tauri::command(async)]
+pub fn network_set_mirror(hub: H, id: String, on: bool) -> Result<NetworkStatus, String> {
+    hub.set_mirror(&id, on)
+}
+
+#[tauri::command(async)]
 pub fn listen_stop(hub: H) -> Result<NetworkStatus, String> {
     hub.stop_listening()
 }
