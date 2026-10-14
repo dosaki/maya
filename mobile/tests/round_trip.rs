@@ -556,3 +556,22 @@ fn a_join_with_a_wrong_code_puts_a_main_phone_s_server_back() {
     hub.stop_server();
     main.stop();
 }
+
+#[test]
+fn a_join_with_a_wrong_code_reconnects_a_phone_that_was_joined() {
+    let (a, a_port, _) = desk();
+    let (b, b_port, _) = desk();
+    let (hub, _page, _dir) = new_hub(free_port());
+    let code = a.open_pairing(maya_core::store::now_ms()).unwrap().0;
+    hub.join("127.0.0.1", a_port, "Pixel", &code).unwrap();
+    wait_until("connected to the first main", || hub.status().assistant.connected);
+    // No pairing window is open on the second main: any code is wrong.
+    let err = hub.join("127.0.0.1", b_port, "Pixel", "123456").unwrap_err();
+    assert_eq!(err, "Wrong or expired pairing code.");
+    assert!(hub.joined());
+    wait_until("reconnected to the first main", || hub.status().assistant.connected);
+    assert_eq!(hub.status().role, NetworkRole::Assistant);
+    hub.stop_listening().unwrap();
+    a.stop();
+    b.stop();
+}

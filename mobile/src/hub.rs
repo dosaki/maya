@@ -320,6 +320,7 @@ impl Hub {
             n => n.to_string(),
         };
         let was_main = self.handle().is_some();
+        let was_joined = self.joined();
         self.stop_server();
         self.stop_client();
         let paired = pair_with(Arc::new(NoSessions), &host, port, &name, &code, phone_caps()).and_then(|(main, id, token)| {
@@ -342,6 +343,10 @@ impl Hub {
             Err(e) => {
                 if was_main {
                     let _ = self.start_server();
+                }
+                // The config is unchanged, so this reconnects to the main it had.
+                if was_joined {
+                    self.start_client();
                 }
                 Err(e)
             }
