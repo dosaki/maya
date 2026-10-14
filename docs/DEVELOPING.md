@@ -276,8 +276,8 @@ The APK lands in `mobile/gen/android/app/build/outputs/apk/universal/`.
 `adb logcat -s RustStdoutStderr:V` shows what the Rust side prints to
 stdout and stderr, panics included; Maya's own log is `maya/maya.log` in
 the app's data directory, which `adb shell run-as com.dosaki.maya.mobile`
-reaches on a debug build. Its network
-key is `maya/identity.key` in the same directory. On the emulator the phone's address is not
+reaches on a debug build. Its network key is `maya/identity.key` in the
+same directory. On the emulator the phone's address is not
 reachable from the Mac: `adb forward tcp:4127 tcp:4127` and pair the
 desktop with `127.0.0.1`.
 
@@ -391,7 +391,8 @@ Three workflows in `.github/workflows/`:
   Tauri side: starting server and client, command execution),
   `terminal_app.rs` (opening Terminal windows), `terminal_win.rs` and
   `terminal_linux.rs` (their Windows and Linux counterparts), `focus.rs` and `dock.rs`
-  (AppKit), `keystore.rs` (the OS key store), `voice.rs` (ElevenLabs), and `ear.rs`, `wake.rs`,
+  (AppKit), `keystore.rs` (the OS key store), `voice.rs` (ElevenLabs), and
+  `ear.rs`, `wake.rs`,
   `listener.rs`, `models.rs` (the voice assistant).
 - `cli/src/` — `main.rs` and `args.rs` (subcommand parsing), `commands.rs`
   (`pair`, `status`, `hooks`, `config`, `start`), `run_cmd.rs` (`run`, the headless

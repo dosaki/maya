@@ -239,10 +239,10 @@ a forwarded port carries the connection until one exists.
   when a main does speak plain text.)
 - New key sets the role to Off as well as dropping the pairings.
 - Keychain writes go through `security -i` on stdin, so a secret never
-  appears on a command line. A Keychain item that `security` wrote is
-  readable by any process that runs `security` as the user: the key store
-  keeps the key out of files an agent might `cat`, not away from a process
-  determined to read it.
+  appears on a command line. On every platform any program running as the
+  user can read the key (`security`, `CredRead`, `secret-tool lookup`): the
+  key store keeps the key out of plain files an agent might `cat`, not away
+  from a process determined to read it.
 - The main confirms a pairing with a sealed frame holding `paired`, which
   the joiner opens before it trusts the main's key (a security review found
   the plain confirmation byte let `pair()` return an unconfirmed key).

@@ -139,9 +139,11 @@ The installer puts the AppImage in `~/.local/bin/maya-app` (set
 `.deb` from the release (`sudo apt install ./Maya_<version>_amd64.deb`, or `_arm64.deb`)
 pulls in the dependencies itself.
 
-For the ElevenLabs voice, also install `pulseaudio-utils` (for `paplay`;
-`ffplay` works too) and `libsecret-tools`. Sessions open in GNOME Terminal,
-Ptyxis or any `x-terminal-emulator`.
+Install `libsecret-tools` too: the desktop app keeps its network key in
+GNOME Keyring through `secret-tool`, and without it the network does not
+start ("Could not reach the key store"). For the ElevenLabs voice, also
+install `pulseaudio-utils` (for `paplay`; `ffplay` works too). Sessions
+open in GNOME Terminal, Ptyxis or any `x-terminal-emulator`.
 
 What is different on Linux:
 
@@ -275,7 +277,7 @@ quiet.
   taken, Settings says so under the menu.
 - **Assistant.** Choose "Assistant to a main Maya" in the Network menu and
   enter the main's host, port, a name for this machine (its hostname when
-  blank) and the pairing code. Pair once; Maya keeps a token and
+  blank) and the pairing code. Pair once; Maya keeps the main's key and
   reconnects on its own, also after you switch the role Off and back on.
   "Pair again" pairs with a fresh code. A status line shows "Connected to
   <main>", "Reconnecting…" (with the last error under it) or the error.
@@ -290,10 +292,12 @@ quiet.
   authenticated (Noise, ChaCha20-Poly1305). A changed, replayed or injected
   frame closes the connection. The desktop app keeps its private key in
   the Keychain, Credential Manager or GNOME Keyring; the CLI and the phone
-  in an owner-only `identity.key` beside their config. Any program running
-  as you can read the CLI's file, and on macOS the Keychain item too
-  (through `security`), so keep a leaked machine's key out with Remove on
-  the main, or New key on the machine itself.
+  in an owner-only `identity.key` beside their config. On every platform,
+  any program running as you can read the key (`security`, `CredRead` and
+  `secret-tool` all hand it over). The key store only keeps it out of
+  plain files, so an agent that reads your config files does not find it.
+  If a machine's key leaks, use Remove on the main, or New key on the
+  machine itself.
 - **Outside the LAN.** Maya does not open anything to the internet. Reach
   a main from outside through a VPN such as Tailscale or WireGuard and
   pair with its address there.
@@ -306,7 +310,7 @@ quiet.
   address; names are only labels, on cards and in what Maya says. Two
   assistants with the same name show as "laptop (192.168.1.20)". A machine
   that pairs again from the same address (after a reset, say) keeps its
-  place in the list with a new token. So does another machine that later
+  place in the list when it pairs again with the same key. So does another machine that later
   gets a disconnected assistant's address (from the router, say) and
   pairs: it takes over that entry.
 - **Make main.** On the main, Settings › Network › Make main beside a
