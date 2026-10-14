@@ -1868,7 +1868,9 @@ mod tests {
         }
         wait_until(|| handle.status().code_used_up);
         assert!(handle.status().code.is_none());
-        assert!(!try_code(port, &code), "the right code no longer works");
+        // The address's lockout goes, so the refusal is the used-up code's.
+        lock(&handle.shared).attempts = Attempts::default();
+        assert_eq!(secure::pair(&mut connect(port), &Keypair::generate(), &code, soon(), &|| false).unwrap_err(), secure::Fail::Refused(secure::WRONG_CODE_REASON.into()), "the right code no longer works");
         handle.open_pairing(now_ms()).unwrap();
         assert!(!handle.status().code_used_up, "a new code clears it");
         handle.stop();

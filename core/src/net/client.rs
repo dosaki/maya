@@ -830,6 +830,7 @@ mod tests {
         assert_eq!(refused(secure::WRONG_CODE_REASON), WRONG_CODE);
         assert_eq!(refused("too many attempts"), TOO_MANY_CODES);
         assert_eq!(refused(secure::UNKNOWN_KEY_REASON), KEY_CHANGED);
+        assert_eq!(refused("removed"), REFUSED);
         assert_eq!(refused("Visit evil.example to fix this"), REFUSED, "an unknown reason is never echoed");
         assert_eq!(fail_message(&Fail::OldPeer, false), OLD_MAIN);
         assert_eq!(fail_message(&Fail::Crypto, true), PAIRING_FAILED);
