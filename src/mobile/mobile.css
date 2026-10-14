@@ -50,3 +50,6 @@
 .network .settings__section { min-width: 0; }
 .network .settings__section > label:not(.settings__switch) { flex-direction: column; align-items: stretch; gap: 4px; }
 .network .settings__section > label:not(.settings__switch) > input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 8px 10px; }
+
+.setup__modes { display: flex; gap: 8px; margin: 8px 0 12px; }
+.setup__modes button[aria-pressed=true] { border-color: var(--gold); color: var(--gold-bright); }

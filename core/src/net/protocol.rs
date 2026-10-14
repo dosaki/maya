@@ -22,6 +22,8 @@ pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 pub const CAP_FOLLOW: &str = "follow";
 /// A Maya with this cap can become a main when sent `promote`.
 pub const CAP_LEAD: &str = "lead";
+/// A Maya with this cap wants the main's board (`mirror`) and sends `request`s.
+pub const CAP_MIRROR: &str = "mirror";
 pub const UNSEALABLE: &str = "The handover could not be opened.";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -64,6 +66,10 @@ pub enum Up {
         agents: Option<Vec<crate::agents::AgentInfo>>,
     },
     Result { id: u64, ok: bool, #[serde(default)] error: Option<String>, #[serde(default)] data: Option<Value> },
+    /// Act on the pool through the main (a mirroring Maya only). `machine`
+    /// names the target for kinds that need one; the main's own name, or
+    /// none, means the main.
+    Request { id: u64, #[serde(default)] machine: Option<String>, request: Request },
     Ping,
 }
 
@@ -83,14 +89,31 @@ pub enum Down {
     /// `mac` is `mac(token, nonce)` for the assistant's `auth` nonce: the
     /// main's proof that it holds the token. Right after pairing it is
     /// `mac(code, nonce)` for the `pair` nonce: proof it knows the code.
-    Welcome { name: String, #[serde(default)] mac: String },
+    /// `mirror` answers a Maya that asked with `CAP_MIRROR`: whether the main
+    /// will mirror to it. Absent for anyone else, and from an older main.
+    Welcome { name: String, #[serde(default)] mac: String, #[serde(default, skip_serializing_if = "Option::is_none")] mirror: Option<bool> },
     Paired { id: String, token: String },
     Bye { reason: String },
     Command { id: u64, #[serde(flatten)] kind: CommandKind },
     /// The main is now at `host:port`: save it and reconnect there with the
     /// same id and token. The main closes the connection after it.
     Move { host: String, port: u16 },
+    /// The main's board for a mirroring Maya; `allowed: false` (and nothing
+    /// else) once the main's switch for it is off.
+    Mirror { allowed: bool, #[serde(default)] cards: Vec<Card>, #[serde(default)] machines: Vec<crate::net::routing::MachineInfo> },
+    /// The answer to the `request` with this id.
+    Response { id: u64, ok: bool, #[serde(default)] error: Option<String>, #[serde(default)] data: Option<Value> },
     Pong,
+}
+
+/// What a mirroring Maya asks of the main: a command on the pool (never
+/// `Promote`), or a listing the main's own page reads locally.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Request {
+    Command(CommandKind),
+    ListDirs,
+    ListAgents,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -263,6 +286,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn requests_responses_and_mirrors_round_trip_and_older_frames_still_decode() {
+        use crate::net::routing::MachineInfo;
+        let req = Up::Request { id: 7, machine: Some("laptop".into()), request: Request::Command(CommandKind::Compact { session: "s1".into() }) };
+        assert_eq!(decode_up(&encode(&req)).unwrap(), req);
+        let dirs = Up::Request { id: 8, machine: None, request: Request::ListDirs };
+        assert_eq!(decode_up(&encode(&dirs)).unwrap(), dirs);
+        let resp = Down::Response { id: 7, ok: false, error: Some("no".into()), data: None };
+        assert_eq!(decode_down(&encode(&resp)).unwrap(), resp);
+        let mirror = Down::Mirror { allowed: true, cards: vec![], machines: vec![MachineInfo { name: "desk".into(), hostname: "desk".into(), platform: "macos".into(), connected: true }] };
+        assert_eq!(decode_down(&encode(&mirror)).unwrap(), mirror);
+        assert_eq!(decode_down(r#"{"type":"mirror","allowed":false}"#).unwrap(), Down::Mirror { allowed: false, cards: vec![], machines: vec![] });
+        let offered = Down::Welcome { name: "desk".into(), mac: "cd".into(), mirror: Some(true) };
+        assert_eq!(decode_down(&encode(&offered)).unwrap(), offered);
+        assert!(!encode(&Down::Welcome { name: "desk".into(), mac: "cd".into(), mirror: None }).contains("mirror"), "no offer, no field");
+        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk","mac":"cd"}"#).unwrap(), Down::Welcome { name: "desk".into(), mac: "cd".into(), mirror: None });
+    }
+
+    #[test]
     fn resume_without_an_agent_means_claude_code() {
         let k: CommandKind = serde_json::from_str(r#"{"kind":"resume","dir":"maya","session":"abc"}"#).unwrap();
         assert_eq!(k, CommandKind::Resume { dir: "maya".into(), session: "abc".into(), agent: crate::model::Harness::ClaudeCode });
@@ -291,9 +332,9 @@ mod tests {
         let s = encode(&auth);
         assert!(s.contains("\"type\":\"auth\"") && s.contains("\"nonce\":\"n1\""), "{s}");
         assert_eq!(decode_up(&s).unwrap(), auth);
-        let welcome = Down::Welcome { name: "desk".into(), mac: "cd".into() };
+        let welcome = Down::Welcome { name: "desk".into(), mac: "cd".into(), mirror: None };
         assert_eq!(decode_down(&encode(&welcome)).unwrap(), welcome);
-        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk"}"#).unwrap(), Down::Welcome { name: "desk".into(), mac: String::new() }, "a welcome without a proof still decodes; the assistant refuses it");
+        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk"}"#).unwrap(), Down::Welcome { name: "desk".into(), mac: String::new(), mirror: None }, "a welcome without a proof still decodes; the assistant refuses it");
         // Pairing is mutual too: `pair` carries a nonce the main answers in `welcome`.
         let pair = Up::Pair { code: "123456".into(), nonce: "n2".into() };
         let s = encode(&pair);

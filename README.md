@@ -26,7 +26,7 @@ the right terminal first.
 - Resumes old sessions of any of them, and reviews pull requests with the agent you chose, on a prompt you can edit in Settings
 - Shows the sessions of all your machines on one board.
 - Runs headless over SSH with the `maya` command.
-- Comes as an Android app too: a main Maya in your pocket that shows every assistant's sessions and notifies you when one needs you.
+- Comes as an Android app too: a main Maya in your pocket, or a phone that joins your computer's Maya, shows every session and notifies you when one needs you.
 
 ## Install
 
@@ -172,8 +172,9 @@ me?" gets an answer, and that Terminal on a card brings up its session.
 
 Download `Maya_<version>.apk` from the release and open it on the phone;
 Android asks to allow installs from your browser once (the builds are not
-on the Play Store). The phone is a **main** Maya and nothing else: it runs
-no agents and shows the sessions of the assistants paired with it.
+on the Play Store). The phone runs no agents. It is either the **main**,
+with your computers paired to it, or it **joins** a computer that is
+already the main and shows that main's whole board.
 
 Without the release keystore secrets, each release's APK is signed with a
 new key, so installing a newer one over an older one means uninstalling
@@ -188,6 +189,13 @@ in-place updates.
    Pair. Its sessions appear on the phone's board.
 3. Upright, the board shows one column at a time: swipe, or tap the
    strip at the top. Sideways it shows up to four.
+
+To join a computer that is already the main instead, choose **Join a main**
+on the first screen (or in the Network tab when the server is off), type
+the computer's address, port 4127 and the code from its Settings › Network
+› Show pairing code, and press **Join**. The computer lists the phone with a
+**Sees and controls all sessions** switch, on from the start; turn it off to
+stop the phone seeing and acting on the sessions.
 
 With the screen off Maya keeps running behind a persistent notification
 ("Main for 2 assistants, 1 connected"). Android may still stop it on some

@@ -33,6 +33,7 @@ const voiceBase = {
   networkName: "",
 };
 const handlers = () => ({
+  onMirror: vi.fn(),
   onInstall: vi.fn(),
   onRemove: vi.fn(),
   onTimeout: vi.fn(),
@@ -832,5 +833,24 @@ describe("check for updates", () => {
   it("shows the outcome of the last check", () => {
     const el = renderSettings({ ...voiceBase, version: "0.18.0", updatesOn: true, updateStatus: "Up to date." }, { ...handlers(), onCheckUpdates: vi.fn() });
     expect(el.querySelector(".settings__update-status")?.textContent).toBe("Up to date.");
+  });
+});
+
+describe("the mirror switch", () => {
+  const phone = { id: "p", name: "Pixel", hostname: "localhost", platform: "android", address: "192.168.1.30", connected: true, lastSeen: null, canLead: true, canFollow: true, mirror: true, wantsMirror: true };
+  const laptop = { id: "g", name: "laptop", hostname: "laptop", platform: "macos", address: "192.168.55.70", connected: true, lastSeen: null, mirror: false, wantsMirror: false };
+  const network = { role: "main" as const, code: null, assistants: [phone, laptop], assistant: { connected: false, mainName: null, error: null } };
+
+  it("shows for a Maya that asked to mirror, says Android, and saves on change", () => {
+    const h = handlers();
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network }, h);
+    const boxes = [...el.querySelectorAll<HTMLInputElement>("input[data-action=mirror]")];
+    expect(boxes.map((b) => b.dataset.id)).toEqual(["p"]);
+    expect(boxes[0].checked).toBe(true);
+    expect(boxes[0].parentElement!.textContent).toContain("Sees and controls all sessions");
+    expect(el.textContent).toContain("Pixel (Android, 192.168.1.30)");
+    boxes[0].checked = false;
+    boxes[0].dispatchEvent(new Event("change"));
+    expect(h.onMirror).toHaveBeenCalledWith("p", false);
   });
 });

@@ -11,15 +11,18 @@
 //! connection thread within a tick (within the connect timeout while a TCP
 //! connect is in flight).
 //!
-//! Locks: none of its own. The app's adapters (`net_app`) take `network` or
+//! Locks: the `RequestLane` holds a mutex briefly, never across a send that
+//! blocks or a callback. The app's adapters (`net_app`) take `network` or
 //! `store` one at a time, never one while holding the other.
 
-use super::protocol::{decode_down, encode, mac, mac_matches, new_nonce, Attachment, CommandKind, Down, Up, DEFAULT_PORT, MAX_FRAME, PROTOCOL};
+use super::protocol::{decode_down, encode, mac, mac_matches, new_nonce, Attachment, CommandKind, Down, Request, Up, DEFAULT_PORT, MAX_FRAME, PROTOCOL};
+use super::routing::MachineInfo;
 use crate::config::{NetworkConfig, NetworkRole};
 use crate::log;
 use crate::model::Card;
 use base64::Engine;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +49,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 /// A connection that lasted this long starts the backoff over.
 const STEADY: Duration = Duration::from_secs(60);
+
+/// What a request reads when no connection to the main is up.
+pub const NOT_CONNECTED: &str = "Not connected to the main Maya.";
+/// What a waiting request reads when its connection drops.
+pub const LOST: &str = "Lost the connection to the main Maya.";
+/// How long a request waits: the main itself waits up to 30 s on an assistant.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
 
 pub const REMOVED: &str = "Removed by the main Maya; pair again.";
 /// What the user reads when the main refuses a pairing code.
@@ -98,6 +108,95 @@ pub trait ClientNotify: Send + Sync {
     fn moved(&self, _host: &str, _port: u16) -> Result<(), String> {
         Err(CANNOT_FOLLOW.into())
     }
+    /// What the main said at `welcome` about mirroring (`Some(true)`: it
+    /// will; `Some(false)`: its switch is off; `None`: it did not say).
+    /// Called right after `connected`.
+    fn mirror_offer(&self, _offered: Option<bool>) {}
+    /// A board from the main, or `allowed: false` once its switch went off.
+    fn mirrored(&self, _allowed: bool, _cards: Vec<Card>, _machines: Vec<MachineInfo>) {}
+    /// Where this Maya's requests to the main go out; `None` sends none.
+    fn lane(&self) -> Option<Arc<RequestLane>> {
+        None
+    }
+}
+
+/// Requests to the main from this Maya's page, matched to their answers by
+/// id. Each connection attaches its outbox while it runs; when it ends,
+/// every request still waiting fails with `LOST`.
+#[derive(Default)]
+pub struct RequestLane {
+    inner: Mutex<Lane>,
+}
+
+#[derive(Default)]
+struct Lane {
+    out: Option<Sender<Up>>,
+    /// Which connection attached `out`, so an older one cannot detach a newer.
+    generation: u64,
+    next: u64,
+    waiting: HashMap<u64, Sender<Result<Option<Value>, String>>>,
+}
+
+impl RequestLane {
+    /// Sends `request` to the main and waits up to `timeout` for its answer.
+    pub fn request(&self, machine: Option<String>, request: Request, timeout: Duration) -> Result<Option<Value>, String> {
+        let (id, rx) = {
+            let mut l = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let out = l.out.clone().ok_or(NOT_CONNECTED)?;
+            l.next += 1;
+            let id = l.next;
+            let (tx, rx) = channel();
+            l.waiting.insert(id, tx);
+            if out.send(Up::Request { id, machine, request }).is_err() {
+                l.waiting.remove(&id);
+                return Err(NOT_CONNECTED.into());
+            }
+            (id, rx)
+        };
+        match rx.recv_timeout(timeout) {
+            Ok(r) => r,
+            Err(_) => {
+                self.inner.lock().unwrap_or_else(|e| e.into_inner()).waiting.remove(&id);
+                Err("The main Maya did not answer in time.".into())
+            }
+        }
+    }
+
+    fn attach(&self, out: Sender<Up>) -> u64 {
+        let mut l = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        l.generation += 1;
+        l.out = Some(out);
+        l.generation
+    }
+
+    fn detach(&self, generation: u64) {
+        let mut l = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if l.generation != generation {
+            return;
+        }
+        l.out = None;
+        for (_, w) in l.waiting.drain() {
+            let _ = w.send(Err(LOST.into()));
+        }
+    }
+
+    fn resolve(&self, id: u64, result: Result<Option<Value>, String>) {
+        let waiter = self.inner.lock().unwrap_or_else(|e| e.into_inner()).waiting.remove(&id);
+        if let Some(w) = waiter {
+            let _ = w.send(result);
+        }
+    }
+}
+
+/// Detaches the lane when the connection's pump ends, however it ends.
+struct Attached(Option<(Arc<RequestLane>, u64)>);
+
+impl Drop for Attached {
+    fn drop(&mut self) {
+        if let Some((lane, generation)) = &self.0 {
+            lane.detach(*generation);
+        }
+    }
 }
 
 /// 1, 2, 4, 8 and 16 seconds, then every 30.
@@ -115,6 +214,20 @@ pub fn display_name(name: &str, hostname: &str) -> String {
         "" => hostname.to_string(),
         n => n.to_string(),
     }
+}
+
+/// The host and code a pairing form gave, checked: a host with no spaces
+/// or slashes, and six digits (spaces dropped).
+pub fn check_pair_args(host: &str, code: &str) -> Result<(String, String), String> {
+    let host = host.trim();
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c == '/') {
+        return Err("Type the main Maya's host name or address.".into());
+    }
+    let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+        return Err("The pairing code has six digits.".into());
+    }
+    Ok((host.to_string(), code))
 }
 
 const ATTACHED: &str = "Attached file: ";
@@ -331,17 +444,18 @@ fn connection(config: &NetworkConfig, exec: &Arc<dyn Executor>, notify: &Arc<dyn
     }
     let deadline = Instant::now() + SILENCE;
     let mut ws = connect(config, stop, deadline)?;
-    let out = handshake(&mut ws, config, &**notify, stop, code, deadline).and_then(|main| {
+    let out = handshake(&mut ws, config, &**notify, stop, code, deadline).and_then(|(main, mirror)| {
         log::line("network", format!("connected to {main}"));
         notify.connected(&main);
+        notify.mirror_offer(mirror);
         pump(&mut ws, exec, notify, &config.token, stop)
     });
     finish(&mut ws);
     out
 }
 
-/// `hello`, then pairing or challenge-response, up to `welcome`; returns the main's name.
-fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, code: Option<&str>, deadline: Instant) -> Result<String, String> {
+/// `hello`, then pairing or challenge-response, up to `welcome`; returns the main's name and its mirror offer.
+fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, code: Option<&str>, deadline: Instant) -> Result<(String, Option<bool>), String> {
     let hostname = super::local_hostname();
     let id = if code.is_some() { None } else { Some(config.assistant_id.clone()) };
     let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), id, caps: notify.caps() };
@@ -370,7 +484,7 @@ fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, sto
                 }
                 creds = Some((id, token));
             }
-            Down::Welcome { name, mac: proof } => {
+            Down::Welcome { name, mac: proof, mirror } => {
                 let proven = |key: &str| ours.as_ref().is_some_and(|n| mac_matches(key, n, &proof));
                 match code {
                     Some(code) => {
@@ -393,7 +507,7 @@ fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, sto
                     None => {}
                 }
                 let name = clean(&name);
-                return Ok(if name.is_empty() { "the main Maya".into() } else { name });
+                return Ok((if name.is_empty() { "the main Maya".into() } else { name }, mirror));
             }
             Down::Bye { reason } => return Err(bye_message(&reason)),
             other => log::line("network", format!("main: ignored {} before welcome", encode(&other).chars().take(40).collect::<String>())),
@@ -404,6 +518,8 @@ fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, sto
 /// Runs a welcomed connection until it drops or `stop` is set.
 fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, token: &str, stop: &AtomicBool) -> Result<(), String> {
     let (tx, rx) = channel::<Up>();
+    let lane = notify.lane();
+    let _attached = Attached(lane.as_ref().map(|l| (l.clone(), l.attach(tx.clone()))));
     // Set once this Maya has become the main: the client ends after it has written its answer.
     let leaving = Arc::new(AtomicBool::new(false));
     let mut last_read = Instant::now();
@@ -446,7 +562,7 @@ fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, t
             Ok(Message::Text(t)) => {
                 last_read = Instant::now();
                 match decode_down(&t) {
-                    Ok(down) => handle(down, exec, notify, token, &tx, &leaving)?,
+                    Ok(down) => handle(down, exec, notify, &lane, token, &tx, &leaving)?,
                     Err(e) => log::line("network", format!("main: ignored a message: {e}")),
                 }
             }
@@ -465,7 +581,7 @@ fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, t
     }
 }
 
-fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, token: &str, tx: &Sender<Up>, leaving: &Arc<AtomicBool>) -> Result<(), String> {
+fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, token: &str, tx: &Sender<Up>, leaving: &Arc<AtomicBool>) -> Result<(), String> {
     match down {
         Down::Command { id, kind: CommandKind::Promote { sealed } } => {
             log::line("network", format!("command {id} promote"));
@@ -513,6 +629,11 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
             notify.moved(&host, port).map_err(|e| format!("Could not follow the main Maya to {host}: {e}"))?;
             return Err(MOVED.into());
         }
+        Down::Mirror { allowed, cards, machines } => notify.mirrored(allowed, cards, machines),
+        Down::Response { id, ok, error, data } => match lane {
+            Some(l) => l.resolve(id, if ok { Ok(data) } else { Err(error.unwrap_or_else(|| "The request failed.".into())) }),
+            None => log::line("network", format!("main: response {id} with no request lane")),
+        },
         Down::Challenge { .. } | Down::Welcome { .. } | Down::Paired { .. } => log::line("network", "main: ignored a handshake message after welcome"),
     }
     Ok(())
@@ -620,10 +741,10 @@ pub fn reconnect(config_of: &dyn Fn() -> NetworkConfig, exec: Arc<dyn Executor>,
 /// The pairing handshake once. Ok((main_name, id, token)). One blocking
 /// connection, at most `SILENCE` long once connected; it ends at `welcome`,
 /// so no command reaches `exec`.
-pub fn pair_with(exec: Arc<dyn Executor>, host: &str, port: u16, name: &str, code: &str) -> Result<(String, String, String), String> {
+pub fn pair_with(exec: Arc<dyn Executor>, host: &str, port: u16, name: &str, code: &str, caps: Vec<String>) -> Result<(String, String, String), String> {
     let config = NetworkConfig { role: NetworkRole::Assistant, main_host: host.trim().into(), main_port: port, name: name.trim().into(), ..Default::default() };
     let stop = Arc::new(AtomicBool::new(false));
-    let notify = Arc::new(PairNotify { stop: stop.clone(), creds: Mutex::new(None), main: Mutex::new(None) });
+    let notify = Arc::new(PairNotify { stop: stop.clone(), creds: Mutex::new(None), main: Mutex::new(None), caps });
     log::line("network", format!("pairing with {}:{}", config.main_host, port_of(&config)));
     run_once(&config, exec, notify.clone(), &stop, Some(code)).map_err(|e| {
         log::line("network", format!("pairing failed: {e}"));
@@ -639,6 +760,7 @@ struct PairNotify {
     stop: Arc<AtomicBool>,
     creds: Mutex<Option<(String, String)>>,
     main: Mutex<Option<String>>,
+    caps: Vec<String>,
 }
 
 impl ClientNotify for PairNotify {
@@ -651,6 +773,9 @@ impl ClientNotify for PairNotify {
     }
     fn disconnected(&self, _: &str) {}
     fn removed(&self) {}
+    fn caps(&self) -> Vec<String> {
+        self.caps.clone()
+    }
 }
 
 #[cfg(test)]
@@ -745,5 +870,13 @@ mod tests {
     fn a_hello_carries_the_name_or_the_hostname() {
         assert_eq!(display_name("", "tiagos-mbp"), "tiagos-mbp");
         assert_eq!(display_name("  laptop ", "tiagos-mbp"), "laptop");
+    }
+
+    #[test]
+    fn a_pairing_form_needs_a_host_and_six_digits() {
+        assert_eq!(check_pair_args(" desk.local ", "483 921"), Ok(("desk.local".into(), "483921".into())));
+        assert_eq!(check_pair_args("", "483921").unwrap_err(), "Type the main Maya's host name or address.");
+        assert_eq!(check_pair_args("http://desk", "483921").unwrap_err(), "Type the main Maya's host name or address.");
+        assert_eq!(check_pair_args("desk", "48392").unwrap_err(), "The pairing code has six digits.");
     }
 }

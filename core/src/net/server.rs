@@ -22,10 +22,12 @@
 //! in the app's lib.rs), and nothing takes the server's mutex while holding `store`.
 
 use super::merge::{display_names, RemoteBoard};
-use super::protocol::{decode_up, encode, mac, mac_matches, new_id, new_nonce, new_token, Attempts, CommandKind, Down, NonceLog, PairingWindow, Up, CAP_FOLLOW, CAP_LEAD, MAX_FRAME, PROTOCOL};
+use super::protocol::{decode_up, encode, mac, mac_matches, new_id, new_nonce, new_token, Attempts, CommandKind, Down, NonceLog, PairingWindow, Request, Up, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, MAX_FRAME, PROTOCOL};
+use super::routing::MachineInfo;
 use super::{AssistantStatus, NetworkStatus, PairingCode};
 use crate::config::{NetworkConfig, NetworkRole, PairedAssistant};
 use crate::log;
+use crate::model::Card;
 use crate::store::now_ms;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -40,6 +42,8 @@ use tungstenite::{Message, WebSocket};
 
 /// How long one read waits; the connection loop's tick.
 const TICK: Duration = Duration::from_millis(100);
+/// Mirrors go out at most this often per connection; the last change still goes.
+const MIRROR_GAP: Duration = Duration::from_millis(300);
 /// A peer silent this long is dropped (assistants ping every 10 s).
 const SILENCE: Duration = Duration::from_secs(15);
 /// Frames before `welcome` are small; a stranger cannot make the main buffer more.
@@ -74,6 +78,12 @@ pub trait Notify: Send + Sync {
     fn status_changed(&self, status: NetworkStatus);
     fn paired(&self, assistant: &PairedAssistant) -> Result<(), String>;
     fn paired_list_changed(&self, assistants: &[PairedAssistant]) -> Result<(), String>;
+    /// A mirroring Maya's request, run on a worker thread with no lock held.
+    /// `machine` is `None` for this main itself. The result is what this
+    /// main's own page would get for the same action.
+    fn request(&self, _machine: Option<&str>, _request: Request) -> Result<Option<Value>, String> {
+        Err("This Maya cannot answer requests.".into())
+    }
 }
 
 struct Conn {
@@ -139,11 +149,44 @@ pub struct Server {
     /// Pairings recorded but not yet registered as connections: a handover
     /// would hand them over without moving them, so it waits for none.
     pairings_in_flight: HashSet<String>,
+    /// The main's last board for mirroring Mayas: one board and the serial it was taken at.
+    mirror: Option<MirrorBoard>,
+    mirror_serial: u64,
+    /// This main's name, so an assistant with the same name gets a label of
+    /// its own (the main's own name means the main in a request).
+    main_name: String,
+}
+
+/// The main's board as its page shows it; local cards have no `machine`.
+struct MirrorBoard {
+    serial: u64,
+    cards: Vec<Card>,
 }
 
 impl Server {
-    fn new(paired: Vec<PairedAssistant>) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new() }
+    fn new(paired: Vec<PairedAssistant>, main_name: String) -> Server {
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, main_name }
+    }
+
+    /// The entry `id` lets its Maya mirror.
+    fn may_mirror(&self, id: &str) -> bool {
+        self.paired.iter().any(|p| p.id == id && p.mirror)
+    }
+
+    /// The machines a mirroring Maya can pick: this main first, then every
+    /// paired assistant but `receiver`.
+    fn mirror_machines(&self, main_name: &str, receiver: &str) -> Vec<MachineInfo> {
+        let me = MachineInfo { name: main_name.into(), hostname: super::local_hostname(), platform: std::env::consts::OS.into(), connected: true };
+        let others = self.paired.iter().zip(self.labels()).filter(|(p, _)| p.id != receiver).map(|(p, (id, label))| MachineInfo { name: label, hostname: p.hostname.clone(), platform: p.platform.clone(), connected: self.conns.contains_key(&id) });
+        std::iter::once(me).chain(others).collect()
+    }
+
+    /// Makes the next tick send the board again to every mirroring Maya.
+    fn bump_mirror(&mut self) {
+        if let Some(board) = self.mirror.take() {
+            self.mirror_serial += 1;
+            self.mirror = Some(MirrorBoard { serial: self.mirror_serial, cards: board.cards });
+        }
     }
 
     fn next(&mut self) -> u64 {
@@ -158,8 +201,10 @@ impl Server {
     /// Each paired assistant's id and label: its name, with its address
     /// when another entry has the same name.
     fn labels(&self) -> Vec<(String, String)> {
-        let entries: Vec<(String, String)> = self.paired.iter().map(|p| (p.name.clone(), p.address.clone())).collect();
-        self.paired.iter().zip(display_names(&entries)).map(|(p, label)| (p.id.clone(), label)).collect()
+        // The main joins the comparison but not the result: an assistant
+        // named like it carries its address too.
+        let entries: Vec<(String, String)> = std::iter::once((self.main_name.clone(), String::new())).chain(self.paired.iter().map(|p| (p.name.clone(), p.address.clone()))).collect();
+        self.paired.iter().zip(display_names(&entries).into_iter().skip(1)).map(|(p, label)| (p.id.clone(), label)).collect()
     }
 
     /// Records a pairing from `address`. A disconnected entry already paired
@@ -167,10 +212,10 @@ impl Server {
     /// gets a new token and the names just given, and its old board goes.
     /// Otherwise the pairing is a new entry. Returns the entry, and what it
     /// was before when it already existed (for `undo_pairing`).
-    fn record_pairing(&mut self, address: &str, name: &str, hostname: &str, platform: &str) -> (PairedAssistant, Option<PairedAssistant>) {
+    fn record_pairing(&mut self, address: &str, name: &str, hostname: &str, platform: &str, mirror: bool) -> (PairedAssistant, Option<PairedAssistant>) {
         let again = self.paired.iter().position(|p| p.address == address && !self.conns.contains_key(&p.id));
         let Some(i) = again else {
-            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token(), address: address.into(), last_seen: None };
+            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), token: new_token(), address: address.into(), last_seen: None, mirror };
             self.paired.push(a.clone());
             self.pairings_in_flight.insert(a.id.clone());
             return (a, None);
@@ -180,6 +225,7 @@ impl Server {
         p.name = name.into();
         p.hostname = hostname.into();
         p.platform = platform.into();
+        p.mirror = mirror;
         p.token = new_token();
         let a = p.clone();
         self.pairings_in_flight.insert(a.id.clone());
@@ -274,7 +320,7 @@ impl Server {
                 let peer = self.peers.get(&p.id);
                 let connected = self.conns.contains_key(&p.id);
                 let can = |cap: &str| connected && peer.is_some_and(|x| x.caps.iter().any(|c| c == cap));
-                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected, last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note), can_lead: can(CAP_LEAD), can_follow: can(CAP_FOLLOW) }
+                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected, last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note), can_lead: can(CAP_LEAD), can_follow: can(CAP_FOLLOW), mirror: p.mirror, wants_mirror: can(CAP_MIRROR) }
             })
             .collect();
         NetworkStatus { role: NetworkRole::Main, code, assistants, addresses: super::local_addresses(), ..Default::default() }
@@ -291,6 +337,8 @@ struct Ctx {
     notify: Arc<dyn Notify>,
     stop: Arc<AtomicBool>,
     main_name: String,
+    /// The entry this main makes for itself at a handover may mirror.
+    own_mirror: AtomicBool,
     live: AtomicUsize,
     /// Connections accepted and not yet through `welcome`.
     pre_auth: Mutex<HandshakeSlots>,
@@ -406,6 +454,47 @@ impl ServerHandle {
         lock(&self.shared).boards.clone()
     }
 
+    /// The main's board as its page shows it (local cards with no machine),
+    /// for every mirroring Maya; each connection sends it on its next tick.
+    pub fn mirror(&self, cards: Vec<Card>) {
+        let mut s = lock(&self.shared);
+        s.mirror_serial += 1;
+        s.mirror = Some(MirrorBoard { serial: s.mirror_serial, cards });
+    }
+
+    /// Lets the Maya `id` see and control every session, or stops it. Saved
+    /// first; if that fails nothing changes. Off tells a connected Maya at
+    /// once; on sends it the board again.
+    pub fn set_mirror(&self, id: &str, on: bool) -> Result<(), String> {
+        let (label, status) = {
+            let mut s = lock(&self.shared);
+            let mut after = s.paired.clone();
+            let entry = after.iter_mut().find(|p| p.id == id).ok_or("That Maya is no longer paired.")?;
+            entry.mirror = on;
+            self.ctx.notify.paired_list_changed(&after)?;
+            s.paired = after;
+            if on {
+                s.bump_mirror();
+            } else if let Some(c) = s.conns.get(id) {
+                let _ = c.tx.send(Down::Mirror { allowed: false, cards: vec![], machines: vec![] });
+            }
+            (s.label(id), s.status(now_ms()))
+        };
+        log::line("network", format!("{label}: {}", if on { "may see and control every session" } else { "no longer sees the sessions" }));
+        self.ctx.notify.status_changed(status);
+        // The app refreshes and mirrors the board (it may hold none yet).
+        if on {
+            self.ctx.notify.board_changed();
+        }
+        Ok(())
+    }
+
+    /// The entry this main makes for itself at a handover may mirror: a
+    /// phone, where the user pressed Make main.
+    pub fn set_own_mirror(&self, on: bool) {
+        self.ctx.own_mirror.store(on, Ordering::SeqCst);
+    }
+
     /// Stops accepting and closes every connection within a tick; does not wait.
     pub fn stop(&self) {
         if !self.stop.swap(true, Ordering::SeqCst) {
@@ -428,10 +517,13 @@ pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("Could not listen on port {port}: {e}. Choose another port."))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let paired = lock(&config_view).assistants.clone();
-    let shared = Arc::new(Mutex::new(Server::new(paired)));
+    let (paired, main_name) = {
+        let c = lock(&config_view);
+        (c.assistants.clone(), main_name_of(&c))
+    };
+    let shared = Arc::new(Mutex::new(Server::new(paired, main_name.clone())));
     let stop = Arc::new(AtomicBool::new(false));
-    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name: main_name_of(&config_view.lock().unwrap()), live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()) });
+    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name, own_mirror: AtomicBool::new(false), live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()) });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
     log::line("network", format!("listening on port {port}"));
@@ -482,6 +574,11 @@ struct Link {
     rx: Receiver<Down>,
     /// No board has arrived on this connection yet.
     first_board: std::cell::Cell<bool>,
+    /// Its `hello` asked for the main's board.
+    wants_mirror: bool,
+    /// The serial of the last mirror sent on this connection, and when.
+    mirror_sent: std::cell::Cell<u64>,
+    mirror_at: std::cell::Cell<Option<Instant>>,
 }
 
 /// Counts a connection as pre-auth until dropped (`welcome` sent, or it failed).
@@ -628,20 +725,21 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
     let name = Some(clean(&name)).filter(|n| !n.is_empty()).or_else(|| Some(hostname.clone()).filter(|h| !h.is_empty())).unwrap_or_else(|| "assistant".into());
     // `proof` answers the assistant's own nonce: under the token when it
     // authenticates, under the pairing code when it pairs.
+    let wants_mirror = caps.iter().any(|c| c == CAP_MIRROR);
     let (id, proof, pairing) = match id {
         Some(id) => {
             let proof = authenticate(ctx, ws, &id, &name, deadline)?;
             (id, proof, None)
         }
         None => {
-            let (p, proof) = pair(ctx, ws, &ip, &name, &hostname, &platform, deadline)?;
+            let (p, proof) = pair(ctx, ws, &ip, &name, &hostname, &platform, wants_mirror, deadline)?;
             (p.entry.id.clone(), proof, Some(p))
         }
     };
     let (tx, rx) = channel();
     // `Err(None)`: no longer paired; `Err(Some(e))`: a fresh pairing that
     // could not be saved.
-    let registered: Result<(u64, String), Option<String>> = {
+    let registered: Result<(u64, String, Option<bool>), Option<String>> = {
         let mut s = lock(&ctx.shared);
         // Registered or refused below: either way no longer in flight.
         s.pairings_in_flight.remove(&id);
@@ -671,7 +769,8 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
                         b.connected = true;
                     }
                     s.sync_boards();
-                    Ok((serial, s.label(&id)))
+                    let offer = wants_mirror.then(|| s.may_mirror(&id));
+                    Ok((serial, s.label(&id), offer))
                 }
                 Err(e) => Err(Some(e)),
             }
@@ -679,7 +778,7 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
             Err(None)
         }
     };
-    let (serial, label) = match registered {
+    let (serial, label, offer) = match registered {
         Ok(r) => r,
         Err(None) => {
             bye(ws, "removed");
@@ -693,13 +792,13 @@ fn admit(ctx: &Ctx, ws: &mut Ws, addr: SocketAddr, deadline: Instant) -> Option<
             return None;
         }
     };
-    let link = Link { id, serial, label, rx, first_board: std::cell::Cell::new(true) };
+    let link = Link { id, serial, label, rx, first_board: std::cell::Cell::new(true), wants_mirror, mirror_sent: std::cell::Cell::new(0), mirror_at: std::cell::Cell::new(None) };
     // Authenticated: boards and results may now be large.
     ws.set_config(|c| {
         c.max_message_size = Some(MAX_FRAME);
         c.max_frame_size = Some(MAX_FRAME);
     });
-    if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone(), mac: proof }) {
+    if let Err(e) = send_down(ws, &Down::Welcome { name: ctx.main_name.clone(), mac: proof, mirror: offer }) {
         // Undone first, so the list `leave` saves no longer holds the
         // pairing it takes back.
         if let Some(p) = pairing {
@@ -762,7 +861,7 @@ impl NewPairing {
 /// Pairs a new assistant, or the same machine again; returns the pairing
 /// and the main's proof for `welcome`: the MAC, under the code, of the
 /// nonce the assistant sent with it.
-fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: &str, deadline: Instant) -> Option<(NewPairing, String)> {
+fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: &str, mirror: bool, deadline: Instant) -> Option<(NewPairing, String)> {
     let (code, nonce) = match read_up(ctx, ws, ip, deadline) {
         Ok(Up::Pair { code, nonce }) => (code, nonce),
         Ok(_) => {
@@ -783,7 +882,7 @@ fn pair(ctx: &Ctx, ws: &mut Ws, ip: &str, name: &str, hostname: &str, platform: 
             s.attempts.failed(ip, now);
             Err("wrong or expired pairing code")
         } else {
-            let pairing = s.record_pairing(ip, name, hostname, platform);
+            let pairing = s.record_pairing(ip, name, hostname, platform, mirror);
             // One code, one assistant.
             s.pairing = None;
             Ok(pairing)
@@ -834,6 +933,35 @@ fn send_queued(ws: &mut Ws, link: &Link) -> Option<String> {
     }
 }
 
+/// The mirror this connection is owed, if any: a newer board than the last
+/// one sent, no sooner than `MIRROR_GAP` after it, to a Maya allowed it.
+fn mirror_due(ctx: &Ctx, link: &Link) -> Option<Down> {
+    if !link.wants_mirror || link.mirror_at.get().is_some_and(|t| t.elapsed() < MIRROR_GAP) {
+        return None;
+    }
+    let s = lock(&ctx.shared);
+    let board = s.mirror.as_ref().filter(|b| b.serial != link.mirror_sent.get())?;
+    if !s.may_mirror(&link.id) {
+        return None;
+    }
+    let cards = board
+        .cards
+        .iter()
+        .filter(|c| c.machine.as_deref() != Some(link.label.as_str()))
+        .map(|c| {
+            let mut c = c.clone();
+            if c.machine.is_none() {
+                c.machine = Some(ctx.main_name.clone());
+                c.machine_platform = Some(std::env::consts::OS.into());
+            }
+            c
+        })
+        .collect();
+    link.mirror_sent.set(board.serial);
+    link.mirror_at.set(Some(Instant::now()));
+    Some(Down::Mirror { allowed: true, cards, machines: s.mirror_machines(&ctx.main_name, &link.id) })
+}
+
 /// Runs a registered connection until it closes; returns why.
 fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
     let mut deadline = Instant::now() + SILENCE;
@@ -843,6 +971,11 @@ fn pump(ctx: &Ctx, ws: &mut Ws, link: &Link) -> String {
         }
         if let Some(why) = send_queued(ws, link) {
             return why;
+        }
+        if let Some(mirror) = mirror_due(ctx, link) {
+            if let Err(e) = send_down(ws, &mirror) {
+                return e;
+            }
         }
         match ws.read() {
             Ok(Message::Text(t)) => {
@@ -930,6 +1063,42 @@ fn handle(ctx: &Ctx, ws: &mut Ws, link: &Link, up: Up) -> Result<(), String> {
         Up::Ping => {
             lock(&ctx.shared).touch(&link.id);
             send_down(ws, &Down::Pong)?;
+        }
+        Up::Request { id, machine, request } => {
+            let (allowed, tx) = {
+                let mut s = lock(&ctx.shared);
+                s.touch(&link.id);
+                let tx = s.conns.get(&link.id).filter(|c| c.serial == link.serial).map(|c| c.tx.clone());
+                (link.wants_mirror && s.may_mirror(&link.id), tx)
+            };
+            let Some(tx) = tx else { return Err(NOT_CURRENT.into()) };
+            let refusal = if !allowed {
+                Some(format!("{} has not allowed this Maya to control its sessions.", ctx.main_name))
+            } else if matches!(request, Request::Command(CommandKind::Promote { .. })) {
+                Some("That cannot be requested.".to_string())
+            } else {
+                None
+            };
+            if let Some(error) = refusal {
+                send_down(ws, &Down::Response { id, ok: false, error: Some(error), data: None })?;
+                return Ok(());
+            }
+            // The main's own name, like none, means the main.
+            let machine = machine.map(|m| clean(&m)).filter(|m| !m.is_empty() && *m != ctx.main_name);
+            let (notify, label) = (ctx.notify.clone(), link.label.clone());
+            let spawned = std::thread::Builder::new().name("net-request".into()).spawn(move || {
+                let down = match notify.request(machine.as_deref(), request) {
+                    Ok(data) => Down::Response { id, ok: true, error: None, data },
+                    Err(e) => {
+                        log::line("network", format!("{label}: request {id} failed: {e}"));
+                        Down::Response { id, ok: false, error: Some(e), data: None }
+                    }
+                };
+                let _ = tx.send(down);
+            });
+            if let Err(e) = spawned {
+                send_down(ws, &Down::Response { id, ok: false, error: Some(format!("no thread for the request: {e}")), data: None })?;
+            }
         }
         Up::Hello { .. } | Up::Pair { .. } | Up::Auth { .. } => log::line("network", format!("{}: ignored a handshake message after welcome", link.label)),
     }
@@ -1126,7 +1295,7 @@ impl ServerHandle {
             }
             s.handover = true;
             s.pairing = None;
-            let me = super::promote::own_entry(&self.ctx.main_name);
+            let me = super::promote::own_entry(&self.ctx.main_name, self.ctx.own_mirror.load(Ordering::SeqCst));
             let list = super::promote::handover_list(&s.paired, id, &me);
             (label, entry.address, entry.token, list, me)
         };
@@ -1175,7 +1344,7 @@ mod tests {
     use crate::model::{Card, Harness, State};
     use crate::net::client;
     use std::sync::atomic::AtomicBool;
-    use crate::net::protocol::{decode_down, encode, mac, CommandKind, Down, Up, PROTOCOL};
+    use crate::net::protocol::{decode_down, encode, mac, CommandKind, Down, Request, Up, PROTOCOL};
     use std::net::TcpStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1200,6 +1369,8 @@ mod tests {
         pub saves_outside_lock: AtomicUsize,
         /// Every save fails while set (a full disk, a read-only config).
         pub fail_saves: AtomicBool,
+        /// Requests a mirroring Maya made, with the machine asked.
+        pub requests: Mutex<Vec<(Option<String>, Request)>>,
         notifier: Mutex<crate::notify::Notifier>,
         server: std::sync::OnceLock<Arc<Mutex<Server>>>,
     }
@@ -1240,6 +1411,16 @@ mod tests {
             }
             *self.saved.lock().unwrap() = list.to_vec();
             Ok(())
+        }
+        fn request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
+            if let Request::Command(CommandKind::Compact { session }) = &request {
+                if session == "slow" {
+                    std::thread::sleep(Duration::from_millis(800));
+                }
+            }
+            let answer = serde_json::json!(format!("{request:?}"));
+            self.requests.lock().unwrap().push((machine.map(str::to_string), request));
+            Ok(Some(answer))
         }
     }
 
@@ -1282,6 +1463,143 @@ mod tests {
         let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
         answer(&mut ws, &token, &nonce);
         (ws, id, token)
+    }
+
+    #[test]
+    fn a_maya_that_asks_to_mirror_is_allowed_at_pairing_and_told_so_in_welcome() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (_phone, phone_id, _, offer) = pair_client_caps(&handle, port, "Pixel", &["follow", "lead", "mirror"]);
+        assert_eq!(offer, Some(true));
+        let (_laptop, laptop_id, _, offer) = pair_client_caps(&handle, port, "laptop", &["follow", "lead"]);
+        assert_eq!(offer, None, "a Maya that did not ask is told nothing");
+        wait_until(|| handle.status().assistants.iter().filter(|a| a.connected).count() == 2);
+        let status = handle.status();
+        let phone = status.assistants.iter().find(|a| a.id == phone_id).unwrap();
+        assert!(phone.mirror && phone.wants_mirror);
+        let laptop = status.assistants.iter().find(|a| a.id == laptop_id).unwrap();
+        assert!(!laptop.mirror && !laptop.wants_mirror);
+        assert!(counter.saved.lock().unwrap().iter().any(|a| a.id == phone_id && a.mirror), "the permission is saved");
+        handle.stop();
+    }
+
+    #[test]
+    fn an_assistant_named_like_the_main_carries_its_address_so_requests_reach_it() {
+        let counter = Arc::new(Counter::default());
+        let handle = start_with(counter.clone(), Arc::new(Mutex::new(NetworkConfig { name: "desk".into(), ..Default::default() })), 0).unwrap();
+        let _ = counter.server.set(handle.shared.clone());
+        let port = handle.port();
+        let (mut phone, _, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        let (_twin, twin_id, _) = pair_client(&handle, port, "desk");
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == twin_id && a.connected));
+        assert_eq!(handle.status().assistants.iter().find(|a| a.id == twin_id).unwrap().name, "desk (127.0.0.1)");
+        handle.mirror(vec![]);
+        let Down::Mirror { machines, .. } = recv(&mut phone) else { panic!("expected a mirror") };
+        let names: Vec<&str> = machines.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["desk", "desk (127.0.0.1)"]);
+        send(&mut phone, &Up::Request { id: 1, machine: Some("desk (127.0.0.1)".into()), request: Request::ListDirs });
+        assert!(matches!(recv(&mut phone), Down::Response { id: 1, ok: true, .. }));
+        assert_eq!(counter.requests.lock().unwrap()[0].0.as_deref(), Some("desk (127.0.0.1)"), "the twin is not taken for the main");
+        handle.stop();
+    }
+
+    #[test]
+    fn the_main_mirrors_its_board_with_its_own_cards_named_and_the_receiver_left_out() {
+        let (handle, port) = test_server();
+        let (mut phone, _, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        let (_laptop, _, _) = pair_client(&handle, port, "laptop");
+        wait_until(|| handle.status().assistants.iter().filter(|a| a.connected).count() == 2);
+        let mut remote = card("r1", "fix");
+        remote.machine = Some("laptop".into());
+        handle.mirror(vec![card("l1", "local"), remote]);
+        let Down::Mirror { allowed, cards, machines } = recv(&mut phone) else { panic!("expected a mirror") };
+        let main = main_name_of(&NetworkConfig::default());
+        assert!(allowed);
+        assert_eq!(cards[0].machine.as_deref(), Some(main.as_str()), "the main's own cards carry its name");
+        assert_eq!(cards[1].machine.as_deref(), Some("laptop"));
+        assert_eq!(machines[0].name, main);
+        assert!(machines[0].connected);
+        assert!(machines.iter().any(|m| m.name == "laptop"));
+        assert!(!machines.iter().any(|m| m.name == "Pixel"), "the receiver is not a machine to pick");
+        handle.stop();
+    }
+
+    #[test]
+    fn turning_the_switch_off_tells_the_maya_and_refuses_its_requests_and_on_mirrors_again() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (mut phone, id, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        handle.set_mirror(&id, false).unwrap();
+        assert!(!counter.saved.lock().unwrap().iter().find(|a| a.id == id).unwrap().mirror, "the switch is saved");
+        assert_eq!(recv(&mut phone), Down::Mirror { allowed: false, cards: vec![], machines: vec![] });
+        send(&mut phone, &Up::Request { id: 1, machine: None, request: Request::Command(CommandKind::Compact { session: "s1".into() }) });
+        let Down::Response { id: 1, ok: false, error: Some(e), .. } = recv(&mut phone) else { panic!("expected a refusal") };
+        assert!(e.ends_with("has not allowed this Maya to control its sessions."), "{e}");
+        assert!(counter.requests.lock().unwrap().is_empty());
+        handle.mirror(vec![card("l1", "local")]);
+        handle.set_mirror(&id, true).unwrap();
+        assert!(matches!(recv(&mut phone), Down::Mirror { allowed: true, .. }));
+        assert_eq!(handle.set_mirror("nobody", true).unwrap_err(), "That Maya is no longer paired.");
+        handle.stop();
+    }
+
+    #[test]
+    fn a_maya_that_reconnects_without_the_mirror_cap_gets_no_board_and_no_requests() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (ws, id, token, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        drop(ws);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        assert!(handle.status().assistants.iter().any(|a| a.id == id && a.mirror), "the permission is still saved");
+        let mut ws = connect(port);
+        hello_caps(&mut ws, "Pixel", Some(&id), &[]);
+        let Down::Challenge { nonce } = recv(&mut ws) else { panic!("expected challenge") };
+        answer(&mut ws, &token, &nonce);
+        send(&mut ws, &Up::Request { id: 1, machine: None, request: Request::ListDirs });
+        let Down::Response { id: 1, ok: false, error: Some(e), .. } = recv(&mut ws) else { panic!("expected a refusal") };
+        assert!(e.ends_with("has not allowed this Maya to control its sessions."), "{e}");
+        assert!(counter.requests.lock().unwrap().is_empty());
+        handle.mirror(vec![card("l1", "local")]);
+        send(&mut ws, &Up::Ping);
+        assert_eq!(recv(&mut ws), Down::Pong, "no board came before the pong");
+        handle.stop();
+    }
+
+    #[test]
+    fn an_allowed_maya_s_requests_reach_the_app_off_the_connection_thread() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (mut phone, _, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        let main = main_name_of(&NetworkConfig::default());
+        send(&mut phone, &Up::Request { id: 1, machine: None, request: Request::Command(CommandKind::Compact { session: "slow".into() }) });
+        send(&mut phone, &Up::Ping);
+        assert_eq!(recv(&mut phone), Down::Pong, "a slow request does not hold up the connection");
+        assert_eq!(recv(&mut phone), Down::Response { id: 1, ok: true, error: None, data: Some(serde_json::json!(format!("{:?}", Request::Command(CommandKind::Compact { session: "slow".into() })))) });
+        send(&mut phone, &Up::Request { id: 2, machine: Some(main.clone()), request: Request::ListDirs });
+        assert!(matches!(recv(&mut phone), Down::Response { id: 2, ok: true, .. }));
+        send(&mut phone, &Up::Request { id: 3, machine: Some("laptop".into()), request: Request::ListAgents });
+        assert!(matches!(recv(&mut phone), Down::Response { id: 3, ok: true, .. }));
+        let seen: Vec<Option<String>> = counter.requests.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
+        assert_eq!(seen, [None, None, Some("laptop".to_string())], "the main's own name means the main");
+        send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::Promote { sealed: "x".into() }) });
+        assert_eq!(recv(&mut phone), Down::Response { id: 4, ok: false, error: Some("That cannot be requested.".into()), data: None });
+        handle.stop();
+    }
+
+    #[test]
+    fn a_phone_main_hands_over_an_entry_for_itself_that_may_mirror() {
+        let (handle, port) = test_server();
+        handle.set_own_mirror(true);
+        let (mut g, g_id, g_token) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        let h = handle.clone();
+        let t = std::thread::spawn(move || h.promote(&g_id));
+        let Down::Command { id: cmd, kind: CommandKind::Promote { sealed } } = recv(&mut g) else { panic!("expected promote") };
+        let list = crate::net::promote::open_list(&g_token, &sealed).unwrap();
+        assert!(list.last().unwrap().mirror);
+        send(&mut g, &Up::Result { id: cmd, ok: true, error: None, data: Some(serde_json::json!({ "port": 5001 })) });
+        assert!(t.join().unwrap().unwrap().me.mirror);
+        handle.stop();
     }
 
     #[test]
@@ -1389,7 +1707,7 @@ mod tests {
         assert!(lock(&handle.shared).pairings_in_flight.is_empty(), "a finished pairing is no longer in flight");
         // A machine past `record_pairing` but not yet registered: it would be
         // handed over without being moved.
-        let (entry, previous) = lock(&handle.shared).record_pairing("10.0.0.9", "mini", "h", "macos");
+        let (entry, previous) = lock(&handle.shared).record_pairing("10.0.0.9", "mini", "h", "macos", false);
         assert_eq!(handle.promote(&g_id).unwrap_err(), "A Maya is pairing right now; try again in a moment.");
         assert!(!lock(&handle.shared).handover, "a refused handover leaves no turn behind");
         lock(&handle.shared).undo_pairing(&entry.id, previous);
@@ -1397,16 +1715,23 @@ mod tests {
         handle.stop();
     }
 
-    /// Pairs a new assistant; returns its open socket, id and token.
-    pub(crate) fn pair_client(handle: &ServerHandle, port: u16, name: &str) -> (Client, String, String) {
+    /// Pairs a new assistant whose `hello` carries `caps`; returns its open
+    /// socket, id, token and the welcome's mirror offer.
+    pub(crate) fn pair_client_caps(handle: &ServerHandle, port: u16, name: &str, caps: &[&str]) -> (Client, String, String, Option<bool>) {
         let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
         let mut ws = connect(port);
-        hello(&mut ws, name, None);
+        hello_caps(&mut ws, name, None, caps);
         let nonce = crate::net::protocol::new_nonce();
         send(&mut ws, &Up::Pair { code: code.clone(), nonce: nonce.clone() });
         let Down::Paired { id, token } = recv(&mut ws) else { panic!("expected paired") };
-        let Down::Welcome { mac: proof, .. } = recv(&mut ws) else { panic!("expected welcome") };
+        let Down::Welcome { mac: proof, mirror, .. } = recv(&mut ws) else { panic!("expected welcome") };
         assert!(crate::net::protocol::mac_matches(&code, &nonce, &proof), "the main proves it knows the code");
+        (ws, id, token, mirror)
+    }
+
+    /// Pairs a new assistant; returns its open socket, id and token.
+    pub(crate) fn pair_client(handle: &ServerHandle, port: u16, name: &str) -> (Client, String, String) {
+        let (ws, id, token, _) = pair_client_caps(handle, port, name, &[]);
         (ws, id, token)
     }
 
@@ -1612,25 +1937,25 @@ mod tests {
 
     #[test]
     fn pairings_are_told_apart_by_address_and_equal_names_carry_it() {
-        let mut s = Server::new(vec![]);
-        let (first, previous) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos");
+        let mut s = Server::new(vec![], "desk".into());
+        let (first, previous) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
         assert!(previous.is_none());
         s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, received_at: 0, connected: false });
-        let (second, previous) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos");
+        let (second, previous) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
         assert_eq!(previous.as_ref(), Some(&first), "the same address, disconnected: the same machine");
         assert_eq!(second.id, first.id);
         assert_ne!(second.token, first.token);
         assert_eq!(s.paired.len(), 1);
         assert!(s.by_id.is_empty(), "its old board is dropped");
         // Another address with the same name is another machine.
-        let (other, previous) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos");
+        let (other, previous) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos", false);
         assert!(previous.is_none());
         assert_ne!(other.id, first.id);
         let names: Vec<(String, String)> = s.status(0).assistants.into_iter().map(|a| (a.name, a.address)).collect();
         assert_eq!(names, [("Gnowee (192.168.55.70)".to_string(), "192.168.55.70".to_string()), ("Gnowee (192.168.55.71)".to_string(), "192.168.55.71".to_string())]);
         // A connected entry is never taken over by a new pairing.
         s.conns.insert(other.id.clone(), Conn { tx: channel().0, serial: 1 });
-        let (third, previous) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos");
+        let (third, previous) = s.record_pairing("192.168.55.71", "Gnowee", "TKC-0199", "macos", false);
         assert!(previous.is_none());
         assert_eq!(s.paired.len(), 3);
         assert_ne!(third.id, other.id);
@@ -1640,7 +1965,7 @@ mod tests {
         // A pairing the assistant never completed is taken back.
         s.undo_pairing(&third.id, None);
         assert_eq!(s.paired.len(), 2);
-        let (again, previous) = s.record_pairing("192.168.55.80", "Renamed", "TKC-0176", "macos");
+        let (again, previous) = s.record_pairing("192.168.55.80", "Renamed", "TKC-0176", "macos", false);
         s.undo_pairing(&again.id, previous);
         assert_eq!(s.paired[0].name, "Gnowee", "an entry paired again gets its old self back");
         assert_eq!(s.paired[0].token, second.token);
@@ -2097,7 +2422,7 @@ mod tests {
                 ws.send(Message::text(encode(&Down::Challenge { nonce: "n".into() }))).unwrap();
                 assert!(matches!(read(&mut ws), Up::Auth { .. }));
             }
-            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into() })));
+            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into(), mirror: None })));
             let _ = ws.send(Message::text(encode(&Down::Command { id: 1, kind: CommandKind::Compact { session: "r1".into() } })));
             let _ = ws.read();
         });
@@ -2121,7 +2446,7 @@ mod tests {
             assert!(matches!(read(&mut ws), Up::Hello { .. }));
             assert!(matches!(read(&mut ws), Up::Pair { nonce, .. } if !nonce.is_empty()), "the assistant sends a nonce with its code");
             let _ = ws.send(Message::text(encode(&Down::Paired { id: "evil-id".into(), token: "evil-token".into() })));
-            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into() })));
+            let _ = ws.send(Message::text(encode(&Down::Welcome { name: "evil".into(), mac: proof.into(), mirror: None })));
             let _ = ws.read();
         });
         port
@@ -2438,5 +2763,81 @@ mod tests {
         }
         let _ = (g_thread.join(), b_thread.join());
         handle.stop();
+    }
+
+    #[derive(Default)]
+    struct Mirrorer {
+        lane: Arc<client::RequestLane>,
+        offers: Mutex<Vec<Option<bool>>>,
+        mirrors: Mutex<Vec<(bool, Vec<Card>)>>,
+    }
+
+    impl client::ClientNotify for Mirrorer {
+        fn paired(&self, _: &str, _: &str) {}
+        fn connected(&self, _: &str) {}
+        fn disconnected(&self, _: &str) {}
+        fn removed(&self) {}
+        fn caps(&self) -> Vec<String> {
+            vec!["mirror".into()]
+        }
+        fn mirror_offer(&self, offered: Option<bool>) {
+            self.offers.lock().unwrap().push(offered);
+        }
+        fn mirrored(&self, allowed: bool, cards: Vec<Card>, _: Vec<MachineInfo>) {
+            self.mirrors.lock().unwrap().push((allowed, cards));
+        }
+        fn lane(&self) -> Option<Arc<client::RequestLane>> {
+            Some(self.lane.clone())
+        }
+    }
+
+    /// Pairs a mirroring client with `handle` and runs it until `stop`.
+    fn run_mirrorer(handle: &ServerHandle, port: u16) -> (Arc<Mirrorer>, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
+        let (_, id, token) = client::pair_with(Arc::new(NoSessions), "127.0.0.1", port, "Pixel", &code, vec!["mirror".into()]).unwrap();
+        let m = Arc::new(Mirrorer::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = assistant_config(port, &id, &token);
+        let (n, s) = (m.clone(), stop.clone());
+        let t = std::thread::spawn(move || client::reconnect(&move || config.clone(), Arc::new(NoSessions), n, &s));
+        wait_until(|| m.offers.lock().unwrap().as_slice() == [Some(true)]);
+        (m, stop, t)
+    }
+
+    #[test]
+    fn a_mirroring_client_hears_the_offer_gets_the_board_and_its_requests_answered() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (m, stop, t) = run_mirrorer(&handle, port);
+        handle.mirror(vec![card("l1", "local")]);
+        wait_until(|| m.mirrors.lock().unwrap().iter().any(|(ok, cards)| *ok && cards.iter().any(|c| c.session_id == "l1")));
+        let lane = m.lane.clone();
+        let slow = {
+            let l = lane.clone();
+            std::thread::spawn(move || l.request(None, Request::Command(CommandKind::Compact { session: "slow".into() }), Duration::from_secs(5)))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(lane.request(Some("laptop".into()), Request::ListAgents, Duration::from_secs(5)), Ok(Some(serde_json::json!(format!("{:?}", Request::ListAgents)))));
+        let slow_answer = format!("{:?}", Request::Command(CommandKind::Compact { session: "slow".into() }));
+        assert_eq!(slow.join().unwrap(), Ok(Some(serde_json::json!(slow_answer))), "each answer reaches its own caller");
+        stop.store(true, Ordering::SeqCst);
+        t.join().unwrap();
+        assert_eq!(lane.request(None, Request::ListDirs, Duration::from_secs(1)).unwrap_err(), client::NOT_CONNECTED);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_request_waiting_when_the_main_goes_away_fails_at_once() {
+        let (handle, port) = test_server();
+        let (m, stop, t) = run_mirrorer(&handle, port);
+        let lane = m.lane.clone();
+        let began = Instant::now();
+        let waiting = std::thread::spawn(move || lane.request(None, Request::Command(CommandKind::Compact { session: "slow".into() }), Duration::from_secs(30)));
+        std::thread::sleep(Duration::from_millis(100));
+        handle.stop();
+        assert_eq!(waiting.join().unwrap().unwrap_err(), client::LOST);
+        assert!(began.elapsed() < Duration::from_secs(5), "not left to time out");
+        stop.store(true, Ordering::SeqCst);
+        t.join().unwrap();
     }
 }

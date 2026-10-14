@@ -72,6 +72,10 @@ pub struct AssistantStatus {
     pub can_lead: bool,
     /// Connected and able to follow a new main; false for an older Maya.
     pub can_follow: bool,
+    /// The main lets it see and control every session (its paired entry).
+    pub mirror: bool,
+    /// Connected and asked to mirror (`CAP_MIRROR`): the main shows its switch.
+    pub wants_mirror: bool,
 }
 
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
@@ -83,6 +87,19 @@ pub struct AssistantLink {
     pub error: Option<String>,
     /// The client is waiting to try again (not removed, not unpaired).
     pub retrying: bool,
+    /// What the main said about mirroring at the last connect; `None` before.
+    pub mirror: Option<MirrorAccess>,
+}
+
+/// Whether the main shares its board with this Maya.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MirrorAccess {
+    Allowed,
+    /// The main's switch for this Maya is off.
+    Refused,
+    /// The main runs an older Maya that cannot mirror.
+    Unsupported,
 }
 
 /// The running side of the network role: the main's server or the assistant's client.
@@ -133,7 +150,7 @@ pub fn paired_offline(paired: &[PairedAssistant]) -> Vec<AssistantStatus> {
     paired
         .iter()
         .zip(merge::display_names(&entries))
-        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: false, last_seen: p.last_seen, note: None, can_lead: false, can_follow: false })
+        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: false, last_seen: p.last_seen, note: None, can_lead: false, can_follow: false, mirror: p.mirror, wants_mirror: false })
         .collect()
 }
 
@@ -209,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_main_that_cannot_listen_says_why_and_keeps_its_paired_list() {
-        let p = |id: &str, name: &str, address: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: address.into(), last_seen: Some(42) };
+        let p = |id: &str, name: &str, address: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: address.into(), last_seen: Some(42), mirror: false };
         let status = NetworkStatus { role: NetworkRole::Main, assistants: paired_offline(&[p("a1", "laptop", "10.0.0.5"), p("b2", "desk", "10.0.0.6")]), main_error: Some("Could not listen on port 4127: Address already in use".into()), ..Default::default() };
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["mainError"], "Could not listen on port 4127: Address already in use");

@@ -25,19 +25,48 @@ const running: NetworkStatus = {
   assistant: { connected: false, mainName: null, error: null },
   mainError: null,
 };
-const base: NetworkModel = { status: running, name: "Pixel 8", port: 4127, notifyAwaiting: true, notifyCompleted: false, addresses: ["192.168.1.20"], notificationsAllowed: true, busy: false, error: null, promote: null };
-const handlers = () => ({ onSave: vi.fn(), onStart: vi.fn(), onStop: vi.fn(), onCode: vi.fn(), onRemove: vi.fn(), onSwitch: vi.fn(), onBattery: vi.fn(), onMakeMain: vi.fn(), onPromote: vi.fn(), onPromoteCancel: vi.fn(), onStopListening: vi.fn() });
+const base: NetworkModel = { mainHost: "", mainPort: 0, status: running, name: "Pixel 8", port: 4127, notifyAwaiting: true, notifyCompleted: false, addresses: ["192.168.1.20"], notificationsAllowed: true, busy: false, error: null, promote: null };
+const handlers = () => ({ onSave: vi.fn(), onStart: vi.fn(), onStop: vi.fn(), onCode: vi.fn(), onRemove: vi.fn(), onSwitch: vi.fn(), onBattery: vi.fn(), onMakeMain: vi.fn(), onPromote: vi.fn(), onPromoteCancel: vi.fn(), onStopListening: vi.fn(), onJoin: vi.fn(), onMirror: vi.fn() });
 
 describe("renderNetwork", () => {
-  it("shows Listening with Stop listening while the phone assists a main", () => {
+  it("shows Connected to with the main's address and Leave while the phone has joined a main", () => {
     const h = handlers();
-    const listening: NetworkModel = { ...base, status: { role: "assistant", code: null, assistants: [], assistant: { connected: true, mainName: "laptop", error: null } } };
-    const el = renderNetwork(listening, h, NOW);
-    expect(el.textContent).toContain("Listening to laptop");
+    const joined: NetworkModel = { ...base, mainHost: "192.168.1.10", mainPort: 4127, status: { role: "assistant", code: null, assistants: [], assistant: { connected: true, mainName: "laptop", error: null } } };
+    const el = renderNetwork(joined, h, NOW);
+    expect(el.textContent).toContain("Connected to laptop");
+    expect(el.textContent).toContain("192.168.1.10:4127");
     expect(el.querySelector("button[data-action=start]")).toBeNull();
+    expect(el.querySelector("button[data-action=join]")).toBeNull();
     expect(el.querySelector(".network__code")).toBeNull();
-    el.querySelector<HTMLButtonElement>("button[data-action=stop-listening]")!.click();
+    el.querySelector<HTMLButtonElement>("button[data-action=leave]")!.click();
     expect(h.onStopListening).toHaveBeenCalled();
+  });
+
+  it("offers Join a main while the phone is off, and keeps what was typed across a repaint", () => {
+    const h = handlers();
+    const off: NetworkModel = { ...base, status: { ...running, role: "off", code: null, assistants: [] } };
+    const el = renderNetwork(off, h, NOW);
+    el.querySelector<HTMLInputElement>("input[name=host]")!.value = "desk.local";
+    el.querySelector<HTMLInputElement>("input[name=code]")!.value = "483921";
+    const edits = carryEdits(el, off);
+    const again = renderNetwork(off, h, NOW);
+    restoreEdits(again, edits);
+    expect(again.querySelector<HTMLInputElement>("input[name=host]")!.value).toBe("desk.local");
+    again.querySelector<HTMLButtonElement>("button[data-action=join]")!.click();
+    expect(h.onJoin).toHaveBeenCalledWith("desk.local", 4127, "483921");
+    expect(renderNetwork(base, h, NOW).querySelector("button[data-action=join]")).toBeNull();
+  });
+
+  it("shows the mirror switch for a Maya that asked, and Android by name", () => {
+    const h = handlers();
+    const fold = { id: "f", name: "Fold", hostname: "localhost", platform: "android", address: "192.168.1.31", connected: true, lastSeen: null, mirror: false, wantsMirror: true };
+    const el = renderNetwork({ ...base, status: { ...running, assistants: [fold] } }, h, NOW);
+    expect(el.textContent).toContain("Android");
+    const box = el.querySelector<HTMLInputElement>("input[data-action=mirror]")!;
+    expect(box.checked).toBe(false);
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    expect(h.onMirror).toHaveBeenCalledWith("f", true);
   });
 
   it("says Reconnecting with the last error while it cannot reach the main", () => {

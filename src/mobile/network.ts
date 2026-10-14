@@ -13,6 +13,9 @@ export type { NetworkStatus } from "../settings";
 
 export interface NetworkModel {
   status: NetworkStatus;
+  /** The joined main's host and port, from the config. */
+  mainHost: string;
+  mainPort: number;
   name: string;
   port: number;
   notifyAwaiting: boolean;
@@ -37,9 +40,11 @@ export interface NetworkHandlers {
   onPromote(id: string): void;
   onPromoteCancel(): void;
   onStopListening(): void;
+  onJoin(host: string, port: number, code: string): void;
+  onMirror(id: string, on: boolean): void;
 }
 
-const PLATFORM_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
+const PLATFORM_NAMES: Record<string, string> = { android: "Android", macos: "macOS", linux: "Linux", windows: "Windows" };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -71,6 +76,29 @@ function minutesLeft(expiresAt: number, nowMs: number): number {
   return Math.max(0, Math.ceil((expiresAt - nowMs) / 60_000));
 }
 
+const JOIN_HINT = "Open Settings → Network on the main, choose Show pairing code, and type the code it shows.";
+
+function input(label: string, name: string, value: string, type = "text"): { label: HTMLLabelElement; input: HTMLInputElement } {
+  const l = el("label", "", `${label} `);
+  const i = el("input", "");
+  i.name = name;
+  i.type = type;
+  i.value = value;
+  l.append(i);
+  return { label: l, input: i };
+}
+
+function joinSection(h: NetworkHandlers): HTMLElement {
+  const join = section("Join a main");
+  const host = input("Host", "host", "");
+  const port = input("Port", "joinPort", "4127", "number");
+  const code = input("Pairing code", "code", "");
+  code.input.inputMode = "numeric";
+  join.append(host.label, port.label, code.label, el("p", "settings__hint", JOIN_HINT));
+  join.append(button("Join", "join", () => h.onJoin(host.input.value, Number(port.input.value) || 0, code.input.value), true));
+  return join;
+}
+
 export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = el("div", "settings__body network");
   const running = m.status.role === "main";
@@ -94,14 +122,15 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
   phone.append(name, port, row);
   if (listening) {
     const link = m.status.assistant;
-    const line = link.connected && link.mainName ? `Listening to ${link.mainName}` : "Reconnecting…";
-    phone.append(el("p", "network__listening", line));
+    phone.append(el("p", "network__listening", link.connected && link.mainName ? `Connected to ${link.mainName}` : "Reconnecting…"));
+    if (m.mainHost) phone.append(el("p", "settings__hint", `${m.mainHost}:${m.mainPort || 4127}`));
     if (!link.connected && link.error) phone.append(el("p", "settings__hint", link.error));
-    phone.append(button("Stop listening", "stop-listening", h.onStopListening));
+    phone.append(button("Leave", "leave", h.onStopListening));
   }
   if (m.status.mainError) phone.append(el("p", "settings__error", m.status.mainError));
   if (m.error) phone.append(el("p", "settings__error", m.error));
   root.append(phone);
+  if (!running && !listening) root.append(joinSection(h));
 
   if (running) {
     const pairing = section("Pairing");
@@ -127,6 +156,17 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
     const seen = a.connected ? "Connected" : a.lastSeen ? `Last seen ${formatAge(a.lastSeen, nowMs)} ago` : "Never connected";
     text.append(el("div", "network__assistant-meta", [platform, a.address, seen].filter(Boolean).join(" · ")));
     if (a.note) text.append(el("div", "network__assistant-meta", a.note));
+    if (a.wantsMirror || a.mirror) {
+      const sw = el("label", "settings__switch");
+      const box = el("input", "");
+      box.type = "checkbox";
+      box.dataset.action = "mirror";
+      box.dataset.id = a.id;
+      box.checked = !!a.mirror;
+      box.addEventListener("change", () => h.onMirror(a.id, box.checked));
+      sw.append(box, document.createTextNode(" Sees and controls all sessions"));
+      text.append(sw);
+    }
     const rm = button("Remove", "remove-assistant", () => h.onRemove(a.id));
     rm.dataset.id = a.id;
     r.append(text);
@@ -166,40 +206,37 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
 }
 
 interface ConfigView {
-  network: { name: string; port: number };
+  network: { name: string; port: number; mainHost?: string; mainPort?: number };
   notifyOnAwaiting: boolean;
   notifyOnCompleted: boolean;
 }
 
-/** Carry forward name/port edits across repaints. Returns typed values that differ from the model. */
-export function carryEdits(pane: ParentNode, model: { name: string; port: number }): { name?: string; port?: string; focus?: "name" | "port" } {
-  const nameInput = pane.querySelector<HTMLInputElement>("input[name=name]");
-  const portInput = pane.querySelector<HTMLInputElement>("input[name=port]");
-  const edits: { name?: string; port?: string; focus?: "name" | "port" } = {};
-  if (nameInput && nameInput.value !== model.name) edits.name = nameInput.value;
-  if (portInput && portInput.value !== String(model.port)) edits.port = portInput.value;
+const CARRIED = ["name", "port", "host", "joinPort", "code"] as const;
+type Carried = (typeof CARRIED)[number];
+export type Edits = Partial<Record<Carried, string>> & { focus?: Carried };
+
+/** Carry forward typed values across repaints: each field that differs from what a fresh render shows, and the focused one. */
+export function carryEdits(pane: ParentNode, model: { name: string; port: number }): Edits {
+  const fresh: Record<Carried, string> = { name: model.name, port: String(model.port), host: "", joinPort: "4127", code: "" };
+  const edits: Edits = {};
   const doc = pane.ownerDocument;
-  if (doc && nameInput && doc.activeElement === nameInput) edits.focus = "name";
-  else if (doc && portInput && doc.activeElement === portInput) edits.focus = "port";
+  for (const f of CARRIED) {
+    const input = pane.querySelector<HTMLInputElement>(`input[name=${f}]`);
+    if (!input) continue;
+    if (input.value !== fresh[f]) edits[f] = input.value;
+    if (doc && doc.activeElement === input) edits.focus = f;
+  }
   return edits;
 }
 
 /** Restore carried edits into the pane after a repaint. */
-export function restoreEdits(pane: ParentNode, edits: ReturnType<typeof carryEdits>): void {
-  if (edits.name !== undefined) {
-    const nameInput = pane.querySelector<HTMLInputElement>("input[name=name]");
-    if (nameInput) nameInput.value = edits.name;
-  }
-  if (edits.port !== undefined) {
-    const portInput = pane.querySelector<HTMLInputElement>("input[name=port]");
-    if (portInput) portInput.value = edits.port;
-  }
-  if (edits.focus === "name") {
-    const nameInput = pane.querySelector<HTMLInputElement>("input[name=name]");
-    if (nameInput) nameInput.focus();
-  } else if (edits.focus === "port") {
-    const portInput = pane.querySelector<HTMLInputElement>("input[name=port]");
-    if (portInput) portInput.focus();
+export function restoreEdits(pane: ParentNode, edits: Edits): void {
+  for (const f of CARRIED) {
+    const input = pane.querySelector<HTMLInputElement>(`input[name=${f}]`);
+    if (!input) continue;
+    const v = edits[f];
+    if (v !== undefined) input.value = v;
+    if (edits.focus === f) input.focus();
   }
 }
 
@@ -213,6 +250,8 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
   if (!pane) return () => undefined;
   let config: ConfigView | null = null;
   const model: NetworkModel = {
+    mainHost: "",
+    mainPort: 0,
     status: { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, mainError: null },
     name: "",
     port: 4127,
@@ -248,6 +287,15 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     model.status = s;
     onStatus(s);
     paint();
+  };
+  const loadConfig = async () => {
+    config = await invoke<ConfigView>("get_config");
+    model.name = config.network.name;
+    model.port = config.network.port || 4127;
+    model.mainHost = config.network.mainHost ?? "";
+    model.mainPort = config.network.mainPort ?? 0;
+    model.notifyAwaiting = config.notifyOnAwaiting;
+    model.notifyCompleted = config.notifyOnCompleted;
   };
   const saveConfig = async (edit: (c: ConfigView) => void) => {
     const full = await invoke<ConfigView>("get_config");
@@ -292,16 +340,20 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
       setStatus(await invoke<NetworkStatus>("network_promote", { id }));
       model.promote = null;
     }),
-    onStopListening: () => void busy(async () => setStatus(await invoke<NetworkStatus>("listen_stop"))),
+    onStopListening: () => void busy(async () => {
+      setStatus(await invoke<NetworkStatus>("listen_stop"));
+      await loadConfig();
+    }),
+    onJoin: (host, port, code) => void busy(async () => {
+      setStatus(await invoke<NetworkStatus>("network_pair", { host, port, name: model.name, code }));
+      await loadConfig();
+    }),
+    onMirror: (id, on) => void busy(async () => setStatus(await invoke<NetworkStatus>("network_set_mirror", { id, on }))),
     onBattery: () => void invoke("request_battery_exemption").catch((e) => showToast(String(e))),
   };
   void listen<NetworkStatus>("network", (e) => setStatus(e.payload));
   void (async () => {
-    config = await invoke<ConfigView>("get_config");
-    model.name = config.network.name;
-    model.port = config.network.port || 4127;
-    model.notifyAwaiting = config.notifyOnAwaiting;
-    model.notifyCompleted = config.notifyOnCompleted;
+    await loadConfig();
     model.addresses = await invoke<string[]>("local_addresses").catch(() => []);
     setStatus(await invoke<NetworkStatus>("network_status"));
   })();

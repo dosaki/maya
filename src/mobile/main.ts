@@ -77,7 +77,7 @@ function paintStrip(): void {
 }
 
 function paintHint(host: HTMLElement): void {
-  if (!status || status.assistants.length > 0) return;
+  if (!status || status.role !== "main" || status.assistants.length > 0) return;
   const hint = document.createElement("div");
   hint.className = "board__hint";
   const p = document.createElement("p");
