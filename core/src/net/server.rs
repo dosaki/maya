@@ -152,6 +152,9 @@ pub struct Server {
     /// The main's last board for mirroring Mayas: one board and the serial it was taken at.
     mirror: Option<MirrorBoard>,
     mirror_serial: u64,
+    /// This main's name, so an assistant with the same name gets a label of
+    /// its own (the main's own name means the main in a request).
+    main_name: String,
 }
 
 /// The main's board as its page shows it; local cards have no `machine`.
@@ -161,8 +164,8 @@ struct MirrorBoard {
 }
 
 impl Server {
-    fn new(paired: Vec<PairedAssistant>) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0 }
+    fn new(paired: Vec<PairedAssistant>, main_name: String) -> Server {
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), nonces: NonceLog::default(), paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, main_name }
     }
 
     /// The entry `id` lets its Maya mirror.
@@ -198,8 +201,10 @@ impl Server {
     /// Each paired assistant's id and label: its name, with its address
     /// when another entry has the same name.
     fn labels(&self) -> Vec<(String, String)> {
-        let entries: Vec<(String, String)> = self.paired.iter().map(|p| (p.name.clone(), p.address.clone())).collect();
-        self.paired.iter().zip(display_names(&entries)).map(|(p, label)| (p.id.clone(), label)).collect()
+        // The main joins the comparison but not the result: an assistant
+        // named like it carries its address too.
+        let entries: Vec<(String, String)> = std::iter::once((self.main_name.clone(), String::new())).chain(self.paired.iter().map(|p| (p.name.clone(), p.address.clone()))).collect();
+        self.paired.iter().zip(display_names(&entries).into_iter().skip(1)).map(|(p, label)| (p.id.clone(), label)).collect()
     }
 
     /// Records a pairing from `address`. A disconnected entry already paired
@@ -512,10 +517,13 @@ pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("Could not listen on port {port}: {e}. Choose another port."))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let paired = lock(&config_view).assistants.clone();
-    let shared = Arc::new(Mutex::new(Server::new(paired)));
+    let (paired, main_name) = {
+        let c = lock(&config_view);
+        (c.assistants.clone(), main_name_of(&c))
+    };
+    let shared = Arc::new(Mutex::new(Server::new(paired, main_name.clone())));
     let stop = Arc::new(AtomicBool::new(false));
-    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name: main_name_of(&config_view.lock().unwrap()), own_mirror: AtomicBool::new(false), live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()) });
+    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name, own_mirror: AtomicBool::new(false), live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()) });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
     log::line("network", format!("listening on port {port}"));
@@ -1476,6 +1484,26 @@ mod tests {
     }
 
     #[test]
+    fn an_assistant_named_like_the_main_carries_its_address_so_requests_reach_it() {
+        let counter = Arc::new(Counter::default());
+        let handle = start_with(counter.clone(), Arc::new(Mutex::new(NetworkConfig { name: "desk".into(), ..Default::default() })), 0).unwrap();
+        let _ = counter.server.set(handle.shared.clone());
+        let port = handle.port();
+        let (mut phone, _, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        let (_twin, twin_id, _) = pair_client(&handle, port, "desk");
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == twin_id && a.connected));
+        assert_eq!(handle.status().assistants.iter().find(|a| a.id == twin_id).unwrap().name, "desk (127.0.0.1)");
+        handle.mirror(vec![]);
+        let Down::Mirror { machines, .. } = recv(&mut phone) else { panic!("expected a mirror") };
+        let names: Vec<&str> = machines.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["desk", "desk (127.0.0.1)"]);
+        send(&mut phone, &Up::Request { id: 1, machine: Some("desk (127.0.0.1)".into()), request: Request::ListDirs });
+        assert!(matches!(recv(&mut phone), Down::Response { id: 1, ok: true, .. }));
+        assert_eq!(counter.requests.lock().unwrap()[0].0.as_deref(), Some("desk (127.0.0.1)"), "the twin is not taken for the main");
+        handle.stop();
+    }
+
+    #[test]
     fn the_main_mirrors_its_board_with_its_own_cards_named_and_the_receiver_left_out() {
         let (handle, port) = test_server();
         let (mut phone, _, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
@@ -1909,7 +1937,7 @@ mod tests {
 
     #[test]
     fn pairings_are_told_apart_by_address_and_equal_names_carry_it() {
-        let mut s = Server::new(vec![]);
+        let mut s = Server::new(vec![], "desk".into());
         let (first, previous) = s.record_pairing("192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
         assert!(previous.is_none());
         s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, received_at: 0, connected: false });

@@ -288,19 +288,25 @@ impl Hub {
     /// Listens to the main in the config and mirrors its board; the keep-awake
     /// service runs meanwhile. That main can make this phone the main.
     pub fn start_client(self: &Arc<Self>) {
+        // The old client and the last link's state go before the new client
+        // starts, so its first mirror is never wiped behind it. A new link
+        // seeds the notifier afresh and shows none of the last one's cards.
+        let old = self.client.lock().unwrap().take();
+        if let Some(old) = old {
+            old.stop();
+        }
+        *self.link.lock().unwrap() = AssistantLink { retrying: true, ..Default::default() };
+        self.mirror_seeded.store(false, Ordering::SeqCst);
+        *self.mirror.lock().unwrap() = MirrorView::default();
         let weak = Arc::downgrade(self);
         let handle = ClientHandle::spawn(move |stop| {
             let notify: Arc<dyn ClientNotify> = Arc::new(HubClientNotify { hub: weak.clone(), stop: stop.clone() });
             let config_of = move || weak.upgrade().map(|h| h.settings.lock().unwrap().config.network.clone()).unwrap_or_default();
             reconnect(&config_of, Arc::new(NoSessions), notify, &stop);
         });
-        *self.link.lock().unwrap() = AssistantLink { retrying: true, ..Default::default() };
-        // A new link seeds the notifier afresh and shows none of the last one's cards.
-        self.mirror_seeded.store(false, Ordering::SeqCst);
-        *self.mirror.lock().unwrap() = MirrorView::default();
-        if let Some(old) = self.client.lock().unwrap().replace(handle) {
-            old.stop();
-        }
+        *self.client.lock().unwrap() = Some(handle);
+        // A mirror that landed before the handle was in shows now.
+        self.refresh();
         self.sink.service_start("Reconnecting…");
         self.sink.network(&self.status());
     }
