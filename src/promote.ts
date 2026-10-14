@@ -10,6 +10,6 @@ export function promoteLines(assistants: AssistantStatus[], id: string, thisDevi
   return [
     `Make ${g.name} the main Maya? Every connected Maya will assist ${g.name}, and so will ${thisDevice}.`,
     ...others.filter((a) => a.connected && !a.canFollow).map((a) => `${a.name} cannot follow and stays with no main; pair it with ${g.name} afterwards.`),
-    ...others.filter((a) => !a.connected).map((a) => `${a.name} is offline; when it is back, set its Host to ${g.address}. It does not need to pair again.`),
+    ...others.filter((a) => !a.connected).map((a) => `${a.name} is offline; when it is back, pair it with ${g.name}.`),
   ];
 }

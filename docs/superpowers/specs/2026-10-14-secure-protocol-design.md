@@ -260,6 +260,9 @@ a forwarded port carries the connection until one exists.
   pairing, its config and its key file are all saved; New key on the phone
   changes nothing if a step fails.
 - `maya run` refuses to start with a pairing but no `identity.key`.
+- An assistant that is offline during Make main pins the old main's key,
+  so it pairs again with the new main when it is back; the confirmation
+  says so.
 
 ## Testing
 

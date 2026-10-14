@@ -786,7 +786,7 @@ describe("Make main", () => {
     const el = renderSettings({ ...voiceBase, networkRole: "main", network, networkPromote: "g" }, h);
     const confirm = el.querySelector<HTMLElement>("[data-for=promote-confirm]")!;
     expect(confirm.textContent).toContain("Make laptop the main Maya? Every connected Maya will assist laptop");
-    expect(confirm.textContent).toContain("nas is offline; when it is back, set its Host to 192.168.55.70.");
+    expect(confirm.textContent).toContain("nas is offline; when it is back, pair it with laptop.");
     confirm.querySelector<HTMLButtonElement>("button[data-action=promote-confirm]")!.click();
     expect(h.onPromote).toHaveBeenCalledWith("g");
     confirm.querySelector<HTMLButtonElement>("button[data-action=promote-cancel]")!.click();

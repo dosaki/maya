@@ -306,18 +306,17 @@ quiet.
   know, and keeps that machine's last board with an unreadable-board note.
   From 0.11.0 on, a card from an agent Maya does not know shows as
   "Unknown agent" instead.
-- **Names and addresses.** The main tells machines apart by their IP
-  address; names are only labels, on cards and in what Maya says. Two
+- **Names and addresses.** The main tells machines apart by their key;
+  names and addresses are only labels, on cards and in what Maya says. Two
   assistants with the same name show as "laptop (192.168.1.20)". A machine
-  that pairs again from the same address (after a reset, say) keeps its
-  place in the list when it pairs again with the same key. So does another machine that later
-  gets a disconnected assistant's address (from the router, say) and
-  pairs: it takes over that entry.
+  that pairs again with the same key keeps its place in the list. A
+  machine with a new key (after New key or a reset, say) is a new entry,
+  even from the same address.
 - **Make main.** On the main, Settings › Network › Make main beside a
   connected assistant hands it the role. Every connected Maya follows the
   new main with no new pairing; an assistant that is offline at that
-  moment needs its Host set to the new main's address. It does not need to
-  pair again.
+  moment still knows only the old main's key, so pair it with the new main
+  when it is back.
 - **Versions.** Run the same Maya on every machine. The main notes an
   assistant that runs another version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
