@@ -52,6 +52,10 @@ pub struct NetworkConfig {
     pub pair_again: bool,
     /// The main's paired assistants.
     pub assistants: Vec<PairedAssistant>,
+    /// A protocol 1 assistant's token: read only to tell a pairing that
+    /// was dropped from a host typed but never paired; never written.
+    #[serde(default, rename = "token", skip_serializing)]
+    pub legacy_token: String,
 }
 
 impl NetworkConfig {
@@ -60,7 +64,7 @@ impl NetworkConfig {
     pub fn drop_insecure_pairings(&mut self) {
         let before = self.assistants.len();
         self.assistants.retain(|a| !a.key.is_empty());
-        let stale_link = self.role == NetworkRole::Assistant && self.main_key.is_empty() && !self.main_host.trim().is_empty();
+        let stale_link = self.role == NetworkRole::Assistant && self.main_key.is_empty() && !self.legacy_token.is_empty();
         if self.assistants.len() != before || stale_link {
             self.pair_again = true;
         }
@@ -560,6 +564,10 @@ mod tests {
         assert!(c.network.pair_again);
         let old_link = r#"{"completedTimeoutMinutes":5,"network":{"role":"assistant","mainHost":"desk.local","assistantId":"a","token":"t"}}"#;
         assert!(serde_json::from_str::<Config>(old_link).unwrap().migrate().network.pair_again);
+        let typed_only = r#"{"completedTimeoutMinutes":5,"network":{"role":"assistant","mainHost":"desk.local"}}"#;
+        assert!(!serde_json::from_str::<Config>(typed_only).unwrap().migrate().network.pair_again, "a host typed but never paired");
+        let resaved = serde_json::to_string(&serde_json::from_str::<Config>(old_link).unwrap()).unwrap();
+        assert!(!resaved.contains("token"), "the protocol 1 token is never written back");
         let fresh = Config::default().migrate();
         assert!(!fresh.network.pair_again, "nothing was paired, nothing to say");
     }
