@@ -696,14 +696,8 @@ fn stop_assistant(app: &AppHandle) {
 /// Pairs this Maya with a main as its assistant and starts the client.
 #[tauri::command(async)]
 fn network_pair(app: AppHandle, state: TauriState<AppState>, host: String, port: u16, name: String, code: String) -> Result<NetworkStatus, String> {
-    let host = host.trim();
-    if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c == '/') {
-        return Err("Type the main Maya's host name or address.".into());
-    }
-    let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
-        return Err("The pairing code has six digits.".into());
-    }
+    let (host, code) = net::client::check_pair_args(&host, &code)?;
+    let host = host.as_str();
     let port = if port == 0 { net::protocol::DEFAULT_PORT } else { port };
     // "Pair again" while connected: the running client goes first, and its
     // connection with it, so the main reuses this machine's entry instead of

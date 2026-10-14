@@ -2713,4 +2713,79 @@ mod tests {
         let _ = (g_thread.join(), b_thread.join());
         handle.stop();
     }
+
+    #[derive(Default)]
+    struct Mirrorer {
+        lane: Arc<client::RequestLane>,
+        offers: Mutex<Vec<Option<bool>>>,
+        mirrors: Mutex<Vec<(bool, Vec<Card>)>>,
+    }
+
+    impl client::ClientNotify for Mirrorer {
+        fn paired(&self, _: &str, _: &str) {}
+        fn connected(&self, _: &str) {}
+        fn disconnected(&self, _: &str) {}
+        fn removed(&self) {}
+        fn caps(&self) -> Vec<String> {
+            vec!["mirror".into()]
+        }
+        fn mirror_offer(&self, offered: Option<bool>) {
+            self.offers.lock().unwrap().push(offered);
+        }
+        fn mirrored(&self, allowed: bool, cards: Vec<Card>, _: Vec<MachineInfo>) {
+            self.mirrors.lock().unwrap().push((allowed, cards));
+        }
+        fn lane(&self) -> Option<Arc<client::RequestLane>> {
+            Some(self.lane.clone())
+        }
+    }
+
+    /// Pairs a mirroring client with `handle` and runs it until `stop`.
+    fn run_mirrorer(handle: &ServerHandle, port: u16) -> (Arc<Mirrorer>, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+        let (code, _) = handle.open_pairing(crate::store::now_ms()).unwrap();
+        let (_, id, token) = client::pair_with(Arc::new(NoSessions), "127.0.0.1", port, "Pixel", &code, vec!["mirror".into()]).unwrap();
+        let m = Arc::new(Mirrorer::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = assistant_config(port, &id, &token);
+        let (n, s) = (m.clone(), stop.clone());
+        let t = std::thread::spawn(move || client::reconnect(&move || config.clone(), Arc::new(NoSessions), n, &s));
+        wait_until(|| m.offers.lock().unwrap().as_slice() == [Some(true)]);
+        (m, stop, t)
+    }
+
+    #[test]
+    fn a_mirroring_client_hears_the_offer_gets_the_board_and_its_requests_answered() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (m, stop, t) = run_mirrorer(&handle, port);
+        handle.mirror(vec![card("l1", "local")]);
+        wait_until(|| m.mirrors.lock().unwrap().iter().any(|(ok, cards)| *ok && cards.iter().any(|c| c.session_id == "l1")));
+        let lane = m.lane.clone();
+        let slow = {
+            let l = lane.clone();
+            std::thread::spawn(move || l.request(None, Request::Command(CommandKind::Compact { session: "slow".into() }), Duration::from_secs(5)))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(lane.request(Some("laptop".into()), Request::ListAgents, Duration::from_secs(5)), Ok(Some(serde_json::json!("done"))));
+        assert_eq!(slow.join().unwrap(), Ok(Some(serde_json::json!("done"))), "each answer reaches its own caller");
+        stop.store(true, Ordering::SeqCst);
+        t.join().unwrap();
+        assert_eq!(lane.request(None, Request::ListDirs, Duration::from_secs(1)).unwrap_err(), client::NOT_CONNECTED);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_request_waiting_when_the_main_goes_away_fails_at_once() {
+        let (handle, port) = test_server();
+        let (m, stop, t) = run_mirrorer(&handle, port);
+        let lane = m.lane.clone();
+        let began = Instant::now();
+        let waiting = std::thread::spawn(move || lane.request(None, Request::Command(CommandKind::Compact { session: "slow".into() }), Duration::from_secs(30)));
+        std::thread::sleep(Duration::from_millis(100));
+        handle.stop();
+        assert_eq!(waiting.join().unwrap().unwrap_err(), client::LOST);
+        assert!(began.elapsed() < Duration::from_secs(5), "not left to time out");
+        stop.store(true, Ordering::SeqCst);
+        t.join().unwrap();
+    }
 }

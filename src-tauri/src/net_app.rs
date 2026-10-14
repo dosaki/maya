@@ -62,7 +62,7 @@ pub fn push_board(app: &AppHandle) {
 pub fn pair(app: &AppHandle, host: &str, port: u16, name: &str, code: &str) -> Result<String, String> {
     // The connection ends at `welcome`, so no command reaches this executor.
     let exec: Arc<dyn Executor> = Arc::new(TauriExecutor { app: app.clone(), board_due: Arc::new(AtomicBool::new(false)) });
-    let (main, id, token) = pair_with(exec, host, port, name, code)?;
+    let (main, id, token) = pair_with(exec, host, port, name, code, vec![])?;
     crate::update_config(app, |c| {
         c.network.role = NetworkRole::Assistant;
         c.network.main_host = host.trim().into();

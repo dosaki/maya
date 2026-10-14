@@ -61,7 +61,7 @@ pub fn pair(claude_dir: &Path, host: &str, port: u16, name: Option<&str>, code: 
     let name = name.map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(maya_core::net::local_hostname);
     let store = Arc::new(Mutex::new(Store::new(claude_dir.to_path_buf())));
     let exec: Arc<dyn Executor> = Arc::new(CliExecutor::new(store.clone(), Arc::new(Tmux::default())));
-    let (main, id, token) = client::pair_with(exec, host, port, &name, code).map_err(|e| (1, e))?;
+    let (main, id, token) = client::pair_with(exec, host, port, &name, code, vec![]).map_err(|e| (1, e))?;
     let mut s = store.lock().unwrap();
     s.config.network.role = NetworkRole::Assistant;
     s.config.network.main_host = host.trim().into();

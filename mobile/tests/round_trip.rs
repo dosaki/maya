@@ -137,7 +137,7 @@ fn pairs_merges_a_board_routes_a_reply_and_notifies_only_what_is_new() {
 
     // The assistant pairs with its first board already holding an ask: not news.
     let assistant = Arc::new(FakeAssistant { cards: Mutex::new(vec![card("s1", State::Awaiting, 1_000)]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) });
-    let (main_name, id, token) = pair_with(assistant.clone(), "127.0.0.1", port, "laptop", &code).unwrap();
+    let (main_name, id, token) = pair_with(assistant.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
     assert_eq!(main_name, "Pixel");
     let saved = maya_core::config::load(&maya_dir.join("config.json"));
     assert_eq!(saved.network.assistants.len(), 1, "the pairing was saved");
@@ -231,7 +231,7 @@ fn a_refresh_with_no_new_frame_drops_an_expired_assistant_and_clears_its_notific
     hub.start_server().unwrap();
     let code = hub.pairing_code().unwrap().code.expect("a pairing code").code;
     let assistant = Arc::new(FakeAssistant { cards: Mutex::new(vec![card("s1", State::Working, 1_000)]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) });
-    let (_, id, token) = pair_with(assistant.clone(), "127.0.0.1", port, "laptop", &code).unwrap();
+    let (_, id, token) = pair_with(assistant.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
     let link = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), assistant_id: id, token, ..Default::default() };
     let stop = Arc::new(AtomicBool::new(false));
     let client = {
@@ -320,7 +320,7 @@ fn the_phone_hands_the_main_role_over_listens_and_is_made_the_main_again() {
     let port = hub.settings.lock().unwrap().config.listen_port();
     let code = hub.pairing_code().unwrap().code.unwrap().code;
     let exec: Arc<dyn Executor> = Arc::new(FakeAssistant { cards: Mutex::new(vec![]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) });
-    let (_, id, token) = pair_with(exec.clone(), "127.0.0.1", port, "laptop", &code).unwrap();
+    let (_, id, token) = pair_with(exec.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
     let config = Arc::new(Mutex::new(NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), assistant_id: id.clone(), token, port: free_port(), ..Default::default() }));
     let lead = Arc::new(Lead { config: config.clone(), server: Mutex::new(None) });
     let stop = Arc::new(AtomicBool::new(false));
