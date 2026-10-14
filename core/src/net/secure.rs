@@ -2,9 +2,10 @@
 //! over the six-digit code, then a Noise `XXpsk3` handshake keyed by it;
 //! every later connection is a Noise `IK` handshake against the main's
 //! pinned key. After either, each WebSocket binary frame holds one or more
-//! Noise transport messages, `[u16 length][message]`, so every byte is
-//! encrypted and authenticated and a changed, replayed, reordered or
-//! injected frame fails to open.
+//! Noise transport messages, `[u16 length][message]`, and each message's
+//! plaintext starts with a flag saying whether more follow in its frame. So
+//! every byte is encrypted and authenticated, and a changed, replayed,
+//! reordered, injected, merged or cut frame fails to open.
 
 use super::identity::{Keypair, KEY_LEN};
 use super::protocol::MAX_FRAME;
@@ -20,8 +21,12 @@ const PROLOGUE: &[u8] = b"maya protocol 2";
 /// Noise's limit on one message, its 16-byte tag included.
 const NOISE_MAX: usize = 65_535;
 const TAG: usize = 16;
-/// The most plaintext one Noise message carries.
-const CHUNK: usize = NOISE_MAX - TAG;
+/// The most frame data one Noise message carries, past its flag byte.
+const CHUNK: usize = NOISE_MAX - TAG - 1;
+/// The first byte of every Noise message's plaintext: more messages follow
+/// in this frame, or this is the frame's last.
+const MORE: u8 = 0x01;
+const LAST: u8 = 0x00;
 
 /// The joining Maya's first frame starts with one of these.
 pub const MODE_PAIR: u8 = 1;
@@ -33,6 +38,8 @@ pub const KIND_MESSAGE: u8 = 0x00;
 pub const KIND_REFUSAL: u8 = 0xFF;
 pub const WRONG_CODE_REASON: &str = "wrong or expired pairing code";
 pub const UNKNOWN_KEY_REASON: &str = "unknown key";
+/// The main's last word in a pairing, sealed: it proves the main knows the code.
+const PAIRED: &str = "paired";
 pub const FORGED: &str = "A frame failed authentication; connection closed.";
 const SPAKE_LEN: usize = 33;
 const JOINER: &[u8] = b"maya-join";
@@ -58,7 +65,7 @@ impl std::fmt::Display for ChannelError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Got {
     Text(String),
-    /// A ping or pong: the peer is alive, nothing to decode.
+    /// A WebSocket ping or pong: unauthenticated, so never proof the peer is alive.
     Control,
     /// The read timed out (the connection loop's tick).
     Idle,
@@ -94,20 +101,25 @@ pub(crate) fn is_timeout(e: &tungstenite::Error) -> bool {
 }
 
 /// `plain` as one frame: Noise messages of at most `CHUNK` bytes of
-/// plaintext each, each after its length. Empty plaintext is one message.
+/// plaintext each, each flagged `MORE` or `LAST` and each after its length.
+/// Empty plaintext is one message holding only `LAST`.
 pub fn seal_frame(noise: &mut TransportState, plain: &[u8]) -> Result<Vec<u8>, String> {
     let chunks: Vec<&[u8]> = if plain.is_empty() { vec![&[][..]] } else { plain.chunks(CHUNK).collect() };
-    let mut out = Vec::with_capacity(plain.len() + chunks.len() * (TAG + 2));
+    let last = chunks.len() - 1;
+    let mut out = Vec::with_capacity(plain.len() + chunks.len() * (TAG + 3));
     let mut buf = vec![0u8; NOISE_MAX];
-    for chunk in chunks {
-        let n = noise.write_message(chunk, &mut buf).map_err(|e| format!("could not encrypt: {e}"))?;
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let mut body = vec![if i == last { LAST } else { MORE }];
+        body.extend_from_slice(chunk);
+        let n = noise.write_message(&body, &mut buf).map_err(|e| format!("could not encrypt: {e}"))?;
         out.extend_from_slice(&(n as u16).to_be_bytes());
         out.extend_from_slice(&buf[..n]);
     }
     Ok(out)
 }
 
-/// The text a frame holds; anything that does not open is `Forged`.
+/// The text a frame holds; anything that does not open is `Forged`. The
+/// frame must end exactly at its `LAST` message.
 pub fn open_frame(noise: &mut TransportState, frame: &[u8]) -> Result<String, ChannelError> {
     if frame.is_empty() {
         return Err(ChannelError::Forged);
@@ -115,18 +127,23 @@ pub fn open_frame(noise: &mut TransportState, frame: &[u8]) -> Result<String, Ch
     let mut plain = Vec::new();
     let mut buf = vec![0u8; NOISE_MAX];
     let mut rest = frame;
-    while !rest.is_empty() {
+    loop {
         let len = rest.get(..2).ok_or(ChannelError::Forged)?;
         let n = u16::from_be_bytes([len[0], len[1]]) as usize;
         let body = rest.get(2..2 + n).ok_or(ChannelError::Forged)?;
+        rest = &rest[2 + n..];
         let k = noise.read_message(body, &mut buf).map_err(|_| ChannelError::Forged)?;
-        plain.extend_from_slice(&buf[..k]);
+        let (flag, data) = buf[..k].split_first().ok_or(ChannelError::Forged)?;
+        plain.extend_from_slice(data);
         if plain.len() > MAX_FRAME {
             return Err(ChannelError::Io(format!("frame too large ({} bytes)", plain.len())));
         }
-        rest = &rest[2 + n..];
+        match *flag {
+            LAST if rest.is_empty() => return String::from_utf8(plain).map_err(|_| ChannelError::Forged),
+            MORE if !rest.is_empty() => {}
+            _ => return Err(ChannelError::Forged),
+        }
     }
-    String::from_utf8(plain).map_err(|_| ChannelError::Forged)
 }
 
 /// A WebSocket after its handshake: JSON text in, JSON text out, sealed.
@@ -197,16 +214,16 @@ fn read_frame<S: Read + Write>(ws: &mut WebSocket<S>, deadline: Instant, stopped
         if stopped() {
             return Err(Fail::Io("stopped".into()));
         }
+        // Checked on every frame, not only on a quiet read, so pings cannot hold it open.
+        if Instant::now() > deadline {
+            return Err(Fail::Io("timed out".into()));
+        }
         match ws.read() {
             Ok(Message::Binary(b)) => return Ok(b.to_vec()),
             Ok(Message::Text(_)) => return Err(Fail::OldPeer),
             Ok(Message::Close(_)) => return Err(Fail::Io("closed".into())),
             Ok(_) => {}
-            Err(e) if is_timeout(&e) => {
-                if Instant::now() > deadline {
-                    return Err(Fail::Io("timed out".into()));
-                }
-            }
+            Err(e) if is_timeout(&e) => {}
             Err(e) => return Err(Fail::Io(e.to_string())),
         }
     }
@@ -252,8 +269,9 @@ fn password(code: &str) -> Password {
 }
 
 /// The joining Maya's pairing: SPAKE2 over `code`, then `XXpsk3` keyed by
-/// it, then the main's word that the code matched. Returns the transport
-/// and the main's public key.
+/// it, then the main's sealed `paired`, which only a main that knew the code
+/// can send. Returns the transport and the main's public key once the main
+/// has proved it knows the code.
 pub fn pair<S: Read + Write>(ws: &mut WebSocket<S>, me: &Keypair, code: &str, deadline: Instant, stopped: &dyn Fn() -> bool) -> Result<(TransportState, [u8; KEY_LEN]), Fail> {
     let (spake, ours) = Spake2::<Ed25519Group>::start_a(&password(code), &Identity::new(JOINER), &Identity::new(MAIN));
     let mut first = vec![MODE_PAIR];
@@ -264,9 +282,13 @@ pub fn pair<S: Read + Write>(ws: &mut WebSocket<S>, me: &Keypair, code: &str, de
     send_frame(ws, message(&mut hs)?)?;
     absorb(&mut hs, &from_main(ws, deadline, stopped)?)?;
     send_frame(ws, message(&mut hs)?)?;
-    // The main checks the code with that last message and says so.
-    from_main(ws, deadline, stopped)?;
-    finish(hs)
+    // The main checks the code with that last message and says so, sealed.
+    let confirm = from_main(ws, deadline, stopped)?;
+    let (mut t, key) = finish(hs)?;
+    if open_frame(&mut t, &confirm).map_err(|_| Fail::Crypto)? != PAIRED {
+        return Err(Fail::Crypto);
+    }
+    Ok((t, key))
 }
 
 /// An assistant's connection: `IK` against the main's pinned key.
@@ -305,8 +327,11 @@ pub fn accept<S: Read + Write>(ws: &mut WebSocket<S>, me: &Keypair, deadline: In
                 }
                 return Err(f);
             }
-            send_message(ws, &[])?;
-            let (t, key) = finish(hs)?;
+            let (mut t, key) = finish(hs)?;
+            // Sealed, so the joiner knows this main holds the code too.
+            let mut frame = vec![KIND_MESSAGE];
+            frame.extend(seal_frame(&mut t, PAIRED.as_bytes()).map_err(Fail::Io)?);
+            send_frame(ws, frame)?;
             Ok((t, Accepted { key, paired: true }))
         }
         Some((&MODE_CONNECT, msg)) => {
@@ -380,8 +405,24 @@ mod frame_tests {
         let (mut a, _) = transport_pair();
         let frame = seal_frame(&mut a, &vec![b'x'; CHUNK * 2 + 10]).unwrap();
         let first = u16::from_be_bytes([frame[0], frame[1]]) as usize;
-        assert_eq!(first, NOISE_MAX, "a full chunk plus its tag");
-        assert_eq!(frame.len(), 3 * 2 + (CHUNK * 2 + 10) + 3 * TAG);
+        assert_eq!(first, NOISE_MAX, "a full chunk, its flag byte and its tag");
+        assert_eq!(frame.len(), 3 * 2 + (CHUNK * 2 + 10) + 3 * (TAG + 1), "a length, a flag and a tag per message");
+    }
+
+    #[test]
+    fn merged_frames_are_forged() {
+        let (mut a, mut b) = transport_pair();
+        let mut merged = seal_frame(&mut a, b"one").unwrap();
+        merged.extend(seal_frame(&mut a, b"two").unwrap());
+        assert_eq!(open_frame(&mut b, &merged), Err(ChannelError::Forged));
+    }
+
+    #[test]
+    fn a_frame_cut_at_a_chunk_boundary_is_forged() {
+        let (mut a, mut b) = transport_pair();
+        let frame = seal_frame(&mut a, &vec![b'x'; CHUNK + 10]).unwrap();
+        let first = 2 + u16::from_be_bytes([frame[0], frame[1]]) as usize;
+        assert_eq!(open_frame(&mut b, &frame[..first]), Err(ChannelError::Forged));
     }
 }
 
@@ -531,5 +572,58 @@ mod handshake_tests {
             }
         };
         assert_eq!(got, Err(ChannelError::Forged));
+    }
+
+    #[test]
+    fn a_main_that_does_not_know_the_code_is_not_trusted() {
+        let (mut j, mut m) = ws_pair();
+        let main = Keypair::generate();
+        let fake = std::thread::spawn(move || {
+            // The joiner's first frame, then its SPAKE2 with a different code.
+            let first = read_frame(&mut m, soon(), &|| false).unwrap();
+            let (spake, ours) = Spake2::<Ed25519Group>::start_b(&password("654321"), &Identity::new(JOINER), &Identity::new(MAIN));
+            send_message(&mut m, &ours).unwrap();
+            let psk = spake_key(spake, &first[1..]).unwrap();
+            let mut hs = builder(PAIR_PATTERN, &main).unwrap().psk(3, &psk).and_then(|b| b.build_responder()).unwrap();
+            absorb(&mut hs, &read_frame(&mut m, soon(), &|| false).unwrap()).unwrap();
+            send_message(&mut m, &message(&mut hs).unwrap()).unwrap();
+            // Message 3 is sealed under the wrong psk, so it is not read.
+            read_frame(&mut m, soon(), &|| false).unwrap();
+            let mut frame = vec![KIND_MESSAGE];
+            frame.extend(crate::net::protocol::random(40));
+            send_frame(&mut m, frame).unwrap();
+            m
+        });
+        let out = pair(&mut j, &Keypair::generate(), "123456", soon(), &|| false);
+        assert_eq!(out.unwrap_err(), Fail::Crypto);
+        drop(fake.join());
+    }
+
+    #[test]
+    fn pings_do_not_stretch_the_deadline() {
+        let (mut j, mut m) = ws_pair();
+        let pinger = std::thread::spawn(move || {
+            read_frame(&mut m, soon(), &|| false).unwrap();
+            let end = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < end {
+                if m.send(Message::Ping(Default::default())).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            m
+        });
+        let start = Instant::now();
+        let out = connect(&mut j, &Keypair::generate(), &Keypair::generate().public, Instant::now() + Duration::from_millis(300), &|| false);
+        assert!(matches!(out, Err(Fail::Io(_))), "{out:?}");
+        assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+        drop(pinger.join());
+    }
+
+    #[test]
+    fn an_unknown_mode_is_malformed() {
+        let (mut j, mut m) = ws_pair();
+        j.send(Message::binary(vec![9, 1, 2, 3])).unwrap();
+        assert_eq!(accept(&mut m, &Keypair::generate(), soon(), &|| false, &mut || panic!("no code for an unknown mode")).unwrap_err(), Fail::Malformed);
     }
 }
