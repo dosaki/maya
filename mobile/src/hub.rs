@@ -369,7 +369,10 @@ impl Hub {
         let key = match self.identity() {
             Ok(k) => k,
             Err(e) => {
-                self.link.lock().unwrap().error = Some(e);
+                // With no client running, `status()` shows the Off branch,
+                // which carries `main_error`: the page sees why.
+                self.link.lock().unwrap().error = Some(e.clone());
+                *self.main_error.lock().unwrap() = Some(e);
                 self.sink.network(&self.status());
                 return;
             }
@@ -381,6 +384,7 @@ impl Hub {
             reconnect(&config_of, key, Arc::new(NoSessions), notify, &stop);
         });
         *self.client.lock().unwrap() = Some(handle);
+        *self.main_error.lock().unwrap() = None;
         // A mirror that landed before the handle was in shows now.
         self.refresh();
         self.sink.service_start("Reconnecting…");

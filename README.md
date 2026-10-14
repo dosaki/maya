@@ -297,8 +297,10 @@ quiet.
   any program running as you can read the key (`security`, `CredRead` and
   `secret-tool` all hand it over). The key store only keeps it out of
   plain files, so an agent that reads your config files does not find it.
-  If a machine's key leaks, use Remove on the main, or New key on the
-  machine itself.
+  If a machine's key leaks, the other Mayas still trust it until you take
+  that trust away: Remove the machine on the main (if the main's key
+  leaked, use Forget main on every assistant and the phone). Then use New
+  key on the machine and pair it again. New key alone revokes nothing.
 - **Outside the LAN.** Maya does not open anything to the internet. Reach
   a main from outside through a VPN such as Tailscale or WireGuard and
   pair with its address there.

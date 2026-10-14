@@ -82,12 +82,22 @@ pub fn replace(path: &Path) -> Result<Keypair, String> {
     Ok(k)
 }
 
-/// `key` saved over `path`, owner-only.
+/// `key` saved over `path`, owner-only. It is written and synced to a
+/// sibling file first and renamed over `path` only then, so a failed write
+/// never leaves `path` without the key it held.
 pub fn save(path: &Path, key: &Keypair) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    crate::config::write_private(path, key.to_secret().as_bytes()).map_err(|e| format!("Could not save {}: {e}", path.display()))
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("{name}.tmp"));
+    let written = crate::config::write_private(&tmp, key.to_secret().as_bytes())
+        .and_then(|()| std::fs::OpenOptions::new().write(true).open(&tmp)?.sync_all())
+        .and_then(|()| std::fs::rename(&tmp, path));
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("Could not save {}: {e}", path.display())
+    })
 }
 
 #[cfg(test)]
@@ -155,5 +165,21 @@ mod tests {
         std::fs::write(&path, "garbage").unwrap();
         assert!(load_or_create(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "garbage", "the file is left alone");
+    }
+
+    #[test]
+    fn a_save_that_fails_leaves_the_old_key_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        let old = load_or_create(&path).unwrap();
+        // The sibling it writes first cannot be created.
+        std::fs::create_dir(dir.path().join(format!("{FILE}.tmp"))).unwrap();
+        assert!(save(&path, &Keypair::generate()).is_err());
+        assert_eq!(load_or_create(&path).unwrap().public, old.public, "the old key is still there");
+        std::fs::remove_dir(dir.path().join(format!("{FILE}.tmp"))).unwrap();
+        let new = Keypair::generate();
+        save(&path, &new).unwrap();
+        assert_eq!(load_or_create(&path).unwrap().public, new.public);
+        assert!(!dir.path().join(format!("{FILE}.tmp")).exists(), "nothing is left beside it");
     }
 }

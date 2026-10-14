@@ -183,11 +183,15 @@ pub fn load(item: &Item) -> Result<Option<String>, String> {
         let found = maya_core::command("secret-tool")
             .args(secret_tool_args(item).2)
             .stdin(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .output()
             .map_err(|e| format!("could not run secret-tool (install libsecret-tools): {e}"))?;
+        let search_err = String::from_utf8_lossy(&found.stderr);
         if found.stdout.iter().any(|b| !b.is_ascii_whitespace()) {
             Err("GNOME Keyring holds the item but did not unlock it".into())
+        } else if !search_err.trim().is_empty() {
+            // A search that failed proves nothing: never take it for "no key".
+            Err(format!("GNOME Keyring: {}", search_err.trim()))
         } else {
             Ok(None)
         }

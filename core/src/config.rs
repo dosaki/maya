@@ -64,7 +64,8 @@ impl NetworkConfig {
     pub fn drop_insecure_pairings(&mut self) {
         let before = self.assistants.len();
         self.assistants.retain(|a| !a.key.is_empty());
-        let stale_link = self.role == NetworkRole::Assistant && self.main_key.is_empty() && !self.legacy_token.is_empty();
+        // Whatever the role now: an assistant switched Off still held a link.
+        let stale_link = self.main_key.is_empty() && !self.legacy_token.is_empty();
         if self.assistants.len() != before || stale_link {
             self.pair_again = true;
         }
@@ -564,6 +565,8 @@ mod tests {
         assert!(c.network.pair_again);
         let old_link = r#"{"completedTimeoutMinutes":5,"network":{"role":"assistant","mainHost":"desk.local","assistantId":"a","token":"t"}}"#;
         assert!(serde_json::from_str::<Config>(old_link).unwrap().migrate().network.pair_again);
+        let switched_off = r#"{"completedTimeoutMinutes":5,"network":{"role":"off","mainHost":"desk.local","assistantId":"a","token":"t"}}"#;
+        assert!(serde_json::from_str::<Config>(switched_off).unwrap().migrate().network.pair_again, "an old link switched Off is told too");
         let typed_only = r#"{"completedTimeoutMinutes":5,"network":{"role":"assistant","mainHost":"desk.local"}}"#;
         assert!(!serde_json::from_str::<Config>(typed_only).unwrap().migrate().network.pair_again, "a host typed but never paired");
         let resaved = serde_json::to_string(&serde_json::from_str::<Config>(old_link).unwrap()).unwrap();

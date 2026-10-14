@@ -651,13 +651,21 @@ fn network_new_key(app: AppHandle, state: TauriState<AppState>) -> Result<Networ
             })
             .map(|_| ())
         },
-        |secret| keystore::store(&keystore::NETWORK_KEY, secret),
+        |secret| {
+            // Stored and cached under one lock, so two New keys at once (or
+            // a first use) never leave the cache holding a key the store
+            // does not. Not held across the restore: restarting Main reads
+            // the identity.
+            let mut held = state.identity.lock().unwrap();
+            keystore::store(&keystore::NETWORK_KEY, secret)?;
+            *held = Some(std::sync::Arc::new(maya_core::net::identity::Keypair::from_secret(secret)?));
+            Ok(())
+        },
         || {
             let _ = update_config(&app, |c| *c = before);
         },
     )?;
-    *state.identity.lock().unwrap() = Some(std::sync::Arc::new(k));
-    log::line("network", "new key made; every pairing dropped");
+    log::line("network", format!("new key {} made; every pairing dropped", k.public_b64()));
     Ok(network_status_of(&state))
 }
 
