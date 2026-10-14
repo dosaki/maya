@@ -6,6 +6,7 @@ pub mod server;
 pub mod client;
 pub mod promote;
 pub mod identity;
+pub mod secure;
 
 use crate::config::{Config, NetworkRole, PairedAssistant};
 use serde::Serialize;
