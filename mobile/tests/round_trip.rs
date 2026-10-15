@@ -3,6 +3,7 @@
 
 use maya_core::config::{Config, NetworkConfig, NetworkRole};
 use maya_core::model::{AwaitKind, Awaiting, Card, Harness, State};
+use maya_core::net::identity::Keypair;
 use maya_core::net::client::{pair_with, reconnect, run_once, ClientNotify, Executor, RequestLane};
 use maya_core::net::protocol::{CommandKind, Request};
 use maya_core::net::routing::MachineInfo;
@@ -78,7 +79,7 @@ impl Executor for FakeAssistant {
 
 struct Quiet;
 impl ClientNotify for Quiet {
-    fn paired(&self, _: &str, _: &str) {}
+    fn paired(&self, _: &str) {}
     fn connected(&self, _: &str) {}
     fn disconnected(&self, _: &str) {}
     fn removed(&self) {}
@@ -149,17 +150,18 @@ fn pairs_merges_a_board_routes_a_reply_and_notifies_only_what_is_new() {
 
     // The assistant pairs with its first board already holding an ask: not news.
     let assistant = Arc::new(FakeAssistant { cards: Mutex::new(vec![card("s1", State::Awaiting, 1_000)]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) });
-    let (main_name, id, token) = pair_with(assistant.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
+    let me = Arc::new(Keypair::generate());
+    let (main_name, main_key) = pair_with(assistant.clone(), me.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
     assert_eq!(main_name, "Pixel");
     let saved = maya_core::config::load(&maya_dir.join("config.json"));
     assert_eq!(saved.network.assistants.len(), 1, "the pairing was saved");
-    assert_eq!(saved.network.assistants[0].id, id);
+    assert_eq!(saved.network.assistants[0].key, me.public_b64());
 
-    let link = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), assistant_id: id, token, ..Default::default() };
+    let link = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), main_key, ..Default::default() };
     let stop = Arc::new(AtomicBool::new(false));
     let client = {
         let (assistant, stop) = (assistant.clone(), stop.clone());
-        std::thread::spawn(move || run_once(&link, assistant, Arc::new(Quiet), &stop, None))
+        std::thread::spawn(move || run_once(&link, &me, assistant, Arc::new(Quiet), &stop, None))
     };
 
     wait_until("the first board", || hub.cards().iter().any(|c| c.session_id == "s1"));
@@ -243,12 +245,13 @@ fn a_refresh_with_no_new_frame_drops_an_expired_assistant_and_clears_its_notific
     hub.start_server().unwrap();
     let code = hub.pairing_code().unwrap().code.expect("a pairing code").code;
     let assistant = Arc::new(FakeAssistant { cards: Mutex::new(vec![card("s1", State::Working, 1_000)]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) });
-    let (_, id, token) = pair_with(assistant.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
-    let link = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), assistant_id: id, token, ..Default::default() };
+    let me = Keypair::generate();
+    let (_, main_key) = pair_with(assistant.clone(), Arc::new(me.clone()), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
+    let link = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), main_key, ..Default::default() };
     let stop = Arc::new(AtomicBool::new(false));
     let client = {
         let (assistant, stop) = (assistant.clone(), stop.clone());
-        std::thread::spawn(move || run_once(&link, assistant, Arc::new(Quiet), &stop, None))
+        std::thread::spawn(move || run_once(&link, &me, assistant, Arc::new(Quiet), &stop, None))
     };
     wait_until("the first board", || hub.cards().iter().any(|c| c.session_id == "s1"));
     *assistant.cards.lock().unwrap() = vec![card("s1", State::Awaiting, 2_000)];
@@ -294,12 +297,13 @@ fn new_hub(port: u16) -> (Arc<Hub>, Arc<Page>, tempfile::TempDir) {
 
 /// A desktop-like assistant: its client becomes a main on `promote`.
 struct Lead {
+    identity: Arc<Keypair>,
     config: Arc<Mutex<NetworkConfig>>,
     server: Mutex<Option<maya_core::net::server::ServerHandle>>,
 }
 
 impl ClientNotify for Lead {
-    fn paired(&self, _: &str, _: &str) {}
+    fn paired(&self, _: &str) {}
     fn connected(&self, _: &str) {}
     fn disconnected(&self, _: &str) {}
     fn removed(&self) {}
@@ -310,7 +314,7 @@ impl ClientNotify for Lead {
         let mut c = Config::default();
         c.network = self.config.lock().unwrap().clone();
         maya_core::net::promote::as_main(&mut c, list);
-        let h = maya_core::net::server::start_with(Arc::new(NoNotify), Arc::new(Mutex::new(c.network.clone())), 0)?;
+        let h = maya_core::net::server::start_with(Arc::new(NoNotify), Arc::new(Mutex::new(c.network.clone())), 0, self.identity.clone())?;
         *self.config.lock().unwrap() = c.network;
         let port = h.port();
         *self.server.lock().unwrap() = Some(h);
@@ -338,12 +342,14 @@ fn the_phone_hands_the_main_role_over_listens_and_is_made_the_main_again() {
     let port = hub.settings.lock().unwrap().config.listen_port();
     let code = hub.pairing_code().unwrap().code.unwrap().code;
     let exec: Arc<dyn Executor> = Arc::new(FakeAssistant { cards: Mutex::new(vec![]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) });
-    let (_, id, token) = pair_with(exec.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
-    let config = Arc::new(Mutex::new(NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), assistant_id: id.clone(), token, port: free_port(), ..Default::default() }));
-    let lead = Arc::new(Lead { config: config.clone(), server: Mutex::new(None) });
+    let me = Arc::new(Keypair::generate());
+    let (_, main_key) = pair_with(exec.clone(), me.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
+    let id = hub.status().assistants[0].id.clone();
+    let config = Arc::new(Mutex::new(NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), main_key, port: free_port(), ..Default::default() }));
+    let lead = Arc::new(Lead { identity: me.clone(), config: config.clone(), server: Mutex::new(None) });
     let stop = Arc::new(AtomicBool::new(false));
     let (n, s, cfg) = (lead.clone(), stop.clone(), config.clone());
-    let laptop = std::thread::spawn(move || maya_core::net::client::reconnect(&move || cfg.lock().unwrap().clone(), exec, n, &s));
+    let laptop = std::thread::spawn(move || maya_core::net::client::reconnect(&move || cfg.lock().unwrap().clone(), me, exec, n, &s));
     wait_until("the laptop can lead", || hub.status().assistants.iter().any(|a| a.id == id && a.can_lead));
 
     // The phone makes the laptop the main and listens to it.
@@ -374,8 +380,7 @@ fn stop_listening_turns_the_phone_off_and_forgets_its_link() {
         c.network.role = NetworkRole::Assistant;
         c.network.main_host = "127.0.0.1".into();
         c.network.main_port = free_port();
-        c.network.assistant_id = "id".into();
-        c.network.token = "tok".into();
+        c.network.main_key = "a2V5".into();
     })
     .unwrap();
     hub.start_client();
@@ -383,7 +388,7 @@ fn stop_listening_turns_the_phone_off_and_forgets_its_link() {
     assert_eq!(status.role, NetworkRole::Off);
     let c = hub.settings.lock().unwrap().config.network.clone();
     assert_eq!(c.role, NetworkRole::Off);
-    assert!(c.assistant_id.is_empty() && c.token.is_empty() && c.main_host.is_empty());
+    assert!(c.main_key.is_empty() && c.main_host.is_empty());
     assert!(hub.client.lock().unwrap().is_none());
 }
 
@@ -394,8 +399,7 @@ fn stop_listening_that_cannot_save_keeps_the_phone_listening() {
         c.network.role = NetworkRole::Assistant;
         c.network.main_host = "127.0.0.1".into();
         c.network.main_port = free_port();
-        c.network.assistant_id = "id".into();
-        c.network.token = "tok".into();
+        c.network.main_key = "a2V5".into();
     })
     .unwrap();
     hub.start_client();
@@ -404,7 +408,7 @@ fn stop_listening_that_cannot_save_keeps_the_phone_listening() {
     assert!(hub.stop_listening().is_err());
     assert!(hub.client.lock().unwrap().is_some(), "still listening");
     assert_eq!(hub.status().role, NetworkRole::Assistant);
-    assert_eq!(hub.settings.lock().unwrap().config.network.token, "tok");
+    assert_eq!(hub.settings.lock().unwrap().config.network.main_key, "a2V5");
     hub.client.lock().unwrap().take().unwrap().stop();
 }
 
@@ -416,7 +420,7 @@ struct Mirrorer {
 }
 
 impl ClientNotify for Mirrorer {
-    fn paired(&self, _: &str, _: &str) {}
+    fn paired(&self, _: &str) {}
     fn connected(&self, _: &str) {}
     fn disconnected(&self, _: &str) {}
     fn removed(&self) {}
@@ -449,22 +453,24 @@ fn a_phone_main_mirrors_its_board_and_forwards_a_mirroring_maya_s_reply() {
     // The laptop, with one session.
     let code = hub.pairing_code().unwrap().code.unwrap().code;
     let laptop = Arc::new(FakeAssistant { cards: Mutex::new(vec![card("s1", State::Idle, 1_000)]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) });
-    let (_, id, token) = pair_with(laptop.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
-    let link = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), assistant_id: id, token, ..Default::default() };
+    let laptop_key = Arc::new(Keypair::generate());
+    let (_, main_key) = pair_with(laptop.clone(), laptop_key.clone(), "127.0.0.1", port, "laptop", &code, vec![]).unwrap();
+    let link = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), main_key: main_key.clone(), ..Default::default() };
     let stop = Arc::new(AtomicBool::new(false));
     let laptop_thread = {
         let (laptop, stop) = (laptop.clone(), stop.clone());
-        std::thread::spawn(move || run_once(&link, laptop, Arc::new(Quiet), &stop, None))
+        std::thread::spawn(move || run_once(&link, &laptop_key, laptop, Arc::new(Quiet), &stop, None))
     };
     wait_until("the laptop's board", || hub.cards().iter().any(|c| c.session_id == "s1"));
     // A second phone joins and mirrors.
     let code = hub.pairing_code().unwrap().code.unwrap().code;
-    let (_, pid, ptoken) = pair_with(Arc::new(FakeAssistant { cards: Mutex::new(vec![]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) }), "127.0.0.1", port, "Fold", &code, vec!["mirror".into()]).unwrap();
+    let fold_key = Arc::new(Keypair::generate());
+    let (_, fold_main_key) = pair_with(Arc::new(FakeAssistant { cards: Mutex::new(vec![]), due: AtomicBool::new(false), ran: Mutex::new(vec![]) }), fold_key.clone(), "127.0.0.1", port, "Fold", &code, vec!["mirror".into()]).unwrap();
     let m = Arc::new(Mirrorer::default());
-    let pcfg = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "Fold".into(), assistant_id: pid.clone(), token: ptoken, ..Default::default() };
+    let pcfg = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "Fold".into(), main_key: fold_main_key, ..Default::default() };
     let pthread = {
         let (m, stop) = (m.clone(), stop.clone());
-        std::thread::spawn(move || reconnect(&move || pcfg.clone(), Arc::new(NoExec), m, &stop))
+        std::thread::spawn(move || reconnect(&move || pcfg.clone(), fold_key, Arc::new(NoExec), m, &stop))
     };
     wait_until("the mirror", || m.mirrors.lock().unwrap().iter().any(|(ok, cards)| *ok && cards.iter().any(|c| c.session_id == "s1" && c.machine.as_deref() == Some("laptop"))));
     m.lane.request(None, Request::Command(CommandKind::Reply { session: "s1".into(), text: "from the fold".into(), attachments: vec![] }), Duration::from_secs(5)).unwrap();
@@ -472,6 +478,7 @@ fn a_phone_main_mirrors_its_board_and_forwards_a_mirroring_maya_s_reply() {
     let err = m.lane.request(Some("Pixel".into()), Request::Command(CommandKind::ListResumable { dir: "/d".into(), agent: Harness::ClaudeCode }), Duration::from_secs(5)).unwrap_err();
     assert_eq!(err, "This phone runs no sessions.", "the phone main's own name means the phone");
     // The switch off: the second phone is told and refused.
+    let pid = hub.status().assistants.iter().find(|a| a.name == "Fold").unwrap().id.clone();
     hub.set_mirror(&pid, false).unwrap();
     wait_until("the refusal", || m.mirrors.lock().unwrap().iter().any(|(ok, _)| !ok));
     assert!(m.lane.request(None, Request::ListDirs, Duration::from_secs(5)).unwrap_err().ends_with("has not allowed this Maya to control its sessions."));
@@ -511,9 +518,13 @@ impl maya_core::net::server::Notify for MainNotify {
 }
 
 fn desk() -> (ServerHandle, u16, Arc<MainNotify>) {
+    desk_with(Arc::new(Keypair::generate()))
+}
+
+fn desk_with(key: Arc<Keypair>) -> (ServerHandle, u16, Arc<MainNotify>) {
     let notify = Arc::new(MainNotify::default());
     let config = NetworkConfig { name: "desk".into(), ..Default::default() };
-    let handle = start_with(notify.clone(), Arc::new(Mutex::new(config)), 0).unwrap();
+    let handle = start_with(notify.clone(), Arc::new(Mutex::new(config)), 0, key).unwrap();
     let port = handle.port();
     (handle, port, notify)
 }
@@ -562,7 +573,8 @@ fn the_phone_joins_a_main_mirrors_it_quietly_acts_through_it_and_leaves() {
 
 #[test]
 fn a_reconnect_announces_the_asks_that_began_while_away() {
-    let (main, port, notify) = desk();
+    let key = Arc::new(Keypair::generate());
+    let (main, port, notify) = desk_with(key.clone());
     let (hub, _page, alerts, _dir) = new_hub_recording(free_port());
     let code = main.open_pairing(maya_core::store::now_ms()).unwrap().0;
     hub.join("127.0.0.1", port, "Pixel", &code).unwrap();
@@ -580,7 +592,7 @@ fn a_reconnect_announces_the_asks_that_began_while_away() {
     let config = Arc::new(Mutex::new(config));
     let started = std::time::Instant::now();
     let main = loop {
-        match start_with(Arc::new(MainNotify::default()), config.clone(), port) {
+        match start_with(Arc::new(MainNotify::default()), config.clone(), port, key.clone()) {
             Ok(m) => break m,
             Err(e) => {
                 assert!(started.elapsed() < Duration::from_secs(10), "the port did not come back: {e}");
@@ -643,4 +655,80 @@ fn a_request_to_an_older_main_fails_at_once() {
     let err = hub.request(None, Request::ListDirs).unwrap_err();
     assert_eq!(err, "Studio runs an older Maya that cannot share its sessions. Update it.");
     assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn the_phone_keeps_one_key_until_new_key_drops_every_pairing() {
+    let (hub, _page, dir) = new_hub(free_port());
+    let first = hub.identity().unwrap();
+    assert_eq!(hub.identity().unwrap().public, first.public, "kept");
+    assert!(dir.path().join("maya").join(maya_core::net::identity::FILE).exists());
+    hub.update_config(|c| c.network.main_key = "a2V5".into()).unwrap();
+    hub.new_key().unwrap();
+    assert_ne!(hub.identity().unwrap().public, first.public);
+    let config = hub.settings.lock().unwrap().config.clone();
+    assert!(config.network.main_key.is_empty() && config.network.assistants.is_empty());
+    assert_eq!(config.network.role, NetworkRole::Off);
+}
+
+#[test]
+fn every_status_the_page_gets_carries_pair_again() {
+    let (hub, page, _dir) = new_hub(free_port());
+    hub.update_config(|c| c.network.pair_again = true).unwrap();
+    assert!(hub.status().pair_again);
+    hub.start_server().unwrap();
+    assert!(hub.status().pair_again);
+    assert!(page.statuses.lock().unwrap().last().unwrap().pair_again, "the server start pushes it");
+    hub.stop_server();
+    hub.update_config(|c| c.network.pair_again = true).unwrap();
+    assert!(!hub.new_key().unwrap().pair_again, "New key clears it");
+}
+
+#[test]
+fn a_new_key_that_cannot_save_the_config_changes_and_stops_nothing() {
+    let (hub, _page, dir) = new_hub(free_port());
+    hub.start_server().unwrap();
+    let key = hub.identity().unwrap().public;
+    let on_disk = std::fs::read(dir.path().join("maya").join(maya_core::net::identity::FILE)).unwrap();
+    // A directory where the config file should be: every save fails.
+    hub.settings.lock().unwrap().path = dir.path().to_path_buf();
+    assert!(hub.new_key().is_err());
+    assert_eq!(hub.status().role, NetworkRole::Main, "still the main");
+    assert!(hub.server.lock().unwrap().is_some(), "the server still runs");
+    assert_eq!(hub.identity().unwrap().public, key);
+    assert_eq!(std::fs::read(dir.path().join("maya").join(maya_core::net::identity::FILE)).unwrap(), on_disk);
+    hub.stop_server();
+}
+
+#[test]
+fn a_new_key_that_cannot_write_the_key_file_restores_the_config() {
+    let (hub, _page, dir) = new_hub(free_port());
+    hub.update_config(|c| c.network.main_key = "a2V5".into()).unwrap();
+    hub.start_server().unwrap();
+    let key = hub.identity().unwrap().public;
+    // Replacing the key renames a file over this path; a directory there makes that fail.
+    let path = dir.path().join("maya").join(maya_core::net::identity::FILE);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir_all(path.join("x")).unwrap();
+    assert!(hub.new_key().is_err());
+    let c = hub.settings.lock().unwrap().config.network.clone();
+    assert_eq!((c.role, c.main_key.as_str()), (NetworkRole::Main, "a2V5"));
+    assert!(hub.server.lock().unwrap().is_some(), "the server still runs");
+    assert_eq!(hub.identity().unwrap().public, key, "the cached key is unchanged");
+    hub.stop_server();
+}
+
+#[test]
+fn a_join_with_an_unreadable_key_file_fails_before_it_changes_anything() {
+    let (main, port, _) = desk();
+    let (hub, _page, dir) = new_hub(free_port());
+    hub.update_config(|c| c.network.main_key = "a2V5".into()).unwrap();
+    let path = dir.path().join("maya").join(maya_core::net::identity::FILE);
+    std::fs::create_dir_all(&path).unwrap();
+    let code = main.open_pairing(maya_core::store::now_ms()).unwrap().0;
+    assert!(hub.join("127.0.0.1", port, "Pixel", &code).is_err());
+    let c = hub.settings.lock().unwrap().config.network.clone();
+    assert_eq!((c.role, c.main_key.as_str()), (NetworkRole::Main, "a2V5"));
+    assert!(main.status().assistants.is_empty(), "no pairing was attempted");
+    main.stop();
 }

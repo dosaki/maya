@@ -269,6 +269,12 @@ pub fn network_pair(hub: H, host: String, port: u16, name: String, code: String)
     hub.join(&host, port, &name, &code)
 }
 
+/// Drops every pairing and makes this phone a new key pair.
+#[tauri::command(async)]
+pub fn network_new_key(hub: H) -> Result<NetworkStatus, String> {
+    hub.new_key()
+}
+
 /// Starts the server, remembers that it should run, and opens pairing.
 #[tauri::command(async)]
 pub fn server_start(hub: H) -> Result<NetworkStatus, String> {

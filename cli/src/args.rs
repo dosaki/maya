@@ -4,7 +4,7 @@ use maya_core::launch::LaunchOptions;
 
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
-    Pair { host: String, port: u16, code: String, name: Option<String> },
+    Pair { host: String, port: u16, code: String, name: Option<String>, new_key: bool },
     Run,
     Status,
     Hooks(HooksOp),
@@ -28,6 +28,7 @@ pub enum ConfigOp {
 }
 
 pub const USAGE: &str = "usage: maya <pair|run|status|hooks|config|start|--version> …
+       maya pair <host[:port]> --code <code> [--name <name>] [--new-key]
        maya start [--dir <dir>] [--prompt <prompt>] [--agent <claude-code|codex|antigravity|grok|kiro|opencode>] [--model <model>] [--effort <effort>] [--mode <mode>] [--name <name>]";
 
 /// The main Maya's default port when none is given after the host.
@@ -79,9 +80,14 @@ fn parse_pair(rest: &[String]) -> Result<Cmd, String> {
     let mut host: Option<String> = None;
     let mut code: Option<String> = None;
     let mut name: Option<String> = None;
+    let mut new_key = false;
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
+            "--new-key" => {
+                new_key = true;
+                i += 1;
+            }
             "--code" => code = Some(take_value(rest, &mut i, "--code")?),
             "--name" => name = Some(take_value(rest, &mut i, "--name")?),
             s if s.starts_with("--") => return Err(format!("{USAGE}\nunknown flag: {s}")),
@@ -95,7 +101,7 @@ fn parse_pair(rest: &[String]) -> Result<Cmd, String> {
     let host = host.ok_or_else(|| format!("{USAGE}\npair needs a host"))?;
     let code = code.ok_or_else(|| format!("{USAGE}\npair needs --code"))?;
     let (host, port) = split_host_port(&host)?;
-    Ok(Cmd::Pair { host, port, code, name })
+    Ok(Cmd::Pair { host, port, code, name, new_key })
 }
 
 fn parse_hooks(rest: &[String]) -> Result<Cmd, String> {
@@ -150,8 +156,9 @@ mod tests {
 
     #[test]
     fn pair_takes_host_port_code_and_name() {
-        assert_eq!(parse(&a("pair 10.0.0.5 --code 483921")).unwrap(), Cmd::Pair { host: "10.0.0.5".into(), port: 4127, code: "483921".into(), name: None });
-        assert_eq!(parse(&a("pair desk.local:5000 --code 111222 --name box")).unwrap(), Cmd::Pair { host: "desk.local".into(), port: 5000, code: "111222".into(), name: Some("box".into()) });
+        assert_eq!(parse(&a("pair 10.0.0.5 --code 483921")).unwrap(), Cmd::Pair { host: "10.0.0.5".into(), port: 4127, code: "483921".into(), name: None, new_key: false });
+        assert_eq!(parse(&a("pair 10.0.0.5 --code 483921 --new-key")).unwrap(), Cmd::Pair { host: "10.0.0.5".into(), port: 4127, code: "483921".into(), name: None, new_key: true });
+        assert_eq!(parse(&a("pair desk.local:5000 --code 111222 --name box")).unwrap(), Cmd::Pair { host: "desk.local".into(), port: 5000, code: "111222".into(), name: Some("box".into()), new_key: false });
         assert!(parse(&a("pair 10.0.0.5")).unwrap_err().contains("--code"));
         assert!(parse(&a("pair --code 1")).unwrap_err().contains("host"));
         assert!(parse(&a("pair desk.local:0 --code 111222")).unwrap_err().contains("bad port: 0"));

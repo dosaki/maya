@@ -15,7 +15,9 @@
 //! blocks or a callback. The app's adapters (`net_app`) take `network` or
 //! `store` one at a time, never one while holding the other.
 
-use super::protocol::{decode_down, encode, mac, mac_matches, new_nonce, Attachment, CommandKind, Down, Request, Up, DEFAULT_PORT, MAX_FRAME, PROTOCOL};
+use super::identity::{decode_key, encode_key, Keypair};
+use super::protocol::{decode_down, encode, Attachment, CommandKind, Down, Request, Up, DEFAULT_PORT, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
+use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use crate::config::{NetworkConfig, NetworkRole};
 use crate::log;
@@ -31,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tungstenite::handshake::HandshakeError;
 use tungstenite::protocol::WebSocketConfig;
-use tungstenite::{Message, WebSocket};
+use tungstenite::WebSocket;
 
 /// How long one read waits; the connection loop's tick.
 const TICK: Duration = Duration::from_millis(100);
@@ -61,13 +63,19 @@ pub const REMOVED: &str = "Removed by the main Maya; pair again.";
 /// What the user reads when the main refuses a pairing code.
 pub const WRONG_CODE: &str = "Wrong or expired pairing code.";
 pub const NOT_PAIRED: &str = "Not paired with a main Maya yet; pair in Settings.";
-pub const MAIN_UNPROVEN: &str = "The main Maya failed to prove it holds the pairing token.";
-pub const PAIRING_UNPROVEN: &str = "The main Maya failed to prove it knows the pairing code.";
+pub const KEY_CHANGED: &str = "The main Maya's key has changed. If you reset it, pair again; otherwise someone may be impersonating it.";
+pub const OLD_MAIN: &str = "The main runs an older Maya. Update it.";
+pub const NO_ANSWER: &str = "The main Maya did not answer. If it runs an older Maya, update it.";
+pub const PAIRING_FAILED: &str = "The pairing did not complete; try again with a new code.";
+/// What the user reads for a refusal whose reason this Maya does not know:
+/// refusals are unauthenticated, so their text is never shown.
+pub const REFUSED: &str = "The main Maya refused the connection.";
+const TOO_MANY_CODES: &str = "Too many wrong codes; wait five minutes and try again.";
 /// Why a connection ended when the main moved; `reconnect` tries the new host at once.
 pub const MOVED: &str = "The main Maya moved to another machine.";
 pub const CANNOT_LEAD: &str = "This Maya cannot become a main.";
 pub const CANNOT_FOLLOW: &str = "This Maya cannot follow the main to another machine.";
-/// How long the client waits before trying again after `MAIN_UNPROVEN`.
+/// How long the client waits before trying again after `KEY_CHANGED`.
 const UNPROVEN_WAIT_MS: u64 = 30_000;
 
 /// Runs the main's commands on this Maya and describes its board.
@@ -87,8 +95,8 @@ pub trait Executor: Send + Sync {
 
 /// What the client tells the app.
 pub trait ClientNotify: Send + Sync {
-    /// The main minted this assistant's id and token (pairing only).
-    fn paired(&self, id: &str, token: &str);
+    /// The main's public key, learned at pairing (pairing only).
+    fn paired(&self, main_key: &str);
     fn connected(&self, main_name: &str);
     fn disconnected(&self, error: &str);
     fn removed(&self);
@@ -103,9 +111,9 @@ pub trait ClientNotify: Send + Sync {
     fn promoted(&self, _assistants: Vec<crate::config::PairedAssistant>) -> Result<u16, String> {
         Err(CANNOT_LEAD.into())
     }
-    /// The main is now at `host:port`: save it (the id and token stay).
+    /// The main is now at `host:port` with the public key `key`: save both.
     /// Runs on the connection thread.
-    fn moved(&self, _host: &str, _port: u16) -> Result<(), String> {
+    fn moved(&self, _host: &str, _port: u16, _key: &str) -> Result<(), String> {
         Err(CANNOT_FOLLOW.into())
     }
     /// What the main said at `welcome` about mirroring (`Some(true)`: it
@@ -284,19 +292,32 @@ fn bye_message(reason: &str) -> String {
     match reason {
         "removed" => REMOVED.into(),
         "wrong or expired pairing code" => WRONG_CODE.into(),
-        "too many attempts" => "Too many wrong codes; wait five minutes and try again.".into(),
-        "authentication failed" => "The main Maya did not accept this assistant's key; pair again.".into(),
+        "too many attempts" => TOO_MANY_CODES.into(),
+        "unknown key" => KEY_CHANGED.into(),
         "protocol" => "The main Maya runs a different version of Maya.".into(),
         "could not save the pairing" => "The main could not save the pairing.".into(),
         other => format!("The main Maya closed the connection ({}).", clean(other)),
     }
 }
 
-type Ws = WebSocket<TcpStream>;
-
-fn is_timeout(e: &tungstenite::Error) -> bool {
-    matches!(e, tungstenite::Error::Io(io) if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))
+/// What the user reads when the handshake did not complete. A refusal is
+/// unauthenticated, so only the reasons this Maya knows become their own message.
+fn fail_message(f: &Fail, pairing: bool) -> String {
+    match f {
+        Fail::OldPeer => OLD_MAIN.into(),
+        Fail::Refused(reason) if reason == secure::WRONG_CODE_REASON => WRONG_CODE.into(),
+        Fail::Refused(reason) if reason == "too many attempts" => TOO_MANY_CODES.into(),
+        Fail::Refused(reason) if reason == secure::UNKNOWN_KEY_REASON => KEY_CHANGED.into(),
+        Fail::Refused(_) => REFUSED.into(),
+        Fail::Crypto if pairing => PAIRING_FAILED.into(),
+        Fail::Crypto => KEY_CHANGED.into(),
+        Fail::Io(e) if e == "stopped" => "stopped".into(),
+        Fail::Io(_) | Fail::Malformed => NO_ANSWER.into(),
+    }
 }
+
+type Ws = WebSocket<TcpStream>;
+type Chan = Channel<TcpStream>;
 
 fn stopped(stop: &AtomicBool) -> bool {
     stop.load(Ordering::SeqCst)
@@ -362,8 +383,8 @@ fn connect(config: &NetworkConfig, stop: &AtomicBool, deadline: Instant) -> Resu
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_nodelay(true);
     let url = if host.contains(':') && !host.starts_with('[') { format!("ws://[{host}]:{port}/") } else { format!("ws://{host}:{port}/") };
-    // Commands carry attachments inline: allow what the protocol allows.
-    let ws_config = WebSocketConfig::default().max_message_size(Some(MAX_FRAME)).max_frame_size(Some(MAX_FRAME));
+    // Small until `welcome`, so whatever answers cannot make this Maya buffer more.
+    let ws_config = WebSocketConfig::default().max_message_size(Some(PRE_AUTH_FRAME)).max_frame_size(Some(PRE_AUTH_FRAME));
     let mut attempt = tungstenite::client::client_with_config(url, stream, Some(ws_config));
     loop {
         match attempt {
@@ -379,29 +400,32 @@ fn connect(config: &NetworkConfig, stop: &AtomicBool, deadline: Instant) -> Resu
     }
 }
 
-fn send_up(ws: &mut Ws, up: &Up) -> Result<(), String> {
-    ws.send(Message::text(encode(up))).map_err(|e| format!("Lost the connection to the main Maya: {e}"))
+fn send_up(ch: &mut Chan, up: &Up) -> Result<(), String> {
+    ch.send(&encode(up)).map_err(|e| format!("Lost the connection to the main Maya: {e}"))
 }
 
-/// The next frame from the main that parses, by `deadline`; garbage is logged and skipped.
-fn read_down(ws: &mut Ws, stop: &AtomicBool, deadline: Instant) -> Result<Down, String> {
+/// The next message from the main that parses, by `deadline`; garbage is logged and skipped.
+fn read_down(ch: &mut Chan, stop: &AtomicBool, deadline: Instant) -> Result<Down, String> {
     loop {
         if stopped(stop) {
             return Err("stopped".into());
         }
-        match ws.read() {
-            Ok(Message::Text(t)) => match decode_down(&t) {
+        // Checked on every frame, not only on a quiet read, so pings cannot hold it open.
+        if Instant::now() > deadline {
+            return Err("The main Maya did not answer in time.".into());
+        }
+        match ch.read() {
+            Ok(Got::Text(t)) => match decode_down(&t) {
                 Ok(down) => return Ok(down),
                 Err(e) => log::line("network", format!("main: ignored a message: {e}")),
             },
-            Ok(Message::Close(_)) => return Err("The main Maya closed the connection.".into()),
-            Ok(_) => {}
-            Err(e) if is_timeout(&e) => {
-                if Instant::now() > deadline {
-                    return Err("The main Maya did not answer in time.".into());
-                }
+            Ok(Got::Closed) => return Err("The main Maya closed the connection.".into()),
+            Ok(Got::Control | Got::Idle) => {}
+            Err(ChannelError::Forged) => {
+                log::line("network", format!("main: {}", secure::FORGED));
+                return Err(secure::FORGED.into());
             }
-            Err(e) => return Err(format!("Lost the connection to the main Maya: {e}")),
+            Err(ChannelError::Io(e)) => return Err(format!("Lost the connection to the main Maya: {e}")),
         }
     }
 }
@@ -413,18 +437,18 @@ fn finish(ws: &mut Ws) {
     while Instant::now() < end {
         match ws.read() {
             Ok(_) => {}
-            Err(e) if is_timeout(&e) => {}
+            Err(e) if secure::is_timeout(&e) => {}
             Err(_) => break,
         }
     }
 }
 
-/// One connection to the main: pairs with `code` (the token is then empty)
-/// or authenticates with the token, sends boards and runs commands until the
-/// link drops (`Err`) or `stop` is set (`Ok`). The notifier hears of every
-/// failure except one after a stop.
-pub fn run_once(config: &NetworkConfig, exec: Arc<dyn Executor>, notify: Arc<dyn ClientNotify>, stop: &AtomicBool, code: Option<&str>) -> Result<(), String> {
-    match connection(config, &exec, &notify, stop, code) {
+/// One connection to the main: pairs with `code`, or connects with the
+/// pinned main key, sends boards and runs commands until the link drops
+/// (`Err`) or `stop` is set (`Ok`). The notifier hears of every failure
+/// except one after a stop.
+pub fn run_once(config: &NetworkConfig, identity: &Keypair, exec: Arc<dyn Executor>, notify: Arc<dyn ClientNotify>, stop: &AtomicBool, code: Option<&str>) -> Result<(), String> {
+    match connection(config, identity, &exec, &notify, stop, code) {
         Ok(()) => Ok(()),
         Err(_) if stopped(stop) => Ok(()),
         Err(e) => {
@@ -438,73 +462,55 @@ pub fn run_once(config: &NetworkConfig, exec: Arc<dyn Executor>, notify: Arc<dyn
     }
 }
 
-fn connection(config: &NetworkConfig, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, stop: &AtomicBool, code: Option<&str>) -> Result<(), String> {
-    if code.is_none() && (config.assistant_id.is_empty() || config.token.is_empty()) {
-        return Err(NOT_PAIRED.into());
-    }
+fn connection(config: &NetworkConfig, identity: &Keypair, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, stop: &AtomicBool, code: Option<&str>) -> Result<(), String> {
+    let main_key = match code {
+        Some(_) => None,
+        None => Some(decode_key(&config.main_key).map_err(|_| NOT_PAIRED.to_string())?),
+    };
     let deadline = Instant::now() + SILENCE;
     let mut ws = connect(config, stop, deadline)?;
-    let out = handshake(&mut ws, config, &**notify, stop, code, deadline).and_then(|(main, mirror)| {
+    let quit = || stopped(stop);
+    let shook = match (code, main_key) {
+        (Some(code), _) => secure::pair(&mut ws, identity, code, deadline, &quit).map(|(t, k)| (t, Some(k))),
+        (None, Some(k)) => secure::connect(&mut ws, identity, &k, deadline, &quit).map(|t| (t, None)),
+        (None, None) => unreachable!("a main key or a code"),
+    };
+    let (noise, learned) = match shook {
+        Ok(done) => done,
+        Err(f) => {
+            finish(&mut ws);
+            return Err(fail_message(&f, code.is_some()));
+        }
+    };
+    let mut ch = Channel::new(ws, noise);
+    let out = handshake(&mut ch, config, &**notify, stop, learned, deadline).and_then(|(main, mirror)| {
         log::line("network", format!("connected to {main}"));
         notify.connected(&main);
         notify.mirror_offer(mirror);
-        pump(&mut ws, exec, notify, &config.token, stop)
+        pump(&mut ch, exec, notify, stop)
     });
-    finish(&mut ws);
+    finish(&mut ch.ws);
     out
 }
 
-/// `hello`, then pairing or challenge-response, up to `welcome`; returns the main's name and its mirror offer.
-fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, code: Option<&str>, deadline: Instant) -> Result<(String, Option<bool>), String> {
+/// `hello`, then `welcome`; returns the main's name and its mirror offer.
+/// `learned` is the main's key from a pairing, kept only once welcomed.
+fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, learned: Option<[u8; 32]>, deadline: Instant) -> Result<(String, Option<bool>), String> {
     let hostname = super::local_hostname();
-    let id = if code.is_some() { None } else { Some(config.assistant_id.clone()) };
-    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), id, caps: notify.caps() };
-    send_up(ws, &hello)?;
-    let code = code.map(str::trim);
-    // The nonce this side sent with `pair` or `auth`; the main must answer it
-    // in `welcome`, under the code or the token.
-    let mut ours: Option<String> = None;
-    if let Some(code) = code {
-        let mine = new_nonce();
-        send_up(ws, &Up::Pair { code: code.to_string(), nonce: mine.clone() })?;
-        ours = Some(mine);
-    }
-    // The id and token from `paired`, kept until the main proves it knows the code.
-    let mut creds: Option<(String, String)> = None;
+    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps() };
+    send_up(ch, &hello)?;
     loop {
-        match read_down(ws, stop, deadline)? {
-            Down::Challenge { nonce } if code.is_none() => {
-                let mine = new_nonce();
-                send_up(ws, &Up::Auth { mac: mac(&config.token, &nonce), nonce: mine.clone() })?;
-                ours = Some(mine);
-            }
-            Down::Paired { id, token } if code.is_some() => {
-                if id.is_empty() || token.is_empty() {
-                    return Err("The main Maya sent an empty key.".into());
-                }
-                creds = Some((id, token));
-            }
-            Down::Welcome { name, mac: proof, mirror } => {
-                let proven = |key: &str| ours.as_ref().is_some_and(|n| mac_matches(key, n, &proof));
-                match code {
-                    Some(code) => {
-                        let Some((id, token)) = creds.take() else {
-                            return Err("The main Maya did not pair this assistant.".into());
-                        };
-                        // Whatever answered must know the code just typed;
-                        // only then are the credentials worth keeping.
-                        if !proven(code) {
-                            log::line("network", "the main did not prove it knows the pairing code");
-                            return Err(PAIRING_UNPROVEN.into());
-                        }
-                        notify.paired(&id, &token);
-                    }
-                    // With a stored token, the main proves it holds it too.
-                    None if !proven(&config.token) => {
-                        log::line("network", "the main did not prove it holds the token");
-                        return Err(MAIN_UNPROVEN.into());
-                    }
-                    None => {}
+        match read_down(ch, stop, deadline)? {
+            Down::Welcome { name, mirror } => {
+                // Commands carry attachments inline: allow what the protocol
+                // allows, and the little sealing adds (`open_frame` caps the
+                // text at `MAX_FRAME`).
+                ch.ws.set_config(|c| {
+                    c.max_message_size = Some(MAX_FRAME + MAX_FRAME / 1024);
+                    c.max_frame_size = Some(MAX_FRAME + MAX_FRAME / 1024);
+                });
+                if let Some(key) = learned {
+                    notify.paired(&encode_key(&key));
                 }
                 let name = clean(&name);
                 return Ok((if name.is_empty() { "the main Maya".into() } else { name }, mirror));
@@ -516,7 +522,7 @@ fn handshake(ws: &mut Ws, config: &NetworkConfig, notify: &dyn ClientNotify, sto
 }
 
 /// Runs a welcomed connection until it drops or `stop` is set.
-fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, token: &str, stop: &AtomicBool) -> Result<(), String> {
+fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, stop: &AtomicBool) -> Result<(), String> {
     let (tx, rx) = channel::<Up>();
     let lane = notify.lane();
     let _attached = Attached(lane.as_ref().map(|l| (l.clone(), l.attach(tx.clone()))));
@@ -536,11 +542,15 @@ fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, t
         // flag was set is written before the connection ends.
         let leave = leaving.load(Ordering::SeqCst);
         while let Ok(up) = rx.try_recv() {
-            send_up(ws, &up)?;
+            send_up(ch, &up)?;
         }
         if leave {
             log::line("network", "this Maya is the main now; the client ends");
             return Ok(());
+        }
+        // Checked on every turn: only sealed messages show the main is alive.
+        if last_read.elapsed() > SILENCE {
+            return Err("The main Maya stopped answering.".into());
         }
         board_wanted |= exec.board_requested();
         let since = last_board.as_ref().map(|(t, _)| t.elapsed());
@@ -550,45 +560,45 @@ fn pump(ws: &mut Ws, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, t
             let (cards, dirs) = exec.board();
             let frame = encode(&Up::Board { cards, dirs, agents: exec.agents() });
             if refresh || last_board.as_ref().map_or(true, |(_, f)| *f != frame) {
-                ws.send(Message::text(frame.clone())).map_err(|e| format!("Lost the connection to the main Maya: {e}"))?;
+                ch.send(&frame).map_err(|e| format!("Lost the connection to the main Maya: {e}"))?;
                 last_board = Some((Instant::now(), frame));
             }
         }
         if last_ping.elapsed() >= PING_EVERY {
-            send_up(ws, &Up::Ping)?;
+            send_up(ch, &Up::Ping)?;
             last_ping = Instant::now();
         }
-        match ws.read() {
-            Ok(Message::Text(t)) => {
+        match ch.read() {
+            Ok(Got::Text(t)) => {
                 last_read = Instant::now();
                 match decode_down(&t) {
-                    Ok(down) => handle(down, exec, notify, &lane, token, &tx, &leaving)?,
+                    Ok(down) => handle(down, exec, notify, &lane, &tx, &leaving)?,
                     Err(e) => log::line("network", format!("main: ignored a message: {e}")),
                 }
             }
             // The old main may close first once it has seen the answer.
-            Ok(Message::Close(_)) if leaving.load(Ordering::SeqCst) => return Ok(()),
-            Ok(Message::Close(_)) => return Err("The main Maya closed the connection.".into()),
-            Ok(_) => last_read = Instant::now(),
-            Err(e) if is_timeout(&e) => {
-                if last_read.elapsed() > SILENCE {
-                    return Err("The main Maya stopped answering.".into());
-                }
+            Ok(Got::Closed) if leaving.load(Ordering::SeqCst) => return Ok(()),
+            Ok(Got::Closed) => return Err("The main Maya closed the connection.".into()),
+            // Unauthenticated, so never proof the main is alive.
+            Ok(Got::Control | Got::Idle) => {}
+            Err(ChannelError::Forged) => {
+                log::line("network", format!("main: {}", secure::FORGED));
+                return Err(secure::FORGED.into());
             }
-            Err(_) if leaving.load(Ordering::SeqCst) => return Ok(()),
-            Err(e) => return Err(format!("Lost the connection to the main Maya: {e}")),
+            Err(ChannelError::Io(_)) if leaving.load(Ordering::SeqCst) => return Ok(()),
+            Err(ChannelError::Io(e)) => return Err(format!("Lost the connection to the main Maya: {e}")),
         }
     }
 }
 
-fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, token: &str, tx: &Sender<Up>, leaving: &Arc<AtomicBool>) -> Result<(), String> {
+fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, tx: &Sender<Up>, leaving: &Arc<AtomicBool>) -> Result<(), String> {
     match down {
-        Down::Command { id, kind: CommandKind::Promote { sealed } } => {
+        Down::Command { id, kind: CommandKind::Promote { list } } => {
             log::line("network", format!("command {id} promote"));
-            let (notify, out, leaving, token) = (notify.clone(), tx.clone(), leaving.clone(), token.to_string());
+            let (notify, out, leaving) = (notify.clone(), tx.clone(), leaving.clone());
             // On its own thread, as every command: becoming the main starts a server.
             let spawned = std::thread::Builder::new().name("net-promote".into()).spawn(move || {
-                match super::promote::open_list(&token, &sealed).and_then(|list| notify.promoted(list)) {
+                match notify.promoted(list) {
                     Ok(port) => {
                         let _ = out.send(Up::Result { id, ok: true, error: None, data: Some(serde_json::json!({ "port": port })) });
                         leaving.store(true, Ordering::SeqCst);
@@ -623,10 +633,14 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
         }
         Down::Bye { reason } => return Err(bye_message(&reason)),
         Down::Pong => {}
-        Down::Move { host, port } => {
+        Down::Move { host, port, key } => {
             let host = clean(&host);
+            if decode_key(&key).is_err() {
+                log::line("network", format!("the main moved to {host}:{port} with no usable key; not following"));
+                return Err(format!("Could not follow the main Maya to {host}: {}", super::identity::BAD_KEY));
+            }
             log::line("network", format!("the main moved to {host}:{port}"));
-            notify.moved(&host, port).map_err(|e| format!("Could not follow the main Maya to {host}: {e}"))?;
+            notify.moved(&host, port, &key).map_err(|e| format!("Could not follow the main Maya to {host}: {e}"))?;
             return Err(MOVED.into());
         }
         Down::Mirror { allowed, cards, machines } => notify.mirrored(allowed, cards, machines),
@@ -634,7 +648,7 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
             Some(l) => l.resolve(id, if ok { Ok(data) } else { Err(error.unwrap_or_else(|| "The request failed.".into())) }),
             None => log::line("network", format!("main: response {id} with no request lane")),
         },
-        Down::Challenge { .. } | Down::Welcome { .. } | Down::Paired { .. } => log::line("network", "main: ignored a handshake message after welcome"),
+        Down::Welcome { .. } => log::line("network", "main: ignored a welcome after welcome"),
     }
     Ok(())
 }
@@ -683,8 +697,7 @@ impl ClientHandle {
 
 /// Pairs (`pair`) only once the running client, if any, has stopped and its
 /// connection has closed. Otherwise the main would still count this machine
-/// as connected and take the new pairing for a second machine at the same
-/// address.
+/// as connected and find the pairing's key on a connected entry.
 pub fn pair_after_stopping<T>(running: Option<ClientHandle>, pair: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     if let Some(c) = running {
         c.stop_and_join();
@@ -693,23 +706,23 @@ pub fn pair_after_stopping<T>(running: Option<ClientHandle>, pair: impl FnOnce()
 }
 
 /// How long `reconnect` waits after a failure: none after a move, 30 s
-/// after a main that could not prove the token, else the backoff.
+/// after a main that could not prove it holds the pinned key, else the backoff.
 fn retry_wait_ms(error: &str, attempt: u32) -> u64 {
     match error {
         MOVED => 0,
-        MAIN_UNPROVEN => UNPROVEN_WAIT_MS,
+        KEY_CHANGED => UNPROVEN_WAIT_MS,
         _ => backoff_ms(attempt),
     }
 }
 
 /// Reconnects until `stop`, reading the config afresh each attempt.
-pub fn reconnect(config_of: &dyn Fn() -> NetworkConfig, exec: Arc<dyn Executor>, notify: Arc<dyn ClientNotify>, stop: &AtomicBool) {
+pub fn reconnect(config_of: &dyn Fn() -> NetworkConfig, identity: Arc<Keypair>, exec: Arc<dyn Executor>, notify: Arc<dyn ClientNotify>, stop: &AtomicBool) {
     let mut attempt = 0u32;
     while !stopped(stop) {
         let config = config_of();
         log::line("network", format!("connecting to {}:{}", config.main_host.trim(), port_of(&config)));
         let began = Instant::now();
-        match run_once(&config, exec.clone(), notify.clone(), stop, None) {
+        match run_once(&config, &identity, exec.clone(), notify.clone(), stop, None) {
             Ok(()) => break,
             Err(e) if e == REMOVED || e == NOT_PAIRED => {
                 log::line("network", format!("{e} Not reconnecting."));
@@ -720,7 +733,7 @@ pub fn reconnect(config_of: &dyn Fn() -> NetworkConfig, exec: Arc<dyn Executor>,
                     attempt = 0;
                 }
                 // Whatever answered at the main's address could not prove it
-                // holds the token: do not hammer it.
+                // holds its key: do not hammer it.
                 if e == MOVED {
                     attempt = 0;
                 }
@@ -738,34 +751,34 @@ pub fn reconnect(config_of: &dyn Fn() -> NetworkConfig, exec: Arc<dyn Executor>,
     }
 }
 
-/// The pairing handshake once. Ok((main_name, id, token)). One blocking
-/// connection, at most `SILENCE` long once connected; it ends at `welcome`,
-/// so no command reaches `exec`.
-pub fn pair_with(exec: Arc<dyn Executor>, host: &str, port: u16, name: &str, code: &str, caps: Vec<String>) -> Result<(String, String, String), String> {
+/// The pairing handshake once. Ok((main_name, main_key)). One blocking
+/// connection, at most `SILENCE` long once connected; it ends at
+/// `welcome`, so no command reaches `exec`.
+pub fn pair_with(exec: Arc<dyn Executor>, identity: Arc<Keypair>, host: &str, port: u16, name: &str, code: &str, caps: Vec<String>) -> Result<(String, String), String> {
     let config = NetworkConfig { role: NetworkRole::Assistant, main_host: host.trim().into(), main_port: port, name: name.trim().into(), ..Default::default() };
     let stop = Arc::new(AtomicBool::new(false));
-    let notify = Arc::new(PairNotify { stop: stop.clone(), creds: Mutex::new(None), main: Mutex::new(None), caps });
+    let notify = Arc::new(PairNotify { stop: stop.clone(), key: Mutex::new(None), main: Mutex::new(None), caps });
     log::line("network", format!("pairing with {}:{}", config.main_host, port_of(&config)));
-    run_once(&config, exec, notify.clone(), &stop, Some(code)).map_err(|e| {
+    run_once(&config, &identity, exec, notify.clone(), &stop, Some(code)).map_err(|e| {
         log::line("network", format!("pairing failed: {e}"));
         e
     })?;
-    let (id, token) = notify.creds.lock().unwrap().take().ok_or("The main Maya did not pair this assistant.")?;
+    let key = notify.key.lock().unwrap().take().ok_or("The main Maya did not pair this assistant.")?;
     let main = notify.main.lock().unwrap().take().unwrap_or_default();
-    Ok((main, id, token))
+    Ok((main, key))
 }
 
-/// Pairing's notifier: keeps the credentials and ends the connection at `welcome`.
+/// Pairing's notifier: keeps the main's key and ends the connection at `welcome`.
 struct PairNotify {
     stop: Arc<AtomicBool>,
-    creds: Mutex<Option<(String, String)>>,
+    key: Mutex<Option<String>>,
     main: Mutex<Option<String>>,
     caps: Vec<String>,
 }
 
 impl ClientNotify for PairNotify {
-    fn paired(&self, id: &str, token: &str) {
-        *self.creds.lock().unwrap() = Some((id.into(), token.into()));
+    fn paired(&self, main_key: &str) {
+        *self.key.lock().unwrap() = Some(main_key.into());
     }
     fn connected(&self, main_name: &str) {
         *self.main.lock().unwrap() = Some(main_name.into());
@@ -783,10 +796,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frames_from_the_main_are_small_until_welcome() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let main = std::thread::spawn(move || {
+            let mut ws = tungstenite::accept(listener.accept().unwrap().0).unwrap();
+            ws.send(tungstenite::Message::binary(vec![0u8; PRE_AUTH_FRAME + 1])).unwrap();
+            ws
+        });
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, ..Default::default() };
+        let mut ws = connect(&config, &AtomicBool::new(false), Instant::now() + Duration::from_secs(5)).unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        let err = loop {
+            match ws.read() {
+                Err(e) if secure::is_timeout(&e) && Instant::now() < end => {}
+                other => break other,
+            }
+        };
+        assert!(matches!(err, Err(tungstenite::Error::Capacity(_))), "{:?}", err.map(|m| m.len()));
+        drop(main.join());
+    }
+
+    #[test]
     fn a_move_retries_at_once() {
         assert_eq!(retry_wait_ms(MOVED, 4), 0);
-        assert_eq!(retry_wait_ms(MAIN_UNPROVEN, 0), 30_000);
+        assert_eq!(retry_wait_ms(KEY_CHANGED, 0), 30_000);
         assert_eq!(retry_wait_ms("Lost the connection", 2), 4_000);
+    }
+
+    #[test]
+    fn a_refusal_shows_only_the_messages_this_maya_knows() {
+        let refused = |r: &str| fail_message(&Fail::Refused(r.into()), true);
+        assert_eq!(refused(secure::WRONG_CODE_REASON), WRONG_CODE);
+        assert_eq!(refused("too many attempts"), TOO_MANY_CODES);
+        assert_eq!(refused(secure::UNKNOWN_KEY_REASON), KEY_CHANGED);
+        assert_eq!(refused("removed"), REFUSED);
+        assert_eq!(refused("Visit evil.example to fix this"), REFUSED, "an unknown reason is never echoed");
+        assert_eq!(fail_message(&Fail::OldPeer, false), OLD_MAIN);
+        assert_eq!(fail_message(&Fail::Crypto, true), PAIRING_FAILED);
+        assert_eq!(fail_message(&Fail::Crypto, false), KEY_CHANGED);
+        assert_eq!(fail_message(&Fail::Io("stopped".into()), false), "stopped");
+        assert_eq!(fail_message(&Fail::Io("timed out".into()), false), NO_ANSWER);
+        assert_eq!(fail_message(&Fail::Malformed, true), NO_ANSWER);
     }
 
     #[test]

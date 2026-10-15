@@ -5,6 +5,8 @@ pub mod routing;
 pub mod server;
 pub mod client;
 pub mod promote;
+pub mod identity;
+pub mod secure;
 
 use crate::config::{Config, NetworkRole, PairedAssistant};
 use serde::Serialize;
@@ -24,7 +26,13 @@ pub struct NetworkStatus {
     pub main_error: Option<String>,
     /// This machine's IPv4 addresses, for an assistant to type as the main's host.
     pub addresses: Vec<String>,
+    /// The last code took three wrong tries; the main must regenerate one.
+    pub code_used_up: bool,
+    /// Protocol 1 pairings were dropped on update (`NetworkConfig::pair_again`).
+    pub pair_again: bool,
 }
+
+pub const CODE_USED_UP: &str = "Code used up after 3 wrong tries — Regenerate.";
 
 /// An address another machine on the LAN could reach: not loopback,
 /// link-local (169.254/16) or unspecified.
@@ -133,7 +141,7 @@ pub fn network_change(before: &Config, after: &Config) -> Vec<NetChange> {
         (true, true) if before.listen_port() != after.listen_port() || before.network.name != after.network.name => out.push(NetChange::RestartMain),
         _ => {}
     }
-    let link = |c: &Config| (c.network.main_host.clone(), c.main_port(), c.network.name.clone(), c.network.assistant_id.clone(), c.network.token.clone());
+    let link = |c: &Config| (c.network.main_host.clone(), c.main_port(), c.network.name.clone(), c.network.main_key.clone());
     match (b.role == Assistant, a.role == Assistant) {
         (true, false) => out.insert(0, NetChange::StopAssistant),
         (false, true) => out.push(NetChange::StartAssistant),
@@ -226,7 +234,7 @@ mod tests {
 
     #[test]
     fn a_main_that_cannot_listen_says_why_and_keeps_its_paired_list() {
-        let p = |id: &str, name: &str, address: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), token: "t".into(), address: address.into(), last_seen: Some(42), mirror: false };
+        let p = |id: &str, name: &str, address: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: address.into(), last_seen: Some(42), mirror: false };
         let status = NetworkStatus { role: NetworkRole::Main, assistants: paired_offline(&[p("a1", "laptop", "10.0.0.5"), p("b2", "desk", "10.0.0.6")]), main_error: Some("Could not listen on port 4127: Address already in use".into()), ..Default::default() };
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["mainError"], "Could not listen on port 4127: Address already in use");

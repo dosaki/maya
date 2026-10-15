@@ -139,9 +139,12 @@ The installer puts the AppImage in `~/.local/bin/maya-app` (set
 `.deb` from the release (`sudo apt install ./Maya_<version>_amd64.deb`, or `_arm64.deb`)
 pulls in the dependencies itself.
 
-For the ElevenLabs voice, also install `pulseaudio-utils` (for `paplay`;
-`ffplay` works too) and `libsecret-tools`. Sessions open in GNOME Terminal,
-Ptyxis or any `x-terminal-emulator`.
+With the AppImage, install `libsecret-tools` too (the `.deb` pulls it
+in): the desktop app keeps its network key in GNOME Keyring through
+`secret-tool`, and without it the network does not start ("Could not
+reach the key store"). For the ElevenLabs voice, also
+install `pulseaudio-utils` (for `paplay`; `ffplay` works too). Sessions
+open in GNOME Terminal, Ptyxis or any `x-terminal-emulator`.
 
 What is different on Linux:
 
@@ -275,45 +278,53 @@ quiet.
   taken, Settings says so under the menu.
 - **Assistant.** Choose "Assistant to a main Maya" in the Network menu and
   enter the main's host, port, a name for this machine (its hostname when
-  blank) and the pairing code. Pair once; Maya keeps a token and
+  blank) and the pairing code. Pair once; Maya keeps the main's key and
   reconnects on its own, also after you switch the role Off and back on.
   "Pair again" pairs with a fresh code. A status line shows "Connected to
   <main>", "Reconnecting…" (with the last error under it) or the error.
   On macOS 15 and later, macOS asks once whether Maya may reach devices on
   the local network: allow it.
-- **Trust.** Pairing sends the code, in plain text, to the host you typed.
-  Whatever answers there must send back proof that it received that code;
-  a host that is not a Maya main fails the handshake and the assistant
-  keeps nothing. That proof does not show the answer came from your main:
-  on a network you do not trust, an impostor that controls the typed host
-  could read the code and pair in its place, so pair on a network you
-  trust. (A password-authenticated key exchange would close this gap; this
-  version does not have one.) After pairing, each side proves it holds the
-  token on every connection; an assistant never obeys a main that cannot.
+- **Trust.** Pairing runs SPAKE2 over the six-digit code: whatever answers
+  at the host you typed learns nothing about the code unless it is the Maya
+  showing it, and a code allows three tries before it is used up. Each
+  Maya then pins the other's public key; a machine is known by its key,
+  not its address.
+- **Encrypted.** Every frame between two Mayas is encrypted and
+  authenticated (Noise, ChaCha20-Poly1305). A changed, replayed or injected
+  frame closes the connection. The desktop app keeps its private key in
+  the Keychain, Credential Manager or GNOME Keyring; the CLI and the phone
+  in an owner-only `identity.key` beside their config. On every platform,
+  any program running as you can read the key (`security`, `CredRead` and
+  `secret-tool` all hand it over). The key store only keeps it out of
+  plain files, so an agent that reads your config files does not find it.
+  If a machine's key leaks, the other Mayas still trust it until you take
+  that trust away: Remove the machine on the main (if the main's key
+  leaked, use Forget main on every assistant and the phone). Then use New
+  key on the machine and pair it again. New key alone revokes nothing.
+- **Outside the LAN.** Maya does not open anything to the internet. Reach
+  a main from outside through a VPN such as Tailscale or WireGuard and
+  pair with its address there.
 - **Versions.** Both machines need 0.11.0 or later to show Kiro sessions:
   a main on an older release cannot read a card from an agent it does not
   know, and keeps that machine's last board with an unreadable-board note.
   From 0.11.0 on, a card from an agent Maya does not know shows as
   "Unknown agent" instead.
-- **Names and addresses.** The main tells machines apart by their IP
-  address; names are only labels, on cards and in what Maya says. Two
+- **Names and addresses.** The main tells machines apart by their key;
+  names and addresses are only labels, on cards and in what Maya says. Two
   assistants with the same name show as "laptop (192.168.1.20)". A machine
-  that pairs again from the same address (after a reset, say) keeps its
-  place in the list with a new token. So does another machine that later
-  gets a disconnected assistant's address (from the router, say) and
-  pairs: it takes over that entry.
+  that pairs again with the same key keeps its place in the list. A
+  machine with a new key (after New key or a reset, say) is a new entry,
+  even from the same address.
 - **Make main.** On the main, Settings › Network › Make main beside a
   connected assistant hands it the role. Every connected Maya follows the
   new main with no new pairing; an assistant that is offline at that
-  moment needs its Host set to the new main's address. It does not need to
-  pair again.
+  moment still knows only the old main's key, so pair it with the new main
+  when it is back.
 - **Versions.** Run the same Maya on every machine. The main notes an
   assistant that runs another version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
   names and attachments (up to 20 MB). Commands run on the assistant; the
   main never touches the assistant's files.
-- **Plain text on the LAN.** Traffic is not encrypted in this version; all
-  data is plain text.
 - **Remote cards.** On the main, an assistant's sessions sit in the same
   columns as local ones, with a remote glyph (its tooltip names the
   machine and its address) and the machine's name under the session name
@@ -346,7 +357,8 @@ too, with no desktop and no app: the `maya` command line tool.
   app uses, so Awaiting Decision and Completed are exact.
 - **Pair.** `./maya pair <main host> --code <code> --name <label>`, with the
   code from the main's Settings › Network (`--name` is optional; the
-  machine's hostname is used when it is left out).
+  machine's hostname is used when it is left out). `--new-key` pairs with a
+  new key; the old key and pairing stay unless the new ones are all saved.
 - **Projects.** `./maya config projects-dir <path>` sets the folder whose
   subfolders the main offers for start and resume (`~` works). Until it is
   set, `maya run` warns at start and starting or resuming from the main

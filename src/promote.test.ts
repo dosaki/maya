@@ -10,7 +10,7 @@ describe("promoteLines", () => {
     expect(promoteLines(list, "g", "this Mac")).toEqual([
       "Make laptop the main Maya? Every connected Maya will assist laptop, and so will this Mac.",
       "old cannot follow and stays with no main; pair it with laptop afterwards.",
-      "nas is offline; when it is back, set its Host to 192.168.55.70. It does not need to pair again.",
+      "nas is offline; when it is back, pair it with laptop.",
     ]);
   });
 

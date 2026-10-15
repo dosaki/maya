@@ -60,6 +60,10 @@ export interface NetworkStatus {
   mainError?: string | null;
   /** This machine's IPv4 addresses, for an assistant to type as the main's host. */
   addresses?: string[];
+  /** The open code was struck out by 3 wrong tries. */
+  codeUsedUp?: boolean;
+  /** This Maya was updated to secure pairing and must pair again. */
+  pairAgain?: boolean;
 }
 
 /**
@@ -136,12 +140,14 @@ export interface SettingsModel {
   networkCode?: string;
   /** The message from a failed Pair attempt, shown in the status line; cleared by the next attempt or a success. */
   networkError?: string | null;
-  /** The config holds an assistant id and token: choosing Assistant reconnects without pairing. */
+  /** The config holds the main's key: choosing Assistant reconnects without pairing. */
   networkPaired?: boolean;
   /** "Pair again" was clicked: the pairing form shows even though credentials are stored. */
   networkRepair?: boolean;
   /** A Pair is in flight: the button is disabled and further clicks are ignored. */
   networkPairing?: boolean;
+  /** New key's confirmation is open. */
+  networkNewKeyConfirm?: boolean;
 }
 
 export type VoiceProvider = "builtin" | "elevenlabs";
@@ -201,6 +207,10 @@ export interface SettingsHandlers {
   onMirror(id: string, on: boolean): void;
   onPromote(id: string): void;
   onPromoteCancel(): void;
+  onNewKeyAsk(): void;
+  onNewKey(): void;
+  onNewKeyCancel(): void;
+  onForgetMain(): void;
   onPair(host: string, port: number, name: string, code: string): void;
 }
 
@@ -210,8 +220,8 @@ interface NetworkConfigJson {
   mainHost: string;
   mainPort: number;
   name: string;
-  assistantId: string;
-  token: string;
+  mainKey: string;
+  pairAgain?: boolean;
   assistants: { id: string; name: string; hostname: string; platform: string; token: string; address?: string; lastSeen?: number | null }[];
 }
 
@@ -820,6 +830,14 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   roleLabel.append(roleSel);
   network.append(roleLabel);
 
+  if (netRole !== "off" && net.pairAgain) {
+    const note = document.createElement("div");
+    note.className = "settings__hint";
+    note.dataset.for = "pair-again-note";
+    note.textContent = "This Maya was updated to secure pairing — pair again.";
+    network.append(note);
+  }
+
   // Both roles carry a name: assistants show the main's in "Connected to …",
   // and the main shows an assistant's on its cards.
   const nameField = () => {
@@ -873,6 +891,11 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       expiry.className = "settings__hint settings__code-expiry";
       expiry.textContent = `expires in ${expiresInMinutes(net.code.expiresAt, nowMs)} min`;
       network.append(expiry);
+    } else if (net.codeUsedUp) {
+      const used = document.createElement("div");
+      used.className = "settings__hint";
+      used.textContent = "Code used up after 3 wrong tries — Regenerate.";
+      network.append(used);
     }
 
     const regen = document.createElement("button");
@@ -1000,6 +1023,14 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       again.textContent = "Pair again";
       again.addEventListener("click", () => h.onPairAgain());
       network.append(again);
+
+      const forget = document.createElement("button");
+      forget.type = "button";
+      forget.className = "settings__link";
+      forget.dataset.action = "forget-main";
+      forget.textContent = "Forget main";
+      forget.addEventListener("click", () => h.onForgetMain());
+      network.append(forget);
     }
   }
   if (netRole === "assistant" && (!model.networkPaired || model.networkRepair)) {
@@ -1056,6 +1087,38 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     }
   }
 
+  if (netRole !== "off") {
+    if (model.networkNewKeyConfirm) {
+      const confirm = document.createElement("div");
+      confirm.className = "settings__confirm";
+      confirm.dataset.for = "new-key-confirm";
+      const p = document.createElement("p");
+      p.textContent = "Drop every pairing and make a new key?";
+      confirm.append(p);
+      const yes = document.createElement("button");
+      yes.type = "button";
+      yes.dataset.action = "new-key-confirm";
+      yes.textContent = "Drop and make a new key";
+      yes.addEventListener("click", () => h.onNewKey());
+      const no = document.createElement("button");
+      no.type = "button";
+      no.dataset.action = "new-key-cancel";
+      no.textContent = "Cancel";
+      no.addEventListener("click", () => h.onNewKeyCancel());
+      confirm.append(yes, no);
+      network.append(confirm);
+    } else {
+      const fresh = document.createElement("button");
+      fresh.type = "button";
+      fresh.className = "settings__link";
+      fresh.dataset.action = "new-key";
+      fresh.textContent = "New key";
+      fresh.disabled = !!model.networkPromoting;
+      fresh.addEventListener("click", () => h.onNewKeyAsk());
+      network.append(fresh);
+    }
+  }
+
   if (model.error) {
     const err = document.createElement("div");
     err.className = "settings__error";
@@ -1102,7 +1165,7 @@ export async function initSettings(): Promise<void> {
   };
 
   const applyNetworkConfig = (c: ConfigJson) => {
-    model.networkPaired = !!(c.network?.assistantId && c.network?.token);
+    model.networkPaired = !!c.network?.mainKey;
     model.networkPort = c.network?.port ?? 0;
     model.networkMainHost = c.network?.mainHost ?? "";
     model.networkMainPort = c.network?.mainPort ?? 0;
@@ -1158,7 +1221,7 @@ export async function initSettings(): Promise<void> {
   const saveNetwork = (patch: Partial<NetworkConfigJson>) =>
     run(async () => {
       const fresh = await invoke<ConfigJson>("get_config");
-      const net: NetworkConfigJson = { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", assistantId: "", token: "", assistants: [], ...fresh.network, ...patch };
+      const net: NetworkConfigJson = { role: "off", port: 0, mainHost: "", mainPort: 0, name: "", mainKey: "", assistants: [], ...fresh.network, ...patch };
       const c = await invoke<ConfigJson>("set_config", { config: { ...fresh, network: net } });
       applyNetworkConfig(c);
     });
@@ -1267,6 +1330,25 @@ export async function initSettings(): Promise<void> {
       model.networkPromote = null;
       paint();
     },
+    onNewKeyAsk: () => {
+      model.networkNewKeyConfirm = true;
+      paint();
+    },
+    onNewKeyCancel: () => {
+      model.networkNewKeyConfirm = false;
+      paint();
+    },
+    onNewKey: () => {
+      model.networkNewKeyConfirm = false;
+      void run(async () => {
+        model.network = await invoke<NetworkStatus>("network_new_key");
+        model.networkPaired = false;
+      });
+    },
+    onForgetMain: () => void run(async () => {
+      model.network = await invoke<NetworkStatus>("network_forget_main");
+      model.networkPaired = false;
+    }),
     onPromote: (id) => {
       if (model.networkPromoting) return;
       model.networkPromoting = true;
