@@ -22,6 +22,10 @@ impl Kind {
     }
 }
 
+/// The channel for a notification the phone also speaks: no sound, so none
+/// clashes with the speech (`silent()` is iOS-only in the plugin).
+pub const SPOKEN_CHANNEL: &str = "spoken";
+
 /// One notification to show. `id` is stable per session, so a newer one
 /// replaces the older in place; `session_id` rides along so a tap opens
 /// the card.
@@ -32,6 +36,16 @@ pub struct Post {
     pub title: String,
     pub body: String,
     pub session_id: String,
+    /// What the phone says for it when it speaks events (`notify::spoken_line`).
+    pub spoken: Option<String>,
+    /// Posted on `SPOKEN_CHANNEL` because the phone is saying it aloud.
+    pub quiet: bool,
+}
+
+impl Post {
+    pub fn channel_id(&self) -> &'static str {
+        if self.quiet { SPOKEN_CHANNEL } else { self.kind.channel_id() }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,7 +151,7 @@ pub fn plan(cards: &[Card], fresh: &[Card], finished: &[Card], posted: &mut Post
 
 fn push(out: &mut Vec<Action>, posted: &mut Posted, c: &Card, kind: Kind, body: String) {
     posted.0.insert(c.session_id.clone(), kind);
-    out.push(Action::Post(Post { id: notification_id(&c.session_id), kind, title: title_for(c), body, session_id: c.session_id.clone() }));
+    out.push(Action::Post(Post { id: notification_id(&c.session_id), kind, title: title_for(c), body, session_id: c.session_id.clone(), spoken: maya_core::notify::spoken_line(c), quiet: false }));
 }
 
 /// The foreground service's line.
@@ -242,6 +256,19 @@ mod tests {
         assert!(plan(&[done.clone()], &[], &[done], &mut quiet, Switches { awaiting: true, completed: false }).is_empty());
         let asked = card("c", State::Awaiting, 1);
         assert!(plan(&[asked.clone()], &[asked], &[], &mut quiet, Switches { awaiting: false, completed: true }).is_empty());
+    }
+
+    #[test]
+    fn a_post_carries_the_line_to_speak_and_starts_loud() {
+        let mut posted = Posted::default();
+        let mut c = card("s1", State::Awaiting, 1);
+        c.machine = None;
+        let actions = plan(&[c.clone()], &[c], &[], &mut posted, ON);
+        let Action::Post(p) = &actions[0] else { panic!("expected a post") };
+        assert_eq!(p.spoken.as_deref(), Some("hexgrid needs a decision"));
+        assert!(!p.quiet);
+        assert_eq!(p.channel_id(), "decisions");
+        assert_eq!(Post { quiet: true, ..p.clone() }.channel_id(), SPOKEN_CHANNEL);
     }
 
     #[test]

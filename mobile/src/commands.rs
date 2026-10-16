@@ -226,20 +226,25 @@ pub fn get_config(hub: H) -> Config {
     hub.settings.lock().unwrap().config.clone()
 }
 
-/// Saves what the Network screen edits: name, port and the two switches.
-/// The role and the paired list stay the server's. A new name or port on a
+/// What the Network screen edits, from the page's config onto the saved one.
+fn apply_settings(c: &mut Config, from: &Config) {
+    if !from.network.name.trim().is_empty() {
+        c.network.name = from.network.name.trim().to_string();
+    }
+    c.network.port = from.network.port;
+    c.notify_on_awaiting = from.notify_on_awaiting;
+    c.notify_on_completed = from.notify_on_completed;
+    c.speak_notifications = from.speak_notifications;
+    c.wake_word = from.wake_word;
+}
+
+/// Saves what the Network screen edits: name, port, the notification switches
+/// and voice. The role and the paired list stay the server's. A new name or port on a
 /// running server restarts it; assistants reconnect within seconds.
 #[tauri::command(async)]
 pub fn set_config(hub: H, config: Config) -> Result<Config, String> {
     let before = hub.settings.lock().unwrap().config.clone();
-    let saved = hub.update_config(|c| {
-        if !config.network.name.trim().is_empty() {
-            c.network.name = config.network.name.trim().to_string();
-        }
-        c.network.port = config.network.port;
-        c.notify_on_awaiting = config.notify_on_awaiting;
-        c.notify_on_completed = config.notify_on_completed;
-    })?;
+    let saved = hub.update_config(|c| apply_settings(c, &config))?;
     let running = hub.server.lock().unwrap().is_some();
     if running && (before.listen_port() != saved.listen_port() || before.network.name != saved.network.name) {
         log::line("network", "settings changed; restarting the server");
@@ -337,6 +342,15 @@ mod tests {
     fn missing_data_is_an_error_not_a_panic() {
         assert_eq!(data::<Vec<Turn>>(None).unwrap_err(), "The assistant sent no result.");
         assert!(data::<Vec<Turn>>(Some(serde_json::json!([]))).unwrap().is_empty());
+    }
+
+    #[test]
+    fn settings_carry_speak_and_the_wake_word() {
+        let mut c = Config::default();
+        let from = Config { speak_notifications: false, wake_word: true, ..Config::default() };
+        apply_settings(&mut c, &from);
+        assert!(!c.speak_notifications);
+        assert!(c.wake_word);
     }
 
     #[test]

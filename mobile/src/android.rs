@@ -136,11 +136,13 @@ mod imp {
         }
     }
 
-    /// The two channels the switches gate; creating an existing channel is a no-op on Android.
+    /// The channels the switches and speech post on; creating an existing channel is a no-op on Android.
     pub fn create_channels<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         let n = app.notification();
         n.create_channel(Channel::builder(crate::alerts::Kind::Decision.channel_id(), "Decisions").description("A session needs a decision").importance(Importance::High).vibration(true).build()).map_err(|e| e.to_string())?;
-        n.create_channel(Channel::builder(crate::alerts::Kind::Finished.channel_id(), "Finished").description("A session finished its turn").importance(Importance::Default).build()).map_err(|e| e.to_string())
+        n.create_channel(Channel::builder(crate::alerts::Kind::Finished.channel_id(), "Finished").description("A session finished its turn").importance(Importance::Default).build()).map_err(|e| e.to_string())?;
+        n.create_channel(Channel::builder(crate::alerts::SPOKEN_CHANNEL, "Spoken").description("A session Maya just announced aloud").importance(Importance::Low).vibration(false).build()).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// `res/drawable/ic_stat_maya.xml`: a white glyph, since Android draws
@@ -153,7 +155,7 @@ mod imp {
 
     impl<R: Runtime> Alerts for AndroidAlerts<R> {
         fn post(&self, p: &Post) {
-            let shown = self.app.notification().builder().id(p.id).channel_id(p.kind.channel_id()).icon(STATUS_ICON).title(&p.title).body(&p.body).extra("sessionId", &p.session_id).auto_cancel().show();
+            let shown = self.app.notification().builder().id(p.id).channel_id(p.channel_id()).icon(STATUS_ICON).title(&p.title).body(&p.body).extra("sessionId", &p.session_id).auto_cancel().show();
             if let Err(e) = shown {
                 log::line("android", format!("notification: {e}"));
             }
