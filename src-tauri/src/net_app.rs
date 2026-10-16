@@ -6,10 +6,10 @@
 //! while holding the other.
 
 use crate::actions;
+use crate::listener::{self, Interpreted, VoiceContext};
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
-use crate::listener::{self, Interpreted, VoiceContext};
 use crate::net::protocol::{CommandKind, Request, CAP_FOLLOW, CAP_LEAD};
 use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, target_of, Target, ROUTE_TIMEOUT};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
@@ -308,6 +308,9 @@ fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, Strin
         }
         Request::Execute { action } => {
             let fresh = revalidate(&action, &listener::voice_context(app))?;
+            if let Some(why) = refuse_remote(&fresh) {
+                return Ok(Some(said_data(&why)));
+            }
             let said = listener::execute_action(app, &fresh)?;
             Ok(Some(said_data(&said)))
         }
@@ -389,14 +392,14 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use crate::listener::{Interpreted as I, VoiceContext as VC};
+    use crate::model::{AwaitKind, Awaiting, Choice, Harness, Question, State};
 
     #[test]
     fn interpret_answers_say_and_a_pending_action() {
-        let said = interpret_data(&I::Say("All quiet.".into()));
+        let said = interpret_data(&Interpreted::Say("All quiet.".into()));
         assert_eq!(said, serde_json::json!({"say": "All quiet."}));
         let pending = maya_core::wake::Pending { say: "Answering hexgrid with \"Yes\". Yes?".into(), action: serde_json::json!({"kind": "answer"}) };
-        let asked = interpret_data(&I::Confirm(pending));
+        let asked = interpret_data(&Interpreted::Confirm(pending));
         assert_eq!(asked["say"], "Answering hexgrid with \"Yes\". Yes?");
         assert_eq!(asked["pending"]["say"], asked["say"]);
         assert_eq!(asked["pending"]["action"]["kind"], "answer");
@@ -410,9 +413,40 @@ mod tests {
 
     #[test]
     fn execute_revalidates_against_the_board_now() {
-        let gone = VC { cards: vec![], dirs: vec![], machines: vec![], prs: vec![] };
+        let gone = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![] };
         let err = revalidate(&serde_json::json!({"kind": "reply", "session": "s1", "name": "hexgrid", "text": "ship it"}), &gone).unwrap_err();
         assert!(!err.is_empty(), "a session that has gone fails with a reason");
+    }
+
+    fn asking(id: &str, name: &str, state_since: u64) -> Card {
+        Card {
+            session_id: id.into(), pid: 1, name: name.into(), cwd: format!("/Users/x/dev/{name}"), state: State::Awaiting, state_since, snippet: "".into(),
+            awaiting: Some(Awaiting {
+                kind: AwaitKind::Question,
+                detail: "Ship it?".into(),
+                questions: vec![Question { question: "Ship it?".into(), header: "".into(), options: vec![Choice { label: "Yes".into(), description: "".into() }], multi_select: false }],
+            }),
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None,
+        }
+    }
+
+    fn board(cards: Vec<Card>) -> VoiceContext {
+        VoiceContext { cards, dirs: vec![], machines: vec![], prs: vec![] }
+    }
+
+    #[test]
+    fn an_ask_answered_at_the_desk_is_refused_with_the_reason() {
+        let action = serde_json::json!({"kind": "answer", "session": "s1", "name": "hexgrid", "option": 1, "askId": 42});
+        assert_eq!(revalidate(&action, &board(vec![asking("s1", "hexgrid", 42)])).unwrap()["askId"], 42);
+        let err = revalidate(&action, &board(vec![asking("s1", "hexgrid", 99)])).unwrap_err();
+        assert_eq!(err, "The question has changed; ask me again.");
+    }
+
+    #[test]
+    fn a_reply_for_a_session_still_there_resolves_to_its_id() {
+        let action = serde_json::json!({"kind": "reply", "session": "s1", "name": "hexgrid", "text": "ship it"});
+        let fresh = revalidate(&action, &board(vec![asking("s1", "hexgrid", 42)])).unwrap();
+        assert_eq!(fresh["session"], "s1");
     }
 
     #[test]
