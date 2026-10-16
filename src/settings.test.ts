@@ -300,7 +300,7 @@ describe("renderSettings", () => {
     const sections = [...el.querySelectorAll<HTMLElement>(".settings__section")];
     expect(sections.map((s) => s.dataset.group)).toEqual(["general", "sessions", "reviews", "notifications", "voice", "network"]);
     expect(sections.filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["general"]);
-    expect(nav.map((b) => b.getAttribute("aria-selected"))).toEqual(["true", "false", "false", "false", "false", "false"]);
+    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null]);
   });
 
   it("puts each setting in its group", () => {
@@ -348,7 +348,7 @@ describe("renderSettings", () => {
   it("opens the group the model names", () => {
     const el = renderSettings({ ...voiceBase, settingsGroup: "network" }, handlers());
     expect([...el.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["network"]);
-    expect(el.querySelector(".settings__nav button[aria-selected=true]")?.textContent).toBe("Network");
+    expect(el.querySelector(".settings__nav button[aria-current=true]")?.textContent).toBe("Network");
   });
 
   it("switches group in place from the sidebar, keeps the choice on the model and remembers it", () => {
@@ -358,7 +358,7 @@ describe("renderSettings", () => {
     const typed = el.querySelector<HTMLInputElement>("input[name=projectsDir]")!;
     el.querySelector<HTMLButtonElement>(".settings__nav button[data-group=voice]")!.click();
     expect([...el.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["voice"]);
-    expect(el.querySelector(".settings__nav button[aria-selected=true]")?.textContent).toBe("Voice");
+    expect(el.querySelector(".settings__nav button[aria-current=true]")?.textContent).toBe("Voice");
     expect(el.querySelector("input[name=projectsDir]")).toBe(typed);
     expect(model.settingsGroup).toBe("voice");
     expect(storedSettingsGroup()).toBe("voice");

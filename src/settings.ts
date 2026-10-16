@@ -425,7 +425,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     b.className = "settings__nav-item";
     b.dataset.group = key;
     b.textContent = title;
-    b.addEventListener("click", () => {
+    const choose = () => {
       model.settingsGroup = key;
       try {
         localStorage.setItem(SETTINGS_GROUP_KEY, key);
@@ -433,12 +433,21 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
         /* private mode: nothing to remember */
       }
       show(key);
-    });
+    };
+    // On the press, not the click: the press blurs a just-edited field, and
+    // the save its `change` starts can repaint (and replace this button)
+    // before the release, so the click would never land. `click` still
+    // serves the keyboard.
+    b.addEventListener("pointerdown", (e) => { if (e.button === 0) choose(); });
+    b.addEventListener("click", choose);
     return b;
   });
   const show = (group: SettingsGroup) => {
     for (const [key, s] of Object.entries(sections)) s.hidden = key !== group;
-    for (const b of navButtons) b.setAttribute("aria-selected", String(b.dataset.group === group));
+    for (const b of navButtons) {
+      if (b.dataset.group === group) b.setAttribute("aria-current", "true");
+      else b.removeAttribute("aria-current");
+    }
   };
   nav.append(...navButtons);
   content.append(...Object.values(sections));

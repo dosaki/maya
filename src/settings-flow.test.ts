@@ -69,6 +69,36 @@ describe("settings flow", () => {
     localStorage.removeItem("maya.settingsGroup");
   });
 
+  it("switches group on the press, so the save a blur starts cannot repaint the click away", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "" };
+    invoke.mockImplementation((cmd: string, args?: { config?: Record<string, unknown> }) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "set_config") return Promise.resolve({ ...config, ...args?.config });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    const visible = () => [...document.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group);
+
+    localStorage.setItem("maya.settingsGroup", "sessions");
+    await initSettings();
+    await flush();
+    const dir = document.querySelector<HTMLInputElement>("input[name=projectsDir]")!;
+    dir.value = "~/code";
+    const pressed = document.querySelector<HTMLButtonElement>(".settings__nav button[data-group=voice]")!;
+    pressed.dispatchEvent(new MouseEvent("pointerdown", { button: 0, bubbles: true }));
+    // The blur's save lands and repaints before the button is let go.
+    dir.dispatchEvent(new Event("change"));
+    await flush();
+    expect(pressed.isConnected).toBe(false);
+    expect(visible()).toEqual(["voice"]);
+    expect(document.querySelector(".settings__nav button[aria-current=true]")?.textContent).toBe("Voice");
+    localStorage.removeItem("maya.settingsGroup");
+  });
+
   it("saves against the freshest config rather than a stale local model", async () => {
     let config: Record<string, unknown> = {
       completedTimeoutMinutes: 30,

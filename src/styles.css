@@ -59,7 +59,7 @@ body { margin: 0; background: var(--bg); }
 .settings__nav { display: flex; flex-direction: column; gap: 2px; flex: 0 0 170px; position: sticky; top: 0; }
 .settings__body--sidebar .settings__nav-item { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 7px 12px; color: var(--muted); text-align: left; font: inherit; cursor: pointer; }
 .settings__body--sidebar .settings__nav-item:hover { color: var(--text); }
-.settings__body--sidebar .settings__nav-item[aria-selected=true] { background: var(--panel); border-color: var(--gold-deep); color: var(--gold-bright); }
+.settings__body--sidebar .settings__nav-item[aria-current=true] { background: var(--panel); border-color: var(--gold-deep); color: var(--gold-bright); }
 .settings__content { flex: 1; min-width: 0; max-width: 680px; display: flex; flex-direction: column; gap: 12px; }
 @media (max-width: 719px) {
   .settings__body.settings__body--sidebar { flex-direction: column; align-items: stretch; }
@@ -77,6 +77,10 @@ body { margin: 0; background: var(--bg); }
 .settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch):has(> textarea) { grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .settings__body--sidebar textarea { max-width: none; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
 .settings__body--sidebar .settings__section > button, .settings__body--sidebar .settings__subsection > button { align-self: flex-start; }
+/* Too narrow for the shared control column: each label above its control. */
+@media (max-width: 479px) {
+  .settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch) { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+}
 .popover { position: absolute; top: 48px; right: 16px; width: 320px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; box-shadow: 0 8px 30px rgba(0,0,0,.18); z-index: 10; }
 .pane { flex: 1; min-height: 0; padding: 16px; overflow: auto; box-sizing: border-box; }
 .settings.pane { max-width: 1400px; }
