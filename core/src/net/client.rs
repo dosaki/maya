@@ -120,6 +120,9 @@ pub trait ClientNotify: Send + Sync {
     /// will; `Some(false)`: its switch is off; `None`: it did not say).
     /// Called right after `connected`.
     fn mirror_offer(&self, _offered: Option<bool>) {}
+    /// What the main said it can do at `welcome` (`CAP_VOICE`); empty for
+    /// an older main. Called right after `mirror_offer`.
+    fn main_caps(&self, _caps: &[String]) {}
     /// A board from the main, or `allowed: false` once its switch went off.
     fn mirrored(&self, _allowed: bool, _cards: Vec<Card>, _machines: Vec<MachineInfo>) {}
     /// Where this Maya's requests to the main go out; `None` sends none.
@@ -483,25 +486,26 @@ fn connection(config: &NetworkConfig, identity: &Keypair, exec: &Arc<dyn Executo
         }
     };
     let mut ch = Channel::new(ws, noise);
-    let out = handshake(&mut ch, config, &**notify, stop, learned, deadline).and_then(|(main, mirror)| {
+    let out = handshake(&mut ch, config, &**notify, stop, learned, deadline).and_then(|(main, mirror, caps)| {
         log::line("network", format!("connected to {main}"));
         notify.connected(&main);
         notify.mirror_offer(mirror);
+        notify.main_caps(&caps);
         pump(&mut ch, exec, notify, stop)
     });
     finish(&mut ch.ws);
     out
 }
 
-/// `hello`, then `welcome`; returns the main's name and its mirror offer.
+/// `hello`, then `welcome`; returns the main's name, its mirror offer and its caps.
 /// `learned` is the main's key from a pairing, kept only once welcomed.
-fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, learned: Option<[u8; 32]>, deadline: Instant) -> Result<(String, Option<bool>), String> {
+fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, learned: Option<[u8; 32]>, deadline: Instant) -> Result<(String, Option<bool>, Vec<String>), String> {
     let hostname = super::local_hostname();
     let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps() };
     send_up(ch, &hello)?;
     loop {
         match read_down(ch, stop, deadline)? {
-            Down::Welcome { name, mirror } => {
+            Down::Welcome { name, mirror, caps } => {
                 // Commands carry attachments inline: allow what the protocol
                 // allows, and the little sealing adds (`open_frame` caps the
                 // text at `MAX_FRAME`).
@@ -513,7 +517,7 @@ fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, s
                     notify.paired(&encode_key(&key));
                 }
                 let name = clean(&name);
-                return Ok((if name.is_empty() { "the main Maya".into() } else { name }, mirror));
+                return Ok((if name.is_empty() { "the main Maya".into() } else { name }, mirror, caps));
             }
             Down::Bye { reason } => return Err(bye_message(&reason)),
             other => log::line("network", format!("main: ignored {} before welcome", encode(&other).chars().take(40).collect::<String>())),

@@ -148,7 +148,7 @@ impl ClientNotify for TauriClientNotify {
     fn paired(&self, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
-        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None });
+        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false });
     }
     fn disconnected(&self, error: &str) {
         log::line("network", format!("disconnected: {error}"));
@@ -261,6 +261,7 @@ impl Executor for TauriExecutor {
 pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
     let state = app.state::<AppState>();
     match request {
+        Request::Interpret { .. } | Request::Execute { .. } => Err("This Maya cannot interpret voice commands yet.".into()),
         Request::ListDirs => match machine {
             Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),

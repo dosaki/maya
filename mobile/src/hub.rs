@@ -502,6 +502,7 @@ impl Hub {
         match request {
             Request::ListDirs => to_data(serde_json::to_value(machine.map(|m| merge::dirs_of(&self.boards(), m)).unwrap_or_default())),
             Request::ListAgents => to_data(serde_json::to_value(agents_reply(false, machine.and_then(|m| merge::agents_of(&self.boards(), m)), Vec::new))),
+            Request::Interpret { .. } | Request::Execute { .. } => Err("This phone cannot interpret voice commands.".into()),
             Request::Command(kind) => match target_of(&kind) {
                 Target::Session(session) => self.send(&session, |_| kind),
                 Target::Machine => self.send_to(machine.ok_or("This phone runs no sessions.")?, kind),
@@ -654,7 +655,7 @@ impl ClientNotify for HubClientNotify {
     fn paired(&self, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
-        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None });
+        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false });
         self.refresh();
     }
     fn disconnected(&self, error: &str) {
@@ -689,6 +690,10 @@ impl ClientNotify for HubClientNotify {
         }
         self.set(|l| l.mirror = Some(access));
         h.refresh();
+    }
+    fn main_caps(&self, caps: &[String]) {
+        let voice = caps.iter().any(|c| c == maya_core::net::protocol::CAP_VOICE);
+        self.set(|l| l.voice = voice);
     }
     fn mirrored(&self, allowed: bool, cards: Vec<Card>, machines: Vec<MachineInfo>) {
         if self.stop.load(Ordering::SeqCst) {
@@ -748,6 +753,35 @@ impl ClientNotify for HubClientNotify {
 mod tests {
     use super::*;
     use maya_core::net::client::Executor;
+
+    struct NoAlerts;
+    impl crate::alerts::Alerts for NoAlerts {
+        fn post(&self, _: &crate::alerts::Post) {}
+        fn clear(&self, _: i32) {}
+        fn service_line(&self, _: &str) {}
+    }
+    struct NoSink;
+    impl Sink for NoSink {
+        fn sessions(&self, _: &[Card]) {}
+        fn network(&self, _: &NetworkStatus) {}
+        fn service_start(&self, _: &str) {}
+        fn service_stop(&self) {}
+    }
+
+    /// A hub over an empty config in a fresh directory, with no-op alerts and sink.
+    pub(crate) fn test_hub() -> Arc<Hub> {
+        let dir = std::env::temp_dir().join(format!("maya-hub-test-{}-{}", std::process::id(), now_ms()));
+        let settings = Settings { path: settings_path(&dir), config: Config::default() };
+        Hub::new(dir, settings, Arc::new(NoAlerts), Arc::new(NoSink))
+    }
+
+    #[test]
+    fn the_phone_as_main_refuses_voice_requests() {
+        let hub = test_hub();
+        let err = hub.serve_request(None, Request::Interpret { command: "hi".into(), history: vec![] }).unwrap_err();
+        assert_eq!(err, "This phone cannot interpret voice commands.");
+        assert!(hub.serve_request(None, Request::Execute { action: serde_json::json!({}) }).is_err());
+    }
 
     #[test]
     fn a_late_paired_list_change_leaves_an_assistant_config_empty() {
