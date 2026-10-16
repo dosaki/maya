@@ -1,7 +1,7 @@
 # The phone speaks and listens — design
 
 Date: 2026-10-16
-Status: proposed
+Status: implemented
 Builds on: `2026-10-07-maya-android-companion-design.md`,
 `2026-10-14-phone-joins-a-main-design.md`
 
