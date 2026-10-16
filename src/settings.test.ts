@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { nextNetworkRole, pairingRepaintDue, renderSettings, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -82,7 +82,7 @@ describe("renderSettings", () => {
   it("puts Maya's agent first, with that agent's models under it", () => {
     const h = handlers();
     const el = renderSettings({ ...voiceBase, agents, agent: "grok", agentModel: "grok-4.7" }, h);
-    expect(el.querySelector(".settings__section .settings__heading")?.textContent).toBe("Maya");
+    expect(el.querySelector(".settings__section .settings__heading")?.textContent).toBe("General");
     const agent = el.querySelector<HTMLSelectElement>("select[name=agent]")!;
     expect([...agent.options].map((o) => o.textContent)).toEqual(["Claude Code", "Grok Build"]);
     expect(agent.value).toBe("grok");
@@ -292,24 +292,109 @@ describe("renderSettings", () => {
     expect(renderSettings({ ...voiceBase, listen: true, listenError: null }, h).querySelector(".settings__error[data-for=listen]")).toBeNull();
   });
 
-  it("groups the fields into titled sections, in the order the grid lays them out", () => {
+  it("lists the groups in a sidebar, one titled section each, and shows only General at first", () => {
     const el = renderSettings(voiceBase, handlers());
-    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["Maya", "Sessions", "Notifications", "Network", "Voice assistant"]);
-    expect([...el.querySelectorAll(".settings__section")].map((x) => x.classList[1])).toEqual([
-      "settings__section--maya",
-      "settings__section--sessions",
-      "settings__section--notifications",
-      "settings__section--network",
-      "settings__section--assistant",
-    ]);
-    expect(el.querySelector(".settings__section input[name=listen]")).not.toBeNull();
+    const nav = [...el.querySelectorAll<HTMLButtonElement>(".settings__nav button")];
+    expect(nav.map((b) => b.textContent)).toEqual(["General", "Sessions", "Pull requests", "Notifications", "Voice", "Network"]);
+    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Sessions", "Pull requests", "Notifications", "Voice", "Network"]);
+    const sections = [...el.querySelectorAll<HTMLElement>(".settings__section")];
+    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "sessions", "reviews", "notifications", "voice", "network"]);
+    expect(sections.filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["general"]);
+    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null]);
   });
 
-  it("shows the app version at the end of the Maya section once it is known", () => {
+  it("puts each setting in its group", () => {
+    const el = renderSettings({ ...voiceBase, voiceProvider: "elevenlabs", recognizer: "builtin", focusVisible: false, networkRole: "main", network: { ...voiceBase.network, role: "main" } }, handlers());
+    const groupOf = (selector: string) => el.querySelector(selector)?.closest<HTMLElement>(".settings__section")?.dataset.group;
+    const expected: Record<string, string> = {
+      "select[name=agent]": "general",
+      "select[name=agentModel]": "general",
+      "button[data-action=remove]": "sessions",
+      "button[data-action=install-codex]": "sessions",
+      "input[name=timeout]": "sessions",
+      "input[name=projectsDir]": "sessions",
+      "input[name=clonesDir]": "reviews",
+      "textarea[name=reviewPrompt]": "reviews",
+      "input[name=notifyPrReview]": "reviews",
+      "input[name=notify]": "notifications",
+      "input[name=speak]": "notifications",
+      "[data-for=focus]": "notifications",
+      "select[name=voiceProvider]": "voice",
+      "input[name=elevenKey]": "voice",
+      "select[name=elevenVoice]": "voice",
+      "input[name=voiceVolume]": "voice",
+      "button[data-action=try-voice]": "voice",
+      "input[name=listen]": "voice",
+      "select[name=recognizer]": "voice",
+      "select[name=whisperModel]": "voice",
+      "select[name=microphone]": "voice",
+      "select[name=networkRole]": "network",
+      "input[name=networkPort]": "network",
+      "input[name=networkName]": "network",
+    };
+    expect(Object.fromEntries(Object.keys(expected).map((s) => [s, groupOf(s)]))).toEqual(expected);
+  });
+
+  it("splits Voice into Speaking, then Listening", () => {
+    const voice = renderSettings(voiceBase, handlers()).querySelector(".settings__section--voice")!;
+    expect([...voice.querySelectorAll(".settings__subheading")].map((x) => x.textContent)).toEqual(["Speaking", "Listening"]);
+    const [speaking, listening] = [...voice.querySelectorAll(".settings__subheading")];
+    const follows = (a: Element, b: Element) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(follows(speaking, voice.querySelector("select[name=voiceProvider]")!)).toBe(true);
+    expect(follows(voice.querySelector("button[data-action=try-voice]")!, listening)).toBe(true);
+    expect(follows(listening, voice.querySelector("input[name=listen]")!)).toBe(true);
+  });
+
+  it("opens the group the model names", () => {
+    const el = renderSettings({ ...voiceBase, settingsGroup: "network" }, handlers());
+    expect([...el.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["network"]);
+    expect(el.querySelector(".settings__nav button[aria-current=true]")?.textContent).toBe("Network");
+  });
+
+  it("switches group in place from the sidebar, keeps the choice on the model and remembers it", () => {
+    localStorage.removeItem(SETTINGS_GROUP_KEY);
+    const model: SettingsModel = { ...voiceBase };
+    const el = renderSettings(model, handlers());
+    const typed = el.querySelector<HTMLInputElement>("input[name=projectsDir]")!;
+    el.querySelector<HTMLButtonElement>(".settings__nav button[data-group=voice]")!.click();
+    expect([...el.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["voice"]);
+    expect(el.querySelector(".settings__nav button[aria-current=true]")?.textContent).toBe("Voice");
+    expect(el.querySelector("input[name=projectsDir]")).toBe(typed);
+    expect(model.settingsGroup).toBe("voice");
+    expect(storedSettingsGroup()).toBe("voice");
+  });
+
+  it("falls back to General for a missing or unknown remembered group", () => {
+    localStorage.removeItem(SETTINGS_GROUP_KEY);
+    expect(storedSettingsGroup()).toBe("general");
+    localStorage.setItem(SETTINGS_GROUP_KEY, "assistant");
+    expect(storedSettingsGroup()).toBe("general");
+    localStorage.setItem(SETTINGS_GROUP_KEY, "reviews");
+    expect(storedSettingsGroup()).toBe("reviews");
+    localStorage.removeItem(SETTINGS_GROUP_KEY);
+  });
+
+  it("keeps the page error visible whichever group is open", () => {
+    const el = renderSettings({ ...voiceBase, error: "boom", settingsGroup: "network" }, handlers());
+    const err = el.querySelector<HTMLElement>(".settings__error")!;
+    expect(err.textContent).toBe("boom");
+    expect(err.closest(".settings__section")).toBeNull();
+  });
+
+  it("puts a device's buttons on their own row under its name and status", () => {
+    const assistants = [{ id: "a1", name: "Iris", hostname: "iris", platform: "android", address: "192.168.55.99", connected: true, lastSeen: null, canLead: true, wantsMirror: true, mirror: true }];
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network: { ...voiceBase.network, role: "main", assistants } }, handlers());
+    const row = el.querySelector(".settings__assistant")!;
+    expect(row.firstElementChild?.textContent).toContain("Iris (Android, 192.168.55.99) — Connected");
+    const actions = row.querySelector(".settings__assistant-actions")!;
+    expect([...actions.children].map((c) => (c as HTMLElement).dataset.action ?? c.querySelector<HTMLElement>("input")?.dataset.action)).toEqual(["remove-assistant", "make-main", "mirror"]);
+  });
+
+  it("shows the app version at the end of the General section once it is known", () => {
     const el = renderSettings({ ...voiceBase, version: "0.13.0" }, handlers());
-    const maya = el.querySelector(".settings__section--maya")!;
-    expect(maya.lastElementChild?.className).toBe("settings__hint settings__version");
-    expect(maya.lastElementChild?.textContent).toBe("Maya 0.13.0");
+    const general = el.querySelector(".settings__section--general")!;
+    expect(general.lastElementChild?.className).toBe("settings__hint settings__version");
+    expect(general.lastElementChild?.textContent).toBe("Maya 0.13.0");
     expect(renderSettings(voiceBase, handlers()).querySelector(".settings__version")).toBeNull();
   });
 

@@ -114,8 +114,10 @@ export interface SettingsModel {
   whisperModel: string;
   models: ModelInfo[];
   downloading: { id: string; received: number; total: number } | null;
-  /** The app version, shown under Maya; unset until Tauri answers. */
+  /** The app version, shown under General; unset until Tauri answers. */
   version?: string;
+  /** The group the sidebar shows; General when unset. */
+  settingsGroup?: SettingsGroup;
   /** This install can check for updates (`update_kind` is not `off`). */
   updatesOn?: boolean;
   /** The outcome of the last Check for updates; unset before one. */
@@ -245,12 +247,50 @@ interface ConfigJson {
   network?: NetworkConfigJson;
 }
 
-/** A titled card in the settings grid. */
-function section(title: string, key: string): HTMLElement {
+/** The sidebar's groups, in its order. */
+export const SETTINGS_GROUPS = [
+  ["general", "General"],
+  ["sessions", "Sessions"],
+  ["reviews", "Pull requests"],
+  ["notifications", "Notifications"],
+  ["voice", "Voice"],
+  ["network", "Network"],
+] as const;
+export type SettingsGroup = (typeof SETTINGS_GROUPS)[number][0];
+
+export const SETTINGS_GROUP_KEY = "maya.settingsGroup";
+
+function asSettingsGroup(v: string | null | undefined): SettingsGroup {
+  return SETTINGS_GROUPS.find(([key]) => key === v)?.[0] ?? "general";
+}
+
+/** The group open last time, per browser; General when none or unknown. */
+export function storedSettingsGroup(): SettingsGroup {
+  try {
+    return asSettingsGroup(localStorage.getItem(SETTINGS_GROUP_KEY));
+  } catch {
+    return "general";
+  }
+}
+
+/** A titled card, one per sidebar group. */
+function section(title: string, key: SettingsGroup): HTMLElement {
   const s = document.createElement("section");
   s.className = `settings__section settings__section--${key}`;
+  s.dataset.group = key;
   const heading = document.createElement("h2");
   heading.className = "settings__heading";
+  heading.textContent = title;
+  s.append(heading);
+  return s;
+}
+
+/** A titled part of a section, such as Voice's Speaking and Listening. */
+function subsection(title: string): HTMLElement {
+  const s = document.createElement("div");
+  s.className = "settings__subsection";
+  const heading = document.createElement("h3");
+  heading.className = "settings__subheading";
   heading.textContent = title;
   s.append(heading);
   return s;
@@ -367,15 +407,55 @@ export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean 
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = document.createElement("div");
-  root.className = "settings__body";
-  // DOM order is the grid's reading order: the three across the top, then
-  // Network bottom-left and Voice assistant bottom-right (Sessions spans).
-  const maya = section("Maya", "maya");
-  const sessions = section("Sessions", "sessions");
-  const notifications = section("Notifications", "notifications");
-  const network = section("Network", "network");
-  const assistant = section("Voice assistant", "assistant");
-  root.append(maya, sessions, notifications, network, assistant);
+  root.className = "settings__body settings__body--sidebar";
+  const nav = document.createElement("nav");
+  nav.className = "settings__nav";
+  nav.setAttribute("aria-label", "Settings");
+  const content = document.createElement("div");
+  content.className = "settings__content";
+  root.append(nav, content);
+
+  // Every group is built on each paint and the sidebar only toggles
+  // `hidden`, so a switch keeps half-typed fields and the in-place ticks
+  // (pairing code, addresses) still find their elements.
+  const sections = Object.fromEntries(SETTINGS_GROUPS.map(([key, title]) => [key, section(title, key)])) as Record<SettingsGroup, HTMLElement>;
+  const navButtons = SETTINGS_GROUPS.map(([key, title]) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "settings__nav-item";
+    b.dataset.group = key;
+    b.textContent = title;
+    const choose = () => {
+      model.settingsGroup = key;
+      try {
+        localStorage.setItem(SETTINGS_GROUP_KEY, key);
+      } catch {
+        /* private mode: nothing to remember */
+      }
+      show(key);
+    };
+    // On the press, not the click: the press blurs a just-edited field, and
+    // the save its `change` starts can repaint (and replace this button)
+    // before the release, so the click would never land. `click` still
+    // serves the keyboard.
+    b.addEventListener("pointerdown", (e) => { if (e.button === 0) choose(); });
+    b.addEventListener("click", choose);
+    return b;
+  });
+  const show = (group: SettingsGroup) => {
+    for (const [key, s] of Object.entries(sections)) s.hidden = key !== group;
+    for (const b of navButtons) {
+      if (b.dataset.group === group) b.setAttribute("aria-current", "true");
+      else b.removeAttribute("aria-current");
+    }
+  };
+  nav.append(...navButtons);
+  content.append(...Object.values(sections));
+  show(model.settingsGroup ?? "general");
+  const { general, sessions, reviews, notifications, voice, network } = sections;
+  const speaking = subsection("Speaking");
+  const listening = subsection("Listening");
+  voice.append(speaking, listening);
 
   const agents = model.agents.length > 0 ? model.agents : [CLAUDE_AGENT];
   // An agent that is chosen but not listed (uninstalled, or the listing has
@@ -406,12 +486,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     h.onAgent(agentSel.value as Harness);
   });
   agentLabel.append(agentSel);
-  maya.append(agentLabel);
+  general.append(agentLabel);
   const agentHint = document.createElement("div");
   agentHint.className = "settings__hint";
   agentHint.dataset.for = "agent";
   agentHint.textContent = "Interprets your voice commands, picks folders for 'Let Maya choose', and is the default for new and resumed sessions and reviews.";
-  maya.append(agentHint);
+  general.append(agentHint);
 
   const agentModelLabel = document.createElement("label");
   agentModelLabel.textContent = "Model";
@@ -430,7 +510,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   agentModelSel.value = chosenAgent.models.some((m) => m.id === model.agentModel) ? model.agentModel : "";
   agentModelSel.addEventListener("change", () => h.onAgentModel(agentSel.value as Harness, agentModelSel.value));
   agentModelLabel.append(agentModelSel);
-  maya.append(agentModelLabel);
+  general.append(agentModelLabel);
   if (model.version) {
     const version = document.createElement("div");
     version.className = "settings__hint settings__version";
@@ -449,7 +529,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
         version.append(" ", status);
       }
     }
-    maya.append(version);
+    general.append(version);
   }
 
   const net = model.network ?? DEFAULT_NETWORK_STATUS;
@@ -533,7 +613,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   clonesInput.value = model.clonesDir;
   clonesInput.addEventListener("change", () => h.onClonesDir(clonesInput.value.trim()));
   clonesLabel.append(clonesInput);
-  sessions.append(clonesLabel);
+  reviews.append(clonesLabel);
 
   const reviewLabel = document.createElement("label");
   reviewLabel.textContent = "Review prompt (for the Review button)";
@@ -544,12 +624,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   reviewInput.value = model.reviewPrompt;
   reviewInput.addEventListener("change", () => h.onReviewPrompt(reviewInput.value.trim()));
   reviewLabel.append(reviewInput);
-  sessions.append(reviewLabel);
+  reviews.append(reviewLabel);
   const reviewHint = document.createElement("div");
   reviewHint.className = "settings__hint";
   reviewHint.dataset.for = "reviewPrompt";
   reviewHint.textContent = "Blank uses the built-in prompt. {number}, {repo} and {url} are filled in; a prompt that uses none gets \" PR #<number> (<url>)\" appended.";
-  sessions.append(reviewHint);
+  reviews.append(reviewHint);
 
   const notifyLabel = document.createElement("label");
   notifyLabel.className = "settings__check";
@@ -569,7 +649,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   prBox.checked = model.notifyOnPrReview !== false;
   prBox.addEventListener("change", () => h.onNotifyPrReview?.(prBox.checked));
   prLabel.append(prBox, document.createTextNode(" Notify me when a PR assigned to me is approved or needs changes"));
-  notifications.append(prLabel);
+  reviews.append(prLabel);
 
   const speakLabel = document.createElement("label");
   speakLabel.className = "settings__check";
@@ -609,7 +689,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   listenBox.disabled = isAssistant;
   listenBox.addEventListener("change", () => h.onListen(listenBox.checked));
   listenLabel.append(listenBox, document.createTextNode(' Listen for "Maya" (on-device speech recognition)'));
-  assistant.append(listenLabel);
+  listening.append(listenLabel);
   if (isAssistant) {
     // The main Maya owns notifications and listening while this machine is
     // an assistant: say so right under the toggle rather than leave it
@@ -618,7 +698,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     note.className = "settings__hint";
     note.dataset.for = "listen";
     note.textContent = "The main Maya notifies and listens for this machine.";
-    assistant.append(note);
+    listening.append(note);
   } else if (model.listenError) {
     // The listener stopped on its own (Dictation off, no microphone…): say
     // why right under the toggle, or an unticked box looks like a glitch.
@@ -626,7 +706,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     err.className = "settings__error";
     err.dataset.for = "listen";
     err.textContent = model.listenError;
-    assistant.append(err);
+    listening.append(err);
   }
 
   const recLabel = document.createElement("label");
@@ -642,7 +722,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   rec.value = model.recognizer;
   rec.addEventListener("change", () => h.onRecognizer(rec.value === "builtin" ? "builtin" : "system"));
   recLabel.append(rec);
-  assistant.append(recLabel);
+  listening.append(recLabel);
 
   if (model.recognizer === "builtin") {
     const mb = (n: number) => `${Math.round(n / 1_000_000)} MB`;
@@ -660,7 +740,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     sel.value = model.whisperModel;
     sel.addEventListener("change", () => h.onWhisperModel(sel.value));
     modelPickerLabel.append(sel);
-    assistant.append(modelPickerLabel);
+    listening.append(modelPickerLabel);
 
     const row = document.createElement("div");
     row.className = "settings__row";
@@ -705,7 +785,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       rm.addEventListener("click", () => h.onRemoveModel(m.id));
       row.append(rm);
     }
-    assistant.append(row);
+    listening.append(row);
     if (model.downloading) {
       const bar = document.createElement("progress");
       bar.setAttribute("name", "modelDownload");
@@ -715,7 +795,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       const pct = document.createElement("div");
       pct.className = "settings__progress";
       pct.textContent = `Downloading ${downloadingLabel}… ${Math.round((100 * model.downloading.received) / Math.max(1, model.downloading.total))}%`;
-      assistant.append(bar, pct);
+      listening.append(bar, pct);
     }
   }
 
@@ -736,7 +816,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   mic.value = model.microphones.includes(model.microphone) ? model.microphone : "";
   mic.addEventListener("change", () => h.onMicrophone(mic.value));
   micLabel.append(mic);
-  assistant.append(micLabel);
+  listening.append(micLabel);
 
   const providerLabel = document.createElement("label");
   providerLabel.textContent = "Voice";
@@ -751,7 +831,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   provider.value = model.voiceProvider;
   provider.addEventListener("change", () => h.onVoiceProvider(provider.value === "elevenlabs" ? "elevenlabs" : "builtin"));
   providerLabel.append(provider);
-  notifications.append(providerLabel);
+  speaking.append(providerLabel);
 
   if (model.voiceProvider === "elevenlabs") {
     const keyLabel = document.createElement("label");
@@ -767,7 +847,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       key.value = "";
     });
     keyLabel.append(key);
-    notifications.append(keyLabel);
+    speaking.append(keyLabel);
 
     const voiceLabel = document.createElement("label");
     voiceLabel.textContent = "ElevenLabs voice";
@@ -783,7 +863,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     voice.disabled = model.elevenVoices.length === 0;
     voice.addEventListener("change", () => h.onElevenVoice(voice.value));
     voiceLabel.append(voice);
-    notifications.append(voiceLabel);
+    speaking.append(voiceLabel);
   }
 
   // The number follows the drag; the volume is saved once the slider is let go.
@@ -805,14 +885,14 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   volumeControl.className = "settings__range";
   volumeControl.append(volume, volumeShown);
   volumeLabel.append(volumeControl);
-  notifications.append(volumeLabel);
+  speaking.append(volumeLabel);
 
   const tryBtn = document.createElement("button");
   tryBtn.type = "button";
   tryBtn.dataset.action = "try-voice";
   tryBtn.textContent = "Try the voice";
   tryBtn.addEventListener("click", () => h.onTryVoice());
-  notifications.append(tryBtn);
+  speaking.append(tryBtn);
 
   const roleLabel = document.createElement("label");
   roleLabel.textContent = "Network";
@@ -928,7 +1008,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       rm.textContent = "Remove";
       rm.disabled = !!model.networkPromoting;
       rm.addEventListener("click", () => h.onRemoveAssistant(a.id));
-      row.append(info, rm);
+      // Name and status on one line, the buttons on their own row beneath,
+      // so a long status never squeezes them into a column.
+      const actions = document.createElement("div");
+      actions.className = "settings__assistant-actions";
+      actions.append(rm);
+      row.append(info, actions);
       if (a.connected && a.canLead) {
         const mk = document.createElement("button");
         mk.type = "button";
@@ -937,7 +1022,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
         mk.textContent = "Make main";
         mk.disabled = !!model.networkPromoting;
         mk.addEventListener("click", () => h.onMakeMain(a.id));
-        row.append(mk);
+        actions.append(mk);
       }
       if (a.wantsMirror || a.mirror) {
         const sw = document.createElement("label");
@@ -950,7 +1035,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
         box.disabled = !!model.networkPromoting;
         box.addEventListener("change", () => h.onMirror(a.id, box.checked));
         sw.append(box, document.createTextNode(" Sees and controls all sessions"));
-        row.append(sw);
+        actions.append(sw);
       }
       list.append(row);
       if (model.networkPromote === a.id) {
@@ -1123,7 +1208,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const err = document.createElement("div");
     err.className = "settings__error";
     err.textContent = model.error;
-    root.append(err);
+    // Above the sections, so it shows whichever group is open.
+    content.prepend(err);
   }
   return root;
 }
@@ -1162,6 +1248,7 @@ export async function initSettings(): Promise<void> {
     networkMainHost: "",
     networkMainPort: 0,
     networkName: "",
+    settingsGroup: storedSettingsGroup(),
   };
 
   const applyNetworkConfig = (c: ConfigJson) => {
