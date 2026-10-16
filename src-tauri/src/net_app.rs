@@ -9,6 +9,7 @@ use crate::actions;
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
+use crate::listener::{self, Interpreted, VoiceContext};
 use crate::net::protocol::{CommandKind, Request, CAP_FOLLOW, CAP_LEAD};
 use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, target_of, Target, ROUTE_TIMEOUT};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
@@ -254,6 +255,66 @@ impl Executor for TauriExecutor {
     }
 }
 
+/// What a phone's `Interpret` gets back: the line to say, and the action to
+/// run on its yes when there is one.
+pub(crate) fn interpret_data(outcome: &Interpreted) -> Value {
+    match outcome {
+        Interpreted::Say(s) => serde_json::json!({ "say": s }),
+        Interpreted::Confirm(p) => serde_json::json!({ "say": p.say, "pending": { "say": p.say, "action": p.action } }),
+        // Run is executed before answering; see `serve_voice`.
+        Interpreted::Run(_) => serde_json::json!({ "say": "" }),
+    }
+}
+
+pub(crate) fn said_data(say: &str) -> Value {
+    serde_json::json!({ "say": say })
+}
+
+/// Why an action that runs at once cannot run for a phone: focus brings a
+/// window forward on this machine, which the user holding the phone cannot see.
+pub(crate) fn refuse_remote(action: &Value) -> Option<String> {
+    (action["kind"] == "focus").then(|| "I can only bring a window forward when you're at the computer.".to_string())
+}
+
+/// A confirmed action checked again against the board as it is now: the
+/// ask may have been answered at the desk while the phone waited for yes.
+/// The action keeps the session id `validate` gave it: an id matches one
+/// card exactly, where the name could match another session by then.
+pub(crate) fn revalidate(action: &Value, ctx: &VoiceContext) -> Result<Value, String> {
+    let fresh = maya_core::interpreter::validate(action, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs)?;
+    // An answer must still be for the ask the user heard read back.
+    if action["kind"] == "answer" && fresh["askId"] != action["askId"] {
+        return Err("The question has changed; ask me again.".into());
+    }
+    Ok(fresh)
+}
+
+/// A phone's voice request: interpret (running a compact at once), or run a
+/// confirmed action. Nothing is spoken here, and the desktop's own
+/// conversation is untouched.
+fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, String> {
+    match request {
+        Request::Interpret { command, history } => {
+            let pairs = listener::exchanges(history.iter().map(|t| (t.who.as_str(), t.text.as_str())));
+            let outcome = listener::interpret_text(app, &command, &pairs);
+            if let Interpreted::Run(action) = &outcome {
+                if let Some(why) = refuse_remote(action) {
+                    return Ok(Some(said_data(&why)));
+                }
+                let said = listener::execute_action(app, action).map(|s| listener::spoken_for(action).unwrap_or(s)).unwrap_or_else(|e| e);
+                return Ok(Some(said_data(&said)));
+            }
+            Ok(Some(interpret_data(&outcome)))
+        }
+        Request::Execute { action } => {
+            let fresh = revalidate(&action, &listener::voice_context(app))?;
+            let said = listener::execute_action(app, &fresh)?;
+            Ok(Some(said_data(&said)))
+        }
+        _ => unreachable!("serve_voice is only called for voice requests"),
+    }
+}
+
 /// Answers a mirroring Maya's request as this Maya's own page would:
 /// a session's command goes to whichever machine lists it, a machine's
 /// command to the machine named (`None` is this Mac), and the listings
@@ -261,7 +322,7 @@ impl Executor for TauriExecutor {
 pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
     let state = app.state::<AppState>();
     match request {
-        Request::Interpret { .. } | Request::Execute { .. } => Err("This Maya cannot interpret voice commands yet.".into()),
+        voice @ (Request::Interpret { .. } | Request::Execute { .. }) => serve_voice(app, voice),
         Request::ListDirs => match machine {
             Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),
@@ -327,6 +388,32 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    use crate::listener::{Interpreted as I, VoiceContext as VC};
+
+    #[test]
+    fn interpret_answers_say_and_a_pending_action() {
+        let said = interpret_data(&I::Say("All quiet.".into()));
+        assert_eq!(said, serde_json::json!({"say": "All quiet."}));
+        let pending = maya_core::wake::Pending { say: "Answering hexgrid with \"Yes\". Yes?".into(), action: serde_json::json!({"kind": "answer"}) };
+        let asked = interpret_data(&I::Confirm(pending));
+        assert_eq!(asked["say"], "Answering hexgrid with \"Yes\". Yes?");
+        assert_eq!(asked["pending"]["say"], asked["say"]);
+        assert_eq!(asked["pending"]["action"]["kind"], "answer");
+    }
+
+    #[test]
+    fn focus_cannot_run_for_a_phone() {
+        assert!(refuse_remote(&serde_json::json!({"kind": "focus", "session": "s1"})).is_some());
+        assert!(refuse_remote(&serde_json::json!({"kind": "compact", "session": "s1"})).is_none());
+    }
+
+    #[test]
+    fn execute_revalidates_against_the_board_now() {
+        let gone = VC { cards: vec![], dirs: vec![], machines: vec![], prs: vec![] };
+        let err = revalidate(&serde_json::json!({"kind": "reply", "session": "s1", "name": "hexgrid", "text": "ship it"}), &gone).unwrap_err();
+        assert!(!err.is_empty(), "a session that has gone fails with a reason");
+    }
 
     #[test]
     fn a_stored_key_is_used_and_none_stored_makes_and_stores_one() {

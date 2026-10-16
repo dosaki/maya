@@ -214,6 +214,16 @@ impl Notify for TauriNetNotify {
     fn request(&self, machine: Option<&str>, request: net::protocol::Request) -> Result<Option<serde_json::Value>, String> {
         net_app::serve_request(&self.app, machine, request)
     }
+
+    fn main_caps(&self) -> Vec<String> {
+        // Voice needs Maya's agent on this machine to interpret.
+        let brain = self.app.state::<AppState>().store.lock().unwrap().config.brain();
+        if launch::find_binary(brain).is_ok() {
+            vec![net::protocol::CAP_VOICE.to_string()]
+        } else {
+            vec![]
+        }
+    }
 }
 
 /// The assistants' last snapshots when this Maya is the main; else none.
