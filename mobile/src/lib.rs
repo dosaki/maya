@@ -7,6 +7,9 @@ pub mod alerts;
 pub mod android;
 mod commands;
 pub mod hub;
+// Wired to the page and Android in the next step; until then nothing calls it.
+#[allow(dead_code)]
+mod voice;
 
 use hub::{Hub, Sink};
 use maya_core::config::NetworkRole;
