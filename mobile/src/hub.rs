@@ -20,7 +20,7 @@ use maya_core::store::now_ms;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 /// What the hub tells the outside: the page's events and the service.
@@ -101,6 +101,21 @@ pub struct Hub {
     /// The time boards are merged and routed at: the real clock, or a
     /// test's, so expiry can be checked without waiting five minutes.
     now: Box<dyn Fn() -> u64 + Send + Sync>,
+    /// The phone's voice conversation, once the app has made it. Taken
+    /// alone: `refresh` calls into it with only its own serial lock held,
+    /// and it never calls back into a hub lock while it holds its own.
+    pub voice: OnceLock<Arc<crate::voice::Voice>>,
+    /// On silent, vibrate or Do Not Disturb (the voice plugin's `quiet`).
+    pub silenced: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
+    /// What `joined` answers in a test, so it needs no running client.
+    #[cfg(test)]
+    joined_override: Mutex<Option<bool>>,
+}
+
+/// Whether board events may be spoken at all: Speak is on and the phone is
+/// not on silent, vibrate or Do Not Disturb. Replies are always spoken.
+pub(crate) fn speaks_events(speak_on: bool, silenced: bool) -> bool {
+    speak_on && !silenced
 }
 
 impl Hub {
@@ -110,7 +125,11 @@ impl Hub {
 
     /// `new` with the clock boards are merged at.
     pub fn with_clock(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>, now: impl Fn() -> u64 + Send + Sync + 'static) -> Arc<Hub> {
-        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), client: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now) })
+        Arc::new(Hub {
+            maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), client: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now), voice: OnceLock::new(), silenced: OnceLock::new(),
+            #[cfg(test)]
+            joined_override: Mutex::new(None),
+        })
     }
 
     fn handle(&self) -> Option<ServerHandle> {
@@ -138,7 +157,35 @@ impl Hub {
 
     /// This phone listens to a main (joined, or after handing its role away).
     pub fn joined(&self) -> bool {
+        #[cfg(test)]
+        if let Some(joined) = *self.joined_override.lock().unwrap() {
+            return joined;
+        }
         self.client.lock().unwrap().is_some()
+    }
+
+    /// Sets the link and what `joined` answers, with no client running.
+    #[cfg(test)]
+    pub(crate) fn set_link_for_test(&self, link: AssistantLink, joined: bool) {
+        *self.link.lock().unwrap() = link;
+        *self.joined_override.lock().unwrap() = Some(joined);
+    }
+
+    /// Why voice is not offered, or `None` when it is: the phone must have
+    /// joined a main that interprets (`CAP_VOICE`) and lets it control sessions.
+    pub fn voice_offer(&self) -> Option<String> {
+        if !self.joined() {
+            return Some(crate::voice::NO_MAIN.into());
+        }
+        let link = self.link.lock().unwrap();
+        let main = link.main_name.clone().unwrap_or_else(|| "the main Maya".into());
+        if link.mirror != Some(MirrorAccess::Allowed) {
+            return Some(format!("{main} has not allowed this phone to control its sessions."));
+        }
+        if !link.voice {
+            return Some(format!("Update {main} to talk to Maya."));
+        }
+        None
     }
 
     /// Sends a request to the joined main and waits for its answer.
@@ -186,16 +233,30 @@ impl Hub {
             let mut n = self.notifier.lock().unwrap();
             (n.take_new(&cards), n.take_finished(&cards))
         };
-        let switches = {
+        let (switches, speak_on) = {
             let s = self.settings.lock().unwrap();
-            Switches { awaiting: s.config.notify_on_awaiting, completed: s.config.notify_on_completed }
+            (Switches { awaiting: s.config.notify_on_awaiting, completed: s.config.notify_on_completed }, s.config.speak_notifications)
         };
         let actions = alerts::plan(&cards, &fresh, &finished, &mut self.posted.lock().unwrap(), switches);
+        // Asked only when there is something to post: it is a call into Android.
+        let mut events_spoken = None;
         for a in actions {
             match a {
-                Action::Post(p) => self.alerts.post(&p),
+                Action::Post(mut p) => {
+                    let may_speak = *events_spoken.get_or_insert_with(|| speaks_events(speak_on, self.silenced.get().is_some_and(|f| f())));
+                    if let (true, Some(v), Some(line)) = (may_speak, self.voice.get(), p.spoken.as_deref()) {
+                        // Spoken (now or once the conversation is idle): post without a sound.
+                        p.quiet = v.announce(line);
+                    }
+                    self.alerts.post(&p)
+                }
                 Action::Clear(id) => self.alerts.clear(id),
             }
+        }
+        // No hub lock but the serial one is held here: the voice's callbacks
+        // (the page event, the plugin queue) take none.
+        if let Some(v) = self.voice.get() {
+            v.set_offer(self.voice_offer());
         }
         self.sink.sessions(&cards);
     }
@@ -694,6 +755,8 @@ impl ClientNotify for HubClientNotify {
     fn main_caps(&self, caps: &[String]) {
         let voice = caps.iter().any(|c| c == maya_core::net::protocol::CAP_VOICE);
         self.set(|l| l.voice = voice);
+        // So the voice's offer follows the link.
+        self.refresh();
     }
     fn mirrored(&self, allowed: bool, cards: Vec<Card>, machines: Vec<MachineInfo>) {
         if self.stop.load(Ordering::SeqCst) {
@@ -733,6 +796,8 @@ impl ClientNotify for HubClientNotify {
         h.client.lock().unwrap().take();
         *h.mirror.lock().unwrap() = MirrorView::default();
         *h.link.lock().unwrap() = AssistantLink::default();
+        // No longer joined: the voice's offer is withdrawn.
+        h.refresh();
         log::line("network", format!("promoted to main by {by}; {handed} assistants handed over"));
         let port = h.handle().map(|s| s.port()).ok_or("The server is stopped.")?;
         h.sink.network(&h.status());
@@ -773,6 +838,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("maya-hub-test-{}-{}", std::process::id(), now_ms()));
         let settings = Settings { path: settings_path(&dir), config: Config::default() };
         Hub::new(dir, settings, Arc::new(NoAlerts), Arc::new(NoSink))
+    }
+
+    #[test]
+    fn voice_is_offered_only_when_joined_to_a_main_that_interprets() {
+        let hub = test_hub();
+        assert_eq!(hub.voice_offer().as_deref(), Some("Voice needs a desktop main."));
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: false, ..Default::default() }, true);
+        assert_eq!(hub.voice_offer().as_deref(), Some("Update Yhi to talk to Maya."));
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
+        assert_eq!(hub.voice_offer(), None);
+    }
+
+    #[test]
+    fn events_are_spoken_only_with_speak_on_and_the_phone_not_silenced() {
+        assert!(speaks_events(true, false));
+        assert!(!speaks_events(false, false), "Speak off");
+        assert!(!speaks_events(true, true), "silent, vibrate or Do Not Disturb");
     }
 
     #[test]

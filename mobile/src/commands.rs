@@ -240,9 +240,10 @@ fn apply_settings(c: &mut Config, from: &Config) {
 
 /// Saves what the Network screen edits: name, port, the notification switches
 /// and voice. The role and the paired list stay the server's. A new name or port on a
-/// running server restarts it; assistants reconnect within seconds.
+/// running server restarts it; assistants reconnect within seconds. Turning
+/// the wake word on asks for the microphone the first time.
 #[tauri::command(async)]
-pub fn set_config(hub: H, config: Config) -> Result<Config, String> {
+pub fn set_config(app: AppHandle, hub: H, config: Config) -> Result<Config, String> {
     let before = hub.settings.lock().unwrap().config.clone();
     let saved = hub.update_config(|c| apply_settings(c, &config))?;
     let running = hub.server.lock().unwrap().is_some();
@@ -250,7 +251,52 @@ pub fn set_config(hub: H, config: Config) -> Result<Config, String> {
         log::line("network", "settings changed; restarting the server");
         hub.start_server()?;
     }
+    // Only a change of the wake word reaches the voice: an unrelated save
+    // must not restart a wake loop that gave up, or clear why.
+    if let Some(v) = hub.voice.get().filter(|_| saved.wake_word != before.wake_word) {
+        if saved.wake_word && !android::microphone_allowed(&app) {
+            microphone_refused(&hub, v)?;
+            return Ok(hub.settings.lock().unwrap().config.clone());
+        }
+        v.set_wake(saved.wake_word);
+    }
     Ok(saved)
+}
+
+fn voice(hub: &H) -> Result<Arc<crate::voice::Voice>, String> {
+    hub.voice.get().cloned().ok_or_else(|| "Voice is not ready.".into())
+}
+
+/// The microphone was refused: the wake word turns off and the bar says why.
+fn microphone_refused(hub: &H, v: &crate::voice::Voice) -> Result<(), String> {
+    hub.update_config(|c| c.wake_word = false)?;
+    v.set_wake(false);
+    v.failed("Microphone access is off.", true);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn voice_view(hub: H) -> Result<crate::voice::VoiceView, String> {
+    let v = voice(&hub)?;
+    v.set_offer(hub.voice_offer());
+    Ok(v.view())
+}
+
+/// Asks for the microphone the first time, then listens for one command.
+#[tauri::command(async)]
+pub fn voice_tap(app: AppHandle, hub: H) -> Result<(), String> {
+    let v = voice(&hub)?;
+    if !android::microphone_allowed(&app) {
+        return microphone_refused(&hub, &v);
+    }
+    v.tap();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn voice_confirm(hub: H, yes: bool) -> Result<(), String> {
+    voice(&hub)?.confirm(yes);
+    Ok(())
 }
 
 #[tauri::command]

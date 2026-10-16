@@ -7,15 +7,16 @@ pub mod alerts;
 pub mod android;
 mod commands;
 pub mod hub;
-// Wired to the page and Android in the next step; until then nothing calls it.
-#[allow(dead_code)]
-mod voice;
+pub mod voice;
 
 use hub::{Hub, Sink};
 use maya_core::config::NetworkRole;
 use maya_core::log;
 use maya_core::model::Card;
+use maya_core::net::protocol::Request;
 use maya_core::net::NetworkStatus;
+use maya_core::store::now_ms;
+use serde_json::Value;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -59,12 +60,35 @@ fn spawn_refresh(hub: Weak<Hub>) {
     });
 }
 
+/// The phone's voice conversation: it asks the joined main, shows itself
+/// to the page as the `voice` event, and hears the voice plugin's events.
+fn make_voice(handle: &AppHandle, hub: &Arc<Hub>) {
+    let ask_hub = Arc::downgrade(hub);
+    let ask: voice::Ask = Arc::new(move |r: Request| -> Result<Option<Value>, String> { ask_hub.upgrade().ok_or("Maya is closing.")?.request(None, r) });
+    let shown = handle.clone();
+    let show: voice::Show = Arc::new(move |v: &voice::VoiceView| {
+        let _ = shown.emit("voice", v);
+    });
+    let v = voice::Voice::new(android::voice_io(handle), ask, show, now_ms);
+    // Read first: the settings lock is not held while the voice runs.
+    let wake = hub.settings.lock().unwrap().config.wake_word;
+    v.set_wake(wake);
+    let _ = hub.voice.set(v.clone());
+    let quiet = handle.clone();
+    let _ = hub.silenced.set(Box::new(move || android::silenced(&quiet)));
+    android::watch_voice(handle, Arc::downgrade(&v));
+    if !android::on_device(handle) {
+        v.set_note(Some("Speech goes through Google's service and may leave the phone.".into()));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(android::init())
+        .plugin(android::voice_init())
         .invoke_handler(tauri::generate_handler![
             commands::list_sessions,
             commands::session_history,
@@ -105,7 +129,10 @@ pub fn run() {
             commands::local_addresses,
             commands::request_battery_exemption,
             commands::notifications_allowed,
-            commands::pending_tap
+            commands::pending_tap,
+            commands::voice_view,
+            commands::voice_tap,
+            commands::voice_confirm
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -120,6 +147,7 @@ pub fn run() {
             let settings = hub::load_settings(&maya_dir, &android::device_model(&handle));
             let hub = Hub::new(maya_dir, settings, android::alerts(&handle), Arc::new(TauriSink { app: handle.clone() }));
             app.manage(hub.clone());
+            make_voice(&handle, &hub);
             spawn_refresh(Arc::downgrade(&hub));
             if let Err(e) = android::create_channels(&handle) {
                 log::line("android", format!("notification channels: {e}"));

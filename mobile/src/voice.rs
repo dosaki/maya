@@ -500,6 +500,20 @@ impl Voice {
     }
 }
 
+/// One event from the voice plugin (`{event, …}`) onto the conversation.
+pub fn dispatch(v: &Voice, e: &Value) {
+    let text = || e["text"].as_str().unwrap_or("");
+    match e["event"].as_str().unwrap_or("") {
+        "partial" => v.partial(text()),
+        "final" => v.heard(text()),
+        "ended" => v.ended(),
+        "failed" => v.failed(e["message"].as_str().unwrap_or("speech recognition failed"), e["fatal"].as_bool().unwrap_or(false)),
+        "spoken" => v.spoken(e["ok"].as_bool().unwrap_or(true)),
+        "screen" => v.screen(e["on"].as_bool().unwrap_or(false)),
+        other => log::line("voice", format!("ignored plugin event {other:?}")),
+    }
+}
+
 fn push(history: &mut Vec<VoiceTurn>, who: &str, text: &str) {
     if text.trim().is_empty() {
         return;
@@ -908,6 +922,22 @@ mod tests {
         v.failed("No recogniser.", true);
         assert_eq!(io.take(), Vec::<String>::new());
         assert_eq!(v.view().state, "idle");
+    }
+
+    #[test]
+    fn plugin_events_reach_the_conversation() {
+        let (v, io, asked) = voice(vec![Ok(serde_json::json!({"say": "Hi."}))]);
+        v.tap();
+        io.take();
+        dispatch(&v, &serde_json::json!({"event": "partial", "text": "what ne"}));
+        assert_eq!(v.view().heard, "what ne");
+        dispatch(&v, &serde_json::json!({"event": "final", "text": "what needs me"}));
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        dispatch(&v, &serde_json::json!({"event": "spoken", "ok": true}));
+        assert_eq!(v.view().state, "idle");
+        dispatch(&v, &serde_json::json!({"event": "screen", "on": false}));
+        assert_eq!(v.view().state, "off");
+        dispatch(&v, &serde_json::json!({"event": "nonsense"}));
     }
 
     #[test]
