@@ -46,7 +46,7 @@
 
 /* The Network tab fits a 320 px screen: one column below the desktop's
    380 px minimum, and each field's label above a full-width input. */
-.settings.pane .settings__body.network { grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); }
+.settings.pane .settings__body.network { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 16px; align-items: start; }
 .network .settings__section { min-width: 0; }
 .network .settings__section > label:not(.settings__switch) { flex-direction: column; align-items: stretch; gap: 4px; }
 .network .settings__section > label:not(.settings__switch) > input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 8px 10px; }

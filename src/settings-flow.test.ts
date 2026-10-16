@@ -34,7 +34,7 @@ describe("settings flow", () => {
 
     await initSettings();
     await flush();
-    expect(document.querySelector(".settings__section--maya .settings__version")?.textContent).toBe("Maya 0.13.0");
+    expect(document.querySelector(".settings__section--general .settings__version")?.textContent).toBe("Maya 0.13.0");
 
     getVersion.mockImplementationOnce(() => Promise.reject(new Error("no tauri")));
     document.body.innerHTML = '<div id="settings" class="settings pane" hidden></div>';
@@ -42,6 +42,31 @@ describe("settings flow", () => {
     await flush();
     expect(document.querySelector("input[name=timeout]")).not.toBeNull();
     expect(document.querySelector(".settings__version")).toBeNull();
+  });
+
+  it("opens on the group chosen last time, and keeps it through a repaint", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "" };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    const visible = () => [...document.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group);
+
+    localStorage.setItem("maya.settingsGroup", "voice");
+    await initSettings();
+    await flush();
+    expect(visible()).toEqual(["voice"]);
+
+    document.querySelector<HTMLButtonElement>(".settings__nav button[data-group=sessions]")!.click();
+    document.querySelector<HTMLInputElement>("input[name=timeout]")!.dispatchEvent(new Event("change"));
+    await flush();
+    expect(visible()).toEqual(["sessions"]);
+    localStorage.removeItem("maya.settingsGroup");
   });
 
   it("saves against the freshest config rather than a stale local model", async () => {
