@@ -281,6 +281,8 @@ impl Voice {
         if !Self::active(&i) || i.speaking || i.thinking {
             return;
         }
+        // The recogniser ran to its end: the failures are no longer in a row.
+        i.failures = 0;
         let now = (self.now)();
         if i.flow.drop_expired(now) {
             i.view.pending = None;
@@ -299,11 +301,20 @@ impl Voice {
         if fatal || !i.wake {
             i.view.error = Some(message.to_string());
             i.flow = Flow::new();
+            // A fatal error would fail again at once: no wake loop this session.
+            if fatal {
+                i.wake = false;
+            }
+            if !i.speaking && !i.thinking {
+                self.carry_on(&mut i);
+            }
             self.publish(&mut i);
             return;
         }
         i.failures += 1;
         if i.failures >= MAX_FAILURES {
+            // Off for this session; `set_wake` turns it back on.
+            i.wake = false;
             i.view.error = Some(format!("Wake word stopped: {message}"));
             self.publish(&mut i);
             return;
@@ -407,6 +418,13 @@ impl Voice {
     /// thread unless `sync`. The lock is released while the main thinks.
     fn request(&self, mut i: std::sync::MutexGuard<'_, Inner>, request: Request) {
         let execute = matches!(request, Request::Execute { .. });
+        // The user has moved on: a read-back still being said must not re-arm
+        // its confirmation when it finishes.
+        i.after = After::Idle;
+        if i.speaking {
+            self.io.stop_speaking();
+            i.speaking = false;
+        }
         // The recogniser has stopped: it hears one utterance per `listen`.
         i.thinking = true;
         let generation = i.generation;
@@ -449,8 +467,9 @@ impl Voice {
             }
         };
         let say = data["say"].as_str().unwrap_or("").to_string();
-        push(&mut i.history, "maya", &say);
         let pending = data.get("pending").filter(|p| !p.is_null()).map(|p| Pending { say: p["say"].as_str().unwrap_or(&say).to_string(), action: p["action"].clone() });
+        // The turn is what Maya says: the read-back when there is one.
+        push(&mut i.history, "maya", pending.as_ref().map_or(&say, |p| &p.say));
         match pending {
             Some(p) => {
                 i.flow.set_pending(p.clone(), (self.now)());
@@ -482,6 +501,9 @@ impl Voice {
 }
 
 fn push(history: &mut Vec<VoiceTurn>, who: &str, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
     history.push(VoiceTurn { who: who.into(), text: text.into() });
     let extra = history.len().saturating_sub(HISTORY * 2);
     history.drain(..extra);
@@ -805,5 +827,109 @@ mod tests {
         assert_eq!(io.take(), Vec::<String>::new(), "a mic opened now would be thrown away");
         assert_eq!(v.view().state, "thinking");
         let _ = release.send(());
+    }
+
+    #[test]
+    fn a_yes_during_the_read_back_runs_the_action_once() {
+        let action = serde_json::json!({"kind": "reply", "session": "s1"});
+        let io = Arc::new(FakeIo::default());
+        let asked = Arc::new(Mutex::new(vec![]));
+        let me: Arc<Mutex<std::sync::Weak<Voice>>> = Arc::new(Mutex::new(std::sync::Weak::new()));
+        let (a, m) = (asked.clone(), me.clone());
+        let ask: Ask = Arc::new(move |r: Request| {
+            let execute = matches!(r, Request::Execute { .. });
+            a.lock().unwrap().push(r);
+            if !execute {
+                return Ok(Some(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action.clone()}})));
+            }
+            // The read-back finishes while the main runs the action.
+            let v = m.lock().unwrap().upgrade();
+            if let Some(v) = v {
+                v.spoken(true);
+            }
+            Ok(Some(serde_json::json!({"say": "Sent."})))
+        });
+        let v = Voice::new_sync(io.clone(), ask, Arc::new(|_| {}), now);
+        *me.lock().unwrap() = Arc::downgrade(&v);
+        v.screen(true);
+        v.set_offer(None);
+        v.tap();
+        v.heard("tell x y");
+        io.take();
+        v.confirm(true);
+        assert_eq!(io.take(), vec!["stop listening", "stop speaking", "say Sent."]);
+        v.spoken(true);
+        assert_eq!(io.take(), Vec::<String>::new(), "no mic reopened for a confirm");
+        assert_eq!(v.view().pending, None);
+        v.heard("okay");
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.iter().filter(|r| matches!(r, Request::Execute { .. })).count(), 1);
+    }
+
+    #[test]
+    fn only_failures_in_a_row_stop_the_wake_loop_and_it_stays_stopped() {
+        let (v, io, _) = voice(vec![]);
+        v.set_wake(true);
+        for _ in 0..10 {
+            v.failed("busy", false);
+            v.ended();
+        }
+        assert_eq!(v.view().error, None, "an ended() between failures breaks the run");
+        for _ in 0..5 {
+            v.failed("busy", false);
+        }
+        assert_eq!(v.view().error.as_deref(), Some("Wake word stopped: busy"));
+        assert_eq!(v.view().state, "idle");
+        io.take();
+        v.ended();
+        assert!(v.announce("laptop needs a decision"));
+        v.spoken(true);
+        assert_eq!(io.take(), vec!["say laptop needs a decision"], "the loop does not restart by itself");
+        v.set_wake(true);
+        assert_eq!(io.take(), vec!["listen wake"]);
+    }
+
+    #[test]
+    fn a_recogniser_failure_lets_a_waiting_event_through() {
+        let (v, io, _) = voice(vec![]);
+        v.tap();
+        assert!(v.announce("laptop needs a decision"));
+        io.take();
+        v.failed("x", false);
+        assert_eq!(io.take(), vec!["say laptop needs a decision"]);
+        assert_eq!(v.view().error.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn a_fatal_failure_does_not_restart_the_wake_loop() {
+        let (v, io, _) = voice(vec![]);
+        v.set_wake(true);
+        io.take();
+        v.failed("No recogniser.", true);
+        assert_eq!(io.take(), Vec::<String>::new());
+        assert_eq!(v.view().state, "idle");
+    }
+
+    #[test]
+    fn history_records_the_read_back_that_was_spoken() {
+        let action = serde_json::json!({"kind": "reply", "session": "s1"});
+        let (v, _, asked) = voice(vec![
+            Ok(serde_json::json!({"say": "I'll tell x.", "pending": {"say": "Telling x: y. Yes?", "action": action}})),
+            Ok(serde_json::json!({"say": ""})),
+            Ok(serde_json::json!({"say": "Done."})),
+            Ok(serde_json::json!({"say": "Done."})),
+        ]);
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        v.heard("Maya tell z w");
+        {
+            let Request::Interpret { history, .. } = &asked.lock().unwrap()[1] else { panic!() };
+            assert_eq!(history.last().unwrap().text, "Telling x: y. Yes?");
+        }
+        v.tap();
+        v.heard("q3");
+        let Request::Interpret { history, .. } = &asked.lock().unwrap()[2] else { panic!() };
+        assert!(history.iter().all(|t| !t.text.trim().is_empty()), "a blank answer is not a turn: {history:?}");
     }
 }
