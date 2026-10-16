@@ -1964,22 +1964,42 @@ Inside `mod imp` (Android):
         }
     }
 
-    pub struct AndroidVoice<R: Runtime> {
-        pub app: AppHandle<R>,
+    /// One call to the plugin, run in order on the voice worker thread.
+    enum Call {
+        Listen(bool),
+        StopListening,
+        Speak(String),
+        StopSpeaking,
     }
 
-    impl<R: Runtime> crate::voice::VoiceIo for AndroidVoice<R> {
+    /// `Voice` calls these with its lock held, and a plugin call blocks
+    /// until Kotlin answers, while Kotlin may send an event (which takes
+    /// that lock) before answering. So each call is queued to one worker
+    /// thread, in order, and returns at once (ledger ruling R8).
+    pub struct AndroidVoice {
+        calls: std::sync::Mutex<std::sync::mpsc::Sender<Call>>,
+    }
+
+    impl AndroidVoice {
+        fn send(&self, call: Call) {
+            if self.calls.lock().unwrap().send(call).is_err() {
+                log::line("voice", "the voice worker has stopped");
+            }
+        }
+    }
+
+    impl crate::voice::VoiceIo for AndroidVoice {
         fn listen(&self, wake: bool) {
-            voice_call(&self.app, "listen", ListenArgs { wake })
+            self.send(Call::Listen(wake))
         }
         fn stop_listening(&self) {
-            voice_call(&self.app, "stopListening", ())
+            self.send(Call::StopListening)
         }
         fn speak(&self, line: &str) {
-            voice_call(&self.app, "speak", LineArgs { line })
+            self.send(Call::Speak(line.to_string()))
         }
         fn stop_speaking(&self) {
-            voice_call(&self.app, "stopSpeaking", ())
+            self.send(Call::StopSpeaking)
         }
     }
 
@@ -1989,7 +2009,22 @@ Inside `mod imp` (Android):
     }
 
     pub fn voice_io<R: Runtime>(app: &AppHandle<R>) -> Arc<dyn crate::voice::VoiceIo> {
-        Arc::new(AndroidVoice { app: app.clone() })
+        let (tx, rx) = std::sync::mpsc::channel::<Call>();
+        let app = app.clone();
+        std::thread::Builder::new()
+            .name("voice-plugin".into())
+            .spawn(move || {
+                for call in rx {
+                    match call {
+                        Call::Listen(wake) => voice_call(&app, "listen", ListenArgs { wake }),
+                        Call::StopListening => voice_call(&app, "stopListening", ()),
+                        Call::Speak(line) => voice_call(&app, "speak", LineArgs { line: &line }),
+                        Call::StopSpeaking => voice_call(&app, "stopSpeaking", ()),
+                    }
+                }
+            })
+            .expect("a thread for the voice plugin");
+        Arc::new(AndroidVoice { calls: std::sync::Mutex::new(tx) })
     }
 
     #[derive(Serialize)]
@@ -2225,6 +2260,8 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
     private var recognizerOnDevice = false
     private var tts: TextToSpeech? = null
     @Volatile private var ttsReady = false
+    /** The line being spoken; an interrupted one reports nothing (ledger ruling R9). */
+    @Volatile private var utterance: String? = null
     @Volatile private var onScreen = true
     /** Where events go: the Rust side's channel, from `watch`. */
     @Volatile private var events: Channel? = null
@@ -2248,10 +2285,10 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
             ttsReady = status == TextToSpeech.SUCCESS
             tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {}
-                override fun onDone(utteranceId: String?) = spoken(true)
+                override fun onDone(utteranceId: String?) = finished(utteranceId, true)
                 @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) = spoken(false)
-                override fun onError(utteranceId: String?, errorCode: Int) = spoken(false)
+                override fun onError(utteranceId: String?) = finished(utteranceId, false)
+                override fun onError(utteranceId: String?, errorCode: Int) = finished(utteranceId, false)
             })
         }
     }
@@ -2270,6 +2307,13 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
 
     private fun spoken(ok: Boolean) {
         emit("spoken") { put("ok", ok) }
+    }
+
+    /** Only the latest line's end counts: a newer `speak` replaced the rest. */
+    private fun finished(id: String?, ok: Boolean) {
+        if (id == null || id != utterance) return
+        utterance = null
+        spoken(ok)
     }
 
     private fun onDeviceAvailable(): Boolean =
@@ -2319,12 +2363,15 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
             return invoke.resolve()
         }
         main.post { stopRecognizer() }
-        engine.speak(args.line, TextToSpeech.QUEUE_FLUSH, Bundle(), UUID.randomUUID().toString())
+        val id = UUID.randomUUID().toString()
+        utterance = id
+        engine.speak(args.line, TextToSpeech.QUEUE_FLUSH, Bundle(), id)
         invoke.resolve()
     }
 
     @Command
     fun stopSpeaking(invoke: Invoke) {
+        utterance = null
         tts?.stop()
         invoke.resolve()
     }
