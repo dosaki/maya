@@ -4,7 +4,7 @@
 
 **Goal:** A phone joined to a desktop main takes voice commands (tap-to-talk, plus an optional "Maya" wake word) that the main's agent interprets, speaks the answers, and announces board events aloud, all only while the app is on screen.
 
-**Architecture:** The wake-word state machine moves into `core` so both apps share it. Two new protocol requests (`Interpret`, `Execute`) let the phone use the main's interpreter without touching the desktop's own conversation; the main advertises them with a `voice` cap in `welcome`. On the phone, a host-testable Rust `Conversation` drives a `VoiceIo` trait implemented by a new Kotlin `VoicePlugin` (Android's `SpeechRecognizer` and `TextToSpeech`); the page forwards the plugin's events to Rust commands. Kotlin itself stops the mic and the voice when the app leaves the screen.
+**Architecture:** The wake-word state machine moves into `core` so both apps share it. Two new protocol requests (`Interpret`, `Execute`) let the phone use the main's interpreter without touching the desktop's own conversation; the main advertises them with a `voice` cap in `welcome`. On the phone, a host-testable Rust `Voice` drives a `VoiceIo` trait implemented by a new Kotlin `VoicePlugin` (Android's `SpeechRecognizer` and `TextToSpeech`), whose events come back to Rust over a channel; the page only shows the view and sends taps. Kotlin itself stops the mic and the voice when the app leaves the screen.
 
 **Tech Stack:** Rust (maya-core, Tauri 2 desktop and mobile), Kotlin (Tauri Android plugin, `android.speech`, `ProcessLifecycleOwner`), TypeScript (vitest).
 
@@ -13,7 +13,8 @@
 ## Global Constraints
 
 - Voice is offered only while the phone has joined a desktop main whose `welcome` carries the `voice` cap and whose mirror switch allows this phone.
-- Nothing listens or speaks while the app is not on screen; Kotlin enforces this independently of the page.
+- Nothing listens or speaks while the app is not on screen; Kotlin enforces this independently of the page and of Rust.
+- The page never calls the voice plugin: its events reach Rust through a `tauri::ipc::Channel` given to the plugin's `watch` command, and Rust asks for the microphone (ledger ruling R1).
 - The wake word runs only on the on-device recogniser (API 31+); tap-to-talk may use the default recogniser.
 - The read-back for a confirmation is the main's `spoken_for(action)`, never the model's `say`.
 - Actions needing a yes: reply, answer, start, resume, review (`interpreter::needs_confirm`).
@@ -60,7 +61,7 @@
 | `mobile/src/lib.rs` | modify | register the plugin and commands, make the `Voice` |
 | `mobile/gen/android/app/src/main/java/com/dosaki/maya/mobile/VoicePlugin.kt` | create | recogniser, voice, on-screen state, quiet state |
 | `mobile/gen/android/app/src/main/AndroidManifest.xml` | modify | `RECORD_AUDIO` |
-| `src/mobile/voice.ts` | create | plugin event bridge, mic bar |
+| `src/mobile/voice.ts` | create | mic bar (shows the `voice` view, sends taps) |
 | `src/mobile/voice.test.ts` | create | mic bar tests |
 | `src/mobile/network.ts` | modify | Voice card |
 | `src/mobile/network.test.ts` | modify | Voice card tests |
@@ -956,11 +957,12 @@ pub trait VoiceIo: Send + Sync {
 pub type Ask = Arc<dyn Fn(Request) -> Result<Option<Value>, String> + Send + Sync>;
 pub type Show = Arc<dyn Fn(&VoiceView) + Send + Sync>;
 #[derive(Serialize, Clone, Debug, Default, PartialEq)] #[serde(rename_all = "camelCase")]
-pub struct VoiceView { pub state: String, pub heard: String, pub said: String, pub pending: Option<String>, pub error: Option<String>, pub offer: Option<String> }
+pub struct VoiceView { pub state: String, pub heard: String, pub said: String, pub pending: Option<String>, pub error: Option<String>, pub offer: Option<String>, pub note: Option<String> }
 pub struct Voice { … }
 impl Voice {
     pub fn new(io: Arc<dyn VoiceIo>, ask: Ask, show: Show, now: fn() -> u64) -> Arc<Voice>;
     pub fn set_offer(&self, offer: Option<String>);     // None = voice offered
+    pub fn set_note(&self, note: Option<String>);       // shown while idle (an online recogniser)
     pub fn set_wake(&self, on: bool);
     pub fn tap(&self);
     pub fn partial(&self, text: &str);
@@ -985,12 +987,19 @@ Create `mobile/src/voice.rs` with the tests module first (the implementation fol
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::cell::Cell;
     use std::sync::Mutex;
 
-    static NOW: AtomicU64 = AtomicU64::new(1_000);
+    // Per test thread: cargo runs tests in parallel, and `new_sync` calls
+    // `now` on the test's own thread.
+    thread_local! {
+        static NOW: Cell<u64> = const { Cell::new(1_000) };
+    }
     fn now() -> u64 {
-        NOW.load(Ordering::SeqCst)
+        NOW.with(|n| n.get())
+    }
+    fn advance(ms: u64) {
+        NOW.with(|n| n.set(n.get() + ms));
     }
 
     #[derive(Default)]
@@ -1098,7 +1107,7 @@ mod tests {
         v.heard("tell x y");
         v.spoken(true);
         io.take();
-        NOW.fetch_add(maya_core::wake::CONFIRM_WAIT_MS + 1, Ordering::SeqCst);
+        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
         v.ended();
         assert_eq!(io.take(), vec!["say OK."]);
         assert_eq!(v.view().pending, None);
@@ -1110,7 +1119,7 @@ mod tests {
         let (v, io, asked) = voice(vec![]);
         v.tap();
         io.take();
-        NOW.fetch_add(maya_core::wake::COMMAND_WAIT_MS + 1, Ordering::SeqCst);
+        advance(maya_core::wake::COMMAND_WAIT_MS + 1);
         v.ended();
         assert_eq!(io.take(), Vec::<String>::new());
         assert_eq!(v.view().state, "idle");
@@ -1185,6 +1194,7 @@ mod tests {
     fn no_tap_without_the_voice_cap() {
         let (v, io, asked) = voice(vec![]);
         v.set_offer(Some("Update Yhi to talk to Maya.".into()));
+        io.take();
         v.tap();
         assert_eq!(io.take(), Vec::<String>::new());
         assert_eq!(v.view().offer.as_deref(), Some("Update Yhi to talk to Maya."));
@@ -1211,6 +1221,13 @@ mod tests {
         v.failed("busy", false);
         assert_eq!(v.view().error.as_deref(), Some("Wake word stopped: busy"));
         assert_eq!(v.backoffs(), vec![1_000, 2_000, 4_000, 8_000]);
+    }
+
+    #[test]
+    fn the_note_shows_in_the_view() {
+        let (v, _, _) = voice(vec![]);
+        v.set_note(Some("Speech goes through Google's service and may leave the phone.".into()));
+        assert_eq!(v.view().note.as_deref(), Some("Speech goes through Google's service and may leave the phone."));
     }
 
     #[test]
@@ -1281,6 +1298,8 @@ pub struct VoiceView {
     pub error: Option<String>,
     /// Why voice is not offered; `None` when it is.
     pub offer: Option<String>,
+    /// Shown while idle: tap-to-talk goes through an online recogniser.
+    pub note: Option<String>,
 }
 
 /// Turns sent with each command (the interpreter pairs at most 6 of them).
@@ -1387,6 +1406,12 @@ impl Voice {
         } else if i.wake {
             self.io.listen(true);
         }
+        self.publish(&mut i);
+    }
+
+    pub fn set_note(&self, note: Option<String>) {
+        let mut i = self.inner.lock().unwrap();
+        i.view.note = note;
         self.publish(&mut i);
     }
 
@@ -1609,7 +1634,7 @@ impl Voice {
         if busy {
             i.events.push_back(line.to_string());
         } else {
-            self.io.stop_listening();
+            // Speaking cancels a running recognition on the Android side.
             self.say(&mut i, line, After::Idle);
             self.publish(&mut i);
         }
@@ -1633,8 +1658,8 @@ impl Voice {
     /// thread unless `sync`. The lock is released while the main thinks.
     fn request(&self, mut i: std::sync::MutexGuard<'_, Inner>, request: Request) {
         let execute = matches!(request, Request::Execute { .. });
+        // The recogniser has stopped: it hears one utterance per `listen`.
         i.thinking = true;
-        self.io.stop_listening();
         let generation = i.generation;
         self.publish(&mut i);
         drop(i);
@@ -1724,7 +1749,7 @@ In `mobile/src/lib.rs` add `mod voice;` (or `pub mod voice;` if `hub.rs` uses it
 - [ ] **Step 4: Run the tests**
 
 Run: `cargo test -p maya-mobile voice`
-Expected: PASS. If a test's expected call list differs only by an extra `stop listening` the implementation issues before speaking, decide which is right against the spec ("the loop pauses while she speaks") and fix the code, not the test.
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -1752,10 +1777,33 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Interfaces:**
 - Consumes: Task 6's `Voice`, `VoiceIo`, `VoiceView`; Task 5's `Post.spoken`/`quiet`; Task 2's `AssistantLink.voice`.
-- Produces: Tauri commands `voice_view() -> VoiceView`, `voice_tap()`, `voice_partial(text)`, `voice_heard(text)`, `voice_ended()`, `voice_failed(message, fatal)`, `voice_spoken(ok)`, `voice_screen(on)`, `voice_confirm(yes)`, `voice_refused()`; event `voice` (payload `VoiceView`). Plugin `voice` with Kotlin commands `listen{wake}`, `stopListening`, `speak{line}`, `stopSpeaking`, `quiet -> {value}`.
+- Produces: Tauri commands `voice_view() -> VoiceView`, `voice_tap()`, `voice_confirm(yes)`; event `voice` (payload `VoiceView`). `voice::dispatch(&Voice, &Value)` routes one plugin event. Plugin `voice` with Kotlin commands `watch{channel}`, `listen{wake}`, `stopListening`, `speak{line}`, `stopSpeaking`, `quiet -> {value}`, `state -> {onScreen, available, onDevice}`, and the built-in `checkPermissions`/`requestPermissions` (alias `microphone`).
+- The plugin's events (`partial{text}`, `final{text}`, `ended`, `failed{message, fatal}`, `spoken{ok}`, `screen{on}`, each as `{event, …}`) reach Rust through a `tauri::ipc::Channel` handed to `watch`; the page never calls the plugin.
 - `Hub::voice_offer(&self) -> Option<String>`: `None` when voice is offered.
 
-- [ ] **Step 1: Write the failing hub tests**
+- [ ] **Step 1: Write the failing tests**
+
+In `mobile/src/voice.rs` tests:
+
+```rust
+    #[test]
+    fn plugin_events_reach_the_conversation() {
+        let (v, io, asked) = voice(vec![Ok(serde_json::json!({"say": "Hi."}))]);
+        v.tap();
+        io.take();
+        dispatch(&v, &serde_json::json!({"event": "partial", "text": "what ne"}));
+        assert_eq!(v.view().heard, "what ne");
+        dispatch(&v, &serde_json::json!({"event": "final", "text": "what needs me"}));
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        dispatch(&v, &serde_json::json!({"event": "spoken", "ok": true}));
+        assert_eq!(v.view().state, "idle");
+        dispatch(&v, &serde_json::json!({"event": "screen", "on": false}));
+        assert_eq!(v.view().state, "off");
+        dispatch(&v, &serde_json::json!({"event": "nonsense"}));
+    }
+```
+
+In `mobile/src/hub.rs` tests:
 
 In `mobile/src/hub.rs` tests:
 
@@ -1853,7 +1901,27 @@ In `refresh`, replace the `for a in actions` loop with:
 
 In `HubClientNotify`, after `main_caps`, `mirror_offer` and `disconnected` change the link, call `h.refresh()` (they already do or call `self.refresh()`), so `set_offer` follows.
 
-- [ ] **Step 4: Implement the Android bridge**
+- [ ] **Step 4: Route plugin events**
+
+In `mobile/src/voice.rs`:
+
+```rust
+/// One event from the voice plugin (`{event, …}`) onto the conversation.
+pub fn dispatch(v: &Voice, e: &Value) {
+    let text = || e["text"].as_str().unwrap_or("");
+    match e["event"].as_str().unwrap_or("") {
+        "partial" => v.partial(text()),
+        "final" => v.heard(text()),
+        "ended" => v.ended(),
+        "failed" => v.failed(e["message"].as_str().unwrap_or("speech recognition failed"), e["fatal"].as_bool().unwrap_or(false)),
+        "spoken" => v.spoken(e["ok"].as_bool().unwrap_or(true)),
+        "screen" => v.screen(e["on"].as_bool().unwrap_or(false)),
+        other => log::line("voice", format!("ignored plugin event {other:?}")),
+    }
+}
+```
+
+- [ ] **Step 5: Implement the Android bridge**
 
 In `mobile/src/android.rs`, add a second plugin and the `VoiceIo`:
 
@@ -1923,17 +1991,77 @@ Inside `mod imp` (Android):
     pub fn voice_io<R: Runtime>(app: &AppHandle<R>) -> Arc<dyn crate::voice::VoiceIo> {
         Arc::new(AndroidVoice { app: app.clone() })
     }
+
+    #[derive(Serialize)]
+    struct WatchArgs {
+        channel: tauri::ipc::Channel<serde_json::Value>,
+    }
+
+    /// Hands the plugin a channel for its events, which go straight to the
+    /// conversation. `Channel::new` registers itself with mobile plugins.
+    pub fn watch_voice<R: Runtime>(app: &AppHandle<R>, voice: std::sync::Weak<crate::voice::Voice>) {
+        let channel = tauri::ipc::Channel::<serde_json::Value>::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(json) = body {
+                match (serde_json::from_str::<serde_json::Value>(&json), voice.upgrade()) {
+                    (Ok(e), Some(v)) => crate::voice::dispatch(&v, &e),
+                    (Err(e), _) => log::line("voice", format!("unreadable plugin event: {e}")),
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        voice_call(app, "watch", WatchArgs { channel });
+    }
+
+    #[derive(Deserialize)]
+    struct MicPermission {
+        microphone: String,
+    }
+
+    #[derive(Serialize)]
+    struct PermissionArgs {
+        permissions: Vec<&'static str>,
+    }
+
+    /// Whether Maya may use the microphone, asking the user the first time.
+    /// Blocks until they answer; call it from an async command.
+    pub fn microphone_allowed<R: Runtime>(app: &AppHandle<R>) -> bool {
+        let h = &app.state::<VoiceHandle<R>>().0;
+        if h.run_mobile_plugin::<MicPermission>("checkPermissions", ()).is_ok_and(|p| p.microphone == "granted") {
+            return true;
+        }
+        h.run_mobile_plugin::<MicPermission>("requestPermissions", PermissionArgs { permissions: vec!["microphone"] }).is_ok_and(|p| p.microphone == "granted")
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RecognizerState {
+        on_device: bool,
+    }
+
+    /// The phone has an on-device recogniser (the wake word needs one).
+    pub fn on_device<R: Runtime>(app: &AppHandle<R>) -> bool {
+        app.state::<VoiceHandle<R>>().0.run_mobile_plugin::<RecognizerState>("state", ()).map(|s| s.on_device).unwrap_or(true)
+    }
 ```
 
-And in the host (`#[cfg(not(target_os = "android"))]`) module, the matching no-ops: `voice_io` returning a struct whose four methods `log::line("voice", …)`, and `silenced` returning `false`. Re-export `voice_io` and `silenced` the same way the file re-exports `alerts` and `device_model`.
+And in the host (`#[cfg(not(target_os = "android"))]`) module, the matching no-ops: `voice_io` returning a struct whose four methods `log::line("voice", …)`, `silenced` returning `false`, `watch_voice` doing nothing, `microphone_allowed` returning `true` and `on_device` returning `true`. Re-export all five the same way the file re-exports `alerts` and `device_model`.
 
-- [ ] **Step 5: Add the commands**
+- [ ] **Step 6: Add the commands**
 
 In `mobile/src/commands.rs`:
 
 ```rust
 fn voice(hub: &H) -> Result<Arc<crate::voice::Voice>, String> {
     hub.voice.get().cloned().ok_or_else(|| "Voice is not ready.".into())
+}
+
+/// The microphone was refused: the wake word turns off and the bar says why.
+fn microphone_refused(hub: &H, v: &crate::voice::Voice) -> Result<(), String> {
+    hub.update_config(|c| c.wake_word = false)?;
+    v.set_wake(false);
+    v.failed("Microphone access is off.", true);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1943,45 +2071,14 @@ pub fn voice_view(hub: H) -> Result<crate::voice::VoiceView, String> {
     Ok(v.view())
 }
 
-#[tauri::command]
-pub fn voice_tap(hub: H) -> Result<(), String> {
-    voice(&hub)?.tap();
-    Ok(())
-}
-
-#[tauri::command]
-pub fn voice_partial(hub: H, text: String) -> Result<(), String> {
-    voice(&hub)?.partial(&text);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn voice_heard(hub: H, text: String) -> Result<(), String> {
-    voice(&hub)?.heard(&text);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn voice_ended(hub: H) -> Result<(), String> {
-    voice(&hub)?.ended();
-    Ok(())
-}
-
-#[tauri::command]
-pub fn voice_failed(hub: H, message: String, fatal: bool) -> Result<(), String> {
-    voice(&hub)?.failed(&message, fatal);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn voice_spoken(hub: H, ok: bool) -> Result<(), String> {
-    voice(&hub)?.spoken(ok);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn voice_screen(hub: H, on: bool) -> Result<(), String> {
-    voice(&hub)?.screen(on);
+/// Asks for the microphone the first time, then listens for one command.
+#[tauri::command(async)]
+pub fn voice_tap(app: tauri::AppHandle, hub: H) -> Result<(), String> {
+    let v = voice(&hub)?;
+    if !crate::android::microphone_allowed(&app) {
+        return microphone_refused(&hub, &v);
+    }
+    v.tap();
     Ok(())
 }
 
@@ -1990,23 +2087,23 @@ pub fn voice_confirm(hub: H, yes: bool) -> Result<(), String> {
     voice(&hub)?.confirm(yes);
     Ok(())
 }
-
-/// The microphone permission was refused: the wake word turns off.
-#[tauri::command(async)]
-pub fn voice_refused(hub: H) -> Result<Config, String> {
-    let saved = hub.update_config(|c| c.wake_word = false)?;
-    let v = voice(&hub)?;
-    v.set_wake(false);
-    v.failed("Microphone access is off.", true);
-    Ok(saved)
-}
 ```
 
-In `set_config`, after saving, tell the voice: `if let Some(v) = hub.voice.get() { v.set_wake(saved.wake_word); }`.
+In `set_config`, take `app: tauri::AppHandle` as its first parameter and, after saving, tell the voice — asking for the microphone when the wake word was just turned on:
 
-- [ ] **Step 6: Register and build the voice**
+```rust
+    if let Some(v) = hub.voice.get() {
+        if saved.wake_word && !before.wake_word && !crate::android::microphone_allowed(&app) {
+            microphone_refused(&hub, v)?;
+            return Ok(hub.settings.lock().unwrap().config.clone());
+        }
+        v.set_wake(saved.wake_word);
+    }
+```
 
-In `mobile/src/lib.rs`: `.plugin(android::voice_init())` after `.plugin(android::init())`; add the ten `commands::voice_*` to `generate_handler!`; and in `setup`, after `app.manage(hub.clone())`:
+- [ ] **Step 7: Register and build the voice**
+
+In `mobile/src/lib.rs`: `.plugin(android::voice_init())` after `.plugin(android::init())`; add `commands::voice_view`, `commands::voice_tap` and `commands::voice_confirm` to `generate_handler!`; and in `setup`, after `app.manage(hub.clone())`:
 
 ```rust
             let ask_hub = Arc::downgrade(&hub);
@@ -2020,16 +2117,22 @@ In `mobile/src/lib.rs`: `.plugin(android::voice_init())` after `.plugin(android:
             let _ = hub.voice.set(v);
             let quiet = handle.clone();
             let _ = hub.silenced.set(Box::new(move || android::silenced(&quiet)));
+            if let Some(v) = hub.voice.get() {
+                android::watch_voice(&handle, Arc::downgrade(v));
+                if !android::on_device(&handle) {
+                    v.set_note(Some("Speech goes through Google's service and may leave the phone.".into()));
+                }
+            }
 ```
 
 (`maya_core::store::now_ms` is the clock the desktop uses; use the hub's own `now` if `store` is not public.)
 
-- [ ] **Step 7: Run the tests and a host build**
+- [ ] **Step 8: Run the tests and a host build**
 
 Run: `cargo test -p maya-mobile && cargo build -p maya-mobile`
 Expected: PASS and builds (the host build compiles the no-op bridge).
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add mobile/src mobile/tests
@@ -2048,8 +2151,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `docs/DEVELOPING.md` (the hand-edited files list, ~line 294)
 
 **Interfaces:**
-- Consumes: Task 7's commands `listen{wake}`, `stopListening`, `speak{line}`, `stopSpeaking`, `quiet`.
-- Produces: plugin events `partial{text}`, `final{text}`, `ended{}`, `failed{message, fatal}`, `spoken{ok}`, `screen{on}`; permission alias `microphone`; command `state -> {onScreen, available, onDevice}` (the page reads `onDevice` to show the online-recogniser note).
+- Consumes: Task 7's calls `watch{channel}`, `listen{wake}`, `stopListening`, `speak{line}`, `stopSpeaking`, `quiet`, `state`, `checkPermissions`, `requestPermissions{permissions: ["microphone"]}`.
+- Produces: events on the watched channel, each `{event, …}`: `partial{text}`, `final{text}`, `ended`, `failed{message, fatal}`, `spoken{ok}`, `screen{on}` (also sent once when `watch` is called, so Rust learns the current state); permission alias `microphone`; `state -> {onScreen, available, onDevice}`.
 
 - [ ] **Step 1: Add the permission**
 
@@ -2088,6 +2191,7 @@ import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
 import app.tauri.annotation.TauriPlugin
+import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
@@ -2101,6 +2205,11 @@ class ListenArgs {
 @InvokeArg
 class SpeakArgs {
     var line: String = ""
+}
+
+@InvokeArg
+class WatchArgs {
+    lateinit var channel: Channel
 }
 
 /**
@@ -2117,6 +2226,20 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
     private var tts: TextToSpeech? = null
     @Volatile private var ttsReady = false
     @Volatile private var onScreen = true
+    /** Where events go: the Rust side's channel, from `watch`. */
+    @Volatile private var events: Channel? = null
+
+    private fun emit(event: String, fill: JSObject.() -> Unit = {}) {
+        events?.send(JSObject().apply { put("event", event); fill() })
+    }
+
+    @Command
+    fun watch(invoke: Invoke) {
+        events = invoke.parseArgs(WatchArgs::class.java).channel
+        // ON_START may have come before the channel did.
+        emit("screen") { put("on", onScreen) }
+        invoke.resolve()
+    }
 
     override fun load(webView: WebView) {
         super.load(webView)
@@ -2135,18 +2258,18 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
 
     override fun onStart(owner: LifecycleOwner) {
         onScreen = true
-        trigger("screen", JSObject().apply { put("on", true) })
+        emit("screen") { put("on", true) }
     }
 
     override fun onStop(owner: LifecycleOwner) {
         onScreen = false
         stopRecognizer()
         tts?.stop()
-        trigger("screen", JSObject().apply { put("on", false) })
+        emit("screen") { put("on", false) }
     }
 
     private fun spoken(ok: Boolean) {
-        trigger("spoken", JSObject().apply { put("ok", ok) })
+        emit("spoken") { put("ok", ok) }
     }
 
     private fun onDeviceAvailable(): Boolean =
@@ -2217,7 +2340,7 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
     }
 
     private fun fail(message: String, fatal: Boolean) {
-        trigger("failed", JSObject().apply { put("message", message); put("fatal", fatal) })
+        emit("failed") { put("message", message); put("fatal", fatal) }
     }
 
     private fun startRecognizer(wake: Boolean) {
@@ -2256,19 +2379,19 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
 
         override fun onPartialResults(partialResults: Bundle?) {
             val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: return
-            trigger("partial", JSObject().apply { put("text", text) })
+            emit("partial") { put("text", text) }
         }
 
         override fun onResults(results: Bundle?) {
             val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()
-            if (text.isNullOrBlank()) trigger("ended", JSObject())
-            else trigger("final", JSObject().apply { put("text", text) })
+            if (text.isNullOrBlank()) emit("ended")
+            else emit("final") { put("text", text) }
         }
 
         override fun onError(error: Int) {
             when (error) {
                 // Nothing said, or nothing understood: not a failure.
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> trigger("ended", JSObject())
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> emit("ended")
                 // Our own cancel (leaving the screen, speaking): say nothing.
                 SpeechRecognizer.ERROR_CLIENT -> {}
                 SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> fail("Microphone access is off.", true)
@@ -2329,8 +2452,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Modify: `src/mobile/main.ts` (mount), `src/mobile/mobile.css`, `mobile/web/index.html` (a host element)
 
 **Interfaces:**
-- Consumes: Task 7's commands and `voice` event; Task 8's plugin events and `microphone` permission.
-- Produces: `renderVoiceBar(view: VoiceView, h: VoiceHandlers, note?: string): HTMLElement`, `initVoice(): Promise<void>`.
+- Consumes: Task 7's commands `voice_view`, `voice_tap`, `voice_confirm` and its `voice` event. The page never calls the plugin: Rust receives its events and asks for the microphone.
+- Produces: `renderVoiceBar(view: VoiceView, h: VoiceHandlers): HTMLElement`, `initVoice(): Promise<void>`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2340,7 +2463,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 import { describe, expect, it, vi } from "vitest";
 import { renderVoiceBar, type VoiceView } from "./voice";
 
-const base: VoiceView = { state: "idle", heard: "", said: "", pending: null, error: null, offer: null };
+const base: VoiceView = { state: "idle", heard: "", said: "", pending: null, error: null, offer: null, note: null };
 const handlers = () => ({ onTap: vi.fn(), onConfirm: vi.fn() });
 
 describe("renderVoiceBar", () => {
@@ -2381,8 +2504,8 @@ describe("renderVoiceBar", () => {
 
   it("notes an online recogniser while idle", () => {
     const note = "Speech goes through Google's service and may leave the phone.";
-    expect(renderVoiceBar(base, handlers(), note).querySelector(".voice__note")?.textContent).toBe(note);
-    expect(renderVoiceBar({ ...base, state: "thinking" }, handlers(), note).querySelector(".voice__note")).toBeNull();
+    expect(renderVoiceBar({ ...base, note }, handlers()).querySelector(".voice__note")?.textContent).toBe(note);
+    expect(renderVoiceBar({ ...base, note, state: "thinking" }, handlers()).querySelector(".voice__note")).toBeNull();
   });
 
   it("shows an error under the mic", () => {
@@ -2418,11 +2541,11 @@ Expected: FAIL (module missing, card missing).
 - [ ] **Step 3: Implement `voice.ts`**
 
 ```ts
-// The phone's mic bar, and the bridge that hands the voice plugin's events
-// to the Rust conversation. Kotlin stops listening and speaking off screen
-// by itself; the `screen` event only keeps Rust in step.
+// The phone's mic bar. The conversation runs in Rust, which hears the
+// voice plugin's events and asks for the microphone itself; the page only
+// shows the `voice` view and sends taps and Yes/No.
 
-import { addPluginListener, checkPermissions, invoke, requestPermissions } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export interface VoiceView {
@@ -2433,6 +2556,8 @@ export interface VoiceView {
   error: string | null;
   /** Why voice is not offered; null when it is. */
   offer: string | null;
+  /** Shown while idle: tap-to-talk goes through an online recogniser. */
+  note: string | null;
 }
 
 export interface VoiceHandlers {
@@ -2442,8 +2567,14 @@ export interface VoiceHandlers {
 
 const NO_MAIN = "Voice needs a desktop main.";
 
-/** `note` is shown while idle: the recogniser may send audio online. */
-export function renderVoiceBar(v: VoiceView, h: VoiceHandlers, note = ""): HTMLElement {
+function line(className: string, text: string): HTMLElement {
+  const d = document.createElement("div");
+  d.className = className;
+  d.textContent = text;
+  return d;
+}
+
+export function renderVoiceBar(v: VoiceView, h: VoiceHandlers): HTMLElement {
   const bar = document.createElement("div");
   bar.className = `voice voice--${v.state}`;
   bar.hidden = v.offer === NO_MAIN;
@@ -2451,19 +2582,19 @@ export function renderVoiceBar(v: VoiceView, h: VoiceHandlers, note = ""): HTMLE
   mic.type = "button";
   mic.className = "voice__mic";
   mic.dataset.action = "mic";
-  mic.setAttribute("aria-label", v.state === "awaiting-command" ? "Stop listening" : "Talk to Maya");
+  mic.setAttribute("aria-label", "Talk to Maya");
   mic.textContent = "🎙";
   mic.disabled = v.offer !== null;
   mic.addEventListener("click", () => h.onTap());
-  const line = document.createElement("div");
-  line.className = "voice__line";
-  if (v.offer) line.textContent = v.offer;
-  else if (v.state === "thinking") line.textContent = "Thinking…";
+  const said = document.createElement("div");
+  said.className = "voice__line";
+  if (v.offer) said.textContent = v.offer;
+  else if (v.state === "thinking") said.textContent = "Thinking…";
   else {
-    if (v.heard) line.append(Object.assign(document.createElement("div"), { className: "voice__heard", textContent: v.heard }));
-    if (v.said) line.append(Object.assign(document.createElement("div"), { className: "voice__said", textContent: v.said }));
+    if (v.heard) said.append(line("voice__heard", v.heard));
+    if (v.said) said.append(line("voice__said", v.said));
   }
-  bar.append(mic, line);
+  bar.append(mic, said);
   if (v.pending && v.state === "awaiting-confirm") {
     const answer = document.createElement("div");
     answer.className = "voice__answer";
@@ -2477,49 +2608,22 @@ export function renderVoiceBar(v: VoiceView, h: VoiceHandlers, note = ""): HTMLE
     }
     bar.append(answer);
   }
-  if (note && v.state === "idle" && !v.offer) bar.append(Object.assign(document.createElement("div"), { className: "voice__note", textContent: note }));
-  if (v.error) bar.append(Object.assign(document.createElement("div"), { className: "voice__error", textContent: v.error }));
+  if (v.note && v.state === "idle" && !v.offer) bar.append(line("voice__note", v.note));
+  if (v.error) bar.append(line("voice__error", v.error));
   return bar;
-}
-
-/** The first tap asks for the microphone; a refusal turns the wake word off. */
-async function microphoneAllowed(): Promise<boolean> {
-  try {
-    const now = await checkPermissions<{ microphone: string }>("voice");
-    if (now.microphone === "granted") return true;
-    const asked = await requestPermissions<{ microphone: string }>("voice");
-    if (asked.microphone === "granted") return true;
-  } catch {
-    // Not on Android (the desktop preview): let Rust say what it can.
-    return true;
-  }
-  await invoke("voice_refused").catch(() => undefined);
-  return false;
 }
 
 export async function initVoice(): Promise<void> {
   const host = document.getElementById("voice-host");
   if (!host) return;
   const handlers: VoiceHandlers = {
-    onTap: () => void microphoneAllowed().then((ok) => (ok ? invoke("voice_tap") : undefined)),
-    onConfirm: (yes) => void invoke("voice_confirm", { yes }),
+    onTap: () => void invoke("voice_tap").catch(() => undefined),
+    onConfirm: (yes) => void invoke("voice_confirm", { yes }).catch(() => undefined),
   };
-  // Tap-to-talk on a phone without an on-device recogniser goes through Google.
-  const local = await invoke<{ onDevice: boolean }>("plugin:voice|state").catch(() => ({ onDevice: true }));
-  const note = local.onDevice ? "" : "Speech goes through Google's service and may leave the phone.";
-  const paint = (v: VoiceView) => host.replaceChildren(renderVoiceBar(v, handlers, note));
+  const paint = (v: VoiceView) => host.replaceChildren(renderVoiceBar(v, handlers));
   await listen<VoiceView>("voice", (e) => paint(e.payload));
-  const forward = <T>(event: string, f: (p: T) => Promise<unknown>) =>
-    addPluginListener<T>("voice", event, (p) => void f(p).catch(() => undefined)).catch(() => undefined);
-  await forward<{ text: string }>("partial", (p) => invoke("voice_partial", { text: p.text }));
-  await forward<{ text: string }>("final", (p) => invoke("voice_heard", { text: p.text }));
-  await forward<Record<string, never>>("ended", () => invoke("voice_ended"));
-  await forward<{ message: string; fatal: boolean }>("failed", (p) => invoke("voice_failed", { message: p.message, fatal: p.fatal }));
-  await forward<{ ok: boolean }>("spoken", (p) => invoke("voice_spoken", { ok: p.ok }));
-  await forward<{ on: boolean }>("screen", (p) => invoke("voice_screen", { on: p.on }));
-  // The app starts on screen; Kotlin's first ON_START may predate the listener.
-  await invoke("voice_screen", { on: true }).catch(() => undefined);
-  paint(await invoke<VoiceView>("voice_view").catch(() => ({ state: "off", heard: "", said: "", pending: null, error: null, offer: NO_MAIN }) as VoiceView));
+  const off: VoiceView = { state: "off", heard: "", said: "", pending: null, error: null, offer: NO_MAIN, note: null };
+  paint(await invoke<VoiceView>("voice_view").catch(() => off));
 }
 ```
 
