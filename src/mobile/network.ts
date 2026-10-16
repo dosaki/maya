@@ -20,6 +20,8 @@ export interface NetworkModel {
   port: number;
   notifyAwaiting: boolean;
   notifyCompleted: boolean;
+  speak: boolean;
+  wakeWord: boolean;
   addresses: string[];
   notificationsAllowed: boolean;
   busy: boolean;
@@ -36,7 +38,7 @@ export interface NetworkHandlers {
   onStop(): void;
   onCode(): void;
   onRemove(id: string): void;
-  onSwitch(which: "awaiting" | "completed", on: boolean): void;
+  onSwitch(which: "awaiting" | "completed" | "speak" | "wakeWord", on: boolean): void;
   onBattery(): void;
   onMakeMain(id: string): void;
   onPromote(id: string): void;
@@ -217,6 +219,20 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
   if (!m.notificationsAllowed) notifications.append(el("p", "settings__error", "Notifications are off for Maya in Android settings."));
   root.append(notifications);
 
+  const voice = section("Voice");
+  for (const [which, label, on] of [["speak", "Speak", m.speak], ["wakeWord", "Wake word \"Maya\" (experimental)", m.wakeWord]] as const) {
+    const l = el("label", "settings__switch");
+    const box = el("input", "");
+    box.type = "checkbox";
+    box.name = which;
+    box.checked = on;
+    box.addEventListener("change", () => h.onSwitch(which, box.checked));
+    l.append(box, document.createTextNode(` ${label}`));
+    voice.append(l);
+  }
+  voice.append(el("p", "settings__hint", "While Maya is on screen she reads out sessions that need you, and with the wake word on she listens for \"Maya\". She never listens with the app closed. Voice needs a desktop main."));
+  root.append(voice);
+
   const battery = section("Battery");
   battery.append(button("Keep Maya awake", "battery", h.onBattery));
   battery.append(el("p", "settings__hint", "Android may otherwise stop the server with the screen off."));
@@ -230,6 +246,8 @@ interface ConfigView {
   network: { name: string; port: number; mainHost?: string; mainPort?: number };
   notifyOnAwaiting: boolean;
   notifyOnCompleted: boolean;
+  speakNotifications: boolean;
+  wakeWord: boolean;
 }
 
 const CARRIED = ["name", "port", "host", "joinPort", "code"] as const;
@@ -278,6 +296,8 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     port: 4127,
     notifyAwaiting: true,
     notifyCompleted: true,
+    speak: true,
+    wakeWord: false,
     addresses: [],
     notificationsAllowed: true,
     busy: false,
@@ -318,6 +338,8 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     model.mainPort = config.network.mainPort ?? 0;
     model.notifyAwaiting = config.notifyOnAwaiting;
     model.notifyCompleted = config.notifyOnCompleted;
+    model.speak = config.speakNotifications ?? true;
+    model.wakeWord = config.wakeWord ?? false;
   };
   const saveConfig = async (edit: (c: ConfigView) => void) => {
     const full = await invoke<ConfigView>("get_config");
@@ -327,6 +349,8 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     model.port = config.network.port || 4127;
     model.notifyAwaiting = config.notifyOnAwaiting;
     model.notifyCompleted = config.notifyOnCompleted;
+    model.speak = config.speakNotifications ?? true;
+    model.wakeWord = config.wakeWord ?? false;
   };
   const busy = async (f: () => Promise<void>) => {
     model.busy = true;
@@ -354,7 +378,9 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     onRemove: (id) => void busy(async () => setStatus(await invoke<NetworkStatus>("network_remove_assistant", { id }))),
     onSwitch: (which, on) => void busy(() => saveConfig((c) => {
       if (which === "awaiting") c.notifyOnAwaiting = on;
-      else c.notifyOnCompleted = on;
+      else if (which === "completed") c.notifyOnCompleted = on;
+      else if (which === "speak") c.speakNotifications = on;
+      else if (which === "wakeWord") c.wakeWord = on;
     })),
     onMakeMain: (id) => { model.promote = id; paint(); },
     onPromoteCancel: () => { model.promote = null; paint(); },

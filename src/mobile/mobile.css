@@ -53,3 +53,15 @@
 
 .setup__modes { display: flex; gap: 8px; margin: 8px 0 12px; }
 .setup__modes button[aria-pressed=true] { border-color: var(--gold); color: var(--gold-bright); }
+
+/* The mic bar under the column strip: the mic, what was heard and said, Yes and No. */
+.voice { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.voice__mic { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--gold-deep); background: var(--panel); color: var(--gold-bright); font-size: 20px; }
+.voice--listening .voice__mic, .voice--awaiting-command .voice__mic, .voice--awaiting-confirm .voice__mic { background: var(--gold); color: var(--on-gold); }
+.voice__mic:disabled { opacity: .5; }
+.voice__line { flex: 1; min-width: 0; font-size: 14px; }
+.voice__heard { color: var(--muted); }
+.voice__answer { display: flex; gap: 8px; }
+.voice__answer button { min-height: 40px; padding: 0 16px; }
+.voice__error { flex-basis: 100%; color: #dc2626; font-size: 12.5px; }
+.voice__note { flex-basis: 100%; color: var(--muted); font-size: 12.5px; }

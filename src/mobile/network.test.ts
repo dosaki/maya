@@ -25,7 +25,7 @@ const running: NetworkStatus = {
   assistant: { connected: false, mainName: null, error: null },
   mainError: null,
 };
-const base: NetworkModel = { mainHost: "", mainPort: 0, status: running, name: "Pixel 8", port: 4127, notifyAwaiting: true, notifyCompleted: false, addresses: ["192.168.1.20"], notificationsAllowed: true, busy: false, error: null, promote: null };
+const base: NetworkModel = { mainHost: "", mainPort: 0, status: running, name: "Pixel 8", port: 4127, notifyAwaiting: true, notifyCompleted: false, speak: true, wakeWord: false, addresses: ["192.168.1.20"], notificationsAllowed: true, busy: false, error: null, promote: null };
 const handlers = () => ({ onSave: vi.fn(), onStart: vi.fn(), onStop: vi.fn(), onCode: vi.fn(), onRemove: vi.fn(), onSwitch: vi.fn(), onBattery: vi.fn(), onMakeMain: vi.fn(), onPromote: vi.fn(), onPromoteCancel: vi.fn(), onNewKeyAsk: vi.fn(), onNewKey: vi.fn(), onNewKeyCancel: vi.fn(), onStopListening: vi.fn(), onJoin: vi.fn(), onMirror: vi.fn() });
 
 describe("renderNetwork", () => {
@@ -234,5 +234,20 @@ describe("secure pairing on the phone", () => {
     expect(asking.textContent).toContain("Drop every pairing and make a new key?");
     asking.querySelector<HTMLButtonElement>("button[data-action=new-key-confirm]")!.click();
     expect(h.onNewKey).toHaveBeenCalled();
+  });
+});
+
+describe("the Voice card", () => {
+  it("has a Voice card with Speak and the wake word", () => {
+    const h = handlers();
+    const el = renderNetwork({ ...base, speak: true, wakeWord: false }, h);
+    const speak = el.querySelector<HTMLInputElement>("input[name=speak]")!;
+    const wake = el.querySelector<HTMLInputElement>("input[name=wakeWord]")!;
+    expect(speak.checked).toBe(true);
+    expect(wake.checked).toBe(false);
+    wake.checked = true;
+    wake.dispatchEvent(new Event("change"));
+    expect(h.onSwitch).toHaveBeenCalledWith("wakeWord", true);
+    expect(el.textContent).toContain("experimental");
   });
 });
