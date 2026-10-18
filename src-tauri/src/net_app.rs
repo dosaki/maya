@@ -271,9 +271,14 @@ pub(crate) fn said_data(say: &str) -> Value {
 }
 
 /// Why an action that runs at once cannot run for a phone: focus brings a
-/// window forward on this machine, which the user holding the phone cannot see.
+/// window forward and open opens a browser, both on this machine, which the
+/// user holding the phone cannot see.
 pub(crate) fn refuse_remote(action: &Value) -> Option<String> {
-    (action["kind"] == "focus").then(|| "I can only bring a window forward when you're at the computer.".to_string())
+    match action["kind"].as_str() {
+        Some("focus") => Some("I can only bring a window forward when you're at the computer.".into()),
+        Some("open") => Some("I can only open a pull request on the computer itself.".into()),
+        _ => None,
+    }
 }
 
 /// A confirmed action checked again against the board as it is now: the
@@ -406,8 +411,9 @@ mod tests {
     }
 
     #[test]
-    fn focus_cannot_run_for_a_phone() {
-        assert!(refuse_remote(&serde_json::json!({"kind": "focus", "session": "s1"})).is_some());
+    fn focus_and_open_cannot_run_for_a_phone() {
+        assert_eq!(refuse_remote(&serde_json::json!({"kind": "focus", "session": "s1"})).as_deref(), Some("I can only bring a window forward when you're at the computer."));
+        assert_eq!(refuse_remote(&serde_json::json!({"kind": "open", "repo": "dosaki/collector", "number": 14})).as_deref(), Some("I can only open a pull request on the computer itself."));
         assert!(refuse_remote(&serde_json::json!({"kind": "compact", "session": "s1"})).is_none());
     }
 
