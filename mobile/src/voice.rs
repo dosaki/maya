@@ -352,7 +352,11 @@ impl Voice {
         if !Self::active(&i) {
             return;
         }
-        if fatal || !i.wake {
+        // Inside a tap, follow-up or confirmation window the failed
+        // recogniser was that window's, not the wake loop's: end the window
+        // as without the wake word, and carry on (the wake loop resumes).
+        let window = i.flow.state((self.now)()) != "idle";
+        if fatal || !i.wake || window {
             i.view.error = Some(message.to_string());
             i.flow = Flow::new();
             // A fatal error would fail again at once: no wake loop this session.
@@ -391,7 +395,9 @@ impl Voice {
     /// A backoff ran out: restart the wake loop if nothing else has taken
     /// the recogniser or the conversation since. A tap, a question's reply
     /// or a confirmation listens in a window of its own; the wake loop
-    /// comes back by itself once that window closes.
+    /// comes back by itself once that window closes, since every way one
+    /// closes carries on: heard, ended, a failure (`failed` ends the
+    /// window), a second tap, or a confirmation's own expiry timer.
     fn retry_wake(&self, generation: u64) {
         let i = self.inner.lock().unwrap();
         let idle = i.flow.state((self.now)()) == "idle";
@@ -1140,6 +1146,37 @@ mod tests {
         assert_eq!(io.take(), Vec::<String>::new(), "the tap's window is still open");
         advance(maya_core::wake::COMMAND_WAIT_MS + 1);
         v.retry_wake(generation);
+        assert_eq!(io.take(), vec!["listen wake"]);
+    }
+
+    #[test]
+    fn a_failure_inside_a_tap_window_ends_it_and_the_wake_loop_resumes() {
+        let (v, io, _) = voice(vec![]);
+        v.set_wake(true);
+        v.tap();
+        io.take();
+        v.failed("no network for speech recognition", false);
+        assert_eq!(io.take(), vec!["listen wake"], "the tap's recogniser is gone: back to the wake loop");
+        assert_eq!(v.view().error.as_deref(), Some("no network for speech recognition"));
+        assert_eq!(v.view().state, "listening");
+        assert!(v.backoffs().is_empty(), "not a wake loop failure");
+        advance(maya_core::wake::COMMAND_WAIT_MS + 1);
+        v.retry_wake(v.begin_request());
+        assert_eq!(io.take(), vec!["listen wake"], "a retry finds nothing in its way");
+    }
+
+    #[test]
+    fn a_failure_inside_a_follow_up_window_lets_a_waiting_event_through() {
+        let (v, io, _) = voice(vec![Ok(serde_json::json!({"say": "Which one?"}))]);
+        v.set_wake(true);
+        v.tap();
+        v.heard("answer it");
+        v.spoken(true);
+        assert!(v.announce("laptop needs a decision"));
+        io.take();
+        v.failed("the recogniser is busy", false);
+        assert_eq!(io.take(), vec!["say laptop needs a decision"]);
+        v.spoken(true);
         assert_eq!(io.take(), vec!["listen wake"]);
     }
 
