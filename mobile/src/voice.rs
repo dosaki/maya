@@ -197,17 +197,45 @@ impl Voice {
         self.publish(&mut i);
     }
 
+    /// The mic button. While Maya speaks it cuts her off and listens, for
+    /// yes or no when she was reading an action back. While a command
+    /// window listens it stops listening; a waiting confirmation stops
+    /// listening too but keeps its action and its buttons. Otherwise it
+    /// listens for one command.
     pub fn tap(&self) {
         let mut i = self.inner.lock().unwrap();
         // While the main thinks, anything heard would be thrown away.
         if !Self::active(&i) || i.thinking {
             return;
         }
+        let now = (self.now)();
         if i.speaking {
             self.io.stop_speaking();
             i.speaking = false;
+            if let After::Confirm(p) = std::mem::replace(&mut i.after, After::Idle) {
+                i.flow.set_pending(p, now);
+                self.io.listen(false);
+                self.publish(&mut i);
+                return;
+            }
+        } else {
+            if i.flow.drop_expired(now) {
+                i.view.pending = None;
+            }
+            if i.flow.has_pending() {
+                self.io.stop_listening();
+                self.publish(&mut i);
+                return;
+            }
+            if i.flow.state(now) == "awaiting-command" {
+                i.flow = Flow::new();
+                self.io.stop_listening();
+                self.carry_on(&mut i);
+                self.publish(&mut i);
+                return;
+            }
         }
-        i.flow.await_reply((self.now)());
+        i.flow.await_reply(now);
         i.view.heard.clear();
         self.io.listen(false);
         self.publish(&mut i);
@@ -1027,5 +1055,97 @@ mod tests {
         advance(maya_core::wake::COMMAND_WAIT_MS + 1);
         v.retry_wake(generation);
         assert_eq!(io.take(), vec!["listen wake"]);
+    }
+
+    #[test]
+    fn a_second_tap_stops_listening() {
+        let (v, io, asked) = voice(vec![]);
+        v.tap();
+        io.take();
+        v.tap();
+        assert_eq!(io.take(), vec!["stop listening"]);
+        assert_eq!(v.view().state, "idle");
+        v.heard("late words");
+        assert!(asked.lock().unwrap().is_empty(), "nothing heard after the stop is a command");
+    }
+
+    #[test]
+    fn a_second_tap_speaks_a_waiting_event_then_resumes_the_wake_loop() {
+        let (v, io, _) = voice(vec![]);
+        v.set_wake(true);
+        v.tap();
+        assert!(v.announce("laptop needs a decision"));
+        io.take();
+        v.tap();
+        assert_eq!(io.take(), vec!["stop listening", "say laptop needs a decision"]);
+        v.spoken(true);
+        assert_eq!(io.take(), vec!["listen wake"]);
+    }
+
+    #[test]
+    fn a_second_tap_after_a_question_stops_listening() {
+        let (v, io, _) = voice(vec![Ok(serde_json::json!({"say": "Which one?"}))]);
+        v.tap();
+        v.heard("answer it");
+        v.spoken(true);
+        io.take();
+        v.tap();
+        assert_eq!(io.take(), vec!["stop listening"]);
+        assert_eq!(v.view().state, "idle");
+    }
+
+    #[test]
+    fn a_tap_during_a_confirmation_stops_listening_but_keeps_it() {
+        let (v, io, asked) = voice(read_back());
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        io.take();
+        v.tap();
+        assert_eq!(io.take(), vec!["stop listening"]);
+        assert_eq!(v.view().pending.as_deref(), Some("Telling x: y. Yes?"));
+        assert_eq!(v.view().state, "awaiting-confirm");
+        v.confirm(true);
+        assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { .. }));
+    }
+
+    #[test]
+    fn a_tap_after_a_stopped_confirmation_ran_out_starts_a_command() {
+        let (v, io, _) = voice(read_back());
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        v.tap();
+        io.take();
+        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
+        v.tap();
+        assert_eq!(io.take(), vec!["listen"]);
+        assert_eq!(v.view().pending, None);
+        assert_eq!(v.view().state, "awaiting-command");
+    }
+
+    #[test]
+    fn a_tap_while_speaking_stops_and_listens() {
+        let (v, io, _) = voice(vec![Ok(serde_json::json!({"say": "Two sessions need you."}))]);
+        v.tap();
+        v.heard("what needs me");
+        io.take();
+        v.tap();
+        assert_eq!(io.take(), vec!["stop speaking", "listen"]);
+        assert_eq!(v.view().state, "awaiting-command");
+    }
+
+    #[test]
+    fn a_tap_during_the_read_back_listens_for_yes_or_no() {
+        let (v, io, asked) = voice(read_back());
+        v.tap();
+        v.heard("tell x y");
+        io.take();
+        v.tap();
+        assert_eq!(io.take(), vec!["stop speaking", "listen"]);
+        assert_eq!(v.view().state, "awaiting-confirm");
+        assert_eq!(v.view().pending.as_deref(), Some("Telling x: y. Yes?"));
+        v.heard("yes");
+        assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { .. }));
     }
 }
