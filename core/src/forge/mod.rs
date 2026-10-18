@@ -263,7 +263,7 @@ pub(crate) fn post_graphql(http: &dyn Http, forge: &Forge, query: &str) -> Resul
 pub fn current_pr(http: &dyn Http, forge: &Forge, repo: &str, branch: &str) -> Result<Option<crate::model::PullRequest>, String> {
     match forge.site.provider {
         GitProvider::Github => github::current_pr(http, forge, repo, branch),
-        GitProvider::Gitlab => Err("GitLab is not supported yet".into()),
+        GitProvider::Gitlab => gitlab::current_pr(http, forge, repo, branch),
     }
 }
 
@@ -271,7 +271,7 @@ pub fn current_pr(http: &dyn Http, forge: &Forge, repo: &str, branch: &str) -> R
 pub fn review_prs(http: &dyn Http, forge: &Forge) -> Result<Vec<crate::reviews::ReviewPr>, String> {
     match forge.site.provider {
         GitProvider::Github => github::review_prs(http, forge),
-        GitProvider::Gitlab => Err("GitLab is not supported yet".into()),
+        GitProvider::Gitlab => gitlab::review_prs(http, forge),
     }
 }
 
@@ -279,7 +279,7 @@ pub fn review_prs(http: &dyn Http, forge: &Forge) -> Result<Vec<crate::reviews::
 pub fn whoami(http: &dyn Http, forge: &Forge) -> Result<String, String> {
     match forge.site.provider {
         GitProvider::Github => github::whoami(http, forge),
-        GitProvider::Gitlab => Err("GitLab is not supported yet".into()),
+        GitProvider::Gitlab => gitlab::whoami(http, forge),
     }
 }
 
