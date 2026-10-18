@@ -142,6 +142,10 @@ pub struct Config {
     /// Whisper model id for the built-in recogniser.
     #[serde(default = "default_whisper_model")]
     pub whisper_model: String,
+    /// GitHub and GitLab. None in a config from before 0.24 (and a fresh
+    /// one): the first start fills it in after importing `gh`'s token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<Vec<GitConnection>>,
     #[serde(default)]
     pub network: NetworkConfig,
 }
@@ -164,6 +168,126 @@ pub enum VoiceProvider {
     #[default]
     Builtin,
     Elevenlabs,
+}
+
+/// A code host Maya reads pull requests from.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GitProvider {
+    #[default]
+    Github,
+    Gitlab,
+}
+
+impl GitProvider {
+    pub fn label(self) -> &'static str {
+        match self {
+            GitProvider::Github => "GitHub",
+            GitProvider::Gitlab => "GitLab",
+        }
+    }
+
+    /// The variable a new connection reads its token from.
+    pub fn default_env(self) -> &'static str {
+        match self {
+            GitProvider::Github => "GH_TOKEN",
+            GitProvider::Gitlab => "GITLAB_TOKEN",
+        }
+    }
+
+    /// What goes between a repo and a number: `repo#12` on GitHub, `repo!12` on GitLab.
+    pub fn sigil(self) -> char {
+        match self {
+            GitProvider::Github => '#',
+            GitProvider::Gitlab => '!',
+        }
+    }
+}
+
+pub const GITHUB_URL: &str = "https://github.com";
+pub const GITLAB_DEFAULT_URL: &str = "https://gitlab.com";
+
+/// Where a connection's token comes from: the OS key store, or a variable
+/// read from the login shell.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TokenSource {
+    Stored,
+    Env { name: String },
+}
+
+/// GitHub or GitLab, switched on or off, with where its token comes from.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitConnection {
+    pub provider: GitProvider,
+    pub enabled: bool,
+    /// GitLab only; None is `GITLAB_DEFAULT_URL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    pub token: TokenSource,
+}
+
+impl GitConnection {
+    /// GitHub on, GitLab off, each reading its default variable.
+    pub fn default_for(provider: GitProvider) -> Self {
+        GitConnection { provider, enabled: provider == GitProvider::Github, base_url: None, token: TokenSource::Env { name: provider.default_env().into() } }
+    }
+
+    /// The web address repos live under, without a trailing slash.
+    pub fn web_base(&self) -> String {
+        match self.provider {
+            GitProvider::Github => GITHUB_URL.into(),
+            GitProvider::Gitlab => self.base_url.as_deref().map(str::trim).filter(|u| !u.is_empty()).unwrap_or(GITLAB_DEFAULT_URL).trim_end_matches('/').to_string(),
+        }
+    }
+
+    /// The variable to read, the provider's default when blank; None for a stored token.
+    pub fn env_name(&self) -> Option<String> {
+        match &self.token {
+            TokenSource::Stored => None,
+            TokenSource::Env { name } => {
+                let name = name.trim();
+                Some(if name.is_empty() { self.provider.default_env() } else { name }.to_string())
+            }
+        }
+    }
+}
+
+/// True for a shell variable name: letters, digits and `_`, not starting
+/// with a digit. Only such a name goes into the login-shell probe.
+pub fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Why the Git settings cannot be saved, if they cannot.
+pub fn validate_git(conns: &[GitConnection]) -> Result<(), String> {
+    for c in conns {
+        if let Some(url) = c.base_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+            let host = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).and_then(|r| r.split('/').next()).filter(|h| !h.is_empty());
+            if host.is_none() {
+                return Err(format!("{} URL must be an http(s) address.", c.provider.label()));
+            }
+        }
+        if let TokenSource::Env { name } = &c.token {
+            let n = name.trim();
+            if !n.is_empty() && !valid_env_name(n) {
+                return Err(format!("The {} token variable must be a name like {}.", c.provider.label(), c.provider.default_env()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The connections the first start saves: GitHub on with `gh`'s token when
+/// it could be stored, else reading `GH_TOKEN`; GitLab off.
+pub fn git_after_import(stored: bool) -> Vec<GitConnection> {
+    let mut github = GitConnection::default_for(GitProvider::Github);
+    if stored {
+        github.token = TokenSource::Stored;
+    }
+    vec![github, GitConnection::default_for(GitProvider::Gitlab)]
 }
 
 /// The whisper model used until the user picks another.
@@ -210,6 +334,7 @@ impl Default for Config {
             interpreter_model: None,
             recognizer: if cfg!(any(windows, target_os = "linux")) { Recognizer::Builtin } else { Recognizer::System },
             whisper_model: DEFAULT_MODEL.into(),
+            git: None,
             network: NetworkConfig::default(),
         }
     }
@@ -276,6 +401,29 @@ impl Config {
             crate::net::protocol::DEFAULT_PORT
         } else {
             self.network.main_port
+        }
+    }
+
+    /// One GitHub and one GitLab connection, in that order: the saved ones,
+    /// with defaults for any missing.
+    pub fn git_connections(&self) -> Vec<GitConnection> {
+        [GitProvider::Github, GitProvider::Gitlab]
+            .into_iter()
+            .map(|p| self.git.as_ref().and_then(|g| g.iter().find(|c| c.provider == p)).cloned().unwrap_or_else(|| GitConnection::default_for(p)))
+            .collect()
+    }
+
+    /// Trims the Git settings as typed: the URL's spaces, trailing slashes
+    /// and a pasted `/api/v4` (blank becomes None), and the variable name.
+    pub fn normalize_git(&mut self) {
+        for c in self.git.iter_mut().flatten() {
+            c.base_url = c.base_url.as_deref().map(|u| {
+                let u = u.trim().trim_end_matches('/');
+                u.strip_suffix("/api/v4").unwrap_or(u).trim_end_matches('/').to_string()
+            }).filter(|u| !u.is_empty());
+            if let TokenSource::Env { name } = &mut c.token {
+                *name = name.trim().to_string();
+            }
         }
     }
 }
@@ -605,5 +753,113 @@ mod tests {
         assert!(!older.notify_on_awaiting);
         let text = serde_json::to_string(&Config { notify_on_completed: false, ..Config::default() }).unwrap();
         assert!(text.contains(r#""notifyOnCompleted":false"#));
+    }
+
+    #[test]
+    fn git_defaults_to_github_on_reading_gh_token_and_gitlab_off() {
+        let c = Config::default();
+        assert_eq!(c.git, None, "no git field until the first start imports gh's token");
+        let conns = c.git_connections();
+        assert_eq!(conns.len(), 2);
+        assert_eq!((conns[0].provider, conns[0].enabled), (GitProvider::Github, true));
+        assert_eq!(conns[0].token, TokenSource::Env { name: "GH_TOKEN".into() });
+        assert_eq!((conns[1].provider, conns[1].enabled, conns[1].base_url.clone()), (GitProvider::Gitlab, false, None));
+        assert_eq!(conns[1].token, TokenSource::Env { name: "GITLAB_TOKEN".into() });
+    }
+
+    #[test]
+    fn an_older_config_reads_with_no_git_field_and_round_trips_once_set() {
+        let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
+        assert_eq!(older.git, None);
+        let set = Config { git: Some(git_after_import(true)), ..Config::default() };
+        let text = serde_json::to_string(&set).unwrap();
+        assert!(text.contains(r#""git":[{"provider":"github","enabled":true,"token":{"kind":"stored"}}"#), "{text}");
+        assert!(text.contains(r#"{"provider":"gitlab","enabled":false,"token":{"kind":"env","name":"GITLAB_TOKEN"}}"#), "{text}");
+        let back: Config = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.git, set.git);
+    }
+
+    #[test]
+    fn git_connections_fills_in_a_missing_provider_and_keeps_the_order() {
+        let only_gitlab = GitConnection { provider: GitProvider::Gitlab, enabled: true, base_url: Some("https://gitlab.acme.io".into()), token: TokenSource::Stored };
+        let c = Config { git: Some(vec![only_gitlab.clone()]), ..Config::default() };
+        let conns = c.git_connections();
+        assert_eq!(conns[0], GitConnection::default_for(GitProvider::Github));
+        assert_eq!(conns[1], only_gitlab);
+    }
+
+    #[test]
+    fn the_import_stores_github_as_a_pasted_token_or_falls_back_to_gh_token() {
+        assert_eq!(git_after_import(true)[0].token, TokenSource::Stored);
+        assert_eq!(git_after_import(false)[0].token, TokenSource::Env { name: "GH_TOKEN".into() });
+        assert!(git_after_import(true)[0].enabled);
+        assert!(!git_after_import(true)[1].enabled, "GitLab starts off");
+    }
+
+    #[test]
+    fn web_base_is_github_or_the_gitlab_url_defaulting_to_gitlab_com() {
+        assert_eq!(GitConnection::default_for(GitProvider::Github).web_base(), "https://github.com");
+        let mut gl = GitConnection::default_for(GitProvider::Gitlab);
+        assert_eq!(gl.web_base(), "https://gitlab.com");
+        gl.base_url = Some("  ".into());
+        assert_eq!(gl.web_base(), "https://gitlab.com", "blank is the default");
+        gl.base_url = Some("https://acme.io/gitlab/".into());
+        assert_eq!(gl.web_base(), "https://acme.io/gitlab");
+    }
+
+    #[test]
+    fn env_name_is_the_default_when_blank() {
+        let mut c = GitConnection::default_for(GitProvider::Github);
+        c.token = TokenSource::Env { name: " ".into() };
+        assert_eq!(c.env_name().as_deref(), Some("GH_TOKEN"));
+        c.token = TokenSource::Env { name: " MY_TOKEN ".into() };
+        assert_eq!(c.env_name().as_deref(), Some("MY_TOKEN"));
+        c.token = TokenSource::Stored;
+        assert_eq!(c.env_name(), None);
+    }
+
+    #[test]
+    fn env_names_are_letters_digits_and_underscores_only() {
+        for ok in ["GH_TOKEN", "_x", "a1"] {
+            assert!(valid_env_name(ok), "{ok}");
+        }
+        for bad in ["", "1A", "GH TOKEN", "GH_TOKEN; rm -rf ~", "$(id)", "A-B", "É"] {
+            assert!(!valid_env_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn validate_git_refuses_a_bad_url_or_variable_name() {
+        let gl = |url: &str| GitConnection { base_url: Some(url.into()), ..GitConnection::default_for(GitProvider::Gitlab) };
+        assert!(validate_git(&[gl("https://gitlab.acme.io")]).is_ok());
+        assert!(validate_git(&[gl("http://10.0.0.5:8080/gitlab")]).is_ok());
+        assert!(validate_git(&[gl("")]).is_ok(), "blank means gitlab.com");
+        assert_eq!(validate_git(&[gl("gitlab.acme.io")]).unwrap_err(), "GitLab URL must be an http(s) address.");
+        assert_eq!(validate_git(&[gl("https://")]).unwrap_err(), "GitLab URL must be an http(s) address.");
+        let bad_env = GitConnection { token: TokenSource::Env { name: "GH_TOKEN; rm -rf ~".into() }, ..GitConnection::default_for(GitProvider::Github) };
+        assert_eq!(validate_git(&[bad_env]).unwrap_err(), "The GitHub token variable must be a name like GH_TOKEN.");
+        let blank_env = GitConnection { token: TokenSource::Env { name: "".into() }, ..GitConnection::default_for(GitProvider::Github) };
+        assert!(validate_git(&[blank_env]).is_ok(), "blank means the default");
+    }
+
+    #[test]
+    fn normalize_git_trims_the_url_and_a_pasted_api_suffix_and_the_name() {
+        let mut c = Config {
+            git: Some(vec![
+                GitConnection { token: TokenSource::Env { name: " GH_TOKEN ".into() }, ..GitConnection::default_for(GitProvider::Github) },
+                GitConnection { base_url: Some(" https://gitlab.acme.io/api/v4/ ".into()), ..GitConnection::default_for(GitProvider::Gitlab) },
+            ]),
+            ..Config::default()
+        };
+        c.normalize_git();
+        let g = c.git.unwrap();
+        assert_eq!(g[0].token, TokenSource::Env { name: "GH_TOKEN".into() });
+        assert_eq!(g[1].base_url.as_deref(), Some("https://gitlab.acme.io"));
+        let mut blank = Config { git: Some(vec![GitConnection { base_url: Some("  ".into()), ..GitConnection::default_for(GitProvider::Gitlab) }]), ..Config::default() };
+        blank.normalize_git();
+        assert_eq!(blank.git.unwrap()[0].base_url, None);
+        let mut none = Config::default();
+        none.normalize_git();
+        assert_eq!(none.git, None, "nothing to normalise stays unimported");
     }
 }
