@@ -77,6 +77,9 @@ struct Inner {
     after: After,
     events: VecDeque<String>,
     generation: u64,
+    /// Bumped by each confirmation held or armed: an older window's
+    /// expiry timer finds it changed and does nothing.
+    epoch: u64,
     failures: u32,
     backoffs: Vec<u64>,
     view: VoiceView,
@@ -106,7 +109,7 @@ impl Voice {
     fn build(io: Arc<dyn VoiceIo>, ask: Ask, show: Show, now: fn() -> u64, sync: bool) -> Arc<Voice> {
         let inner = Inner {
             flow: Flow::new(), history: vec![], on_screen: false, wake: false, offer: Some(NO_MAIN.into()), speaking: false, thinking: false,
-            after: After::Idle, events: VecDeque::new(), generation: 0, failures: 0, backoffs: vec![], view: VoiceView { state: "off".into(), ..Default::default() },
+            after: After::Idle, events: VecDeque::new(), generation: 0, epoch: 0, failures: 0, backoffs: vec![], view: VoiceView { state: "off".into(), ..Default::default() },
         };
         let v = Arc::new(Voice { inner: Mutex::new(inner), io, ask, show, now, sync, me: Mutex::new(std::sync::Weak::new()) });
         *v.me.lock().unwrap() = Arc::downgrade(&v);
@@ -229,7 +232,7 @@ impl Voice {
             self.io.stop_speaking();
             i.speaking = false;
             if let After::Confirm(p) = std::mem::replace(&mut i.after, After::Idle) {
-                i.flow.set_pending(p, now);
+                self.arm_confirm(&mut i, p);
                 self.io.listen(false);
                 self.publish(&mut i);
                 return;
@@ -397,6 +400,55 @@ impl Voice {
         }
     }
 
+    /// Starts a confirmation's answer window, and a timer that ends it
+    /// even when nothing is listening (a tap stopped the mic): the timer
+    /// thread holds only a `Weak`, and the generation and epoch tell it
+    /// whether this window is still the one waiting.
+    fn arm_confirm(&self, i: &mut Inner, p: Pending) {
+        i.flow.set_pending(p, (self.now)());
+        i.epoch += 1;
+        if self.sync {
+            return;
+        }
+        let (generation, epoch) = (i.generation, i.epoch);
+        let me = self.me.lock().unwrap().clone();
+        std::thread::spawn(move || {
+            let mut wait = maya_core::wake::CONFIRM_WAIT_MS + 1;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+                match me.upgrade() {
+                    Some(v) if v.expire_pending(generation, epoch) => wait = 250,
+                    _ => break,
+                }
+            }
+        });
+    }
+
+    /// A confirmation's timer ran out: as `ended` does for an expired
+    /// action, say "OK." and carry on once it is said. True when the
+    /// window is still open (a clock that lagged the sleep): try again.
+    fn expire_pending(&self, generation: u64, epoch: u64) -> bool {
+        let mut i = self.inner.lock().unwrap();
+        // Speaking or thinking, what follows settles the action itself.
+        if i.generation != generation || i.epoch != epoch || !Self::active(&i) || i.speaking || i.thinking || !i.flow.has_pending() {
+            return false;
+        }
+        if !i.flow.drop_expired((self.now)()) {
+            return true;
+        }
+        i.view.pending = None;
+        self.say(&mut i, "OK.", After::Idle);
+        self.publish(&mut i);
+        false
+    }
+
+    /// The generation and epoch a confirmation's timer now carries; a test seam.
+    #[cfg(test)]
+    fn confirm_epoch(&self) -> (u64, u64) {
+        let i = self.inner.lock().unwrap();
+        (i.generation, i.epoch)
+    }
+
     #[cfg(test)]
     fn backoffs(&self) -> Vec<u64> {
         self.inner.lock().unwrap().backoffs.clone()
@@ -432,7 +484,7 @@ impl Voice {
         let now = (self.now)();
         match std::mem::replace(&mut i.after, After::Idle) {
             After::Confirm(p) => {
-                i.flow.set_pending(p, now);
+                self.arm_confirm(&mut i, p);
                 self.io.listen(false);
             }
             After::Command => {
@@ -549,6 +601,7 @@ impl Voice {
             Some(p) => {
                 // Held while it is read back; `spoken` starts its window.
                 i.flow.hold_pending(p.clone());
+                i.epoch += 1;
                 let line = p.say.clone();
                 i.view.pending = Some(line.clone());
                 self.say(&mut i, &line, After::Confirm(p));
@@ -1206,6 +1259,50 @@ mod tests {
         advance(maya_core::wake::CONFIRM_WAIT_MS - 1);
         v.heard("yes");
         assert!(matches!(asked.lock().unwrap().get(1), Some(Request::Execute { .. })));
+    }
+
+    #[test]
+    fn a_stopped_confirmation_still_runs_out_and_the_wake_loop_comes_back() {
+        let (v, io, asked) = voice(read_back());
+        v.set_wake(true);
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        let (generation, epoch) = v.confirm_epoch();
+        v.tap();
+        io.take();
+        assert!(v.expire_pending(generation, epoch), "still inside its window: try again later");
+        assert_eq!(io.take(), Vec::<String>::new());
+        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
+        assert!(!v.expire_pending(generation, epoch));
+        assert_eq!(io.take(), vec!["say OK."]);
+        assert_eq!(v.view().pending, None);
+        v.spoken(true);
+        assert_eq!(io.take(), vec!["listen wake"]);
+        assert_eq!(asked.lock().unwrap().len(), 1, "nothing ran");
+    }
+
+    #[test]
+    fn an_older_window_s_timer_does_not_end_a_newer_confirmation() {
+        let action = serde_json::json!({"kind": "reply", "session": "s1"});
+        let (v, io, _) = voice(vec![
+            Ok(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action}})),
+            Ok(serde_json::json!({"say": "Telling z: w. Yes?", "pending": {"say": "Telling z: w. Yes?", "action": action}})),
+        ]);
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        let (generation, older) = v.confirm_epoch();
+        v.heard("Maya tell z w");
+        v.spoken(true);
+        let (_, newer) = v.confirm_epoch();
+        v.tap();
+        io.take();
+        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
+        assert!(!v.expire_pending(generation, older));
+        assert_eq!(io.take(), Vec::<String>::new(), "the older timer is stale");
+        v.expire_pending(generation, newer);
+        assert_eq!(io.take(), vec!["say OK."]);
     }
 
     /// Every view the page was shown, for checks on what was published.
