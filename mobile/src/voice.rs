@@ -407,9 +407,15 @@ impl Voice {
         // Off screen Android refuses to speak at all: not a missing voice.
         let active = Self::active(&i);
         if active {
+            let error = i.view.error.as_deref();
             if ok {
-                Self::clear_error(&mut i);
-            } else {
+                // Speaking proves the voice, not the recogniser or the microphone.
+                if error == Some(NO_TTS) {
+                    i.view.error = None;
+                }
+            } else if error != Some(MIC_OFF) && !error.is_some_and(|e| e.starts_with(WAKE_STOPPED)) {
+                // A refused microphone keeps its Open settings button, and a
+                // stopped wake loop its error until the setting changes.
                 i.view.error = Some(NO_TTS.into());
             }
         }
@@ -1217,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn an_error_clears_on_a_tap_a_heard_command_or_a_spoken_line() {
+    fn an_error_clears_on_a_tap_or_a_heard_command() {
         let (v, _, _) = voice(vec![Ok(serde_json::json!({"say": "Hi."}))]);
         v.failed("no network for speech recognition", false);
         assert!(v.view().error.is_some());
@@ -1226,9 +1232,26 @@ mod tests {
         v.failed("no network for speech recognition", false);
         v.heard("what needs me");
         assert_eq!(v.view().error, None, "a heard command clears it");
+        v.failed(MIC_OFF, true);
+        v.tap();
+        assert_eq!(v.view().error, None, "a tap clears a refused microphone: it was asked for again");
+    }
+
+    #[test]
+    fn a_spoken_line_clears_only_the_missing_voice() {
+        let (v, _, _) = voice(vec![]);
+        v.spoken(false);
+        assert_eq!(v.view().error.as_deref(), Some(NO_TTS));
+        v.spoken(true);
+        assert_eq!(v.view().error, None, "the voice is there after all");
         v.failed("no network for speech recognition", false);
         v.spoken(true);
-        assert_eq!(v.view().error, None, "a spoken line clears it");
+        assert_eq!(v.view().error.as_deref(), Some("no network for speech recognition"), "speaking says nothing about the recogniser");
+        v.failed(MIC_OFF, true);
+        v.spoken(true);
+        assert_eq!(v.view().error.as_deref(), Some(MIC_OFF), "the Open settings button stays");
+        v.spoken(false);
+        assert_eq!(v.view().error.as_deref(), Some(MIC_OFF), "a failed line does not hide a refused microphone");
     }
 
     #[test]
