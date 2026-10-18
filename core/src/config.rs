@@ -261,11 +261,12 @@ pub fn valid_env_name(name: &str) -> bool {
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Why the Git settings cannot be saved, if they cannot.
+/// Why the Git settings cannot be saved, if they cannot. A URL carrying
+/// credentials (`user:token@host`) is refused: the token has its own field.
 pub fn validate_git(conns: &[GitConnection]) -> Result<(), String> {
     for c in conns {
         if let Some(url) = c.base_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
-            let host = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).and_then(|r| r.split('/').next()).filter(|h| !h.is_empty());
+            let host = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).and_then(|r| r.split('/').next()).filter(|h| !h.is_empty() && !h.contains('@'));
             if host.is_none() {
                 return Err(format!("{} URL must be an http(s) address.", c.provider.label()));
             }
@@ -857,6 +858,7 @@ mod tests {
         assert!(validate_git(&[gl("")]).is_ok(), "blank means gitlab.com");
         assert_eq!(validate_git(&[gl("gitlab.acme.io")]).unwrap_err(), "GitLab URL must be an http(s) address.");
         assert_eq!(validate_git(&[gl("https://")]).unwrap_err(), "GitLab URL must be an http(s) address.");
+        assert_eq!(validate_git(&[gl("https://oauth2:glpat-x@gitlab.acme.io")]).unwrap_err(), "GitLab URL must be an http(s) address.", "no credentials in the URL");
         let bad_env = GitConnection { token: TokenSource::Env { name: "GH_TOKEN; rm -rf ~".into() }, ..GitConnection::default_for(GitProvider::Github) };
         assert_eq!(validate_git(&[bad_env]).unwrap_err(), "The GitHub token variable must be a name like GH_TOKEN.");
         let blank_env = GitConnection { token: TokenSource::Env { name: "".into() }, ..GitConnection::default_for(GitProvider::Github) };
