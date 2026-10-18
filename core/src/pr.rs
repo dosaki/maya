@@ -12,7 +12,7 @@ pub fn parse(stdout: &str) -> Option<PullRequest> {
     let number = v["number"].as_u64()?;
     let url = v["url"].as_str()?.to_string();
     let state = if v["isDraft"].as_bool() == Some(true) { "draft".to_string() } else { v["state"].as_str()?.to_ascii_lowercase() };
-    Some(PullRequest { number, url, state })
+    Some(PullRequest { number, url, state, forge: crate::config::GitProvider::Github })
 }
 
 /// Asks `gh` for the PR of `dir`'s current branch. None when there is no
@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn parses_gh_pr_view_output_with_lowercase_state_and_draft() {
         let out = r#"{"number":781,"state":"MERGED","url":"https://github.com/o/r/pull/781","isDraft":false}"#;
-        assert_eq!(parse(out), Some(PullRequest { number: 781, url: "https://github.com/o/r/pull/781".into(), state: "merged".into() }));
+        assert_eq!(parse(out), Some(PullRequest { number: 781, url: "https://github.com/o/r/pull/781".into(), state: "merged".into(), forge: Default::default() }));
         let draft = r#"{"number":9,"state":"OPEN","url":"https://github.com/o/r/pull/9","isDraft":true}"#;
         assert_eq!(parse(draft).unwrap().state, "draft");
         assert_eq!(parse("no pull requests found for branch"), None);
@@ -85,7 +85,7 @@ mod tests {
         let mut c = PrCache::default();
         let dirs = vec!["/a".to_string(), "/b".to_string()];
         assert_eq!(c.due(&dirs, 1000), dirs);
-        c.set("/a", Some(PullRequest { number: 1, url: "u".into(), state: "open".into() }), 1000);
+        c.set("/a", Some(PullRequest { number: 1, url: "u".into(), state: "open".into(), forge: Default::default() }), 1000);
         c.set("/b", None, 1000);
         assert_eq!(c.get("/a").map(|p| p.number), Some(1));
         assert_eq!(c.get("/b"), None);

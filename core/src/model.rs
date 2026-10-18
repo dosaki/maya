@@ -83,6 +83,9 @@ pub struct PullRequest {
     pub url: String,
     /// "open", "draft", "merged" or "closed".
     pub state: String,
+    /// GitHub or GitLab; a card from an older Maya has none and is GitHub.
+    #[serde(default)]
+    pub forge: crate::config::GitProvider,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -141,6 +144,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_pull_request_from_an_older_maya_is_a_github_one() {
+        let pr: PullRequest = serde_json::from_str(r#"{"number":7,"url":"https://github.com/o/r/pull/7","state":"open"}"#).unwrap();
+        assert_eq!(pr.forge, crate::config::GitProvider::Github);
+        let json = serde_json::to_value(PullRequest { forge: crate::config::GitProvider::Gitlab, ..pr }).unwrap();
+        assert_eq!(json["forge"], "gitlab");
+    }
+
+    #[test]
     fn opencode_has_a_wire_name() {
         assert_eq!(serde_json::to_string(&Harness::OpenCode).unwrap(), "\"opencode\"");
         assert_eq!(serde_json::from_str::<Harness>("\"opencode\"").unwrap(), Harness::OpenCode);
@@ -188,7 +199,7 @@ mod tests {
             awaiting: Some(Awaiting { kind: AwaitKind::Permission, detail: "Bash: rm -rf".into(), questions: vec![] }),
             has_inbox: false,
             harness: Harness::ClaudeCode,
-            pr: Some(PullRequest { number: 781, url: "https://github.com/o/r/pull/781".into(), state: "merged".into() }),
+            pr: Some(PullRequest { number: 781, url: "https://github.com/o/r/pull/781".into(), state: "merged".into(), forge: Default::default() }),
             context: Some(crate::context::ContextUsage { used: 124_000, window: 200_000, percent: 62 }),
             machine: None,
             machine_address: None, machine_platform: None,

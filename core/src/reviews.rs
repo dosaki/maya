@@ -1,5 +1,6 @@
 use crate::launch::{shell_single_quote, LaunchOptions};
 use crate::model::Harness;
+use crate::config::GitProvider;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -26,7 +27,9 @@ pub enum ReviewMark {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewPr {
     pub number: u64,
-    /// `owner/name`.
+    /// GitHub or GitLab.
+    pub forge: GitProvider,
+    /// The repo's full path: `owner/name`, or `group/sub/name` on GitLab.
     pub repo: String,
     pub title: String,
     pub author: String,
@@ -42,6 +45,18 @@ pub struct ReviewPr {
     pub pr_review: Option<ReviewMark>,
     /// Who gave `pr_review`.
     pub pr_reviewers: Vec<String>,
+}
+
+impl ReviewPr {
+    /// `Org/bedrock#451` or `grp/r!12`: how the lists and the voice name it.
+    pub fn reference(&self) -> String {
+        format!("{}{}{}", self.repo, self.forge.sigil(), self.number)
+    }
+
+    /// The repo's last path segment.
+    pub fn repo_name(&self) -> &str {
+        self.repo.rsplit('/').next().unwrap_or(&self.repo)
+    }
 }
 
 /// Three searches in one call: PRs asking for the user's review, open PRs
@@ -111,6 +126,7 @@ fn parse_node(p: &serde_json::Value, reason: Reason, login: &str) -> Option<Revi
     let (pr_review, pr_reviewers) = pr_review(p, login);
     Some(ReviewPr {
         number: p["number"].as_u64()?,
+        forge: GitProvider::Github,
         repo: p["repository"]["nameWithOwner"].as_str()?.to_string(),
         title: p["title"].as_str().unwrap_or("").to_string(),
         author: p["author"]["login"].as_str().unwrap_or("").to_string(),
@@ -205,7 +221,7 @@ impl PrNotifier {
 }
 
 fn short_title(pr: &ReviewPr) -> String {
-    format!("{} #{}", pr.repo.rsplit('/').next().unwrap_or(&pr.repo), pr.number)
+    format!("{} {}{}", pr.repo_name(), pr.forge.sigil(), pr.number)
 }
 
 /// A PR review banner: `repo #n`, `Approved by jane`, the PR's title.
@@ -222,7 +238,10 @@ pub fn pr_banner(pr: &ReviewPr) -> (String, String, String) {
 
 /// What Maya says when an assigned PR is approved or needs changes.
 pub fn pr_spoken_line(pr: &ReviewPr) -> Option<String> {
-    let name = crate::notify::spoken_name(&short_title(pr));
+    let name = match pr.forge {
+        GitProvider::Github => crate::notify::spoken_name(&format!("{} {}", pr.repo_name(), pr.number)),
+        GitProvider::Gitlab => crate::notify::spoken_name(&format!("{} merge request {}", pr.repo_name(), pr.number)),
+    };
     match pr.pr_review {
         Some(ReviewMark::Approved) => Some(format!("{name} was approved")),
         Some(ReviewMark::ChangesRequested) => Some(format!("{name} needs changes")),
@@ -340,6 +359,7 @@ pub fn shell_command(agent: Harness, target: &ReviewTarget, name_with_owner: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::GitProvider;
     use std::path::Path;
 
     fn node(number: u64, repo: &str, author: &str, updated: &str, opinionated: &str, latest: &str) -> String {
@@ -555,8 +575,23 @@ mod tests {
         assert_eq!(pr_spoken_line(&ReviewPr { pr_review: Some(ReviewMark::Commented), ..pr() }), None);
     }
 
+    #[test]
+    fn a_merge_request_is_named_with_a_bang_and_spoken_plainly() {
+        let mr = ReviewPr { forge: GitProvider::Gitlab, repo: "grp/sub/bedrock".into(), number: 12, pr_review: Some(ReviewMark::Approved), pr_reviewers: vec!["jane".into()], ..pr() };
+        assert_eq!(mr.reference(), "grp/sub/bedrock!12");
+        assert_eq!(pr().reference(), "Org/bedrock#451");
+        assert_eq!(pr_banner(&mr).0, "bedrock !12");
+        assert_eq!(pr_spoken_line(&mr).as_deref(), Some("bedrock merge request 12 was approved"));
+    }
+
+    #[test]
+    fn graphql_prs_are_github_prs() {
+        let prs = parse_graphql(&response(&[node(1, "o/r", "jane", "", "", "")], &[], &[])).unwrap();
+        assert_eq!(prs[0].forge, GitProvider::Github);
+    }
+
     fn pr() -> ReviewPr {
-        ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None, pr_review: None, pr_reviewers: vec![] }
+        ReviewPr { number: 451, forge: GitProvider::Github, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None, pr_review: None, pr_reviewers: vec![] }
     }
 
     #[test]

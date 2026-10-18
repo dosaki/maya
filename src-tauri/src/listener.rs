@@ -219,13 +219,15 @@ pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Res
         "review" => {
             let repo = action["repo"].as_str().unwrap_or("").to_string();
             let number = action["number"].as_u64().unwrap_or(0);
-            review_pr(state.clone(), repo, number)?;
+            let forge = serde_json::from_value(action["forge"].clone()).ok();
+            review_pr(state.clone(), forge, repo, number)?;
             Ok("Review started.".into())
         }
         "open" => {
             let repo = action["repo"].as_str().unwrap_or("").to_string();
             let number = action["number"].as_u64().unwrap_or(0);
-            open_review_pr(state.clone(), repo, number)?;
+            let forge = serde_json::from_value(action["forge"].clone()).ok();
+            open_review_pr(state.clone(), forge, repo, number)?;
             Ok("Opened.".into())
         }
         other => Err(format!("I don't know how to {other}")),

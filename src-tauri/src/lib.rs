@@ -84,6 +84,7 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 use config::Config;
 use listener::VoiceState;
 use maya_core::agents;
+use maya_core::config::GitProvider;
 use maya_core::net::routing::{agents_reply, check_remote_agent, machines_of, remote_attachments, AgentsReply, MachineInfo, ROUTE_TIMEOUT};
 use model::{Card, Harness};
 use net::merge;
@@ -388,14 +389,15 @@ fn list_review_prs(state: TauriState<AppState>) -> ReviewState {
     state.reviews.lock().unwrap().clone()
 }
 
-fn review_pr_for(state: &TauriState<AppState>, repo: &str, number: u64) -> Result<reviews::ReviewPr, String> {
-    state.reviews.lock().unwrap().prs.iter().find(|p| p.repo == repo && p.number == number).cloned().ok_or("That pull request is no longer on the list.".into())
+fn review_pr_for(state: &TauriState<AppState>, forge: Option<GitProvider>, repo: &str, number: u64) -> Result<reviews::ReviewPr, String> {
+    let forge = forge.unwrap_or_default();
+    state.reviews.lock().unwrap().prs.iter().find(|p| p.forge == forge && p.repo == repo && p.number == number).cloned().ok_or("That pull request is no longer on the list.".into())
 }
 
 /// Opens a listed PR in the browser; the URL comes from the fetched list.
 #[tauri::command(async)]
-fn open_review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<(), String> {
-    let pr = review_pr_for(&state, &repo, number)?;
+fn open_review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<(), String> {
+    let pr = review_pr_for(&state, forge, &repo, number)?;
     open_in_browser(&pr.url)
 }
 
@@ -403,8 +405,8 @@ fn open_review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Res
 /// review prompt from Settings, in the project checkout when it is free,
 /// else in a clone under the clones dir.
 #[tauri::command(async)]
-fn review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<String, String> {
-    let pr = review_pr_for(&state, &repo, number)?;
+fn review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<String, String> {
+    let pr = review_pr_for(&state, forge, &repo, number)?;
     actions::start_review(&local(&state), &pr)
 }
 
@@ -1421,7 +1423,7 @@ mod route_tests {
             awaiting: None,
             has_inbox: true,
             harness: model::Harness::ClaudeCode,
-            pr: Some(model::PullRequest { number: 7, url: url.into(), state: "open".into() }),
+            pr: Some(model::PullRequest { number: 7, url: url.into(), state: "open".into(), forge: Default::default() }),
             context: None,
             machine: Some("laptop".into()),
             machine_address: None, machine_platform: None,

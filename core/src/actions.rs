@@ -1311,7 +1311,7 @@ mod tests {
         let store = with_agents(store, vec![agents::claude(), crate::agents::info_for(Harness::Codex, None)]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let pr = crate::reviews::ReviewPr { number: 451, repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] };
+        let pr = crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] };
         assert!(!dir.path().join("clones").exists());
         let folder = start_review(&l, &pr).unwrap();
         assert!(Path::new(&folder).ends_with(Path::new("clones").join("bedrock-451")), "{folder}");
@@ -1338,7 +1338,7 @@ mod tests {
         let store = with_agents(store, vec![agents::claude()]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let pr = crate::reviews::ReviewPr { number: 1, repo: "o/r".into(), title: String::new(), author: String::new(), url: "https://github.com/o/r/pull/1".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] };
+        let pr = crate::reviews::ReviewPr { number: 1, forge: Default::default(), repo: "o/r".into(), title: String::new(), author: String::new(), url: "https://github.com/o/r/pull/1".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] };
         assert_eq!(start_review(&l, &pr).unwrap_err(), "Grok Build is not installed on this machine.");
         assert!(fake.calls.lock().unwrap().is_empty());
     }

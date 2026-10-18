@@ -15,6 +15,7 @@ use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, target
 use crate::net::server::{send_command_with, start_with, ServerHandle};
 use crate::net::AssistantLink;
 use crate::config::{self, NetworkRole};
+use maya_core::config::GitProvider;
 use crate::log;
 use crate::model::Card;
 use crate::store::now_ms;
@@ -292,7 +293,8 @@ pub(crate) fn revalidate(action: &Value, ctx: &VoiceContext) -> Result<Value, St
     match action["kind"].as_str() {
         Some("review") => {
             if let (Some(repo), Some(number)) = (action["repo"].as_str(), action["number"].as_u64()) {
-                asked["pr"] = Value::String(format!("{repo}#{number}"));
+                let forge: GitProvider = serde_json::from_value(action["forge"].clone()).unwrap_or_default();
+                asked["pr"] = Value::String(format!("{repo}{}{number}", forge.sigil()));
             }
         }
         Some("start" | "resume") => {
@@ -312,7 +314,8 @@ pub(crate) fn revalidate(action: &Value, ctx: &VoiceContext) -> Result<Value, St
         return Err("The question has changed; ask me again.".into());
     }
     // A pull request that has gone must not resolve to another with its number.
-    if action["kind"] == "review" && (fresh["repo"] != action["repo"] || fresh["number"] != action["number"]) {
+    let forge_of = |v: &Value| v["forge"].as_str().unwrap_or("github").to_string();
+    if action["kind"] == "review" && (fresh["repo"] != action["repo"] || fresh["number"] != action["number"] || forge_of(&fresh) != forge_of(action)) {
         return Err("The pull request has changed; ask me again.".into());
     }
     Ok(fresh)
@@ -480,7 +483,7 @@ mod tests {
     }
 
     fn pr(repo: &str, number: u64) -> maya_core::reviews::ReviewPr {
-        maya_core::reviews::ReviewPr { number, repo: repo.into(), title: format!("{repo} {number}"), author: "alex".into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: false, updated_at: "2026-10-01T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] }
+        maya_core::reviews::ReviewPr { number, forge: maya_core::config::GitProvider::Github, repo: repo.into(), title: format!("{repo} {number}"), author: "alex".into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: false, updated_at: "2026-10-01T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] }
     }
 
     #[test]
@@ -491,6 +494,14 @@ mod tests {
         assert_eq!((fresh["repo"].as_str(), fresh["number"].as_u64()), (Some("dosaki/collector"), Some(14)), "the confirmed one, though another repo has a #14 now");
         let gone = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/maya", 14)] };
         assert_eq!(revalidate(&action, &gone).unwrap_err(), "The pull request has changed; ask me again.");
+    }
+
+    #[test]
+    fn a_review_whose_forge_changed_is_refused() {
+        // Same repo path and number, but the action was for GitLab's MR.
+        let action = serde_json::json!({"kind": "review", "pr": "dosaki/collector!14", "forge": "gitlab", "repo": "dosaki/collector", "number": 14, "title": "dosaki/collector 14"});
+        let ctx = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/collector", 14)] };
+        assert_eq!(revalidate(&action, &ctx).unwrap_err(), "The pull request has changed; ask me again.", "the number found GitHub's PR, which is not the MR the user heard");
     }
 
     #[test]

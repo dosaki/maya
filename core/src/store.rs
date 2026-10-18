@@ -580,7 +580,7 @@ mod tests {
         let mut due = store.pr_dirs_due(1);
         due.sort();
         assert_eq!(due, vec!["/Users/x/dev/eye".to_string(), "/Users/x/dev/other".to_string()]);
-        let pr = PullRequest { number: 5, url: "https://github.com/o/r/pull/5".into(), state: "open".into() };
+        let pr = PullRequest { number: 5, url: "https://github.com/o/r/pull/5".into(), state: "open".into(), forge: Default::default() };
         store.set_pr("/Users/x/dev/eye", Some(pr.clone()), 1);
         store.set_pr("/Users/x/dev/other", None, 1);
         let cards = store.refresh(2);
