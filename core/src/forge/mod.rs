@@ -176,14 +176,17 @@ pub trait Http: Sync {
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
-/// `Http` over `ureq`, every status handed back rather than raised.
+/// `Http` over `ureq`, every status handed back rather than raised. It
+/// trusts the certificates the OS trusts, so an internal CA or a
+/// TLS-inspecting proxy works as it does for `git` and `gh`.
 pub struct Ureq {
     agent: ureq::Agent,
 }
 
 impl Ureq {
     pub fn new() -> Self {
-        let config = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)).http_status_as_error(false).build();
+        let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
+        let config = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)).http_status_as_error(false).tls_config(tls).build();
         Ureq { agent: ureq::Agent::new_with_config(config) }
     }
 }
@@ -325,6 +328,14 @@ pub(crate) mod fake {
 mod tests {
     use super::*;
     use crate::config::{GitConnection, GitProvider, TokenSource};
+
+    #[test]
+    fn the_forges_trust_the_systems_certificates() {
+        // A self-hosted GitLab on an internal CA, or a TLS-inspecting proxy,
+        // is trusted where the OS trusts it, as `gh` did.
+        let roots = Ureq::new().agent.config().tls_config().root_certs().clone();
+        assert!(matches!(roots, ureq::tls::RootCerts::PlatformVerifier), "{roots:?}");
+    }
 
     fn github() -> ForgeSite {
         ForgeSite::of(&GitConnection::default_for(GitProvider::Github))
