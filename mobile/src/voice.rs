@@ -541,7 +541,8 @@ impl Voice {
         push(&mut i.history, "maya", pending.as_ref().map_or(&say, |p| &p.say));
         match pending {
             Some(p) => {
-                i.flow.set_pending(p.clone(), (self.now)());
+                // Held while it is read back; `spoken` starts its window.
+                i.flow.hold_pending(p.clone());
                 let line = p.say.clone();
                 i.view.pending = Some(line.clone());
                 self.say(&mut i, &line, After::Confirm(p));
@@ -1173,6 +1174,32 @@ mod tests {
         assert_eq!(v.view().pending.as_deref(), Some("Telling x: y. Yes?"));
         v.heard("yes");
         assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { .. }));
+    }
+
+    #[test]
+    fn a_yes_during_a_long_read_back_still_confirms() {
+        let (v, io, asked) = voice(read_back());
+        v.tap();
+        v.heard("tell x y");
+        io.take();
+        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
+        assert_eq!(v.view().pending.as_deref(), Some("Telling x: y. Yes?"), "Yes and No still show");
+        v.confirm(true);
+        assert!(matches!(asked.lock().unwrap().get(1), Some(Request::Execute { .. })), "the window starts when the read-back ends");
+    }
+
+    #[test]
+    fn the_answer_window_starts_when_the_read_back_ends() {
+        let (v, io, asked) = voice(read_back());
+        v.tap();
+        v.heard("tell x y");
+        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
+        v.spoken(true);
+        io.take();
+        assert_eq!(v.view().state, "awaiting-confirm");
+        advance(maya_core::wake::CONFIRM_WAIT_MS - 1);
+        v.heard("yes");
+        assert!(matches!(asked.lock().unwrap().get(1), Some(Request::Execute { .. })));
     }
 
     /// Every view the page was shown, for checks on what was published.

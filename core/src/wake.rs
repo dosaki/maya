@@ -187,6 +187,13 @@ impl Flow {
         self.state = State::AwaitingConfirm { pending: p, until: now_ms + CONFIRM_WAIT_MS };
     }
 
+    /// Holds a pending action with no deadline yet, while its read-back is
+    /// still being said: a yes may come at any point of it. `set_pending`
+    /// starts the answer window once the read-back has ended.
+    pub fn hold_pending(&mut self, p: Pending) {
+        self.state = State::AwaitingConfirm { pending: p, until: u64::MAX };
+    }
+
     /// True while a pending action is held, whether or not its window has run
     /// out; the next segment (or a new `set_pending`) settles it.
     pub fn has_pending(&self) -> bool {
@@ -399,6 +406,19 @@ mod tests {
         assert!(f.drop_expired(1000 + CONFIRM_WAIT_MS + 1));
         assert!(!f.has_pending());
         assert!(!f.drop_expired(1000 + CONFIRM_WAIT_MS + 2), "nothing left to drop");
+    }
+
+    #[test]
+    fn a_held_pending_action_waits_until_its_window_is_set() {
+        let mut f = Flow::new();
+        f.hold_pending(pending());
+        assert!(f.has_pending());
+        assert_eq!(f.state(1_000 + 10 * CONFIRM_WAIT_MS), "awaiting-confirm", "held for as long as the read-back lasts");
+        assert!(!f.drop_expired(1_000 + 10 * CONFIRM_WAIT_MS));
+        assert_eq!(f.on_segment("yes", 1_000 + 10 * CONFIRM_WAIT_MS), vec![Effect::Execute(pending().action)], "a yes during the read-back confirms");
+        f.hold_pending(pending());
+        f.set_pending(pending(), 50_000);
+        assert_eq!(f.state(50_000 + CONFIRM_WAIT_MS + 1), "idle", "once set, its window runs as usual");
     }
 
     #[test]
