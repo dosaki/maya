@@ -334,12 +334,21 @@ impl Voice {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(delay));
                 if let Some(v) = me.upgrade() {
-                    let i = v.inner.lock().unwrap();
-                    if i.generation == generation && Self::active(&i) && i.wake && !i.speaking && !i.thinking {
-                        v.io.listen(true);
-                    }
+                    v.retry_wake(generation);
                 }
             });
+        }
+    }
+
+    /// A backoff ran out: restart the wake loop if nothing else has taken
+    /// the recogniser or the conversation since. A tap, a question's reply
+    /// or a confirmation listens in a window of its own; the wake loop
+    /// comes back by itself once that window closes.
+    fn retry_wake(&self, generation: u64) {
+        let i = self.inner.lock().unwrap();
+        let idle = i.flow.state((self.now)()) == "idle";
+        if i.generation == generation && Self::active(&i) && i.wake && !i.speaking && !i.thinking && idle {
+            self.io.listen(true);
         }
     }
 
@@ -1003,5 +1012,20 @@ mod tests {
         assert_eq!(v.view().state, "awaiting-confirm");
         v.heard("yes");
         assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { .. }));
+    }
+
+    #[test]
+    fn a_wake_retry_does_not_cut_off_a_tap() {
+        let (v, io, _) = voice(vec![]);
+        v.set_wake(true);
+        v.failed("the recogniser is busy", false);
+        let generation = v.begin_request();
+        v.tap();
+        io.take();
+        v.retry_wake(generation);
+        assert_eq!(io.take(), Vec::<String>::new(), "the tap's window is still open");
+        advance(maya_core::wake::COMMAND_WAIT_MS + 1);
+        v.retry_wake(generation);
+        assert_eq!(io.take(), vec!["listen wake"]);
     }
 }

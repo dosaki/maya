@@ -208,6 +208,10 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             if (onDevice) putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
         }
+        // A tap during the wake loop finds the recogniser still listening:
+        // without this it answers ERROR_RECOGNIZER_BUSY. The cancel's own
+        // ERROR_CLIENT is ignored below.
+        recognizer?.cancel()
         recognizer?.startListening(intent)
     }
 
