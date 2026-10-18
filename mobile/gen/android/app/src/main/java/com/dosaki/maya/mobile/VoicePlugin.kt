@@ -170,7 +170,11 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
         main.post { stopRecognizer() }
         val id = UUID.randomUUID().toString()
         utterance = id
-        engine.speak(args.line, TextToSpeech.QUEUE_FLUSH, Bundle(), id)
+        // Not queued at all (a line over getMaxSpeechInputLength(), say):
+        // no callback will follow, so report it now or Rust stays speaking.
+        if (engine.speak(args.line, TextToSpeech.QUEUE_FLUSH, Bundle(), id) == TextToSpeech.ERROR) {
+            finished(id, false)
+        }
         invoke.resolve()
     }
 
