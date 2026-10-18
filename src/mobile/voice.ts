@@ -36,29 +36,29 @@ function line(className: string, text: string): HTMLElement {
 
 export function renderVoiceBar(v: VoiceView, h: VoiceHandlers): HTMLElement {
   const bar = document.createElement("div");
-  bar.className = `voice voice--${v.state}`;
+  bar.className = `voicebar voicebar--${v.state}`;
   bar.hidden = v.offer === NO_MAIN;
   const mic = document.createElement("button");
   mic.type = "button";
-  mic.className = "voice__mic";
+  mic.className = "voicebar__mic";
   mic.dataset.action = "mic";
   mic.setAttribute("aria-label", "Talk to Maya");
   mic.textContent = "🎙";
   mic.disabled = v.offer !== null;
   mic.addEventListener("click", () => h.onTap());
   const said = document.createElement("div");
-  said.className = "voice__line";
+  said.className = "voicebar__line";
   if (v.offer) said.textContent = v.offer;
   else if (v.state === "thinking") said.textContent = "Thinking…";
   else {
-    if (v.heard) said.append(line("voice__heard", v.heard));
-    if (v.said) said.append(line("voice__said", v.said));
+    if (v.heard) said.append(line("voicebar__heard", v.heard));
+    if (v.said) said.append(line("voicebar__said", v.said));
   }
   bar.append(mic, said);
   // From the start of the read-back: a yes may come before it ends.
   if (v.pending) {
     const answer = document.createElement("div");
-    answer.className = "voice__answer";
+    answer.className = "voicebar__answer";
     for (const [label, yes] of [["Yes", true], ["No", false]] as const) {
       const b = document.createElement("button");
       b.type = "button";
@@ -69,12 +69,12 @@ export function renderVoiceBar(v: VoiceView, h: VoiceHandlers): HTMLElement {
     }
     bar.append(answer);
   }
-  if (v.note && v.state === "idle" && !v.offer) bar.append(line("voice__note", v.note));
-  if (v.error) bar.append(line("voice__error", v.error));
+  if (v.note && v.state === "idle" && !v.offer) bar.append(line("voicebar__note", v.note));
+  if (v.error) bar.append(line("voicebar__error", v.error));
   if (v.error === MIC_OFF) {
     const open = document.createElement("button");
     open.type = "button";
-    open.className = "voice__settings";
+    open.className = "voicebar__settings";
     open.dataset.action = "open-settings";
     open.textContent = "Open settings";
     open.addEventListener("click", () => h.onOpenSettings());

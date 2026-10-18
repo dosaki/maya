@@ -5,6 +5,14 @@ const base: VoiceView = { state: "idle", heard: "", said: "", pending: null, err
 const handlers = () => ({ onTap: vi.fn(), onConfirm: vi.fn(), onOpenSettings: vi.fn() });
 
 describe("renderVoiceBar", () => {
+  it("uses its own class names, not the desktop's 28 px .voice button", () => {
+    const el = renderVoiceBar({ ...base, state: "listening", pending: "Telling x: y. Yes?", error: MIC_OFF, note: "n" }, handlers());
+    expect(el.className).toBe("voicebar voicebar--listening");
+    const classes = [el, ...el.querySelectorAll("*")].flatMap((e) => [...e.classList]);
+    expect(classes.filter((c) => c === "voice" || c.startsWith("voice-") || c.startsWith("voice_"))).toEqual([]);
+    expect(el.querySelector(".voicebar__mic")).not.toBeNull();
+  });
+
   it("offers the mic when voice is offered, and taps through", () => {
     const h = handlers();
     const el = renderVoiceBar(base, h);
@@ -52,12 +60,12 @@ describe("renderVoiceBar", () => {
 
   it("notes an online recogniser while idle", () => {
     const note = "Speech goes through Google's service and may leave the phone.";
-    expect(renderVoiceBar({ ...base, note }, handlers()).querySelector(".voice__note")?.textContent).toBe(note);
-    expect(renderVoiceBar({ ...base, note, state: "thinking" }, handlers()).querySelector(".voice__note")).toBeNull();
+    expect(renderVoiceBar({ ...base, note }, handlers()).querySelector(".voicebar__note")?.textContent).toBe(note);
+    expect(renderVoiceBar({ ...base, note, state: "thinking" }, handlers()).querySelector(".voicebar__note")).toBeNull();
   });
 
   it("shows an error under the mic", () => {
-    expect(renderVoiceBar({ ...base, error: "Microphone access is off." }, handlers()).querySelector(".voice__error")?.textContent).toBe("Microphone access is off.");
+    expect(renderVoiceBar({ ...base, error: "Microphone access is off." }, handlers()).querySelector(".voicebar__error")?.textContent).toBe("Microphone access is off.");
   });
 
   it("offers the app's settings when the microphone is refused", () => {
