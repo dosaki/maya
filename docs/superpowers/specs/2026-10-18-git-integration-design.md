@@ -1,7 +1,7 @@
 # Git integration: GitHub and GitLab — design
 
 Date: 2026-10-18
-Status: approved design, not yet implemented
+Status: implemented
 
 ## Purpose
 

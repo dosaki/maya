@@ -9,7 +9,7 @@ sidecar: Swift in `ear/` on macOS, Rust in `ear-rs/` on Windows and Linux.
 
 - Rust (rustup), Node 20+, pnpm
 - the Xcode Command Line Tools (`xcode-select --install`) for `swiftc`
-- `jq` on PATH for the Claude Code hook, `gh` for the Pull Requests tab
+- `jq` on PATH for the Claude Code hook
 
 ## Build and run
 
@@ -32,6 +32,17 @@ puts `Maya.app` in `target/release/bundle/macos/` (with `--target <triple>`,
 `target/<triple>/release/bundle/macos/Maya.app`). The voice
 features only work from a bundle: the sidecar, the whisper framework and
 the microphone and speech permissions are all tied to it.
+
+## Git integration
+
+The Pull requests tab and each card's PR badge talk to GitHub's and
+GitLab's APIs directly (`core/src/forge/`); `gh` is not needed. Settings
+→ Git switches each on or off and says where its token comes from: a
+pasted token, kept in the OS key store (`maya-github`, `maya-gitlab`), or
+a variable read from the login shell (`forge::env`). GitLab's URL defaults
+to `https://gitlab.com`. The first start after 0.24 imports `gh auth
+token` once, when `gh` is logged in. Review clones run `git clone` with
+the user's own git credentials.
 
 ## Windows
 
