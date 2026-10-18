@@ -1005,25 +1005,25 @@ describe("Settings → Git", () => {
 
   it("shows a block per provider, its fields disabled while it is off", () => {
     const root = renderSettings(gitModel(), handlers());
-    expect(block(root, "github").querySelector<HTMLInputElement>("input[name=gitEnabled]")!.checked).toBe(true);
-    expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name=gitEnabled]")!.checked).toBe(false);
-    expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name=gitBaseUrl]")!.disabled).toBe(true);
-    expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name=gitBaseUrl]")!.placeholder).toBe("https://gitlab.com");
-    expect(block(root, "github").querySelector("input[name=gitBaseUrl]")).toBeNull();
+    expect(block(root, "github").querySelector<HTMLInputElement>("input[name^=gitEnabled]")!.checked).toBe(true);
+    expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name^=gitEnabled]")!.checked).toBe(false);
+    expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name^=gitBaseUrl]")!.disabled).toBe(true);
+    expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name^=gitBaseUrl]")!.placeholder).toBe("https://gitlab.com");
+    expect(block(root, "github").querySelector("input[name^=gitBaseUrl]")).toBeNull();
   });
 
   it("shows the variable field for env and the token field for stored, never filled", () => {
     const stored = gitConnections([{ provider: "github", enabled: true, token: { kind: "stored" } }]);
     const root = renderSettings(gitModel({ git: stored, gitStatus: { github: { hasToken: true }, gitlab: { hasToken: false } } }), handlers());
     const gh = block(root, "github");
-    const tokenField = gh.querySelector<HTMLInputElement>("input[name=gitToken]")!;
+    const tokenField = gh.querySelector<HTMLInputElement>("input[name=gitToken-github]")!;
     expect(tokenField.type).toBe("password");
     expect(tokenField.value).toBe("");
-    expect(gh.querySelector("input[name=gitEnvName]")).toBeNull();
+    expect(gh.querySelector("input[name^=gitEnvName]")).toBeNull();
     expect(gh.querySelector("[data-action=git-clear]")).not.toBeNull();
     const gl = block(root, "gitlab");
-    expect(gl.querySelector<HTMLInputElement>("input[name=gitEnvName]")!.value).toBe("GITLAB_TOKEN");
-    expect(gl.querySelector("input[name=gitToken]")).toBeNull();
+    expect(gl.querySelector<HTMLInputElement>("input[name^=gitEnvName]")!.value).toBe("GITLAB_TOKEN");
+    expect(gl.querySelector("input[name=gitToken-gitlab]")).toBeNull();
   });
 
   it("calls a handler for each change", () => {
@@ -1031,22 +1031,22 @@ describe("Settings → Git", () => {
     const stored = gitConnections([{ provider: "github", enabled: true, token: { kind: "stored" } }, { provider: "gitlab", enabled: true, token: { kind: "env", name: "GITLAB_TOKEN" } }]);
     const root = renderSettings(gitModel({ git: stored, gitStatus: { github: { hasToken: true }, gitlab: { hasToken: false } } }), h);
     const gl = block(root, "gitlab");
-    const on = gl.querySelector<HTMLInputElement>("input[name=gitEnabled]")!;
+    const on = gl.querySelector<HTMLInputElement>("input[name^=gitEnabled]")!;
     on.checked = false;
     on.dispatchEvent(new Event("change"));
     expect(h.onGitEnabled).toHaveBeenCalledWith("gitlab", false);
-    const url = gl.querySelector<HTMLInputElement>("input[name=gitBaseUrl]")!;
+    const url = gl.querySelector<HTMLInputElement>("input[name^=gitBaseUrl]")!;
     url.value = "  https://gitlab.acme.io/ ";
     url.dispatchEvent(new Event("change"));
     expect(h.onGitBaseUrl).toHaveBeenCalledWith("https://gitlab.acme.io/");
-    const env = gl.querySelector<HTMLInputElement>("input[name=gitEnvName]")!;
+    const env = gl.querySelector<HTMLInputElement>("input[name^=gitEnvName]")!;
     env.value = " MY_TOKEN ";
     env.dispatchEvent(new Event("change"));
     expect(h.onGitEnvName).toHaveBeenCalledWith("gitlab", "MY_TOKEN");
     gl.querySelector<HTMLInputElement>("input[name=gitTokenKind-gitlab][value=stored]")!.dispatchEvent(new Event("change"));
     expect(h.onGitTokenKind).toHaveBeenCalledWith("gitlab", "stored");
     const gh = block(root, "github");
-    const tok = gh.querySelector<HTMLInputElement>("input[name=gitToken]")!;
+    const tok = gh.querySelector<HTMLInputElement>("input[name=gitToken-github]")!;
     tok.value = " ghp_new ";
     tok.dispatchEvent(new Event("change"));
     expect(h.onGitToken).toHaveBeenCalledWith("github", "ghp_new");

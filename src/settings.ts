@@ -343,6 +343,8 @@ type Field = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 /** The named field in `root` that has focus, and its selection when it has one. */
 interface FocusedField {
   name: string;
+  /** Set for radios, which share a name across the group. */
+  value?: string;
   start: number | null;
   end: number | null;
   direction: "forward" | "backward" | "none" | null;
@@ -356,6 +358,7 @@ function focusedField(root: HTMLElement): FocusedField | null {
   const el = document.activeElement;
   if (!isField(el) || !el.name || !root.contains(el)) return null;
   const focused: FocusedField = { name: el.name, start: null, end: null, direction: null };
+  if (el instanceof HTMLInputElement && el.type === "radio") focused.value = el.value;
   if (el instanceof HTMLSelectElement) return focused;
   try {
     // Null (or a throw, in some engines) for inputs with no caret, such as checkboxes.
@@ -369,7 +372,8 @@ function focusedField(root: HTMLElement): FocusedField | null {
 }
 
 function restoreFocus(root: HTMLElement, f: FocusedField): void {
-  const el = [...root.querySelectorAll("input, select, textarea")].find((e): e is Field => isField(e) && e.name === f.name);
+  const named = [...root.querySelectorAll("input, select, textarea")].filter((e): e is Field => isField(e) && e.name === f.name);
+  const el = (f.value !== undefined && named.find((e) => e.value === f.value)) || named[0];
   if (!el) return;
   el.focus();
   if (el instanceof HTMLSelectElement || f.start === null || f.end === null) return;
@@ -695,7 +699,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     onLabel.className = "settings__check";
     const on = document.createElement("input");
     on.type = "checkbox";
-    on.name = "gitEnabled";
+    on.name = `gitEnabled-${p}`;
     on.checked = conn.enabled;
     on.addEventListener("change", () => h.onGitEnabled?.(p, on.checked));
     onLabel.append(on, document.createTextNode(` ${GIT_LABEL[p]}`));
@@ -706,7 +710,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       urlLabel.textContent = "URL";
       const url = document.createElement("input");
       url.type = "text";
-      url.name = "gitBaseUrl";
+      url.name = "gitBaseUrl-gitlab";
       url.placeholder = "https://gitlab.com";
       url.value = conn.baseUrl ?? "";
       url.disabled = !conn.enabled;
@@ -737,7 +741,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       tokLabel.textContent = `${GIT_LABEL[p]} token`;
       const tok = document.createElement("input");
       tok.type = "password";
-      tok.name = "gitToken";
+      tok.name = `gitToken-${p}`;
       tok.autocomplete = "off";
       tok.disabled = !conn.enabled;
       tok.placeholder = status.hasToken ? `saved in ${secretStore()}; paste to replace` : "paste your token";
@@ -762,7 +766,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       envLabel.textContent = "Variable";
       const env = document.createElement("input");
       env.type = "text";
-      env.name = "gitEnvName";
+      env.name = `gitEnvName-${p}`;
       env.placeholder = GIT_DEFAULT_ENV[p];
       env.value = conn.token.name;
       env.disabled = !conn.enabled;
