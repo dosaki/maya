@@ -76,9 +76,11 @@ GitLab    [on/off]
   `clear_git_token(provider)`. The page learns only `hasToken: bool`
   through `get_git_status`.
 - **From env var:** a name field, defaulting to `GH_TOKEN` (GitHub) and
-  `GITLAB_TOKEN` (GitLab). A blank name reads as the default.
+  `GITLAB_TOKEN` (GitLab). A blank name reads as the default. The name
+  goes into a shell line (the login-shell probe), so `set_config` refuses
+  anything but letters, digits and `_`, not starting with a digit.
 - **GitLab URL:** blank means `https://gitlab.com`. On save it is trimmed
-  of trailing slashes and must parse as an `http` or `https` URL; a path
+  of trailing slashes and of a pasted `/api/v4`, and must parse as an `http` or `https` URL; a path
   is allowed (`https://example.com/gitlab`). An invalid URL is refused by
   `set_config` with a message naming the field.
 - **Test** calls `test_git_connection(provider)`, which resolves the
@@ -90,8 +92,8 @@ GitLab    [on/off]
 `core/src/config.rs` gains:
 
 ```rust
-#[serde(default = "default_git")]
-pub git: Vec<GitConnection>,
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub git: Option<Vec<GitConnection>>,
 
 pub struct GitConnection {
     pub provider: GitProvider,          // "github" | "gitlab"
@@ -108,11 +110,12 @@ pub enum TokenSource {
 
 - `Config::default()` has GitHub on with `Env { name: "GH_TOKEN" }` and
   GitLab off with `Env { name: "GITLAB_TOKEN" }`, base URL None.
-- `git_for(provider)` returns the first connection of that provider,
-  inserting the default when missing, so the page always has one of each.
-- A config file with no `git` field is marked as needing the one-time
-  `gh` import (see Upgrade). The marker is the missing field, not a
-  separate flag: once saved, the field exists.
+- `git_connections()` returns one GitHub and one GitLab connection, in
+  that order, with the default for any missing, so the page always has
+  one of each.
+- A config with no `git` field (None) needs the one-time `gh` import
+  (see Upgrade). The marker is the missing field, not a separate flag:
+  once saved, the field exists.
 
 ## Tokens
 
@@ -220,10 +223,10 @@ so the card can say "MR !12" or "PR #12".
 ## Wiring
 
 - **Badge:** `pr::lookup(dir, forges)` reads `remote.origin.url` and
-  `git rev-parse --abbrev-ref HEAD` (a detached `HEAD` means no PR),
+  `git symbolic-ref --short -q HEAD` (a detached `HEAD` means no PR),
   routes the remote, and calls the forge's `current_pr`. An error is
-  logged once per directory and cached as "none" for `TTL_MS` (60 s), as
-  a failed `gh` call is today.
+  cached as "none" for `TTL_MS` (60 s), as a failed `gh` call is today,
+  so it is logged at most once a minute per directory.
 - **Pull requests tab:** `reviews::fetch(forges)` asks every enabled
   forge on its own thread and merges the lists, newest update first. The
   result is `{ prs, errors: [{ forge, message }] }`. `ReviewState.error:
@@ -232,8 +235,8 @@ so the card can say "MR !12" or "PR #12".
   provider does not empty the tab. With no forge enabled, `fetch` is not
   called and the state says `off: true`.
 - **Notifications:** `PrNotifier` is keyed by URL and works unchanged
-  for MRs. `pr_banner` and `pr_spoken_line` say "merge request" for
-  GitLab.
+  for MRs. `pr_banner` titles an MR `repo !12`, and
+  `pr_spoken_line` says "repo merge request 12".
 - **Review clone:** `shell_command` runs
   `git clone '<web base>/<repo>.git' '<dir>'`, where the web base is
   `https://github.com` or the GitLab base URL. `find_checkout` and
@@ -288,9 +291,9 @@ At startup, when the loaded config had no `git` field:
 
 | Situation | What the user sees |
 |---|---|
-| Provider on, no token | "No GitLab token: paste one or set GITLAB_TOKEN in Settings → Git" in the tab; no calls |
+| Provider on, no token | "No GitLab token: set GITLAB_TOKEN or paste a token in Settings → Git." in the tab; no calls |
 | 401 / 403 | "GitLab check failed: the token was refused (401). It needs the read_api scope." |
-| Timeout, DNS, TLS | "GitLab check failed: could not reach https://gitlab.acme.io: <reason>" |
+| Timeout, DNS, TLS | "GitLab check failed: could not reach gitlab.acme.io: <reason>" |
 | GraphQL `errors` with no data | the first error's `message` |
 | Bad GitLab URL in Settings | `set_config` refuses: "GitLab URL must be an http(s) address." |
 | Key store unavailable | "Could not store the token: <reason>" on save; the source stays as it was |
