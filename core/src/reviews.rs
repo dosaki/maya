@@ -299,7 +299,8 @@ pub struct ReviewTarget {
     pub clone: bool,
 }
 
-/// The free project checkout if there is one; else `<clones>/<repo>-<number>`,
+/// The free project checkout if there is one; else `<clones>/<repo>-<number>`
+/// (`<repo>-mr<number>` on GitLab, so `!12` never reuses GitHub's `#12`),
 /// cloned unless it already exists.
 pub fn resolve_target(projects_root: &Path, clones_root: &Path, site: &ForgeSite, repo: &str, number: u64, live_cwds: &[String]) -> ReviewTarget {
     if let Some(dir) = find_checkout(projects_root, site, repo) {
@@ -308,16 +309,17 @@ pub fn resolve_target(projects_root: &Path, clones_root: &Path, site: &ForgeSite
         }
     }
     let repo_name = repo.rsplit('/').next().unwrap_or(repo);
-    let dir = clones_root.join(format!("{repo_name}-{number}"));
+    let marker = if site.provider == GitProvider::Gitlab { "mr" } else { "" };
+    let dir = clones_root.join(format!("{repo_name}-{marker}{number}"));
     let clone = !dir.is_dir();
     ReviewTarget { dir, clone }
 }
 
 /// The name a review session is started with, so the board can tie it back
-/// to its PR: `review <repo> #<number>`.
-pub fn session_name(name_with_owner: &str, number: u64) -> String {
+/// to its PR: `review <repo> #<number>`, or `review <repo> !<number>` on GitLab.
+pub fn session_name(forge: GitProvider, name_with_owner: &str, number: u64) -> String {
     let repo_name = name_with_owner.rsplit('/').next().unwrap_or(name_with_owner);
-    format!("review {repo_name} #{number}")
+    format!("review {repo_name} {}{number}", forge.sigil())
 }
 
 /// The prompt a review session starts with: the template with `{number}`,
@@ -341,8 +343,8 @@ pub fn render_prompt(template: &str, pr: &ReviewPr) -> String {
 /// the agent in the folder on the prompt file, as a new session named
 /// `review <repo> #<number>` (`-n` for Claude Code; the others get the name
 /// typed later, as `actions::start_session` does).
-pub fn shell_command(agent: Harness, target: &ReviewTarget, clone_url: &str, name_with_owner: &str, number: u64, prompt_file: &Path, grok_id: Option<&str>) -> String {
-    let opts = LaunchOptions { agent, name: Some(session_name(name_with_owner, number)), ..Default::default() };
+pub fn shell_command(agent: Harness, target: &ReviewTarget, clone_url: &str, session: &str, prompt_file: &Path, grok_id: Option<&str>) -> String {
+    let opts = LaunchOptions { agent, name: Some(session.to_string()), ..Default::default() };
     let start = crate::launch::session_command(&target.dir, prompt_file, &opts, grok_id);
     if target.clone {
         let dir = shell_single_quote(&target.dir.to_string_lossy());
@@ -552,8 +554,21 @@ mod tests {
     }
 
     #[test]
+    fn a_gitlab_clone_folder_is_named_for_the_mr_and_never_reuses_githubs() {
+        let t = tempfile::tempdir().unwrap();
+        let (projects, clones) = (t.path().join("dev"), t.path().join("reviews"));
+        std::fs::create_dir_all(clones.join("r-12")).unwrap();
+        let gl = ForgeSite::of(&crate::config::GitConnection { base_url: Some("https://gitlab.acme.io".into()), enabled: true, ..crate::config::GitConnection::default_for(GitProvider::Gitlab) });
+        let mr = resolve_target(&projects, &clones, &gl, "grp/r", 12, &[]);
+        assert_eq!(mr, ReviewTarget { dir: clones.join("r-mr12"), clone: true }, "GitHub's r-12 is another repo's");
+        let gh = resolve_target(&projects, &clones, &github_site(), "Org/r", 12, &[]);
+        assert_eq!(gh, ReviewTarget { dir: clones.join("r-12"), clone: false });
+    }
+
+    #[test]
     fn review_session_name_is_predictable() {
-        assert_eq!(session_name("Org/bedrock", 451), "review bedrock #451");
+        assert_eq!(session_name(GitProvider::Github, "Org/bedrock", 451), "review bedrock #451");
+        assert_eq!(session_name(GitProvider::Gitlab, "grp/sub/bedrock", 12), "review bedrock !12");
     }
 
     /// The PR's review state as seen by viewer `Me` on a PR by `author`.
@@ -671,15 +686,15 @@ mod tests {
     fn the_review_shell_line_runs_the_agent_on_the_prompt_file_with_the_review_name() {
         let file = Path::new("/Users/x/.claude/maya/prompts/1.txt");
         let free = ReviewTarget { dir: PathBuf::from("/Users/x/dev/bedrock"), clone: false };
-        let s = shell_command(crate::model::Harness::ClaudeCode, &free, "https://github.com/Org/bedrock.git", "Org/bedrock", 451, file, None);
+        let s = shell_command(crate::model::Harness::ClaudeCode, &free, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
         assert_eq!(s, "cd '/Users/x/dev/bedrock' && p=\"$(cat '/Users/x/.claude/maya/prompts/1.txt')\" && rm -f '/Users/x/.claude/maya/prompts/1.txt' && claude -n 'review bedrock #451' -- \"$p\"");
         let clone = ReviewTarget { dir: PathBuf::from("/Users/x/dev/reviews/bedrock-451"), clone: true };
-        let s = shell_command(crate::model::Harness::Codex, &clone, "https://github.com/Org/bedrock.git", "Org/bedrock", 451, file, None);
+        let s = shell_command(crate::model::Harness::Codex, &clone, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
         assert!(s.starts_with("mkdir -p '/Users/x/dev/reviews' && git clone 'https://github.com/Org/bedrock.git' '/Users/x/dev/reviews/bedrock-451' && "), "{s}");
         assert!(s.ends_with("&& codex -- \"$p\""), "no -n for Codex: the name waits as a pending name: {s}");
-        let s = shell_command(crate::model::Harness::Grok, &free, "https://github.com/Org/bedrock.git", "Org/bedrock", 451, file, Some("1111-2222"));
+        let s = shell_command(crate::model::Harness::Grok, &free, "https://github.com/Org/bedrock.git", "review bedrock #451", file, Some("1111-2222"));
         assert!(s.ends_with("&& grok --session-id '1111-2222' -- \"$p\""), "{s}");
-        let s = shell_command(crate::model::Harness::Antigravity, &free, "https://github.com/Org/bedrock.git", "Org/bedrock", 451, file, None);
+        let s = shell_command(crate::model::Harness::Antigravity, &free, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
         assert!(s.ends_with("&& agy --prompt-interactive=\"$p\""), "{s}");
     }
 }

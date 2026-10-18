@@ -147,7 +147,13 @@ pub fn route<'a, T: AsRef<ForgeSite>>(remote: &str, sites: &'a [T]) -> Option<(&
         }
         let prefix = site.prefix();
         let prefix = prefix.trim_start_matches('/');
-        let path = if http && !prefix.is_empty() { path.strip_prefix(&format!("{prefix}/"))?.to_string() } else { path.clone() };
+        let path = if http && !prefix.is_empty() {
+            // The prefix is the site's own spelling; the repo path keeps the remote's.
+            let want = format!("{prefix}/");
+            path.get(..want.len()).filter(|head| head.eq_ignore_ascii_case(&want)).map(|_| path[want.len()..].to_string())?
+        } else {
+            path.clone()
+        };
         (!path.is_empty()).then_some((s, path))
     })
 }
@@ -391,6 +397,11 @@ mod tests {
             assert!(!path.contains("secret"));
         }
         assert!(route("git@other.io:grp/r.git", &s).is_none());
+        let upper = [gitlab("https://acme.io/GitLab")];
+        let (_, path) = route("https://acme.io/gitlab/grp/r.git", &upper).unwrap();
+        assert_eq!(path, "grp/r", "the prefix matches in any case; the repo path keeps its own");
+        let (_, path) = route("https://acme.io/GITLAB/Grp/R.git", &upper).unwrap();
+        assert_eq!(path, "Grp/R");
     }
 
     #[test]

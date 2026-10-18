@@ -37,7 +37,10 @@ pub fn forges(conns: &[GitConnection]) -> (Vec<Forge>, Vec<ForgeError>) {
 /// After a Git setting or token changed: look everything up again, now.
 pub fn settings_changed(app: &AppHandle) {
     forge::env::forget();
-    app.state::<AppState>().store.lock().unwrap().clear_prs();
+    let state = app.state::<AppState>();
+    // Before the cache is cleared: a poll that began earlier then drops its answers.
+    state.git_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    state.store.lock().unwrap().clear_prs();
     let handle = app.clone();
     std::thread::spawn(move || {
         crate::poll_reviews(&handle);

@@ -21,13 +21,14 @@ export interface ReviewContext {
 
 /**
  * The live session working on `pr`, if any: one started from the Review
- * button (named `review <repo> #<n>`), one whose branch has this PR, or one
+ * button (named `review <repo> #<n>`, or `!<n>` for a GitLab MR), one whose branch has this PR, or one
  * inside the PR's clone folder. The most recently active match wins.
  */
 export function relatedSession(pr: ReviewPr, cards: Card[], clonesDir: string | null): Card | null {
   const repoName = pr.repo.split("/").pop() ?? pr.repo;
-  const name = `review ${repoName} #${pr.number}`;
-  const cloneDir = clonesDir ? `${clonesDir.replace(/\/+$/, "")}/${repoName}-${pr.number}` : null;
+  const name = `review ${repoName} ${prRef(pr)}`;
+  // A GitLab MR's clone folder says `mr`, so `!12` never lands in GitHub's `-12`.
+  const cloneDir = clonesDir ? `${clonesDir.replace(/\/+$/, "")}/${repoName}-${pr.forge === "gitlab" ? "mr" : ""}${pr.number}` : null;
   const matches = cards.filter(
     (c) => c.name === name || c.pr?.url === pr.url || (cloneDir !== null && (c.cwd === cloneDir || c.cwd.startsWith(`${cloneDir}/`))),
   );
@@ -136,6 +137,7 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
   }
   const forgeMark = iconElement(pr.forge, 12);
   forgeMark.classList.add("pr__forge");
+  forgeMark.removeAttribute("aria-hidden");
   forgeMark.setAttribute("role", "img");
   forgeMark.setAttribute("aria-label", pr.forge === "gitlab" ? "GitLab" : "GitHub");
   name.append(forgeMark);

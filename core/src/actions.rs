@@ -678,7 +678,7 @@ pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, 
             (store.config.brain_model().map(String::from), agents().into_iter().find(|a| a.harness == model::Harness::OpenCode).unwrap_or_else(|| crate::agents::info_for(model::Harness::OpenCode, None)))
         };
         let options = launch::LaunchOptions { agent, model: brain_model, ..Default::default() };
-        let name = crate::reviews::session_name(&pr.repo, pr.number);
+        let name = crate::reviews::session_name(pr.forge, &pr.repo, pr.number);
         start_opencode(l, &target.dir, &crate::reviews::render_prompt(&template, pr), Some(&name), &options, &info)?;
         return Ok(target.dir.to_string_lossy().into_owned());
     }
@@ -695,9 +695,9 @@ pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, 
     if target.clone {
         std::fs::create_dir_all(&cwd).map_err(|e| format!("Could not create the clones folder {}: {e}.", cwd.display()))?;
     }
-    l.terminal.open(&crate::reviews::shell_command(agent, &target, &site.clone_url(&pr.repo), &pr.repo, pr.number, &file, grok_id.as_deref()), &cwd, &tmux_label())?;
+    l.terminal.open(&crate::reviews::shell_command(agent, &target, &site.clone_url(&pr.repo), &crate::reviews::session_name(pr.forge, &pr.repo, pr.number), &file, grok_id.as_deref()), &cwd, &tmux_label())?;
     if agent != model::Harness::ClaudeCode {
-        let name = crate::reviews::session_name(&pr.repo, pr.number);
+        let name = crate::reviews::session_name(pr.forge, &pr.repo, pr.number);
         l.store.lock().unwrap().add_pending_name(crate::pending_names::PendingName::new(agent, &target.dir.to_string_lossy(), &name, now_ms(), known, grok_id));
     }
     Ok(target.dir.to_string_lossy().into_owned())

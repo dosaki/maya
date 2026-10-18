@@ -1686,6 +1686,22 @@ export async function initSettings(): Promise<void> {
   // Settings already the visible tab) cannot be missed.
   window.addEventListener("maya:config-changed", refetchAndPaint);
 
+  // Registered before the first await too: the Pull requests tab can ask for
+  // the Git group while Settings is still loading.
+  let loaded = false;
+  document.addEventListener(OPEN_SETTINGS_GROUP, (e) => {
+    const group = (e as CustomEvent<string>).detail;
+    if (!SETTINGS_GROUPS.some(([key]) => key === group)) return;
+    model.settingsGroup = group as SettingsGroup;
+    try {
+      localStorage.setItem(SETTINGS_GROUP_KEY, group);
+    } catch {
+      /* private mode: nothing to remember */
+    }
+    // Before the first load there is nothing to draw yet; its own paint shows the group.
+    if (loaded) paint();
+  });
+
   // The voice panel can turn listening on or off on its own; mirror that
   // into the model so the Settings checkbox doesn't show a stale state.
   // Every partial transcript emits `voice`: repaint only when listening
@@ -1774,18 +1790,7 @@ export async function initSettings(): Promise<void> {
       // ignore: an older backend or a stray failure just leaves Network off
     }
   });
-
-  document.addEventListener(OPEN_SETTINGS_GROUP, (e) => {
-    const group = (e as CustomEvent<string>).detail;
-    if (!SETTINGS_GROUPS.some(([key]) => key === group)) return;
-    model.settingsGroup = group as SettingsGroup;
-    try {
-      localStorage.setItem(SETTINGS_GROUP_KEY, group);
-    } catch {
-      /* private mode: nothing to remember */
-    }
-    paint();
-  });
+  loaded = true;
 
   // Listing installed agents can take seconds (it probes each harness), so
   // it runs after the rest of Settings is already usable rather than inside

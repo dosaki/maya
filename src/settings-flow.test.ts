@@ -758,6 +758,29 @@ describe("settings flow", () => {
     expect(status()).toBe("could not check for updates: offline");
   });
 
+  it("opens on Git when the Pull requests tab asks while Settings is still loading", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", git: null };
+    let release: () => void = () => {};
+    const late = new Promise<void>((r) => (release = r));
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return late.then(() => ({ ...config }));
+      if (cmd === "get_git_status") return Promise.resolve({ github: { hasToken: false }, gitlab: { hasToken: false } });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    const init = initSettings();
+    document.dispatchEvent(new CustomEvent("maya:settings-group", { detail: "git" }));
+    release();
+    await init;
+    await flush();
+    const visible = [...document.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group);
+    expect(visible).toEqual(["git"]);
+  });
+
   it("saves a GitLab URL into the git list and opens on Git when the Pull requests tab asks", async () => {
     let saved: any = null;
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", git: null };

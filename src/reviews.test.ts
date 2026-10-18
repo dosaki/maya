@@ -40,6 +40,22 @@ describe("relatedSession", () => {
     // Without a clones directory the folder rule is skipped.
     expect(relatedSession(pr(), [byDir], null)).toBeNull();
   });
+
+  it("tells a GitLab MR from a GitHub PR of the same number: by session name and by clone folder", () => {
+    const mr = pr({ forge: "gitlab", repo: "grp/sub/bedrock", number: 12, url: "https://gitlab.acme.io/grp/sub/bedrock/-/merge_requests/12" });
+    const ghPr = pr({ number: 12, url: "https://github.com/Org/bedrock/pull/12" });
+    const ghNamed = session({ name: "review bedrock #12" });
+    const glNamed = session({ name: "review bedrock !12" });
+    expect(relatedSession(mr, [ghNamed], null)).toBeNull();
+    expect(relatedSession(mr, [glNamed], null)).toBe(glNamed);
+    expect(relatedSession(ghPr, [glNamed], null)).toBeNull();
+    expect(relatedSession(ghPr, [ghNamed], null)).toBe(ghNamed);
+    const ghDir = session({ cwd: "/Users/x/dev/reviews/bedrock-12" });
+    const glDir = session({ cwd: "/Users/x/dev/reviews/bedrock-mr12/src" });
+    expect(relatedSession(mr, [ghDir], "/Users/x/dev/reviews")).toBeNull();
+    expect(relatedSession(mr, [glDir], "/Users/x/dev/reviews")).toBe(glDir);
+    expect(relatedSession(ghPr, [glDir], "/Users/x/dev/reviews")).toBeNull();
+  });
 });
 
 describe("renderReviews", () => {
@@ -275,6 +291,7 @@ describe("forges", () => {
     expect(cards.map((c) => c.querySelector(".pr__repo")?.textContent)).toEqual(["bedrock !12", "bedrock #451"]);
     expect(cards.map((c) => c.dataset.forge)).toEqual(["gitlab", "github"]);
     expect(cards[0].querySelector(".pr__forge")?.getAttribute("aria-label")).toBe("GitLab");
+    expect(cards[0].querySelector(".pr__forge")?.hasAttribute("aria-hidden")).toBe(false);
   });
 
   it("says each forge's error on its own line and still lists the PRs", () => {

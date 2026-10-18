@@ -138,6 +138,9 @@ pub struct AppState {
     pub network: Mutex<net::NetworkState>,
     /// This Maya's network key pair, read from the key store at first use.
     pub identity: Mutex<Option<std::sync::Arc<maya_core::net::identity::Keypair>>>,
+    /// Bumped whenever a Git setting or token changes, so a poll that began
+    /// under the old settings can tell its answers are stale and drop them.
+    pub git_generation: std::sync::atomic::AtomicU64,
 }
 
 /// The server's line to the app: repaints the board, tells the page about
@@ -247,6 +250,7 @@ pub struct ReviewState {
 }
 
 pub(crate) fn poll_reviews(app: &AppHandle) {
+    let generation = app.state::<AppState>().git_generation.load(std::sync::atomic::Ordering::SeqCst);
     let conns = app.state::<AppState>().store.lock().unwrap().config.git_connections();
     let (forges, missing) = git::forges(&conns);
     let off = forges.is_empty() && missing.is_empty();
@@ -261,6 +265,10 @@ pub(crate) fn poll_reviews(app: &AppHandle) {
     let decided;
     let snapshot = {
         let mut r = state.reviews.lock().unwrap();
+        if state.git_generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
+            log::line("app", "pull requests: the Git settings changed during the check; its answers are dropped");
+            return;
+        }
         let (prs, errors) = reviews::combine(&r.prs, fetched, missing);
         decided = state.pr_notifier.lock().unwrap().take_changes(&prs, &answered);
         r.prs = prs;
@@ -909,6 +917,7 @@ pub(crate) fn poll_pull_requests(app: &AppHandle) {
     if due.is_empty() {
         return;
     }
+    let generation = app.state::<AppState>().git_generation.load(std::sync::atomic::Ordering::SeqCst);
     let (forges, _) = git::forges(&conns);
     for dir in due {
         let pr = pr::lookup(std::path::Path::new(&dir), &forges, git::http()).unwrap_or_else(|e| {
@@ -916,7 +925,12 @@ pub(crate) fn poll_pull_requests(app: &AppHandle) {
             None
         });
         let state = app.state::<AppState>();
-        state.store.lock().unwrap().set_pr(&dir, pr, now_ms());
+        let mut store = state.store.lock().unwrap();
+        if state.git_generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
+            log::line("app", "pull requests: the Git settings changed during the lookup; its answers are dropped");
+            return;
+        }
+        store.set_pr(&dir, pr, now_ms());
     }
     refresh_and_emit(app);
 }
@@ -1268,7 +1282,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
         .invoke_handler(tauri::generate_handler![
             git::get_git_status,
