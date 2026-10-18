@@ -259,6 +259,30 @@ pub(crate) fn post_graphql(http: &dyn Http, forge: &Forge, query: &str) -> Resul
     answer(forge, http.post_json(&forge.site.graphql_url(), &forge.token, &body))
 }
 
+/// The PR or MR of `branch` in `repo`.
+pub fn current_pr(http: &dyn Http, forge: &Forge, repo: &str, branch: &str) -> Result<Option<crate::model::PullRequest>, String> {
+    match forge.site.provider {
+        GitProvider::Github => github::current_pr(http, forge, repo, branch),
+        GitProvider::Gitlab => Err("GitLab is not supported yet".into()),
+    }
+}
+
+/// The open PRs or MRs waiting on the user.
+pub fn review_prs(http: &dyn Http, forge: &Forge) -> Result<Vec<crate::reviews::ReviewPr>, String> {
+    match forge.site.provider {
+        GitProvider::Github => github::review_prs(http, forge),
+        GitProvider::Gitlab => Err("GitLab is not supported yet".into()),
+    }
+}
+
+/// Who the token belongs to, for Settings' Test button.
+pub fn whoami(http: &dyn Http, forge: &Forge) -> Result<String, String> {
+    match forge.site.provider {
+        GitProvider::Github => github::whoami(http, forge),
+        GitProvider::Gitlab => Err("GitLab is not supported yet".into()),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod fake {
     use std::sync::Mutex;

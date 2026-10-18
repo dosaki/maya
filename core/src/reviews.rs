@@ -140,14 +140,14 @@ fn parse_node(p: &serde_json::Value, reason: Reason, login: &str) -> Option<Revi
     })
 }
 
-/// `gh api graphql` output of `QUERY` as one list of review PRs.
+/// GitHub's reply to `QUERY` as one list of review PRs.
 pub fn parse_graphql(json: &str) -> Result<Vec<ReviewPr>, String> {
-    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("gh output was not JSON: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("GitHub's reply was not JSON: {e}"))?;
     let error = v["errors"].as_array().and_then(|e| e.first()).and_then(|e| e["message"].as_str()).map(|m| format!("GitHub said: {m}"));
     let data = &v["data"];
     // An org the token cannot reach adds an error but keeps the rest.
     let Some(login) = data["viewer"]["login"].as_str() else {
-        return Err(error.unwrap_or_else(|| "gh output had no viewer".into()));
+        return Err(error.unwrap_or_else(|| "GitHub's reply had no viewer".into()));
     };
     if let Some(e) = &error {
         crate::log::line("app", format!("pull requests: partial results: {e}"));
