@@ -45,7 +45,7 @@ pub fn board_summary(cards: &[Card]) -> String {
 }
 
 /// One line per pull request on the Pull Requests tab:
-/// `repo#number` (`repo!number (GitLab)` for a merge request) | title | by author [| draft] [| assigned to you [| approved by x]] [| you approved]`.
+/// `repo#number` (`repo!number (GitLab)` for a merge request) | title | by author [| draft] [| assigned to you [| approved by x]] [| you approved].
 pub fn pr_summary(prs: &[ReviewPr]) -> String {
     prs.iter()
         .map(|p| {
