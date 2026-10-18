@@ -251,6 +251,8 @@ body { margin: 0; background: var(--bg); }
 .pr__head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .pr__name { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
 .pr__repo { font-weight: 600; }
+.pr__forge { color: var(--muted); margin-right: 4px; vertical-align: -1px; }
+.reviews__off { color: var(--muted); padding: 8px 0 12px; font-size: 13px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .pr__dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .pr__dot--approved { background: var(--completed); }
 .pr__dot--commented { background: var(--working); }

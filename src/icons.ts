@@ -1,3 +1,5 @@
+import github from "./assets/icons/github.svg?raw";
+import gitlab from "./assets/icons/gitlab.svg?raw";
 import close from "./assets/icons/close.svg?raw";
 import compact from "./assets/icons/compact.svg?raw";
 import remote from "./assets/icons/remote.svg?raw";
@@ -11,7 +13,7 @@ import terminal from "./assets/icons/terminal.svg?raw";
  * edited in Inkscape. Draw strokes and fills with `currentColor` so the
  * icon takes the button's text colour.
  */
-const FILES = { terminal, reply, compact, resume, remote, close, search } as const;
+const FILES = { terminal, reply, compact, resume, remote, close, search, github, gitlab } as const;
 
 export type IconName = keyof typeof FILES;
 

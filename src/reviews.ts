@@ -1,8 +1,16 @@
 import { formatAge } from "./format";
-import { iconButton } from "./icons";
-import { STATE_LABEL, type Card, type ReviewMark, type ReviewPr, type ReviewState } from "./types";
+import { iconButton, iconElement } from "./icons";
+import { STATE_LABEL, prRef, type Card, type GitProvider, type ReviewMark, type ReviewPr, type ReviewState } from "./types";
 
-export type ReviewAction = { kind: "open-pr" | "review"; repo: string; number: number } | { kind: "terminal"; repo: string; number: number; pid: number };
+/** Settings listens for this on `document`; `detail` names the group to open. */
+export const OPEN_SETTINGS_GROUP = "maya:settings-group";
+
+export type ReviewAction =
+  | { kind: "open-pr" | "review"; forge: GitProvider; repo: string; number: number }
+  | { kind: "terminal"; forge: GitProvider; repo: string; number: number; pid: number }
+  | { kind: "git-settings" };
+
+const repoKey = (p: ReviewPr) => `${p.forge}:${p.repo}`;
 
 /** What the pane needs beyond the PR list to link PRs to live sessions. */
 export interface ReviewContext {
@@ -48,7 +56,7 @@ export type StateFilter = "all" | "toReview" | ReviewMark;
 
 export interface ReviewFilters {
   state: StateFilter;
-  /** `owner/name`, or null for every repository. */
+  /** `<forge>:<repo>`, or null for every repository. */
   repo: string | null;
 }
 
@@ -78,7 +86,7 @@ export function markFor(pr: ReviewPr, tab: ReviewTab): ReviewMark | null {
 export function applyFilters(prs: ReviewPr[], f: ReviewFilters, tab: ReviewTab = "review"): ReviewPr[] {
   return prs.filter((p) => {
     const mark = markFor(p, tab);
-    return (f.repo === null || p.repo === f.repo) && (f.state === "all" || (f.state === "toReview" ? mark === null : mark === f.state));
+    return (f.repo === null || repoKey(p) === f.repo) && (f.state === "all" || (f.state === "toReview" ? mark === null : mark === f.state));
   });
 }
 
@@ -94,10 +102,14 @@ export function tabCount(prs: ReviewPr[], tab: ReviewTab): number {
 
 /** One option per repository in `prs`, sorted, named by the short name unless two share it. */
 export function repoOptions(prs: ReviewPr[]): { value: string; label: string }[] {
-  const repos = [...new Set(prs.map((p) => p.repo))].sort((a, b) => a.localeCompare(b));
-  const short = (r: string) => r.split("/").pop() ?? r;
-  const label = (r: string) => (repos.filter((o) => short(o) === short(r)).length > 1 ? r : short(r));
-  return repos.map((r) => ({ value: r, label: label(r) })).sort((a, b) => a.label.localeCompare(b.label));
+  const keys = [...new Map(prs.map((p) => [repoKey(p), p])).values()];
+  const short = (p: ReviewPr) => p.repo.split("/").pop() ?? p.repo;
+  const label = (p: ReviewPr) => {
+    if (keys.filter((o) => short(o) === short(p)).length === 1) return short(p);
+    const clash = keys.some((o) => o.repo === p.repo && o.forge !== p.forge);
+    return clash && p.forge === "gitlab" ? `${p.repo} (GitLab)` : p.repo;
+  };
+  return keys.map((p) => ({ value: repoKey(p), label: label(p) })).sort((a, b) => a.label.localeCompare(b.label) || a.value.localeCompare(b.value));
 }
 
 /** The PRs waiting on the user from either sub-tab, each counted once. */
@@ -107,6 +119,7 @@ export function waitingCount(prs: ReviewPr[]): number {
 
 export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | null = null, tab: ReviewTab = "review"): HTMLElement {
   const root = el("article", "pr");
+  root.dataset.forge = pr.forge;
   root.dataset.repo = pr.repo;
   root.dataset.number = String(pr.number);
   const head = el("header", "pr__head");
@@ -121,7 +134,12 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
     dot.setAttribute("aria-label", label);
     name.append(dot);
   }
-  name.append(el("span", "pr__repo", `${pr.repo.split("/").pop() ?? pr.repo} #${pr.number}`));
+  const forgeMark = iconElement(pr.forge, 12);
+  forgeMark.classList.add("pr__forge");
+  forgeMark.setAttribute("role", "img");
+  forgeMark.setAttribute("aria-label", pr.forge === "gitlab" ? "GitLab" : "GitHub");
+  name.append(forgeMark);
+  name.append(el("span", "pr__repo", `${pr.repo.split("/").pop() ?? pr.repo} ${prRef(pr)}`));
   const chips = el("span", "pr__chips");
   if (pr.isDraft) chips.append(el("span", "pr__chip pr__chip--draft", "draft"));
   head.append(name, chips);
@@ -165,9 +183,18 @@ export function renderReviews(
   filters: ReviewFilters = { state: "all", repo: null },
 ): HTMLElement {
   const root = el("section", "reviews");
-  if (state.error) root.append(el("div", "reviews__error", `GitHub check failed: ${state.error}`));
+  if (state.off) {
+    const off = el("div", "reviews__off", "Git integration is off. Turn on GitHub or GitLab in Settings → Git. ");
+    const go = el("button", "card__btn", "Open Settings");
+    go.type = "button";
+    go.dataset.action = "git-settings";
+    off.append(go);
+    root.append(off);
+    return root;
+  }
+  for (const e of state.errors) root.append(el("div", "reviews__error", e.message));
   if (state.prs.length === 0) {
-    root.append(el("div", "reviews__empty", state.fetchedAt === null ? "Checking GitHub…" : "Nothing waiting on you."));
+    root.append(el("div", "reviews__empty", state.fetchedAt === null ? "Checking…" : "Nothing waiting on you."));
     return root;
   }
   const inTab = state.prs.filter((p) => p.reasons.includes(tab));
@@ -212,10 +239,10 @@ function fillSelect(sel: HTMLSelectElement, options: { value: string; label: str
 export function makeReviewsView(host: HTMLElement) {
   let tab = storedTab();
   const filters: Record<ReviewTab, ReviewFilters> = { review: { ...DEFAULT_FILTERS.review }, assigned: { ...DEFAULT_FILTERS.assigned } };
-  let state: ReviewState = { prs: [], error: null, fetchedAt: null };
+  let state: ReviewState = { prs: [], errors: [], off: false, fetchedAt: null };
   let nowMs = Date.now();
   let ctx: ReviewContext = { cards: [], clonesDir: null };
-  let repoKey: string | null = null;
+  let optionsKey: string | null = null;
 
   const bar = el("div", "reviews__bar");
   const tabs = el("div", "reviews__tabs");
@@ -263,9 +290,9 @@ export function makeReviewsView(host: HTMLElement) {
     const f = filters[tab];
     if (f.repo !== null && !repos.some((r) => r.value === f.repo)) f.repo = null;
     const key = `${tab}\n${repos.map((r) => `${r.value}=${r.label}`).join("\n")}`;
-    if (key !== repoKey) {
+    if (key !== optionsKey) {
       fillSelect(repoSel, [{ value: "", label: "All Repositories" }, ...repos]);
-      repoKey = key;
+      optionsKey = key;
     }
     repoSel.value = f.repo ?? "";
     stateSel.value = f.state;
@@ -292,12 +319,14 @@ export function makeReviewsView(host: HTMLElement) {
 /** What a click in the Pull Requests pane means: one of the two buttons, or nothing. */
 export function reviewActionFor(target: Element): ReviewAction | null {
   const btn = target.closest<HTMLElement>("button[data-action]");
+  if (btn?.dataset.action === "git-settings") return { kind: "git-settings" };
   const card = target.closest<HTMLElement>(".pr");
   if (!btn || !card?.dataset.repo || !card.dataset.number) return null;
   const kind = btn.dataset.action;
+  const forge: GitProvider = card.dataset.forge === "gitlab" ? "gitlab" : "github";
   const repo = card.dataset.repo;
   const number = Number(card.dataset.number);
-  if (kind === "terminal") return { kind, repo, number, pid: Number(btn.dataset.pid) };
+  if (kind === "terminal") return { kind, forge, repo, number, pid: Number(btn.dataset.pid) };
   if (kind !== "open-pr" && kind !== "review") return null;
-  return { kind, repo, number };
+  return { kind, forge, repo, number };
 }
