@@ -103,7 +103,8 @@ pub struct Hub {
     now: Box<dyn Fn() -> u64 + Send + Sync>,
     /// The phone's voice conversation, once the app has made it. Taken
     /// alone: `refresh` calls into it with only its own serial lock held,
-    /// and it never calls back into a hub lock while it holds its own.
+    /// and it never calls back into a hub lock while it holds its own (its
+    /// event gate, `events_may_speak`, runs with the voice's lock released).
     pub voice: OnceLock<Arc<crate::voice::Voice>>,
     /// On silent, vibrate or Do Not Disturb (the voice plugin's `quiet`).
     pub silenced: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
@@ -193,6 +194,15 @@ impl Hub {
             return Some(format!("Update {main} to talk to Maya."));
         }
         None
+    }
+
+    /// `speaks_events` now, for a board event that waited behind a
+    /// conversation: the voice asks this as it is about to speak it, with
+    /// none of its locks held. Takes `settings` alone and briefly; the
+    /// `silenced` call into Android runs after it is released.
+    pub fn events_may_speak(&self) -> bool {
+        let speak_on = self.settings.lock().unwrap().config.speak_notifications;
+        speaks_events(speak_on, || self.silenced.get().is_some_and(|f| f()))
     }
 
     /// Sends a request to the joined main and waits for its answer.
@@ -952,6 +962,24 @@ mod tests {
         assert_eq!(asked.load(Ordering::SeqCst), 0, "a call into Android for nothing");
         assert!(said.0.lock().unwrap().is_empty());
         assert!(!posts.0.lock().unwrap()[0].quiet);
+    }
+
+    #[test]
+    fn a_queued_event_asks_the_settings_and_the_phone_at_playback() {
+        let (hub, _, _) = hub_with_a_new_ask(false);
+        let quiet = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (q, a) = (quiet.clone(), asked.clone());
+        let _ = hub.silenced.set(Box::new(move || {
+            a.fetch_add(1, Ordering::SeqCst);
+            q.load(Ordering::SeqCst)
+        }));
+        assert!(!hub.events_may_speak(), "Speak off");
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "not asked with Speak off");
+        hub.update_config(|c| c.speak_notifications = true).unwrap();
+        assert!(hub.events_may_speak());
+        quiet.store(true, Ordering::SeqCst);
+        assert!(!hub.events_may_speak(), "silenced since");
     }
 
     #[test]

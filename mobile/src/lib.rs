@@ -76,6 +76,11 @@ fn make_voice(handle: &AppHandle, hub: &Arc<Hub>) {
     let _ = hub.voice.set(v.clone());
     let quiet = handle.clone();
     let _ = hub.silenced.set(Box::new(move || android::silenced(&quiet)));
+    // A board event that waited behind a conversation is spoken only if
+    // Speak is still on and the phone not silenced by then. The voice asks
+    // with its lock released, on a thread of its own.
+    let gate_hub = Arc::downgrade(hub);
+    v.set_event_gate(Arc::new(move || gate_hub.upgrade().is_some_and(|h| h.events_may_speak())));
     android::watch_voice(handle, Arc::downgrade(&v));
     if !android::on_device(handle) {
         v.set_note(Some("Speech goes through Google's service and may leave the phone.".into()));

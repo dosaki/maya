@@ -25,6 +25,8 @@ pub trait VoiceIo: Send + Sync {
 
 pub type Ask = Arc<dyn Fn(Request) -> Result<Option<Value>, String> + Send + Sync>;
 pub type Show = Arc<dyn Fn(&VoiceView) + Send + Sync>;
+/// Whether a board event may be spoken now (Speak on, the phone not silenced).
+pub type Gate = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// What the page shows.
 #[derive(Serialize, Clone, Debug, Default, PartialEq)]
@@ -76,6 +78,9 @@ struct Inner {
     thinking: bool,
     after: After,
     events: VecDeque<String>,
+    /// `carry_on` found the conversation idle with an event waiting;
+    /// `play_queued` asks the gate and speaks it. Busy meanwhile.
+    playing: bool,
     generation: u64,
     /// Bumped by each confirmation held or armed: an older window's
     /// expiry timer finds it changed and does nothing.
@@ -94,6 +99,8 @@ pub struct Voice {
     /// Run requests on the calling thread (tests) instead of a spawned one.
     sync: bool,
     me: Mutex<std::sync::Weak<Voice>>,
+    /// See `set_event_gate`; never called with `inner` held.
+    gate: Mutex<Option<Gate>>,
 }
 
 impl Voice {
@@ -109,9 +116,9 @@ impl Voice {
     fn build(io: Arc<dyn VoiceIo>, ask: Ask, show: Show, now: fn() -> u64, sync: bool) -> Arc<Voice> {
         let inner = Inner {
             flow: Flow::new(), history: vec![], on_screen: false, wake: false, offer: Some(NO_MAIN.into()), speaking: false, thinking: false,
-            after: After::Idle, events: VecDeque::new(), generation: 0, epoch: 0, failures: 0, backoffs: vec![], view: VoiceView { state: "off".into(), ..Default::default() },
+            after: After::Idle, events: VecDeque::new(), playing: false, generation: 0, epoch: 0, failures: 0, backoffs: vec![], view: VoiceView { state: "off".into(), ..Default::default() },
         };
-        let v = Arc::new(Voice { inner: Mutex::new(inner), io, ask, show, now, sync, me: Mutex::new(std::sync::Weak::new()) });
+        let v = Arc::new(Voice { inner: Mutex::new(inner), io, ask, show, now, sync, me: Mutex::new(std::sync::Weak::new()), gate: Mutex::new(None) });
         *v.me.lock().unwrap() = Arc::downgrade(&v);
         v
     }
@@ -167,6 +174,12 @@ impl Voice {
         self.publish(&mut i);
     }
 
+    /// Asked before each waiting board event is spoken: one queued while
+    /// Speak was on may not play once it is off or the phone is silenced.
+    pub fn set_event_gate(&self, gate: Gate) {
+        *self.gate.lock().unwrap() = Some(gate);
+    }
+
     pub fn set_note(&self, note: Option<String>) {
         let mut i = self.inner.lock().unwrap();
         i.view.note = note;
@@ -196,6 +209,7 @@ impl Voice {
         i.thinking = false;
         i.after = After::Idle;
         i.events.clear();
+        i.playing = false;
         i.view.pending = None;
         self.io.stop_listening();
         self.io.stop_speaking();
@@ -221,6 +235,11 @@ impl Voice {
     /// listening too but keeps its action and its buttons. Otherwise it
     /// listens for one command.
     pub fn tap(&self) {
+        self.tap_now();
+        self.play_queued();
+    }
+
+    fn tap_now(&self) {
         let mut i = self.inner.lock().unwrap();
         // While the main thinks, anything heard would be thrown away.
         if !Self::active(&i) || i.thinking {
@@ -287,6 +306,11 @@ impl Voice {
     }
 
     pub fn heard(&self, text: &str) {
+        self.heard_now(text);
+        self.play_queued();
+    }
+
+    fn heard_now(&self, text: &str) {
         let mut i = self.inner.lock().unwrap();
         if !Self::active(&i) || i.thinking {
             return;
@@ -331,6 +355,11 @@ impl Voice {
     }
 
     pub fn ended(&self) {
+        self.ended_now();
+        self.play_queued();
+    }
+
+    fn ended_now(&self) {
         let mut i = self.inner.lock().unwrap();
         if !Self::active(&i) || i.speaking || i.thinking {
             return;
@@ -348,6 +377,11 @@ impl Voice {
     }
 
     pub fn failed(&self, message: &str, fatal: bool) {
+        self.failed_now(message, fatal);
+        self.play_queued();
+    }
+
+    fn failed_now(&self, message: &str, fatal: bool) {
         let mut i = self.inner.lock().unwrap();
         if !Self::active(&i) {
             return;
@@ -461,6 +495,11 @@ impl Voice {
     }
 
     pub fn spoken(&self, ok: bool) {
+        self.spoken_now(ok);
+        self.play_queued();
+    }
+
+    fn spoken_now(&self, ok: bool) {
         let mut i = self.inner.lock().unwrap();
         // Off screen Android refuses to speak at all: not a missing voice.
         let active = Self::active(&i);
@@ -503,16 +542,67 @@ impl Voice {
     }
 
     /// Nothing is being said and the recogniser has stopped: listen again
-    /// inside an open window, else speak the next waiting event, else go
-    /// back to the wake loop when it is on.
+    /// inside an open window, else speak the next waiting event (through
+    /// `play_queued`, once the lock is released), else go back to the wake
+    /// loop when it is on.
     fn carry_on(&self, i: &mut Inner) {
         if i.flow.state((self.now)()) != "idle" {
             self.io.listen(false);
-        } else if let Some(line) = i.events.pop_front() {
-            self.say(i, &line, After::Idle);
+        } else if !i.events.is_empty() {
+            i.playing = true;
         } else if i.wake {
             self.io.listen(true);
         }
+    }
+
+    /// Speaks the next waiting event once `carry_on` has found the
+    /// conversation idle, if the gate still allows events. Called by every
+    /// entry point that can carry on, after it has released the lock. The
+    /// gate calls into Android: never under the lock, and on a thread of its
+    /// own (unless `sync`), not on the plugin's event thread that called in.
+    fn play_queued(&self) {
+        let generation = {
+            let i = self.inner.lock().unwrap();
+            if !i.playing {
+                return;
+            }
+            i.generation
+        };
+        let gate = self.gate.lock().unwrap().clone();
+        let inline = self.sync || gate.is_none();
+        let me = self.me.lock().unwrap().clone();
+        let run = move || {
+            let allowed = gate.map_or(true, |g| g());
+            if let Some(v) = me.upgrade() {
+                v.play_next(generation, allowed);
+            }
+        };
+        if inline {
+            run();
+        } else {
+            std::thread::spawn(run);
+        }
+    }
+
+    fn play_next(&self, generation: u64, allowed: bool) {
+        let mut i = self.inner.lock().unwrap();
+        if !std::mem::take(&mut i.playing) || i.generation != generation {
+            return;
+        }
+        // Something took over meanwhile; it carries on when it is done.
+        if !Self::active(&i) || i.speaking || i.thinking || i.flow.state((self.now)()) != "idle" {
+            return;
+        }
+        if !allowed && !i.events.is_empty() {
+            log::line("voice", format!("{} waiting board events dropped: Speak is off or the phone is silenced", i.events.len()));
+            i.events.clear();
+        }
+        match i.events.pop_front() {
+            Some(line) => self.say(&mut i, &line, After::Idle),
+            None if i.wake => self.io.listen(true),
+            None => {}
+        }
+        self.publish(&mut i);
     }
 
     /// Speaks a board event now, or once the conversation is idle. False
@@ -522,7 +612,7 @@ impl Voice {
         if !Self::active(&i) {
             return false;
         }
-        let busy = i.speaking || i.thinking || i.flow.state((self.now)()) != "idle";
+        let busy = i.speaking || i.thinking || i.playing || i.flow.state((self.now)()) != "idle";
         if busy {
             i.events.push_back(line.to_string());
         } else {
@@ -583,6 +673,11 @@ impl Voice {
     }
 
     fn finish_interpret(&self, generation: u64, answer: Result<Option<Value>, String>) {
+        self.finish_interpret_now(generation, answer);
+        self.play_queued();
+    }
+
+    fn finish_interpret_now(&self, generation: u64, answer: Result<Option<Value>, String>) {
         let mut i = self.inner.lock().unwrap();
         if i.generation != generation {
             log::line("voice", "an answer arrived after the conversation ended; dropped");
@@ -1340,6 +1435,33 @@ mod tests {
         assert_eq!(io.take(), Vec::<String>::new(), "the older timer is stale");
         v.expire_pending(generation, newer);
         assert_eq!(io.take(), vec!["say OK."]);
+    }
+
+    #[test]
+    fn a_queued_event_is_spoken_only_if_events_may_still_be_spoken() {
+        for allowed in [true, false] {
+            let (v, io, _) = voice(read_back());
+            let gate_open = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let unlocked = Arc::new(Mutex::new(vec![]));
+            let (g, u, me) = (gate_open.clone(), unlocked.clone(), Arc::downgrade(&v));
+            v.set_event_gate(Arc::new(move || {
+                // Asked with the voice's lock free: the real gate calls into Android.
+                u.lock().unwrap().push(me.upgrade().is_some_and(|v| v.inner.try_lock().is_ok()));
+                g.load(std::sync::atomic::Ordering::SeqCst)
+            }));
+            v.set_wake(true);
+            v.tap();
+            v.heard("tell x y");
+            assert!(v.announce("laptop needs a decision"));
+            io.take();
+            gate_open.store(allowed, std::sync::atomic::Ordering::SeqCst);
+            v.confirm(false);
+            v.spoken(true);
+            let next = if allowed { "say laptop needs a decision" } else { "listen wake" };
+            assert_eq!(io.take(), vec!["stop listening", "say OK.", next], "allowed: {allowed}");
+            let unlocked = unlocked.lock().unwrap();
+            assert!(!unlocked.is_empty() && unlocked.iter().all(|u| *u), "asked at playback, never under the lock: {unlocked:?}");
+        }
     }
 
     /// Every view the page was shown, for checks on what was published.
