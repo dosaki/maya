@@ -285,11 +285,35 @@ pub(crate) fn refuse_remote(action: &Value) -> Option<String> {
 /// ask may have been answered at the desk while the phone waited for yes.
 /// The action keeps the session id `validate` gave it: an id matches one
 /// card exactly, where the name could match another session by then.
+/// A pull request is looked up by the `repo#number` it resolved to, and a
+/// remote project by `"<dir> (on <machine>)"`, the way the lists spell them.
 pub(crate) fn revalidate(action: &Value, ctx: &VoiceContext) -> Result<Value, String> {
-    let fresh = maya_core::interpreter::validate(action, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs)?;
+    let mut asked = action.clone();
+    match action["kind"].as_str() {
+        Some("review") => {
+            if let (Some(repo), Some(number)) = (action["repo"].as_str(), action["number"].as_u64()) {
+                asked["pr"] = Value::String(format!("{repo}#{number}"));
+            }
+        }
+        Some("start" | "resume") => {
+            // `validate` adds the machine back when the dir list still has it there.
+            if let Some(obj) = asked.as_object_mut() {
+                obj.remove("machine");
+            }
+            if let (Some(dir), Some(m)) = (action["dir"].as_str(), action["machine"].as_str().filter(|m| !m.is_empty())) {
+                asked["dir"] = Value::String(format!("{dir} (on {m})"));
+            }
+        }
+        _ => {}
+    }
+    let fresh = maya_core::interpreter::validate(&asked, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs)?;
     // An answer must still be for the ask the user heard read back.
     if action["kind"] == "answer" && fresh["askId"] != action["askId"] {
         return Err("The question has changed; ask me again.".into());
+    }
+    // A pull request that has gone must not resolve to another with its number.
+    if action["kind"] == "review" && (fresh["repo"] != action["repo"] || fresh["number"] != action["number"]) {
+        return Err("The pull request has changed; ask me again.".into());
     }
     Ok(fresh)
 }
@@ -453,6 +477,35 @@ mod tests {
         let action = serde_json::json!({"kind": "reply", "session": "s1", "name": "hexgrid", "text": "ship it"});
         let fresh = revalidate(&action, &board(vec![asking("s1", "hexgrid", 42)])).unwrap();
         assert_eq!(fresh["session"], "s1");
+    }
+
+    fn pr(repo: &str, number: u64) -> maya_core::reviews::ReviewPr {
+        maya_core::reviews::ReviewPr { number, repo: repo.into(), title: format!("{repo} {number}"), author: "alex".into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: false, updated_at: "2026-10-01T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] }
+    }
+
+    #[test]
+    fn a_review_whose_pull_request_has_gone_is_refused_not_moved_to_another() {
+        let action = serde_json::json!({"kind": "review", "pr": "#14", "repo": "dosaki/collector", "number": 14, "title": "dosaki/collector 14"});
+        let still = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/collector", 14), pr("dosaki/maya", 14)] };
+        let fresh = revalidate(&action, &still).unwrap();
+        assert_eq!((fresh["repo"].as_str(), fresh["number"].as_u64()), (Some("dosaki/collector"), Some(14)), "the confirmed one, though another repo has a #14 now");
+        let gone = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/maya", 14)] };
+        assert_eq!(revalidate(&action, &gone).unwrap_err(), "The pull request has changed; ask me again.");
+    }
+
+    #[test]
+    fn a_confirmed_remote_project_revalidates_on_its_machine() {
+        let ctx = |dirs: &[&str]| VoiceContext { cards: vec![], dirs: dirs.iter().map(|d| d.to_string()).collect(), machines: vec!["laptop".into()], prs: vec![] };
+        let remote = serde_json::json!({"kind": "start", "dir": "maya", "machine": "laptop", "prompt": "go"});
+        for dirs in [&["maya (on laptop)"][..], &["maya", "maya (on laptop)"][..]] {
+            let fresh = revalidate(&remote, &ctx(dirs)).unwrap();
+            assert_eq!((fresh["dir"].as_str(), fresh["machine"].as_str()), (Some("maya"), Some("laptop")), "{dirs:?}");
+        }
+        let resumed = revalidate(&serde_json::json!({"kind": "resume", "dir": "maya", "machine": "laptop"}), &ctx(&["maya (on laptop)"])).unwrap();
+        assert_eq!(resumed["machine"].as_str(), Some("laptop"));
+        let local = revalidate(&serde_json::json!({"kind": "start", "dir": "maya", "prompt": "go"}), &ctx(&["maya", "maya (on laptop)"])).unwrap();
+        assert_eq!((local["dir"].as_str(), local["machine"].as_str()), (Some("maya"), None), "a local project stays local");
+        assert!(revalidate(&remote, &ctx(&["maya"])).is_err(), "the laptop no longer lists it");
     }
 
     #[test]
