@@ -417,6 +417,11 @@ impl Store {
         self.prs.due(&dirs, now_ms)
     }
 
+    /// Forgets every PR lookup: the Git settings changed.
+    pub fn clear_prs(&mut self) {
+        self.prs.clear();
+    }
+
     pub fn set_pr(&mut self, dir: &str, pr: Option<PullRequest>, now_ms: u64) {
         self.prs.set(dir, pr, now_ms);
     }

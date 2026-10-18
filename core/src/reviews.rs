@@ -3,7 +3,7 @@ use crate::model::Harness;
 use crate::config::GitProvider;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use crate::forge::{Forge, ForgeError, ForgeSite, Http};
 
 /// Why a PR is on the list.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,19 +181,36 @@ pub fn merge(a: Vec<ReviewPr>, b: Vec<ReviewPr>) -> Vec<ReviewPr> {
     out
 }
 
-/// Open PRs where the user is a requested reviewer, has reviewed, or is an assignee.
-pub fn fetch() -> Result<Vec<ReviewPr>, String> {
-    let out = crate::gh()
-        .args(["api", "graphql", "-f", &format!("query={QUERY}")])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("could not run gh: {e}"))?;
-    // gh exits non-zero on any GraphQL error, partial results included.
-    match parse_graphql(&String::from_utf8_lossy(&out.stdout)) {
-        Ok(prs) => Ok(prs),
-        Err(_) if !out.status.success() => Err(format!("gh failed: {}", String::from_utf8_lossy(&out.stderr).trim())),
-        Err(e) => Err(e),
+/// One forge's answer to "what is waiting on me".
+pub struct Fetched {
+    pub forge: GitProvider,
+    pub result: Result<Vec<ReviewPr>, String>,
+}
+
+/// Asks every forge at once.
+pub fn fetch(forges: &[Forge], http: &dyn Http) -> Vec<Fetched> {
+    std::thread::scope(|s| {
+        let handles: Vec<_> = forges.iter().map(|f| (f.site.provider, s.spawn(move || crate::forge::review_prs(http, f)))).collect();
+        handles.into_iter().map(|(forge, h)| Fetched { forge, result: h.join().unwrap_or_else(|_| Err("the check stopped unexpectedly".into())) }).collect()
+    })
+}
+
+/// The new list and the error lines: a forge that answered replaces its
+/// PRs, one that failed keeps its last ones and adds a line, and a forge
+/// that was not asked (off, or no token) drops out. `errors` holds the
+/// lines for forges that were not asked.
+pub fn combine(previous: &[ReviewPr], fetched: Vec<Fetched>, mut errors: Vec<ForgeError>) -> (Vec<ReviewPr>, Vec<ForgeError>) {
+    let mut out = Vec::new();
+    for f in fetched {
+        match f.result {
+            Ok(prs) => out = merge(out, prs),
+            Err(e) => {
+                out = merge(out, previous.iter().filter(|p| p.forge == f.forge).cloned().collect());
+                errors.push(ForgeError { forge: f.forge, message: format!("{} check failed: {e}", f.forge.label()) });
+            }
+        }
     }
+    (out, errors)
 }
 
 /// Remembers the review state of each assigned PR so a turn to approved or
@@ -249,43 +266,21 @@ pub fn pr_spoken_line(pr: &ReviewPr) -> Option<String> {
     }
 }
 
-/// True when a git remote URL (SSH or HTTPS) points at `owner/name` on GitHub.
-pub fn remote_matches(remote: &str, name_with_owner: &str) -> bool {
-    let r = remote.trim().trim_end_matches('/');
-    let r = r.strip_suffix(".git").unwrap_or(r);
-    let path = if let Some(p) = r.strip_prefix("git@github.com:") {
-        p
-    } else if let Some(p) = r.strip_prefix("https://github.com/") {
-        p
-    } else if let Some(p) = r.strip_prefix("ssh://git@github.com/") {
-        p
-    } else {
-        return false;
-    };
-    path.eq_ignore_ascii_case(name_with_owner)
+fn is_checkout_of(dir: &Path, site: &ForgeSite, repo: &str) -> bool {
+    crate::forge::origin_of(dir).and_then(|o| crate::forge::route(&o, std::slice::from_ref(site)).map(|(_, p)| p)).is_some_and(|p| p.eq_ignore_ascii_case(repo))
 }
 
-fn origin_of(dir: &Path) -> Option<String> {
-    let out = crate::command("git").args(["-C", dir.to_str()?, "config", "--get", "remote.origin.url"]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    if out.status.success() {
-        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        None
-    }
-}
-
-/// A checkout of `name_with_owner` under `projects_root`: the folder named
+/// A checkout of `repo` on `site` under `projects_root`: the folder named
 /// after the repo when it is one, else the first match by folder name.
-pub fn find_checkout(projects_root: &Path, name_with_owner: &str) -> Option<PathBuf> {
+pub fn find_checkout(projects_root: &Path, site: &ForgeSite, repo: &str) -> Option<PathBuf> {
     let Ok(entries) = std::fs::read_dir(projects_root) else { return None };
     let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir() && p.join(".git").exists()).collect();
     dirs.sort();
-    let repo_name = name_with_owner.rsplit('/').next().unwrap_or(name_with_owner);
-    let named = projects_root.join(repo_name);
-    if dirs.contains(&named) && origin_of(&named).map_or(false, |o| remote_matches(&o, name_with_owner)) {
+    let named = projects_root.join(repo.rsplit('/').next().unwrap_or(repo));
+    if dirs.contains(&named) && is_checkout_of(&named, site, repo) {
         return Some(named);
     }
-    dirs.into_iter().find(|d| origin_of(d).map_or(false, |o| remote_matches(&o, name_with_owner)))
+    dirs.into_iter().find(|d| is_checkout_of(d, site, repo))
 }
 
 /// True when any live session's working directory is `dir` or inside it.
@@ -304,13 +299,13 @@ pub struct ReviewTarget {
 
 /// The free project checkout if there is one; else `<clones>/<repo>-<number>`,
 /// cloned unless it already exists.
-pub fn resolve_target(projects_root: &Path, clones_root: &Path, name_with_owner: &str, number: u64, live_cwds: &[String]) -> ReviewTarget {
-    if let Some(dir) = find_checkout(projects_root, name_with_owner) {
+pub fn resolve_target(projects_root: &Path, clones_root: &Path, site: &ForgeSite, repo: &str, number: u64, live_cwds: &[String]) -> ReviewTarget {
+    if let Some(dir) = find_checkout(projects_root, site, repo) {
         if !is_busy(&dir, live_cwds) {
             return ReviewTarget { dir, clone: false };
         }
     }
-    let repo_name = name_with_owner.rsplit('/').next().unwrap_or(name_with_owner);
+    let repo_name = repo.rsplit('/').next().unwrap_or(repo);
     let dir = clones_root.join(format!("{repo_name}-{number}"));
     let clone = !dir.is_dir();
     ReviewTarget { dir, clone }
@@ -340,17 +335,17 @@ pub fn render_prompt(template: &str, pr: &ReviewPr) -> String {
     }
 }
 
-/// The shell line the review terminal runs: a clone first when needed, then
+/// The shell line the review terminal runs: a `git clone` first when needed, with the user's own git credentials, then
 /// the agent in the folder on the prompt file, as a new session named
 /// `review <repo> #<number>` (`-n` for Claude Code; the others get the name
 /// typed later, as `actions::start_session` does).
-pub fn shell_command(agent: Harness, target: &ReviewTarget, name_with_owner: &str, number: u64, prompt_file: &Path, grok_id: Option<&str>) -> String {
+pub fn shell_command(agent: Harness, target: &ReviewTarget, clone_url: &str, name_with_owner: &str, number: u64, prompt_file: &Path, grok_id: Option<&str>) -> String {
     let opts = LaunchOptions { agent, name: Some(session_name(name_with_owner, number)), ..Default::default() };
     let start = crate::launch::session_command(&target.dir, prompt_file, &opts, grok_id);
     if target.clone {
         let dir = shell_single_quote(&target.dir.to_string_lossy());
         let parent = shell_single_quote(&target.dir.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
-        format!("mkdir -p {parent} && gh repo clone {} {dir} && {start}", shell_single_quote(name_with_owner))
+        format!("mkdir -p {parent} && git clone {} {dir} && {start}", shell_single_quote(clone_url))
     } else {
         start
     }
@@ -453,13 +448,49 @@ mod tests {
         assert_eq!(prs[0].my_review, None, "replying on your own PR is not reviewing it");
     }
 
+    use crate::forge::{ForgeError, ForgeSite};
+
+    fn github_site() -> ForgeSite {
+        ForgeSite::of(&crate::config::GitConnection::default_for(GitProvider::Github))
+    }
+
     #[test]
-    fn remote_matching_accepts_ssh_and_https_forms_case_insensitively() {
-        assert!(remote_matches("git@github.com:Org/bedrock.git", "org/bedrock"));
-        assert!(remote_matches("https://github.com/Org/bedrock", "Org/bedrock"));
-        assert!(remote_matches("https://github.com/Org/bedrock.git/", "Org/bedrock"));
-        assert!(!remote_matches("git@github.com:Org/bedrock-fork.git", "Org/bedrock"));
-        assert!(!remote_matches("git@gitlab.com:Org/bedrock.git", "Org/bedrock"));
+    fn find_checkout_matches_a_gitlab_checkout_through_its_site() {
+        let t = tempfile::tempdir().unwrap();
+        let gl = ForgeSite::of(&crate::config::GitConnection { base_url: Some("https://gitlab.acme.io".into()), enabled: true, ..crate::config::GitConnection::default_for(GitProvider::Gitlab) });
+        let r = repo_with_origin(t.path(), "r", "git@gitlab.acme.io:grp/sub/r.git");
+        assert_eq!(find_checkout(t.path(), &gl, "grp/sub/r"), Some(r));
+        assert_eq!(find_checkout(t.path(), &github_site(), "grp/sub/r"), None, "the same path on GitHub is another repo");
+    }
+
+    #[test]
+    fn combine_keeps_a_failing_forges_last_prs_and_says_why() {
+        let gh_old = ReviewPr { number: 1, url: "gh1".into(), updated_at: "2026-10-01".into(), ..pr() };
+        let gl_old = ReviewPr { number: 2, url: "gl2".into(), forge: GitProvider::Gitlab, updated_at: "2026-10-02".into(), ..pr() };
+        let gh_new = ReviewPr { number: 3, url: "gh3".into(), updated_at: "2026-10-03".into(), ..pr() };
+        let fetched = vec![Fetched { forge: GitProvider::Github, result: Ok(vec![gh_new]) }, Fetched { forge: GitProvider::Gitlab, result: Err("401".into()) }];
+        let (prs, errors) = combine(&[gh_old, gl_old], fetched, vec![]);
+        assert_eq!(prs.iter().map(|p| p.number).collect::<Vec<_>>(), vec![3, 2], "GitHub's list is replaced, GitLab's kept");
+        assert_eq!(errors, vec![ForgeError { forge: GitProvider::Gitlab, message: "GitLab check failed: 401".into() }]);
+    }
+
+    #[test]
+    fn combine_drops_a_forge_that_was_not_asked_and_passes_its_error_on() {
+        let gl_old = ReviewPr { forge: GitProvider::Gitlab, ..pr() };
+        let missing = vec![ForgeError { forge: GitProvider::Gitlab, message: "No GitLab token: paste one in Settings → Git.".into() }];
+        let (prs, errors) = combine(&[gl_old], vec![], missing.clone());
+        assert!(prs.is_empty());
+        assert_eq!(errors, missing);
+    }
+
+    #[test]
+    fn fetch_asks_every_forge() {
+        let gh = crate::forge::Forge { site: github_site(), token: "t".into() };
+        let body = r#"{"data":{"viewer":{"login":"Me"},"requested":{"nodes":[]},"reviewed":{"nodes":[]},"assigned":{"nodes":[]}}}"#;
+        let http = crate::forge::fake::FakeHttp::new(vec![("/graphql", 200, body)]);
+        let out = fetch(&[gh], &http);
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].forge, out[0].result.clone()), (GitProvider::Github, Ok(vec![])));
     }
 
     fn repo_with_origin(root: &Path, name: &str, origin: &str) -> std::path::PathBuf {
@@ -479,10 +510,10 @@ mod tests {
         let main = repo_with_origin(t.path(), "bouncer", "https://github.com/Org/bouncer");
         repo_with_origin(t.path(), "other", "git@github.com:Org/other.git");
         std::fs::create_dir_all(t.path().join("plain-folder")).unwrap();
-        assert_eq!(find_checkout(t.path(), "Org/bouncer"), Some(main));
+        assert_eq!(find_checkout(t.path(), &github_site(), "Org/bouncer"), Some(main));
         std::fs::remove_dir_all(t.path().join("bouncer")).unwrap();
-        assert_eq!(find_checkout(t.path(), "Org/bouncer"), Some(alt));
-        assert_eq!(find_checkout(t.path(), "Org/missing"), None);
+        assert_eq!(find_checkout(t.path(), &github_site(), "Org/bouncer"), Some(alt));
+        assert_eq!(find_checkout(t.path(), &github_site(), "Org/missing"), None);
     }
 
     #[test]
@@ -500,14 +531,14 @@ mod tests {
         let projects = t.path().join("dev");
         let clones = t.path().join("reviews");
         let main = repo_with_origin(&projects, "bedrock", "git@github.com:Org/bedrock.git");
-        let free = resolve_target(&projects, &clones, "Org/bedrock", 451, &[]);
+        let free = resolve_target(&projects, &clones, &github_site(), "Org/bedrock", 451, &[]);
         assert_eq!(free, ReviewTarget { dir: main.clone(), clone: false });
-        let busy = resolve_target(&projects, &clones, "Org/bedrock", 451, &[main.to_string_lossy().into_owned()]);
+        let busy = resolve_target(&projects, &clones, &github_site(), "Org/bedrock", 451, &[main.to_string_lossy().into_owned()]);
         assert_eq!(busy, ReviewTarget { dir: clones.join("bedrock-451"), clone: true });
         std::fs::create_dir_all(clones.join("bedrock-451")).unwrap();
-        let again = resolve_target(&projects, &clones, "Org/bedrock", 451, &[main.to_string_lossy().into_owned()]);
+        let again = resolve_target(&projects, &clones, &github_site(), "Org/bedrock", 451, &[main.to_string_lossy().into_owned()]);
         assert_eq!(again, ReviewTarget { dir: clones.join("bedrock-451"), clone: false }, "an existing clone is reused");
-        let none = resolve_target(&projects, &clones, "Org/nowhere", 7, &[]);
+        let none = resolve_target(&projects, &clones, &github_site(), "Org/nowhere", 7, &[]);
         assert_eq!(none, ReviewTarget { dir: clones.join("nowhere-7"), clone: true });
     }
 
@@ -609,15 +640,15 @@ mod tests {
     fn the_review_shell_line_runs_the_agent_on_the_prompt_file_with_the_review_name() {
         let file = Path::new("/Users/x/.claude/maya/prompts/1.txt");
         let free = ReviewTarget { dir: PathBuf::from("/Users/x/dev/bedrock"), clone: false };
-        let s = shell_command(crate::model::Harness::ClaudeCode, &free, "Org/bedrock", 451, file, None);
+        let s = shell_command(crate::model::Harness::ClaudeCode, &free, "https://github.com/Org/bedrock.git", "Org/bedrock", 451, file, None);
         assert_eq!(s, "cd '/Users/x/dev/bedrock' && p=\"$(cat '/Users/x/.claude/maya/prompts/1.txt')\" && rm -f '/Users/x/.claude/maya/prompts/1.txt' && claude -n 'review bedrock #451' -- \"$p\"");
         let clone = ReviewTarget { dir: PathBuf::from("/Users/x/dev/reviews/bedrock-451"), clone: true };
-        let s = shell_command(crate::model::Harness::Codex, &clone, "Org/bedrock", 451, file, None);
-        assert!(s.starts_with("mkdir -p '/Users/x/dev/reviews' && gh repo clone 'Org/bedrock' '/Users/x/dev/reviews/bedrock-451' && "), "{s}");
+        let s = shell_command(crate::model::Harness::Codex, &clone, "https://github.com/Org/bedrock.git", "Org/bedrock", 451, file, None);
+        assert!(s.starts_with("mkdir -p '/Users/x/dev/reviews' && git clone 'https://github.com/Org/bedrock.git' '/Users/x/dev/reviews/bedrock-451' && "), "{s}");
         assert!(s.ends_with("&& codex -- \"$p\""), "no -n for Codex: the name waits as a pending name: {s}");
-        let s = shell_command(crate::model::Harness::Grok, &free, "Org/bedrock", 451, file, Some("1111-2222"));
+        let s = shell_command(crate::model::Harness::Grok, &free, "https://github.com/Org/bedrock.git", "Org/bedrock", 451, file, Some("1111-2222"));
         assert!(s.ends_with("&& grok --session-id '1111-2222' -- \"$p\""), "{s}");
-        let s = shell_command(crate::model::Harness::Antigravity, &free, "Org/bedrock", 451, file, None);
+        let s = shell_command(crate::model::Harness::Antigravity, &free, "https://github.com/Org/bedrock.git", "Org/bedrock", 451, file, None);
         assert!(s.ends_with("&& agy --prompt-interactive=\"$p\""), "{s}");
     }
 }

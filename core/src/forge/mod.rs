@@ -283,6 +283,12 @@ pub fn whoami(http: &dyn Http, forge: &Forge) -> Result<String, String> {
     }
 }
 
+/// The `origin` remote's URL of the checkout at `dir`.
+pub fn origin_of(dir: &std::path::Path) -> Option<String> {
+    let out = crate::command("git").args(["-C", dir.to_str()?, "config", "--get", "remote.origin.url"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 pub(crate) mod fake {
     use std::sync::Mutex;
