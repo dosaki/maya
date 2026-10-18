@@ -283,6 +283,7 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
         main.post { ProcessLifecycleOwner.get().lifecycle.removeObserver(this) }
         recognizer?.destroy()
         tts?.shutdown()
-        super.onDestroy()
+        // Plugin's, not DefaultLifecycleObserver's onDestroy(owner).
+        super<Plugin>.onDestroy()
     }
 }
