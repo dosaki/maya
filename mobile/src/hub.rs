@@ -173,13 +173,19 @@ impl Hub {
     }
 
     /// Why voice is not offered, or `None` when it is: the phone must have
-    /// joined a main that interprets (`CAP_VOICE`) and lets it control sessions.
+    /// joined a main that interprets (`CAP_VOICE`) and lets it control
+    /// sessions, and be connected to it now. Withdrawn on a disconnect, it
+    /// resets the conversation; `HubClientNotify` refreshes on every link
+    /// change, so it comes back with the link.
     pub fn voice_offer(&self) -> Option<String> {
         if !self.joined() {
             return Some(crate::voice::NO_MAIN.into());
         }
         let link = self.link.lock().unwrap();
         let main = link.main_name.clone().unwrap_or_else(|| "the main Maya".into());
+        if !link.connected {
+            return Some(format!("Reconnecting to {main}…"));
+        }
         if link.mirror != Some(MirrorAccess::Allowed) {
             return Some(format!("{main} has not allowed this phone to control its sessions."));
         }
@@ -850,6 +856,27 @@ mod tests {
         assert_eq!(hub.voice_offer().as_deref(), Some("Update Yhi to talk to Maya."));
         hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
         assert_eq!(hub.voice_offer(), None);
+        hub.set_link_for_test(AssistantLink { connected: false, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
+        assert_eq!(hub.voice_offer().as_deref(), Some("Reconnecting to Yhi…"), "a dropped link cannot carry a command");
+    }
+
+    #[test]
+    fn a_disconnect_withdraws_voice_and_a_reconnect_brings_it_back() {
+        let (hub, _, _) = hub_with_a_new_ask(false);
+        let v = hub.voice.get().unwrap().clone();
+        let link = |connected| AssistantLink { connected, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() };
+        hub.refresh();
+        assert_eq!(v.view().offer, None);
+        v.tap();
+        assert_eq!(v.view().state, "awaiting-command");
+        hub.set_link_for_test(link(false), true);
+        hub.refresh();
+        assert_eq!(v.view().offer.as_deref(), Some("Reconnecting to Yhi…"));
+        assert_eq!(v.view().state, "off", "the open window is dropped");
+        hub.set_link_for_test(link(true), true);
+        hub.refresh();
+        assert_eq!(v.view().offer, None);
+        assert_eq!(v.view().state, "idle");
     }
 
     #[test]
