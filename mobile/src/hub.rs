@@ -114,8 +114,9 @@ pub struct Hub {
 
 /// Whether board events may be spoken at all: Speak is on and the phone is
 /// not on silent, vibrate or Do Not Disturb. Replies are always spoken.
-pub(crate) fn speaks_events(speak_on: bool, silenced: bool) -> bool {
-    speak_on && !silenced
+/// `silenced` is a call into Android, made only when Speak is on.
+pub(crate) fn speaks_events(speak_on: bool, silenced: impl FnOnce() -> bool) -> bool {
+    speak_on && !silenced()
 }
 
 impl Hub {
@@ -238,12 +239,18 @@ impl Hub {
             (Switches { awaiting: s.config.notify_on_awaiting, completed: s.config.notify_on_completed }, s.config.speak_notifications)
         };
         let actions = alerts::plan(&cards, &fresh, &finished, &mut self.posted.lock().unwrap(), switches);
+        // First, so an event arriving as voice comes or goes sees the new
+        // offer. No hub lock but the serial one is held here: the voice's
+        // callbacks (the page event, the plugin queue) take none.
+        if let Some(v) = self.voice.get() {
+            v.set_offer(self.voice_offer());
+        }
         // Asked only when there is something to post: it is a call into Android.
         let mut events_spoken = None;
         for a in actions {
             match a {
                 Action::Post(mut p) => {
-                    let may_speak = *events_spoken.get_or_insert_with(|| speaks_events(speak_on, self.silenced.get().is_some_and(|f| f())));
+                    let may_speak = *events_spoken.get_or_insert_with(|| speaks_events(speak_on, || self.silenced.get().is_some_and(|f| f())));
                     if let (true, Some(v), Some(line)) = (may_speak, self.voice.get(), p.spoken.as_deref()) {
                         // Spoken (now or once the conversation is idle): post without a sound.
                         p.quiet = v.announce(line);
@@ -252,11 +259,6 @@ impl Hub {
                 }
                 Action::Clear(id) => self.alerts.clear(id),
             }
-        }
-        // No hub lock but the serial one is held here: the voice's callbacks
-        // (the page event, the plugin queue) take none.
-        if let Some(v) = self.voice.get() {
-            v.set_offer(self.voice_offer());
         }
         self.sink.sessions(&cards);
     }
@@ -852,9 +854,77 @@ mod tests {
 
     #[test]
     fn events_are_spoken_only_with_speak_on_and_the_phone_not_silenced() {
-        assert!(speaks_events(true, false));
-        assert!(!speaks_events(false, false), "Speak off");
-        assert!(!speaks_events(true, true), "silent, vibrate or Do Not Disturb");
+        assert!(speaks_events(true, || false));
+        assert!(!speaks_events(false, || panic!("not asked with Speak off")), "Speak off");
+        assert!(!speaks_events(true, || true), "silent, vibrate or Do Not Disturb");
+    }
+
+    #[derive(Default)]
+    struct Posts(Mutex<Vec<crate::alerts::Post>>);
+    impl crate::alerts::Alerts for Posts {
+        fn post(&self, p: &crate::alerts::Post) {
+            self.0.lock().unwrap().push(p.clone());
+        }
+        fn clear(&self, _: i32) {}
+        fn service_line(&self, _: &str) {}
+    }
+
+    #[derive(Default)]
+    struct Said(Mutex<Vec<String>>);
+    impl crate::voice::VoiceIo for Said {
+        fn listen(&self, _: bool) {}
+        fn stop_listening(&self) {}
+        fn speak(&self, line: &str) {
+            self.0.lock().unwrap().push(line.to_string());
+        }
+        fn stop_speaking(&self) {}
+    }
+
+    /// A hub joined to a main that interprets, with Speak as given, the
+    /// voice on screen but not yet told it is offered, and a card that has
+    /// just started waiting on the mirrored board.
+    fn hub_with_a_new_ask(speak: bool) -> (Arc<Hub>, Arc<Posts>, Arc<Said>) {
+        let dir = std::env::temp_dir().join(format!("maya-hub-voice-test-{}-{}-{speak}", std::process::id(), now_ms()));
+        let config = Config { speak_notifications: speak, ..Config::default() };
+        let posts = Arc::new(Posts::default());
+        let hub = Hub::new(dir.clone(), Settings { path: settings_path(&dir), config }, posts.clone(), Arc::new(NoSink));
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
+        let said = Arc::new(Said::default());
+        let ask: crate::voice::Ask = Arc::new(|_| Err("not asked".into()));
+        let v = crate::voice::Voice::new(said.clone(), ask, Arc::new(|_| {}), now_ms);
+        v.screen(true);
+        let _ = hub.voice.set(v);
+        hub.notifier.lock().unwrap().take_new(&[]);
+        let card: Card = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1", "pid": 0, "name": "hexgrid", "cwd": "/home/u/dev/hexgrid", "state": "awaiting", "stateSince": 5,
+            "snippet": "", "hasInbox": true, "harness": "claudeCode", "stale": false
+        }))
+        .unwrap();
+        hub.mirror.lock().unwrap().cards = vec![card];
+        (hub, posts, said)
+    }
+
+    #[test]
+    fn an_ask_arriving_as_voice_comes_up_is_spoken() {
+        let (hub, posts, said) = hub_with_a_new_ask(true);
+        hub.refresh();
+        assert_eq!(said.0.lock().unwrap().as_slice(), ["hexgrid needs a decision"]);
+        assert!(posts.0.lock().unwrap()[0].quiet, "posted without a sound, since it is spoken");
+    }
+
+    #[test]
+    fn with_speak_off_the_phone_is_not_asked_whether_it_is_silenced() {
+        let (hub, posts, said) = hub_with_a_new_ask(false);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = asked.clone();
+        let _ = hub.silenced.set(Box::new(move || {
+            a.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        hub.refresh();
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "a call into Android for nothing");
+        assert!(said.0.lock().unwrap().is_empty());
+        assert!(!posts.0.lock().unwrap()[0].quiet);
     }
 
     #[test]
