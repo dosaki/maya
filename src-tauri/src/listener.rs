@@ -165,7 +165,7 @@ fn remote_focus_refusal(machine: Option<&str>) -> Option<String> {
 
 /// Runs a validated action through the same paths as the page's buttons;
 /// the Ok text is what Maya says after a confirmed action.
-fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String, String> {
+pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String, String> {
     let state = app.state::<AppState>();
     let kind = action["kind"].as_str().unwrap_or("");
     let session = action["session"].as_str().unwrap_or("").to_string();
@@ -232,23 +232,102 @@ fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String,
     }
 }
 
-/// The last exchanges as (user, maya) pairs, oldest first, for the interpreter:
-/// pairs from the last 12 turns, at most 6 of them.
-fn recent_exchanges(app: &AppHandle) -> Vec<(String, String)> {
+/// What a spoken command comes to before anything is said or run.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Interpreted {
+    /// Say this; nothing runs.
+    Say(String),
+    /// Read this back, and run its action on a yes.
+    Confirm(wake::Pending),
+    /// Run this at once (focus, compact) and say what it did.
+    Run(serde_json::Value),
+}
+
+/// What the interpreter sees and checks an action against.
+pub(crate) struct VoiceContext {
+    pub cards: Vec<maya_core::model::Card>,
+    pub dirs: Vec<String>,
+    pub machines: Vec<String>,
+    pub prs: Vec<maya_core::reviews::ReviewPr>,
+}
+
+/// The board, the project dirs (a remote one as "<dir> (on <machine>)"),
+/// the connected machines and the PRs, as the page shows them now.
+pub(crate) fn voice_context(app: &AppHandle) -> VoiceContext {
     let state = app.state::<AppState>();
-    let v = state.voice.lock().unwrap();
+    let mut dirs = {
+        let store = state.store.lock().unwrap();
+        store.config.projects_dir_path().map(|r| launch::list_project_dirs(&r)).unwrap_or_default()
+    };
+    // Taken after `store` is released (lock order: `store` then `network`).
+    let cards = crate::merged_cards(&state);
+    let mut machines = vec![];
+    for board in crate::remote_boards(&state).into_iter().filter(|b| b.connected) {
+        for d in &board.dirs {
+            dirs.push(format!("{d} (on {})", board.machine));
+        }
+        machines.push(board.machine);
+    }
+    let prs = state.reviews.lock().unwrap().prs.clone();
+    VoiceContext { cards, dirs, machines, prs }
+}
+
+/// The interpreter's reply as one of the three outcomes. The read-back for
+/// a confirmation is what will run (`spoken_for`), never the model's `say`.
+pub(crate) fn decide(reply: &interpreter::Reply, ctx: &VoiceContext) -> Interpreted {
+    let Some(proposed) = reply.action.as_ref().filter(|a| a["kind"] != "report") else {
+        return Interpreted::Say(reply.say.clone());
+    };
+    match interpreter::validate(proposed, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs) {
+        Err(why) => Interpreted::Say(why),
+        Ok(action) if interpreter::needs_confirm(&action) => {
+            let say = spoken_for(&action).unwrap_or_else(|| "Shall I?".into());
+            Interpreted::Confirm(wake::Pending { say, action })
+        }
+        Ok(action) => Interpreted::Run(action),
+    }
+}
+
+/// (user, maya) pairs from the last 12 turns, at most 6, oldest first.
+pub(crate) fn exchanges<'a>(turns: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<(String, String)> {
+    let turns: Vec<(&str, &str)> = turns.into_iter().collect();
     let mut pairs = Vec::new();
-    let mut last_user: Option<String> = None;
-    let start = v.history.len().saturating_sub(12);
-    for t in &v.history[start..] {
-        if t.who == "user" {
-            last_user = Some(t.text.clone());
+    let mut last_user: Option<&str> = None;
+    for (who, text) in &turns[turns.len().saturating_sub(12)..] {
+        if *who == "user" {
+            last_user = Some(text);
         } else if let Some(u) = last_user.take() {
-            pairs.push((u, t.text.clone()));
+            pairs.push((u.to_string(), text.to_string()));
         }
     }
     let skip = pairs.len().saturating_sub(6);
     pairs.split_off(skip)
+}
+
+/// Asks Maya's agent what `cmd` means. Speaks nothing and stores nothing:
+/// the desktop listener and a phone's request both act on the outcome.
+pub(crate) fn interpret_text(app: &AppHandle, cmd: &str, history: &[(String, String)]) -> Interpreted {
+    let (brain, model, maya_dir) = {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        (store.config.brain(), store.config.brain_model().map(String::from), store.claude_dir().join("maya"))
+    };
+    let ctx = voice_context(app);
+    let Ok(binary) = launch::find_binary(brain) else {
+        return Interpreted::Say(format!("I can't find the {} command.", launch::binary_name(brain)));
+    };
+    match interpreter::run(brain, &binary, model.as_deref(), cmd, &ctx.cards, &ctx.prs, history, &maya_dir, interpreter::TIMEOUT) {
+        Ok(reply) => decide(&reply, &ctx),
+        Err(interpreter::RunError::TimedOut) => Interpreted::Say("Sorry, that took too long.".into()),
+        Err(_) => Interpreted::Say("Sorry, I didn't catch that.".into()),
+    }
+}
+
+/// The last exchanges as (user, maya) pairs, oldest first, for the interpreter.
+fn recent_exchanges(app: &AppHandle) -> Vec<(String, String)> {
+    let state = app.state::<AppState>();
+    let v = state.voice.lock().unwrap();
+    exchanges(v.history.iter().map(|t| (t.who.as_str(), t.text.as_str())))
 }
 
 /// Says `text`, then shows idle; both only while run `generation` is current.
@@ -305,65 +384,19 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     if !started {
         return;
     }
-    let (dirs_local, brain, model, maya_dir) = {
-        let state = app.state::<AppState>();
-        let store = state.store.lock().unwrap();
-        let dirs_local = store.config.projects_dir_path().map(|r| launch::list_project_dirs(&r)).unwrap_or_default();
-        (dirs_local, store.config.brain(), store.config.brain_model().map(String::from), store.claude_dir().join("maya"))
-    };
-    // Cards and remote dirs come from the same merged board `list_sessions`
-    // shows, taken after `store` is released (lock order: `store` then `network`).
-    let state = app.state::<AppState>();
-    let cards = crate::merged_cards(&state);
-    let mut dirs = dirs_local;
-    let mut machines = vec![];
-    for board in crate::remote_boards(&state).into_iter().filter(|b| b.connected) {
-        for d in &board.dirs {
-            dirs.push(format!("{d} (on {})", board.machine));
-        }
-        machines.push(board.machine);
-    }
-    let prs = app.state::<AppState>().reviews.lock().unwrap().prs.clone();
-    let history = recent_exchanges(app);
-    let binary = match launch::find_binary(brain) {
-        Ok(b) => b,
-        Err(_) => {
-            reply_then_idle(app, generation, &format!("I can't find the {} command.", launch::binary_name(brain)), inbox);
-            return;
-        }
-    };
-    let reply = match interpreter::run(brain, &binary, model.as_deref(), cmd, &cards, &prs, &history, &maya_dir, interpreter::TIMEOUT) {
-        Ok(r) => r,
-        Err(interpreter::RunError::TimedOut) => {
-            reply_then_idle(app, generation, "Sorry, that took too long.", inbox);
-            return;
-        }
-        Err(_) => {
-            reply_then_idle(app, generation, "Sorry, I didn't catch that.", inbox);
-            return;
-        }
-    };
+    let outcome = interpret_text(app, cmd, &recent_exchanges(app));
     if !is_current(app, generation) {
         log::line("listener", "run replaced while thinking; reply dropped");
         return;
     }
-    // No action, or only a report: the spoken reply is the whole answer.
-    let Some(proposed) = reply.action.as_ref().filter(|a| a["kind"] != "report") else {
-        log::line("action", "report only; nothing to run");
-        reply_then_idle(app, generation, &reply.say, inbox);
-        return;
-    };
-    match interpreter::validate(proposed, &cards, &dirs, &machines, &prs) {
-        Err(why) => {
-            log::line("action", format!("rejected: {why}"));
-            reply_then_idle(app, generation, &why, inbox)
+    match outcome {
+        Interpreted::Say(s) => {
+            log::line("action", "nothing to run");
+            reply_then_idle(app, generation, &s, inbox)
         }
-        Ok(action) if interpreter::needs_confirm(&action) => {
-            // The read-back is what will run, never the model's `say`, so a
-            // yes always confirms the action the user heard.
-            let say = spoken_for(&action).unwrap_or_else(|| "Shall I?".into());
-            log::line("action", format!("needs confirmation: {action}"));
-            let pending = wake::Pending { say: say.clone(), action };
+        Interpreted::Confirm(pending) => {
+            let say = pending.say.clone();
+            log::line("action", format!("needs confirmation: {}", pending.action));
             // Stored before the read-back so a tap on the page can answer it.
             let accepted = {
                 let state = app.state::<AppState>();
@@ -410,7 +443,7 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
                 }
             }
         }
-        Ok(action) => {
+        Interpreted::Run(action) => {
             // Focus and compact run at once and say what they did.
             log::line("action", format!("running now: {action}"));
             let said = match execute_action(app, &action) {
@@ -968,6 +1001,59 @@ pub(crate) fn spoken_for(action: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use maya_core::model::{AwaitKind, Awaiting, Card, Harness, State};
+
+    fn card(id: &str, name: &str, ask: &str) -> Card {
+        Card {
+            session_id: id.into(), pid: 1, name: name.into(), cwd: format!("/Users/x/dev/{name}"), state: State::Awaiting, state_since: 42, snippet: "".into(),
+            awaiting: Some(Awaiting { kind: AwaitKind::Text, detail: ask.into(), questions: vec![] }),
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None,
+        }
+    }
+
+    fn ctx() -> VoiceContext {
+        VoiceContext { cards: vec![card("s1", "hexgrid", "Ship it?")], dirs: vec![], machines: vec![], prs: vec![] }
+    }
+
+    fn reply(say: &str, action: Option<serde_json::Value>) -> interpreter::Reply {
+        interpreter::Reply { say: say.into(), action, confirm: false }
+    }
+
+    #[test]
+    fn a_report_is_only_said() {
+        assert_eq!(decide(&reply("Two sessions need you.", None), &ctx()), Interpreted::Say("Two sessions need you.".into()));
+        assert_eq!(decide(&reply("All quiet.", Some(serde_json::json!({"kind": "report"}))), &ctx()), Interpreted::Say("All quiet.".into()));
+    }
+
+    #[test]
+    fn a_reply_waits_for_a_yes_with_the_main_read_back() {
+        let r = reply("Sure!", Some(serde_json::json!({"kind": "reply", "session": "hexgrid", "text": "ship it"})));
+        let Interpreted::Confirm(p) = decide(&r, &ctx()) else { panic!("expected a confirmation") };
+        assert_eq!(p.say, "Telling hexgrid: ship it. Yes?");
+        assert_eq!(p.action["session"], "s1");
+    }
+
+    #[test]
+    fn compact_runs_at_once() {
+        let r = reply("Compacting.", Some(serde_json::json!({"kind": "compact", "session": "hexgrid"})));
+        assert!(matches!(decide(&r, &ctx()), Interpreted::Run(a) if a["kind"] == "compact"));
+    }
+
+    #[test]
+    fn an_action_on_nothing_says_why() {
+        let r = reply("Done.", Some(serde_json::json!({"kind": "reply", "session": "nope", "text": "x"})));
+        assert!(matches!(decide(&r, &ctx()), Interpreted::Say(_)));
+    }
+
+    #[test]
+    fn exchanges_pair_the_last_twelve_turns_into_at_most_six() {
+        let turns: Vec<(String, String)> = (0..20).flat_map(|i| [("user".to_string(), format!("u{i}")), ("maya".to_string(), format!("m{i}"))]).collect();
+        let pairs = exchanges(turns.iter().map(|(w, t)| (w.as_str(), t.as_str())));
+        assert_eq!(pairs.len(), 6);
+        assert_eq!(pairs.last().unwrap(), &("u19".to_string(), "m19".to_string()));
+        assert_eq!(pairs.first().unwrap(), &("u14".to_string(), "m14".to_string()));
+    }
+
     use serde_json::json;
 
     #[test]

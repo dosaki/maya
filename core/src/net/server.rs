@@ -84,6 +84,10 @@ pub trait Notify: Send + Sync {
     fn request(&self, _machine: Option<&str>, _request: Request) -> Result<Option<Value>, String> {
         Err("This Maya cannot answer requests.".into())
     }
+    /// What this main offers a mirroring Maya, sent in `welcome`.
+    fn main_caps(&self) -> Vec<String> {
+        vec![]
+    }
 }
 
 struct Conn {
@@ -855,7 +859,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
         c.max_message_size = Some(MAX_FRAME + MAX_FRAME / 1024);
         c.max_frame_size = Some(MAX_FRAME + MAX_FRAME / 1024);
     });
-    if let Err(e) = send_down(ch, &Down::Welcome { name: ctx.main_name.clone(), mirror: offer }) {
+    if let Err(e) = send_down(ch, &Down::Welcome { name: ctx.main_name.clone(), mirror: offer, caps: ctx.notify.main_caps() }) {
         // Undone first, so the list `leave` saves no longer holds the
         // pairing it takes back.
         if let Some(p) = pairing {
@@ -1351,7 +1355,7 @@ mod tests {
     use crate::net::client;
     use std::sync::atomic::AtomicBool;
     use crate::net::identity::Keypair;
-    use crate::net::protocol::{decode_down, encode, CommandKind, Down, Request, Up, PROTOCOL};
+    use crate::net::protocol::{decode_down, encode, CommandKind, Down, Request, Up, CAP_VOICE, PROTOCOL};
     use crate::net::secure::{self, Channel, Got};
     use std::net::TcpStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1378,6 +1382,8 @@ mod tests {
         pub saves_outside_lock: AtomicUsize,
         /// Every save fails while set (a full disk, a read-only config).
         pub fail_saves: AtomicBool,
+        /// What `main_caps` answers (`CAP_VOICE` for a main that interprets).
+        pub caps: Mutex<Vec<String>>,
         /// Requests a mirroring Maya made, with the machine asked.
         pub requests: Mutex<Vec<(Option<String>, Request)>>,
         notifier: Mutex<crate::notify::Notifier>,
@@ -1420,6 +1426,9 @@ mod tests {
             }
             *self.saved.lock().unwrap() = list.to_vec();
             Ok(())
+        }
+        fn main_caps(&self) -> Vec<String> {
+            self.caps.lock().unwrap().clone()
         }
         fn request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
             if let Request::Command(CommandKind::Compact { session }) = &request {
@@ -1465,6 +1474,20 @@ mod tests {
             s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         }
         ws
+    }
+
+    #[test]
+    fn welcome_names_what_the_main_can_do() {
+        let counter = Arc::new(Counter::default());
+        *counter.caps.lock().unwrap() = vec![CAP_VOICE.into()];
+        let (handle, port) = test_server_with(counter.clone());
+        let (ch, id, me) = pair_client(&handle, port, "Pixel");
+        drop(ch);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        let mut ch = connect_as(&handle, port, &me, "Pixel", &["mirror"]);
+        let Down::Welcome { caps, .. } = recv(&mut ch) else { panic!("expected welcome") };
+        assert_eq!(caps, vec![CAP_VOICE.to_string()]);
+        handle.stop();
     }
 
     pub(crate) fn hello_up(name: &str, caps: &[&str]) -> Up {

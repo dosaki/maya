@@ -6,6 +6,7 @@
 //! while holding the other.
 
 use crate::actions;
+use crate::listener::{self, Interpreted, VoiceContext};
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
@@ -148,7 +149,7 @@ impl ClientNotify for TauriClientNotify {
     fn paired(&self, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
-        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None });
+        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false });
     }
     fn disconnected(&self, error: &str) {
         log::line("network", format!("disconnected: {error}"));
@@ -254,6 +255,98 @@ impl Executor for TauriExecutor {
     }
 }
 
+/// What a phone's `Interpret` gets back: the line to say, and the action to
+/// run on its yes when there is one.
+pub(crate) fn interpret_data(outcome: &Interpreted) -> Value {
+    match outcome {
+        Interpreted::Say(s) => serde_json::json!({ "say": s }),
+        Interpreted::Confirm(p) => serde_json::json!({ "say": p.say, "pending": { "say": p.say, "action": p.action } }),
+        // Run is executed before answering; see `serve_voice`.
+        Interpreted::Run(_) => serde_json::json!({ "say": "" }),
+    }
+}
+
+pub(crate) fn said_data(say: &str) -> Value {
+    serde_json::json!({ "say": say })
+}
+
+/// Why an action that runs at once cannot run for a phone: focus brings a
+/// window forward and open opens a browser, both on this machine, which the
+/// user holding the phone cannot see.
+pub(crate) fn refuse_remote(action: &Value) -> Option<String> {
+    match action["kind"].as_str() {
+        Some("focus") => Some("I can only bring a window forward when you're at the computer.".into()),
+        Some("open") => Some("I can only open a pull request on the computer itself.".into()),
+        _ => None,
+    }
+}
+
+/// A confirmed action checked again against the board as it is now: the
+/// ask may have been answered at the desk while the phone waited for yes.
+/// The action keeps the session id `validate` gave it: an id matches one
+/// card exactly, where the name could match another session by then.
+/// A pull request is looked up by the `repo#number` it resolved to, and a
+/// remote project by `"<dir> (on <machine>)"`, the way the lists spell them.
+pub(crate) fn revalidate(action: &Value, ctx: &VoiceContext) -> Result<Value, String> {
+    let mut asked = action.clone();
+    match action["kind"].as_str() {
+        Some("review") => {
+            if let (Some(repo), Some(number)) = (action["repo"].as_str(), action["number"].as_u64()) {
+                asked["pr"] = Value::String(format!("{repo}#{number}"));
+            }
+        }
+        Some("start" | "resume") => {
+            // `validate` adds the machine back when the dir list still has it there.
+            if let Some(obj) = asked.as_object_mut() {
+                obj.remove("machine");
+            }
+            if let (Some(dir), Some(m)) = (action["dir"].as_str(), action["machine"].as_str().filter(|m| !m.is_empty())) {
+                asked["dir"] = Value::String(format!("{dir} (on {m})"));
+            }
+        }
+        _ => {}
+    }
+    let fresh = maya_core::interpreter::validate(&asked, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs)?;
+    // An answer must still be for the ask the user heard read back.
+    if action["kind"] == "answer" && fresh["askId"] != action["askId"] {
+        return Err("The question has changed; ask me again.".into());
+    }
+    // A pull request that has gone must not resolve to another with its number.
+    if action["kind"] == "review" && (fresh["repo"] != action["repo"] || fresh["number"] != action["number"]) {
+        return Err("The pull request has changed; ask me again.".into());
+    }
+    Ok(fresh)
+}
+
+/// A phone's voice request: interpret (running a compact at once), or run a
+/// confirmed action. Nothing is spoken here, and the desktop's own
+/// conversation is untouched.
+fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, String> {
+    match request {
+        Request::Interpret { command, history } => {
+            let pairs = listener::exchanges(history.iter().map(|t| (t.who.as_str(), t.text.as_str())));
+            let outcome = listener::interpret_text(app, &command, &pairs);
+            if let Interpreted::Run(action) = &outcome {
+                if let Some(why) = refuse_remote(action) {
+                    return Ok(Some(said_data(&why)));
+                }
+                let said = listener::execute_action(app, action).map(|s| listener::spoken_for(action).unwrap_or(s)).unwrap_or_else(|e| e);
+                return Ok(Some(said_data(&said)));
+            }
+            Ok(Some(interpret_data(&outcome)))
+        }
+        Request::Execute { action } => {
+            let fresh = revalidate(&action, &listener::voice_context(app))?;
+            if let Some(why) = refuse_remote(&fresh) {
+                return Ok(Some(said_data(&why)));
+            }
+            let said = listener::execute_action(app, &fresh)?;
+            Ok(Some(said_data(&said)))
+        }
+        _ => unreachable!("serve_voice is only called for voice requests"),
+    }
+}
+
 /// Answers a mirroring Maya's request as this Maya's own page would:
 /// a session's command goes to whichever machine lists it, a machine's
 /// command to the machine named (`None` is this Mac), and the listings
@@ -261,6 +354,7 @@ impl Executor for TauriExecutor {
 pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
     let state = app.state::<AppState>();
     match request {
+        voice @ (Request::Interpret { .. } | Request::Execute { .. }) => serve_voice(app, voice),
         Request::ListDirs => match machine {
             Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),
@@ -326,6 +420,93 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    use crate::model::{AwaitKind, Awaiting, Choice, Harness, Question, State};
+
+    #[test]
+    fn interpret_answers_say_and_a_pending_action() {
+        let said = interpret_data(&Interpreted::Say("All quiet.".into()));
+        assert_eq!(said, serde_json::json!({"say": "All quiet."}));
+        let pending = maya_core::wake::Pending { say: "Answering hexgrid with \"Yes\". Yes?".into(), action: serde_json::json!({"kind": "answer"}) };
+        let asked = interpret_data(&Interpreted::Confirm(pending));
+        assert_eq!(asked["say"], "Answering hexgrid with \"Yes\". Yes?");
+        assert_eq!(asked["pending"]["say"], asked["say"]);
+        assert_eq!(asked["pending"]["action"]["kind"], "answer");
+    }
+
+    #[test]
+    fn focus_and_open_cannot_run_for_a_phone() {
+        assert_eq!(refuse_remote(&serde_json::json!({"kind": "focus", "session": "s1"})).as_deref(), Some("I can only bring a window forward when you're at the computer."));
+        assert_eq!(refuse_remote(&serde_json::json!({"kind": "open", "repo": "dosaki/collector", "number": 14})).as_deref(), Some("I can only open a pull request on the computer itself."));
+        assert!(refuse_remote(&serde_json::json!({"kind": "compact", "session": "s1"})).is_none());
+    }
+
+    #[test]
+    fn execute_revalidates_against_the_board_now() {
+        let gone = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![] };
+        let err = revalidate(&serde_json::json!({"kind": "reply", "session": "s1", "name": "hexgrid", "text": "ship it"}), &gone).unwrap_err();
+        assert!(!err.is_empty(), "a session that has gone fails with a reason");
+    }
+
+    fn asking(id: &str, name: &str, state_since: u64) -> Card {
+        Card {
+            session_id: id.into(), pid: 1, name: name.into(), cwd: format!("/Users/x/dev/{name}"), state: State::Awaiting, state_since, snippet: "".into(),
+            awaiting: Some(Awaiting {
+                kind: AwaitKind::Question,
+                detail: "Ship it?".into(),
+                questions: vec![Question { question: "Ship it?".into(), header: "".into(), options: vec![Choice { label: "Yes".into(), description: "".into() }], multi_select: false }],
+            }),
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None,
+        }
+    }
+
+    fn board(cards: Vec<Card>) -> VoiceContext {
+        VoiceContext { cards, dirs: vec![], machines: vec![], prs: vec![] }
+    }
+
+    #[test]
+    fn an_ask_answered_at_the_desk_is_refused_with_the_reason() {
+        let action = serde_json::json!({"kind": "answer", "session": "s1", "name": "hexgrid", "option": 1, "askId": 42});
+        assert_eq!(revalidate(&action, &board(vec![asking("s1", "hexgrid", 42)])).unwrap()["askId"], 42);
+        let err = revalidate(&action, &board(vec![asking("s1", "hexgrid", 99)])).unwrap_err();
+        assert_eq!(err, "The question has changed; ask me again.");
+    }
+
+    #[test]
+    fn a_reply_for_a_session_still_there_resolves_to_its_id() {
+        let action = serde_json::json!({"kind": "reply", "session": "s1", "name": "hexgrid", "text": "ship it"});
+        let fresh = revalidate(&action, &board(vec![asking("s1", "hexgrid", 42)])).unwrap();
+        assert_eq!(fresh["session"], "s1");
+    }
+
+    fn pr(repo: &str, number: u64) -> maya_core::reviews::ReviewPr {
+        maya_core::reviews::ReviewPr { number, repo: repo.into(), title: format!("{repo} {number}"), author: "alex".into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: false, updated_at: "2026-10-01T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] }
+    }
+
+    #[test]
+    fn a_review_whose_pull_request_has_gone_is_refused_not_moved_to_another() {
+        let action = serde_json::json!({"kind": "review", "pr": "#14", "repo": "dosaki/collector", "number": 14, "title": "dosaki/collector 14"});
+        let still = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/collector", 14), pr("dosaki/maya", 14)] };
+        let fresh = revalidate(&action, &still).unwrap();
+        assert_eq!((fresh["repo"].as_str(), fresh["number"].as_u64()), (Some("dosaki/collector"), Some(14)), "the confirmed one, though another repo has a #14 now");
+        let gone = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/maya", 14)] };
+        assert_eq!(revalidate(&action, &gone).unwrap_err(), "The pull request has changed; ask me again.");
+    }
+
+    #[test]
+    fn a_confirmed_remote_project_revalidates_on_its_machine() {
+        let ctx = |dirs: &[&str]| VoiceContext { cards: vec![], dirs: dirs.iter().map(|d| d.to_string()).collect(), machines: vec!["laptop".into()], prs: vec![] };
+        let remote = serde_json::json!({"kind": "start", "dir": "maya", "machine": "laptop", "prompt": "go"});
+        for dirs in [&["maya (on laptop)"][..], &["maya", "maya (on laptop)"][..]] {
+            let fresh = revalidate(&remote, &ctx(dirs)).unwrap();
+            assert_eq!((fresh["dir"].as_str(), fresh["machine"].as_str()), (Some("maya"), Some("laptop")), "{dirs:?}");
+        }
+        let resumed = revalidate(&serde_json::json!({"kind": "resume", "dir": "maya", "machine": "laptop"}), &ctx(&["maya (on laptop)"])).unwrap();
+        assert_eq!(resumed["machine"].as_str(), Some("laptop"));
+        let local = revalidate(&serde_json::json!({"kind": "start", "dir": "maya", "prompt": "go"}), &ctx(&["maya", "maya (on laptop)"])).unwrap();
+        assert_eq!((local["dir"].as_str(), local["machine"].as_str()), (Some("maya"), None), "a local project stays local");
+        assert!(revalidate(&remote, &ctx(&["maya"])).is_err(), "the laptop no longer lists it");
+    }
 
     #[test]
     fn a_stored_key_is_used_and_none_stored_makes_and_stores_one() {

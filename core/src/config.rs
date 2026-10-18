@@ -94,6 +94,9 @@ pub struct Config {
     /// voice instead of playing the notification sound.
     #[serde(default = "default_true")]
     pub speak_notifications: bool,
+    /// The phone listens for "Maya" while its app is on screen. The desktop ignores it.
+    #[serde(default)]
+    pub wake_word: bool,
     /// Make no sound at all: no spoken lines and silent banners. Banners,
     /// the badge and the Dock bounce still come.
     #[serde(default)]
@@ -193,6 +196,7 @@ impl Default for Config {
             notify_on_completed: true,
             notify_on_pr_review: true,
             speak_notifications: true,
+            wake_word: false,
             muted: false,
             voice_provider: Default::default(),
             voice_volume: default_voice_volume(),
@@ -387,6 +391,15 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "notifyOnAwaiting": false}"#).unwrap();
         assert!(!c.notify_on_awaiting);
         assert!(serde_json::to_string(&c).unwrap().contains("\"notifyOnAwaiting\":false"));
+    }
+
+    #[test]
+    fn the_wake_word_defaults_off_and_round_trips() {
+        assert!(!Config::default().wake_word);
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30,"wakeWord":true}"#).unwrap();
+        assert!(c.wake_word);
+        let old: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
+        assert!(!old.wake_word);
     }
 
     #[test]

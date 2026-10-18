@@ -97,6 +97,8 @@ pub struct AssistantLink {
     pub retrying: bool,
     /// What the main said about mirroring at the last connect; `None` before.
     pub mirror: Option<MirrorAccess>,
+    /// The main interprets voice commands for this Maya (`CAP_VOICE` at the last welcome).
+    pub voice: bool,
 }
 
 /// Whether the main shares its board with this Maya.

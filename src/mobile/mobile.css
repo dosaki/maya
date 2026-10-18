@@ -53,3 +53,17 @@
 
 .setup__modes { display: flex; gap: 8px; margin: 8px 0 12px; }
 .setup__modes button[aria-pressed=true] { border-color: var(--gold); color: var(--gold-bright); }
+
+/* The mic bar under the column strip: the mic, what was heard and said, Yes and No.
+   Not `.voice`: styles.css, loaded first, uses that for the desktop's 28 px button. */
+.voicebar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.voicebar__mic { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--gold-deep); background: var(--panel); color: var(--gold-bright); font-size: 20px; }
+.voicebar--listening .voicebar__mic, .voicebar--awaiting-command .voicebar__mic, .voicebar--awaiting-confirm .voicebar__mic { background: var(--gold); color: var(--on-gold); }
+.voicebar__mic:disabled { opacity: .5; }
+.voicebar__line { flex: 1; min-width: 0; font-size: 14px; }
+.voicebar__heard { color: var(--muted); }
+.voicebar__answer { display: flex; gap: 8px; }
+.voicebar__answer button { min-height: 40px; padding: 0 16px; }
+.voicebar__error { flex-basis: 100%; color: #dc2626; font-size: 12.5px; }
+.voicebar__settings { min-height: 40px; padding: 0 16px; }
+.voicebar__note { flex-basis: 100%; color: var(--muted); font-size: 12.5px; }

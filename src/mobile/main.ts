@@ -19,6 +19,7 @@ import { showToast } from "../toast";
 import type { Card, CardState } from "../types";
 import { updates } from "../update";
 import { makeCardHistory } from "./card-history";
+import { initVoice } from "./voice";
 import { initNetwork, type NetworkStatus } from "./network";
 import { watchTaps } from "./notify-tap";
 import { initSetup } from "./setup";
@@ -175,7 +176,10 @@ async function start(): Promise<void> {
   tabs = makeTabs((tab) => {
     const strip = document.getElementById("strip-host");
     if (strip) strip.hidden = tab !== "sessions";
+    const voice = document.getElementById("voice-host");
+    if (voice) voice.hidden = tab !== "sessions";
   });
+  void initVoice();
   const recheckNotifications = initNetwork((s) => {
     status = s;
     paint();

@@ -25,6 +25,9 @@ pub const CAP_FOLLOW: &str = "follow";
 pub const CAP_LEAD: &str = "lead";
 /// A Maya with this cap wants the main's board (`mirror`) and sends `request`s.
 pub const CAP_MIRROR: &str = "mirror";
+/// A main with this cap interprets voice commands for a mirroring Maya
+/// (`Request::Interpret`, `Request::Execute`).
+pub const CAP_VOICE: &str = "voice";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -79,7 +82,14 @@ fn known_agents<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<cra
 pub enum Down {
     /// `mirror` answers a Maya that asked with `CAP_MIRROR`: whether the main
     /// will mirror to it. Absent for anyone else.
-    Welcome { name: String, #[serde(default, skip_serializing_if = "Option::is_none")] mirror: Option<bool> },
+    Welcome {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mirror: Option<bool>,
+        /// What this main can do for a mirroring Maya (`CAP_VOICE`); an older main sends none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        caps: Vec<String>,
+    },
     Bye { reason: String },
     Command { id: u64, #[serde(flatten)] kind: CommandKind },
     /// The main is now at `host:port` with the public key `key`: pin it and
@@ -93,6 +103,15 @@ pub enum Down {
     Pong,
 }
 
+/// One turn of a phone's voice conversation, oldest first.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceTurn {
+    /// "user" or "maya".
+    pub who: String,
+    pub text: String,
+}
+
 /// What a mirroring Maya asks of the main: a command on the pool (never
 /// `Promote`), or a listing the main's own page reads locally.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -101,6 +120,12 @@ pub enum Request {
     Command(CommandKind),
     ListDirs,
     ListAgents,
+    /// A spoken command for the main's agent; `history` is the phone's
+    /// conversation so far. Answered with `{say, pending?: {say, action}}`.
+    Interpret { command: String, #[serde(default)] history: Vec<VoiceTurn> },
+    /// A validated action the user confirmed by voice; the main validates it
+    /// again against its board before running it. Answered with `{say}`.
+    Execute { action: Value },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -213,10 +238,30 @@ mod tests {
         let mirror = Down::Mirror { allowed: true, cards: vec![], machines: vec![MachineInfo { name: "desk".into(), hostname: "desk".into(), platform: "macos".into(), connected: true }] };
         assert_eq!(decode_down(&encode(&mirror)).unwrap(), mirror);
         assert_eq!(decode_down(r#"{"type":"mirror","allowed":false}"#).unwrap(), Down::Mirror { allowed: false, cards: vec![], machines: vec![] });
-        let offered = Down::Welcome { name: "desk".into(), mirror: Some(true) };
+        let offered = Down::Welcome { name: "desk".into(), mirror: Some(true), caps: vec![] };
         assert_eq!(decode_down(&encode(&offered)).unwrap(), offered);
-        assert!(!encode(&Down::Welcome { name: "desk".into(), mirror: None }).contains("mirror"), "no offer, no field");
-        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk"}"#).unwrap(), Down::Welcome { name: "desk".into(), mirror: None });
+        assert!(!encode(&Down::Welcome { name: "desk".into(), mirror: None, caps: vec![] }).contains("mirror"), "no offer, no field");
+        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk"}"#).unwrap(), Down::Welcome { name: "desk".into(), mirror: None, caps: vec![] });
+    }
+
+    #[test]
+    fn voice_requests_round_trip() {
+        let ask = Up::Request { id: 7, machine: None, request: Request::Interpret { command: "what needs me".into(), history: vec![VoiceTurn { who: "user".into(), text: "hi".into() }, VoiceTurn { who: "maya".into(), text: "Hello.".into() }] } };
+        assert_eq!(decode_up(&encode(&ask)).unwrap(), ask);
+        let run = Up::Request { id: 8, machine: None, request: Request::Execute { action: serde_json::json!({"kind": "answer", "session": "s1", "option": 1}) } };
+        assert_eq!(decode_up(&encode(&run)).unwrap(), run);
+    }
+
+    #[test]
+    fn welcome_carries_caps_only_when_there_are_some() {
+        let voiced = Down::Welcome { name: "desk".into(), mirror: Some(true), caps: vec![CAP_VOICE.into()] };
+        assert_eq!(decode_down(&encode(&voiced)).unwrap(), voiced);
+        assert!(!encode(&Down::Welcome { name: "desk".into(), mirror: None, caps: vec![] }).contains("caps"));
+    }
+
+    #[test]
+    fn an_old_welcome_without_caps_still_decodes() {
+        assert_eq!(decode_down(r#"{"type":"welcome","name":"desk","mirror":true}"#).unwrap(), Down::Welcome { name: "desk".into(), mirror: Some(true), caps: vec![] });
     }
 
     #[test]
@@ -243,7 +288,7 @@ mod tests {
         let s = encode(&slash);
         assert!(s.contains("\"kind\":\"slash\"") && s.contains("\"text\":\"/review\""), "{s}");
         assert_eq!(decode_down(&s).unwrap(), slash);
-        let welcome = Down::Welcome { name: "desk".into(), mirror: None };
+        let welcome = Down::Welcome { name: "desk".into(), mirror: None, caps: vec![] };
         assert_eq!(decode_down(&encode(&welcome)).unwrap(), welcome);
     }
 

@@ -20,7 +20,7 @@ use maya_core::store::now_ms;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 /// What the hub tells the outside: the page's events and the service.
@@ -101,6 +101,23 @@ pub struct Hub {
     /// The time boards are merged and routed at: the real clock, or a
     /// test's, so expiry can be checked without waiting five minutes.
     now: Box<dyn Fn() -> u64 + Send + Sync>,
+    /// The phone's voice conversation, once the app has made it. Taken
+    /// alone: `refresh` calls into it with only its own serial lock held,
+    /// and it never calls back into a hub lock while it holds its own (its
+    /// event gate, `events_may_speak`, runs with the voice's lock released).
+    pub voice: OnceLock<Arc<crate::voice::Voice>>,
+    /// On silent, vibrate or Do Not Disturb (the voice plugin's `quiet`).
+    pub silenced: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
+    /// What `joined` answers in a test, so it needs no running client.
+    #[cfg(test)]
+    joined_override: Mutex<Option<bool>>,
+}
+
+/// Whether board events may be spoken at all: Speak is on and the phone is
+/// not on silent, vibrate or Do Not Disturb. Replies are always spoken.
+/// `silenced` is a call into Android, made only when Speak is on.
+pub(crate) fn speaks_events(speak_on: bool, silenced: impl FnOnce() -> bool) -> bool {
+    speak_on && !silenced()
 }
 
 impl Hub {
@@ -110,7 +127,11 @@ impl Hub {
 
     /// `new` with the clock boards are merged at.
     pub fn with_clock(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>, now: impl Fn() -> u64 + Send + Sync + 'static) -> Arc<Hub> {
-        Arc::new(Hub { maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), client: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now) })
+        Arc::new(Hub {
+            maya_dir, settings: Mutex::new(settings), server: Mutex::new(None), main_error: Mutex::new(None), client: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, now: Box::new(now), voice: OnceLock::new(), silenced: OnceLock::new(),
+            #[cfg(test)]
+            joined_override: Mutex::new(None),
+        })
     }
 
     fn handle(&self) -> Option<ServerHandle> {
@@ -138,7 +159,50 @@ impl Hub {
 
     /// This phone listens to a main (joined, or after handing its role away).
     pub fn joined(&self) -> bool {
+        #[cfg(test)]
+        if let Some(joined) = *self.joined_override.lock().unwrap() {
+            return joined;
+        }
         self.client.lock().unwrap().is_some()
+    }
+
+    /// Sets the link and what `joined` answers, with no client running.
+    #[cfg(test)]
+    pub(crate) fn set_link_for_test(&self, link: AssistantLink, joined: bool) {
+        *self.link.lock().unwrap() = link;
+        *self.joined_override.lock().unwrap() = Some(joined);
+    }
+
+    /// Why voice is not offered, or `None` when it is: the phone must have
+    /// joined a main that interprets (`CAP_VOICE`) and lets it control
+    /// sessions, and be connected to it now. Withdrawn on a disconnect, it
+    /// resets the conversation; `HubClientNotify` refreshes on every link
+    /// change, so it comes back with the link.
+    pub fn voice_offer(&self) -> Option<String> {
+        if !self.joined() {
+            return Some(crate::voice::NO_MAIN.into());
+        }
+        let link = self.link.lock().unwrap();
+        let main = link.main_name.clone().unwrap_or_else(|| "the main Maya".into());
+        if !link.connected {
+            return Some(format!("Reconnecting to {main}…"));
+        }
+        if link.mirror != Some(MirrorAccess::Allowed) {
+            return Some(format!("{main} has not allowed this phone to control its sessions."));
+        }
+        if !link.voice {
+            return Some(format!("Update {main} to talk to Maya."));
+        }
+        None
+    }
+
+    /// `speaks_events` now, for a board event that waited behind a
+    /// conversation: the voice asks this as it is about to speak it, with
+    /// none of its locks held. Takes `settings` alone and briefly; the
+    /// `silenced` call into Android runs after it is released.
+    pub fn events_may_speak(&self) -> bool {
+        let speak_on = self.settings.lock().unwrap().config.speak_notifications;
+        speaks_events(speak_on, || self.silenced.get().is_some_and(|f| f()))
     }
 
     /// Sends a request to the joined main and waits for its answer.
@@ -186,14 +250,29 @@ impl Hub {
             let mut n = self.notifier.lock().unwrap();
             (n.take_new(&cards), n.take_finished(&cards))
         };
-        let switches = {
+        let (switches, speak_on) = {
             let s = self.settings.lock().unwrap();
-            Switches { awaiting: s.config.notify_on_awaiting, completed: s.config.notify_on_completed }
+            (Switches { awaiting: s.config.notify_on_awaiting, completed: s.config.notify_on_completed }, s.config.speak_notifications)
         };
         let actions = alerts::plan(&cards, &fresh, &finished, &mut self.posted.lock().unwrap(), switches);
+        // First, so an event arriving as voice comes or goes sees the new
+        // offer. No hub lock but the serial one is held here: the voice's
+        // callbacks (the page event, the plugin queue) take none.
+        if let Some(v) = self.voice.get() {
+            v.set_offer(self.voice_offer());
+        }
+        // Asked only when there is something to post: it is a call into Android.
+        let mut events_spoken = None;
         for a in actions {
             match a {
-                Action::Post(p) => self.alerts.post(&p),
+                Action::Post(mut p) => {
+                    let may_speak = *events_spoken.get_or_insert_with(|| speaks_events(speak_on, || self.silenced.get().is_some_and(|f| f())));
+                    if let (true, Some(v), Some(line)) = (may_speak, self.voice.get(), p.spoken.as_deref()) {
+                        // Spoken (now or once the conversation is idle): post without a sound.
+                        p.quiet = v.announce(line);
+                    }
+                    self.alerts.post(&p)
+                }
                 Action::Clear(id) => self.alerts.clear(id),
             }
         }
@@ -502,6 +581,7 @@ impl Hub {
         match request {
             Request::ListDirs => to_data(serde_json::to_value(machine.map(|m| merge::dirs_of(&self.boards(), m)).unwrap_or_default())),
             Request::ListAgents => to_data(serde_json::to_value(agents_reply(false, machine.and_then(|m| merge::agents_of(&self.boards(), m)), Vec::new))),
+            Request::Interpret { .. } | Request::Execute { .. } => Err("This phone cannot interpret voice commands.".into()),
             Request::Command(kind) => match target_of(&kind) {
                 Target::Session(session) => self.send(&session, |_| kind),
                 Target::Machine => self.send_to(machine.ok_or("This phone runs no sessions.")?, kind),
@@ -654,7 +734,7 @@ impl ClientNotify for HubClientNotify {
     fn paired(&self, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
-        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None });
+        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false });
         self.refresh();
     }
     fn disconnected(&self, error: &str) {
@@ -689,6 +769,12 @@ impl ClientNotify for HubClientNotify {
         }
         self.set(|l| l.mirror = Some(access));
         h.refresh();
+    }
+    fn main_caps(&self, caps: &[String]) {
+        let voice = caps.iter().any(|c| c == maya_core::net::protocol::CAP_VOICE);
+        self.set(|l| l.voice = voice);
+        // So the voice's offer follows the link.
+        self.refresh();
     }
     fn mirrored(&self, allowed: bool, cards: Vec<Card>, machines: Vec<MachineInfo>) {
         if self.stop.load(Ordering::SeqCst) {
@@ -728,6 +814,8 @@ impl ClientNotify for HubClientNotify {
         h.client.lock().unwrap().take();
         *h.mirror.lock().unwrap() = MirrorView::default();
         *h.link.lock().unwrap() = AssistantLink::default();
+        // No longer joined: the voice's offer is withdrawn.
+        h.refresh();
         log::line("network", format!("promoted to main by {by}; {handed} assistants handed over"));
         let port = h.handle().map(|s| s.port()).ok_or("The server is stopped.")?;
         h.sink.network(&h.status());
@@ -748,6 +836,159 @@ impl ClientNotify for HubClientNotify {
 mod tests {
     use super::*;
     use maya_core::net::client::Executor;
+
+    struct NoAlerts;
+    impl crate::alerts::Alerts for NoAlerts {
+        fn post(&self, _: &crate::alerts::Post) {}
+        fn clear(&self, _: i32) {}
+        fn service_line(&self, _: &str) {}
+    }
+    struct NoSink;
+    impl Sink for NoSink {
+        fn sessions(&self, _: &[Card]) {}
+        fn network(&self, _: &NetworkStatus) {}
+        fn service_start(&self, _: &str) {}
+        fn service_stop(&self) {}
+    }
+
+    /// A hub over an empty config in a fresh directory, with no-op alerts and sink.
+    pub(crate) fn test_hub() -> Arc<Hub> {
+        let dir = std::env::temp_dir().join(format!("maya-hub-test-{}-{}", std::process::id(), now_ms()));
+        let settings = Settings { path: settings_path(&dir), config: Config::default() };
+        Hub::new(dir, settings, Arc::new(NoAlerts), Arc::new(NoSink))
+    }
+
+    #[test]
+    fn voice_is_offered_only_when_joined_to_a_main_that_interprets() {
+        let hub = test_hub();
+        assert_eq!(hub.voice_offer().as_deref(), Some("Voice needs a desktop main."));
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: false, ..Default::default() }, true);
+        assert_eq!(hub.voice_offer().as_deref(), Some("Update Yhi to talk to Maya."));
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
+        assert_eq!(hub.voice_offer(), None);
+        hub.set_link_for_test(AssistantLink { connected: false, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
+        assert_eq!(hub.voice_offer().as_deref(), Some("Reconnecting to Yhi…"), "a dropped link cannot carry a command");
+    }
+
+    #[test]
+    fn a_disconnect_withdraws_voice_and_a_reconnect_brings_it_back() {
+        let (hub, _, _) = hub_with_a_new_ask(false);
+        let v = hub.voice.get().unwrap().clone();
+        let link = |connected| AssistantLink { connected, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() };
+        hub.refresh();
+        assert_eq!(v.view().offer, None);
+        v.tap();
+        assert_eq!(v.view().state, "awaiting-command");
+        hub.set_link_for_test(link(false), true);
+        hub.refresh();
+        assert_eq!(v.view().offer.as_deref(), Some("Reconnecting to Yhi…"));
+        assert_eq!(v.view().state, "off", "the open window is dropped");
+        hub.set_link_for_test(link(true), true);
+        hub.refresh();
+        assert_eq!(v.view().offer, None);
+        assert_eq!(v.view().state, "idle");
+    }
+
+    #[test]
+    fn events_are_spoken_only_with_speak_on_and_the_phone_not_silenced() {
+        assert!(speaks_events(true, || false));
+        assert!(!speaks_events(false, || panic!("not asked with Speak off")), "Speak off");
+        assert!(!speaks_events(true, || true), "silent, vibrate or Do Not Disturb");
+    }
+
+    #[derive(Default)]
+    struct Posts(Mutex<Vec<crate::alerts::Post>>);
+    impl crate::alerts::Alerts for Posts {
+        fn post(&self, p: &crate::alerts::Post) {
+            self.0.lock().unwrap().push(p.clone());
+        }
+        fn clear(&self, _: i32) {}
+        fn service_line(&self, _: &str) {}
+    }
+
+    #[derive(Default)]
+    struct Said(Mutex<Vec<String>>);
+    impl crate::voice::VoiceIo for Said {
+        fn listen(&self, _: bool) {}
+        fn stop_listening(&self) {}
+        fn speak(&self, line: &str) {
+            self.0.lock().unwrap().push(line.to_string());
+        }
+        fn stop_speaking(&self) {}
+    }
+
+    /// A hub joined to a main that interprets, with Speak as given, the
+    /// voice on screen but not yet told it is offered, and a card that has
+    /// just started waiting on the mirrored board.
+    fn hub_with_a_new_ask(speak: bool) -> (Arc<Hub>, Arc<Posts>, Arc<Said>) {
+        let dir = std::env::temp_dir().join(format!("maya-hub-voice-test-{}-{}-{speak}", std::process::id(), now_ms()));
+        let config = Config { speak_notifications: speak, ..Config::default() };
+        let posts = Arc::new(Posts::default());
+        let hub = Hub::new(dir.clone(), Settings { path: settings_path(&dir), config }, posts.clone(), Arc::new(NoSink));
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
+        let said = Arc::new(Said::default());
+        let ask: crate::voice::Ask = Arc::new(|_| Err("not asked".into()));
+        let v = crate::voice::Voice::new(said.clone(), ask, Arc::new(|_| {}), now_ms);
+        v.screen(true);
+        let _ = hub.voice.set(v);
+        hub.notifier.lock().unwrap().take_new(&[]);
+        let card: Card = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1", "pid": 0, "name": "hexgrid", "cwd": "/home/u/dev/hexgrid", "state": "awaiting", "stateSince": 5,
+            "snippet": "", "hasInbox": true, "harness": "claudeCode", "stale": false
+        }))
+        .unwrap();
+        hub.mirror.lock().unwrap().cards = vec![card];
+        (hub, posts, said)
+    }
+
+    #[test]
+    fn an_ask_arriving_as_voice_comes_up_is_spoken() {
+        let (hub, posts, said) = hub_with_a_new_ask(true);
+        hub.refresh();
+        assert_eq!(said.0.lock().unwrap().as_slice(), ["hexgrid needs a decision"]);
+        assert!(posts.0.lock().unwrap()[0].quiet, "posted without a sound, since it is spoken");
+    }
+
+    #[test]
+    fn with_speak_off_the_phone_is_not_asked_whether_it_is_silenced() {
+        let (hub, posts, said) = hub_with_a_new_ask(false);
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let a = asked.clone();
+        let _ = hub.silenced.set(Box::new(move || {
+            a.fetch_add(1, Ordering::SeqCst);
+            false
+        }));
+        hub.refresh();
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "a call into Android for nothing");
+        assert!(said.0.lock().unwrap().is_empty());
+        assert!(!posts.0.lock().unwrap()[0].quiet);
+    }
+
+    #[test]
+    fn a_queued_event_asks_the_settings_and_the_phone_at_playback() {
+        let (hub, _, _) = hub_with_a_new_ask(false);
+        let quiet = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (q, a) = (quiet.clone(), asked.clone());
+        let _ = hub.silenced.set(Box::new(move || {
+            a.fetch_add(1, Ordering::SeqCst);
+            q.load(Ordering::SeqCst)
+        }));
+        assert!(!hub.events_may_speak(), "Speak off");
+        assert_eq!(asked.load(Ordering::SeqCst), 0, "not asked with Speak off");
+        hub.update_config(|c| c.speak_notifications = true).unwrap();
+        assert!(hub.events_may_speak());
+        quiet.store(true, Ordering::SeqCst);
+        assert!(!hub.events_may_speak(), "silenced since");
+    }
+
+    #[test]
+    fn the_phone_as_main_refuses_voice_requests() {
+        let hub = test_hub();
+        let err = hub.serve_request(None, Request::Interpret { command: "hi".into(), history: vec![] }).unwrap_err();
+        assert_eq!(err, "This phone cannot interpret voice commands.");
+        assert!(hub.serve_request(None, Request::Execute { action: serde_json::json!({}) }).is_err());
+    }
 
     #[test]
     fn a_late_paired_list_change_leaves_an_assistant_config_empty() {

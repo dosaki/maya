@@ -1,4 +1,4 @@
-pub use maya_core::{actions, answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, kiro, launch, log, model, net, notify, opencode, pr, registry, resume, reviews, state, store, terminal, transcript, tty, watcher};
+pub use maya_core::{actions, answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, kiro, launch, log, model, net, notify, opencode, pr, registry, resume, reviews, state, store, terminal, transcript, tty, wake, watcher};
 
 pub mod badge;
 #[cfg(target_os = "macos")]
@@ -18,7 +18,6 @@ pub mod terminal_win;
 pub mod updater;
 pub mod keystore;
 pub mod voice;
-pub mod wake;
 
 /// This platform's terminal: `TERMINAL`, `open_terminal_with` and `focus_pid`.
 #[cfg(target_os = "macos")]
@@ -214,6 +213,16 @@ impl Notify for TauriNetNotify {
 
     fn request(&self, machine: Option<&str>, request: net::protocol::Request) -> Result<Option<serde_json::Value>, String> {
         net_app::serve_request(&self.app, machine, request)
+    }
+
+    fn main_caps(&self) -> Vec<String> {
+        // Voice needs Maya's agent on this machine to interpret.
+        let brain = self.app.state::<AppState>().store.lock().unwrap().config.brain();
+        if launch::find_binary(brain).is_ok() {
+            vec![net::protocol::CAP_VOICE.to_string()]
+        } else {
+            vec![]
+        }
     }
 }
 
