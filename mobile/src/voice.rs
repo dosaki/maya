@@ -219,6 +219,12 @@ impl Voice {
             return;
         }
         i.view.heard = text.to_string();
+        // Still talking: a command window lasts until the words stop. A
+        // confirmation keeps its own window and its pending action.
+        let now = (self.now)();
+        if i.flow.state(now) == "awaiting-command" {
+            i.flow.await_reply(now);
+        }
         self.publish(&mut i);
     }
 
@@ -961,5 +967,41 @@ mod tests {
         v.heard("q3");
         let Request::Interpret { history, .. } = &asked.lock().unwrap()[2] else { panic!() };
         assert!(history.iter().all(|t| !t.text.trim().is_empty()), "a blank answer is not a turn: {history:?}");
+    }
+
+    fn read_back() -> Vec<Result<Value, String>> {
+        let action = serde_json::json!({"kind": "reply", "session": "s1"});
+        vec![
+            Ok(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action}})),
+            Ok(serde_json::json!({"say": "Sent."})),
+        ]
+    }
+
+    #[test]
+    fn a_tap_window_lasts_while_you_speak() {
+        let (v, io, asked) = voice(vec![Ok(serde_json::json!({"say": "Done."}))]);
+        v.tap();
+        io.take();
+        for words in ["tell", "tell hexgrid", "tell hexgrid to ship"] {
+            advance(maya_core::wake::COMMAND_WAIT_MS - 1_000);
+            v.partial(words);
+        }
+        advance(maya_core::wake::COMMAND_WAIT_MS - 1_000);
+        v.heard("tell hexgrid to ship it");
+        let asked = asked.lock().unwrap();
+        assert!(matches!(&asked[..], [Request::Interpret { command, .. }] if command == "tell hexgrid to ship it"), "{asked:?}");
+    }
+
+    #[test]
+    fn a_partial_during_a_read_back_keeps_it_a_confirmation() {
+        let (v, io, asked) = voice(read_back());
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        io.take();
+        v.partial("ye");
+        assert_eq!(v.view().state, "awaiting-confirm");
+        v.heard("yes");
+        assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { .. }));
     }
 }
