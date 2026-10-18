@@ -2,7 +2,7 @@
 //! GraphQL query). A reviewer stays on an MR after reviewing, so the
 //! review-requested list also holds the ones the user already reviewed.
 
-use super::{encode, get_json, post_graphql, Forge, Http};
+use super::{scrub, encode, get_json, post_graphql, Forge, Http};
 use crate::config::GitProvider;
 use crate::model::PullRequest;
 use crate::reviews::{merge, Reason, ReviewMark, ReviewPr};
@@ -103,7 +103,8 @@ pub fn current_pr(http: &dyn Http, forge: &Forge, repo: &str, branch: &str) -> R
 }
 
 pub fn review_prs(http: &dyn Http, forge: &Forge) -> Result<Vec<ReviewPr>, String> {
-    parse_graphql(&post_graphql(http, forge, QUERY)?)
+    // The error GitLab reports may quote what it was sent.
+    parse_graphql(&post_graphql(http, forge, QUERY)?).map_err(|e| scrub(&e, &forge.token))
 }
 
 pub fn whoami(http: &dyn Http, forge: &Forge) -> Result<String, String> {
@@ -209,6 +210,12 @@ mod tests {
             http.seen.lock().unwrap()[0].0,
             "https://gitlab.acme.io/api/v4/projects/grp%2Fsub%2Fr/merge_requests?source_branch=feat%2Fx%231%2By&state=all&order_by=updated_at&per_page=10"
         );
+    }
+
+    #[test]
+    fn a_graphql_error_quoting_the_token_is_scrubbed() {
+        let http = FakeHttp::new(vec![("/api/graphql", 200, r#"{"errors":[{"message":"bad token glpat"}]}"#)]);
+        assert_eq!(review_prs(&http, &forge()).unwrap_err(), "GitLab said: bad token ***");
     }
 
     #[test]

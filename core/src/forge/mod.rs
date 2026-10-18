@@ -230,11 +230,14 @@ fn scopes(p: GitProvider) -> &'static str {
 }
 
 /// The body of a 2xx reply, or what went wrong in words.
-fn check(p: GitProvider, status: u16, body: String) -> Result<String, String> {
+/// The body of a 2xx reply, else why not. An error body is scrubbed of
+/// `token` before it is cut, so no part of the token survives the cut.
+fn check(p: GitProvider, status: u16, body: String, token: &str) -> Result<String, String> {
     match status {
         200..=299 => Ok(body),
         401 | 403 => Err(format!("the token was refused ({status}). It needs the {}.", scopes(p))),
         _ => {
+            let body = scrub(&body, token);
             let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
             let message = v["message"].as_str().or_else(|| v["error"].as_str()).map(str::to_string).unwrap_or_else(|| body.chars().take(200).collect());
             Err(format!("{status}: {message}"))
@@ -244,7 +247,7 @@ fn check(p: GitProvider, status: u16, body: String) -> Result<String, String> {
 
 fn answer(forge: &Forge, r: Result<(u16, String), String>) -> Result<String, String> {
     let out = match r {
-        Ok((status, body)) => check(forge.site.provider, status, body),
+        Ok((status, body)) => check(forge.site.provider, status, body, &forge.token),
         Err(e) => Err(format!("could not reach {}: {e}", forge.site.host())),
     };
     out.map_err(|e| scrub(&e, &forge.token))
@@ -425,6 +428,15 @@ mod tests {
         let gl = Forge { site: gitlab("https://gitlab.com"), token: "glpat".into() };
         let http = fake::FakeHttp::new(vec![("/user", 403, "{}")]);
         assert_eq!(get_json(&http, &gl, "https://gitlab.com/api/v4/user").unwrap_err(), "the token was refused (403). It needs the read_api scope.");
+    }
+
+    #[test]
+    fn a_long_error_body_is_scrubbed_before_it_is_cut() {
+        let f = Forge { site: github(), token: "ghp_secrettoken".into() };
+        let body = format!("{}ghp_secrettoken and more", "x".repeat(195));
+        let http = fake::FakeHttp::new(vec![("/user", 500, &body)]);
+        let e = get_json(&http, &f, "https://api.github.com/user").unwrap_err();
+        assert!(!e.contains("ghp_s"), "a token cut at the limit must not survive: {e}");
     }
 
     #[test]

@@ -140,8 +140,10 @@ fn parse_node(p: &serde_json::Value, reason: Reason, login: &str) -> Option<Revi
     })
 }
 
-/// GitHub's reply to `QUERY` as one list of review PRs.
-pub fn parse_graphql(json: &str) -> Result<Vec<ReviewPr>, String> {
+/// GitHub's reply to `QUERY` as one list of review PRs, and the error
+/// GitHub reported beside them, if any. Not logged here: the caller holds
+/// the token to scrub it with.
+pub fn parse_graphql(json: &str) -> Result<(Vec<ReviewPr>, Option<String>), String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("GitHub's reply was not JSON: {e}"))?;
     let error = v["errors"].as_array().and_then(|e| e.first()).and_then(|e| e["message"].as_str()).map(|m| format!("GitHub said: {m}"));
     let data = &v["data"];
@@ -149,9 +151,6 @@ pub fn parse_graphql(json: &str) -> Result<Vec<ReviewPr>, String> {
     let Some(login) = data["viewer"]["login"].as_str() else {
         return Err(error.unwrap_or_else(|| "GitHub's reply had no viewer".into()));
     };
-    if let Some(e) = &error {
-        crate::log::line("app", format!("pull requests: partial results: {e}"));
-    }
     let list = |key: &str, reason: Reason| -> Vec<ReviewPr> {
         data[key]["nodes"].as_array().map(|a| a.iter().filter_map(|p| parse_node(p, reason, login)).collect()).unwrap_or_default()
     };
@@ -159,7 +158,7 @@ pub fn parse_graphql(json: &str) -> Result<Vec<ReviewPr>, String> {
     // old verdict is not this round's, so the PR is to review.
     let requested: Vec<ReviewPr> = list("requested", Reason::Review).into_iter().map(|p| ReviewPr { my_review: None, ..p }).collect();
     let review = merge(requested, list("reviewed", Reason::Review));
-    Ok(merge(review, list("assigned", Reason::Assigned)))
+    Ok((merge(review, list("assigned", Reason::Assigned)), error))
 }
 
 /// One list from two, de-duplicated by URL with reasons combined, newest first.
@@ -360,6 +359,11 @@ mod tests {
     use crate::config::GitProvider;
     use std::path::Path;
 
+    /// `parse_graphql`'s list, without the partial error.
+    fn parse(json: &str) -> Result<Vec<ReviewPr>, String> {
+        parse_graphql(json).map(|(prs, _)| prs)
+    }
+
     fn node(number: u64, repo: &str, author: &str, updated: &str, opinionated: &str, latest: &str) -> String {
         format!(
             r#"{{"number":{number},"title":"t{number}","url":"https://github.com/{repo}/pull/{number}","isDraft":false,"updatedAt":"{updated}","repository":{{"nameWithOwner":"{repo}"}},"author":{{"login":"{author}"}},"latestOpinionatedReviews":{{"nodes":[{opinionated}]}},"latestReviews":{{"nodes":[{latest}]}}}}"#
@@ -388,7 +392,7 @@ mod tests {
         let pending = node(451, "Org/bedrock", "jane", "2026-09-28T10:00:00Z", "", "");
         let both = node(3, "Org/plugins", "bob", "2026-09-29T09:00:00Z", "", "");
         let json = response(&[pending.clone(), both.clone()], &[], &[both]);
-        let prs = parse_graphql(&json).unwrap();
+        let prs = parse(&json).unwrap();
         assert_eq!(prs.iter().map(|p| p.number).collect::<Vec<_>>(), vec![3, 451]);
         let p = &prs[1];
         assert_eq!((p.number, p.repo.as_str(), p.title.as_str(), p.author.as_str(), p.is_draft), (451, "Org/bedrock", "t451", "jane", false));
@@ -396,14 +400,14 @@ mod tests {
         assert_eq!(p.reasons, vec![Reason::Review]);
         assert_eq!(p.my_review, None, "not reviewed yet");
         assert_eq!(prs[0].reasons, vec![Reason::Review, Reason::Assigned]);
-        assert!(parse_graphql("not json").is_err());
-        assert!(parse_graphql(r#"{"errors":[{"message":"bad query"}]}"#).unwrap_err().contains("bad query"));
+        assert!(parse("not json").is_err());
+        assert!(parse(r#"{"errors":[{"message":"bad query"}]}"#).unwrap_err().contains("bad query"));
     }
 
     #[test]
     fn a_pr_the_user_reviewed_stays_under_review_requested() {
         let done = node(9, "Org/x", "jane", "2026-09-28T10:00:00Z", &review("me", "APPROVED"), &review("me", "APPROVED"));
-        let prs = parse_graphql(&response(&[], &[done], &[])).unwrap();
+        let prs = parse(&response(&[], &[done], &[])).unwrap();
         assert_eq!(prs[0].reasons, vec![Reason::Review]);
         assert_eq!(prs[0].my_review, Some(ReviewMark::Approved), "logins match case-insensitively");
     }
@@ -411,7 +415,7 @@ mod tests {
     #[test]
     fn a_pending_request_means_to_review_whatever_the_user_said_before() {
         let again = node(8, "Org/x", "jane", "2026-09-28T10:00:00Z", &review("me", "CHANGES_REQUESTED"), &review("me", "CHANGES_REQUESTED"));
-        let prs = parse_graphql(&response(&[again.clone()], &[again], &[])).unwrap();
+        let prs = parse(&response(&[again.clone()], &[again], &[])).unwrap();
         assert_eq!(prs.len(), 1);
         assert_eq!(prs[0].my_review, None, "the author asked again: the old verdict is not this round's review");
     }
@@ -420,7 +424,9 @@ mod tests {
     fn partial_results_are_kept_when_github_also_reports_an_error() {
         let ok = node(1, "o/r", "jane", "", "", "");
         let json = response(&[ok], &[], &[]).replacen("{\"data\"", "{\"errors\":[{\"message\":\"SAML enforcement\"}],\"data\"", 1);
-        assert_eq!(parse_graphql(&json).unwrap().len(), 1);
+        let (prs, partial) = parse_graphql(&json).unwrap();
+        assert_eq!(prs.len(), 1);
+        assert_eq!(partial.as_deref(), Some("GitHub said: SAML enforcement"), "for the caller to log scrubbed");
     }
 
     #[test]
@@ -432,7 +438,7 @@ mod tests {
     fn the_users_review_prefers_a_verdict_over_a_comment_and_ignores_others() {
         let v = |opinionated: &str, latest: &str| {
             let n = node(1, "o/r", "jane", "", opinionated, latest);
-            parse_graphql(&response(&[], &[n], &[])).unwrap()[0].my_review
+            parse(&response(&[], &[n], &[])).unwrap()[0].my_review
         };
         assert_eq!(v(&review("Me", "APPROVED"), &review("Me", "COMMENTED")), Some(ReviewMark::Approved));
         assert_eq!(v(&review("Me", "CHANGES_REQUESTED"), &review("Me", "CHANGES_REQUESTED")), Some(ReviewMark::ChangesRequested));
@@ -446,7 +452,7 @@ mod tests {
     #[test]
     fn the_users_own_pr_has_no_review_state() {
         let own = node(5, "o/r", "me", "", "", &review("Me", "COMMENTED"));
-        let prs = parse_graphql(&response(&[], &[], &[own])).unwrap();
+        let prs = parse(&response(&[], &[], &[own])).unwrap();
         assert_eq!(prs[0].reasons, vec![Reason::Assigned]);
         assert_eq!(prs[0].my_review, None, "replying on your own PR is not reviewing it");
     }
@@ -553,7 +559,7 @@ mod tests {
     /// The PR's review state as seen by viewer `Me` on a PR by `author`.
     fn pr_state(author: &str, opinionated: &[String], latest: &[String]) -> (Option<ReviewMark>, Vec<String>) {
         let n = node(1, "o/r", author, "", &opinionated.join(","), &latest.join(","));
-        let p = parse_graphql(&response(&[], &[], &[n])).unwrap().remove(0);
+        let p = parse(&response(&[], &[], &[n])).unwrap().remove(0);
         (p.pr_review, p.pr_reviewers)
     }
 
@@ -642,7 +648,7 @@ mod tests {
 
     #[test]
     fn graphql_prs_are_github_prs() {
-        let prs = parse_graphql(&response(&[node(1, "o/r", "jane", "", "", "")], &[], &[])).unwrap();
+        let prs = parse(&response(&[node(1, "o/r", "jane", "", "", "")], &[], &[])).unwrap();
         assert_eq!(prs[0].forge, GitProvider::Github);
     }
 

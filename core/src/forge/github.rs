@@ -1,7 +1,7 @@
 //! GitHub: the PR of a branch (REST) and the PRs waiting on the user (the
 //! GraphQL search `reviews::QUERY`, parsed by `reviews::parse_graphql`).
 
-use super::{encode, get_json, post_graphql, Forge, Http};
+use super::{encode, get_json, post_graphql, scrub, Forge, Http};
 use crate::config::GitProvider;
 use crate::model::PullRequest;
 use crate::reviews::ReviewPr;
@@ -33,8 +33,14 @@ pub fn current_pr(http: &dyn Http, forge: &Forge, repo: &str, branch: &str) -> R
 }
 
 /// Open PRs asking for the user's review, reviewed by them, or assigned to them.
+/// GitHub's error text may quote what it was sent, so it is scrubbed here,
+/// where the token is known.
 pub fn review_prs(http: &dyn Http, forge: &Forge) -> Result<Vec<ReviewPr>, String> {
-    crate::reviews::parse_graphql(&post_graphql(http, forge, crate::reviews::QUERY)?)
+    let (prs, partial) = crate::reviews::parse_graphql(&post_graphql(http, forge, crate::reviews::QUERY)?).map_err(|e| scrub(&e, &forge.token))?;
+    if let Some(e) = partial {
+        crate::log::line("app", format!("pull requests: partial results: {}", scrub(&e, &forge.token)));
+    }
+    Ok(prs)
 }
 
 /// The token's user.
@@ -77,6 +83,18 @@ mod tests {
         assert_eq!(pr.number, 12);
         let url = &http.seen.lock().unwrap()[0].0;
         assert_eq!(url, "https://api.github.com/repos/Org/r/pulls?head=Org%3Afeat%2Fx%231%2By&state=all&sort=updated&direction=desc&per_page=10");
+    }
+
+    #[test]
+    fn graphql_errors_quoting_the_token_are_scrubbed_in_the_error_and_the_log() {
+        let http = FakeHttp::new(vec![("/graphql", 200, r#"{"errors":[{"message":"no access for ghp_x"}]}"#)]);
+        assert_eq!(review_prs(&http, &forge()).unwrap_err(), "GitHub said: no access for ***");
+        let partial = r#"{"errors":[{"message":"SAML blocks ghp_x (partial-test)"}],"data":{"viewer":{"login":"Me"},"requested":{"nodes":[]},"reviewed":{"nodes":[]},"assigned":{"nodes":[]}}}"#;
+        let http = FakeHttp::new(vec![("/graphql", 200, partial)]);
+        assert_eq!(review_prs(&http, &forge()).unwrap(), vec![]);
+        let lines = crate::log::lines();
+        assert!(!lines.iter().any(|l| l.text.contains("ghp_x (partial-test)")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.text == "pull requests: partial results: GitHub said: SAML blocks *** (partial-test)"), "{lines:?}");
     }
 
     #[test]
