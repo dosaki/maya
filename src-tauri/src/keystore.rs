@@ -20,6 +20,9 @@ pub struct Item {
 pub const ELEVENLABS: Item = Item { service: "maya-elevenlabs", account: "api-key", label: "Maya ElevenLabs", linux_account: "elevenlabs" };
 pub const NETWORK_KEY: Item = Item { service: "maya-network-key", account: "private-key", label: "Maya network key", linux_account: "network-key" };
 
+pub const GITHUB_TOKEN: Item = Item { service: "maya-github", account: "token", label: "Maya GitHub token", linux_account: "github-token" };
+pub const GITLAB_TOKEN: Item = Item { service: "maya-gitlab", account: "token", label: "Maya GitLab token", linux_account: "gitlab-token" };
+
 /// `security` exits with this when the item is not in the keychain.
 #[cfg(target_os = "macos")]
 const ERR_SEC_ITEM_NOT_FOUND: i32 = 44;
@@ -72,6 +75,22 @@ pub fn load(item: &Item) -> Result<Option<String>, String> {
     }
 }
 
+/// Deletes the secret; removing one that is not there is fine.
+#[cfg(target_os = "macos")]
+pub fn remove(item: &Item) -> Result<(), String> {
+    let out = maya_core::command("security")
+        .args(["delete-generic-password", "-s", item.service, "-a", item.account])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("could not run security: {e}"))?;
+    match out.status.code() {
+        Some(0) | Some(ERR_SEC_ITEM_NOT_FOUND) => Ok(()),
+        _ => Err(format!("Keychain: {}", String::from_utf8_lossy(&out.stderr).trim())),
+    }
+}
+
 /// Stores the secret in Credential Manager (replacing any previous one).
 #[cfg(windows)]
 pub fn store(item: &Item, secret: &str) -> Result<(), String> {
@@ -119,6 +138,21 @@ pub fn load(item: &Item) -> Result<Option<String>, String> {
         CredFree(cred as *const _);
         let secret = String::from_utf8(bytes).map_err(|_| "Credential Manager: the secret is not text".to_string())?;
         Ok(Some(secret.trim().to_string()).filter(|s| !s.is_empty()))
+    }
+}
+
+/// Deletes the secret; removing one that is not there is fine.
+#[cfg(windows)]
+pub fn remove(item: &Item) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
+    use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
+    // SAFETY: the target string outlives the call.
+    unsafe {
+        if CredDeleteW(wide(item.service).as_ptr(), CRED_TYPE_GENERIC, 0) != 0 || GetLastError() == ERROR_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(format!("Credential Manager: {}", std::io::Error::last_os_error()))
+        }
     }
 }
 
@@ -200,6 +234,28 @@ pub fn load(item: &Item) -> Result<Option<String>, String> {
     }
 }
 
+/// `secret-tool` arguments that delete the item.
+#[cfg(any(test, target_os = "linux"))]
+fn secret_tool_clear_args(item: &Item) -> Vec<String> {
+    ["clear", "service", "maya", "account", item.linux_account].map(String::from).to_vec()
+}
+
+/// Deletes the secret; `secret-tool clear` succeeds when nothing matches.
+#[cfg(target_os = "linux")]
+pub fn remove(item: &Item) -> Result<(), String> {
+    let out = maya_core::command("secret-tool")
+        .args(secret_tool_clear_args(item))
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("could not run secret-tool (install libsecret-tools): {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("GNOME Keyring: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,10 +272,16 @@ mod tests {
         assert_eq!(lookup.last().unwrap(), "network-key");
     }
 
+    #[test]
+    fn the_git_tokens_have_their_own_items() {
+        assert_eq!((GITHUB_TOKEN.service, GITHUB_TOKEN.account, GITHUB_TOKEN.linux_account), ("maya-github", "token", "github-token"));
+        assert_eq!((GITLAB_TOKEN.service, GITLAB_TOKEN.account, GITLAB_TOKEN.linux_account), ("maya-gitlab", "token", "gitlab-token"));
+        assert_eq!(secret_tool_clear_args(&GITLAB_TOKEN), ["clear", "service", "maya", "account", "gitlab-token"].map(String::from).to_vec());
+    }
+
     #[cfg(windows)]
     #[test]
     fn credential_manager_round_trips_and_replaces_the_secret() {
-        use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
         let service: &'static str = Box::leak(format!("maya-test-{}", std::process::id()).into_boxed_str());
         let item = Item { service, account: "test", label: "test", linux_account: "test" };
         assert_eq!(load(&item), Ok(None));
@@ -228,7 +290,8 @@ mod tests {
         store(&item, "second").unwrap();
         assert_eq!(load(&item), Ok(Some("second".to_string())));
         assert!(store(&item, "  ").unwrap_err().contains("empty"));
-        unsafe { CredDeleteW(wide(service).as_ptr(), CRED_TYPE_GENERIC, 0) };
+        remove(&item).unwrap();
         assert_eq!(load(&item), Ok(None));
+        remove(&item).unwrap();
     }
 }
