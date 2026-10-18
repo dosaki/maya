@@ -55,7 +55,8 @@ export function renderVoiceBar(v: VoiceView, h: VoiceHandlers): HTMLElement {
     if (v.said) said.append(line("voice__said", v.said));
   }
   bar.append(mic, said);
-  if (v.pending && v.state === "awaiting-confirm") {
+  // From the start of the read-back: a yes may come before it ends.
+  if (v.pending) {
     const answer = document.createElement("div");
     answer.className = "voice__answer";
     for (const [label, yes] of [["Yes", true], ["No", false]] as const) {

@@ -40,6 +40,16 @@ describe("renderVoiceBar", () => {
     expect(renderVoiceBar(base, h).querySelector("button[data-action=yes]")).toBeNull();
   });
 
+  it("shows Yes and No during the read-back itself", () => {
+    const h = handlers();
+    const el = renderVoiceBar({ ...base, state: "speaking", pending: "Telling x: y. Yes?" }, h);
+    el.querySelector<HTMLButtonElement>("button[data-action=yes]")!.click();
+    expect(h.onConfirm.mock.calls).toEqual([[true]]);
+    const done = renderVoiceBar({ ...base, state: "speaking", pending: null }, h);
+    expect(done.querySelector("button[data-action=yes]")).toBeNull();
+    expect(done.querySelector("button[data-action=no]")).toBeNull();
+  });
+
   it("notes an online recogniser while idle", () => {
     const note = "Speech goes through Google's service and may leave the phone.";
     expect(renderVoiceBar({ ...base, note }, handlers()).querySelector(".voice__note")?.textContent).toBe(note);
