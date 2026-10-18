@@ -457,6 +457,16 @@ impl Config {
     }
 }
 
+/// Whether the first-start Git import may save the config: only when the
+/// file is missing or parses, so a file `load` could not read is never
+/// replaced by the defaults it fell back to.
+pub fn import_allowed(path: &Path) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(t) => serde_json::from_str::<Config>(&t).is_ok(),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Writes the config readable by its owner only.
 pub fn save(path: &Path, config: &Config) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -509,6 +519,17 @@ mod tests {
         save(&p, &Config::default()).unwrap();
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
         assert_eq!(load(&p), Config::default());
+    }
+
+    #[test]
+    fn the_import_saves_only_over_a_missing_or_readable_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.json");
+        assert!(import_allowed(&p), "missing");
+        std::fs::write(&p, r#"{"completedTimeoutMinutes":5,"projectsDir":"~/dev"}"#).unwrap();
+        assert!(import_allowed(&p), "valid, no git yet");
+        std::fs::write(&p, r#"{"completedTimeoutMinutes":5,"projectsDir":"#).unwrap();
+        assert!(!import_allowed(&p), "unparseable");
     }
 
     #[test]

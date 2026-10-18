@@ -36,6 +36,7 @@ pub fn forges(conns: &[GitConnection]) -> (Vec<Forge>, Vec<ForgeError>) {
 
 /// After a Git setting or token changed: look everything up again, now.
 pub fn settings_changed(app: &AppHandle) {
+    forge::env::forget();
     app.state::<AppState>().store.lock().unwrap().clear_prs();
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -46,9 +47,20 @@ pub fn settings_changed(app: &AppHandle) {
 
 /// The first start after 0.24 (or ever): GitHub on with `gh`'s token when
 /// `gh` is logged in, else reading `GH_TOKEN`; GitLab off. Never again after.
-pub fn import_if_needed(app: &AppHandle) {
-    if app.state::<AppState>().store.lock().unwrap().config.git.is_some() {
-        return;
+/// Never over a config.json that did not parse: that would save the
+/// defaults `load` fell back to. True when it saved the Git settings.
+pub fn import_if_needed(app: &AppHandle) -> bool {
+    let path = {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        if store.config.git.is_some() {
+            return false;
+        }
+        store.config_path()
+    };
+    if !config::import_allowed(&path) {
+        log::line("app", "git: config.json did not parse; the Git import waits so it cannot overwrite it");
+        return false;
     }
     let stored = match forge::env::import_gh_token() {
         Some(token) => match keystore::store(&keystore::GITHUB_TOKEN, &token) {
@@ -60,14 +72,20 @@ pub fn import_if_needed(app: &AppHandle) {
         },
         None => false,
     };
-    log::line("app", if stored { "git: imported gh's GitHub token" } else { "git: no gh token to import; GitHub reads GH_TOKEN" });
+    let mut saved = false;
     if let Err(e) = crate::update_config(app, |c| {
         if c.git.is_none() {
             c.git = Some(config::git_after_import(stored));
+            saved = true;
         }
     }) {
         log::line("app", format!("git: could not save the Git settings: {e}"));
+        return false;
     }
+    if saved {
+        log::line("app", if stored { "git: imported gh's GitHub token" } else { "git: no gh token to import; GitHub reads GH_TOKEN" });
+    }
+    saved
 }
 
 #[derive(Serialize)]
@@ -107,6 +125,7 @@ pub fn clear_git_token(app: AppHandle, provider: GitProvider) -> Result<(), Stri
 #[tauri::command(async)]
 pub fn test_git_connection(state: TauriState<AppState>, provider: GitProvider) -> Result<String, String> {
     let conn = state.store.lock().unwrap().config.git_connections().into_iter().find(|c| c.provider == provider).ok_or("No such connection.")?;
+    forge::env::forget();
     let f = forge::resolve(&conn, |p| keystore::load(token_item(p)).ok().flatten(), forge::env::read)?;
     forge::whoami(http(), &f)
 }

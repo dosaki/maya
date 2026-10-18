@@ -1361,17 +1361,21 @@ pub fn run() {
             std::thread::spawn(move || {
                 watcher::run(&sessions_dir, &maya_dir, Duration::from_secs(5), || refresh_and_emit(&handle));
             });
-            let git_handle = app.handle().clone();
+            let pr_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                poll_pull_requests(&pr_handle);
+                std::thread::sleep(Duration::from_secs(10));
+            });
+            let review_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                poll_reviews(&review_handle);
+                std::thread::sleep(Duration::from_secs(120));
+            });
+            // Its own thread: a slow `gh` or Keychain prompt must not hold up the polls.
+            let import_handle = app.handle().clone();
             std::thread::spawn(move || {
-                git::import_if_needed(&git_handle);
-                let pr_handle = git_handle.clone();
-                std::thread::spawn(move || loop {
-                    poll_pull_requests(&pr_handle);
-                    std::thread::sleep(Duration::from_secs(10));
-                });
-                loop {
-                    poll_reviews(&git_handle);
-                    std::thread::sleep(Duration::from_secs(120));
+                if git::import_if_needed(&import_handle) {
+                    git::settings_changed(&import_handle);
                 }
             });
             let role = app.state::<AppState>().store.lock().unwrap().config.network.role;

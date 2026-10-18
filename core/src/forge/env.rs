@@ -33,9 +33,20 @@ pub fn parse_probe(out: &str, name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// What the login shell said for each name asked, found or not.
+#[cfg(unix)]
+static CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+
+/// Forgets what the login shell said, so a variable set since is found.
+pub fn forget() {
+    #[cfg(unix)]
+    {
+        *CACHE.lock().unwrap() = None;
+    }
+}
+
 #[cfg(unix)]
 fn from_login_shell(name: &str) -> Option<String> {
-    static CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
     if let Some(v) = CACHE.lock().unwrap().get_or_insert_with(HashMap::new).get(name) {
         return v.clone();
     }
@@ -106,6 +117,15 @@ mod tests {
         assert_eq!(read("GH_TOKEN; touch /tmp/maya-pwned"), None);
         assert_eq!(read("$(id)"), None);
         assert_eq!(read(""), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forget_drops_what_the_login_shell_said() {
+        let name = "MAYA_ENV_TEST_FORGET";
+        CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(name.into(), None);
+        forget();
+        assert!(!CACHE.lock().unwrap().as_ref().is_some_and(|c| c.contains_key(name)));
     }
 
     #[test]
