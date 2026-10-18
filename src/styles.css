@@ -301,3 +301,6 @@ body { margin: 0; background: var(--bg); }
 .voice__pending button { margin: 6px 6px 0 0; }
 .voice__empty, .voice__error { color: var(--muted); font-size: 13px; }
 .voice__error { color: #e5484d; }
+
+.settings__git { display: flex; flex-direction: column; gap: 6px; padding: 8px 0 12px; border-bottom: 1px solid var(--border); }
+.settings__git-kinds { display: flex; gap: 12px; flex-wrap: wrap; }

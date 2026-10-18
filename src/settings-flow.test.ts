@@ -757,4 +757,35 @@ describe("settings flow", () => {
     await flush();
     expect(status()).toBe("could not check for updates: offline");
   });
+
+  it("saves a GitLab URL into the git list and opens on Git when the Pull requests tab asks", async () => {
+    let saved: any = null;
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", git: null };
+    invoke.mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "set_config") { saved = args.config; return Promise.resolve(args.config); }
+      if (cmd === "get_git_status") return Promise.resolve({ github: { hasToken: false }, gitlab: { hasToken: false } });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.dispatchEvent(new CustomEvent("maya:settings-group", { detail: "git" }));
+    await flush();
+    const visible = [...document.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group);
+    expect(visible).toEqual(["git"]);
+    const enable = document.querySelector<HTMLInputElement>(".settings__git[data-provider=gitlab] input[name=gitEnabled]")!;
+    enable.checked = true;
+    enable.dispatchEvent(new Event("change"));
+    await flush();
+    expect(saved.git).toEqual([
+      { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" } },
+      { provider: "gitlab", enabled: true, baseUrl: null, token: { kind: "env", name: "GITLAB_TOKEN" } },
+    ]);
+    localStorage.removeItem("maya.settingsGroup");
+  });
 });

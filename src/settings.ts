@@ -4,7 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, recognizerOptions, secretStore, thisComputerLower } from "./platform";
-import type { Harness } from "./types";
+import type { GitProvider, Harness } from "./types";
+import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
 import { promoteLines } from "./promote";
@@ -118,6 +119,10 @@ export interface SettingsModel {
   version?: string;
   /** The group the sidebar shows; General when unset. */
   settingsGroup?: SettingsGroup;
+  /** GitHub then GitLab, from `gitConnections`. */
+  git?: GitConnectionJson[];
+  /** Whether a pasted token is stored, and the last Test's outcome. */
+  gitStatus?: Record<GitProvider, { hasToken: boolean; test?: string | null }>;
   /** This install can check for updates (`update_kind` is not `off`). */
   updatesOn?: boolean;
   /** The outcome of the last Check for updates; unset before one. */
@@ -167,6 +172,13 @@ export interface ModelInfo {
 export type Recognizer = "system" | "builtin";
 
 export interface SettingsHandlers {
+  onGitEnabled?(p: GitProvider, on: boolean): void;
+  onGitTokenKind?(p: GitProvider, kind: "stored" | "env"): void;
+  onGitEnvName?(p: GitProvider, name: string): void;
+  onGitBaseUrl?(url: string): void;
+  onGitToken?(p: GitProvider, token: string): void;
+  onGitClearToken?(p: GitProvider): void;
+  onGitTest?(p: GitProvider): void;
   onInstall(): void;
   onCodexInstall?(): void;
   onCodexRemove?(): void;
@@ -227,7 +239,27 @@ interface NetworkConfigJson {
   assistants: { id: string; name: string; hostname: string; platform: string; token: string; address?: string; lastSeen?: number | null }[];
 }
 
+export interface GitConnectionJson {
+  provider: GitProvider;
+  enabled: boolean;
+  /** GitLab only; null is https://gitlab.com. */
+  baseUrl?: string | null;
+  token: { kind: "stored" } | { kind: "env"; name: string };
+}
+
+const GIT_DEFAULT_ENV: Record<GitProvider, string> = { github: "GH_TOKEN", gitlab: "GITLAB_TOKEN" };
+const GIT_LABEL: Record<GitProvider, string> = { github: "GitHub", gitlab: "GitLab" };
+
+/** One GitHub and one GitLab connection, in that order, as the Rust side defaults them. */
+export function gitConnections(raw: GitConnectionJson[] | null | undefined): GitConnectionJson[] {
+  return (["github", "gitlab"] as const).map((provider) => {
+    const found = raw?.find((c) => c.provider === provider);
+    return found ? { ...found, baseUrl: found.baseUrl ?? null } : { provider, enabled: provider === "github", baseUrl: null, token: { kind: "env", name: GIT_DEFAULT_ENV[provider] } };
+  });
+}
+
 interface ConfigJson {
+  git?: GitConnectionJson[] | null;
   completedTimeoutMinutes: number;
   projectsDir?: string | null;
   clonesDir?: string | null;
@@ -251,6 +283,7 @@ interface ConfigJson {
 export const SETTINGS_GROUPS = [
   ["general", "General"],
   ["sessions", "Sessions"],
+  ["git", "Git"],
   ["reviews", "Pull requests"],
   ["notifications", "Notifications"],
   ["voice", "Voice"],
@@ -452,7 +485,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   nav.append(...navButtons);
   content.append(...Object.values(sections));
   show(model.settingsGroup ?? "general");
-  const { general, sessions, reviews, notifications, voice, network } = sections;
+  const { general, sessions, git, reviews, notifications, voice, network } = sections;
   const speaking = subsection("Speaking");
   const listening = subsection("Listening");
   voice.append(speaking, listening);
@@ -650,6 +683,114 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   prBox.addEventListener("change", () => h.onNotifyPrReview?.(prBox.checked));
   prLabel.append(prBox, document.createTextNode(" Notify me when a PR assigned to me is approved or needs changes"));
   reviews.append(prLabel);
+
+  for (const conn of model.git ?? gitConnections(null)) {
+    const p = conn.provider;
+    const status = model.gitStatus?.[p] ?? { hasToken: false };
+    const box = document.createElement("div");
+    box.className = "settings__git";
+    box.dataset.provider = p;
+
+    const onLabel = document.createElement("label");
+    onLabel.className = "settings__check";
+    const on = document.createElement("input");
+    on.type = "checkbox";
+    on.name = "gitEnabled";
+    on.checked = conn.enabled;
+    on.addEventListener("change", () => h.onGitEnabled?.(p, on.checked));
+    onLabel.append(on, document.createTextNode(` ${GIT_LABEL[p]}`));
+    box.append(onLabel);
+
+    if (p === "gitlab") {
+      const urlLabel = document.createElement("label");
+      urlLabel.textContent = "URL";
+      const url = document.createElement("input");
+      url.type = "text";
+      url.name = "gitBaseUrl";
+      url.placeholder = "https://gitlab.com";
+      url.value = conn.baseUrl ?? "";
+      url.disabled = !conn.enabled;
+      url.addEventListener("change", () => h.onGitBaseUrl?.(url.value.trim()));
+      urlLabel.append(url);
+      box.append(urlLabel);
+    }
+
+    const kinds = document.createElement("div");
+    kinds.className = "settings__git-kinds";
+    for (const [kind, text] of [["stored", "Paste a token"], ["env", "From env var"]] as const) {
+      const l = document.createElement("label");
+      l.className = "settings__check";
+      const r = document.createElement("input");
+      r.type = "radio";
+      r.name = `gitTokenKind-${p}`;
+      r.value = kind;
+      r.checked = conn.token.kind === kind;
+      r.disabled = !conn.enabled;
+      r.addEventListener("change", () => h.onGitTokenKind?.(p, kind));
+      l.append(r, document.createTextNode(` ${text}`));
+      kinds.append(l);
+    }
+    box.append(kinds);
+
+    if (conn.token.kind === "stored") {
+      const tokLabel = document.createElement("label");
+      tokLabel.textContent = `${GIT_LABEL[p]} token`;
+      const tok = document.createElement("input");
+      tok.type = "password";
+      tok.name = "gitToken";
+      tok.autocomplete = "off";
+      tok.disabled = !conn.enabled;
+      tok.placeholder = status.hasToken ? `saved in ${secretStore()}; paste to replace` : "paste your token";
+      tok.addEventListener("change", () => {
+        const t = tok.value.trim();
+        tok.value = "";
+        if (t) h.onGitToken?.(p, t);
+      });
+      tokLabel.append(tok);
+      box.append(tokLabel);
+      if (status.hasToken) {
+        const clear = document.createElement("button");
+        clear.type = "button";
+        clear.className = "settings__link";
+        clear.dataset.action = "git-clear";
+        clear.textContent = "Clear";
+        clear.addEventListener("click", () => h.onGitClearToken?.(p));
+        box.append(clear);
+      }
+    } else {
+      const envLabel = document.createElement("label");
+      envLabel.textContent = "Variable";
+      const env = document.createElement("input");
+      env.type = "text";
+      env.name = "gitEnvName";
+      env.placeholder = GIT_DEFAULT_ENV[p];
+      env.value = conn.token.name;
+      env.disabled = !conn.enabled;
+      env.addEventListener("change", () => h.onGitEnvName?.(p, env.value.trim()));
+      envLabel.append(env);
+      box.append(envLabel);
+    }
+
+    const test = document.createElement("button");
+    test.type = "button";
+    test.className = "settings__link";
+    test.dataset.action = "git-test";
+    test.textContent = "Test";
+    test.disabled = !conn.enabled;
+    test.addEventListener("click", () => h.onGitTest?.(p));
+    box.append(test);
+    if (status.test) {
+      const out = document.createElement("div");
+      out.className = "settings__hint settings__git-test";
+      out.textContent = status.test;
+      box.append(out);
+    }
+    git.append(box);
+  }
+  const gitHint = document.createElement("div");
+  gitHint.className = "settings__hint";
+  gitHint.textContent = "Maya reads pull requests and merge requests with these tokens. GitHub needs the repo scope; GitLab needs read_api. Reviews clone with your own git credentials.";
+  git.append(gitHint);
 
   const speakLabel = document.createElement("label");
   speakLabel.className = "settings__check";
@@ -1266,6 +1407,29 @@ export async function initSettings(): Promise<void> {
     model.elevenVoices = await invoke<ElevenVoice[]>("list_elevenlabs_voices");
   };
 
+  const loadGitStatus = async () => {
+    try {
+      const s = await invoke<Record<GitProvider, { hasToken: boolean }>>("get_git_status");
+      model.gitStatus = { github: { ...model.gitStatus?.github, ...s.github }, gitlab: { ...model.gitStatus?.gitlab, ...s.gitlab } };
+    } catch {
+      model.gitStatus ??= { github: { hasToken: false }, gitlab: { hasToken: false } };
+    }
+  };
+
+  /** Applies `change` to one connection of the freshest config and saves the list. */
+  const saveGit = (p: GitProvider, change: (c: GitConnectionJson) => void) =>
+    run(async () => {
+      const fresh = await invoke<ConfigJson>("get_config");
+      const git = gitConnections(fresh.git);
+      change(git.find((c) => c.provider === p)!);
+      const c = await invoke<ConfigJson>("set_config", { config: { ...fresh, git } });
+      applyConfig(c);
+    });
+
+  const setTest = (p: GitProvider, text: string) => {
+    model.gitStatus = { github: { hasToken: false }, gitlab: { hasToken: false }, ...model.gitStatus, [p]: { ...model.gitStatus?.[p], hasToken: model.gitStatus?.[p]?.hasToken ?? false, test: text } };
+  };
+
   const loadModels = async () => {
     try {
       model.models = await invoke<ModelInfo[]>("list_whisper_models");
@@ -1291,6 +1455,7 @@ export async function initSettings(): Promise<void> {
     model.reviewPrompt = c.reviewPrompt ?? "";
     model.recognizer = c.recognizer;
     model.whisperModel = c.whisperModel;
+    model.git = gitConnections(c.git);
     applyNetworkConfig(c);
   };
 
@@ -1333,6 +1498,20 @@ export async function initSettings(): Promise<void> {
   };
 
   const handlers: SettingsHandlers = {
+    onGitEnabled: (p, on) => void saveGit(p, (c) => { c.enabled = on; }),
+    onGitBaseUrl: (url) => void saveGit("gitlab", (c) => { c.baseUrl = url || null; }),
+    onGitTokenKind: (p, kind) => void saveGit(p, (c) => { c.token = kind === "stored" ? { kind: "stored" } : { kind: "env", name: GIT_DEFAULT_ENV[p] }; }),
+    onGitEnvName: (p, name) => void saveGit(p, (c) => { c.token = { kind: "env", name }; }),
+    onGitToken: (p, token) => void run(async () => { await invoke("store_git_token", { provider: p, token }); await loadGitStatus(); }),
+    onGitClearToken: (p) => void run(async () => { await invoke("clear_git_token", { provider: p }); await loadGitStatus(); }),
+    onGitTest: (p) => {
+      setTest(p, "Testing…");
+      paint();
+      invoke<string>("test_git_connection", { provider: p })
+        .then((login) => setTest(p, `Connected as @${login}`))
+        .catch((e) => setTest(p, String(e)))
+        .finally(() => { if (!panel.hidden) paint(); });
+    },
     onCheckUpdates: () => {
       model.updateStatus = "Checking…";
       paint();
@@ -1575,6 +1754,7 @@ export async function initSettings(): Promise<void> {
     model.codexHookInstalled = codexInstalled;
     applyConfig(config);
     await loadVoices();
+    await loadGitStatus();
     await loadModels();
     try {
       const raw = await invoke<string>("voice_selftest");
@@ -1589,6 +1769,18 @@ export async function initSettings(): Promise<void> {
     } catch {
       // ignore: an older backend or a stray failure just leaves Network off
     }
+  });
+
+  document.addEventListener(OPEN_SETTINGS_GROUP, (e) => {
+    const group = (e as CustomEvent<string>).detail;
+    if (!SETTINGS_GROUPS.some(([key]) => key === group)) return;
+    model.settingsGroup = group as SettingsGroup;
+    try {
+      localStorage.setItem(SETTINGS_GROUP_KEY, group);
+    } catch {
+      /* private mode: nothing to remember */
+    }
+    paint();
   });
 
   // Listing installed agents can take seconds (it probes each harness), so
