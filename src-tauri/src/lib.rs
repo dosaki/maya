@@ -256,12 +256,13 @@ pub(crate) fn poll_reviews(app: &AppHandle) {
             log::line("app", format!("pull requests: {}: {e}", f.forge.label()));
         }
     }
+    let answered: Vec<_> = fetched.iter().filter(|f| f.result.is_ok()).map(|f| f.forge).collect();
     let state = app.state::<AppState>();
     let decided;
     let snapshot = {
         let mut r = state.reviews.lock().unwrap();
         let (prs, errors) = reviews::combine(&r.prs, fetched, missing);
-        decided = state.pr_notifier.lock().unwrap().take_changes(&prs);
+        decided = state.pr_notifier.lock().unwrap().take_changes(&prs, &answered);
         r.prs = prs;
         r.errors = errors;
         r.off = off;

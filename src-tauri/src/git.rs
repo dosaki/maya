@@ -54,14 +54,18 @@ pub fn import_if_needed(app: &AppHandle) {
         Some(token) => match keystore::store(&keystore::GITHUB_TOKEN, &token) {
             Ok(()) => true,
             Err(e) => {
-                log::line("app", format!("git: could not keep gh's token: {e}"));
+                log::line("app", format!("git: could not keep gh's token: {}", forge::scrub(&e, token.trim())));
                 false
             }
         },
         None => false,
     };
     log::line("app", if stored { "git: imported gh's GitHub token" } else { "git: no gh token to import; GitHub reads GH_TOKEN" });
-    if let Err(e) = crate::update_config(app, |c| c.git = Some(config::git_after_import(stored))) {
+    if let Err(e) = crate::update_config(app, |c| {
+        if c.git.is_none() {
+            c.git = Some(config::git_after_import(stored));
+        }
+    }) {
         log::line("app", format!("git: could not save the Git settings: {e}"));
     }
 }

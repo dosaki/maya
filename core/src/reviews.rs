@@ -214,25 +214,28 @@ pub fn combine(previous: &[ReviewPr], fetched: Vec<Fetched>, mut errors: Vec<For
 }
 
 /// Remembers the review state of each assigned PR so a turn to approved or
-/// changes requested is announced once. The first poll only primes it:
-/// what was already decided when Maya starts is not news.
+/// changes requested is announced once. A forge's first answer only primes
+/// it: what was already decided when Maya starts, or when a forge is first
+/// switched on or given a token, is not news.
 #[derive(Default)]
 pub struct PrNotifier {
     last: std::collections::HashMap<String, Option<ReviewMark>>,
-    primed: bool,
+    /// Forges that have answered once: what they held then is not news.
+    primed: std::collections::HashSet<GitProvider>,
 }
 
 impl PrNotifier {
     /// The assigned PRs that became approved or changes requested since the last call.
-    pub fn take_changes(&mut self, prs: &[ReviewPr]) -> Vec<ReviewPr> {
+    /// `answered` lists the forges whose fetch succeeded this round.
+    pub fn take_changes(&mut self, prs: &[ReviewPr], answered: &[GitProvider]) -> Vec<ReviewPr> {
         let mut out = Vec::new();
         for p in prs.iter().filter(|p| p.reasons.contains(&Reason::Assigned)) {
             let before = self.last.insert(p.url.clone(), p.pr_review).flatten();
-            if self.primed && matches!(p.pr_review, Some(ReviewMark::Approved | ReviewMark::ChangesRequested)) && p.pr_review != before {
+            if self.primed.contains(&p.forge) && matches!(p.pr_review, Some(ReviewMark::Approved | ReviewMark::ChangesRequested)) && p.pr_review != before {
                 out.push(p.clone());
             }
         }
-        self.primed = true;
+        self.primed.extend(answered.iter().copied());
         out
     }
 }
@@ -583,16 +586,38 @@ mod tests {
         use ReviewMark::*;
         let mut n = PrNotifier::default();
         let nums = |v: Vec<ReviewPr>| v.iter().map(|p| p.number).collect::<Vec<_>>();
-        assert_eq!(nums(n.take_changes(&[assigned(1, Some(Approved)), assigned(2, None)])), Vec::<u64>::new(), "the first poll only primes");
-        assert_eq!(nums(n.take_changes(&[assigned(1, Some(Approved)), assigned(2, None)])), Vec::<u64>::new(), "no change, no news");
-        assert_eq!(nums(n.take_changes(&[assigned(1, Some(Approved)), assigned(2, Some(Commented))])), Vec::<u64>::new(), "a comment is not announced");
-        assert_eq!(nums(n.take_changes(&[assigned(1, Some(ChangesRequested)), assigned(2, Some(Approved))])), vec![1, 2]);
-        assert_eq!(nums(n.take_changes(&[assigned(1, Some(ChangesRequested)), assigned(2, Some(Approved))])), Vec::<u64>::new(), "once each");
-        assert_eq!(nums(n.take_changes(&[assigned(2, Some(Approved))])), Vec::<u64>::new());
-        assert_eq!(nums(n.take_changes(&[assigned(1, Some(ChangesRequested)), assigned(2, Some(Approved))])), Vec::<u64>::new(), "a PR that left the list and came back unchanged is not news");
-        assert_eq!(nums(n.take_changes(&[assigned(3, Some(Approved))])), vec![3], "newly assigned and already approved is news");
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(Approved)), assigned(2, None)], &[GitProvider::Github])), Vec::<u64>::new(), "the first poll only primes");
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(Approved)), assigned(2, None)], &[GitProvider::Github])), Vec::<u64>::new(), "no change, no news");
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(Approved)), assigned(2, Some(Commented))], &[GitProvider::Github])), Vec::<u64>::new(), "a comment is not announced");
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(ChangesRequested)), assigned(2, Some(Approved))], &[GitProvider::Github])), vec![1, 2]);
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(ChangesRequested)), assigned(2, Some(Approved))], &[GitProvider::Github])), Vec::<u64>::new(), "once each");
+        assert_eq!(nums(n.take_changes(&[assigned(2, Some(Approved))], &[GitProvider::Github])), Vec::<u64>::new());
+        assert_eq!(nums(n.take_changes(&[assigned(1, Some(ChangesRequested)), assigned(2, Some(Approved))], &[GitProvider::Github])), Vec::<u64>::new(), "a PR that left the list and came back unchanged is not news");
+        assert_eq!(nums(n.take_changes(&[assigned(3, Some(Approved))], &[GitProvider::Github])), vec![3], "newly assigned and already approved is news");
         let requested_only = ReviewPr { reasons: vec![Reason::Review], ..assigned(4, Some(Approved)) };
-        assert_eq!(nums(n.take_changes(&[requested_only])), Vec::<u64>::new(), "only assigned PRs are announced");
+        assert_eq!(nums(n.take_changes(&[requested_only], &[GitProvider::Github])), Vec::<u64>::new(), "only assigned PRs are announced");
+    }
+
+    #[test]
+    fn a_forge_is_primed_by_its_own_first_answer() {
+        use ReviewMark::*;
+        let mr = |n, r| ReviewPr { forge: GitProvider::Gitlab, url: format!("https://gitlab.com/g/p/-/merge_requests/{n}"), ..assigned(n, r) };
+        let nums = |v: Vec<ReviewPr>| v.iter().map(|p| p.number).collect::<Vec<_>>();
+        let gh = [GitProvider::Github];
+        let mut n = PrNotifier::default();
+        n.take_changes(&[], &gh);
+        assert_eq!(nums(n.take_changes(&[mr(7, Some(Approved))], &[GitProvider::Github, GitProvider::Gitlab])), Vec::<u64>::new(), "GitLab's first answer only primes it");
+        assert_eq!(nums(n.take_changes(&[mr(7, Some(ChangesRequested))], &[GitProvider::Github, GitProvider::Gitlab])), vec![7]);
+    }
+
+    #[test]
+    fn a_forge_that_failed_is_not_primed() {
+        use ReviewMark::*;
+        let mut n = PrNotifier::default();
+        n.take_changes(&[], &[]);
+        n.take_changes(&[assigned(1, Some(Approved))], &[]);
+        let out = n.take_changes(&[assigned(1, Some(ChangesRequested))], &[GitProvider::Github]);
+        assert!(out.is_empty(), "the first answer primes, even after failed rounds");
     }
 
     #[test]
