@@ -9,6 +9,7 @@ pub mod config;
 pub mod context;
 pub mod events;
 pub mod foreign;
+pub mod forge;
 pub mod grok;
 pub mod kiro;
 pub mod hook_install;
