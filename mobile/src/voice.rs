@@ -48,6 +48,10 @@ const HISTORY: usize = 12;
 const MAX_FAILURES: u32 = 5;
 /// The offer until the hub says otherwise: not joined to a main.
 pub const NO_MAIN: &str = "Voice needs a desktop main.";
+/// Android has no text-to-speech voice to say a line with.
+const NO_TTS: &str = "No text-to-speech voice is installed; replies show here instead.";
+/// The wake loop gave up; its error stays until the setting is changed.
+const WAKE_STOPPED: &str = "Wake word stopped: ";
 
 /// What to do once the current line has been spoken.
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +116,14 @@ impl Voice {
 
     fn active(i: &Inner) -> bool {
         i.on_screen && i.offer.is_none()
+    }
+
+    /// Something worked: the last error goes, except a wake loop that gave
+    /// up, which only `set_wake` clears.
+    fn clear_error(i: &mut Inner) {
+        if !i.view.error.as_deref().is_some_and(|e| e.starts_with(WAKE_STOPPED)) {
+            i.view.error = None;
+        }
     }
 
     /// Recomputes the view's state and shows it.
@@ -208,6 +220,7 @@ impl Voice {
         if !Self::active(&i) || i.thinking {
             return;
         }
+        Self::clear_error(&mut i);
         let now = (self.now)();
         if i.speaking {
             self.io.stop_speaking();
@@ -273,6 +286,7 @@ impl Voice {
             return;
         }
         i.failures = 0;
+        Self::clear_error(&mut i);
         i.view.heard = text.to_string();
         let effects = i.flow.on_segment(text, (self.now)());
         if effects.is_empty() {
@@ -349,7 +363,7 @@ impl Voice {
         if i.failures >= MAX_FAILURES {
             // Off for this session; `set_wake` turns it back on.
             i.wake = false;
-            i.view.error = Some(format!("Wake word stopped: {message}"));
+            i.view.error = Some(format!("{WAKE_STOPPED}{message}"));
             self.publish(&mut i);
             return;
         }
@@ -387,14 +401,23 @@ impl Voice {
 
     pub fn spoken(&self, ok: bool) {
         let mut i = self.inner.lock().unwrap();
-        if !ok {
-            i.view.error = Some("No text-to-speech voice is installed; replies show here instead.".into());
+        // Off screen Android refuses to speak at all: not a missing voice.
+        let active = Self::active(&i);
+        if active {
+            if ok {
+                Self::clear_error(&mut i);
+            } else {
+                i.view.error = Some(NO_TTS.into());
+            }
         }
         if !i.speaking {
+            if active {
+                self.publish(&mut i);
+            }
             return;
         }
         i.speaking = false;
-        if !Self::active(&i) {
+        if !active {
             return;
         }
         let now = (self.now)();
@@ -1147,5 +1170,61 @@ mod tests {
         assert_eq!(v.view().pending.as_deref(), Some("Telling x: y. Yes?"));
         v.heard("yes");
         assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { .. }));
+    }
+
+    /// Every view the page was shown, for checks on what was published.
+    fn voice_shown() -> (Arc<Voice>, Arc<FakeIo>, Arc<Mutex<Vec<VoiceView>>>) {
+        let io = Arc::new(FakeIo::default());
+        let shown = Arc::new(Mutex::new(vec![]));
+        let s = shown.clone();
+        let ask: Ask = Arc::new(|_| Ok(Some(serde_json::json!({"say": "Hi."}))));
+        let v = Voice::new_sync(io.clone(), ask, Arc::new(move |view: &VoiceView| s.lock().unwrap().push(view.clone())), now);
+        v.screen(true);
+        v.set_offer(None);
+        io.take();
+        shown.lock().unwrap().clear();
+        (v, io, shown)
+    }
+
+    #[test]
+    fn an_error_clears_on_a_tap_a_heard_command_or_a_spoken_line() {
+        let (v, _, _) = voice(vec![Ok(serde_json::json!({"say": "Hi."}))]);
+        v.failed("no network for speech recognition", false);
+        assert!(v.view().error.is_some());
+        v.tap();
+        assert_eq!(v.view().error, None, "a tap clears it");
+        v.failed("no network for speech recognition", false);
+        v.heard("what needs me");
+        assert_eq!(v.view().error, None, "a heard command clears it");
+        v.failed("no network for speech recognition", false);
+        v.spoken(true);
+        assert_eq!(v.view().error, None, "a spoken line clears it");
+    }
+
+    #[test]
+    fn the_wake_word_stopped_error_stays_until_the_setting_changes() {
+        let (v, _, _) = voice(vec![Ok(serde_json::json!({"say": "Hi."}))]);
+        v.set_wake(true);
+        for _ in 0..5 {
+            v.failed("busy", false);
+        }
+        v.tap();
+        v.heard("what needs me");
+        v.spoken(true);
+        assert_eq!(v.view().error.as_deref(), Some("Wake word stopped: busy"));
+        v.set_wake(true);
+        assert_eq!(v.view().error, None);
+    }
+
+    #[test]
+    fn a_missing_voice_is_shown_on_screen_only() {
+        let (v, _, shown) = voice_shown();
+        v.spoken(false);
+        let last = shown.lock().unwrap().last().cloned();
+        assert_eq!(last.and_then(|s| s.error).as_deref(), Some(NO_TTS), "published, not just set");
+        let (v, _, _) = voice_shown();
+        v.screen(false);
+        v.spoken(false);
+        assert_eq!(v.view().error, None, "off screen, Android refuses to speak: not a missing voice");
     }
 }
