@@ -64,4 +64,5 @@
 .voice__answer { display: flex; gap: 8px; }
 .voice__answer button { min-height: 40px; padding: 0 16px; }
 .voice__error { flex-basis: 100%; color: #dc2626; font-size: 12.5px; }
+.voice__settings { min-height: 40px; padding: 0 16px; }
 .voice__note { flex-basis: 100%; color: var(--muted); font-size: 12.5px; }

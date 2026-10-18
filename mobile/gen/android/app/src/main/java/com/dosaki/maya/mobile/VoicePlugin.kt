@@ -3,13 +3,16 @@ package com.dosaki.maya.mobile
 import android.Manifest
 import android.app.Activity
 import android.app.NotificationManager
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -29,6 +32,9 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.util.UUID
+
+/** A refused microphone; the page offers the app's settings for exactly this text. */
+private const val MIC_OFF = "Microphone access is off."
 
 @InvokeArg
 class ListenArgs {
@@ -136,7 +142,7 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
             return invoke.resolve()
         }
         if (getPermissionState("microphone") != PermissionState.GRANTED) {
-            fail("Microphone access is off.", true)
+            fail(MIC_OFF, true)
             return invoke.resolve()
         }
         if (args.wake && !onDeviceAvailable()) {
@@ -173,6 +179,18 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
         utterance = null
         tts?.stop()
         invoke.resolve()
+    }
+
+    /** The app's page in Android's settings, where a refused microphone is allowed again. */
+    @Command
+    fun openSettings(invoke: Invoke) {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", activity.packageName, null))
+        try {
+            activity.startActivity(intent)
+            invoke.resolve()
+        } catch (e: ActivityNotFoundException) {
+            invoke.reject("This phone has no settings page for Maya.")
+        }
     }
 
     /** On silent or vibrate, or in Do Not Disturb: board events stay unspoken. */
@@ -244,7 +262,7 @@ class VoicePlugin(private val activity: Activity) : Plugin(activity), DefaultLif
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> emit("ended")
                 // Our own cancel (leaving the screen, speaking): say nothing.
                 SpeechRecognizer.ERROR_CLIENT -> {}
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> fail("Microphone access is off.", true)
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> fail(MIC_OFF, true)
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
                     fail("English speech recognition is not installed on this phone.", true)
                 else -> fail(describe(error), false)

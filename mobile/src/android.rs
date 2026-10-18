@@ -327,6 +327,12 @@ mod imp {
     pub fn on_device<R: Runtime>(app: &AppHandle<R>) -> bool {
         app.state::<VoiceHandle<R>>().0.run_mobile_plugin::<RecognizerState>("state", ()).map(|s| s.on_device).unwrap_or(true)
     }
+
+    /// Opens the app's page in Android's settings, where a refused
+    /// microphone is allowed again. Never called with the voice's lock held.
+    pub fn open_app_settings<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+        app.state::<VoiceHandle<R>>().0.run_mobile_plugin::<serde_json::Value>("openSettings", ()).map(|_| ()).map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -424,6 +430,11 @@ mod imp {
 
     pub fn on_device<R: Runtime>(_: &AppHandle<R>) -> bool {
         true
+    }
+
+    pub fn open_app_settings<R: Runtime>(_: &AppHandle<R>) -> Result<(), String> {
+        log::line("voice", "would open the app's settings");
+        Ok(())
     }
 }
 

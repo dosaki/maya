@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderVoiceBar, type VoiceView } from "./voice";
+import { MIC_OFF, renderVoiceBar, type VoiceView } from "./voice";
 
 const base: VoiceView = { state: "idle", heard: "", said: "", pending: null, error: null, offer: null, note: null };
-const handlers = () => ({ onTap: vi.fn(), onConfirm: vi.fn() });
+const handlers = () => ({ onTap: vi.fn(), onConfirm: vi.fn(), onOpenSettings: vi.fn() });
 
 describe("renderVoiceBar", () => {
   it("offers the mic when voice is offered, and taps through", () => {
@@ -48,5 +48,17 @@ describe("renderVoiceBar", () => {
 
   it("shows an error under the mic", () => {
     expect(renderVoiceBar({ ...base, error: "Microphone access is off." }, handlers()).querySelector(".voice__error")?.textContent).toBe("Microphone access is off.");
+  });
+
+  it("offers the app's settings when the microphone is refused", () => {
+    expect(MIC_OFF).toBe("Microphone access is off.");
+    const h = handlers();
+    const el = renderVoiceBar({ ...base, error: MIC_OFF }, h);
+    const open = el.querySelector<HTMLButtonElement>("button[data-action=open-settings]")!;
+    expect(open.textContent).toBe("Open settings");
+    open.click();
+    expect(h.onOpenSettings).toHaveBeenCalled();
+    expect(renderVoiceBar({ ...base, error: "no network for speech recognition" }, h).querySelector("button[data-action=open-settings]")).toBeNull();
+    expect(renderVoiceBar(base, h).querySelector("button[data-action=open-settings]")).toBeNull();
   });
 });

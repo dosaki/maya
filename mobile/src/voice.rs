@@ -48,6 +48,9 @@ const HISTORY: usize = 12;
 const MAX_FAILURES: u32 = 5;
 /// The offer until the hub says otherwise: not joined to a main.
 pub const NO_MAIN: &str = "Voice needs a desktop main.";
+/// A refused microphone; the page offers the app's settings for exactly
+/// this text (`MIC_OFF` in `src/mobile/voice.ts`).
+pub const MIC_OFF: &str = "Microphone access is off.";
 /// Android has no text-to-speech voice to say a line with.
 const NO_TTS: &str = "No text-to-speech voice is installed; replies show here instead.";
 /// The wake loop gave up; its error stays until the setting is changed.

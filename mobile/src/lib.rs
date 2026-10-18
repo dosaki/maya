@@ -132,7 +132,8 @@ pub fn run() {
             commands::pending_tap,
             commands::voice_view,
             commands::voice_tap,
-            commands::voice_confirm
+            commands::voice_confirm,
+            commands::voice_open_settings
         ])
         .setup(|app| {
             let handle = app.handle().clone();

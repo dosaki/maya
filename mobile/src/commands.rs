@@ -271,7 +271,7 @@ fn voice(hub: &H) -> Result<Arc<crate::voice::Voice>, String> {
 fn microphone_refused(hub: &H, v: &crate::voice::Voice) -> Result<(), String> {
     hub.update_config(|c| c.wake_word = false)?;
     v.set_wake(false);
-    v.failed("Microphone access is off.", true);
+    v.failed(crate::voice::MIC_OFF, true);
     Ok(())
 }
 
@@ -291,6 +291,13 @@ pub fn voice_tap(app: AppHandle, hub: H) -> Result<(), String> {
     }
     v.tap();
     Ok(())
+}
+
+/// Opens the app's page in Android's settings, where a refused microphone
+/// is allowed again.
+#[tauri::command(async)]
+pub fn voice_open_settings(app: AppHandle) -> Result<(), String> {
+    android::open_app_settings(&app)
 }
 
 #[tauri::command]

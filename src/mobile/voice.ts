@@ -20,9 +20,12 @@ export interface VoiceView {
 export interface VoiceHandlers {
   onTap(): void;
   onConfirm(yes: boolean): void;
+  onOpenSettings(): void;
 }
 
 const NO_MAIN = "Voice needs a desktop main.";
+/** The error the Rust side shows for a refused microphone (`voice::MIC_OFF`). */
+export const MIC_OFF = "Microphone access is off.";
 
 function line(className: string, text: string): HTMLElement {
   const d = document.createElement("div");
@@ -67,6 +70,15 @@ export function renderVoiceBar(v: VoiceView, h: VoiceHandlers): HTMLElement {
   }
   if (v.note && v.state === "idle" && !v.offer) bar.append(line("voice__note", v.note));
   if (v.error) bar.append(line("voice__error", v.error));
+  if (v.error === MIC_OFF) {
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "voice__settings";
+    open.dataset.action = "open-settings";
+    open.textContent = "Open settings";
+    open.addEventListener("click", () => h.onOpenSettings());
+    bar.append(open);
+  }
   return bar;
 }
 
@@ -76,6 +88,7 @@ export async function initVoice(): Promise<void> {
   const handlers: VoiceHandlers = {
     onTap: () => void invoke("voice_tap").catch(() => undefined),
     onConfirm: (yes) => void invoke("voice_confirm", { yes }).catch(() => undefined),
+    onOpenSettings: () => void invoke("voice_open_settings").catch(() => undefined),
   };
   const paint = (v: VoiceView) => host.replaceChildren(renderVoiceBar(v, handlers));
   await listen<VoiceView>("voice", (e) => paint(e.payload));
