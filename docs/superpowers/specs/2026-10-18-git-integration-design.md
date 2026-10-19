@@ -62,10 +62,12 @@ A new settings group, `git`, titled "Git", placed before "Pull requests"
 ```
 GitHub    [on/off]
   Token:  (•) Paste a token  [••••••••]  [Clear]   ( ) From env var  [GH_TOKEN    ]
+  Clone with: (•) SSH  ( ) HTTPS
   [Test]  Connected as @login
 GitLab    [on/off]
   URL:    [                          ]  placeholder https://gitlab.com
   Token:  (•) Paste a token  [        ]            ( ) From env var  [GITLAB_TOKEN]
+  Clone with: (•) SSH  ( ) HTTPS
   [Test]
 ```
 
@@ -83,6 +85,9 @@ GitLab    [on/off]
   of trailing slashes and of a pasted `/api/v4`, and must parse as an `http` or `https` URL; a path
   is allowed (`https://example.com/gitlab`). An invalid URL is refused by
   `set_config` with a message naming the field.
+- **Clone with:** SSH or HTTPS, per provider, default SSH. It decides the
+  address a review's `git clone` uses; it is saved as `clone` on the
+  connection.
 - **Test** calls `test_git_connection(provider)`, which resolves the
   token and makes one `whoami` call. It shows "Connected as @login" or
   the error text.
@@ -100,6 +105,7 @@ pub struct GitConnection {
     pub enabled: bool,
     pub base_url: Option<String>,       // gitlab only; None = https://gitlab.com
     pub token: TokenSource,
+    pub clone: CloneProtocol,           // "ssh" (default) | "https"
 }
 
 pub enum TokenSource {
@@ -237,9 +243,13 @@ so the card can say "MR !12" or "PR #12".
 - **Notifications:** `PrNotifier` is keyed by URL and works unchanged
   for MRs. `pr_banner` titles an MR `repo !12`, and
   `pr_spoken_line` says "repo merge request 12".
-- **Review clone:** `shell_command` runs
-  `git clone '<web base>/<repo>.git' '<dir>'`, where the web base is
-  `https://github.com` or the GitLab base URL. `find_checkout` and
+- **Review clone:** `shell_command` runs `git clone '<url>' '<dir>'`. The
+  URL follows the provider's Clone with choice (SSH by default): over SSH
+  it is the API's `sshUrl` (GitHub) or `sshUrlToRepo` (GitLab), over HTTPS
+  the API's `url` plus `.git` (GitHub) or `httpUrlToRepo` (GitLab). When
+  the API gave none, the fallbacks are `git@<host>:<repo>.git` and
+  `<web base>/<repo>.git`, where the web base is `https://github.com` or
+  the GitLab base URL. `find_checkout` and
   `resolve_target` match folders through `forge::route`, and take the
   forge as well as the repo.
 - **PR identity:** everything that names one PR — the tab's `ReviewAction`

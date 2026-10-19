@@ -41,8 +41,9 @@ GitLab's APIs directly (`core/src/forge/`); `gh` is not needed. Settings
 pasted token, kept in the OS key store (`maya-github`, `maya-gitlab`), or
 a variable read from the login shell (`forge::env`). GitLab's URL defaults
 to `https://gitlab.com`. The first start after 0.24 imports `gh auth
-token` once, when `gh` is logged in. Review clones run `git clone` with
-the user's own git credentials.
+token` once, when `gh` is logged in. Review clones run `git clone` over
+SSH (the default) or HTTPS, chosen per provider in Settings → Git, with the
+user's own git credentials.
 
 ## Windows
 
