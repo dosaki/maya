@@ -265,6 +265,10 @@ impl Memory {
         self.record.heartbeat_ms
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn sessions(&self) -> &[Remembered] {
         &self.record.sessions
     }

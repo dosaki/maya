@@ -60,6 +60,8 @@ pub struct Store {
     /// The sessions this machine remembers across restarts, once
     /// `start_remembering` ran (the app does; the CLI and most tests do not).
     memory: Option<Memory>,
+    /// The last save of the memory failed: the streak was logged already.
+    memory_save_failing: bool,
 }
 
 /// Text of the files names come from, read again only when they change.
@@ -161,6 +163,7 @@ impl Store {
             due_renames: Default::default(),
             agents: std::sync::Arc::new(crate::agents::current),
             memory: None,
+            memory_save_failing: false,
         }
     }
 
@@ -545,10 +548,18 @@ impl Store {
     }
 
     /// Writes the memory when it changed; a failure is logged, never fatal.
+    /// A failed save is retried on every refresh, so a streak of failures
+    /// is logged once, and again only after a save succeeded.
     fn save_memory(&mut self) {
         if let Some(m) = self.memory.as_mut() {
-            if let Err(e) = m.save() {
-                crate::log::line("remembered", format!("could not save: {e}"));
+            match m.save() {
+                Ok(()) => self.memory_save_failing = false,
+                Err(e) => {
+                    if !self.memory_save_failing {
+                        crate::log::line("remembered", format!("could not save {}: {e}", m.path().display()));
+                    }
+                    self.memory_save_failing = true;
+                }
             }
         }
     }
@@ -914,6 +925,31 @@ mod tests {
         assert_eq!(second.start_remembering(60_000).len(), 1, "judged before the first refresh");
         second.refresh(61_000);
         assert!(second.was_running().is_empty(), "it is live: nothing to resume");
+    }
+
+    #[test]
+    fn a_save_that_keeps_failing_is_logged_once_until_one_succeeds() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = claude_with_session(t.path());
+        let maya = claude.join("maya");
+        let path = crate::remembered::path_in(&claude);
+        let logged = || crate::log::lines().iter().filter(|l| l.source == "remembered" && l.text.starts_with(&format!("could not save {}", path.display()))).count();
+        // A file where the folder should be: every save fails.
+        std::fs::remove_dir_all(&maya).unwrap();
+        std::fs::write(&maya, "").unwrap();
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.start_remembering(1_000);
+        store.refresh(2_000);
+        store.heartbeat(30_000);
+        assert_eq!(logged(), 1, "one line for the whole streak, not one per refresh");
+        std::fs::remove_file(&maya).unwrap();
+        store.heartbeat(60_000);
+        assert!(path.exists(), "saved again once it can be");
+        std::fs::remove_dir_all(&maya).unwrap();
+        std::fs::write(&maya, "").unwrap();
+        store.heartbeat(90_000);
+        store.heartbeat(120_000);
+        assert_eq!(logged(), 2, "a new streak after a success is logged again, once");
     }
 
     #[test]
