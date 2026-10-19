@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn a_confirmed_resume_all_is_counted_again_on_the_main() {
-        let entry = maya_core::remembered::Remembered { agent: Harness::ClaudeCode, session_id: "a".into(), dir: "/x".into(), name: "a".into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, error: None };
+        let entry = maya_core::remembered::Remembered { agent: Harness::ClaudeCode, session_id: "a".into(), dir: "/x".into(), name: "a".into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None };
         let ctx = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![], remembered: vec![maya_core::remembered::RememberedRow { machine: None, waiting: false, entry }] };
         let action = serde_json::json!({"kind": "resume_all", "scope": "all", "count": 5});
         assert_eq!(revalidate(&action, &ctx).unwrap()["count"], 1, "counted against the list as it is now");

@@ -1881,7 +1881,7 @@ mod tests {
     }
 
     fn was(agent: Harness, id: &str, dir: &Path, last_seen_ms: u64) -> Remembered {
-        Remembered { agent, session_id: id.into(), dir: dir.to_string_lossy().into_owned(), name: format!("{id}-name"), first_seen_ms: 1, last_seen_ms, gone_at_ms: None, offered: false, error: None }
+        Remembered { agent, session_id: id.into(), dir: dir.to_string_lossy().into_owned(), name: format!("{id}-name"), first_seen_ms: 1, last_seen_ms, gone_at_ms: None, offered: false, offered_at_ms: None, error: None }
     }
 
     /// A store whose last run left `entries` running when it stopped.

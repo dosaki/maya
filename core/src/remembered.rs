@@ -14,6 +14,9 @@ pub const GRACE_MS: u64 = 120_000;
 pub const HEARTBEAT_MS: u64 = 30_000;
 /// The pause between two terminals one resume opens.
 pub const RESUME_GAP_MS: u64 = 400;
+/// How long an ignored offer is carried from run to run: a day after it
+/// was first offered, judged by the last run's heartbeat.
+pub const OFFER_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// What a remembered session is known by: its agent and its id.
 pub type Key = (Harness, String);
@@ -44,6 +47,9 @@ pub struct Remembered {
     /// forgotten, or seen live again.
     #[serde(default, skip_serializing_if = "is_false")]
     pub offered: bool,
+    /// When it was first offered; an offer is carried for `OFFER_TTL_MS`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offered_at_ms: Option<u64>,
     /// Why its last resume failed ("folder missing"…).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -144,7 +150,9 @@ impl Memory {
                 return false;
             }
             if e.offered {
-                return true;
+                // A file from before offers were dated: dated now, once.
+                let at = *e.offered_at_ms.get_or_insert(now_ms);
+                return heartbeat.saturating_sub(at) <= OFFER_TTL_MS;
             }
             let running = match e.gone_at_ms {
                 None => true,
@@ -152,6 +160,7 @@ impl Memory {
             };
             if running {
                 e.offered = true;
+                e.offered_at_ms = Some(now_ms);
                 e.gone_at_ms = None;
                 e.error = None;
             }
@@ -181,6 +190,7 @@ impl Memory {
                         e.dir = s.dir.clone();
                         e.gone_at_ms = None;
                         e.offered = false;
+                        e.offered_at_ms = None;
                         e.error = None;
                         self.dirty = true;
                     }
@@ -188,7 +198,7 @@ impl Memory {
                     e.last_seen_ms = now_ms;
                 }
                 None => {
-                    self.record.sessions.push(Remembered { agent: s.agent, session_id: s.session_id.clone(), dir: s.dir.clone(), name: s.name.clone(), first_seen_ms: now_ms, last_seen_ms: now_ms, gone_at_ms: None, offered: false, error: None });
+                    self.record.sessions.push(Remembered { agent: s.agent, session_id: s.session_id.clone(), dir: s.dir.clone(), name: s.name.clone(), first_seen_ms: now_ms, last_seen_ms: now_ms, gone_at_ms: None, offered: false, offered_at_ms: None, error: None });
                     self.dirty = true;
                 }
             }
@@ -376,7 +386,7 @@ mod tests {
     }
 
     fn entry(id: &str) -> Remembered {
-        Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: format!("/Users/x/dev/{id}"), name: format!("{id}-name"), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, error: None }
+        Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: format!("/Users/x/dev/{id}"), name: format!("{id}-name"), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None }
     }
 
     fn memory() -> (tempfile::TempDir, Memory) {
@@ -473,6 +483,7 @@ mod tests {
         let offered = m.classify_at_start(2_000_000);
         assert_eq!(ids(&offered), ["before", "live", "late"], "oldest last-seen first; the long-gone one and the unknown agent are dropped");
         assert!(offered.iter().all(|e| e.offered && e.gone_at_ms.is_none()));
+        assert!(offered.iter().all(|e| e.offered_at_ms == Some(2_000_000)), "offered now; one carried from a file with no date is dated now");
         assert_eq!(m.heartbeat_ms(), 2_000_000);
     }
 
@@ -491,6 +502,31 @@ mod tests {
         next.observe(&[live("a")], 12);
         assert!(next.was_running().is_empty(), "resumed by hand: it leaves the list on its own");
         assert_eq!(next.entry(Harness::ClaudeCode, "a").unwrap().gone_at_ms, None);
+    }
+
+    #[test]
+    fn an_ignored_offer_is_carried_for_a_day_then_dropped() {
+        const HOUR: u64 = 60 * 60 * 1000;
+        let (t, mut m) = memory();
+        m.classify_at_start(1);
+        m.observe(&[live("a")], 2);
+        m.heartbeat(3);
+        m.save().unwrap();
+        // Run 1: offers A; the user ignores the banner.
+        let start = 10_000;
+        let mut run1 = Memory::load(path_in(t.path()));
+        assert_eq!(ids(&run1.classify_at_start(start)), ["a"]);
+        run1.heartbeat(start + HOUR);
+        run1.save().unwrap();
+        // Run 2: its last sign of life is still within a day of the offer.
+        let mut run2 = Memory::load(path_in(t.path()));
+        assert_eq!(ids(&run2.classify_at_start(start + 2 * HOUR)), ["a"], "within a day: still offered");
+        run2.heartbeat(start + 24 * HOUR + 1);
+        run2.save().unwrap();
+        // Run 3: the offer outlived a day of runs: dropped.
+        let mut run3 = Memory::load(path_in(t.path()));
+        assert!(run3.classify_at_start(start + 25 * HOUR).is_empty(), "an offer ignored for more than a day is not carried");
+        assert!(run3.entry(Harness::ClaudeCode, "a").is_none());
     }
 
     #[test]

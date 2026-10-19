@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn remembered_rows_put_this_machine_first_and_mark_an_away_assistant_waiting() {
-        let was = |id: &str| crate::remembered::Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: "/x".into(), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, error: None };
+        let was = |id: &str| crate::remembered::Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: "/x".into(), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None };
         let mut laptop = board("laptop", "laptop", &[], 1, false);
         laptop.remembered = Some(vec![was("r1")]);
         let mut pi = board("pi", "pi", &[], 1, true);

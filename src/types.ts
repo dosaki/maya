@@ -209,6 +209,8 @@ export interface Remembered {
   lastSeenMs: number;
   goneAtMs?: number | null;
   offered?: boolean;
+  /** When it was first offered; carried for a day after. */
+  offeredAtMs?: number | null;
   /** Why its last resume failed ("folder missing"…). */
   error?: string | null;
 }

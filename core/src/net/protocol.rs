@@ -400,7 +400,7 @@ mod tests {
     }
 
     fn was(id: &str) -> crate::remembered::Remembered {
-        crate::remembered::Remembered { agent: crate::model::Harness::ClaudeCode, session_id: id.into(), dir: "/Users/x/dev/calibre".into(), name: "calibre-88".into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, error: None }
+        crate::remembered::Remembered { agent: crate::model::Harness::ClaudeCode, session_id: id.into(), dir: "/Users/x/dev/calibre".into(), name: "calibre-88".into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None }
     }
 
     #[test]
