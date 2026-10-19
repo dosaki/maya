@@ -320,6 +320,25 @@ pub fn plan(rows: &[RememberedRow]) -> ResumePlan {
     p
 }
 
+/// The rows as this Maya knows their machines, not as a page sent them: a
+/// row of a machine `connected` denies is waiting, and a row of this one is
+/// never waiting.
+pub fn settle(rows: &[RememberedRow], connected: &dyn Fn(&str) -> bool) -> Vec<RememberedRow> {
+    rows.iter()
+        .map(|r| {
+            let waiting = r.machine.as_deref().is_some_and(|m| !connected(m));
+            RememberedRow { waiting, ..r.clone() }
+        })
+        .collect()
+}
+
+/// The stored entries `asked` names: same agent, session and folder. A
+/// request for anything else is dropped; nothing is resumed from the page's
+/// own say-so.
+pub fn trusted(stored: &[Remembered], asked: &[Remembered]) -> Vec<Remembered> {
+    asked.iter().filter_map(|a| stored.iter().find(|s| s.key() == a.key() && s.dir == a.dir).cloned()).collect()
+}
+
 /// The rows' keys by machine (None: this one), in first-seen order, with
 /// whether that machine is away.
 pub fn keys_by_machine(rows: &[RememberedRow]) -> Vec<(Option<String>, bool, Vec<Key>)> {
@@ -368,6 +387,22 @@ mod tests {
 
     fn ids(list: &[Remembered]) -> Vec<&str> {
         list.iter().map(|e| e.session_id.as_str()).collect()
+    }
+
+    #[test]
+    fn only_a_stored_session_in_its_stored_folder_is_trusted() {
+        let stored = vec![entry("a"), entry("b")];
+        let moved = Remembered { dir: "/etc".into(), ..entry("a") };
+        let got = trusted(&stored, &[entry("a"), moved, entry("zz")]);
+        assert_eq!(ids(&got), ["a"]);
+        assert_eq!(got[0].dir, "/Users/x/dev/a");
+    }
+
+    #[test]
+    fn settle_marks_a_disconnected_machine_waiting_whatever_the_page_said() {
+        let row = |m: Option<&str>, waiting| RememberedRow { machine: m.map(String::from), waiting, entry: entry("a") };
+        let got = settle(&[row(Some("desk"), false), row(Some("lap"), true), row(None, true)], &|m| m == "lap");
+        assert_eq!(got.iter().map(|r| r.waiting).collect::<Vec<_>>(), [true, false, false]);
     }
 
     #[test]

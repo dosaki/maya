@@ -41,10 +41,20 @@ pub(crate) fn remembered_sessions(state: TauriState<AppState>) -> Vec<Remembered
 /// apart; a waiting machine's rows are skipped and say so.
 pub(crate) fn resume_rows(app: &AppHandle, rows: &[RememberedRow]) -> Vec<ResumeOutcome> {
     let state = app.state::<AppState>();
-    let plan = remembered::plan(rows);
+    // The page's word is not enough: a row's machine state is re-derived here.
+    let boards = crate::remote_boards(&state);
+    let rows = remembered::settle(rows, &|m| boards.iter().any(|b| b.machine == m && b.connected));
+    let plan = remembered::plan(&rows);
+    // Only what this Maya remembers, in the folder it remembers, is resumed here.
+    let stored = state.store.lock().unwrap().was_running();
+    let here = remembered::trusted(&stored, &plan.here);
+    if here.len() < plan.here.len() {
+        log::line("remembered", format!("{} requested sessions are not remembered here; skipped", plan.here.len() - here.len()));
+    }
+    let server = state.network.lock().unwrap().server.clone();
     let mut out = Vec::new();
-    for (key, result) in maya_core::actions::resume_remembered(&crate::local(&state), &plan.here) {
-        if let Some(e) = plan.here.iter().find(|e| e.key() == key) {
+    for (key, result) in maya_core::actions::resume_remembered(&crate::local(&state), &here) {
+        if let Some(e) = here.iter().find(|e| e.key() == key) {
             out.push(ResumeOutcome::of(None, e, &result));
         }
     }
@@ -55,6 +65,12 @@ pub(crate) fn resume_rows(app: &AppHandle, rows: &[RememberedRow]) -> Vec<Resume
             }
             let kind = CommandKind::Resume { dir: e.dir.clone(), session: e.session_id.clone(), agent: e.agent };
             let result = crate::net_app::send_command(app, machine, kind, ROUTE_TIMEOUT).map(|_| ());
+            if result.is_ok() {
+                // The assistant's next Board would say so; until then do not list it again.
+                if let Some(s) = &server {
+                    s.drop_remembered(machine, &[e.key()]);
+                }
+            }
             out.push(ResumeOutcome::of(Some(machine), e, &result));
         }
     }

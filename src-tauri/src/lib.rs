@@ -1276,10 +1276,10 @@ fn apply_config_change(app: &AppHandle, before: &Config, config: &Config) {
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// The PR badges' poll, whose thread also writes the heartbeat.
 const PR_POLL: Duration = Duration::from_secs(10);
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let dir = claude_dir();
     let mut store = Store::new(dir.clone());
