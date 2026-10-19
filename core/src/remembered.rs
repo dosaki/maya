@@ -88,8 +88,6 @@ struct Record {
 pub struct Memory {
     path: PathBuf,
     record: Record,
-    /// When this run began; a session gone since before it is not this run's to prune.
-    started_ms: u64,
     /// Something changed since the last save.
     dirty: bool,
 }
@@ -109,7 +107,7 @@ impl Memory {
                 Record::default()
             }
         };
-        Memory { path, record, started_ms: 0, dirty: false }
+        Memory { path, record, dirty: false }
     }
 
     /// Writes the file, readable by its owner only, when something changed.
@@ -121,7 +119,16 @@ impl Memory {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let text = serde_json::to_string_pretty(&self.record).map_err(|e| e.to_string())?;
-        crate::config::write_private(&self.path, text.as_bytes()).map_err(|e| e.to_string())?;
+        // Written beside the file and renamed over it: a power cut mid-write
+        // leaves the old file whole, never a cut-off one.
+        let mut tmp = self.path.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        let written = crate::config::write_private(&tmp, text.as_bytes()).and_then(|_| std::fs::rename(&tmp, &self.path));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
         self.dirty = false;
         Ok(())
     }
@@ -150,7 +157,6 @@ impl Memory {
             }
             running
         });
-        self.started_ms = now_ms;
         self.record.heartbeat_ms = now_ms;
         self.dirty = true;
         self.was_running()
@@ -187,7 +193,6 @@ impl Memory {
                 }
             }
         }
-        let started = self.started_ms;
         let before = self.record.sessions.len();
         let mut marked = false;
         self.record.sessions.retain_mut(|e| {
@@ -200,7 +205,7 @@ impl Memory {
                     marked = true;
                     true
                 }
-                Some(gone) => !(now_ms.saturating_sub(gone) > GRACE_MS && started <= gone),
+                Some(gone) => now_ms.saturating_sub(gone) <= GRACE_MS,
             }
         });
         if marked || self.record.sessions.len() != before {
@@ -502,6 +507,28 @@ mod tests {
         m.classify_at_start(1);
         m.save().unwrap();
         assert_eq!(std::fs::metadata(path_in(t.path())).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_save_leaves_no_temporary_file_and_a_whole_target() {
+        let (t, mut m) = memory();
+        m.classify_at_start(1);
+        m.observe(&[live("a")], 2);
+        m.save().unwrap();
+        let path = path_in(t.path());
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["remembered.json"]);
+        assert_eq!(Memory::load(path).sessions().len(), 1);
+    }
+
+    #[test]
+    fn a_session_gone_while_the_clock_read_before_the_start_is_still_pruned() {
+        let (_t, mut m) = memory();
+        m.classify_at_start(1_000);
+        m.observe(&[live("b")], 400);
+        m.observe(&[], 300);
+        m.observe(&[], 300 + GRACE_MS + 1);
+        assert!(m.entry(Harness::ClaudeCode, "b").is_none());
     }
 
     #[test]
