@@ -757,4 +757,95 @@ describe("settings flow", () => {
     await flush();
     expect(status()).toBe("could not check for updates: offline");
   });
+
+  it("opens on Git when the Pull requests tab asks while Settings is still loading", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", git: null };
+    let release: () => void = () => {};
+    const late = new Promise<void>((r) => (release = r));
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return late.then(() => ({ ...config }));
+      if (cmd === "get_git_status") return Promise.resolve({ github: { hasToken: false }, gitlab: { hasToken: false } });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    const init = initSettings();
+    document.dispatchEvent(new CustomEvent("maya:settings-group", { detail: "git" }));
+    release();
+    await init;
+    await flush();
+    const visible = [...document.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group);
+    expect(visible).toEqual(["git"]);
+  });
+
+  it("saves a GitLab URL into the git list and opens on Git when the Pull requests tab asks", async () => {
+    let saved: any = null;
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", git: null };
+    invoke.mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "set_config") { saved = args.config; return Promise.resolve(args.config); }
+      if (cmd === "get_git_status") return Promise.resolve({ github: { hasToken: false }, gitlab: { hasToken: false } });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.dispatchEvent(new CustomEvent("maya:settings-group", { detail: "git" }));
+    await flush();
+    const visible = [...document.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group);
+    expect(visible).toEqual(["git"]);
+    const enable = document.querySelector<HTMLInputElement>(".settings__git[data-provider=gitlab] input[name^=gitEnabled]")!;
+    enable.checked = true;
+    enable.dispatchEvent(new Event("change"));
+    await flush();
+    expect(saved.git).toEqual([
+      { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" }, clone: "ssh" },
+      { provider: "gitlab", enabled: true, baseUrl: null, token: { kind: "env", name: "GITLAB_TOKEN" }, clone: "ssh" },
+    ]);
+    localStorage.removeItem("maya.settingsGroup");
+  });
+
+  it("keeps focus inside the same provider block through a repaint", async () => {
+    const both = [
+      { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" } },
+      { provider: "gitlab", enabled: true, baseUrl: null, token: { kind: "env", name: "GITLAB_TOKEN" } },
+    ];
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", git: both };
+    const net = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, mainError: null };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "network_status") return Promise.resolve(net);
+      if (cmd === "get_git_status") return Promise.resolve({ github: { hasToken: false }, gitlab: { hasToken: false } });
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+    document.dispatchEvent(new CustomEvent("maya:settings-group", { detail: "git" }));
+    await flush();
+    const gl = () => document.querySelector<HTMLElement>(".settings__git[data-provider=gitlab]")!;
+    const onNetwork = eventListen.mock.calls.find((c) => c[0] === "network")![1] as (e: { payload: unknown }) => void;
+    let tick = 0;
+    for (const sel of ["input[name^=gitEnabled]", "input[name^=gitEnvName]", "input[name=gitTokenKind-gitlab][value=stored]"]) {
+      const before = gl().querySelector<HTMLInputElement>(sel)!;
+      before.focus();
+      onNetwork({ payload: { ...net, mainError: `n${++tick}` } });
+      expect(gl().querySelector(sel)).not.toBe(before);
+      expect(gl().contains(document.activeElement)).toBe(true);
+      expect(document.activeElement).toBe(gl().querySelector(sel));
+    }
+    localStorage.removeItem("maya.settingsGroup");
+  });
 });

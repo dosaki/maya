@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -295,12 +295,12 @@ describe("renderSettings", () => {
   it("lists the groups in a sidebar, one titled section each, and shows only General at first", () => {
     const el = renderSettings(voiceBase, handlers());
     const nav = [...el.querySelectorAll<HTMLButtonElement>(".settings__nav button")];
-    expect(nav.map((b) => b.textContent)).toEqual(["General", "Sessions", "Pull requests", "Notifications", "Voice", "Network"]);
-    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Sessions", "Pull requests", "Notifications", "Voice", "Network"]);
+    expect(nav.map((b) => b.textContent)).toEqual(["General", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network"]);
+    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network"]);
     const sections = [...el.querySelectorAll<HTMLElement>(".settings__section")];
-    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "sessions", "reviews", "notifications", "voice", "network"]);
+    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "sessions", "git", "reviews", "notifications", "voice", "network"]);
     expect(sections.filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["general"]);
-    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null]);
+    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null]);
   });
 
   it("puts each setting in its group", () => {
@@ -982,5 +982,101 @@ describe("secure pairing in Settings › Network", () => {
     expect(h.onForgetMain).toHaveBeenCalled();
     const fresh = renderSettings({ ...voiceBase, networkRole: "assistant" }, h);
     expect(fresh.querySelector("button[data-action=forget-main]")).toBeNull();
+  });
+});
+
+describe("Settings → Git", () => {
+  const gitModel = (over: Partial<SettingsModel> = {}): SettingsModel => ({
+    ...voiceBase,
+    settingsGroup: "git",
+    git: gitConnections(null),
+    gitStatus: { github: { hasToken: false }, gitlab: { hasToken: false } },
+    ...over,
+  });
+  const block = (root: HTMLElement, p: string) => root.querySelector<HTMLElement>(`.settings__git[data-provider=${p}]`)!;
+
+  it("defaults to GitHub on reading GH_TOKEN and GitLab off reading GITLAB_TOKEN", () => {
+    expect(gitConnections(undefined)).toEqual([
+      { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" }, clone: "ssh" },
+      { provider: "gitlab", enabled: false, baseUrl: null, token: { kind: "env", name: "GITLAB_TOKEN" }, clone: "ssh" },
+    ]);
+    expect(gitConnections([{ provider: "gitlab", enabled: true, token: { kind: "stored" } }])[1]).toEqual({ provider: "gitlab", enabled: true, baseUrl: null, token: { kind: "stored" }, clone: "ssh" });
+    expect(gitConnections([{ provider: "github", enabled: true, token: { kind: "stored" }, clone: "https" }])[0].clone).toBe("https");
+  });
+
+  it("shows a block per provider, its fields disabled while it is off", () => {
+    const root = renderSettings(gitModel(), handlers());
+    expect(block(root, "github").querySelector<HTMLInputElement>("input[name^=gitEnabled]")!.checked).toBe(true);
+    expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name^=gitEnabled]")!.checked).toBe(false);
+    expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name^=gitBaseUrl]")!.disabled).toBe(true);
+    expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name^=gitBaseUrl]")!.placeholder).toBe("https://gitlab.com");
+    expect(block(root, "github").querySelector("input[name^=gitBaseUrl]")).toBeNull();
+  });
+
+  it("offers SSH or HTTPS to clone with, SSH by default, off with its provider", () => {
+    const h = { ...handlers(), onGitClone: vi.fn() };
+    const root = renderSettings(gitModel(), h);
+    const radio = (p: string, v: string) => block(root, p).querySelector<HTMLInputElement>(`input[name=gitClone-${p}][value=${v}]`)!;
+    expect([radio("github", "ssh").checked, radio("github", "https").checked]).toEqual([true, false]);
+    expect(radio("github", "ssh").disabled).toBe(false);
+    expect(radio("gitlab", "ssh").disabled && radio("gitlab", "https").disabled).toBe(true);
+    expect(block(root, "github").textContent).toContain("Clone with");
+    expect(block(root, "github").textContent).toContain("HTTPS");
+    const on = gitModel({ git: gitConnections([{ provider: "gitlab", enabled: true, token: { kind: "stored" }, clone: "https" }]) });
+    const root2 = renderSettings(on, h);
+    expect(block(root2, "gitlab").querySelector<HTMLInputElement>("input[name=gitClone-gitlab][value=https]")!.checked).toBe(true);
+    const https = block(root2, "gitlab").querySelector<HTMLInputElement>("input[name=gitClone-gitlab][value=https]")!;
+    https.dispatchEvent(new Event("change"));
+    expect(h.onGitClone).toHaveBeenCalledWith("gitlab", "https");
+  });
+
+  it("shows the variable field for env and the token field for stored, never filled", () => {
+    const stored = gitConnections([{ provider: "github", enabled: true, token: { kind: "stored" } }]);
+    const root = renderSettings(gitModel({ git: stored, gitStatus: { github: { hasToken: true }, gitlab: { hasToken: false } } }), handlers());
+    const gh = block(root, "github");
+    const tokenField = gh.querySelector<HTMLInputElement>("input[name=gitToken-github]")!;
+    expect(tokenField.type).toBe("password");
+    expect(tokenField.value).toBe("");
+    expect(gh.querySelector("input[name^=gitEnvName]")).toBeNull();
+    expect(gh.querySelector("[data-action=git-clear]")).not.toBeNull();
+    const gl = block(root, "gitlab");
+    expect(gl.querySelector<HTMLInputElement>("input[name^=gitEnvName]")!.value).toBe("GITLAB_TOKEN");
+    expect(gl.querySelector("input[name=gitToken-gitlab]")).toBeNull();
+  });
+
+  it("calls a handler for each change", () => {
+    const h = { ...handlers(), onGitEnabled: vi.fn(), onGitTokenKind: vi.fn(), onGitEnvName: vi.fn(), onGitBaseUrl: vi.fn(), onGitToken: vi.fn(), onGitClearToken: vi.fn(), onGitTest: vi.fn() };
+    const stored = gitConnections([{ provider: "github", enabled: true, token: { kind: "stored" } }, { provider: "gitlab", enabled: true, token: { kind: "env", name: "GITLAB_TOKEN" } }]);
+    const root = renderSettings(gitModel({ git: stored, gitStatus: { github: { hasToken: true }, gitlab: { hasToken: false } } }), h);
+    const gl = block(root, "gitlab");
+    const on = gl.querySelector<HTMLInputElement>("input[name^=gitEnabled]")!;
+    on.checked = false;
+    on.dispatchEvent(new Event("change"));
+    expect(h.onGitEnabled).toHaveBeenCalledWith("gitlab", false);
+    const url = gl.querySelector<HTMLInputElement>("input[name^=gitBaseUrl]")!;
+    url.value = "  https://gitlab.acme.io/ ";
+    url.dispatchEvent(new Event("change"));
+    expect(h.onGitBaseUrl).toHaveBeenCalledWith("https://gitlab.acme.io/");
+    const env = gl.querySelector<HTMLInputElement>("input[name^=gitEnvName]")!;
+    env.value = " MY_TOKEN ";
+    env.dispatchEvent(new Event("change"));
+    expect(h.onGitEnvName).toHaveBeenCalledWith("gitlab", "MY_TOKEN");
+    gl.querySelector<HTMLInputElement>("input[name=gitTokenKind-gitlab][value=stored]")!.dispatchEvent(new Event("change"));
+    expect(h.onGitTokenKind).toHaveBeenCalledWith("gitlab", "stored");
+    const gh = block(root, "github");
+    const tok = gh.querySelector<HTMLInputElement>("input[name=gitToken-github]")!;
+    tok.value = " ghp_new ";
+    tok.dispatchEvent(new Event("change"));
+    expect(h.onGitToken).toHaveBeenCalledWith("github", "ghp_new");
+    expect(tok.value).toBe(""); // emptied at once
+    gh.querySelector<HTMLButtonElement>("[data-action=git-clear]")!.click();
+    expect(h.onGitClearToken).toHaveBeenCalledWith("github");
+    gh.querySelector<HTMLButtonElement>("[data-action=git-test]")!.click();
+    expect(h.onGitTest).toHaveBeenCalledWith("github");
+  });
+
+  it("shows the last test's outcome", () => {
+    const root = renderSettings(gitModel({ gitStatus: { github: { hasToken: false, test: "Connected as @tiago" }, gitlab: { hasToken: false } } }), handlers());
+    expect(block(root, "github").querySelector(".settings__git-test")?.textContent).toBe("Connected as @tiago");
   });
 });

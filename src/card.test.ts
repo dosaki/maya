@@ -25,6 +25,15 @@ describe("remoteTerminalToast", () => {
   });
 });
 
+describe("renderCard: PR button", () => {
+  it("names a GitLab merge request MR !n and a GitHub one PR #n", () => {
+    const gl = renderCard({ ...base, pr: { number: 12, url: "https://gitlab.com/g/r/-/merge_requests/12", state: "open", forge: "gitlab" } }, 0);
+    expect(gl.querySelector("button[data-action=pr]")?.textContent).toBe("MR !12");
+    const gh = renderCard({ ...base, pr: { number: 7, url: "https://github.com/o/r/pull/7", state: "open" } }, 0);
+    expect(gh.querySelector("button[data-action=pr]")?.textContent).toBe("PR #7");
+  });
+});
+
 describe("renderCard: remote cards", () => {
   it("marks a remote card with the machine and drops the Terminal button", () => {
     const el = renderCard({ ...base, machine: "laptop", stale: false }, 0);

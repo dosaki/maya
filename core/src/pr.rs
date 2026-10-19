@@ -2,33 +2,26 @@ use crate::model::PullRequest;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
+use crate::forge::{Forge, Http};
 
-/// How long a lookup result (a PR or none) is trusted before `gh` is asked again.
+/// How long a lookup result (a PR or none) is trusted before the forge is asked again.
 pub const TTL_MS: u64 = 60_000;
 
-/// The PR record in `gh pr view --json number,url,state,isDraft` output.
-pub fn parse(stdout: &str) -> Option<PullRequest> {
-    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
-    let number = v["number"].as_u64()?;
-    let url = v["url"].as_str()?.to_string();
-    let state = if v["isDraft"].as_bool() == Some(true) { "draft".to_string() } else { v["state"].as_str()?.to_ascii_lowercase() };
-    Some(PullRequest { number, url, state })
+/// The checked-out branch; None when detached or not a repo.
+pub fn branch_of(dir: &Path) -> Option<String> {
+    // `symbolic-ref` also names a branch with no commits yet, and fails when detached.
+    let out = crate::command("git").args(["-C", dir.to_str()?, "symbolic-ref", "--short", "-q", "HEAD"]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !b.is_empty()).then_some(b)
 }
 
-/// Asks `gh` for the PR of `dir`'s current branch. None when there is no
-/// repo, remote, PR, or `gh` itself.
-pub fn lookup(dir: &Path) -> Option<PullRequest> {
-    let out = crate::gh()
-        .args(["pr", "view", "--json", "number,url,state,isDraft"])
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse(&String::from_utf8_lossy(&out.stdout))
+/// The PR or MR of `dir`'s branch, from the forge its `origin` belongs to.
+/// Ok(None) when there is no repo, origin, branch or switched-on forge.
+pub fn lookup(dir: &Path, forges: &[Forge], http: &dyn Http) -> Result<Option<PullRequest>, String> {
+    let Some(origin) = crate::forge::origin_of(dir) else { return Ok(None) };
+    let Some((forge, repo)) = crate::forge::route(&origin, forges) else { return Ok(None) };
+    let Some(branch) = branch_of(dir) else { return Ok(None) };
+    crate::forge::current_pr(http, forge, &repo, &branch)
 }
 
 struct Entry {
@@ -59,6 +52,11 @@ impl PrCache {
             .collect()
     }
 
+    /// Forgets everything, so every directory is looked up again.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     /// Forgets directories not in `live`.
     pub fn retain(&mut self, live: &[String]) {
         self.entries.retain(|d, _| live.contains(d));
@@ -71,21 +69,11 @@ mod tests {
     use crate::model::PullRequest;
 
     #[test]
-    fn parses_gh_pr_view_output_with_lowercase_state_and_draft() {
-        let out = r#"{"number":781,"state":"MERGED","url":"https://github.com/o/r/pull/781","isDraft":false}"#;
-        assert_eq!(parse(out), Some(PullRequest { number: 781, url: "https://github.com/o/r/pull/781".into(), state: "merged".into() }));
-        let draft = r#"{"number":9,"state":"OPEN","url":"https://github.com/o/r/pull/9","isDraft":true}"#;
-        assert_eq!(parse(draft).unwrap().state, "draft");
-        assert_eq!(parse("no pull requests found for branch"), None);
-        assert_eq!(parse(r#"{"number":"x"}"#), None);
-    }
-
-    #[test]
     fn cache_serves_known_results_and_reports_what_is_due() {
         let mut c = PrCache::default();
         let dirs = vec!["/a".to_string(), "/b".to_string()];
         assert_eq!(c.due(&dirs, 1000), dirs);
-        c.set("/a", Some(PullRequest { number: 1, url: "u".into(), state: "open".into() }), 1000);
+        c.set("/a", Some(PullRequest { number: 1, url: "u".into(), state: "open".into(), forge: Default::default() }), 1000);
         c.set("/b", None, 1000);
         assert_eq!(c.get("/a").map(|p| p.number), Some(1));
         assert_eq!(c.get("/b"), None);
@@ -97,9 +85,51 @@ mod tests {
         assert_eq!(c.due(&dirs, 1000), vec!["/b".to_string()]);
     }
 
-    #[test]
-    fn lookup_in_a_directory_without_a_repo_is_none() {
+    use crate::config::{GitConnection, GitProvider};
+    use crate::forge::{fake::FakeHttp, Forge, ForgeSite};
+
+    fn github() -> Forge {
+        Forge { site: ForgeSite::of(&GitConnection::default_for(GitProvider::Github)), token: "t".into() }
+    }
+
+    #[cfg(unix)]
+    fn repo_on_branch(origin: Option<&str>, branch: &str) -> tempfile::TempDir {
         let t = tempfile::tempdir().unwrap();
-        assert_eq!(lookup(t.path()), None);
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(["-C", t.path().to_str().unwrap()]).args(args).status().unwrap().success(), "{args:?}");
+        git(&["init", "-q", "-b", branch]);
+        if let Some(o) = origin {
+            git(&["remote", "add", "origin", o]);
+        }
+        t
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_asks_the_routed_forge_for_the_current_branch() {
+        let t = repo_on_branch(Some("git@github.com:Org/r.git"), "feat/x");
+        let http = FakeHttp::new(vec![("/pulls", 200, r#"[{"number":3,"html_url":"https://github.com/Org/r/pull/3","state":"open","draft":false}]"#)]);
+        assert_eq!(lookup(t.path(), &[github()], &http).unwrap().map(|p| p.number), Some(3));
+        assert!(http.seen.lock().unwrap()[0].0.contains("head=Org%3Afeat%2Fx"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lookup_is_none_without_a_repo_a_known_forge_or_an_origin() {
+        let http = FakeHttp::new(vec![]);
+        let plain = tempfile::tempdir().unwrap();
+        assert_eq!(lookup(plain.path(), &[github()], &http), Ok(None));
+        let elsewhere = repo_on_branch(Some("git@gitlab.com:grp/r.git"), "main");
+        assert_eq!(lookup(elsewhere.path(), &[github()], &http), Ok(None), "GitLab is off");
+        let no_origin = repo_on_branch(None, "main");
+        assert_eq!(lookup(no_origin.path(), &[github()], &http), Ok(None));
+        assert!(http.seen.lock().unwrap().is_empty(), "no call was made");
+    }
+
+    #[test]
+    fn clear_forgets_every_result() {
+        let mut c = PrCache::default();
+        c.set("/a", None, 1000);
+        c.clear();
+        assert_eq!(c.due(&["/a".to_string()], 1000), vec!["/a".to_string()]);
     }
 }

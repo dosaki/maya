@@ -16,6 +16,7 @@ pub mod terminal_linux;
 #[cfg(windows)]
 pub mod terminal_win;
 pub mod updater;
+pub mod git;
 pub mod keystore;
 pub mod voice;
 
@@ -84,6 +85,7 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 use config::Config;
 use listener::VoiceState;
 use maya_core::agents;
+use maya_core::config::GitProvider;
 use maya_core::net::routing::{agents_reply, check_remote_agent, machines_of, remote_attachments, AgentsReply, MachineInfo, ROUTE_TIMEOUT};
 use model::{Card, Harness};
 use net::merge;
@@ -136,6 +138,9 @@ pub struct AppState {
     pub network: Mutex<net::NetworkState>,
     /// This Maya's network key pair, read from the key store at first use.
     pub identity: Mutex<Option<std::sync::Arc<maya_core::net::identity::Keypair>>>,
+    /// Bumped whenever a Git setting or token changes, so a poll that began
+    /// under the old settings can tell its answers are stale and drop them.
+    pub git_generation: std::sync::atomic::AtomicU64,
 }
 
 /// The server's line to the app: repaints the board, tells the page about
@@ -232,33 +237,44 @@ pub(crate) fn remote_boards(state: &AppState) -> Vec<merge::RemoteBoard> {
     server.map(|s| s.boards()).unwrap_or_default()
 }
 
-/// The last PR list fetched, and the error from the last attempt if it failed.
+/// The last PR list fetched, and why a forge could not be asked.
 #[derive(Default, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewState {
     pub prs: Vec<reviews::ReviewPr>,
-    pub error: Option<String>,
+    /// One line per forge whose last check failed or that has no token.
+    pub errors: Vec<maya_core::forge::ForgeError>,
+    /// Neither GitHub nor GitLab is switched on.
+    pub off: bool,
     pub fetched_at: Option<u64>,
 }
 
-fn poll_reviews(app: &AppHandle) {
-    let result = reviews::fetch();
+pub(crate) fn poll_reviews(app: &AppHandle) {
+    let generation = app.state::<AppState>().git_generation.load(std::sync::atomic::Ordering::SeqCst);
+    let conns = app.state::<AppState>().store.lock().unwrap().config.git_connections();
+    let (forges, missing) = git::forges(&conns);
+    let off = forges.is_empty() && missing.is_empty();
+    let fetched = reviews::fetch(&forges, git::http());
+    for f in &fetched {
+        if let Err(e) = &f.result {
+            log::line("app", format!("pull requests: {}: {e}", f.forge.label()));
+        }
+    }
+    let answered: Vec<_> = fetched.iter().filter(|f| f.result.is_ok()).map(|f| f.forge).collect();
     let state = app.state::<AppState>();
-    let mut decided = Vec::new();
+    let decided;
     let snapshot = {
         let mut r = state.reviews.lock().unwrap();
-        match result {
-            Ok(prs) => {
-                decided = state.pr_notifier.lock().unwrap().take_changes(&prs);
-                r.prs = prs;
-                r.error = None;
-                r.fetched_at = Some(now_ms());
-            }
-            Err(e) => {
-                log::line("app", format!("pull requests: {e}"));
-                r.error = Some(e);
-            }
+        if state.git_generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
+            log::line("app", "pull requests: the Git settings changed during the check; its answers are dropped");
+            return;
         }
+        let (prs, errors) = reviews::combine(&r.prs, fetched, missing);
+        decided = state.pr_notifier.lock().unwrap().take_changes(&prs, &answered);
+        r.prs = prs;
+        r.errors = errors;
+        r.off = off;
+        r.fetched_at = Some(now_ms());
         r.clone()
     };
     // Announced with no lock held: the banner and the voice take a moment.
@@ -388,14 +404,15 @@ fn list_review_prs(state: TauriState<AppState>) -> ReviewState {
     state.reviews.lock().unwrap().clone()
 }
 
-fn review_pr_for(state: &TauriState<AppState>, repo: &str, number: u64) -> Result<reviews::ReviewPr, String> {
-    state.reviews.lock().unwrap().prs.iter().find(|p| p.repo == repo && p.number == number).cloned().ok_or("That pull request is no longer on the list.".into())
+fn review_pr_for(state: &TauriState<AppState>, forge: Option<GitProvider>, repo: &str, number: u64) -> Result<reviews::ReviewPr, String> {
+    let forge = forge.unwrap_or_default();
+    state.reviews.lock().unwrap().prs.iter().find(|p| p.forge == forge && p.repo == repo && p.number == number).cloned().ok_or("That pull request is no longer on the list.".into())
 }
 
 /// Opens a listed PR in the browser; the URL comes from the fetched list.
 #[tauri::command(async)]
-fn open_review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<(), String> {
-    let pr = review_pr_for(&state, &repo, number)?;
+fn open_review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<(), String> {
+    let pr = review_pr_for(&state, forge, &repo, number)?;
     open_in_browser(&pr.url)
 }
 
@@ -403,8 +420,8 @@ fn open_review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Res
 /// review prompt from Settings, in the project checkout when it is free,
 /// else in a clone under the clones dir.
 #[tauri::command(async)]
-fn review_pr(state: TauriState<AppState>, repo: String, number: u64) -> Result<String, String> {
-    let pr = review_pr_for(&state, &repo, number)?;
+fn review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<String, String> {
+    let pr = review_pr_for(&state, forge, &repo, number)?;
     actions::start_review(&local(&state), &pr)
 }
 
@@ -891,19 +908,29 @@ fn open_pr(state: TauriState<AppState>, session_id: String) -> Result<(), String
 
 /// Looks up PRs for session directories whose result is missing or stale,
 /// outside the store lock, and repaints when anything was learned.
-fn poll_pull_requests(app: &AppHandle) {
-    let due = {
+pub(crate) fn poll_pull_requests(app: &AppHandle) {
+    let (due, conns) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
-        store.pr_dirs_due(now_ms())
+        (store.pr_dirs_due(now_ms()), store.config.git_connections())
     };
     if due.is_empty() {
         return;
     }
+    let generation = app.state::<AppState>().git_generation.load(std::sync::atomic::Ordering::SeqCst);
+    let (forges, _) = git::forges(&conns);
     for dir in due {
-        let pr = pr::lookup(std::path::Path::new(&dir));
+        let pr = pr::lookup(std::path::Path::new(&dir), &forges, git::http()).unwrap_or_else(|e| {
+            log::line("app", format!("pull request for {dir}: {e}"));
+            None
+        });
         let state = app.state::<AppState>();
-        state.store.lock().unwrap().set_pr(&dir, pr, now_ms());
+        let mut store = state.store.lock().unwrap();
+        if state.git_generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
+            log::line("app", "pull requests: the Git settings changed during the lookup; its answers are dropped");
+            return;
+        }
+        store.set_pr(&dir, pr, now_ms());
     }
     refresh_and_emit(app);
 }
@@ -1157,7 +1184,9 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
             return Err(format!("Projects directory does not exist: {}.", dir.display()));
         }
     }
+    config::validate_git(config.git.as_deref().unwrap_or(&[]))?;
     let mut config = config.for_this_platform();
+    config.normalize_git();
     // The main notifies and listens for an assistant.
     if config.network.role == config::NetworkRole::Assistant {
         config.listen = false;
@@ -1173,11 +1202,18 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
         // Mute belongs to the top-bar button, which may have saved it after
         // the page fetched this config.
         config.muted = before.muted;
+        // A page holding a config from before the first-start import must not undo it.
+        if config.git.is_none() {
+            config.git = before.git.clone();
+        }
         config::save(&store.config_path(), &config)?;
         store.config = config.clone();
         before
     };
     apply_config_change(&app, &before, &config);
+    if before.git_connections() != config.git_connections() {
+        git::settings_changed(&app);
+    }
     refresh_and_emit(&app);
     Ok(config)
 }
@@ -1246,9 +1282,13 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
         .invoke_handler(tauri::generate_handler![
+            git::get_git_status,
+            git::store_git_token,
+            git::clear_git_token,
+            git::test_git_connection,
             set_muted,
             focus_visible,
             open_full_disk_access,
@@ -1345,6 +1385,13 @@ pub fn run() {
                 poll_reviews(&review_handle);
                 std::thread::sleep(Duration::from_secs(120));
             });
+            // Its own thread: a slow `gh` or Keychain prompt must not hold up the polls.
+            let import_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                if git::import_if_needed(&import_handle) {
+                    git::settings_changed(&import_handle);
+                }
+            });
             let role = app.state::<AppState>().store.lock().unwrap().config.network.role;
             match role {
                 config::NetworkRole::Main => {
@@ -1421,7 +1468,7 @@ mod route_tests {
             awaiting: None,
             has_inbox: true,
             harness: model::Harness::ClaudeCode,
-            pr: Some(model::PullRequest { number: 7, url: url.into(), state: "open".into() }),
+            pr: Some(model::PullRequest { number: 7, url: url.into(), state: "open".into(), forge: Default::default() }),
             context: None,
             machine: Some("laptop".into()),
             machine_address: None, machine_platform: None,

@@ -19,11 +19,20 @@ export interface Question {
 /** The agent runner behind a session; "other" is one this build does not know. */
 export type Harness = "claude-code" | "codex" | "antigravity" | "grok" | "kiro" | "opencode" | "other";
 
+export type GitProvider = "github" | "gitlab";
+
 export interface PullRequest {
   number: number;
   url: string;
   /** "open", "draft", "merged" or "closed". */
   state: string;
+  /** Absent from an older Maya, which only knew GitHub. */
+  forge?: GitProvider;
+}
+
+/** `#451` on GitHub, `!12` on GitLab. */
+export function prRef(pr: { forge?: GitProvider; number: number }): string {
+  return `${pr.forge === "gitlab" ? "!" : "#"}${pr.number}`;
 }
 
 export interface ContextUsage {
@@ -69,7 +78,8 @@ export function compactButton(className = "card__btn"): HTMLButtonElement {
 /** A pull request waiting on the user, from the Pull Requests tab. */
 export interface ReviewPr {
   number: number;
-  /** owner/name */
+  forge: GitProvider;
+  /** The repo's full path (owner/name, or group/sub/name). */
   repo: string;
   title: string;
   author: string;
@@ -83,13 +93,24 @@ export interface ReviewPr {
   prReview: ReviewMark | null;
   /** Who gave `prReview`. */
   prReviewers: string[];
+  /** The repo's clone addresses from the forge's API; the page does not use them. */
+  sshUrl?: string | null;
+  httpsUrl?: string | null;
 }
 
 export type ReviewMark = "approved" | "commented" | "changesRequested";
 
+export interface ForgeError {
+  forge: GitProvider;
+  /** The whole line, e.g. "GitLab check failed: …". */
+  message: string;
+}
+
 export interface ReviewState {
   prs: ReviewPr[];
-  error: string | null;
+  errors: ForgeError[];
+  /** Neither GitHub nor GitLab is switched on. */
+  off: boolean;
   fetchedAt: number | null;
 }
 
@@ -122,13 +143,13 @@ export interface Card {
   stale?: boolean;
 }
 
-/** The PR button: "PR #12", with the state and URL in its tooltip. */
+/** The PR button: "PR #12" ("MR !12" on GitLab), with the state and URL in its tooltip. */
 export function prButton(pr: PullRequest, className = "card__btn"): HTMLButtonElement {
   const b = document.createElement("button");
   b.type = "button";
   b.className = className;
   b.dataset.action = "pr";
-  b.textContent = `PR #${pr.number}`;
+  b.textContent = `${pr.forge === "gitlab" ? "MR" : "PR"} ${prRef(pr)}`;
   b.title = `${pr.state} · ${pr.url}`;
   return b;
 }

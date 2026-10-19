@@ -45,11 +45,12 @@ pub fn board_summary(cards: &[Card]) -> String {
 }
 
 /// One line per pull request on the Pull Requests tab:
-/// `repo#number | title | by author [| draft] [| assigned to you [| approved by x]] [| you approved]`.
+/// `repo#number` (`repo!number (GitLab)` for a merge request) | title | by author [| draft] [| assigned to you [| approved by x]] [| you approved].
 pub fn pr_summary(prs: &[ReviewPr]) -> String {
     prs.iter()
         .map(|p| {
-            let mut line = format!("{}#{} | {} | by {}", p.repo, p.number, p.title.trim(), p.author);
+            let label = if p.forge == crate::config::GitProvider::Gitlab { " (GitLab)" } else { "" };
+            let mut line = format!("{}{label} | {} | by {}", p.reference(), p.title.trim(), p.author);
             if p.is_draft {
                 line.push_str(" | draft");
             }
@@ -262,12 +263,12 @@ fn find_pr<'a>(prs: &'a [ReviewPr], wanted: &str) -> Result<&'a ReviewPr, String
     if w.is_empty() {
         return Err("Which pull request?".into());
     }
-    if let Some(p) = prs.iter().find(|p| format!("{}#{}", p.repo.to_lowercase(), p.number) == w) {
+    if let Some(p) = prs.iter().find(|p| p.reference().to_lowercase() == w) {
         return Ok(p);
     }
     let digits: String = w.chars().filter(|c| c.is_ascii_digit()).collect();
     let number: Option<u64> = if digits.is_empty() { None } else { digits.parse().ok() };
-    let words: String = w.chars().map(|c| if c.is_ascii_digit() || c == '#' { ' ' } else { c }).collect();
+    let words: String = w.chars().map(|c| if c.is_ascii_digit() || c == '#' || c == '!' { ' ' } else { c }).collect();
     let words = words.trim();
     if let Some(n) = number {
         let by_number: Vec<&ReviewPr> = prs.iter().filter(|p| p.number == n).collect();
@@ -279,7 +280,7 @@ fn find_pr<'a>(prs: &'a [ReviewPr], wanted: &str) -> Result<&'a ReviewPr, String
         match narrowed.as_slice() {
             [one] => return Ok(one),
             [] if by_number.len() == 1 => return Ok(by_number[0]),
-            [a, b, ..] => return Err(format!("Which pull request: {}#{} or {}#{}?", a.repo, a.number, b.repo, b.number)),
+            [a, b, ..] => return Err(format!("Which pull request: {} or {}?", a.reference(), b.reference())),
             _ => {}
         }
     }
@@ -287,7 +288,7 @@ fn find_pr<'a>(prs: &'a [ReviewPr], wanted: &str) -> Result<&'a ReviewPr, String
         let by_title: Vec<&ReviewPr> = prs.iter().filter(|p| loose(&p.title).contains(&loose(words))).collect();
         match by_title.as_slice() {
             [one] => return Ok(one),
-            [a, b, ..] => return Err(format!("Which pull request: {}#{} or {}#{}?", a.repo, a.number, b.repo, b.number)),
+            [a, b, ..] => return Err(format!("Which pull request: {} or {}?", a.reference(), b.reference())),
             [] => {}
         }
     }
@@ -308,6 +309,7 @@ pub fn validate(action: &Value, cards: &[Card], dirs: &[String], machines: &[Str
             let p = find_pr(prs, &wanted)?;
             a["repo"] = Value::String(p.repo.clone());
             a["number"] = Value::from(p.number);
+            a["forge"] = serde_json::to_value(p.forge).unwrap_or_default();
             a["title"] = Value::String(p.title.clone());
             Ok(a)
         }
@@ -439,8 +441,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn merge_requests_are_listed_and_found_by_their_bang() {
+        let mr = crate::reviews::ReviewPr { forge: crate::config::GitProvider::Gitlab, ..pr("grp/collector", 14, "Fix ERD", "bob", false) };
+        let gh = pr("dosaki/collector", 14, "Add ERD overlay", "alex", false);
+        assert!(pr_summary(&[mr.clone()]).starts_with("grp/collector!14 (GitLab) | Fix ERD | by bob"), "{}", pr_summary(&[mr.clone()]));
+        let prs = [gh, mr];
+        let a = validate(&json!({"kind":"review","pr":"grp/collector!14"}), &[], &[], &[], &prs).unwrap();
+        assert_eq!((a["repo"].as_str(), a["number"].as_u64(), a["forge"].as_str()), (Some("grp/collector"), Some(14), Some("gitlab")));
+        let b = validate(&json!({"kind":"open","pr":"dosaki/collector#14"}), &[], &[], &[], &prs).unwrap();
+        assert_eq!(b["forge"], "github");
+        let clash = validate(&json!({"kind":"review","pr":"14"}), &[], &[], &[], &prs).unwrap_err();
+        assert_eq!(clash, "Which pull request: dosaki/collector#14 or grp/collector!14?");
+    }
+
     fn pr(repo: &str, number: u64, title: &str, author: &str, draft: bool) -> crate::reviews::ReviewPr {
-        crate::reviews::ReviewPr { number, repo: repo.into(), title: title.into(), author: author.into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: draft, updated_at: "2026-09-30T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] }
+        crate::reviews::ReviewPr { number, forge: crate::config::GitProvider::Github, repo: repo.into(), title: title.into(), author: author.into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: draft, updated_at: "2026-09-30T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None }
     }
 
     #[test]

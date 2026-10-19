@@ -9,12 +9,12 @@ import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
-import { makeReviewsView, reviewActionFor, waitingCount } from "./reviews";
+import { makeReviewsView, OPEN_SETTINGS_GROUP, reviewActionFor, waitingCount } from "./reviews";
 import { filterCards, makeSessionSearch } from "./search";
 import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
-import { remoteTerminalToast, type Card, type ReviewState } from "./types";
+import { prRef, remoteTerminalToast, type Card, type ReviewState } from "./types";
 import { initMute } from "./mute";
 import { initVoice } from "./voice";
 import { initDebug } from "./debug";
@@ -29,7 +29,7 @@ let retry: ReturnType<typeof setTimeout> | undefined;
 let enableTimer: ReturnType<typeof setTimeout> | undefined;
 let known = new Set<string>();
 let pointer: { x: number; y: number } | null = null;
-let reviews: ReviewState = { prs: [], error: null, fetchedAt: null };
+let reviews: ReviewState = { prs: [], errors: [], off: false, fetchedAt: null };
 let clonesDir: string | null = null;
 let tabs: ReturnType<typeof makeTabs> | null = null;
 let reviewsView: ReturnType<typeof makeReviewsView> | null = null;
@@ -47,13 +47,16 @@ async function reviewAction(target: Element): Promise<void> {
   const action = reviewActionFor(target);
   if (!action) return;
   try {
-    if (action.kind === "terminal") {
+    if (action.kind === "git-settings") {
+      document.dispatchEvent(new CustomEvent(OPEN_SETTINGS_GROUP, { detail: "git" }));
+      tabs?.show("settings");
+    } else if (action.kind === "terminal") {
       await focus(action.pid);
     } else if (action.kind === "open-pr") {
-      await invoke("open_review_pr", { repo: action.repo, number: action.number });
+      await invoke("open_review_pr", { forge: action.forge, repo: action.repo, number: action.number });
     } else {
-      const dir = await invoke<string>("review_pr", { repo: action.repo, number: action.number });
-      showToast(`Reviewing #${action.number} in ${dir.split("/").filter(Boolean).pop() ?? dir}`);
+      const dir = await invoke<string>("review_pr", { forge: action.forge, repo: action.repo, number: action.number });
+      showToast(`Reviewing ${prRef(action)} in ${dir.split("/").filter(Boolean).pop() ?? dir}`);
     }
   } catch (e) {
     showToast(String(e));

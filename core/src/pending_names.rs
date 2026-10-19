@@ -456,7 +456,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_not_yet_cloned_folder_behind_a_symlink_is_still_resolved() {
-        // A review clone is named before `gh repo clone` creates its folder:
+        // A review clone is named before `git clone` creates its folder:
         // `cwd` must still resolve through a symlinked ancestor (macOS's
         // /tmp, a linked clones directory), by canonicalizing the nearest
         // existing ancestor and rejoining the rest untouched.
