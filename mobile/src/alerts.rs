@@ -199,6 +199,7 @@ mod tests {
             terminal: None,
             stale: false,
             model: None,
+            branch: None,
         }
     }
 

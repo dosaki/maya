@@ -922,6 +922,8 @@ pub(crate) fn poll_pull_requests(app: &AppHandle) {
     let generation = app.state::<AppState>().git_generation.load(std::sync::atomic::Ordering::SeqCst);
     let (forges, _) = git::forges(&conns);
     for dir in due {
+        // The status line's branch comes from this poll too, forge or not.
+        let branch = pr::branch_of(std::path::Path::new(&dir));
         let pr = pr::lookup(std::path::Path::new(&dir), &forges, git::http()).unwrap_or_else(|e| {
             log::line("app", format!("pull request for {dir}: {e}"));
             None
@@ -933,6 +935,7 @@ pub(crate) fn poll_pull_requests(app: &AppHandle) {
             return;
         }
         store.set_pr(&dir, pr, now_ms());
+        store.set_branch(&dir, branch);
     }
     refresh_and_emit(app);
 }
@@ -1498,7 +1501,7 @@ mod route_tests {
             machine: Some("laptop".into()),
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None
+            stale: false, model: None, branch: None
         };
         assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));
         assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");

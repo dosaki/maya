@@ -137,6 +137,9 @@ pub struct Card {
     /// `provider/model`): the modal offers that model's own efforts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The branch checked out in `cwd`, from the same lookup as `pr`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 #[cfg(test)]
@@ -204,7 +207,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None
+            stale: false, model: None, branch: None
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["context"]["percent"], 62);
@@ -217,5 +220,15 @@ mod tests {
         assert_eq!(json["state"], "awaiting");
         assert_eq!(json["awaiting"]["kind"], "permission");
         assert_eq!(serde_json::to_value(AwaitKind::Text).unwrap(), "text");
+    }
+
+    #[test]
+    fn a_card_carries_its_branch_and_an_older_cards_has_none() {
+        let older = serde_json::json!({"sessionId": "s1", "pid": 1, "name": "n", "cwd": "/x", "state": "idle", "stateSince": 0, "snippet": "", "awaiting": null, "hasInbox": false, "harness": "claude-code", "pr": null, "context": null});
+        let card: Card = serde_json::from_value(older).unwrap();
+        assert_eq!(card.branch, None);
+        let with = Card { branch: Some("feat/x".into()), ..card };
+        assert_eq!(serde_json::to_value(&with).unwrap()["branch"], "feat/x");
+        assert!(serde_json::to_value(Card { branch: None, ..with }).unwrap().get("branch").is_none(), "left out when unknown");
     }
 }

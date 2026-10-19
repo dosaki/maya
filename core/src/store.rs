@@ -431,6 +431,11 @@ impl Store {
         self.prs.clear();
     }
 
+    /// Records the branch checked out in `dir`, looked up beside its PR.
+    pub fn set_branch(&mut self, dir: &str, branch: Option<String>) {
+        self.prs.set_branch(dir, branch);
+    }
+
     pub fn set_pr(&mut self, dir: &str, pr: Option<PullRequest>, now_ms: u64) {
         self.prs.set(dir, pr, now_ms);
     }
@@ -463,6 +468,9 @@ impl Store {
                 completed_timeout_ms: self.config.completed_timeout_ms(),
             });
             card.pr = self.prs.get(&s.cwd);
+            card.branch = self.prs.branch(&s.cwd);
+            // Claude Code names its model in the transcript; the viewer's status line shows it.
+            card.model = tail.model.clone();
             card.context = tail.context_tokens.map(|used| crate::context::usage(tail.model.as_deref().unwrap_or(""), used, default_1m));
             cards.push(card);
         }
@@ -478,6 +486,7 @@ impl Store {
             }
             let mut card = foreign::derive(s, &tail, now_ms, timeout);
             card.pr = self.prs.get(&s.cwd);
+            card.branch = self.prs.branch(&s.cwd);
             cards.push(card);
         }
         // OpenCode's sessions live in its server: asked on every refresh while it runs.
@@ -495,6 +504,7 @@ impl Store {
         cards.extend(self.opencode.iter().map(|f| {
             let mut card = f.card.clone();
             card.pr = self.prs.get(&card.cwd);
+            card.branch = self.prs.branch(&card.cwd);
             card
         }));
         let due = self.pending.apply(&mut cards, now_ms);
@@ -963,5 +973,24 @@ mod tests {
         store.session_closed(Harness::ClaudeCode, "s7");
         assert!(!crate::remembered::path_in(&claude).exists());
         assert!(store.was_running().is_empty());
+    }
+
+    #[test]
+    fn refresh_attaches_the_branch_and_a_claude_sessions_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("projects/-Users-x-dev-eye")).unwrap();
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle"}"#).unwrap();
+        std::fs::write(
+            claude.join("projects/-Users-x-dev-eye/s7.jsonl"),
+            r#"{"type":"assistant","message":{"model":"claude-opus-5[1m]","usage":{"input_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"hi"}]}}"#,
+        ).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        let card = store.refresh(1).remove(0);
+        assert_eq!(card.model.as_deref(), Some("claude-opus-5[1m]"));
+        assert_eq!(card.branch, None, "not looked up yet");
+        store.set_branch("/Users/x/dev/eye", Some("feat/x".into()));
+        assert_eq!(store.refresh(2)[0].branch.as_deref(), Some("feat/x"));
     }
 }

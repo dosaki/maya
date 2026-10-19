@@ -1,6 +1,6 @@
 import styles from "./styles.css?raw";
 import { describe, expect, it, vi } from "vitest";
-import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, replyStatus, setComposerOptions, setViewerTheme } from "./modal";
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -639,5 +639,47 @@ describe("tool output in the viewer", () => {
       expect(el.querySelector(".turn--tool .turn__text")?.textContent).toBe("Bash(ls)");
       expect(el.querySelector(".turn--tool .turn__out")?.textContent).toBe("a.rs\nb.rs");
     }
+  });
+});
+
+describe("working and status lines", () => {
+  const busy: Card = { ...base, state: "working", stateSince: 1_000, model: "claude-opus-5", branch: "feat/x", pr: { number: 12, url: "u", state: "open" }, context: { used: 84_000, window: 200_000, percent: 42 } };
+
+  it("says how long the session has worked", () => {
+    expect(workingFor(4_000)).toBe("4s");
+    expect(workingFor(724_000)).toBe("12m 4s");
+    expect(workingFor(3_725_000)).toBe("1h 2m");
+    expect(workingFor(-5_000)).toBe("0s");
+  });
+
+  it("shows ✻ Working… while the session works, in both looks", () => {
+    for (const theme of ["terminal", "chat"] as const) {
+      const el = renderModal({ card: busy, turns, status: null, draft: "", theme }, handlers(), 1_000 + 724_000);
+      expect(el.querySelector(".modal__history .modal__working")?.textContent).toBe("✻ Working… (12m 4s)");
+    }
+    expect(renderModal({ card: base, turns, status: null, draft: "" }, handlers()).querySelector(".modal__working")).toBeNull();
+  });
+
+  it("puts model · folder · branch · PR · ctx under the prompt, and model · branch in the header", () => {
+    expect(statusLine(busy)).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
+    expect(statusLine({ ...busy, pr: { number: 3, url: "u", state: "open", forge: "gitlab" } })).toBe("claude-opus-5 · eye · feat/x · MR !3 · ctx 42%");
+    expect(statusLine(base)).toBe("eye");
+    const el = renderModal({ card: busy, turns, status: null, draft: "", theme: "terminal" }, handlers(), 2_000);
+    expect(el.querySelector(".modal__composer + .modal__statusline--foot")?.textContent).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
+    expect(el.querySelector(".modal__titles .modal__statusline--head")?.textContent).toBe("claude-opus-5 · feat/x");
+  });
+
+  it("shows the foot in the terminal look and the header part in the chat look", () => {
+    expect(styles).toContain(".modal__statusline--foot { display: none; }");
+    expect(styles).toContain(".modal--terminal .modal__statusline--foot { display: block;");
+    expect(styles).toContain(".modal--terminal .modal__statusline--head { display: none; }");
+  });
+
+  it("a repaint carries the status lines and the working line along", () => {
+    const root = renderModal({ card: base, turns, status: null, draft: "" }, handlers());
+    patchModal(root, renderModal({ card: busy, turns, status: null, draft: "" }, handlers(), 2_000));
+    expect(root.querySelector(".modal__statusline--head")?.textContent).toBe("claude-opus-5 · feat/x");
+    expect(root.querySelector(".modal__statusline--foot")?.textContent).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
+    expect(root.querySelector(".modal__working")?.textContent).toBe("✻ Working… (1s)");
   });
 });

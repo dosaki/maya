@@ -139,6 +139,8 @@ export interface Card {
   terminal?: string | null;
   /** The model the session runs on, when its agent says (OpenCode's provider/model). */
   model?: string | null;
+  /** The branch checked out in `cwd`, from the same lookup as the PR; absent until looked up. */
+  branch?: string | null;
   /** True when the machine has not reported for a while or is disconnected. */
   stale?: boolean;
 }

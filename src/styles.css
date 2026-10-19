@@ -367,3 +367,12 @@ body { margin: 0; background: var(--bg); }
 .modal--terminal .turn__result--out > :not(.turn__elbow) { grid-column: 2; }
 .modal--terminal .turn__elbow { display: inline; }
 .modal--terminal .turn__summary .turn__elbow { margin-right: 1ch; }
+
+/* While the session works, and the status line: the terminal look's under the prompt, the chat look's in the header. */
+.modal__working { align-self: flex-start; font-size: 12px; color: var(--gold); }
+.modal--terminal .modal__working { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.modal__statusline--head { font-size: 12px; color: var(--muted); }
+.modal__statusline--head:empty { display: none; }
+.modal__statusline--foot { display: none; }
+.modal--terminal .modal__statusline--foot { display: block; padding: 0 16px 8px 32px; background: #0a0a0a; color: #8a8478; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.modal--terminal .modal__statusline--head { display: none; }
