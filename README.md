@@ -18,6 +18,8 @@ the right terminal first.
   - Each session card lands in a column: Idle, Working, Awaiting Decision or Completed
 - Lets you reply, answer questions, and run slash commands and `!` shell lines from the card
 - Starts new sessions and resumes old ones
+- After a restart, offers to resume every session that was running, on this machine and on the paired ones, each in its own folder and terminal: from the Sessions tab, or by voice ("Maya, resume my sessions")
+- Shows a session as a chat or in a terminal look, like the agent's own terminal (Settings → Sessions, or the `>_` button on the session)
 - Tells you when a session needs you
   - Using built-in notifications, and/or a voice and/or a Dock badge
   - Keeps quiet under a Focus mode, or when you mute her from the top bar
@@ -98,7 +100,11 @@ install, where the bar offers a Download link instead.
    backup of your `settings.json` is taken before every change.
 2. Set your **projects directory** (for example `~/dev`) so the "+" can list
    your folders, and a **clones directory** for pull-request reviews.
-3. Optionally turn on **Listen for "Maya"** and pick a speech recogniser
+3. Open **Settings → Git** and turn on GitHub and/or GitLab (with its URL,
+   for a self-hosted GitLab). Give each a token, or the name of a variable
+   that holds one (`GH_TOKEN`, `GITLAB_TOKEN`), and pick SSH (the default)
+   or HTTPS for review clones.
+4. Optionally turn on **Listen for "Maya"** and pick a speech recogniser
    (see Voice).
 
 ## Platform notes
