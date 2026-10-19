@@ -24,6 +24,7 @@ pub mod opencode;
 pub mod pending_names;
 pub mod pr;
 pub mod registry;
+pub mod remembered;
 pub mod resume;
 pub mod reviews;
 pub mod state;
