@@ -58,7 +58,8 @@ pub struct Store {
     /// The agents installed on this machine, replaceable in tests.
     agents: std::sync::Arc<dyn Fn() -> Vec<crate::agents::AgentInfo> + Send + Sync>,
     /// The sessions this machine remembers across restarts, once
-    /// `start_remembering` ran (the app does; the CLI and most tests do not).
+    /// `start_remembering` ran (the app and `maya run` do; other CLI
+    /// commands and most tests do not).
     memory: Option<Memory>,
     /// The last save of the memory failed: the streak was logged already.
     memory_save_failing: bool,
