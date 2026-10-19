@@ -198,3 +198,32 @@ export function remoteTitle(machine: string, address?: string | null, platform?:
   const base = !address || machine.includes(`(${address})`) ? `Runs on ${machine}${shown}` : `Runs on ${machine}${shown}, ${address}`;
   return terminal ? `${base}; attach: tmux attach -t ${terminal}` : base;
 }
+
+/** A session that was running when its machine's Maya last stopped. */
+export interface Remembered {
+  agent: Harness;
+  sessionId: string;
+  dir: string;
+  name: string;
+  firstSeenMs: number;
+  lastSeenMs: number;
+  goneAtMs?: number | null;
+  offered?: boolean;
+  /** Why its last resume failed ("folder missing"…). */
+  error?: string | null;
+}
+
+/** A banner row: `machine` is absent for this machine; `waiting` while that machine is away. */
+export interface RememberedRow extends Remembered {
+  machine?: string | null;
+  waiting?: boolean;
+}
+
+/** What became of one row of a resume; `error` is its reason. */
+export interface ResumeOutcome {
+  machine?: string | null;
+  agent: Harness;
+  sessionId: string;
+  name: string;
+  error?: string | null;
+}

@@ -304,3 +304,15 @@ body { margin: 0; background: var(--bg); }
 
 .settings__git { display: flex; flex-direction: column; gap: 6px; padding: 8px 0 12px; border-bottom: 1px solid var(--border); }
 .settings__git-kinds { display: flex; gap: 12px; flex-wrap: wrap; }
+
+/* The Sessions banner: what was running when Maya last stopped. */
+.remembered-host:empty { display: none; }
+.remembered { margin: 8px 16px 0; padding: 10px 14px; border: 1px solid var(--gold-deep); border-radius: 10px; background: color-mix(in srgb, var(--gold) 8%, var(--panel)); display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.remembered__line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.remembered__text { flex: 1; min-width: 200px; }
+.remembered__line--failed .remembered__text { color: var(--muted); }
+.remembered__choose { display: flex; flex-direction: column; gap: 4px; }
+.remembered__machine { margin: 6px 0 2px; font-size: 12px; font-weight: 600; color: var(--gold); }
+.remembered__row { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.4fr) auto auto; align-items: center; gap: 8px; }
+.remembered__dir, .remembered__age { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remembered__actions { display: flex; gap: 8px; margin-top: 6px; }
