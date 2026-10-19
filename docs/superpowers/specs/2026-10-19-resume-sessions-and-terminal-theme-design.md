@@ -120,8 +120,8 @@ thread (it already ticks every 10 s; the heartbeat writes every third).
 - Resuming on an assistant uses the existing `CommandKind::Resume { dir,
   session, agent }`. Forgetting on an assistant uses a new
   `CommandKind::Forget { sessions: Vec<(Harness, String)> }`; an older
-  assistant answers it with its unknown-command error, which the main logs
-  and ignores.
+  assistant cannot decode it and ignores it without answering, so the main
+  sends it on a thread of its own and logs the timeout.
 - The phone, joined to the main, receives the merged list with the board
   it already mirrors and shows the same banner; its buttons send the same
   commands to the main.
