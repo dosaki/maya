@@ -1,3 +1,4 @@
+import styles from "./styles.css?raw";
 import { describe, expect, it, vi } from "vitest";
 
 const tauri = vi.hoisted(() => ({
@@ -143,5 +144,18 @@ describe("initRemembered", () => {
     expect(host.childElementCount).toBe(0);
     tauri.listeners.remembered({ payload: [row("a", null)] });
     expect(host.textContent).toContain("1 session was running when Maya last stopped");
+  });
+});
+
+describe("the Choose list on screen", () => {
+  it("renders every row and the three buttons, with the badge sized by the stylesheet", () => {
+    const rows = [row("a", null), row("b", null, { agent: "codex" })];
+    const el = renderBanner(model(rows, { choosing: true, ticked: new Set(rows.map(rowKey)) }), handlers(), NOW)!;
+    expect(el.querySelectorAll(".remembered__row")).toHaveLength(2);
+    for (const a of ["resume-chosen", "cancel", "forget-unticked"]) expect(el.querySelector(`button[data-action=${a}]`)).not.toBeNull();
+    const badges = [...el.querySelectorAll(".remembered__row .remembered__agent")];
+    expect(badges).toHaveLength(2);
+    expect(styles).toMatch(/\.remembered__agent\b[^{]*\{[^}]*width: 14px;[^}]*height: 14px/);
+    expect(styles).toMatch(/\.remembered__agent--text\b[^{]*\{[^}]*width: auto/);
   });
 });

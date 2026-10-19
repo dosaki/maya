@@ -148,9 +148,9 @@ body { margin: 0; background: var(--bg); }
 .card__meter-fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; background: linear-gradient(180deg, var(--gold-bright), var(--gold)); }
 .modal__context { font-size: 12px; color: var(--muted); }
 .card__meta { display: flex; align-items: center; gap: 6px; }
-.card__harness, .modal__harness { width: 14px; height: 14px; border-radius: 3px; flex: none; }
+.card__harness, .modal__harness, .remembered__agent { width: 14px; height: 14px; border-radius: 3px; flex: none; }
 .modal__harness { align-self: center; }
-.card__harness--text, .modal__harness--text { width: auto; height: auto; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.card__harness--text, .modal__harness--text, .remembered__agent--text { width: auto; height: auto; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 10px; color: var(--muted); white-space: nowrap; }
 .modal__tweaks { display: flex; gap: 8px; align-items: center; padding: 8px 16px; border-top: 1px solid var(--border); }
 .modal__tweaks .newsession__field { flex: 1; }
 .modal__tweaks .newsession__label:empty { display: none; }
@@ -311,11 +311,14 @@ body { margin: 0; background: var(--bg); }
 .remembered__line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .remembered__text { flex: 1; min-width: 200px; }
 .remembered__line--failed .remembered__text { color: var(--muted); }
-.remembered__choose { display: flex; flex-direction: column; gap: 4px; }
+.remembered__choose { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-height: 50vh; overflow-y: auto; overflow-x: hidden; }
 .remembered__machine { margin: 6px 0 2px; font-size: 12px; font-weight: 600; color: var(--gold); }
-.remembered__row { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1.4fr) auto auto; align-items: center; gap: 8px; }
+.remembered__row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.remembered__name { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remembered__dir { flex: 1.4 1 0; }
+.remembered__age { flex: none; }
 .remembered__dir, .remembered__age { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.remembered__actions { display: flex; gap: 8px; margin-top: 6px; }
+.remembered__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; flex: none; position: sticky; bottom: 0; padding-top: 6px; background: var(--panel); }
 
 /* The session viewer's two looks: chat (today's) and terminal. The markers
    and the > prompt are always there; only the terminal look shows them. */
