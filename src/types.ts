@@ -161,11 +161,29 @@ export const COLUMNS: { state: CardState; title: string }[] = [
   { state: "completed", title: "Completed" },
 ];
 
+/** One line of an edit's diff; `line` is its number in the new file (the old one for a removal), when known. */
+export interface DiffLine {
+  op: "add" | "del" | "same";
+  line?: number | null;
+  text: string;
+}
+
 export interface Turn {
   kind: "user" | "assistant" | "tool" | "peer";
   /** A compaction or an interrupt, sent as a tool line so older Mayas can read it. */
   notice?: boolean;
   text: string;
+  /** A tool call's result: at most 200 lines, 40 from another machine. */
+  output?: string | null;
+  /** Lines in the whole result before any cap; absent from an older Maya. */
+  outputLines?: number;
+  /** The tool call failed. */
+  isError?: boolean;
+  /** An edit's lines: at most 200, 40 from another machine. */
+  diff?: DiffLine[] | null;
+  /** Lines the whole edit adds and removes. */
+  added?: number;
+  removed?: number;
 }
 
 export const STATE_LABEL: Record<CardState, string> = {

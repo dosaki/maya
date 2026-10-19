@@ -417,7 +417,7 @@ Three workflows in `.github/workflows/`:
   file on connect, disconnect and removal — the CLI never notifies, speaks
   or listens like the app), and `status_file.rs`
   (`~/.claude/maya/cli-status.json`, read by `maya status`).
-- `src/` — `main.ts`, `board.ts`, `card.ts`, `modal.ts`, `reviews.ts`,
+- `src/` — `main.ts`, `board.ts`, `card.ts`, `modal.ts` with `toolturn.ts` (a tool call's output and diff in the viewer), `reviews.ts`,
   `settings.ts`, `voice.ts`, `debug.ts`, `tabs.ts`,
   `remembered.ts` (the Sessions banner offering back what ran before a restart, desktop and phone).
 - `src/mobile/` — the phone's page: `main.ts`, `strip.ts` (the column

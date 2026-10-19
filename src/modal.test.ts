@@ -629,3 +629,15 @@ describe("viewer theme", () => {
     host.remove();
   });
 });
+
+describe("tool output in the viewer", () => {
+  it("draws a tool call with its result in both looks, through the one renderer", () => {
+    const t: Turn = { kind: "tool", text: "Bash(ls)", output: "a.rs\nb.rs", outputLines: 2 };
+    for (const theme of ["terminal", undefined] as const) {
+      const el = renderModal({ card: base, turns: [t], status: null, draft: "", theme }, handlers());
+      expect(el.querySelector(".turn--tool .turn__row")?.textContent).toBe("▸ Bash · ls");
+      expect(el.querySelector(".turn--tool .turn__text")?.textContent).toBe("Bash(ls)");
+      expect(el.querySelector(".turn--tool .turn__out")?.textContent).toBe("a.rs\nb.rs");
+    }
+  });
+});

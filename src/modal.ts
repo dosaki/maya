@@ -10,6 +10,7 @@ import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
 import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
 import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, remoteTitle, type Card, type Turn, type ViewerTheme } from "./types";
+import { renderToolTurn, resetToolUi } from "./toolturn";
 import { sendShortcut } from "./platform";
 
 /** Composer features the page turns on: the phone has a picker instead of drag-and-drop. */
@@ -546,6 +547,10 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const history = el("div", "modal__history");
   if (m.turns.length === 0) history.append(el("div", "modal__empty", "No transcript found."));
   for (const t of m.turns) {
+    if (t.kind === "tool" && !t.notice) {
+      history.append(renderToolTurn(t));
+      continue;
+    }
     const kind = t.notice ? "notice" : t.kind;
     const turn = el("div", `turn turn--${kind}`);
     // The terminal look's markers; the chat look hides them.
@@ -674,9 +679,23 @@ export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
   swap(".modal__status");
 }
 
-/** True when both lists hold the same turns in the same order. */
+/** True when both lists hold the same turns in the same order, tool results and diffs included. */
 export function sameTurns(a: Turn[], b: Turn[]): boolean {
-  return a.length === b.length && a.every((t, i) => t.kind === b[i].kind && t.text === b[i].text && !!t.notice === !!b[i].notice);
+  return a.length === b.length && a.every((t, i) => sameTurn(t, b[i]));
+}
+
+function sameTurn(a: Turn, b: Turn): boolean {
+  return (
+    a.kind === b.kind &&
+    a.text === b.text &&
+    !!a.notice === !!b.notice &&
+    (a.output ?? null) === (b.output ?? null) &&
+    (a.outputLines ?? 0) === (b.outputLines ?? 0) &&
+    !!a.isError === !!b.isError &&
+    (a.added ?? 0) === (b.added ?? 0) &&
+    (a.removed ?? 0) === (b.removed ?? 0) &&
+    JSON.stringify(a.diff ?? null) === JSON.stringify(b.diff ?? null)
+  );
 }
 
 /**
@@ -962,6 +981,7 @@ async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): 
 
 export async function openModal(card: Card): Promise<void> {
   closeModal();
+  resetToolUi();
   const keyHandler = (e: KeyboardEvent) => {
     if (e.key === "Escape") dismiss();
   };
