@@ -1,6 +1,6 @@
 import styles from "./styles.css?raw";
 import { beforeEach, describe, expect, it } from "vitest";
-import { PREVIEW_LINES, renderToolTurn, resetToolUi, rowText, toolHead } from "./toolturn";
+import { DIFF_PREVIEW_LINES, PREVIEW_LINES, headText, renderToolTurn, resetToolUi, rowText, toolHead } from "./toolturn";
 import type { Turn } from "./types";
 
 const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join("\n");
@@ -91,6 +91,38 @@ describe("tool turns", () => {
     const t = renderToolTurn({ kind: "tool", text: "Write(/x/big.txt)", diff: [{ op: "add", text: "first" }], added: 300, removed: 0 });
     expect(t.querySelector(".diff__no")?.textContent).toBe("");
     expect(t.querySelector(".turn__diff .turn__left")?.textContent).toBe("… +299 lines");
+  });
+
+  it("shows a long diff's first 10 lines and expands the rest in place, open across repaints", () => {
+    const diff = Array.from({ length: 30 }, (_, i) => ({ op: "add" as const, line: i + 1, text: `l${i + 1}` }));
+    const big: Turn = { kind: "tool", text: "Edit(/x/a.rs)", diff, added: 40, removed: 0 };
+    const t = renderToolTurn(big);
+    expect(t.querySelectorAll(".diff__line").length).toBe(DIFF_PREVIEW_LINES);
+    const more = t.querySelector<HTMLButtonElement>(".turn__diff .turn__more")!;
+    expect(more.textContent).toBe("… +30 lines");
+    more.click();
+    expect(t.querySelectorAll(".diff__line").length).toBe(30);
+    expect(t.querySelector(".turn__more")).toBeNull();
+    expect(t.querySelector(".turn__diff .turn__left")?.textContent).toBe("… +10 lines");
+    const again = renderToolTurn({ ...big });
+    expect(again.querySelectorAll(".diff__line").length).toBe(30);
+    resetToolUi();
+    expect(renderToolTurn({ ...big }).querySelectorAll(".diff__line").length).toBe(DIFF_PREVIEW_LINES);
+  });
+
+  it("labels a new file's Write as the terminal does, and an Edit as an update", () => {
+    const write: Turn = { kind: "tool", text: "Write(/x/notes.md)", diff: [{ op: "add", line: 1, text: "# Notes" }, { op: "add", line: 2, text: "first" }], added: 2, removed: 0 };
+    expect(headText(write)).toBe("Write(/x/notes.md)");
+    expect(rowText(write)).toBe("▸ Write · /x/notes.md (+2)");
+    const t = renderToolTurn(write);
+    expect(t.querySelector(".turn__text")?.textContent).toBe("Write(/x/notes.md)");
+    expect(t.querySelector(".turn__summary-text")?.textContent).toBe("Wrote 2 lines to /x/notes.md");
+    const rewrite: Turn = { ...write, removed: 1 };
+    expect(headText(rewrite)).toBe("Update(/x/notes.md)");
+    expect(rowText(rewrite)).toBe("▸ Update · /x/notes.md (+2 −1)");
+    const added: Turn = { ...edit, removed: 0 };
+    expect(headText(added)).toBe("Update(/x/src/a.rs)");
+    expect(renderToolTurn(added).querySelector(".turn__summary-text")?.textContent).toBe("Updated /x/src/a.rs (+2 −0)");
   });
 
   it("marks a failed call red in both looks", () => {

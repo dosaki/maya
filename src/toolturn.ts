@@ -2,6 +2,8 @@ import type { Turn } from "./types";
 
 /** Output lines a tool call shows before "… +N lines". */
 export const PREVIEW_LINES = 4;
+/** Diff lines an edit shows before "… +N lines". */
+export const DIFF_PREVIEW_LINES = 10;
 
 /**
  * What the user opened, by `toolKey`: chat rows (`opened`) and results shown
@@ -41,17 +43,23 @@ function counts(t: Turn): string {
   return `(+${t.added ?? 0} −${t.removed ?? 0})`;
 }
 
-/** The chat look's row: "▸ Bash · cmd", "▸ Update · path (+a −b)". */
+/** A Write that removed nothing: a new file, which the terminal shows as written, not updated. */
+function isNewFile(t: Turn): boolean {
+  return !!t.diff && toolHead(t.text).name === "Write" && (t.removed ?? 0) === 0;
+}
+
+/** The chat look's row: "▸ Bash · cmd", "▸ Update · path (+a −b)", "▸ Write · path (+n)". */
 export function rowText(t: Turn): string {
   const { name, arg } = toolHead(t.text);
-  const shown = t.diff ? "Update" : name;
+  const shown = t.diff && !isNewFile(t) ? "Update" : name;
   const head = arg ? `▸ ${shown} · ${arg}` : `▸ ${shown}`;
-  return t.diff ? `${head} ${counts(t)}` : head;
+  if (!t.diff) return head;
+  return isNewFile(t) ? `${head} (+${t.added ?? 0})` : `${head} ${counts(t)}`;
 }
 
 /** The terminal look's call: as the agent wrote it, an edit as "Update(path)". */
 export function headText(t: Turn): string {
-  return t.diff ? `Update(${toolHead(t.text).arg})` : t.text;
+  return t.diff && !isNewFile(t) ? `Update(${toolHead(t.text).arg})` : t.text;
 }
 
 /** Output under ⎿: the first PREVIEW_LINES lines and "… +N lines", which shows the rest in place. */
@@ -88,21 +96,46 @@ function renderOutput(t: Turn, key: string): HTMLElement {
   return result;
 }
 
-/** An edit: "⎿ Updated path (+a −b)", then its lines in red and green with their numbers when known. */
-function renderDiff(t: Turn): HTMLElement {
+/**
+ * An edit: "⎿ Updated path (+a −b)" (a new file: "⎿ Wrote n lines to
+ * path"), then its lines in red and green with their numbers when known:
+ * the first DIFF_PREVIEW_LINES and "… +N lines", which shows the rest in place.
+ */
+function renderDiff(t: Turn, key: string): HTMLElement {
   const result = el("div", "turn__result turn__result--diff");
   const summary = el("div", "turn__summary");
-  summary.append(el("span", "turn__elbow", "⎿"), el("span", "turn__summary-text", `Updated ${toolHead(t.text).arg} ${counts(t)}`));
+  const path = toolHead(t.text).arg;
+  const said = isNewFile(t) ? `Wrote ${t.added ?? 0} lines to ${path}` : `Updated ${path} ${counts(t)}`;
+  summary.append(el("span", "turn__elbow", "⎿"), el("span", "turn__summary-text", said));
   const table = el("div", "turn__diff");
   const diff = t.diff ?? [];
-  for (const d of diff) {
-    const line = el("div", `diff__line diff__line--${d.op}`);
-    line.append(el("span", "diff__no", d.line != null ? String(d.line) : ""), el("span", "diff__sign", d.op === "add" ? "+" : d.op === "del" ? "-" : " "), el("span", "diff__text", d.text));
-    table.append(line);
-  }
-  const left = (t.added ?? 0) + (t.removed ?? 0) - diff.filter((d) => d.op !== "same").length;
-  if (left > 0) table.append(el("span", "turn__left", `… +${left} lines`));
+  // Lines a cap kept out of the turn cannot be shown, only counted.
+  const left = (t.added ?? 0) + (t.removed ?? 0) - diff.filter((d) => d.op === "add" || d.op === "del").length;
+  const draw = (lines: typeof diff) => {
+    for (const d of lines) {
+      const line = el("div", `diff__line diff__line--${d.op}`);
+      line.append(el("span", "diff__no", d.line != null ? String(d.line) : ""), el("span", "diff__sign", d.op === "add" ? "+" : d.op === "del" ? "-" : " "), el("span", "diff__text", d.text));
+      table.append(line);
+    }
+  };
   result.append(summary, table);
+  if (diff.length <= DIFF_PREVIEW_LINES || toolUi.expanded.has(key)) {
+    draw(diff);
+    if (left > 0) table.append(el("span", "turn__left", `… +${left} lines`));
+    return result;
+  }
+  draw(diff.slice(0, DIFF_PREVIEW_LINES));
+  const more = el("button", "turn__more", `… +${diff.length - DIFF_PREVIEW_LINES + Math.max(left, 0)} lines`);
+  more.type = "button";
+  more.dataset.action = "more";
+  more.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    toolUi.expanded.add(key);
+    more.remove();
+    draw(diff.slice(DIFF_PREVIEW_LINES));
+    if (left > 0) table.append(el("span", "turn__left", `… +${left} lines`));
+  });
+  table.append(more);
   return result;
 }
 
@@ -113,7 +146,7 @@ function renderDiff(t: Turn): HTMLElement {
  */
 export function renderToolTurn(t: Turn): HTMLElement {
   const key = toolKey(t);
-  const body = t.diff ? renderDiff(t) : t.output ? renderOutput(t, key) : null;
+  const body = t.diff ? renderDiff(t, key) : t.output ? renderOutput(t, key) : null;
   const turn = el("div", "turn turn--tool");
   turn.classList.toggle("turn--failed", !!t.isError);
   const open = !!body && toolUi.opened.has(key);
