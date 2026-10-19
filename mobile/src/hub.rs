@@ -198,7 +198,9 @@ impl Hub {
     /// Forgets `rows` on their machines; as a main, also from what its own
     /// server holds, so a machine that is away leaves the banner too. The
     /// banner updates first; the `Forget` commands follow, and an older
-    /// assistant that never answers one is logged and ignored.
+    /// assistant that never answers one is logged and ignored. Joined, every
+    /// group goes to the main, a waiting machine's too: the main drops what
+    /// it holds for that machine, or its next mirror would list it again.
     pub fn forget_remembered(&self, rows: &[RememberedRow]) {
         let groups: Vec<_> = remembered::keys_by_machine(rows).into_iter().filter_map(|(m, w, k)| m.map(|m| (m, w, k))).collect();
         for (machine, _, keys) in &groups {
@@ -211,8 +213,9 @@ impl Hub {
             self.mirror.lock().unwrap().remembered.retain(|r| !rows.iter().any(|f| f.machine == r.machine && f.entry.key() == r.entry.key()));
         }
         self.refresh();
+        let joined = self.joined();
         for (machine, waiting, keys) in groups {
-            if waiting {
+            if waiting && !joined {
                 continue;
             }
             if let Err(e) = self.send_to(&machine, CommandKind::Forget { sessions: keys }) {
@@ -653,7 +656,19 @@ impl Hub {
             Request::Interpret { .. } | Request::Execute { .. } => Err("This phone cannot interpret voice commands.".into()),
             Request::Command(kind) => match target_of(&kind) {
                 Target::Session(session) => self.send(&session, |_| kind),
-                Target::Machine => self.send_to(machine.ok_or("This phone runs no sessions.")?, kind),
+                Target::Machine => {
+                    let machine = machine.ok_or("This phone runs no sessions.")?;
+                    if let CommandKind::Forget { sessions } = &kind {
+                        // Dropped here first, so the next mirror leaves the rows
+                        // out; an away machine is not waited for.
+                        let connected = self.handle().is_some_and(|s| s.drop_remembered(machine, sessions));
+                        self.refresh();
+                        if !connected {
+                            return Ok(None);
+                        }
+                    }
+                    self.send_to(machine, kind)
+                }
             },
         }
     }
@@ -1105,6 +1120,24 @@ mod tests {
         assert_eq!(hub.remembered(), rows, "the board that follows keeps the rows");
         let out = hub.resume_remembered(&rows);
         assert_eq!(out[0].error.as_deref(), Some("waiting for Gnowee"));
+    }
+
+    #[test]
+    fn a_joined_phone_asks_the_main_to_forget_a_waiting_machine_s_rows_too() {
+        let hub = test_hub();
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("desk".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
+        let machine = format!("Away-{}", now_ms());
+        let rows = vec![remembered_row(Some(&machine), true, "w1")];
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        notify.mirrored_remembered(rows.clone());
+        notify.mirrored(true, vec![], vec![]);
+        hub.forget_remembered(&rows);
+        assert!(hub.remembered().is_empty(), "off the banner at once");
+        // No main is listening in this test: the attempt is what shows the
+        // request went to the main, which forgets the rows it holds for the
+        // away machine so its next mirror does not bring them back.
+        let tried = maya_core::log::lines().iter().any(|l| l.source == "remembered" && l.text.starts_with(&format!("{machine} did not forget its sessions")));
+        assert!(tried, "the Forget was sent through the main, not skipped");
     }
 
     #[test]

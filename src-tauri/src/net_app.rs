@@ -383,6 +383,16 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
                     if let Some(agent) = agent_of(&kind) {
                         check_remote_agent(agent, &merge::agents_of(&crate::remote_boards(&state), m), m)?;
                     }
+                    if let CommandKind::Forget { sessions } = &kind {
+                        // Dropped here first, so the next mirror leaves the
+                        // rows out; an away assistant is not waited for.
+                        let server = state.network.lock().unwrap().server.clone();
+                        let connected = server.is_some_and(|s| s.drop_remembered(m, sessions));
+                        crate::refresh_and_emit(app);
+                        if !connected {
+                            return Ok(None);
+                        }
+                    }
                     send_command(app, m, kind, ROUTE_TIMEOUT)
                 }
                 None => execute(app, kind),

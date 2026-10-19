@@ -493,14 +493,16 @@ impl ServerHandle {
 
     /// Forgets `keys` from the list the assistant shown as `machine` last
     /// sent, so a Dismiss clears the banner even for one that is away. It
-    /// sends its own list again when it reconnects.
-    pub fn drop_remembered(&self, machine: &str, keys: &[Key]) {
+    /// sends its own list again when it reconnects. Whether that assistant
+    /// is connected now, so a `Forget` can follow.
+    pub fn drop_remembered(&self, machine: &str, keys: &[Key]) -> bool {
         let mut s = lock(&self.shared);
-        let Some(id) = s.id_for(machine) else { return };
+        let Some(id) = s.id_for(machine) else { return false };
         if let Some(list) = s.by_id.get_mut(&id).and_then(|b| b.remembered.as_mut()) {
             list.retain(|e| !keys.contains(&e.key()));
         }
         s.sync_boards();
+        s.conns.contains_key(&id)
     }
 
     /// Lets the Maya `id` see and control every session, or stops it. Saved
@@ -3020,13 +3022,15 @@ mod tests {
     fn an_assistant_s_remembered_list_is_kept_while_it_is_away_and_a_dismiss_drops_it() {
         let (handle, port) = test_server();
         let (mut ws, _, _) = pair_client(&handle, port, "desk");
-        send(&mut ws, &Up::Board { cards: vec![], dirs: vec![], agents: None, remembered: Some(vec![was("r9")]) });
-        wait_until(|| handle.boards().iter().any(|b| b.remembered.as_ref().is_some_and(|l| l.len() == 1)));
+        send(&mut ws, &Up::Board { cards: vec![], dirs: vec![], agents: None, remembered: Some(vec![was("r9"), was("r8")]) });
+        wait_until(|| handle.boards().iter().any(|b| b.remembered.as_ref().is_some_and(|l| l.len() == 2)));
+        assert!(handle.drop_remembered("desk", &[was("r8").key()]), "connected: the Forget can follow");
         drop(ws);
         wait_until(|| handle.boards().iter().any(|b| !b.connected));
         assert_eq!(handle.boards()[0].remembered.as_ref().map(Vec::len), Some(1), "kept while it is away");
-        handle.drop_remembered("desk", &[was("r9").key()]);
+        assert!(!handle.drop_remembered("desk", &[was("r9").key()]), "away: nothing to send it to");
         assert_eq!(handle.boards()[0].remembered.as_ref().map(Vec::len), Some(0));
+        assert!(!handle.drop_remembered("nobody", &[was("r9").key()]));
         handle.stop();
     }
 
