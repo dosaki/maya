@@ -71,7 +71,7 @@ impl Executor for CliExecutor {
             CommandKind::Start { dir, prompt, options } => data(actions::start_session(&l, dir, prompt, options)),
             CommandKind::Resume { dir, session, agent } => done(actions::resume_relayed(&l, agent, &dir, &session)),
             CommandKind::ListResumable { dir, agent } => data(actions::list_resumable_sessions(&l, agent, &dir)),
-            CommandKind::History { session } => data(actions::session_history(&l, &session)),
+            CommandKind::History { session } => data(actions::remote_history(&l, &session)),
             CommandKind::Forget { sessions } => {
                 self.store.lock().unwrap().forget_remembered(&sessions);
                 self.board_due.store(true, Ordering::SeqCst);

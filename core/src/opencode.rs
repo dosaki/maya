@@ -220,13 +220,29 @@ pub fn forms(v: &Value) -> Vec<Form> {
         .collect()
 }
 
+/// `name(arg)` for a tool part, as the terminal shows the call, or just the name.
 fn tool_line(part: &Value) -> String {
     let name = part["tool"].as_str().unwrap_or("tool");
     let input = &part["state"]["input"];
     match ["command", "filePath", "path", "pattern"].iter().find_map(|k| input[k].as_str()).map(str::trim).filter(|a| !a.is_empty()) {
-        Some(a) => format!("{name}: {}", truncate(a, 120)),
+        Some(a) => format!("{name}({})", truncate(a, 120)),
         None => name.to_string(),
     }
+}
+
+/// A tool part as a turn with its result: `state.output` (OpenCode 1) or
+/// the text items of `state.content` (2.0). A failed part leads with its
+/// error message; a running one has no result yet.
+fn tool_turn(part: &Value) -> Turn {
+    let mut t = Turn::new(TurnKind::Tool, tool_line(part));
+    let state = &part["state"];
+    let content = state["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
+    let text = state["output"].as_str().map(str::to_string).unwrap_or(content);
+    t.is_error = state["status"].as_str() == Some("error");
+    let error = state["error"]["message"].as_str().or_else(|| state["error"].as_str()).unwrap_or("");
+    let whole = [error, text.as_str()].into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join("\n");
+    t.set_output(&whole);
+    t
 }
 
 /// The newest assistant text and the turns oldest first, from a message
@@ -250,7 +266,7 @@ pub fn messages(v: &Value) -> (Option<String>, Vec<Turn>) {
                                 turns.push(Turn::new(TurnKind::Assistant, t));
                             }
                         }
-                        Some("tool") => turns.push(Turn::new(TurnKind::Tool, tool_line(part))),
+                        Some("tool") => turns.push(tool_turn(part)),
                         _ => {}
                     }
                 }
@@ -765,5 +781,27 @@ mod tests {
         assert!(h[0].contains("authorization: Basic b3BlbmNvZGU6cHc=") || h[0].contains("Authorization: Basic b3BlbmNvZGU6cHc="), "opencode:pw in base64: {}", h[0]);
         drop(h);
         assert!(c.get("/api/nothing").unwrap_err().contains("404"));
+    }
+
+    #[test]
+    fn tool_parts_carry_their_output_or_their_error() {
+        let v = serde_json::json!({"data": [
+            {"type": "assistant", "content": [
+                {"type": "tool", "tool": "bash", "state": {"status": "error", "input": {"command": "ls /nope"}, "error": {"type": "unknown", "message": "ls: /nope: No such file or directory"}}},
+                {"type": "tool", "tool": "read", "state": {"status": "completed", "input": {"filePath": "/x/a.rs"}, "content": [{"type": "text", "text": "fn main() {}"}]}},
+                {"type": "tool", "tool": "bash", "state": {"status": "completed", "input": {"command": "ls"}, "output": "a.rs\nb.rs\n"}},
+                {"type": "tool", "tool": "bash", "state": {"status": "running", "input": {"command": "sleep 9"}}}
+            ]},
+            {"type": "user", "text": "list"}
+        ]});
+        let (_, turns) = messages(&v);
+        let got: Vec<(&str, Option<&str>, bool)> = turns.iter().map(|t| (t.text.as_str(), t.output.as_deref(), t.is_error)).collect();
+        assert_eq!(got, vec![
+            ("list", None, false),
+            ("bash(ls /nope)", Some("ls: /nope: No such file or directory"), true),
+            ("read(/x/a.rs)", Some("fn main() {}"), false),
+            ("bash(ls)", Some("a.rs\nb.rs"), false),
+            ("bash(sleep 9)", None, false),
+        ]);
     }
 }

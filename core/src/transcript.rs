@@ -305,7 +305,7 @@ const MAX_TOOL_TURNS: usize = 200;
 /// The last `max_messages` user, assistant and peer turns with the tool
 /// lines among them: tool calls do not count, or a busy session's last
 /// message would scroll out after a few dozen commands.
-fn keep_last_messages(mut turns: Vec<Turn>, max_messages: usize) -> Vec<Turn> {
+pub(crate) fn keep_last_messages(mut turns: Vec<Turn>, max_messages: usize) -> Vec<Turn> {
     // From the oldest kept message (or the start, when there are fewer),
     // then the oldest tool lines past the cap go: tools never cost a message.
     let mut messages = 0;

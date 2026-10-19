@@ -509,6 +509,12 @@ pub fn session_history(l: &Local, session_id: &str) -> Result<Vec<transcript::Tu
     }
 }
 
+/// A session's history as a reply to another machine: tool output and
+/// diffs cut to `transcript::REMOTE_OUTPUT_LINES` lines.
+pub fn remote_history(l: &Local, session_id: &str) -> Result<Vec<transcript::Turn>, String> {
+    session_history(l, session_id).map(transcript::for_remote)
+}
+
 /// The folders of the projects directory.
 pub fn list_project_dirs(l: &Local) -> Result<Vec<String>, String> {
     let root = projects_root(&l.store.lock().unwrap())?;
@@ -1817,6 +1823,25 @@ mod tests {
         assert_eq!(send_reply(&l, "s1", &"x".repeat(answer::TYPED_MAX_CHARS + 1)), Err("Message is too long to type (over 20000 characters).".into()));
         assert_eq!(send_reply(&l, "s1", "  \n "), Err("Message is empty.".into()));
         assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_history_for_another_machine_cuts_tool_output_to_40_lines() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let s = store.lock().unwrap().session("s1").unwrap();
+        let path = store.lock().unwrap().transcript_path_for(&s);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let out = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let call = serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"seq 100"}}]}});
+        let result = serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b1","content":out}]}});
+        std::fs::write(&path, format!("{call}\n{result}\n")).unwrap();
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let here = session_history(&l, "s1").unwrap();
+        assert_eq!(here[0].output.as_deref().unwrap().lines().count(), 100);
+        let there = remote_history(&l, "s1").unwrap();
+        assert_eq!(there[0].output.as_deref().unwrap().lines().count(), transcript::REMOTE_OUTPUT_LINES);
+        assert_eq!(there[0].output_lines, 100, "the page still says how many lines there were");
     }
 
     #[test]
