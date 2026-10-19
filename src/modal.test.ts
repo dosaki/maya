@@ -1,5 +1,6 @@
+import styles from "./styles.css?raw";
 import { describe, expect, it, vi } from "vitest";
-import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, replyStatus, setComposerOptions } from "./modal";
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, replyStatus, setComposerOptions, setViewerTheme } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -575,5 +576,54 @@ describe("renderModal notices and statuses", () => {
     const awaiting = { ...base, state: "awaiting" as const, awaiting: { kind: "permission" as const, detail: "Bash: git push", questions: [] } };
     const el = renderModal({ card: awaiting, turns: [], status: null, draft: "" }, handlers());
     expect(el.querySelector(".modal__banner")?.textContent).toContain("Answer it there before replying.");
+  });
+});
+
+describe("viewer theme", () => {
+  it("draws the terminal look's markers and prompt, the chat look without the class", () => {
+    const term = renderModal({ card: base, turns, status: null, draft: "", theme: "terminal" }, handlers());
+    expect(term.classList.contains("modal--terminal")).toBe(true);
+    expect([...term.querySelectorAll(".turn")].map((t) => t.querySelector(".turn__mark")?.textContent ?? "")).toEqual([">", "⏺", "⏺", ""]);
+    expect(term.querySelector(".modal__prompt")?.textContent).toBe(">");
+    const chat = renderModal({ card: base, turns, status: null, draft: "" }, handlers());
+    expect(chat.classList.contains("modal--terminal")).toBe(false);
+  });
+
+  it("hides the markers in the chat look and draws the terminal look's colours and font", () => {
+    expect(styles).toContain(".turn__mark, .turn__result-mark, .modal__prompt { display: none; }");
+    expect(styles).toContain(".modal--terminal .turn__mark { display: inline;");
+    expect(styles).toContain(".modal--terminal .modal__panel { background: #0a0a0a; color: #e8e2d4; }");
+    expect(styles).toContain("ui-monospace, SFMono-Regular, Menlo, monospace");
+  });
+
+  it("puts a tool's result under a ⎿ line when the transcript has one", () => {
+    const el = renderModal({ card: base, turns: [{ kind: "tool", text: "Bash: ls\nsrc\ntests" }], status: null, draft: "", theme: "terminal" }, handlers());
+    expect(el.querySelector(".turn--tool .turn__text")?.textContent).toBe("Bash: ls");
+    expect(el.querySelector(".turn--tool .turn__result")?.textContent).toBe("⎿ src\ntests");
+    const single = renderModal({ card: base, turns: [{ kind: "tool", text: "Bash: ls" }], status: null, draft: "" }, handlers());
+    expect(single.querySelector(".turn__result")).toBeNull();
+  });
+
+  it("the header toggle asks for the other look, titled for what it switches to", () => {
+    const h = { ...handlers(), onToggleTheme: vi.fn() };
+    const chat = renderModal({ card: base, turns, status: null, draft: "" }, h);
+    const toggle = chat.querySelector<HTMLButtonElement>("button[data-action=theme]")!;
+    expect(toggle.title).toBe("Terminal look");
+    toggle.click();
+    expect(h.onToggleTheme).toHaveBeenCalled();
+    expect(renderModal({ card: base, turns, status: null, draft: "", theme: "terminal" }, h).querySelector<HTMLButtonElement>("button[data-action=theme]")!.title).toBe("Chat look");
+  });
+
+  it("setViewerTheme redraws an open panel at once", () => {
+    const host = document.createElement("div");
+    host.id = "modal-host";
+    document.body.append(host);
+    host.append(renderModal({ card: base, turns, status: null, draft: "" }, handlers()));
+    setViewerTheme("terminal");
+    expect(host.querySelector(".modal")!.classList.contains("modal--terminal")).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>(".modal__theme")!.title).toBe("Chat look");
+    setViewerTheme("chat");
+    expect(host.querySelector(".modal")!.classList.contains("modal--terminal")).toBe(false);
+    host.remove();
   });
 });

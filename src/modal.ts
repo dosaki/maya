@@ -9,7 +9,7 @@ import { CLAUDE_AGENT, renderChoice, type AgentInfo } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
 import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
-import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, remoteTitle, type Card, type Turn } from "./types";
+import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, remoteTitle, type Card, type Turn, type ViewerTheme } from "./types";
 import { sendShortcut } from "./platform";
 
 /** Composer features the page turns on: the phone has a picker instead of drag-and-drop. */
@@ -17,6 +17,35 @@ const composer = { attachButton: false };
 
 export function setComposerOptions(o: Partial<typeof composer>): void {
   Object.assign(composer, o);
+}
+
+/** The toggle's title: the look it switches to. */
+export const THEME_TITLE: Record<ViewerTheme, string> = { chat: "Terminal look", terminal: "Chat look" };
+
+let theme: ViewerTheme = "chat";
+
+export function viewerTheme(): ViewerTheme {
+  return theme;
+}
+
+/** Sets the viewer's look; an open panel is redrawn at once. */
+export function setViewerTheme(t: ViewerTheme): void {
+  theme = t;
+  const root = document.querySelector<HTMLElement>("#modal-host .modal");
+  if (!root) return;
+  root.classList.toggle("modal--terminal", t === "terminal");
+  const toggle = root.querySelector<HTMLButtonElement>(".modal__theme");
+  if (toggle) {
+    toggle.title = THEME_TITLE[t];
+    toggle.setAttribute("aria-pressed", String(t === "terminal"));
+  }
+}
+
+/** Saves the look in this Maya's config, as Settings does, and tells Settings. */
+export async function saveViewerTheme(t: ViewerTheme): Promise<void> {
+  const config = await invoke<Record<string, unknown>>("get_config");
+  await invoke("set_config", { config: { ...config, viewerTheme: t } });
+  window.dispatchEvent(new CustomEvent("maya:config-changed"));
 }
 
 export interface ModalModel {
@@ -28,6 +57,8 @@ export interface ModalModel {
   next?: number;
   /** Files the next message will point the session at. */
   attachments?: Attachment[];
+  /** The viewer's look; chat when absent. */
+  theme?: ViewerTheme;
   /** The card's agent with its model list, for the Model and Effort pickers; absent until listed. */
   agent?: AgentInfo;
 }
@@ -41,6 +72,8 @@ export interface ModalHandlers {
   onSetOption(setting: "model" | "effort", value: string): void;
   /** Send Shift+Tab to the session to move it to its next permission mode. */
   onCycleMode(): void;
+  /** Switch between the chat and the terminal look. */
+  onToggleTheme?(): void;
   /** Open the session's pull request in the browser. */
   onOpenPr(): void;
   /** Give the session a new name (typed as `/rename`). */
@@ -421,7 +454,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
 }
 
 export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Date.now()): HTMLElement {
-  const root = el("div", "modal");
+  const root = el("div", m.theme === "terminal" ? "modal modal--terminal" : "modal");
   const backdrop = el("div", "modal__backdrop");
   const panel = el("section", "modal__panel");
   panel.setAttribute("role", "dialog");
@@ -467,7 +500,14 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   close.dataset.action = "close";
   close.setAttribute("aria-label", "Close");
   close.addEventListener("click", () => h.onClose());
-  head.append(titles, state, close);
+  const look = el("button", "modal__theme", ">_");
+  look.type = "button";
+  look.dataset.action = "theme";
+  look.title = THEME_TITLE[m.theme ?? "chat"];
+  look.setAttribute("aria-label", "Switch the viewer's look");
+  look.setAttribute("aria-pressed", String(m.theme === "terminal"));
+  look.addEventListener("click", () => h.onToggleTheme?.());
+  head.append(titles, state, look, close);
   panel.append(head);
 
   if (m.card.state === "awaiting") {
@@ -508,12 +548,27 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   for (const t of m.turns) {
     const kind = t.notice ? "notice" : t.kind;
     const turn = el("div", `turn turn--${kind}`);
+    // The terminal look's markers; the chat look hides them.
+    const mark = { user: ">", assistant: "⏺", tool: "⏺", peer: "", notice: "" }[kind];
+    if (mark) turn.append(el("span", "turn__mark", mark));
     const who = { user: "You", assistant: "Claude", peer: "From another session", tool: "", notice: "" }[kind];
     if (who) turn.append(el("div", "turn__who", who));
     const text = el("div", "turn__text");
-    if (kind === "tool" || kind === "notice") text.textContent = t.text;
-    else text.append(renderMarkdown(t.text));
-    turn.append(text);
+    if (kind === "tool") {
+      // The call, and under it its result when the transcript carries one.
+      const [call, ...result] = t.text.split("\n");
+      text.textContent = call;
+      turn.append(text);
+      if (result.join("").trim()) {
+        const res = el("div", "turn__result");
+        res.append(el("span", "turn__result-mark", "⎿ "), document.createTextNode(result.join("\n")));
+        turn.append(res);
+      }
+    } else {
+      if (kind === "notice") text.textContent = t.text;
+      else text.append(renderMarkdown(t.text));
+      turn.append(text);
+    }
     history.append(turn);
   }
   history.addEventListener("click", (ev) => {
@@ -532,6 +587,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const attachments = m.attachments ?? [];
     panel.append(renderChips(attachments, (path) => h.onRemoveAttachment?.(path)));
     const form = el("div", "modal__composer");
+    const prompt = el("span", "modal__prompt", ">");
     const ta = el("textarea", "modal__input");
     // Promise only the terminal lines this agent takes (see `caps`).
     const runs = [caps.slashLines && "/commands", caps.shellLines && "!shell lines"].filter(Boolean).join(" and ");
@@ -583,9 +639,9 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
       attach.type = "button";
       attach.dataset.action = "attach";
       attach.addEventListener("click", () => pick.click());
-      form.append(ta, pick, attach, send);
+      form.append(prompt, ta, pick, attach, send);
     } else {
-      form.append(ta, send);
+      form.append(prompt, ta, send);
     }
     panel.append(form);
   }
@@ -746,7 +802,9 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
 
   m.next = progress?.next(m.card) ?? 0;
   m.attachments = attachments.list();
+  m.theme = theme;
   const fresh = renderModal(m, {
+    onToggleTheme: () => void toggleTheme(),
     onSend: (text) => void guardedSend(text),
     onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
     onClose: dismiss,
@@ -825,6 +883,19 @@ async function cycleMode(): Promise<void> {
     if (current === me) setStatus(true, "Sent Shift+Tab to the terminal; check which mode it shows now");
   } catch (e) {
     if (current === me) setStatus(false, String(e));
+  }
+}
+
+/** The header toggle: the open panel switches at once; a failed save puts it back. */
+async function toggleTheme(): Promise<void> {
+  const before = theme;
+  const next: ViewerTheme = before === "terminal" ? "chat" : "terminal";
+  setViewerTheme(next);
+  try {
+    await saveViewerTheme(next);
+  } catch (e) {
+    setViewerTheme(before);
+    setStatus(false, String(e));
   }
 }
 

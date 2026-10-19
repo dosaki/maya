@@ -227,3 +227,6 @@ export interface ResumeOutcome {
   name: string;
   error?: string | null;
 }
+
+/** How the session viewer draws a conversation. */
+export type ViewerTheme = "chat" | "terminal";

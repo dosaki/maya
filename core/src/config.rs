@@ -146,6 +146,9 @@ pub struct Config {
     /// one): the first start fills it in after importing `gh`'s token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<Vec<GitConnection>>,
+    /// The session viewer's look; the phone keeps its own.
+    #[serde(default)]
+    pub viewer_theme: ViewerTheme,
     #[serde(default)]
     pub network: NetworkConfig,
 }
@@ -168,6 +171,15 @@ pub enum VoiceProvider {
     #[default]
     Builtin,
     Elevenlabs,
+}
+
+/// How the session viewer draws a conversation: as chat, or like the agent's own terminal.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewerTheme {
+    #[default]
+    Chat,
+    Terminal,
 }
 
 /// A code host Maya reads pull requests from.
@@ -374,6 +386,7 @@ impl Default for Config {
             recognizer: if cfg!(any(windows, target_os = "linux")) { Recognizer::Builtin } else { Recognizer::System },
             whisper_model: DEFAULT_MODEL.into(),
             git: None,
+            viewer_theme: ViewerTheme::Chat,
             network: NetworkConfig::default(),
         }
     }
@@ -628,6 +641,17 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "muted": true}"#).unwrap();
         assert!(c.muted);
         assert!(serde_json::to_string(&c).unwrap().contains("\"muted\":true"));
+    }
+
+    #[test]
+    fn the_viewer_look_defaults_to_chat_and_round_trips() {
+        assert_eq!(Config::default().viewer_theme, ViewerTheme::Chat);
+        let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
+        assert_eq!(older.viewer_theme, ViewerTheme::Chat);
+        let set = Config { viewer_theme: ViewerTheme::Terminal, ..Config::default() };
+        let text = serde_json::to_string(&set).unwrap();
+        assert!(text.contains(r#""viewerTheme":"terminal""#), "{text}");
+        assert_eq!(serde_json::from_str::<Config>(&text).unwrap().viewer_theme, ViewerTheme::Terminal);
     }
 
     #[test]

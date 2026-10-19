@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-import { openModal } from "./modal";
+import { openModal, setViewerTheme } from "./modal";
 import type { Card } from "./types";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -29,5 +29,32 @@ describe("openModal for another agent's card", () => {
     expect([...model!.options].map((o) => o.value)).toEqual(["", "auto"]);
     expect(document.querySelector("select[name=effort]")).not.toBeNull();
     expect(document.querySelector("button[data-action=compact]")).not.toBeNull();
+  });
+});
+
+describe("the viewer's look", () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="modal-host"></div>';
+    invoke.mockReset();
+  });
+
+  it("the header toggle switches the open panel at once and saves the look", async () => {
+    let saved: unknown = null;
+    invoke.mockImplementation((cmd: string, args?: { config?: Record<string, unknown> }) => {
+      if (cmd === "session_history") return Promise.resolve([]);
+      if (cmd === "get_config") return Promise.resolve({ completedTimeoutMinutes: 30, viewerTheme: "chat" });
+      if (cmd === "set_config") {
+        saved = args?.config;
+        return Promise.resolve(args?.config);
+      }
+      return Promise.reject(new Error(cmd));
+    });
+    await openModal({ ...kiro, harness: "claude-code" });
+    document.querySelector<HTMLButtonElement>("button[data-action=theme]")!.click();
+    expect(document.querySelector(".modal")!.classList.contains("modal--terminal")).toBe(true);
+    await flush();
+    await flush();
+    expect(saved).toEqual({ completedTimeoutMinutes: 30, viewerTheme: "terminal" });
+    setViewerTheme("chat");
   });
 });
