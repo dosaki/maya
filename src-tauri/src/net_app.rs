@@ -237,6 +237,10 @@ impl Executor for TauriExecutor {
         execute(&self.app, kind)
     }
 
+    fn remembered(&self) -> Option<Vec<maya_core::remembered::Remembered>> {
+        Some(self.app.state::<AppState>().store.lock().unwrap().was_running())
+    }
+
     fn board(&self) -> (Vec<Card>, Vec<String>) {
         let (cards, root) = {
             let state = self.app.state::<AppState>();

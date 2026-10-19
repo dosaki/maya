@@ -60,6 +60,20 @@ pub fn merged(local: Vec<Card>, remotes: &[RemoteBoard], now_ms: u64) -> Vec<Car
     out
 }
 
+/// The "was running" list the banner shows: this machine's first, then each
+/// assistant's last list, labelled with its machine and marked waiting while
+/// it is not connected. Kept for this run however old the board.
+pub fn remembered(local: Vec<crate::remembered::Remembered>, remotes: &[RemoteBoard]) -> Vec<crate::remembered::RememberedRow> {
+    use crate::remembered::RememberedRow;
+    let mut out: Vec<RememberedRow> = local.into_iter().map(|entry| RememberedRow { machine: None, waiting: false, entry }).collect();
+    for b in remotes {
+        for e in b.remembered.iter().flatten() {
+            out.push(RememberedRow { machine: Some(b.machine.clone()), waiting: !b.connected, entry: e.clone() });
+        }
+    }
+    out
+}
+
 /// A board heard from within `EXPIRE_MS`; older ones are left out everywhere.
 fn live(b: &RemoteBoard, now_ms: u64) -> bool {
     now_ms.saturating_sub(b.received_at) <= EXPIRE_MS
@@ -107,20 +121,6 @@ pub fn dirs_of(remotes: &[RemoteBoard], machine: &str) -> Vec<String> {
 
 /// The agents `machine` can start, as it last reported them; None for an
 /// older Maya, which starts Claude Code only.
-/// The "was running" list the banner shows: this machine's first, then each
-/// assistant's last list, labelled with its machine and marked waiting while
-/// it is not connected. Kept for this run however old the board.
-pub fn remembered(local: Vec<crate::remembered::Remembered>, remotes: &[RemoteBoard]) -> Vec<crate::remembered::RememberedRow> {
-    use crate::remembered::RememberedRow;
-    let mut out: Vec<RememberedRow> = local.into_iter().map(|entry| RememberedRow { machine: None, waiting: false, entry }).collect();
-    for b in remotes {
-        for e in b.remembered.iter().flatten() {
-            out.push(RememberedRow { machine: Some(b.machine.clone()), waiting: !b.connected, entry: e.clone() });
-        }
-    }
-    out
-}
-
 pub fn agents_of(remotes: &[RemoteBoard], machine: &str) -> Option<Vec<crate::agents::AgentInfo>> {
     remotes.iter().find(|b| b.machine == machine).and_then(|b| b.agents.clone())
 }

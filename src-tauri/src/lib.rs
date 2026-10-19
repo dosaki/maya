@@ -9,6 +9,7 @@ pub mod focus;
 pub mod listener;
 pub mod models;
 pub mod net_app;
+mod remembered_app;
 #[cfg(target_os = "macos")]
 pub mod terminal_app;
 #[cfg(target_os = "linux")]
@@ -503,7 +504,7 @@ fn announcement(speak_notifications: bool, muted: bool, focus: bool) -> (bool, b
     (spoken, !spoken && !muted)
 }
 
-fn refresh_and_emit(app: &AppHandle) {
+pub(crate) fn refresh_and_emit(app: &AppHandle) {
     let (cards, wants_notify, speak, muted, eleven_voice, assistant, volume) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
@@ -562,6 +563,7 @@ fn refresh_and_emit(app: &AppHandle) {
     if let Some(s) = server {
         s.mirror(cards.clone());
     }
+    remembered_app::publish(app);
     if assistant {
         net_app::push_board(app);
     }
@@ -1275,6 +1277,9 @@ fn apply_config_change(app: &AppHandle, before: &Config, config: &Config) {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// The PR badges' poll, whose thread also writes the heartbeat.
+const PR_POLL: Duration = Duration::from_secs(10);
+
 pub fn run() {
     let dir = claude_dir();
     let mut store = Store::new(dir.clone());
@@ -1313,6 +1318,9 @@ pub fn run() {
             list_project_dirs,
             list_resumable_sessions,
             resume_session,
+            remembered_app::remembered_sessions,
+            remembered_app::resume_remembered,
+            remembered_app::forget_remembered,
             start_session,
             list_agents,
             codex_hook_status,
@@ -1361,6 +1369,9 @@ pub fn run() {
                 let _ = log_handle.emit("log", l);
             });
             log::line("app", format!("Maya {} started; log at {}", env!("CARGO_PKG_VERSION"), log_path.display()));
+            // Before the first refresh: what the last run left is judged against its heartbeat.
+            let offered = app.state::<AppState>().store.lock().unwrap().start_remembering(now_ms());
+            log::line("app", format!("{} sessions were running when Maya last stopped", offered.len()));
             #[cfg(target_os = "macos")]
             focus::install_app_handle(app.handle().clone());
             notify::set_eleven_speaker(voice::speak);
@@ -1376,9 +1387,17 @@ pub fn run() {
                 watcher::run(&sessions_dir, &maya_dir, Duration::from_secs(5), || refresh_and_emit(&handle));
             });
             let pr_handle = app.handle().clone();
-            std::thread::spawn(move || loop {
-                poll_pull_requests(&pr_handle);
-                std::thread::sleep(Duration::from_secs(10));
+            std::thread::spawn(move || {
+                let mut tick: u64 = 0;
+                loop {
+                    poll_pull_requests(&pr_handle);
+                    tick += 1;
+                    // The heartbeat rides this loop: every third tick, 30 s.
+                    if maya_core::remembered::heartbeat_due(tick, PR_POLL.as_millis() as u64) {
+                        remembered_app::heartbeat(&pr_handle);
+                    }
+                    std::thread::sleep(PR_POLL);
+                }
             });
             let review_handle = app.handle().clone();
             std::thread::spawn(move || loop {
@@ -1425,6 +1444,12 @@ pub fn run() {
 #[cfg(test)]
 mod route_tests {
     use super::*;
+
+    #[test]
+    fn the_heartbeat_rides_every_third_pr_poll() {
+        let due: Vec<u64> = (1..=9).filter(|t| maya_core::remembered::heartbeat_due(*t, PR_POLL.as_millis() as u64)).collect();
+        assert_eq!(due, [3, 6, 9]);
+    }
 
     #[test]
     fn the_elevenlabs_key_is_wanted_only_for_the_elevenlabs_provider_with_a_voice() {
