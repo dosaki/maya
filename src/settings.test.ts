@@ -1080,3 +1080,18 @@ describe("Settings → Git", () => {
     expect(block(root, "github").querySelector(".settings__git-test")?.textContent).toBe("Connected as @tiago");
   });
 });
+
+describe("session viewer", () => {
+  it("offers the viewer's look under Sessions and saves the choice", () => {
+    const h = { ...handlers(), onViewerTheme: vi.fn() };
+    const el = renderSettings({ ...voiceBase, viewerTheme: "chat" }, h);
+    const sessions = el.querySelector(".settings__section--sessions")!;
+    expect(sessions.textContent).toContain("Session viewer");
+    const sel = sessions.querySelector<HTMLSelectElement>("select[name=viewerTheme]")!;
+    expect([...sel.options].map((o) => o.textContent)).toEqual(["Chat", "Terminal"]);
+    expect(sel.value).toBe("chat");
+    sel.value = "terminal";
+    sel.dispatchEvent(new Event("change"));
+    expect(h.onViewerTheme).toHaveBeenCalledWith("terminal");
+  });
+});

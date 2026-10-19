@@ -236,6 +236,7 @@ fn apply_settings(c: &mut Config, from: &Config) {
     c.notify_on_completed = from.notify_on_completed;
     c.speak_notifications = from.speak_notifications;
     c.wake_word = from.wake_word;
+    c.viewer_theme = from.viewer_theme;
 }
 
 /// Saves what the Network screen edits: name, port, the notification switches
@@ -383,6 +384,13 @@ const TAP_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_carry_the_viewer_look() {
+        let mut c = Config::default();
+        apply_settings(&mut c, &Config { viewer_theme: maya_core::config::ViewerTheme::Terminal, ..Config::default() });
+        assert_eq!(c.viewer_theme, maya_core::config::ViewerTheme::Terminal);
+    }
 
     #[test]
     fn a_machine_must_be_named() {
