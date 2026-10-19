@@ -293,6 +293,9 @@ pub(crate) fn refuse_remote(action: &Value) -> Option<String> {
 /// A pull request is looked up by the `repo#number` it resolved to, and a
 /// remote project by `"<dir> (on <machine>)"`, the way the lists spell them.
 pub(crate) fn revalidate(action: &Value, ctx: &VoiceContext) -> Result<Value, String> {
+    if action["kind"] == "resume_all" {
+        return maya_core::interpreter::validate_resume_all(action, &ctx.remembered);
+    }
     let mut asked = action.clone();
     match action["kind"].as_str() {
         Some("review") => {
@@ -456,7 +459,7 @@ mod tests {
 
     #[test]
     fn execute_revalidates_against_the_board_now() {
-        let gone = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![] };
+        let gone = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![], remembered: vec![] };
         let err = revalidate(&serde_json::json!({"kind": "reply", "session": "s1", "name": "hexgrid", "text": "ship it"}), &gone).unwrap_err();
         assert!(!err.is_empty(), "a session that has gone fails with a reason");
     }
@@ -474,7 +477,7 @@ mod tests {
     }
 
     fn board(cards: Vec<Card>) -> VoiceContext {
-        VoiceContext { cards, dirs: vec![], machines: vec![], prs: vec![] }
+        VoiceContext { cards, dirs: vec![], machines: vec![], prs: vec![], remembered: vec![] }
     }
 
     #[test]
@@ -499,10 +502,10 @@ mod tests {
     #[test]
     fn a_review_whose_pull_request_has_gone_is_refused_not_moved_to_another() {
         let action = serde_json::json!({"kind": "review", "pr": "#14", "repo": "dosaki/collector", "number": 14, "title": "dosaki/collector 14"});
-        let still = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/collector", 14), pr("dosaki/maya", 14)] };
+        let still = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/collector", 14), pr("dosaki/maya", 14)], remembered: vec![] };
         let fresh = revalidate(&action, &still).unwrap();
         assert_eq!((fresh["repo"].as_str(), fresh["number"].as_u64()), (Some("dosaki/collector"), Some(14)), "the confirmed one, though another repo has a #14 now");
-        let gone = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/maya", 14)] };
+        let gone = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/maya", 14)], remembered: vec![] };
         assert_eq!(revalidate(&action, &gone).unwrap_err(), "The pull request has changed; ask me again.");
     }
 
@@ -510,13 +513,13 @@ mod tests {
     fn a_review_whose_forge_changed_is_refused() {
         // Same repo path and number, but the action was for GitLab's MR.
         let action = serde_json::json!({"kind": "review", "pr": "dosaki/collector!14", "forge": "gitlab", "repo": "dosaki/collector", "number": 14, "title": "dosaki/collector 14"});
-        let ctx = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/collector", 14)] };
+        let ctx = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![pr("dosaki/collector", 14)], remembered: vec![] };
         assert_eq!(revalidate(&action, &ctx).unwrap_err(), "The pull request has changed; ask me again.", "the number found GitHub's PR, which is not the MR the user heard");
     }
 
     #[test]
     fn a_confirmed_remote_project_revalidates_on_its_machine() {
-        let ctx = |dirs: &[&str]| VoiceContext { cards: vec![], dirs: dirs.iter().map(|d| d.to_string()).collect(), machines: vec!["laptop".into()], prs: vec![] };
+        let ctx = |dirs: &[&str]| VoiceContext { cards: vec![], dirs: dirs.iter().map(|d| d.to_string()).collect(), machines: vec!["laptop".into()], prs: vec![], remembered: vec![] };
         let remote = serde_json::json!({"kind": "start", "dir": "maya", "machine": "laptop", "prompt": "go"});
         for dirs in [&["maya (on laptop)"][..], &["maya", "maya (on laptop)"][..]] {
             let fresh = revalidate(&remote, &ctx(dirs)).unwrap();
@@ -575,5 +578,15 @@ mod tests {
 
         let out = new_key_with(|| Err("Could not save the settings.".into()), |_| panic!("no key made"), || panic!("nothing changed"));
         assert_eq!(out.unwrap_err(), "Could not save the settings.");
+    }
+
+    #[test]
+    fn a_confirmed_resume_all_is_counted_again_on_the_main() {
+        let entry = maya_core::remembered::Remembered { agent: Harness::ClaudeCode, session_id: "a".into(), dir: "/x".into(), name: "a".into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, error: None };
+        let ctx = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![], remembered: vec![maya_core::remembered::RememberedRow { machine: None, waiting: false, entry }] };
+        let action = serde_json::json!({"kind": "resume_all", "scope": "all", "count": 5});
+        assert_eq!(revalidate(&action, &ctx).unwrap()["count"], 1, "counted against the list as it is now");
+        let empty = VoiceContext { remembered: vec![], ..ctx };
+        assert_eq!(revalidate(&action, &empty).unwrap_err(), "There's nothing to resume.");
     }
 }
