@@ -1,7 +1,7 @@
 use crate::diff::DiffLine;
 use crate::model::{parse_questions, AwaitKind, Question};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -212,15 +212,77 @@ impl From<WireTurn> for Turn {
     }
 }
 
-/// `<name>: <first useful argument>` for a tool_use block, or just the name.
+/// `Name(first useful argument)` for a tool_use block, as the agent's
+/// terminal shows the call, or just the name.
 pub fn tool_summary(name: &str, input: &Value) -> String {
     let arg = ["command", "file_path", "path", "prompt", "description"]
         .iter()
         .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
         .or_else(|| input["questions"][0]["question"].as_str());
     match arg {
-        Some(a) if !a.trim().is_empty() => format!("{name}: {}", crate::state::truncate(a.trim(), 120)),
+        Some(a) if !a.trim().is_empty() => format!("{name}({})", crate::state::truncate(a.trim(), 120)),
         _ => name.to_string(),
+    }
+}
+
+/// The diff an edit tool's input describes: Edit and MultiEdit as old
+/// against new text, Write as every line added. None for other tools.
+fn edit_diff(name: &str, input: &Value) -> Option<Vec<crate::diff::DiffLine>> {
+    match name {
+        "Edit" => Some(crate::diff::line_diff(input["old_string"].as_str()?, input["new_string"].as_str()?)),
+        "MultiEdit" => Some(
+            input["edits"]
+                .as_array()?
+                .iter()
+                .flat_map(|e| crate::diff::line_diff(e["old_string"].as_str().unwrap_or(""), e["new_string"].as_str().unwrap_or("")))
+                .collect(),
+        ),
+        "Write" => Some(crate::diff::numbered_additions(input["content"].as_str()?)),
+        _ => None,
+    }
+}
+
+/// A `tool_result` block's text: a string, or the text blocks of a list
+/// (images and other blocks are skipped).
+fn result_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Puts a `tool_result` block's outcome on its call. An edit keeps its diff,
+/// numbered from the patch Claude Code recorded (`recorded`, the line's
+/// `toolUseResult`) when there is one; a failed call, edit or not, shows its
+/// error as output and no diff.
+fn attach_result(t: &mut Turn, block: &Value, recorded: Option<&Value>) {
+    t.is_error = block["is_error"].as_bool() == Some(true);
+    if t.diff.is_some() && !t.is_error {
+        let patched = recorded.and_then(|r| crate::diff::from_patch(&r["structuredPatch"]));
+        let created = recorded.filter(|r| r["type"].as_str() == Some("create")).and_then(|r| r["content"].as_str()).map(crate::diff::numbered_additions);
+        if let Some(d) = patched.or(created) {
+            t.set_diff(d);
+        }
+        return;
+    }
+    t.diff = None;
+    (t.added, t.removed) = (0, 0);
+    t.set_output(&result_text(&block["content"]));
+}
+
+/// Puts each `tool_result` block of a user line on the call it answers. The
+/// line's `toolUseResult` belongs to its result only when it holds one.
+fn attach_results(items: &mut [Item], calls: &HashMap<String, usize>, content: &Value, recorded: &Value) {
+    let Some(blocks) = content.as_array() else { return };
+    let results: Vec<&Value> = blocks.iter().filter(|b| b["type"] == "tool_result").collect();
+    let recorded = (results.len() == 1 && recorded.is_object()).then_some(recorded);
+    for b in results {
+        // A result whose call fell before the tail began has nothing to go on.
+        let Some(&i) = b["tool_use_id"].as_str().and_then(|id| calls.get(id)) else { continue };
+        if let Some(Item::Turn(t)) = items.get_mut(i) {
+            attach_result(t, b, recorded);
+        }
     }
 }
 
@@ -325,13 +387,15 @@ fn drop_narration(items: Vec<Item>) -> Vec<Turn> {
     kept
 }
 
-/// Conversation turns (user prompts, assistant text, tool calls) in order,
-/// keeping the last `max_turns` messages and the tool calls among them.
+/// Conversation turns (user prompts, assistant text, tool calls with their
+/// results) in order, keeping the last `max_turns` messages and the tool calls among them.
 /// Subagent sidechain lines, harness-injected user lines (skill bodies,
 /// notifications, subagent hand-backs) and progress narration are skipped;
 /// a compaction or an interrupt is a notice.
 pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
     let mut items = Vec::new();
+    // Where each tool call's turn sits, by its tool_use id, for its result.
+    let mut calls: HashMap<String, usize> = HashMap::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if v["isSidechain"].as_bool() == Some(true) {
@@ -340,6 +404,7 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
         let content = &v["message"]["content"];
         match v["type"].as_str() {
             Some("user") => {
+                attach_results(&mut items, &calls, content, &v["toolUseResult"]);
                 if v["isCompactSummary"].as_bool() == Some(true) {
                     items.push(notice("Earlier conversation compacted"));
                     continue;
@@ -377,7 +442,14 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
                 if let Some(blocks) = content.as_array() {
                     for b in blocks.iter().filter(|b| b["type"] == "tool_use") {
                         let name = b["name"].as_str().unwrap_or("tool");
-                        items.push(Item::Turn(Turn::new(TurnKind::Tool, tool_summary(name, &b["input"]))));
+                        let mut turn = Turn::new(TurnKind::Tool, tool_summary(name, &b["input"]));
+                        if let Some(d) = edit_diff(name, &b["input"]) {
+                            turn.set_diff(d);
+                        }
+                        if let Some(id) = b["id"].as_str() {
+                            calls.insert(id.to_string(), items.len());
+                        }
+                        items.push(Item::Turn(turn));
                     }
                 }
             }
@@ -582,15 +654,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_turns_in_order_skipping_tool_results_and_sidechains() {
+    fn parses_turns_in_order_with_results_on_their_calls_and_no_sidechains() {
         let turns = parse_turns(&fixture("turns.jsonl"), 30);
-        let got: Vec<(TurnKind, &str)> = turns.iter().map(|t| (t.kind, t.text.as_str())).collect();
+        let got: Vec<(TurnKind, &str, Option<&str>)> = turns.iter().map(|t| (t.kind, t.text.as_str(), t.output.as_deref())).collect();
         assert_eq!(got, vec![
-            (TurnKind::User, "build me a board"),
-            (TurnKind::Tool, "Bash: pnpm test"),
-            (TurnKind::Tool, "ListAgents"),
-            (TurnKind::Assistant, "Tests pass.\n\nAnything else?"),
-            (TurnKind::User, "yes, ship it"),
+            (TurnKind::User, "build me a board", None),
+            (TurnKind::Tool, "Bash(pnpm test)", Some("ok")),
+            (TurnKind::Tool, "ListAgents", Some("none")),
+            (TurnKind::Assistant, "Tests pass.\n\nAnything else?", None),
+            (TurnKind::User, "yes, ship it", None),
         ]);
     }
 
@@ -635,11 +707,96 @@ mod tests {
     #[test]
     fn tool_summary_prefers_command_then_paths_then_question() {
         use serde_json::json;
-        assert_eq!(tool_summary("Bash", &json!({"command": "ls", "description": "d"})), "Bash: ls");
-        assert_eq!(tool_summary("Edit", &json!({"file_path": "/a.rs"})), "Edit: /a.rs");
-        assert_eq!(tool_summary("Agent", &json!({"prompt": "x".repeat(300)})).chars().count(), "Agent: ".len() + 120);
-        assert_eq!(tool_summary("AskUserQuestion", &json!({"questions": [{"question": "Which?"}]})), "AskUserQuestion: Which?");
+        assert_eq!(tool_summary("Bash", &json!({"command": "ls", "description": "d"})), "Bash(ls)");
+        assert_eq!(tool_summary("Edit", &json!({"file_path": "/a.rs"})), "Edit(/a.rs)");
+        assert_eq!(tool_summary("Agent", &json!({"prompt": "x".repeat(300)})).chars().count(), "Agent()".len() + 120);
+        assert_eq!(tool_summary("AskUserQuestion", &json!({"questions": [{"question": "Which?"}]})), "AskUserQuestion(Which?)");
         assert_eq!(tool_summary("ListAgents", &json!({})), "ListAgents");
+    }
+
+    #[test]
+    fn tool_calls_carry_their_results_errors_and_edit_diffs() {
+        let turns = parse_turns(&fixture("tools.jsonl"), 30);
+        let kinds: Vec<(TurnKind, &str)> = turns.iter().map(|t| (t.kind, t.text.as_str())).collect();
+        assert_eq!(kinds, vec![
+            (TurnKind::User, "run the tests and fix the typo"),
+            (TurnKind::Tool, "Bash(cargo test)"),
+            (TurnKind::Tool, "Bash(ls /nope)"),
+            (TurnKind::Tool, "Edit(/x/src/a.rs)"),
+            (TurnKind::Tool, "Write(/x/NOTES.md)"),
+            (TurnKind::Assistant, "Fixed the typo; tests pass."),
+        ]);
+        let bash = &turns[1];
+        assert_eq!(bash.output.as_deref(), Some("running 3 tests\ntest a ... ok\ntest b ... ok\ntest c ... ok\n\ntest result: ok. 3 passed"));
+        assert_eq!((bash.output_lines, bash.is_error), (6, false));
+        let failed = &turns[2];
+        assert_eq!(failed.output.as_deref(), Some("Exit code 1\nls: /nope: No such file or directory"));
+        assert!(failed.is_error);
+        let edit = &turns[3];
+        assert_eq!(edit.output, None, "an edit shows its diff, not Claude Code's note");
+        assert_eq!(edit.diff, Some(vec![
+            DiffLine::new(DiffOp::Del, Some(3), "fn mian() {"),
+            DiffLine::new(DiffOp::Add, Some(3), "fn main() {"),
+            DiffLine::new(DiffOp::Same, Some(4), "    run();"),
+            DiffLine::new(DiffOp::Add, Some(5), "    done();"),
+            DiffLine::new(DiffOp::Same, Some(6), "}"),
+        ]));
+        assert_eq!((edit.added, edit.removed), (2, 1));
+        let write = &turns[4];
+        assert_eq!(write.diff, Some(vec![DiffLine::new(DiffOp::Add, Some(1), "# Notes"), DiffLine::new(DiffOp::Add, Some(2), ""), DiffLine::new(DiffOp::Add, Some(3), "first")]));
+        assert_eq!((write.added, write.removed), (3, 0));
+    }
+
+    #[test]
+    fn an_edit_before_its_result_diffs_its_input_and_a_failed_one_shows_the_error() {
+        let edit = serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"e1","name":"Edit","input":{"file_path":"/x/a.rs","old_string":"a\nb","new_string":"a\nc"}}]}}).to_string();
+        let t = &parse_turns(&edit, 30)[0];
+        assert_eq!(t.diff, Some(vec![DiffLine::new(DiffOp::Same, None, "a"), DiffLine::new(DiffOp::Del, None, "b"), DiffLine::new(DiffOp::Add, None, "c")]));
+        assert_eq!((t.added, t.removed), (1, 1));
+        let failed = serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"e1","content":"<tool_use_error>String to replace not found in file.</tool_use_error>","is_error":true}]}}).to_string();
+        let t = &parse_turns(&format!("{edit}\n{failed}"), 30)[0];
+        assert!(t.is_error);
+        assert_eq!(t.diff, None);
+        assert_eq!((t.added, t.removed), (0, 0));
+        assert_eq!(t.output.as_deref(), Some("<tool_use_error>String to replace not found in file.</tool_use_error>"));
+    }
+
+    #[test]
+    fn a_multi_edit_joins_the_diffs_of_its_edits() {
+        let line = serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"m1","name":"MultiEdit","input":{"file_path":"/x/a.rs","edits":[{"old_string":"a","new_string":"b"},{"old_string":"c\nd","new_string":"c"}]}}]}}).to_string();
+        let t = &parse_turns(&line, 30)[0];
+        assert_eq!(t.text, "MultiEdit(/x/a.rs)");
+        assert_eq!(t.diff.as_ref().unwrap().len(), 4);
+        assert_eq!((t.added, t.removed), (1, 2));
+    }
+
+    #[test]
+    fn a_long_result_keeps_its_first_200_lines_and_the_whole_count() {
+        let out = (1..=250).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let call = serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"seq 250"}}]}});
+        let result = serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b1","content":out}]}});
+        let t = &parse_turns(&format!("{call}\n{result}"), 30)[0];
+        assert_eq!(t.output.as_deref().unwrap().lines().count(), TOOL_OUTPUT_LINES);
+        assert!(t.output.as_deref().unwrap().ends_with("line 200"));
+        assert_eq!(t.output_lines, 250);
+    }
+
+    #[test]
+    fn a_cut_off_tail_a_running_call_and_odd_results_do_no_harm() {
+        let text = [
+            // The result of a call made before the tail began.
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"gone","content":"old output"}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"/x/shot.png"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"r1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0"}},{"type":"text","text":"line one\r\nline two\r\n"}]}]}}"#,
+            // Still running: no result yet.
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b9","name":"Bash","input":{"command":"sleep 60"}}]}}"#,
+        ]
+        .join("\n");
+        let turns = parse_turns(&text, 30);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].text, "Read(/x/shot.png)");
+        assert_eq!((turns[0].output.as_deref(), turns[0].output_lines), (Some("line one\nline two"), 2));
+        assert_eq!(turns[1], Turn::new(TurnKind::Tool, "Bash(sleep 60)".into()));
     }
 
     #[test]
