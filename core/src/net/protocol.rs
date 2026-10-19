@@ -59,6 +59,9 @@ pub enum Up {
         dirs: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "known_agents")]
         agents: Option<Vec<crate::agents::AgentInfo>>,
+        /// What was running on this machine when its Maya last stopped; an older Maya sends none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remembered: Option<Vec<crate::remembered::Remembered>>,
     },
     Result { id: u64, ok: bool, #[serde(default)] error: Option<String>, #[serde(default)] data: Option<Value> },
     /// Act on the pool through the main (a mirroring Maya only). `machine`
@@ -97,7 +100,16 @@ pub enum Down {
     Move { host: String, port: u16, key: String },
     /// The main's board for a mirroring Maya; `allowed: false` (and nothing
     /// else) once the main's switch for it is off.
-    Mirror { allowed: bool, #[serde(default)] cards: Vec<Card>, #[serde(default)] machines: Vec<crate::net::routing::MachineInfo> },
+    Mirror {
+        allowed: bool,
+        #[serde(default)]
+        cards: Vec<Card>,
+        #[serde(default)]
+        machines: Vec<crate::net::routing::MachineInfo>,
+        /// The main's merged "was running" list; its own rows carry its name.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        remembered: Vec<crate::remembered::RememberedRow>,
+    },
     /// The answer to the `request` with this id.
     Response { id: u64, ok: bool, #[serde(default)] error: Option<String>, #[serde(default)] data: Option<Value> },
     Pong,
@@ -143,6 +155,8 @@ pub enum CommandKind {
     Resume { dir: String, session: String, #[serde(default)] agent: crate::model::Harness },
     ListResumable { dir: String, #[serde(default)] agent: crate::model::Harness },
     History { session: String },
+    /// Forget these remembered sessions (Dismiss, Forget unticked).
+    Forget { sessions: Vec<(crate::model::Harness, String)> },
     /// Become the main with this paired list (public keys only).
     Promote { list: Vec<crate::config::PairedAssistant> },
 }
@@ -235,9 +249,9 @@ mod tests {
         assert_eq!(decode_up(&encode(&dirs)).unwrap(), dirs);
         let resp = Down::Response { id: 7, ok: false, error: Some("no".into()), data: None };
         assert_eq!(decode_down(&encode(&resp)).unwrap(), resp);
-        let mirror = Down::Mirror { allowed: true, cards: vec![], machines: vec![MachineInfo { name: "desk".into(), hostname: "desk".into(), platform: "macos".into(), connected: true }] };
+        let mirror = Down::Mirror { allowed: true, cards: vec![], machines: vec![MachineInfo { name: "desk".into(), hostname: "desk".into(), platform: "macos".into(), connected: true }], remembered: vec![] };
         assert_eq!(decode_down(&encode(&mirror)).unwrap(), mirror);
-        assert_eq!(decode_down(r#"{"type":"mirror","allowed":false}"#).unwrap(), Down::Mirror { allowed: false, cards: vec![], machines: vec![] });
+        assert_eq!(decode_down(r#"{"type":"mirror","allowed":false}"#).unwrap(), Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![] });
         let offered = Down::Welcome { name: "desk".into(), mirror: Some(true), caps: vec![] };
         assert_eq!(decode_down(&encode(&offered)).unwrap(), offered);
         assert!(!encode(&Down::Welcome { name: "desk".into(), mirror: None, caps: vec![] }).contains("mirror"), "no offer, no field");
@@ -297,7 +311,7 @@ mod tests {
         let old = r#"{"type":"board","cards":[],"dirs":["proj"]}"#;
         let Up::Board { agents, .. } = serde_json::from_str::<Up>(old).unwrap() else { panic!() };
         assert_eq!(agents, None);
-        let new = encode(&Up::Board { cards: vec![], dirs: vec![], agents: Some(vec![crate::agents::claude()]) });
+        let new = encode(&Up::Board { cards: vec![], dirs: vec![], agents: Some(vec![crate::agents::claude()]), remembered: None });
         assert!(new.contains("\"agents\":[{\"harness\":\"claude-code\""), "{new}");
     }
 
@@ -305,7 +319,7 @@ mod tests {
     fn a_card_from_an_agent_this_maya_does_not_know_still_decodes() {
         use crate::model::{Card, Harness, State};
         let card = Card { session_id: "s1".into(), pid: 1, name: "s1".into(), cwd: "/x".into(), state: State::Idle, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness: Harness::Kiro, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None };
-        let text = encode(&Up::Board { cards: vec![card], dirs: vec![], agents: None }).replace("\"harness\":\"kiro\"", "\"harness\":\"future-agent\"");
+        let text = encode(&Up::Board { cards: vec![card], dirs: vec![], agents: None, remembered: None }).replace("\"harness\":\"kiro\"", "\"harness\":\"future-agent\"");
         let Up::Board { cards, .. } = decode_up(&text).unwrap() else { panic!() };
         assert_eq!(cards[0].harness, Harness::Other);
     }
@@ -383,5 +397,43 @@ mod tests {
         let s = encode(&p);
         assert!(s.contains(r#""kind":"promote""#) && s.contains(r#""key":"a2V5""#) && !s.contains("token"), "{s}");
         assert_eq!(decode_down(&s).unwrap(), p);
+    }
+
+    fn was(id: &str) -> crate::remembered::Remembered {
+        crate::remembered::Remembered { agent: crate::model::Harness::ClaudeCode, session_id: id.into(), dir: "/Users/x/dev/calibre".into(), name: "calibre-88".into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, error: None }
+    }
+
+    #[test]
+    fn a_board_carries_what_was_running_and_an_older_board_has_none() {
+        let board = Up::Board { cards: vec![], dirs: vec![], agents: None, remembered: Some(vec![was("s1")]) };
+        let s = encode(&board);
+        assert!(s.contains(r#""remembered":[{"agent":"claude-code","sessionId":"s1""#), "{s}");
+        assert_eq!(decode_up(&s).unwrap(), board);
+        let Up::Board { remembered, .. } = decode_up(r#"{"type":"board","cards":[],"dirs":[]}"#).unwrap() else { panic!() };
+        assert_eq!(remembered, None);
+        assert!(!encode(&Up::Board { cards: vec![], dirs: vec![], agents: None, remembered: None }).contains("remembered"));
+    }
+
+    #[test]
+    fn a_board_with_fields_and_agents_this_maya_does_not_know_still_parses() {
+        let newer = r#"{"type":"board","cards":[],"dirs":[],"remembered":[{"agent":"future-agent","sessionId":"x","dir":"/x","name":"x","firstSeenMs":1,"lastSeenMs":2,"somethingNew":true}],"alsoNew":1}"#;
+        let Up::Board { remembered, .. } = decode_up(newer).unwrap() else { panic!() };
+        assert_eq!(remembered.unwrap()[0].agent, crate::model::Harness::Other);
+    }
+
+    #[test]
+    fn forget_names_each_session_by_agent_and_id() {
+        let f = Down::Command { id: 4, kind: CommandKind::Forget { sessions: vec![(crate::model::Harness::Codex, "c1".into())] } };
+        let s = encode(&f);
+        assert!(s.contains(r#""kind":"forget","sessions":[["codex","c1"]]"#), "{s}");
+        assert_eq!(decode_down(&s).unwrap(), f);
+    }
+
+    #[test]
+    fn a_mirror_carries_the_remembered_rows_only_when_there_are_some() {
+        let rows = vec![crate::remembered::RememberedRow { machine: Some("desk".into()), waiting: false, entry: was("s1") }];
+        let m = Down::Mirror { allowed: true, cards: vec![], machines: vec![], remembered: rows };
+        assert_eq!(decode_down(&encode(&m)).unwrap(), m);
+        assert!(!encode(&Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![] }).contains("remembered"));
     }
 }

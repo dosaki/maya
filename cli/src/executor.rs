@@ -69,9 +69,14 @@ impl Executor for CliExecutor {
             CommandKind::CycleMode { session } => done(actions::cycle_session_mode(&l, &session)),
             CommandKind::Slash { session, text } => done(actions::send_slash_command(&l, &session, &text)),
             CommandKind::Start { dir, prompt, options } => data(actions::start_session(&l, dir, prompt, options)),
-            CommandKind::Resume { dir, session, agent } => done(actions::resume_session(&l, agent, &dir, &session)),
+            CommandKind::Resume { dir, session, agent } => done(actions::resume_relayed(&l, agent, &dir, &session)),
             CommandKind::ListResumable { dir, agent } => data(actions::list_resumable_sessions(&l, agent, &dir)),
             CommandKind::History { session } => data(actions::session_history(&l, &session)),
+            CommandKind::Forget { sessions } => {
+                self.store.lock().unwrap().forget_remembered(&sessions);
+                self.board_due.store(true, Ordering::SeqCst);
+                Ok(None)
+            }
             // The client opens a handover itself (`client::handle`); it never reaches an executor.
             CommandKind::Promote { .. } => Err(maya_core::net::client::CANNOT_LEAD.into()),
         }
