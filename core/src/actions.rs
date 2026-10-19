@@ -299,6 +299,8 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
     if !exited(pid) {
         return Err(format!("{} did not exit; the terminal was left open.", launch::label(harness)));
     }
+    // Closed by the user from its card: not one to offer after a restart.
+    l.store.lock().unwrap().session_closed(harness, session_id);
     let mut last = "nothing else is attached to its terminal".to_string();
     for key in &after {
         match l.terminal.type_line(key, "exit") {
@@ -1492,6 +1494,22 @@ mod tests {
         let l2 = Local { store: &store, terminal: &refusing };
         assert_eq!(cycle_session_mode(&l2, "s1"), Err("This session is not in tmux; only replies reach it.".into()));
         drop(dir);
+    }
+
+    #[test]
+    fn closing_from_the_card_forgets_the_session_at_once() {
+        let (dir, store) = store_with_session("s1", 4242);
+        {
+            let mut s = store.lock().unwrap();
+            s.start_remembering(1);
+            s.refresh(2);
+            assert!(s.remembered_entry(Harness::ClaudeCode, "s1").is_some());
+        }
+        let t = FakeTerminal::default();
+        close_session_with(&Local { store: &store, terminal: &t }, "s1", |_| true).unwrap();
+        assert!(store.lock().unwrap().remembered_entry(Harness::ClaudeCode, "s1").is_none());
+        let file = std::fs::read_to_string(crate::remembered::path_in(dir.path())).unwrap();
+        assert!(!file.contains("\"s1\""), "{file}");
     }
 
     #[test]

@@ -4,6 +4,7 @@ use crate::foreign::{self, ForeignSession};
 use crate::model::Harness;
 use crate::model::{Card, PullRequest};
 use crate::pr::PrCache;
+use crate::remembered::{Key, LiveSession, Memory, Remembered};
 use crate::registry::{self, RegistrySession};
 use crate::state::{derive, DeriveInput};
 use crate::transcript::TailCache;
@@ -56,6 +57,9 @@ pub struct Store {
     due_renames: Vec<(String, String)>,
     /// The agents installed on this machine, replaceable in tests.
     agents: std::sync::Arc<dyn Fn() -> Vec<crate::agents::AgentInfo> + Send + Sync>,
+    /// The sessions this machine remembers across restarts, once
+    /// `start_remembering` ran (the app does; the CLI and most tests do not).
+    memory: Option<Memory>,
 }
 
 /// Text of the files names come from, read again only when they change.
@@ -156,6 +160,7 @@ impl Store {
             pending: Default::default(),
             due_renames: Default::default(),
             agents: std::sync::Arc::new(crate::agents::current),
+            memory: None,
         }
     }
 
@@ -491,6 +496,11 @@ impl Store {
         let due = self.pending.apply(&mut cards, now_ms);
         self.due_renames.extend(due);
         self.log_pending_events();
+        if let Some(m) = self.memory.as_mut() {
+            let live: Vec<LiveSession> = cards.iter().map(LiveSession::of).collect();
+            m.observe(&live, now_ms);
+        }
+        self.save_memory();
         cards
     }
 
@@ -521,6 +531,65 @@ impl Store {
     /// Sessions to `/rename` now, each returned once.
     pub fn take_due_renames(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.due_renames)
+    }
+
+    /// Starts remembering this machine's sessions: reads what the last run
+    /// left, keeps what was running when it stopped, and saves. Called
+    /// once, before the first refresh. Returns what is offered.
+    pub fn start_remembering(&mut self, now_ms: u64) -> Vec<Remembered> {
+        let mut m = Memory::load(crate::remembered::path_in(&self.claude_dir));
+        let offered = m.classify_at_start(now_ms);
+        self.memory = Some(m);
+        self.save_memory();
+        offered
+    }
+
+    /// Writes the memory when it changed; a failure is logged, never fatal.
+    fn save_memory(&mut self) {
+        if let Some(m) = self.memory.as_mut() {
+            if let Err(e) = m.save() {
+                crate::log::line("remembered", format!("could not save: {e}"));
+            }
+        }
+    }
+
+    /// What was running when Maya last stopped and is not running now.
+    pub fn was_running(&self) -> Vec<Remembered> {
+        self.memory.as_ref().map(Memory::was_running).unwrap_or_default()
+    }
+
+    pub fn remembered_entry(&self, agent: Harness, session_id: &str) -> Option<Remembered> {
+        self.memory.as_ref()?.entry(agent, session_id)
+    }
+
+    /// Closed from its card (here or relayed from the main): forgotten at once.
+    pub fn session_closed(&mut self, agent: Harness, session_id: &str) {
+        if let Some(m) = self.memory.as_mut() {
+            m.closed(agent, session_id);
+        }
+        self.save_memory();
+    }
+
+    pub fn forget_remembered(&mut self, keys: &[Key]) {
+        if let Some(m) = self.memory.as_mut() {
+            m.forget(keys);
+        }
+        self.save_memory();
+    }
+
+    pub fn remembered_failed(&mut self, key: &Key, reason: &str) {
+        if let Some(m) = self.memory.as_mut() {
+            m.failed(key, reason);
+        }
+        self.save_memory();
+    }
+
+    /// This run's last sign of life, every `remembered::HEARTBEAT_MS`.
+    pub fn heartbeat(&mut self, now_ms: u64) {
+        if let Some(m) = self.memory.as_mut() {
+            m.heartbeat(now_ms);
+        }
+        self.save_memory();
     }
 }
 
@@ -804,7 +873,58 @@ mod tests {
         std::fs::write(agy.join("history.jsonl"), "{\"display\":\"/rename Fix CI\",\"timestamp\":3,\"workspace\":\"/x\",\"conversationId\":\"a1\",\"type\":\"slash_command\"}\n").unwrap();
         assert_eq!(store.refresh(1).iter().find(|c| c.session_id == "a1").unwrap().name, "Fix CI");
     }
+
+    fn claude_with_session(root: &Path) -> PathBuf {
+        let claude = root.join("claude");
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("maya")).unwrap();
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle"}"#).unwrap();
+        claude
+    }
+
+    #[test]
+    fn a_session_running_when_maya_stopped_is_offered_at_the_next_start() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = claude_with_session(t.path());
+        let mut first = Store::new(claude.clone()).with_alive(|_| true);
+        assert!(first.start_remembering(1_000).is_empty());
+        first.refresh(2_000);
+        first.heartbeat(30_000);
+        drop(first);
+        // The machine restarted: the session's process is gone.
+        let mut second = Store::new(claude).with_alive(|_| false);
+        let offered = second.start_remembering(400_000);
+        assert_eq!(offered.iter().map(|e| (e.session_id.as_str(), e.dir.as_str(), e.name.as_str())).collect::<Vec<_>>(), [("s7", "/Users/x/dev/eye", "eye-7")]);
+        second.refresh(401_000);
+        assert_eq!(second.was_running().len(), 1, "still offered while it is not running");
+        second.forget_remembered(&[(Harness::ClaudeCode, "s7".into())]);
+        assert!(second.was_running().is_empty());
+    }
+
+    #[test]
+    fn sessions_that_outlived_a_restart_of_maya_alone_are_not_offered() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = claude_with_session(t.path());
+        let mut first = Store::new(claude.clone()).with_alive(|_| true);
+        first.start_remembering(1_000);
+        first.refresh(2_000);
+        drop(first);
+        // Only Maya was quit and reopened: the session still runs.
+        let mut second = Store::new(claude).with_alive(|_| true);
+        assert_eq!(second.start_remembering(60_000).len(), 1, "judged before the first refresh");
+        second.refresh(61_000);
+        assert!(second.was_running().is_empty(), "it is live: nothing to resume");
+    }
+
+    #[test]
+    fn a_store_that_does_not_remember_writes_no_file() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = claude_with_session(t.path());
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.refresh(1);
+        store.heartbeat(2);
+        store.session_closed(Harness::ClaudeCode, "s7");
+        assert!(!crate::remembered::path_in(&claude).exists());
+        assert!(store.was_running().is_empty());
+    }
 }
-
-
-
