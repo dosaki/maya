@@ -15,6 +15,9 @@ pub enum DiffOp {
     Add,
     Del,
     Same,
+    /// An op this Maya does not know, from a newer one: shown unchanged.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,7 +40,7 @@ pub fn counts(diff: &[DiffLine]) -> (u32, u32) {
     diff.iter().fold((0, 0), |(a, r), l| match l.op {
         DiffOp::Add => (a + 1, r),
         DiffOp::Del => (a, r + 1),
-        DiffOp::Same => (a, r),
+        DiffOp::Same | DiffOp::Other => (a, r),
     })
 }
 
@@ -94,8 +97,8 @@ fn middle(a: &[&str], b: &[&str]) -> Vec<DiffLine> {
 
 /// Claude Code's `structuredPatch` (hunks of `oldStart`, `newStart` and
 /// `lines` led by ' ', '-' or '+') as numbered lines: a removed line carries
-/// its old number, the others their new one. None unless it is a non-empty
-/// list of hunks.
+/// its old number, the others their new one. None unless it holds at least
+/// one line of the file.
 pub fn from_patch(hunks: &Value) -> Option<Vec<DiffLine>> {
     let hunks = hunks.as_array().filter(|h| !h.is_empty())?;
     let mut out = Vec::new();
@@ -120,7 +123,7 @@ pub fn from_patch(hunks: &Value) -> Option<Vec<DiffLine>> {
                     out.push(DiffLine::new(op, Some(new), text));
                     new += 1;
                 }
-                DiffOp::Same => {
+                DiffOp::Same | DiffOp::Other => {
                     out.push(DiffLine::new(op, Some(new), text));
                     old += 1;
                     new += 1;
@@ -128,7 +131,7 @@ pub fn from_patch(hunks: &Value) -> Option<Vec<DiffLine>> {
             }
         }
     }
-    Some(out)
+    (!out.is_empty()).then_some(out)
 }
 
 /// Every line of `text` added, numbered from 1: a new file.
@@ -194,6 +197,20 @@ mod tests {
         ]);
         assert_eq!(from_patch(&serde_json::json!([])), None, "a new file's patch is empty");
         assert_eq!(from_patch(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn a_patch_with_no_lines_of_the_file_is_none() {
+        let only_marker = serde_json::json!([{"oldStart": 1, "newStart": 1, "lines": ["\\ No newline at end of file"]}]);
+        assert_eq!(from_patch(&only_marker), None);
+        assert_eq!(from_patch(&serde_json::json!([{"oldStart": 1, "newStart": 1}])), None);
+    }
+
+    #[test]
+    fn an_op_from_a_newer_maya_reads_as_other_and_counts_as_neither() {
+        let d: Vec<DiffLine> = serde_json::from_value(serde_json::json!([{"op": "moved", "line": 2, "text": "x"}, {"op": "add", "text": "y"}])).unwrap();
+        assert_eq!(ops(&d), vec![(DiffOp::Other, Some(2), "x"), (DiffOp::Add, None, "y")]);
+        assert_eq!(counts(&d), (1, 0));
     }
 
     #[test]

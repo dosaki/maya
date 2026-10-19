@@ -152,6 +152,18 @@ describe("tool turns", () => {
     expect(styles).toContain(".modal--terminal .turn__row { display: none; }");
   });
 
+  it("draws a diff op from a newer Maya as an unchanged line", () => {
+    const t = renderToolTurn({ kind: "tool", text: "Edit(/x/a.rs)", diff: [{ op: "other", line: 7, text: "kept" }], added: 0, removed: 0 });
+    const row = t.querySelector(".diff__line")!;
+    expect(row.classList.contains("diff__line--same")).toBe(true);
+    expect(row.querySelector(".diff__sign")?.textContent).toBe(" ");
+  });
+
+  it("rings a focused row or expander, and marks a failed call's ⏺ red in the terminal look", () => {
+    expect(styles).toContain(".turn__row:focus-visible, .turn__more:focus-visible { outline: 1px solid var(--gold); outline-offset: 2px; }");
+    expect(styles).toContain(".modal--terminal .turn--failed .turn__mark { color: #dc2626; }");
+  });
+
   it("renders output and diff text as text, never markup", () => {
     const evil = '<img src=x onerror="alert(1)"><script>alert(2)</script>';
     const t = renderToolTurn({ kind: "tool", text: `Bash(${evil})`, output: evil, outputLines: 1 });

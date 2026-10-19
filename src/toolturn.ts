@@ -113,8 +113,10 @@ function renderDiff(t: Turn, key: string): HTMLElement {
   const left = (t.added ?? 0) + (t.removed ?? 0) - diff.filter((d) => d.op === "add" || d.op === "del").length;
   const draw = (lines: typeof diff) => {
     for (const d of lines) {
-      const line = el("div", `diff__line diff__line--${d.op}`);
-      line.append(el("span", "diff__no", d.line != null ? String(d.line) : ""), el("span", "diff__sign", d.op === "add" ? "+" : d.op === "del" ? "-" : " "), el("span", "diff__text", d.text));
+      // An op from a newer Maya draws as an unchanged line.
+      const op = d.op === "add" || d.op === "del" ? d.op : "same";
+      const line = el("div", `diff__line diff__line--${op}`);
+      line.append(el("span", "diff__no", d.line != null ? String(d.line) : ""), el("span", "diff__sign", op === "add" ? "+" : op === "del" ? "-" : " "), el("span", "diff__text", d.text));
       table.append(line);
     }
   };

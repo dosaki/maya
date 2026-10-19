@@ -165,7 +165,7 @@ export const COLUMNS: { state: CardState; title: string }[] = [
 
 /** One line of an edit's diff; `line` is its number in the new file (the old one for a removal), when known. */
 export interface DiffLine {
-  op: "add" | "del" | "same";
+  op: "add" | "del" | "same" | "other";
   line?: number | null;
   text: string;
 }

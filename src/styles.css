@@ -354,6 +354,7 @@ body { margin: 0; background: var(--bg); }
 .turn--failed .turn__out { color: #dc2626; }
 .turn__more { all: unset; cursor: pointer; color: var(--muted); font-size: 11.5px; }
 .turn__more:hover { color: var(--text); }
+.turn__row:focus-visible, .turn__more:focus-visible { outline: 1px solid var(--gold); outline-offset: 2px; }
 .turn__left { color: var(--muted); font-size: 11.5px; }
 .turn__diff { margin-top: 2px; }
 .diff__line { display: grid; grid-template-columns: 5ch 2ch minmax(0, 1fr); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; }
@@ -367,6 +368,7 @@ body { margin: 0; background: var(--bg); }
 .modal--terminal .turn--tool > .turn__result--out { display: grid; grid-template-columns: 3ch minmax(0, 1fr); }
 .modal--terminal .turn__result--out > :not(.turn__elbow) { grid-column: 2; }
 .modal--terminal .turn__elbow { display: inline; }
+.modal--terminal .turn--failed .turn__mark { color: #dc2626; }
 .modal--terminal .turn__summary .turn__elbow { margin-right: 1ch; }
 
 /* While the session works, and the status line: the terminal look's under the prompt, the chat look's in the header. */

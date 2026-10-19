@@ -230,14 +230,14 @@ fn tool_line(part: &Value) -> String {
     }
 }
 
-/// A tool part as a turn with its result: `state.output` (OpenCode 1) or
-/// the text items of `state.content` (2.0). A failed part leads with its
-/// error message; a running one has no result yet.
+/// A tool part as a turn with its result: `state.output` (OpenCode 1) or,
+/// when that is missing or blank, the text items of `state.content` (2.0).
+/// A failed part leads with its error message; a running one has no result yet.
 fn tool_turn(part: &Value) -> Turn {
     let mut t = Turn::new(TurnKind::Tool, tool_line(part));
     let state = &part["state"];
     let content = state["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
-    let text = state["output"].as_str().map(str::to_string).unwrap_or(content);
+    let text = state["output"].as_str().filter(|o| !o.trim().is_empty()).map(str::to_string).unwrap_or(content);
     t.is_error = state["status"].as_str() == Some("error");
     let error = state["error"]["message"].as_str().or_else(|| state["error"].as_str()).unwrap_or("");
     let whole = [error, text.as_str()].into_iter().filter(|s| !s.trim().is_empty()).collect::<Vec<_>>().join("\n");
@@ -796,6 +796,10 @@ mod tests {
             {"type": "user", "text": "list"}
         ]});
         let (_, turns) = messages(&v);
+        let blank = serde_json::json!({"data": [{"type": "assistant", "content": [
+            {"type": "tool", "tool": "read", "state": {"status": "completed", "input": {"filePath": "/x/b.rs"}, "output": " \n", "content": [{"type": "text", "text": "fn b() {}"}]}}
+        ]}]});
+        assert_eq!(messages(&blank).1[0].output.as_deref(), Some("fn b() {}"), "a blank output falls back to the content");
         let got: Vec<(&str, Option<&str>, bool)> = turns.iter().map(|t| (t.text.as_str(), t.output.as_deref(), t.is_error)).collect();
         assert_eq!(got, vec![
             ("list", None, false),
