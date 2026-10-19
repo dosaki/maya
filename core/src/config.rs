@@ -274,13 +274,15 @@ pub fn valid_env_name(name: &str) -> bool {
 }
 
 /// True when the authority `host[:port]` has no port, or a numeric one.
-/// A `:` inside `[...]` (an IPv6 address) is not a port separator.
+/// A `:` inside `[...]` (an IPv6 address) is not a port separator; outside
+/// it, only one `:` is allowed.
 fn valid_port(authority: &str) -> bool {
     let after_host = match authority.strip_prefix('[') {
         Some(rest) => match rest.split_once(']') {
             Some((_, tail)) => tail,
             None => return false,
         },
+        None if authority.matches(':').count() > 1 => return false,
         None => match authority.rfind(':') {
             Some(i) => &authority[i..],
             None => return true,
@@ -908,7 +910,7 @@ mod tests {
         assert_eq!(validate_git(&[gl("gitlab.acme.io")]).unwrap_err(), "GitLab URL must be an http(s) address.");
         assert_eq!(validate_git(&[gl("https://")]).unwrap_err(), "GitLab URL must be an http(s) address.");
         assert_eq!(validate_git(&[gl("https://oauth2:glpat-x@gitlab.acme.io")]).unwrap_err(), "GitLab URL must be an http(s) address.", "no credentials in the URL");
-        for bad in ["https://gitlab.acme.io?x", "https://gitlab.acme.io#x", "https://gitlab.acme.io:bad", "https://gitlab.acme.io:", "https://gitlab acme.io", "https://gitlab.acme.io:80a/x", "https://[::1"] {
+        for bad in ["https://gitlab.acme.io?x", "https://gitlab.acme.io#x", "https://gitlab.acme.io:bad", "https://gitlab.acme.io:", "https://gitlab acme.io", "https://gitlab.acme.io:80a/x", "https://[::1", "https://gitlab.example:8443:9443"] {
             assert_eq!(validate_git(&[gl(bad)]).unwrap_err(), "GitLab URL must be an http(s) address.", "{bad}");
         }
         assert!(validate_git(&[gl("https://[::1]:8443/gitlab")]).is_ok());
