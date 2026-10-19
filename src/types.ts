@@ -139,6 +139,8 @@ export interface Card {
   terminal?: string | null;
   /** The model the session runs on, when its agent says (OpenCode's provider/model). */
   model?: string | null;
+  /** The branch checked out in `cwd`, from the same lookup as the PR; absent until looked up. */
+  branch?: string | null;
   /** True when the machine has not reported for a while or is disconnected. */
   stale?: boolean;
 }
@@ -161,11 +163,29 @@ export const COLUMNS: { state: CardState; title: string }[] = [
   { state: "completed", title: "Completed" },
 ];
 
+/** One line of an edit's diff; `line` is its number in the new file (the old one for a removal), when known. */
+export interface DiffLine {
+  op: "add" | "del" | "same" | "other";
+  line?: number | null;
+  text: string;
+}
+
 export interface Turn {
   kind: "user" | "assistant" | "tool" | "peer";
   /** A compaction or an interrupt, sent as a tool line so older Mayas can read it. */
   notice?: boolean;
   text: string;
+  /** A tool call's result: at most 200 lines, 40 from another machine. */
+  output?: string | null;
+  /** Lines in the whole result before any cap; absent from an older Maya. */
+  outputLines?: number;
+  /** The tool call failed. */
+  isError?: boolean;
+  /** An edit's lines: at most 200, 40 from another machine. */
+  diff?: DiffLine[] | null;
+  /** Lines the whole edit adds and removes. */
+  added?: number;
+  removed?: number;
 }
 
 export const STATE_LABEL: Record<CardState, string> = {
@@ -198,3 +218,37 @@ export function remoteTitle(machine: string, address?: string | null, platform?:
   const base = !address || machine.includes(`(${address})`) ? `Runs on ${machine}${shown}` : `Runs on ${machine}${shown}, ${address}`;
   return terminal ? `${base}; attach: tmux attach -t ${terminal}` : base;
 }
+
+/** A session that was running when its machine's Maya last stopped. */
+export interface Remembered {
+  agent: Harness;
+  sessionId: string;
+  dir: string;
+  name: string;
+  firstSeenMs: number;
+  lastSeenMs: number;
+  goneAtMs?: number | null;
+  offered?: boolean;
+  /** When it was first offered; carried for a day after. */
+  offeredAtMs?: number | null;
+  /** Why its last resume failed ("folder missing"…). */
+  error?: string | null;
+}
+
+/** A banner row: `machine` is absent for this machine; `waiting` while that machine is away. */
+export interface RememberedRow extends Remembered {
+  machine?: string | null;
+  waiting?: boolean;
+}
+
+/** What became of one row of a resume; `error` is its reason. */
+export interface ResumeOutcome {
+  machine?: string | null;
+  agent: Harness;
+  sessionId: string;
+  name: string;
+  error?: string | null;
+}
+
+/** How the session viewer draws a conversation. */
+export type ViewerTheme = "chat" | "terminal";

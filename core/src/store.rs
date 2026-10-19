@@ -4,6 +4,7 @@ use crate::foreign::{self, ForeignSession};
 use crate::model::Harness;
 use crate::model::{Card, PullRequest};
 use crate::pr::PrCache;
+use crate::remembered::{Key, LiveSession, Memory, Remembered};
 use crate::registry::{self, RegistrySession};
 use crate::state::{derive, DeriveInput};
 use crate::transcript::TailCache;
@@ -56,6 +57,12 @@ pub struct Store {
     due_renames: Vec<(String, String)>,
     /// The agents installed on this machine, replaceable in tests.
     agents: std::sync::Arc<dyn Fn() -> Vec<crate::agents::AgentInfo> + Send + Sync>,
+    /// The sessions this machine remembers across restarts, once
+    /// `start_remembering` ran (the app and `maya run` do; other CLI
+    /// commands and most tests do not).
+    memory: Option<Memory>,
+    /// The last save of the memory failed: the streak was logged already.
+    memory_save_failing: bool,
 }
 
 /// Text of the files names come from, read again only when they change.
@@ -156,6 +163,8 @@ impl Store {
             pending: Default::default(),
             due_renames: Default::default(),
             agents: std::sync::Arc::new(crate::agents::current),
+            memory: None,
+            memory_save_failing: false,
         }
     }
 
@@ -422,6 +431,11 @@ impl Store {
         self.prs.clear();
     }
 
+    /// Records the branch checked out in `dir`, looked up beside its PR.
+    pub fn set_branch(&mut self, dir: &str, branch: Option<String>) {
+        self.prs.set_branch(dir, branch);
+    }
+
     pub fn set_pr(&mut self, dir: &str, pr: Option<PullRequest>, now_ms: u64) {
         self.prs.set(dir, pr, now_ms);
     }
@@ -454,6 +468,9 @@ impl Store {
                 completed_timeout_ms: self.config.completed_timeout_ms(),
             });
             card.pr = self.prs.get(&s.cwd);
+            card.branch = self.prs.branch(&s.cwd);
+            // Claude Code names its model in the transcript; the viewer's status line shows it.
+            card.model = tail.model.clone();
             card.context = tail.context_tokens.map(|used| crate::context::usage(tail.model.as_deref().unwrap_or(""), used, default_1m));
             cards.push(card);
         }
@@ -469,6 +486,7 @@ impl Store {
             }
             let mut card = foreign::derive(s, &tail, now_ms, timeout);
             card.pr = self.prs.get(&s.cwd);
+            card.branch = self.prs.branch(&s.cwd);
             cards.push(card);
         }
         // OpenCode's sessions live in its server: asked on every refresh while it runs.
@@ -486,11 +504,17 @@ impl Store {
         cards.extend(self.opencode.iter().map(|f| {
             let mut card = f.card.clone();
             card.pr = self.prs.get(&card.cwd);
+            card.branch = self.prs.branch(&card.cwd);
             card
         }));
         let due = self.pending.apply(&mut cards, now_ms);
         self.due_renames.extend(due);
         self.log_pending_events();
+        if let Some(m) = self.memory.as_mut() {
+            let live: Vec<LiveSession> = cards.iter().map(LiveSession::of).collect();
+            m.observe(&live, now_ms);
+        }
+        self.save_memory();
         cards
     }
 
@@ -521,6 +545,73 @@ impl Store {
     /// Sessions to `/rename` now, each returned once.
     pub fn take_due_renames(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.due_renames)
+    }
+
+    /// Starts remembering this machine's sessions: reads what the last run
+    /// left, keeps what was running when it stopped, and saves. Called
+    /// once, before the first refresh. Returns what is offered.
+    pub fn start_remembering(&mut self, now_ms: u64) -> Vec<Remembered> {
+        let mut m = Memory::load(crate::remembered::path_in(&self.claude_dir));
+        let offered = m.classify_at_start(now_ms);
+        self.memory = Some(m);
+        self.save_memory();
+        offered
+    }
+
+    /// Writes the memory when it changed; a failure is logged, never fatal.
+    /// A failed save is retried on every refresh, so a streak of failures
+    /// is logged once, and again only after a save succeeded.
+    fn save_memory(&mut self) {
+        if let Some(m) = self.memory.as_mut() {
+            match m.save() {
+                Ok(()) => self.memory_save_failing = false,
+                Err(e) => {
+                    if !self.memory_save_failing {
+                        crate::log::line("remembered", format!("could not save {}: {e}", m.path().display()));
+                    }
+                    self.memory_save_failing = true;
+                }
+            }
+        }
+    }
+
+    /// What was running when Maya last stopped and is not running now.
+    pub fn was_running(&self) -> Vec<Remembered> {
+        self.memory.as_ref().map(Memory::was_running).unwrap_or_default()
+    }
+
+    pub fn remembered_entry(&self, agent: Harness, session_id: &str) -> Option<Remembered> {
+        self.memory.as_ref()?.entry(agent, session_id)
+    }
+
+    /// Closed from its card (here or relayed from the main): forgotten at once.
+    pub fn session_closed(&mut self, agent: Harness, session_id: &str) {
+        if let Some(m) = self.memory.as_mut() {
+            m.closed(agent, session_id);
+        }
+        self.save_memory();
+    }
+
+    pub fn forget_remembered(&mut self, keys: &[Key]) {
+        if let Some(m) = self.memory.as_mut() {
+            m.forget(keys);
+        }
+        self.save_memory();
+    }
+
+    pub fn remembered_failed(&mut self, key: &Key, reason: &str) {
+        if let Some(m) = self.memory.as_mut() {
+            m.failed(key, reason);
+        }
+        self.save_memory();
+    }
+
+    /// This run's last sign of life, every `remembered::HEARTBEAT_MS`.
+    pub fn heartbeat(&mut self, now_ms: u64) {
+        if let Some(m) = self.memory.as_mut() {
+            m.heartbeat(now_ms);
+        }
+        self.save_memory();
     }
 }
 
@@ -804,7 +895,102 @@ mod tests {
         std::fs::write(agy.join("history.jsonl"), "{\"display\":\"/rename Fix CI\",\"timestamp\":3,\"workspace\":\"/x\",\"conversationId\":\"a1\",\"type\":\"slash_command\"}\n").unwrap();
         assert_eq!(store.refresh(1).iter().find(|c| c.session_id == "a1").unwrap().name, "Fix CI");
     }
+
+    fn claude_with_session(root: &Path) -> PathBuf {
+        let claude = root.join("claude");
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("maya")).unwrap();
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle"}"#).unwrap();
+        claude
+    }
+
+    #[test]
+    fn a_session_running_when_maya_stopped_is_offered_at_the_next_start() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = claude_with_session(t.path());
+        let mut first = Store::new(claude.clone()).with_alive(|_| true);
+        assert!(first.start_remembering(1_000).is_empty());
+        first.refresh(2_000);
+        first.heartbeat(30_000);
+        drop(first);
+        // The machine restarted: the session's process is gone.
+        let mut second = Store::new(claude).with_alive(|_| false);
+        let offered = second.start_remembering(400_000);
+        assert_eq!(offered.iter().map(|e| (e.session_id.as_str(), e.dir.as_str(), e.name.as_str())).collect::<Vec<_>>(), [("s7", "/Users/x/dev/eye", "eye-7")]);
+        second.refresh(401_000);
+        assert_eq!(second.was_running().len(), 1, "still offered while it is not running");
+        second.forget_remembered(&[(Harness::ClaudeCode, "s7".into())]);
+        assert!(second.was_running().is_empty());
+    }
+
+    #[test]
+    fn sessions_that_outlived_a_restart_of_maya_alone_are_not_offered() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = claude_with_session(t.path());
+        let mut first = Store::new(claude.clone()).with_alive(|_| true);
+        first.start_remembering(1_000);
+        first.refresh(2_000);
+        drop(first);
+        // Only Maya was quit and reopened: the session still runs.
+        let mut second = Store::new(claude).with_alive(|_| true);
+        assert_eq!(second.start_remembering(60_000).len(), 1, "judged before the first refresh");
+        second.refresh(61_000);
+        assert!(second.was_running().is_empty(), "it is live: nothing to resume");
+    }
+
+    #[test]
+    fn a_save_that_keeps_failing_is_logged_once_until_one_succeeds() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = claude_with_session(t.path());
+        let maya = claude.join("maya");
+        let path = crate::remembered::path_in(&claude);
+        let logged = || crate::log::lines().iter().filter(|l| l.source == "remembered" && l.text.starts_with(&format!("could not save {}", path.display()))).count();
+        // A file where the folder should be: every save fails.
+        std::fs::remove_dir_all(&maya).unwrap();
+        std::fs::write(&maya, "").unwrap();
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.start_remembering(1_000);
+        store.refresh(2_000);
+        store.heartbeat(30_000);
+        assert_eq!(logged(), 1, "one line for the whole streak, not one per refresh");
+        std::fs::remove_file(&maya).unwrap();
+        store.heartbeat(60_000);
+        assert!(path.exists(), "saved again once it can be");
+        std::fs::remove_dir_all(&maya).unwrap();
+        std::fs::write(&maya, "").unwrap();
+        store.heartbeat(90_000);
+        store.heartbeat(120_000);
+        assert_eq!(logged(), 2, "a new streak after a success is logged again, once");
+    }
+
+    #[test]
+    fn a_store_that_does_not_remember_writes_no_file() {
+        let t = tempfile::tempdir().unwrap();
+        let claude = claude_with_session(t.path());
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.refresh(1);
+        store.heartbeat(2);
+        store.session_closed(Harness::ClaudeCode, "s7");
+        assert!(!crate::remembered::path_in(&claude).exists());
+        assert!(store.was_running().is_empty());
+    }
+
+    #[test]
+    fn refresh_attaches_the_branch_and_a_claude_sessions_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("projects/-Users-x-dev-eye")).unwrap();
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle"}"#).unwrap();
+        std::fs::write(
+            claude.join("projects/-Users-x-dev-eye/s7.jsonl"),
+            r#"{"type":"assistant","message":{"model":"claude-opus-5[1m]","usage":{"input_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[{"type":"text","text":"hi"}]}}"#,
+        ).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        let card = store.refresh(1).remove(0);
+        assert_eq!(card.model.as_deref(), Some("claude-opus-5[1m]"));
+        assert_eq!(card.branch, None, "not looked up yet");
+        store.set_branch("/Users/x/dev/eye", Some("feat/x".into()));
+        assert_eq!(store.refresh(2)[0].branch.as_deref(), Some("feat/x"));
+    }
 }
-
-
-

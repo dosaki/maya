@@ -91,6 +91,11 @@ pub trait Executor: Send + Sync {
     fn agents(&self) -> Option<Vec<crate::agents::AgentInfo>> {
         None
     }
+    /// What was running on this machine when its Maya last stopped, for
+    /// the main's banner; `None` from a Maya that does not remember.
+    fn remembered(&self) -> Option<Vec<crate::remembered::Remembered>> {
+        None
+    }
 }
 
 /// What the client tells the app.
@@ -123,6 +128,8 @@ pub trait ClientNotify: Send + Sync {
     /// What the main said it can do at `welcome` (`CAP_VOICE`); empty for
     /// an older main. Called right after `mirror_offer`.
     fn main_caps(&self, _caps: &[String]) {}
+    /// The main's "was running" rows, just before `mirrored` with its board.
+    fn mirrored_remembered(&self, _rows: Vec<crate::remembered::RememberedRow>) {}
     /// A board from the main, or `allowed: false` once its switch went off.
     fn mirrored(&self, _allowed: bool, _cards: Vec<Card>, _machines: Vec<MachineInfo>) {}
     /// Where this Maya's requests to the main go out; `None` sends none.
@@ -562,7 +569,7 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
         if since.map_or(true, |d| d >= BOARD_GAP) && (board_wanted || refresh) {
             board_wanted = false;
             let (cards, dirs) = exec.board();
-            let frame = encode(&Up::Board { cards, dirs, agents: exec.agents() });
+            let frame = encode(&Up::Board { cards, dirs, agents: exec.agents(), remembered: exec.remembered() });
             if refresh || last_board.as_ref().map_or(true, |(_, f)| *f != frame) {
                 ch.send(&frame).map_err(|e| format!("Lost the connection to the main Maya: {e}"))?;
                 last_board = Some((Instant::now(), frame));
@@ -647,7 +654,10 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
             notify.moved(&host, port, &key).map_err(|e| format!("Could not follow the main Maya to {host}: {e}"))?;
             return Err(MOVED.into());
         }
-        Down::Mirror { allowed, cards, machines } => notify.mirrored(allowed, cards, machines),
+        Down::Mirror { allowed, cards, machines, remembered } => {
+            notify.mirrored_remembered(remembered);
+            notify.mirrored(allowed, cards, machines);
+        }
         Down::Response { id, ok, error, data } => match lane {
             Some(l) => l.resolve(id, if ok { Ok(data) } else { Err(error.unwrap_or_else(|| "The request failed.".into())) }),
             None => log::line("network", format!("main: response {id} with no request lane")),

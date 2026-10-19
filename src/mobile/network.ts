@@ -8,10 +8,14 @@ import { formatAge } from "../format";
 import { promoteLines } from "../promote";
 import type { NetworkStatus } from "../settings";
 import { showToast } from "../toast";
+import { setViewerTheme } from "../modal";
+import type { ViewerTheme } from "../types";
 
 export type { NetworkStatus } from "../settings";
 
 export interface NetworkModel {
+  /** The session viewer's look; chat when absent. */
+  viewerTheme?: ViewerTheme;
   status: NetworkStatus;
   /** The joined main's host and port, from the config. */
   mainHost: string;
@@ -33,6 +37,7 @@ export interface NetworkModel {
 }
 
 export interface NetworkHandlers {
+  onViewerTheme?(t: ViewerTheme): void;
   onSave(name: string, port: number): void;
   onStart(): void;
   onStop(): void;
@@ -233,6 +238,19 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
   voice.append(el("p", "settings__hint", "While Maya is on screen she reads out sessions that need you, and with the wake word on she listens for \"Maya\". She never listens with the app closed. Voice needs a desktop main."));
   root.append(voice);
 
+  const viewer = section("Session viewer");
+  const viewerSel = el("select", "");
+  viewerSel.name = "viewerTheme";
+  for (const [value, text] of [["chat", "Chat"], ["terminal", "Terminal"]] as const) {
+    const o = el("option", "", text);
+    o.value = value;
+    viewerSel.append(o);
+  }
+  viewerSel.value = m.viewerTheme ?? "chat";
+  viewerSel.addEventListener("change", () => h.onViewerTheme?.(viewerSel.value as ViewerTheme));
+  viewer.append(viewerSel);
+  root.append(viewer);
+
   const battery = section("Battery");
   battery.append(button("Keep Maya awake", "battery", h.onBattery));
   battery.append(el("p", "settings__hint", "Android may otherwise stop the server with the screen off."));
@@ -243,6 +261,7 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
 }
 
 interface ConfigView {
+  viewerTheme?: ViewerTheme;
   network: { name: string; port: number; mainHost?: string; mainPort?: number };
   notifyOnAwaiting: boolean;
   notifyOnCompleted: boolean;
@@ -340,6 +359,8 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     model.notifyCompleted = config.notifyOnCompleted;
     model.speak = config.speakNotifications ?? true;
     model.wakeWord = config.wakeWord ?? false;
+    model.viewerTheme = config.viewerTheme ?? "chat";
+    setViewerTheme(model.viewerTheme);
   };
   const saveConfig = async (edit: (c: ConfigView) => void) => {
     const full = await invoke<ConfigView>("get_config");
@@ -351,6 +372,8 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     model.notifyCompleted = config.notifyOnCompleted;
     model.speak = config.speakNotifications ?? true;
     model.wakeWord = config.wakeWord ?? false;
+    model.viewerTheme = config.viewerTheme ?? "chat";
+    setViewerTheme(model.viewerTheme);
   };
   const busy = async (f: () => Promise<void>) => {
     model.busy = true;
@@ -404,9 +427,12 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
       await loadConfig();
     }),
     onMirror: (id, on) => void busy(async () => setStatus(await invoke<NetworkStatus>("network_set_mirror", { id, on }))),
+    onViewerTheme: (t) => void busy(() => saveConfig((c) => { c.viewerTheme = t; })),
     onBattery: () => void invoke("request_battery_exemption").catch((e) => showToast(String(e))),
   };
   void listen<NetworkStatus>("network", (e) => setStatus(e.payload));
+  // The viewer's own toggle saved the look.
+  window.addEventListener("maya:config-changed", () => void loadConfig().then(paint).catch(() => undefined));
   void (async () => {
     await loadConfig();
     model.addresses = await invoke<string[]>("local_addresses").catch(() => []);

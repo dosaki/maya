@@ -69,9 +69,14 @@ impl Executor for CliExecutor {
             CommandKind::CycleMode { session } => done(actions::cycle_session_mode(&l, &session)),
             CommandKind::Slash { session, text } => done(actions::send_slash_command(&l, &session, &text)),
             CommandKind::Start { dir, prompt, options } => data(actions::start_session(&l, dir, prompt, options)),
-            CommandKind::Resume { dir, session, agent } => done(actions::resume_session(&l, agent, &dir, &session)),
+            CommandKind::Resume { dir, session, agent } => done(actions::resume_relayed(&l, agent, &dir, &session)),
             CommandKind::ListResumable { dir, agent } => data(actions::list_resumable_sessions(&l, agent, &dir)),
-            CommandKind::History { session } => data(actions::session_history(&l, &session)),
+            CommandKind::History { session } => data(actions::remote_history(&l, &session)),
+            CommandKind::Forget { sessions } => {
+                self.store.lock().unwrap().forget_remembered(&sessions);
+                self.board_due.store(true, Ordering::SeqCst);
+                Ok(None)
+            }
             // The client opens a handover itself (`client::handle`); it never reaches an executor.
             CommandKind::Promote { .. } => Err(maya_core::net::client::CANNOT_LEAD.into()),
         }
@@ -103,6 +108,10 @@ impl Executor for CliExecutor {
 
     fn agents(&self) -> Option<Vec<maya_core::agents::AgentInfo>> {
         Some(maya_core::agents::snapshot())
+    }
+
+    fn remembered(&self) -> Option<Vec<maya_core::remembered::Remembered>> {
+        Some(self.store.lock().unwrap().was_running())
     }
 }
 
@@ -168,6 +177,20 @@ mod tests {
         let ex = CliExecutor::new(Arc::new(store), fake.clone());
         assert_eq!(ex.execute(CommandKind::Compact { session: "s1".into() }), Ok(None));
         assert!(matches!(&fake.calls.lock().unwrap()[0], Call::Type { text, .. } if text == "/compact"));
+        drop(dir);
+    }
+
+    #[test]
+    fn the_main_is_told_what_was_running_here_when_maya_run_last_stopped() {
+        let (dir, store) = maya_core::actions::test_support::store_with_session("s1", 4242);
+        let claude = store.lock().unwrap().claude_dir().to_path_buf();
+        let path = maya_core::remembered::path_in(&claude);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"heartbeatMs":1000,"sessions":[{"agent":"claude-code","sessionId":"was","dir":"/Users/x/dev/eye","name":"eye-9","firstSeenMs":1,"lastSeenMs":900}]}"#).unwrap();
+        store.lock().unwrap().start_remembering(2_000);
+        let ex = CliExecutor::new(Arc::new(store), Arc::new(FakeTerminal::default()));
+        let offered = ex.remembered().expect("a CLI assistant reports what it remembers");
+        assert_eq!(offered.iter().map(|e| e.session_id.as_str()).collect::<Vec<_>>(), ["was"]);
         drop(dir);
     }
 }

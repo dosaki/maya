@@ -9,7 +9,8 @@ import { CLAUDE_AGENT, renderChoice, type AgentInfo } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
 import type { Progress } from "./progress";
 import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
-import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, remoteTitle, type Card, type Turn } from "./types";
+import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, prRef, remoteTitle, type Card, type Turn, type ViewerTheme } from "./types";
+import { renderToolTurn, resetToolUi } from "./toolturn";
 import { sendShortcut } from "./platform";
 
 /** Composer features the page turns on: the phone has a picker instead of drag-and-drop. */
@@ -17,6 +18,35 @@ const composer = { attachButton: false };
 
 export function setComposerOptions(o: Partial<typeof composer>): void {
   Object.assign(composer, o);
+}
+
+/** The toggle's title: the look it switches to. */
+export const THEME_TITLE: Record<ViewerTheme, string> = { chat: "Terminal look", terminal: "Chat look" };
+
+let theme: ViewerTheme = "chat";
+
+export function viewerTheme(): ViewerTheme {
+  return theme;
+}
+
+/** Sets the viewer's look; an open panel is redrawn at once. */
+export function setViewerTheme(t: ViewerTheme): void {
+  theme = t;
+  const root = document.querySelector<HTMLElement>("#modal-host .modal");
+  if (!root) return;
+  root.classList.toggle("modal--terminal", t === "terminal");
+  const toggle = root.querySelector<HTMLButtonElement>(".modal__theme");
+  if (toggle) {
+    toggle.title = THEME_TITLE[t];
+    toggle.setAttribute("aria-pressed", String(t === "terminal"));
+  }
+}
+
+/** Saves the look in this Maya's config, as Settings does, and tells Settings. */
+export async function saveViewerTheme(t: ViewerTheme): Promise<void> {
+  const config = await invoke<Record<string, unknown>>("get_config");
+  await invoke("set_config", { config: { ...config, viewerTheme: t } });
+  window.dispatchEvent(new CustomEvent("maya:config-changed"));
 }
 
 export interface ModalModel {
@@ -28,6 +58,8 @@ export interface ModalModel {
   next?: number;
   /** Files the next message will point the session at. */
   attachments?: Attachment[];
+  /** The viewer's look; chat when absent. */
+  theme?: ViewerTheme;
   /** The card's agent with its model list, for the Model and Effort pickers; absent until listed. */
   agent?: AgentInfo;
 }
@@ -41,6 +73,8 @@ export interface ModalHandlers {
   onSetOption(setting: "model" | "effort", value: string): void;
   /** Send Shift+Tab to the session to move it to its next permission mode. */
   onCycleMode(): void;
+  /** Switch between the chat and the terminal look. */
+  onToggleTheme?(): void;
   /** Open the session's pull request in the browser. */
   onOpenPr(): void;
   /** Give the session a new name (typed as `/rename`). */
@@ -420,8 +454,33 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return n;
 }
 
+/** "4s", "12m 4s", "1h 2m": how long a session has worked. A clock running ahead reads 0s. */
+export function workingFor(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** "✻ Working… (12m 4s)" while the session works, from `stateSince`; null otherwise. */
+export function workingText(card: Card, nowMs: number): string | null {
+  return card.state === "working" ? `✻ Working… (${workingFor(nowMs - card.stateSince)})` : null;
+}
+
+/** The terminal look's status line: model · folder · branch · PR · ctx %, each when known. */
+export function statusLine(card: Card): string {
+  const pr = card.pr ? `${card.pr.forge === "gitlab" ? "MR" : "PR"} ${prRef(card.pr)}` : null;
+  return [card.model, projectName(card.cwd), card.branch, pr, card.context ? `ctx ${card.context.percent}%` : null].filter(Boolean).join(" · ");
+}
+
+/** The chat look's part of it, beside the header's folder, PR and ctx %: model · branch. */
+export function headStatus(card: Card): string {
+  return [card.model, card.branch].filter(Boolean).join(" · ");
+}
+
 export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Date.now()): HTMLElement {
-  const root = el("div", "modal");
+  const root = el("div", m.theme === "terminal" ? "modal modal--terminal" : "modal");
   const backdrop = el("div", "modal__backdrop");
   const panel = el("section", "modal__panel");
   panel.setAttribute("role", "dialog");
@@ -461,13 +520,21 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
       titles.append(compact);
     }
   }
+  titles.append(el("span", "modal__statusline modal__statusline--head", headStatus(m.card)));
   const state = el("span", `modal__state modal__state--${m.card.state}`, STATE_LABEL[m.card.state]);
   const close = el("button", "modal__close", "×");
   close.type = "button";
   close.dataset.action = "close";
   close.setAttribute("aria-label", "Close");
   close.addEventListener("click", () => h.onClose());
-  head.append(titles, state, close);
+  const look = el("button", "modal__theme", ">_");
+  look.type = "button";
+  look.dataset.action = "theme";
+  look.title = THEME_TITLE[m.theme ?? "chat"];
+  look.setAttribute("aria-label", "Switch the viewer's look");
+  look.setAttribute("aria-pressed", String(m.theme === "terminal"));
+  look.addEventListener("click", () => h.onToggleTheme?.());
+  head.append(titles, state, look, close);
   panel.append(head);
 
   if (m.card.state === "awaiting") {
@@ -506,8 +573,15 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const history = el("div", "modal__history");
   if (m.turns.length === 0) history.append(el("div", "modal__empty", "No transcript found."));
   for (const t of m.turns) {
+    if (t.kind === "tool" && !t.notice) {
+      history.append(renderToolTurn(t));
+      continue;
+    }
     const kind = t.notice ? "notice" : t.kind;
     const turn = el("div", `turn turn--${kind}`);
+    // The terminal look's markers; the chat look hides them.
+    const mark = { user: ">", assistant: "⏺", tool: "⏺", peer: "", notice: "" }[kind];
+    if (mark) turn.append(el("span", "turn__mark", mark));
     const who = { user: "You", assistant: "Claude", peer: "From another session", tool: "", notice: "" }[kind];
     if (who) turn.append(el("div", "turn__who", who));
     const text = el("div", "turn__text");
@@ -516,6 +590,8 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     turn.append(text);
     history.append(turn);
   }
+  const working = workingText(m.card, nowMs);
+  if (working) history.append(el("div", "modal__working", working));
   history.addEventListener("click", (ev) => {
     const a = (ev.target as Element).closest("a[href]");
     if (!a) return;
@@ -532,6 +608,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const attachments = m.attachments ?? [];
     panel.append(renderChips(attachments, (path) => h.onRemoveAttachment?.(path)));
     const form = el("div", "modal__composer");
+    const prompt = el("span", "modal__prompt", ">");
     const ta = el("textarea", "modal__input");
     // Promise only the terminal lines this agent takes (see `caps`).
     const runs = [caps.slashLines && "/commands", caps.shellLines && "!shell lines"].filter(Boolean).join(" and ");
@@ -583,11 +660,12 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
       attach.type = "button";
       attach.dataset.action = "attach";
       attach.addEventListener("click", () => pick.click());
-      form.append(ta, pick, attach, send);
+      form.append(prompt, ta, pick, attach, send);
     } else {
-      form.append(ta, send);
+      form.append(prompt, ta, send);
     }
     panel.append(form);
+    panel.append(el("div", "modal__statusline modal__statusline--foot", statusLine(m.card)));
   }
   if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.warn ? "warn" : m.status.ok ? "ok" : "error"}`, m.status.text));
 
@@ -620,6 +698,8 @@ export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
   // A rename in progress keeps its input; otherwise the name follows the registry.
   if (!panel.querySelector(".modal__title-input")) swap(".modal__title");
   swap(".modal__state");
+  swap(".modal__statusline--head");
+  swap(".modal__statusline--foot");
   swap(".modal__banner", ".modal__history");
   swap(".modal__history");
   // The pickers arrive with the agent list, after the first paint; a choice
@@ -630,9 +710,23 @@ export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
   swap(".modal__status");
 }
 
-/** True when both lists hold the same turns in the same order. */
+/** True when both lists hold the same turns in the same order, tool results and diffs included. */
 export function sameTurns(a: Turn[], b: Turn[]): boolean {
-  return a.length === b.length && a.every((t, i) => t.kind === b[i].kind && t.text === b[i].text && !!t.notice === !!b[i].notice);
+  return a.length === b.length && a.every((t, i) => sameTurn(t, b[i]));
+}
+
+function sameTurn(a: Turn, b: Turn): boolean {
+  return (
+    a.kind === b.kind &&
+    a.text === b.text &&
+    !!a.notice === !!b.notice &&
+    (a.output ?? null) === (b.output ?? null) &&
+    (a.outputLines ?? 0) === (b.outputLines ?? 0) &&
+    !!a.isError === !!b.isError &&
+    (a.added ?? 0) === (b.added ?? 0) &&
+    (a.removed ?? 0) === (b.removed ?? 0) &&
+    JSON.stringify(a.diff ?? null) === JSON.stringify(b.diff ?? null)
+  );
 }
 
 /**
@@ -746,7 +840,9 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
 
   m.next = progress?.next(m.card) ?? 0;
   m.attachments = attachments.list();
+  m.theme = theme;
   const fresh = renderModal(m, {
+    onToggleTheme: () => void toggleTheme(),
     onSend: (text) => void guardedSend(text),
     onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
     onClose: dismiss,
@@ -828,6 +924,19 @@ async function cycleMode(): Promise<void> {
   }
 }
 
+/** The header toggle: the open panel switches at once; a failed save puts it back. */
+async function toggleTheme(): Promise<void> {
+  const before = theme;
+  const next: ViewerTheme = before === "terminal" ? "chat" : "terminal";
+  setViewerTheme(next);
+  try {
+    await saveViewerTheme(next);
+  } catch (e) {
+    setViewerTheme(before);
+    setStatus(false, String(e));
+  }
+}
+
 /** The status line after a reply, by how it reached the session. */
 export function replyStatus(route: "typed" | "inbox" | null): { ok: boolean; text: string; warn?: boolean } {
   if (route === "typed") return { ok: true, text: "Sent as you" };
@@ -903,6 +1012,7 @@ async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): 
 
 export async function openModal(card: Card): Promise<void> {
   closeModal();
+  resetToolUi();
   const keyHandler = (e: KeyboardEvent) => {
     if (e.key === "Escape") dismiss();
   };
@@ -938,6 +1048,14 @@ export function closeModal(): void {
 /** How often a working remote card's history is refetched when nothing on the card moved. */
 export const REMOTE_WORKING_REFETCH_MS = 3_000;
 
+/** Moves the open panel's working line on to `nowMs` without a repaint. */
+function tickWorking(nowMs: number): void {
+  if (!current) return;
+  const line = document.querySelector<HTMLElement>("#modal-host .modal__working");
+  const text = workingText(current.model.card, nowMs);
+  if (line && text) line.textContent = text;
+}
+
 /**
  * Whether a board refresh should refetch the open card's history. A local
  * card's is a cheap file read, so always; a remote card's is a round trip
@@ -965,6 +1083,7 @@ export function refreshModal(cards: Card[]): void {
     fresh.state !== current.model.card.state || fresh.stateSince !== current.model.card.stateSince || fresh.hasInbox !== current.model.card.hasInbox;
   const refetch = historyRefetchDue(current.model.card, fresh, current.lastRemoteFetchAt, Date.now());
   current.model.card = fresh;
+  tickWorking(Date.now());
   if (refetch) void loadTurns({ force: stateChanged });
   else if (stateChanged) paint();
 }

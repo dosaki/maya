@@ -13,6 +13,7 @@ import { closeModal, openModal, refreshModal, setComposerOptions, setOnDismiss, 
 import { closeNewSession, openNewSession } from "../newsession";
 import { nextEnableDelay } from "../options";
 import { makeProgress } from "../progress";
+import { initRemembered } from "../remembered";
 import { closeResume, openResume } from "../resume";
 import { makeTabs } from "../tabs";
 import { showToast } from "../toast";
@@ -173,11 +174,14 @@ async function start(): Promise<void> {
   void updates.init();
   void initDebug();
   // The column strip sits above the panes but belongs to the board: it goes when another pane shows.
+  const rememberedHost = document.getElementById("remembered");
+  if (rememberedHost) initRemembered(rememberedHost);
   tabs = makeTabs((tab) => {
     const strip = document.getElementById("strip-host");
     if (strip) strip.hidden = tab !== "sessions";
     const voice = document.getElementById("voice-host");
     if (voice) voice.hidden = tab !== "sessions";
+    if (rememberedHost) rememberedHost.hidden = tab !== "sessions";
   });
   void initVoice();
   const recheckNotifications = initNetwork((s) => {

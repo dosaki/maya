@@ -1,5 +1,6 @@
+import styles from "./styles.css?raw";
 import { describe, expect, it, vi } from "vitest";
-import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, replyStatus, setComposerOptions } from "./modal";
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -575,5 +576,110 @@ describe("renderModal notices and statuses", () => {
     const awaiting = { ...base, state: "awaiting" as const, awaiting: { kind: "permission" as const, detail: "Bash: git push", questions: [] } };
     const el = renderModal({ card: awaiting, turns: [], status: null, draft: "" }, handlers());
     expect(el.querySelector(".modal__banner")?.textContent).toContain("Answer it there before replying.");
+  });
+});
+
+describe("viewer theme", () => {
+  it("draws the terminal look's markers and prompt, the chat look without the class", () => {
+    const term = renderModal({ card: base, turns, status: null, draft: "", theme: "terminal" }, handlers());
+    expect(term.classList.contains("modal--terminal")).toBe(true);
+    expect([...term.querySelectorAll(".turn")].map((t) => t.querySelector(".turn__mark")?.textContent ?? "")).toEqual([">", "⏺", "⏺", ""]);
+    expect(term.querySelector(".modal__prompt")?.textContent).toBe(">");
+    const chat = renderModal({ card: base, turns, status: null, draft: "" }, handlers());
+    expect(chat.classList.contains("modal--terminal")).toBe(false);
+  });
+
+  it("hides the markers in the chat look and draws the terminal look's colours and font", () => {
+    expect(styles).toContain(".turn__mark, .modal__prompt { display: none; }");
+    expect(styles).toContain(".modal--terminal .turn__mark { display: inline;");
+    expect(styles).toContain(".modal--terminal .modal__panel { background: #0a0a0a; color: #e8e2d4; }");
+    expect(styles).toContain("ui-monospace, SFMono-Regular, Menlo, monospace");
+  });
+
+  it("keeps a multi-line tool call whole in one .turn__text, in both looks", () => {
+    const text = "Bash(cat <<EOF\nline two\nEOF)";
+    for (const theme of ["terminal", undefined] as const) {
+      const el = renderModal({ card: base, turns: [{ kind: "tool", text }], status: null, draft: "", theme }, handlers());
+      expect(el.querySelectorAll(".turn--tool .turn__text").length).toBe(1);
+      expect(el.querySelector(".turn--tool .turn__text")?.textContent).toBe(text);
+      expect(el.querySelector(".turn__result")).toBeNull();
+    }
+  });
+
+  it("the header toggle asks for the other look, titled for what it switches to", () => {
+    const h = { ...handlers(), onToggleTheme: vi.fn() };
+    const chat = renderModal({ card: base, turns, status: null, draft: "" }, h);
+    const toggle = chat.querySelector<HTMLButtonElement>("button[data-action=theme]")!;
+    expect(toggle.title).toBe("Terminal look");
+    toggle.click();
+    expect(h.onToggleTheme).toHaveBeenCalled();
+    expect(renderModal({ card: base, turns, status: null, draft: "", theme: "terminal" }, h).querySelector<HTMLButtonElement>("button[data-action=theme]")!.title).toBe("Chat look");
+  });
+
+  it("setViewerTheme redraws an open panel at once", () => {
+    const host = document.createElement("div");
+    host.id = "modal-host";
+    document.body.append(host);
+    host.append(renderModal({ card: base, turns, status: null, draft: "" }, handlers()));
+    setViewerTheme("terminal");
+    expect(host.querySelector(".modal")!.classList.contains("modal--terminal")).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>(".modal__theme")!.title).toBe("Chat look");
+    setViewerTheme("chat");
+    expect(host.querySelector(".modal")!.classList.contains("modal--terminal")).toBe(false);
+    host.remove();
+  });
+});
+
+describe("tool output in the viewer", () => {
+  it("draws a tool call with its result in both looks, through the one renderer", () => {
+    const t: Turn = { kind: "tool", text: "Bash(ls)", output: "a.rs\nb.rs", outputLines: 2 };
+    for (const theme of ["terminal", undefined] as const) {
+      const el = renderModal({ card: base, turns: [t], status: null, draft: "", theme }, handlers());
+      expect(el.querySelector(".turn--tool .turn__row")?.textContent).toBe("▸ Bash · ls");
+      expect(el.querySelector(".turn--tool .turn__text")?.textContent).toBe("Bash(ls)");
+      expect(el.querySelector(".turn--tool .turn__out")?.textContent).toBe("a.rs\nb.rs");
+    }
+  });
+});
+
+describe("working and status lines", () => {
+  const busy: Card = { ...base, state: "working", stateSince: 1_000, model: "claude-opus-5", branch: "feat/x", pr: { number: 12, url: "u", state: "open" }, context: { used: 84_000, window: 200_000, percent: 42 } };
+
+  it("says how long the session has worked", () => {
+    expect(workingFor(4_000)).toBe("4s");
+    expect(workingFor(724_000)).toBe("12m 4s");
+    expect(workingFor(3_725_000)).toBe("1h 2m");
+    expect(workingFor(-5_000)).toBe("0s");
+  });
+
+  it("shows ✻ Working… while the session works, in both looks", () => {
+    for (const theme of ["terminal", "chat"] as const) {
+      const el = renderModal({ card: busy, turns, status: null, draft: "", theme }, handlers(), 1_000 + 724_000);
+      expect(el.querySelector(".modal__history .modal__working")?.textContent).toBe("✻ Working… (12m 4s)");
+    }
+    expect(renderModal({ card: base, turns, status: null, draft: "" }, handlers()).querySelector(".modal__working")).toBeNull();
+  });
+
+  it("puts model · folder · branch · PR · ctx under the prompt, and model · branch in the header", () => {
+    expect(statusLine(busy)).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
+    expect(statusLine({ ...busy, pr: { number: 3, url: "u", state: "open", forge: "gitlab" } })).toBe("claude-opus-5 · eye · feat/x · MR !3 · ctx 42%");
+    expect(statusLine(base)).toBe("eye");
+    const el = renderModal({ card: busy, turns, status: null, draft: "", theme: "terminal" }, handlers(), 2_000);
+    expect(el.querySelector(".modal__composer + .modal__statusline--foot")?.textContent).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
+    expect(el.querySelector(".modal__titles .modal__statusline--head")?.textContent).toBe("claude-opus-5 · feat/x");
+  });
+
+  it("shows the foot in the terminal look and the header part in the chat look", () => {
+    expect(styles).toContain(".modal__statusline--foot { display: none; }");
+    expect(styles).toContain(".modal--terminal .modal__statusline--foot { display: block;");
+    expect(styles).toContain(".modal--terminal .modal__statusline--head { display: none; }");
+  });
+
+  it("a repaint carries the status lines and the working line along", () => {
+    const root = renderModal({ card: base, turns, status: null, draft: "" }, handlers());
+    patchModal(root, renderModal({ card: busy, turns, status: null, draft: "" }, handlers(), 2_000));
+    expect(root.querySelector(".modal__statusline--head")?.textContent).toBe("claude-opus-5 · feat/x");
+    expect(root.querySelector(".modal__statusline--foot")?.textContent).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
+    expect(root.querySelector(".modal__working")?.textContent).toBe("✻ Working… (1s)");
   });
 });

@@ -83,6 +83,8 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     let status = status_file::read(&maya_dir).expect("a status file while running");
     assert!(status.connected);
     assert_eq!(status.main_name.as_deref(), Some("Yhi"));
+    // The run remembers this machine's sessions, to offer them back after a restart.
+    wait_until("remembered", || std::fs::read_to_string(maya_core::remembered::path_in(&claude_dir)).is_ok_and(|t| t.contains(r#""sessionId": "s1""#)));
 
     // A second run, even in this same process, is refused while the first
     // holds the lock, and leaves the first's status file alone.

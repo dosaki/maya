@@ -11,6 +11,7 @@ import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
 import { makeReviewsView, OPEN_SETTINGS_GROUP, reviewActionFor, waitingCount } from "./reviews";
 import { filterCards, makeSessionSearch } from "./search";
+import { initRemembered } from "./remembered";
 import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
@@ -168,9 +169,12 @@ async function start(): Promise<void> {
   void maybeShowFirstRun();
   const searchHost = document.getElementById("session-search");
   if (searchHost) search = makeSessionSearch(searchHost, () => paint());
-  // The search box belongs to Sessions but sits outside the board pane.
+  const rememberedHost = document.getElementById("remembered");
+  if (rememberedHost) initRemembered(rememberedHost);
+  // The search box and the banner belong to Sessions but sit outside the board pane.
   tabs = makeTabs((tab) => {
     if (searchHost) searchHost.hidden = tab !== "sessions";
+    if (rememberedHost) rememberedHost.hidden = tab !== "sessions";
   });
   // Cmd+F (Ctrl+F) finds a session, unless a dialog is open over the board.
   window.addEventListener("keydown", (ev) => {

@@ -33,6 +33,8 @@ struct Entry {
 #[derive(Default)]
 pub struct PrCache {
     entries: HashMap<String, Entry>,
+    /// The branch checked out in each directory, from the same poll.
+    branches: HashMap<String, String>,
 }
 
 impl PrCache {
@@ -42,6 +44,22 @@ impl PrCache {
 
     pub fn set(&mut self, dir: &str, pr: Option<PullRequest>, now_ms: u64) {
         self.entries.insert(dir.to_string(), Entry { pr, checked_at: now_ms });
+    }
+
+    pub fn branch(&self, dir: &str) -> Option<String> {
+        self.branches.get(dir).cloned()
+    }
+
+    /// None: detached, or not a repo.
+    pub fn set_branch(&mut self, dir: &str, branch: Option<String>) {
+        match branch {
+            Some(b) => {
+                self.branches.insert(dir.to_string(), b);
+            }
+            None => {
+                self.branches.remove(dir);
+            }
+        }
     }
 
     /// The directories among `dirs` never looked up, or looked up over `TTL_MS` ago.
@@ -55,11 +73,13 @@ impl PrCache {
     /// Forgets everything, so every directory is looked up again.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.branches.clear();
     }
 
     /// Forgets directories not in `live`.
     pub fn retain(&mut self, live: &[String]) {
         self.entries.retain(|d, _| live.contains(d));
+        self.branches.retain(|d, _| live.contains(d));
     }
 }
 
@@ -131,5 +151,21 @@ mod tests {
         c.set("/a", None, 1000);
         c.clear();
         assert_eq!(c.due(&["/a".to_string()], 1000), vec!["/a".to_string()]);
+    }
+
+    #[test]
+    fn branches_are_kept_by_directory_and_forgotten_with_it() {
+        let mut c = PrCache::default();
+        c.set_branch("/a", Some("feat/x".into()));
+        assert_eq!(c.branch("/a").as_deref(), Some("feat/x"));
+        c.set_branch("/a", None);
+        assert_eq!(c.branch("/a"), None, "detached or not a repo");
+        c.set_branch("/a", Some("main".into()));
+        c.set_branch("/b", Some("dev".into()));
+        c.retain(&["/b".to_string()]);
+        assert_eq!(c.branch("/a"), None);
+        assert_eq!(c.branch("/b").as_deref(), Some("dev"));
+        c.clear();
+        assert_eq!(c.branch("/b"), None);
     }
 }

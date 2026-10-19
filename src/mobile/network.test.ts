@@ -250,4 +250,14 @@ describe("the Voice card", () => {
     expect(h.onSwitch).toHaveBeenCalledWith("wakeWord", true);
     expect(el.textContent).toContain("experimental");
   });
+  it("offers the viewer's look and saves the choice", () => {
+    const h = { ...handlers(), onViewerTheme: vi.fn() };
+    const el = renderNetwork({ ...base, viewerTheme: "terminal" }, h, NOW);
+    expect(el.textContent).toContain("Session viewer");
+    const sel = el.querySelector<HTMLSelectElement>("select[name=viewerTheme]")!;
+    expect(sel.value).toBe("terminal");
+    sel.value = "chat";
+    sel.dispatchEvent(new Event("change"));
+    expect(h.onViewerTheme).toHaveBeenCalledWith("chat");
+  });
 });

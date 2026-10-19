@@ -2,6 +2,7 @@
 //! over the `Terminal` seam. The app and the CLI share these bodies; routing
 //! to another machine stays with the caller.
 
+use crate::remembered::{Key, Remembered};
 use crate::store::{now_ms, Store};
 use crate::terminal::Terminal;
 use crate::{answer, foreign, inbox, launch, model, resume, transcript, tty};
@@ -299,6 +300,8 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
     if !exited(pid) {
         return Err(format!("{} did not exit; the terminal was left open.", launch::label(harness)));
     }
+    // Closed by the user from its card: not one to offer after a restart.
+    l.store.lock().unwrap().session_closed(harness, session_id);
     let mut last = "nothing else is attached to its terminal".to_string();
     for key in &after {
         match l.terminal.type_line(key, "exit") {
@@ -506,6 +509,12 @@ pub fn session_history(l: &Local, session_id: &str) -> Result<Vec<transcript::Tu
     }
 }
 
+/// A session's history as a reply to another machine: tool output and
+/// diffs cut to `transcript::REMOTE_OUTPUT_LINES` lines.
+pub fn remote_history(l: &Local, session_id: &str) -> Result<Vec<transcript::Turn>, String> {
+    session_history(l, session_id).map(transcript::for_remote)
+}
+
 /// The folders of the projects directory.
 pub fn list_project_dirs(l: &Local) -> Result<Vec<String>, String> {
     let root = projects_root(&l.store.lock().unwrap())?;
@@ -650,6 +659,102 @@ pub fn resume_session(l: &Local, agent: model::Harness, dir: &str, session_id: &
         return Err("No such session in that folder.".into());
     }
     l.terminal.open(&resume::resume_command(agent, &path, session_id), &path, &tmux_label()).map(|_| ())
+}
+
+/// Why a remembered session could not be resumed, as the banner words it.
+pub const FOLDER_MISSING: &str = "folder missing";
+pub const SESSION_GONE: &str = "the agent no longer has that session";
+
+fn not_installed(agent: model::Harness) -> String {
+    format!("{} is not installed", launch::label(agent))
+}
+
+/// Reopens remembered sessions, each in its own folder and terminal with
+/// its own conversation, oldest first (so the newest ends up in front),
+/// `RESUME_GAP_MS` apart. One already live is skipped. Unlike
+/// `resume_session` the folder need not be under the projects directory:
+/// Maya recorded it, and it must still be an absolute path to a directory.
+/// Successes leave the "was running" list; failures stay with their reason.
+pub fn resume_remembered(l: &Local, entries: &[Remembered]) -> Vec<(Key, Result<(), String>)> {
+    resume_remembered_with(l, entries, &mut |d| std::thread::sleep(d))
+}
+
+/// `resume_remembered` with `pause`, which waits between two terminals.
+fn resume_remembered_with(l: &Local, entries: &[Remembered], pause: &mut dyn FnMut(Duration)) -> Vec<(Key, Result<(), String>)> {
+    let mut order: Vec<&Remembered> = entries.iter().collect();
+    order.sort_by_key(|e| e.last_seen_ms);
+    let (dirs, running, agents, service) = {
+        let store = l.store.lock().unwrap();
+        (store.agent_dirs(), store.live_session_ids(), store.agents_source(), store.opencode_service())
+    };
+    // Listing the agents can take seconds: only when one beyond Claude Code is asked for.
+    let installed: Vec<model::Harness> = if order.iter().any(|e| e.agent != model::Harness::ClaudeCode) { agents().into_iter().map(|a| a.harness).collect() } else { vec![] };
+    let mut opened = false;
+    let mut out = Vec::with_capacity(order.len());
+    for e in order {
+        let result = match resume_one(e, &dirs, &running, &installed, service.as_ref()) {
+            // Already live: nothing to open.
+            Ok(None) => Ok(()),
+            Ok(Some(path)) => {
+                if opened {
+                    pause(Duration::from_millis(crate::remembered::RESUME_GAP_MS));
+                }
+                opened = true;
+                l.terminal.open(&resume::resume_command(e.agent, &path, &e.session_id), &path, &tmux_label()).map(|_| ())
+            }
+            Err(why) => Err(why),
+        };
+        if let Err(why) = &result {
+            crate::log::line("remembered", format!("could not resume {} ({}): {why}", e.name, e.session_id));
+        }
+        out.push((e.key(), result));
+    }
+    let mut store = l.store.lock().unwrap();
+    for (key, result) in &out {
+        match result {
+            Ok(()) => store.forget_remembered(std::slice::from_ref(key)),
+            Err(why) => store.remembered_failed(key, why),
+        }
+    }
+    out
+}
+
+/// The folder to resume `e` in, `None` when it is already live, or why it cannot be.
+fn resume_one(e: &Remembered, dirs: &resume::AgentDirs, running: &[String], installed: &[model::Harness], service: Option<&crate::opencode::Service>) -> Result<Option<PathBuf>, String> {
+    if running.iter().any(|id| *id == e.session_id) {
+        return Ok(None);
+    }
+    if !resume::plain_session_id(&e.session_id) {
+        return Err(SESSION_GONE.into());
+    }
+    let path = PathBuf::from(&e.dir);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err(FOLDER_MISSING.into());
+    }
+    if e.agent == model::Harness::Other || (e.agent != model::Harness::ClaudeCode && !installed.contains(&e.agent)) {
+        return Err(not_installed(e.agent));
+    }
+    let known = match (e.agent, service) {
+        // OpenCode's sessions live in its server, which a restart stopped:
+        // the id Maya recorded is trusted.
+        (model::Harness::OpenCode, None) => true,
+        (model::Harness::OpenCode, Some(s)) => crate::opencode::resumable(&crate::opencode::Client::new(s), &e.dir, running).iter().any(|r| r.id == e.session_id),
+        _ => resume::list_sessions(e.agent, dirs, &e.dir, running).iter().any(|r| r.id == e.session_id),
+    };
+    if !known {
+        return Err(SESSION_GONE.into());
+    }
+    Ok(Some(path))
+}
+
+/// A `Resume` from the main: a remembered session when `dir` is the
+/// absolute folder this Maya recorded for it, else a project folder's.
+pub fn resume_relayed(l: &Local, agent: model::Harness, dir: &str, session_id: &str) -> Result<(), String> {
+    let remembered = l.store.lock().unwrap().remembered_entry(agent, session_id).filter(|e| e.dir == dir);
+    match remembered {
+        Some(e) => resume_remembered(l, &[e]).into_iter().next().map_or(Ok(()), |(_, r)| r),
+        None => resume_session(l, agent, dir, session_id),
+    }
 }
 
 /// Opens a terminal reviewing `pr` with Maya's agent: in the project
@@ -827,7 +932,7 @@ mod tests {
 
     /// A working session's card, under the agent's own name.
     fn test_card(id: &str, harness: Harness, cwd: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state: State::Working, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None }
+        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state: State::Working, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None }
     }
 
     /// Codex rollout lines: a turn starting, and that turn finished with a reply.
@@ -1495,6 +1600,22 @@ mod tests {
     }
 
     #[test]
+    fn closing_from_the_card_forgets_the_session_at_once() {
+        let (dir, store) = store_with_session("s1", 4242);
+        {
+            let mut s = store.lock().unwrap();
+            s.start_remembering(1);
+            s.refresh(2);
+            assert!(s.remembered_entry(Harness::ClaudeCode, "s1").is_some());
+        }
+        let t = FakeTerminal::default();
+        close_session_with(&Local { store: &store, terminal: &t }, "s1", |_| true).unwrap();
+        assert!(store.lock().unwrap().remembered_entry(Harness::ClaudeCode, "s1").is_none());
+        let file = std::fs::read_to_string(crate::remembered::path_in(dir.path())).unwrap();
+        assert!(!file.contains("\"s1\""), "{file}");
+    }
+
+    #[test]
     fn close_types_exit_into_claude_then_exit_into_the_shell_once_claude_has_gone() {
         let (dir, store) = store_with_session("s1", 4242);
         let t = FakeTerminal::default();
@@ -1705,6 +1826,25 @@ mod tests {
     }
 
     #[test]
+    fn a_history_for_another_machine_cuts_tool_output_to_40_lines() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let s = store.lock().unwrap().session("s1").unwrap();
+        let path = store.lock().unwrap().transcript_path_for(&s);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let out = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let call = serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"seq 100"}}]}});
+        let result = serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b1","content":out}]}});
+        std::fs::write(&path, format!("{call}\n{result}\n")).unwrap();
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let here = session_history(&l, "s1").unwrap();
+        assert_eq!(here[0].output.as_deref().unwrap().lines().count(), 100);
+        let there = remote_history(&l, "s1").unwrap();
+        assert_eq!(there[0].output.as_deref().unwrap().lines().count(), transcript::REMOTE_OUTPUT_LINES);
+        assert_eq!(there[0].output_lines, 100, "the page still says how many lines there were");
+    }
+
+    #[test]
     fn a_peer_message_in_the_history_stays_a_peer_turn() {
         let (_d, store) = store_with_session("s1", 4242);
         let s = store.lock().unwrap().session("s1").unwrap();
@@ -1714,7 +1854,7 @@ mod tests {
         std::fs::write(&path, format!("{line}\n")).unwrap();
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        assert_eq!(session_history(&l, "s1").unwrap(), vec![transcript::Turn { kind: transcript::TurnKind::Peer, text: "hello".into() }]);
+        assert_eq!(session_history(&l, "s1").unwrap(), vec![transcript::Turn::new(transcript::TurnKind::Peer, "hello".into())]);
     }
 
     #[test]
@@ -1744,5 +1884,125 @@ mod tests {
         assert_eq!(send_reply(&l, "s1", "\x1b[31m"), Err("Message is empty.".into()));
         assert_eq!(send_reply(&l, "s1", "\x1b[31m\n\t\n"), Err("Message is empty.".into()));
         assert!(fake.calls.lock().unwrap().is_empty(), "not even a bare Enter");
+    }
+    use crate::remembered::Remembered;
+
+    /// A temp `~/.claude` and a folder `elsewhere/<name>` outside any projects directory.
+    fn away_from_projects(name: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let t = tempfile::tempdir().unwrap();
+        let claude = t.path().join("claude");
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("maya")).unwrap();
+        let dir = t.path().join("elsewhere").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        (t, claude, dir)
+    }
+
+    /// Claude Code's transcript for `id` in `dir`: the agent knows the session.
+    fn knows(claude: &Path, dir: &Path, id: &str) {
+        let folder = claude.join("projects").join(crate::registry::project_dir_name(&dir.to_string_lossy()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(format!("{id}.jsonl")), "{\"type\":\"custom-title\",\"customTitle\":\"t\"}\n").unwrap();
+    }
+
+    fn was(agent: Harness, id: &str, dir: &Path, last_seen_ms: u64) -> Remembered {
+        Remembered { agent, session_id: id.into(), dir: dir.to_string_lossy().into_owned(), name: format!("{id}-name"), first_seen_ms: 1, last_seen_ms, gone_at_ms: None, offered: false, offered_at_ms: None, error: None }
+    }
+
+    /// A store whose last run left `entries` running when it stopped.
+    fn after_restart(claude: &Path, entries: Vec<Remembered>) -> Mutex<Store> {
+        let record = serde_json::json!({ "heartbeatMs": 10_000, "sessions": entries });
+        std::fs::write(crate::remembered::path_in(claude), record.to_string()).unwrap();
+        let mut store = Store::new(claude.to_path_buf()).with_alive(|_| true);
+        store.start_remembering(20_000);
+        Mutex::new(store)
+    }
+
+    fn opened(fake: &FakeTerminal) -> Vec<(String, PathBuf)> {
+        fake.calls.lock().unwrap().iter().filter_map(|c| match c { Call::Open { command, cwd, .. } => Some((command.clone(), cwd.clone())), _ => None }).collect()
+    }
+
+    #[test]
+    fn remembered_sessions_reopen_oldest_first_400_ms_apart_outside_the_projects_directory() {
+        let (_t, claude, dir) = away_from_projects("calibre");
+        knows(&claude, &dir, "new1");
+        knows(&claude, &dir, "old1");
+        let store = after_restart(&claude, vec![was(Harness::ClaudeCode, "new1", &dir, 9_000), was(Harness::ClaudeCode, "old1", &dir, 5_000)]);
+        assert!(store.lock().unwrap().config.projects_dir_path().is_none(), "no projects directory at all");
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let entries = store.lock().unwrap().was_running();
+        let mut waits = Vec::new();
+        let out = resume_remembered_with(&l, &entries, &mut |d| waits.push(d));
+        assert_eq!(out, vec![((Harness::ClaudeCode, "old1".to_string()), Ok(())), ((Harness::ClaudeCode, "new1".to_string()), Ok(()))]);
+        let opened = opened(&fake);
+        assert!(opened[0].0.ends_with("claude --resume 'old1'") && opened[1].0.ends_with("claude --resume 'new1'"), "{opened:?}");
+        assert!(opened.iter().all(|(_, cwd)| *cwd == dir), "each in its own folder");
+        assert_eq!(waits, [Duration::from_millis(400)], "one pause, between the two");
+        assert!(store.lock().unwrap().was_running().is_empty(), "resumed: no longer offered");
+    }
+
+    #[test]
+    fn a_live_session_is_skipped_and_failures_stay_offered_with_their_reason() {
+        let (_t, claude, dir) = away_from_projects("app");
+        write_session(&claude, "live1", 4242, &dir.to_string_lossy());
+        let gone = dir.parent().unwrap().join("deleted");
+        let store = after_restart(&claude, vec![was(Harness::ClaudeCode, "live1", &dir, 1), was(Harness::ClaudeCode, "lost", &gone, 2), was(Harness::ClaudeCode, "nolog", &dir, 3), was(Harness::Codex, "cx1", &dir, 4)]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let entries = store.lock().unwrap().was_running();
+        let out: Vec<(String, Result<(), String>)> = resume_remembered_with(&l, &entries, &mut |_| ()).into_iter().map(|((_, id), r)| (id, r)).collect();
+        assert_eq!(
+            out,
+            vec![
+                ("live1".to_string(), Ok(())),
+                ("lost".to_string(), Err("folder missing".to_string())),
+                ("nolog".to_string(), Err("the agent no longer has that session".to_string())),
+                ("cx1".to_string(), Err("Codex is not installed".to_string())),
+            ]
+        );
+        assert!(opened(&fake).is_empty());
+        let left: Vec<(String, Option<String>)> = store.lock().unwrap().was_running().into_iter().map(|e| (e.session_id, e.error)).collect();
+        assert_eq!(
+            left,
+            vec![
+                ("lost".to_string(), Some("folder missing".to_string())),
+                ("nolog".to_string(), Some("the agent no longer has that session".to_string())),
+                ("cx1".to_string(), Some("Codex is not installed".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_folder_with_a_quote_is_quoted_and_a_file_or_relative_path_is_missing() {
+        let (_t, claude, dir) = away_from_projects("it's mine");
+        knows(&claude, &dir, "q1");
+        let file = dir.parent().unwrap().join("notes.txt");
+        std::fs::write(&file, "x").unwrap();
+        let relative = Remembered { dir: "elsewhere/it's mine".into(), ..was(Harness::ClaudeCode, "rel", &dir, 3) };
+        let store = after_restart(&claude, vec![was(Harness::ClaudeCode, "q1", &dir, 1), was(Harness::ClaudeCode, "f1", &file, 2), relative]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let entries = store.lock().unwrap().was_running();
+        let out = resume_remembered_with(&l, &entries, &mut |_| ());
+        assert_eq!(out[0].1, Ok(()));
+        assert_eq!(out[1].1, Err(FOLDER_MISSING.to_string()), "a file is not a folder");
+        assert_eq!(out[2].1, Err(FOLDER_MISSING.to_string()), "a relative path is never run");
+        let opened = opened(&fake);
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].0, format!("cd {} && claude --resume 'q1'", crate::launch::shell_single_quote(&dir.to_string_lossy())));
+    }
+
+    #[test]
+    fn a_relayed_resume_of_a_remembered_folder_resumes_it_and_a_project_name_goes_the_usual_way() {
+        let (_t, claude, dir) = away_from_projects("calibre");
+        knows(&claude, &dir, "r1");
+        let store = after_restart(&claude, vec![was(Harness::ClaudeCode, "r1", &dir, 1)]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        resume_relayed(&l, Harness::ClaudeCode, &dir.to_string_lossy(), "r1").unwrap();
+        assert_eq!(opened(&fake).len(), 1);
+        assert!(store.lock().unwrap().was_running().is_empty());
+        assert_eq!(resume_relayed(&l, Harness::ClaudeCode, "calibre", "r2").unwrap_err(), "Set a projects directory in Settings first.");
     }
 }

@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { makeSendGuard, sameTurns } from "./modal";
+import type { Turn } from "./types";
 
 describe("sameTurns", () => {
   it("compares turn lists by content", () => {
     expect(sameTurns([{ kind: "user", text: "a" }], [{ kind: "user", text: "a" }])).toBe(true);
     expect(sameTurns([{ kind: "user", text: "a" }], [{ kind: "peer", text: "a" }])).toBe(false);
     expect(sameTurns([], [{ kind: "user", text: "a" }])).toBe(false);
+  });
+
+  it("sees a tool result that landed after its call, and a changed diff", () => {
+    const call: Turn = { kind: "tool", text: "Bash(ls)" };
+    expect(sameTurns([call], [{ ...call, output: "a.rs", outputLines: 1 }])).toBe(false);
+    expect(sameTurns([{ ...call, output: "x" }], [{ ...call, output: "x", isError: true }])).toBe(false);
+    const d: Turn = { kind: "tool", text: "Edit(/a)", diff: [{ op: "add", line: 1, text: "a" }], added: 1, removed: 0 };
+    expect(sameTurns([d], [{ ...d, diff: [{ op: "add", line: 1, text: "b" }] }])).toBe(false);
+    expect(sameTurns([d], [{ ...d }])).toBe(true);
   });
 });
 

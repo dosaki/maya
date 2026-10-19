@@ -94,32 +94,104 @@ pub fn parse_tail(text: &str) -> ForeignTail {
     t
 }
 
-/// User and assistant messages, newest last, skipping developer prompts and
-/// the environment preamble Codex injects as a user message.
+/// User and assistant messages and tool calls with their output, newest
+/// last, skipping developer prompts and the environment preamble Codex
+/// injects as a user message. Tool calls do not count against `max_turns`.
 pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
-    let mut out = Vec::new();
+    let mut out: Vec<Turn> = Vec::new();
+    // Where each call's turn sits, by its call_id, for its output.
+    let mut calls: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if v["type"].as_str() != Some("response_item") || v["payload"]["type"].as_str() != Some("message") {
+        if v["type"].as_str() != Some("response_item") {
             continue;
         }
         let p = &v["payload"];
-        let kind = match p["role"].as_str() {
-            Some("user") => TurnKind::User,
-            Some("assistant") => TurnKind::Assistant,
-            _ => continue,
-        };
-        let text: String = p["content"].as_array().map(|c| c.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
-        let text = text.trim();
-        if text.is_empty() || text.starts_with("<environment_context>") {
-            continue;
+        match p["type"].as_str() {
+            Some("message") => {
+                let kind = match p["role"].as_str() {
+                    Some("user") => TurnKind::User,
+                    Some("assistant") => TurnKind::Assistant,
+                    _ => continue,
+                };
+                let text: String = p["content"].as_array().map(|c| c.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+                let text = text.trim();
+                if text.is_empty() || text.starts_with("<environment_context>") {
+                    continue;
+                }
+                out.push(Turn::new(kind, text.to_string()));
+            }
+            Some("function_call" | "custom_tool_call") => {
+                if let Some(id) = p["call_id"].as_str() {
+                    calls.insert(id.to_string(), out.len());
+                }
+                out.push(Turn::new(TurnKind::Tool, call_line(p)));
+            }
+            Some("function_call_output" | "custom_tool_call_output") => {
+                let Some(&i) = p["call_id"].as_str().and_then(|id| calls.get(id)) else { continue };
+                let (text, failed) = call_output(p);
+                out[i].is_error = failed;
+                out[i].set_output(&text);
+            }
+            _ => {}
         }
-        out.push(Turn { kind, text: text.to_string() });
     }
-    if out.len() > max_turns {
-        out.drain(..out.len() - max_turns);
+    crate::transcript::keep_last_messages(out, max_turns)
+}
+
+/// `name(arg)` for a Codex tool call: a shell call's command line, a
+/// patch's file, else the input's first line; just the name without one.
+fn call_line(p: &Value) -> String {
+    let name = p["name"].as_str().unwrap_or("tool");
+    let args: Value = p["arguments"].as_str().and_then(|a| serde_json::from_str(a).ok()).unwrap_or(Value::Null);
+    let input = p["input"].as_str().unwrap_or("");
+    let arg = shell_line(&args["command"])
+        .or_else(|| args["cmd"].as_str().map(str::to_string))
+        .or_else(|| args["path"].as_str().map(str::to_string))
+        .or_else(|| patch_file(input))
+        .or_else(|| input.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string));
+    match arg.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+        Some(a) => format!("{name}({})", crate::state::truncate(a, 120)),
+        None => name.to_string(),
     }
-    out
+}
+
+/// The command a shell call runs: `["bash", "-lc", "ls"]` is the line `ls`;
+/// other argument lists are joined with spaces.
+fn shell_line(command: &Value) -> Option<String> {
+    match command {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(parts) => {
+            let parts: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
+            match parts.as_slice() {
+                [shell, flag, line] if shell.ends_with("sh") && flag.starts_with('-') && flag.ends_with('c') => Some(line.to_string()),
+                _ => Some(parts.join(" ")).filter(|s| !s.is_empty()),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The file an `apply_patch` input changes, from its first `*** … File:` line.
+fn patch_file(input: &str) -> Option<String> {
+    input
+        .lines()
+        .find_map(|l| ["*** Update File: ", "*** Add File: ", "*** Delete File: "].iter().find_map(|p| l.strip_prefix(*p)))
+        .map(|f| f.trim().to_string())
+}
+
+/// A tool call's output text and whether it failed. Older rollouts wrap it
+/// as `{"output": …, "metadata": {"exit_code": n}}`; newer ones lead with
+/// `Exit code: n`.
+fn call_output(p: &Value) -> (String, bool) {
+    let raw = p["output"].as_str().unwrap_or("");
+    if let Ok(v) = serde_json::from_str::<Value>(raw) {
+        if let Some(out) = v["output"].as_str() {
+            return (out.to_string(), v["metadata"]["exit_code"].as_i64().is_some_and(|c| c != 0));
+        }
+    }
+    let code = raw.lines().next().and_then(|l| l.strip_prefix("Exit code: ")).and_then(|c| c.trim().parse::<i64>().ok());
+    (raw.to_string(), code.is_some_and(|c| c != 0))
 }
 
 /// The latest thread name recorded for `id` in `session_index.jsonl` text.
@@ -311,5 +383,40 @@ mod tests {
         assert_eq!(found.0, "aaa");
         assert!(found.1.ends_with("rollout-2026-09-29T08-00-00-aaa.jsonl"));
         assert!(live_rollout_for(codex, "/Users/x/dev/three").is_none());
+    }
+
+    #[test]
+    fn tool_calls_carry_their_output_and_a_failed_exit_code() {
+        let text = concat!(
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"list files"}]}}"#, "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"ls\"],\"workdir\":\"/x\"}","call_id":"call_1"}}"#, "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"{\"output\":\"a.rs\\nb.rs\\n\",\"metadata\":{\"exit_code\":0,\"duration_seconds\":0.1}}"}}"#, "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat nope\"}","call_id":"call_2"}}"#, "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_2","output":"Exit code: 1\nWall time: 0.1 seconds\nOutput:\ncat: nope: No such file or directory\n"}}"#, "\n",
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch\n*** Update File: src/a.rs\n@@\n-x\n+y\n*** End Patch","call_id":"call_3"}}"#, "\n",
+            r#"{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_3","output":"Success. Updated the following files:\nM src/a.rs\n"}}"#, "\n",
+            r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_from_before_the_tail","output":"lost"}}"#, "\n",
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Two files."}]}}"#, "\n",
+        );
+        let turns = parse_turns(text, 30);
+        let got: Vec<(TurnKind, &str, Option<&str>, bool)> = turns.iter().map(|t| (t.kind, t.text.as_str(), t.output.as_deref(), t.is_error)).collect();
+        assert_eq!(got, vec![
+            (TurnKind::User, "list files", None, false),
+            (TurnKind::Tool, "shell(ls)", Some("a.rs\nb.rs"), false),
+            (TurnKind::Tool, "exec_command(cat nope)", Some("Exit code: 1\nWall time: 0.1 seconds\nOutput:\ncat: nope: No such file or directory"), true),
+            (TurnKind::Tool, "apply_patch(src/a.rs)", Some("Success. Updated the following files:\nM src/a.rs"), false),
+            (TurnKind::Assistant, "Two files.", None, false),
+        ]);
+    }
+
+    #[test]
+    fn tool_calls_do_not_push_codex_messages_out() {
+        let mut text = String::from(r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}}"#);
+        for i in 0..40 {
+            text.push_str(&format!("\n{{\"type\":\"response_item\",\"payload\":{{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":\"{{\\\"cmd\\\":\\\"echo {i}\\\"}}\",\"call_id\":\"c{i}\"}}}}"));
+        }
+        let turns = parse_turns(&text, 2);
+        assert_eq!(turns.len(), 41, "the one message and every call after it");
+        assert_eq!(turns[0].text, "go");
     }
 }

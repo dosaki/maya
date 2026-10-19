@@ -18,7 +18,7 @@ use maya_core::net::client::{self, ClientNotify};
 use maya_core::net::identity;
 use maya_core::store::Store;
 use maya_core::terminal::Terminal;
-use maya_core::{actions, hook_install, log, now_ms, watcher};
+use maya_core::{actions, hook_install, log, now_ms, remembered, watcher};
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,6 +82,9 @@ pub fn startup_warnings(config: &Config, hooks_installed: bool, jq_found: bool) 
     }
     out
 }
+
+/// How often the heartbeat thread looks at the stop flag.
+const HEARTBEAT_TICK: Duration = Duration::from_secs(1);
 
 static STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
@@ -198,6 +201,9 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
     for w in startup_warnings(&store.config, matches!(hook_install::status(claude_dir), Ok(true)), jq_found()) {
         log::line("cli", w);
     }
+    // Before the first refresh: what the last run left is judged against its heartbeat.
+    let offered = store.start_remembering(now_ms());
+    log::line("cli", format!("{} sessions were running when maya run last stopped", offered.len()));
 
     let store = Arc::new(Mutex::new(store));
     let exec = Arc::new(CliExecutor::new(store.clone(), terminal));
@@ -224,6 +230,20 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
                     stop.store(true, Ordering::SeqCst);
                 }
             })
+        });
+    }
+    {
+        // This run's sign of life, every `remembered::HEARTBEAT_MS`, until it stops.
+        let (s, stop) = (store.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut tick: u64 = 0;
+            while !stop.load(Ordering::SeqCst) {
+                std::thread::sleep(HEARTBEAT_TICK);
+                tick += 1;
+                if remembered::heartbeat_due(tick, HEARTBEAT_TICK.as_millis() as u64) {
+                    s.lock().unwrap().heartbeat(now_ms());
+                }
+            }
         });
     }
     let config_of = {

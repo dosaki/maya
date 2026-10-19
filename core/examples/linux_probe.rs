@@ -27,7 +27,7 @@ fn main() {
         machine_address: None,
         machine_platform: None,
         terminal: None,
-        stale: false, model: None
+        stale: false, model: None, branch: None
     };
 
     println!("notify::notify(&card, false)");

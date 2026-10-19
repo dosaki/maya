@@ -30,6 +30,7 @@ use super::{AssistantStatus, NetworkStatus, PairingCode};
 use crate::config::{NetworkConfig, NetworkRole, PairedAssistant};
 use crate::log;
 use crate::model::Card;
+use crate::remembered::{Key, RememberedRow};
 use crate::store::now_ms;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -166,6 +167,7 @@ pub struct Server {
 struct MirrorBoard {
     serial: u64,
     cards: Vec<Card>,
+    remembered: Vec<RememberedRow>,
 }
 
 impl Server {
@@ -190,7 +192,7 @@ impl Server {
     fn bump_mirror(&mut self) {
         if let Some(board) = self.mirror.take() {
             self.mirror_serial += 1;
-            self.mirror = Some(MirrorBoard { serial: self.mirror_serial, cards: board.cards });
+            self.mirror = Some(MirrorBoard { serial: self.mirror_serial, cards: board.cards, remembered: board.remembered });
         }
     }
 
@@ -471,7 +473,36 @@ impl ServerHandle {
     pub fn mirror(&self, cards: Vec<Card>) {
         let mut s = lock(&self.shared);
         s.mirror_serial += 1;
-        s.mirror = Some(MirrorBoard { serial: s.mirror_serial, cards });
+        let remembered = s.mirror.as_ref().map(|b| b.remembered.clone()).unwrap_or_default();
+        s.mirror = Some(MirrorBoard { serial: s.mirror_serial, cards, remembered });
+    }
+
+    /// The merged "was running" list for mirroring Mayas; it goes out with
+    /// the board on the next tick when it changed.
+    pub fn mirror_remembered(&self, rows: Vec<RememberedRow>) {
+        let mut s = lock(&self.shared);
+        match &s.mirror {
+            Some(b) if b.remembered == rows => return,
+            None if rows.is_empty() => return,
+            _ => {}
+        }
+        s.mirror_serial += 1;
+        let cards = s.mirror.as_ref().map(|b| b.cards.clone()).unwrap_or_default();
+        s.mirror = Some(MirrorBoard { serial: s.mirror_serial, cards, remembered: rows });
+    }
+
+    /// Forgets `keys` from the list the assistant shown as `machine` last
+    /// sent, so a Dismiss clears the banner even for one that is away. It
+    /// sends its own list again when it reconnects. Whether that assistant
+    /// is connected now, so a `Forget` can follow.
+    pub fn drop_remembered(&self, machine: &str, keys: &[Key]) -> bool {
+        let mut s = lock(&self.shared);
+        let Some(id) = s.id_for(machine) else { return false };
+        if let Some(list) = s.by_id.get_mut(&id).and_then(|b| b.remembered.as_mut()) {
+            list.retain(|e| !keys.contains(&e.key()));
+        }
+        s.sync_boards();
+        s.conns.contains_key(&id)
     }
 
     /// Lets the Maya `id` see and control every session, or stops it. Saved
@@ -488,7 +519,7 @@ impl ServerHandle {
             if on {
                 s.bump_mirror();
             } else if let Some(c) = s.conns.get(id) {
-                let _ = c.tx.send(Down::Mirror { allowed: false, cards: vec![], machines: vec![] });
+                let _ = c.tx.send(Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![] });
             }
             (s.label(id), s.status(now_ms()))
         };
@@ -963,9 +994,18 @@ fn mirror_due(ctx: &Ctx, link: &Link) -> Option<Down> {
             c
         })
         .collect();
+    let remembered = board
+        .remembered
+        .iter()
+        .cloned()
+        .map(|mut r| {
+            r.machine.get_or_insert_with(|| ctx.main_name.clone());
+            r
+        })
+        .collect();
     link.mirror_sent.set(board.serial);
     link.mirror_at.set(Some(Instant::now()));
-    Some(Down::Mirror { allowed: true, cards, machines: s.mirror_machines(&ctx.main_name, &link.id) })
+    Some(Down::Mirror { allowed: true, cards, machines: s.mirror_machines(&ctx.main_name, &link.id), remembered })
 }
 
 /// Runs a registered connection until it closes; returns why.
@@ -1022,7 +1062,7 @@ fn pump(ctx: &Ctx, ch: &mut Chan, link: &Link) -> String {
 
 fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
     match up {
-        Up::Board { cards, dirs, agents } => {
+        Up::Board { cards, dirs, agents, remembered } => {
             // The first board of a connection is seeded, not announced, only
             // when this run of the main holds no board for the assistant: it
             // just paired, or the main just started. A reconnect's first board
@@ -1040,7 +1080,7 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
                 if current {
                     s.touch(&link.id);
                     // `sync_boards` fills in the label, hostname, platform and address.
-                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, agents, received_at: now_ms(), connected: true });
+                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, agents, remembered, received_at: now_ms(), connected: true });
                     s.sync_boards();
                 }
                 current
@@ -1190,6 +1230,7 @@ pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::Answer { .. } => "answer",
         CommandKind::Compact { .. } => "compact",
         CommandKind::Close { .. } => "close",
+        CommandKind::Forget { .. } => "forget",
         CommandKind::Rename { .. } => "rename",
         CommandKind::SetOption { .. } => "set_option",
         CommandKind::CycleMode { .. } => "cycle_mode",
@@ -1604,7 +1645,7 @@ mod tests {
         let mut remote = card("r1", "fix");
         remote.machine = Some("laptop".into());
         handle.mirror(vec![card("l1", "local"), remote]);
-        let Down::Mirror { allowed, cards, machines } = recv(&mut phone) else { panic!("expected a mirror") };
+        let Down::Mirror { allowed, cards, machines, .. } = recv(&mut phone) else { panic!("expected a mirror") };
         let main = main_name_of(&NetworkConfig::default());
         assert!(allowed);
         assert_eq!(cards[0].machine.as_deref(), Some(main.as_str()), "the main's own cards carry its name");
@@ -1624,7 +1665,7 @@ mod tests {
         wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
         handle.set_mirror(&id, false).unwrap();
         assert!(!counter.saved.lock().unwrap().iter().find(|a| a.id == id).unwrap().mirror, "the switch is saved");
-        assert_eq!(recv(&mut phone), Down::Mirror { allowed: false, cards: vec![], machines: vec![] });
+        assert_eq!(recv(&mut phone), Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![] });
         send(&mut phone, &Up::Request { id: 1, machine: None, request: Request::Command(CommandKind::Compact { session: "s1".into() }) });
         let Down::Response { id: 1, ok: false, error: Some(e), .. } = recv(&mut phone) else { panic!("expected a refusal") };
         assert!(e.ends_with("has not allowed this Maya to control its sessions."), "{e}");
@@ -1825,14 +1866,14 @@ mod tests {
     }
 
     pub(crate) fn card(id: &str, name: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None }
+        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None }
     }
 
     #[test]
     fn pairs_snapshots_and_round_trips_a_command() {
         let (handle, port) = test_server();
         let (mut ws, id, key) = pair_client(&handle, port, "laptop");
-        send(&mut ws, &Up::Board { cards: vec![card("r1", "remote")], dirs: vec!["proj".into()], agents: Some(vec![crate::agents::claude()]) });
+        send(&mut ws, &Up::Board { cards: vec![card("r1", "remote")], dirs: vec!["proj".into()], agents: Some(vec![crate::agents::claude()]), remembered: None });
         wait_until(|| handle.shared.lock().unwrap().boards.iter().any(|b| b.machine == "laptop" && b.cards.len() == 1));
         assert_eq!(handle.boards().iter().find(|b| b.machine == "laptop").unwrap().agents.as_ref().unwrap().len(), 1);
         // A command from the main reaches the client and its result comes back.
@@ -1962,7 +2003,7 @@ mod tests {
         ws.send(r#"{"type":"dance"}"#).unwrap();
         send(&mut ws, &Up::Ping);
         assert_eq!(recv(&mut ws), Down::Pong);
-        send(&mut ws, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![], agents: None });
+        send(&mut ws, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None });
         wait_until(|| handle.boards().iter().any(|b| b.machine == "desk" && b.connected));
         assert!(counter.boards.load(Ordering::SeqCst) >= 1);
         // A command in flight fails when its assistant goes away, and the
@@ -2047,7 +2088,7 @@ mod tests {
         let mut s = Server::new(vec![], "desk".into());
         let (first, previous) = s.record_pairing("a2V5", "192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
         assert!(previous.is_none());
-        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, received_at: 0, connected: false });
+        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None, received_at: 0, connected: false });
         // The same key from another address: the same machine, at its new address.
         let (second, previous) = s.record_pairing("a2V5", "192.168.55.80", "Gnowee", "TKC-0176", "macos", false);
         assert_eq!(previous.as_ref(), Some(&first));
@@ -2079,10 +2120,10 @@ mod tests {
         let state = |id: &str, state: State, since: u64| Card { state, state_since: since, ..card(id, "x") };
         let (mut ws, _, key) = pair_client(&handle, port, "desk");
         // Open when it paired: an ask and a finished turn. Nothing is announced.
-        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 100), state("r2", State::Completed, 100)], dirs: vec![], agents: None });
+        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 100), state("r2", State::Completed, 100)], dirs: vec![], agents: None, remembered: None });
         wait_until(|| handle.boards().iter().any(|b| b.cards.len() == 2));
         // A new ask after that is announced, and only it.
-        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 100), state("r2", State::Completed, 100), state("r3", State::Awaiting, 200)], dirs: vec![], agents: None });
+        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 100), state("r2", State::Completed, 100), state("r3", State::Awaiting, 200)], dirs: vec![], agents: None, remembered: None });
         wait_until(|| !counter.announced.lock().unwrap().is_empty());
         assert_eq!(*counter.announced.lock().unwrap(), ["r3"]);
         // It drops; while it is away r1 asks something new and r2 finishes again.
@@ -2091,7 +2132,7 @@ mod tests {
         let mut ws = connect_as(&handle, port, &key, "desk", &[]);
         assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
         // The main still holds its board, so the reconnect's first board is news.
-        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 300), state("r2", State::Completed, 300), state("r3", State::Awaiting, 200)], dirs: vec![], agents: None });
+        send(&mut ws, &Up::Board { cards: vec![state("r1", State::Awaiting, 300), state("r2", State::Completed, 300), state("r3", State::Awaiting, 200)], dirs: vec![], agents: None, remembered: None });
         wait_until(|| counter.announced.lock().unwrap().len() == 3);
         assert_eq!(*counter.announced.lock().unwrap(), ["r3", "r1", "r2"], "what began while away is announced; r3 is not repeated");
         handle.stop();
@@ -2112,9 +2153,9 @@ mod tests {
         let _ = counter.server.set(restarted.shared.clone());
         let mut ws = connect_as(&restarted, restarted.port(), &key, "desk", &[]);
         assert!(matches!(recv(&mut ws), Down::Welcome { .. }));
-        send(&mut ws, &Up::Board { cards: vec![Card { state: State::Awaiting, state_since: 100, ..card("r1", "x") }], dirs: vec![], agents: None });
+        send(&mut ws, &Up::Board { cards: vec![Card { state: State::Awaiting, state_since: 100, ..card("r1", "x") }], dirs: vec![], agents: None, remembered: None });
         wait_until(|| restarted.boards().iter().any(|b| b.cards.len() == 1));
-        send(&mut ws, &Up::Board { cards: vec![Card { state: State::Awaiting, state_since: 100, ..card("r1", "x") }, Card { state: State::Awaiting, state_since: 200, ..card("r2", "x") }], dirs: vec![], agents: None });
+        send(&mut ws, &Up::Board { cards: vec![Card { state: State::Awaiting, state_since: 100, ..card("r1", "x") }, Card { state: State::Awaiting, state_since: 200, ..card("r2", "x") }], dirs: vec![], agents: None, remembered: None });
         wait_until(|| !counter.announced.lock().unwrap().is_empty());
         assert_eq!(*counter.announced.lock().unwrap(), ["r2"]);
         restarted.stop();
@@ -2227,11 +2268,11 @@ mod tests {
         let note = |handle: &ServerHandle| handle.status().assistants.iter().find(|a| a.id == id).unwrap().note.clone();
         let ours = env!("CARGO_PKG_VERSION");
         assert_eq!(note(&handle), Some(format!("runs Maya t; this Mac runs {ours}")));
-        send(&mut ws, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![], agents: None });
+        send(&mut ws, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None });
         wait_until(|| handle.boards().iter().any(|b| b.cards.len() == 1));
         // A newer Maya's board: a card state this version does not know. (An
         // unknown harness is readable since 0.11.0: it decodes to Other.)
-        let mut future = serde_json::to_value(Up::Board { cards: vec![card("r2", "y")], dirs: vec![], agents: None }).unwrap();
+        let mut future = serde_json::to_value(Up::Board { cards: vec![card("r2", "y")], dirs: vec![], agents: None, remembered: None }).unwrap();
         future["cards"][0]["state"] = "future-state".into();
         ws.send(&future.to_string()).unwrap();
         wait_until(|| note(&handle).is_some_and(|n| n.ends_with(UNREADABLE_BOARD)));
@@ -2250,7 +2291,7 @@ mod tests {
         assert!(!cards[0].stale, "the kept cards stay un-stale while the note explains why they do not change");
         assert!(note(&handle).unwrap().ends_with(UNREADABLE_BOARD));
         // A readable board clears the note.
-        send(&mut ws, &Up::Board { cards: vec![card("r3", "z")], dirs: vec![], agents: None });
+        send(&mut ws, &Up::Board { cards: vec![card("r3", "z")], dirs: vec![], agents: None, remembered: None });
         wait_until(|| note(&handle).is_some_and(|n| !n.contains(UNREADABLE_BOARD)));
         // The same version says nothing.
         let (code, _) = handle.open_pairing(now_ms()).unwrap();
@@ -2344,7 +2385,7 @@ mod tests {
         let (mut ws, _, _) = pair_client(&handle, port, "desk");
         let mut big = card("r1", "x");
         big.snippet = "y".repeat(4 * PRE_AUTH_FRAME);
-        send(&mut ws, &Up::Board { cards: vec![big], dirs: vec![], agents: None });
+        send(&mut ws, &Up::Board { cards: vec![big], dirs: vec![], agents: None, remembered: None });
         wait_until(|| handle.boards().iter().any(|b| b.cards.len() == 1));
         handle.stop();
     }
@@ -2647,7 +2688,7 @@ mod tests {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
         let (mut ws, id, _) = pair_client(&handle, port, "desk");
-        send(&mut ws, &Up::Board { cards: vec![card("r1", "remote")], dirs: vec![], agents: None });
+        send(&mut ws, &Up::Board { cards: vec![card("r1", "remote")], dirs: vec![], agents: None, remembered: None });
         wait_until(|| !handle.boards().is_empty());
         counter.fail_saves.store(true, Ordering::SeqCst);
         let err = handle.remove_assistant(&id).unwrap_err();
@@ -2971,6 +3012,45 @@ mod tests {
         assert!(began.elapsed() < Duration::from_secs(5), "not left to time out");
         stop.store(true, Ordering::SeqCst);
         t.join().unwrap();
+    }
+
+    fn was(id: &str) -> crate::remembered::Remembered {
+        crate::remembered::Remembered { agent: crate::model::Harness::ClaudeCode, session_id: id.into(), dir: "/Users/x/dev/calibre".into(), name: format!("{id}-name"), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None }
+    }
+
+    #[test]
+    fn an_assistant_s_remembered_list_is_kept_while_it_is_away_and_a_dismiss_drops_it() {
+        let (handle, port) = test_server();
+        let (mut ws, _, _) = pair_client(&handle, port, "desk");
+        send(&mut ws, &Up::Board { cards: vec![], dirs: vec![], agents: None, remembered: Some(vec![was("r9"), was("r8")]) });
+        wait_until(|| handle.boards().iter().any(|b| b.remembered.as_ref().is_some_and(|l| l.len() == 2)));
+        assert!(handle.drop_remembered("desk", &[was("r8").key()]), "connected: the Forget can follow");
+        drop(ws);
+        wait_until(|| handle.boards().iter().any(|b| !b.connected));
+        assert_eq!(handle.boards()[0].remembered.as_ref().map(Vec::len), Some(1), "kept while it is away");
+        assert!(!handle.drop_remembered("desk", &[was("r9").key()]), "away: nothing to send it to");
+        assert_eq!(handle.boards()[0].remembered.as_ref().map(Vec::len), Some(0));
+        assert!(!handle.drop_remembered("nobody", &[was("r9").key()]));
+        handle.stop();
+    }
+
+    #[test]
+    fn the_mirror_carries_the_remembered_rows_with_the_main_s_own_named() {
+        let (handle, port) = test_server();
+        let (mut phone, _, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        wait_until(|| handle.status().assistants.iter().any(|a| a.connected));
+        handle.mirror(vec![]);
+        let Down::Mirror { remembered, .. } = recv(&mut phone) else { panic!("expected a mirror") };
+        assert!(remembered.is_empty());
+        let local = crate::remembered::RememberedRow { machine: None, waiting: false, entry: was("l1") };
+        let away = crate::remembered::RememberedRow { machine: Some("laptop".into()), waiting: true, entry: was("r1") };
+        handle.mirror_remembered(vec![local, away]);
+        let Down::Mirror { remembered, cards, .. } = recv(&mut phone) else { panic!("expected a mirror") };
+        let main = main_name_of(&NetworkConfig::default());
+        assert!(cards.is_empty(), "the board it already had");
+        assert_eq!(remembered[0].machine.as_deref(), Some(main.as_str()), "the main's own rows carry its name");
+        assert_eq!((remembered[1].machine.as_deref(), remembered[1].waiting), (Some("laptop"), true));
+        handle.stop();
     }
 
     mod tamper {

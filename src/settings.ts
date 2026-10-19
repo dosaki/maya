@@ -4,7 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, recognizerOptions, secretStore, thisComputerLower } from "./platform";
-import type { GitProvider, Harness } from "./types";
+import type { GitProvider, Harness, ViewerTheme } from "./types";
+import { setViewerTheme } from "./modal";
 import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
@@ -80,6 +81,8 @@ export function nextNetworkRole(prev: NetworkStatus | undefined, selected: Netwo
 const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } };
 
 export interface SettingsModel {
+  /** The session viewer's look; chat when absent. */
+  viewerTheme?: ViewerTheme;
   hookInstalled: boolean | null;
   codexHookInstalled?: boolean | null;
   completedTimeoutMinutes: number;
@@ -172,6 +175,7 @@ export interface ModelInfo {
 export type Recognizer = "system" | "builtin";
 
 export interface SettingsHandlers {
+  onViewerTheme?(t: ViewerTheme): void;
   onGitEnabled?(p: GitProvider, on: boolean): void;
   onGitTokenKind?(p: GitProvider, kind: "stored" | "env"): void;
   onGitEnvName?(p: GitProvider, name: string): void;
@@ -262,6 +266,7 @@ export function gitConnections(raw: GitConnectionJson[] | null | undefined): Git
 }
 
 interface ConfigJson {
+  viewerTheme?: ViewerTheme;
   git?: GitConnectionJson[] | null;
   completedTimeoutMinutes: number;
   projectsDir?: string | null;
@@ -643,6 +648,20 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   dirInput.addEventListener("change", () => h.onProjectsDir(dirInput.value.trim()));
   dirLabel.append(dirInput);
   sessions.append(dirLabel);
+  const viewerLabel = document.createElement("label");
+  viewerLabel.textContent = "Session viewer";
+  const viewerSel = document.createElement("select");
+  viewerSel.name = "viewerTheme";
+  for (const [value, text] of [["chat", "Chat"], ["terminal", "Terminal"]] as const) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = text;
+    viewerSel.append(o);
+  }
+  viewerSel.value = model.viewerTheme ?? "chat";
+  viewerSel.addEventListener("change", () => h.onViewerTheme?.(viewerSel.value as ViewerTheme));
+  viewerLabel.append(viewerSel);
+  sessions.append(viewerLabel);
 
   const clonesLabel = document.createElement("label");
   clonesLabel.textContent = "Clones directory (for PR reviews)";
@@ -1481,6 +1500,8 @@ export async function initSettings(): Promise<void> {
     model.recognizer = c.recognizer;
     model.whisperModel = c.whisperModel;
     model.git = gitConnections(c.git);
+    model.viewerTheme = c.viewerTheme ?? "chat";
+    setViewerTheme(model.viewerTheme);
     applyNetworkConfig(c);
   };
 
@@ -1575,6 +1596,7 @@ export async function initSettings(): Promise<void> {
     onAgentModel: (agent, id) => void run(() => saveConfig({ agent, agentModel: id })),
     onReviewPrompt: (text) => void run(() => saveConfig({ reviewPrompt: text })),
     onRecognizer: (r) => void run(() => saveConfig({ recognizer: r })),
+    onViewerTheme: (t) => void run(() => saveConfig({ viewerTheme: t })),
     onWhisperModel: (id) => void run(() => saveConfig({ whisperModel: id })),
     onDownloadModel: (id) => {
       model.downloading = { id, received: 0, total: model.models.find((m) => m.id === id)?.bytes ?? 0 };

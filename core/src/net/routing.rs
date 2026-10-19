@@ -100,7 +100,7 @@ pub fn target_of(kind: &super::protocol::CommandKind) -> Target {
     use super::protocol::CommandKind::*;
     match kind {
         Reply { session, .. } | Answer { session, .. } | Compact { session } | Close { session } | Rename { session, .. } | SetOption { session, .. } | CycleMode { session } | Slash { session, .. } | History { session } => Target::Session(session.clone()),
-        Start { .. } | Resume { .. } | ListResumable { .. } | Promote { .. } => Target::Machine,
+        Start { .. } | Resume { .. } | ListResumable { .. } | Promote { .. } | Forget { .. } => Target::Machine,
     }
 }
 
@@ -222,5 +222,10 @@ mod tests {
         assert_eq!(m.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["laptop (10.0.0.2)", "laptop (10.0.0.3)"]);
         assert_eq!((m[0].connected, m[1].connected), (true, false));
         assert_eq!(m[1].platform, "linux");
+    }
+
+    #[test]
+    fn forget_goes_to_the_machine_named() {
+        assert_eq!(target_of(&crate::net::protocol::CommandKind::Forget { sessions: vec![] }), Target::Machine);
     }
 }

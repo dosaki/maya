@@ -236,6 +236,7 @@ fn apply_settings(c: &mut Config, from: &Config) {
     c.notify_on_completed = from.notify_on_completed;
     c.speak_notifications = from.speak_notifications;
     c.wake_word = from.wake_word;
+    c.viewer_theme = from.viewer_theme;
 }
 
 /// Saves what the Network screen edits: name, port, the notification switches
@@ -385,6 +386,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn settings_carry_the_viewer_look() {
+        let mut c = Config::default();
+        apply_settings(&mut c, &Config { viewer_theme: maya_core::config::ViewerTheme::Terminal, ..Config::default() });
+        assert_eq!(c.viewer_theme, maya_core::config::ViewerTheme::Terminal);
+    }
+
+    #[test]
     fn a_machine_must_be_named() {
         assert_eq!(machine_arg(None).unwrap_err(), "Choose a machine first.");
         assert_eq!(machine_arg(Some("  ".into())).unwrap_err(), "Choose a machine first.");
@@ -410,4 +418,22 @@ mod tests {
     fn the_phone_only_ever_shows_a_notice() {
         assert_eq!(super::update_kind(), if cfg!(debug_assertions) { "off" } else { "notice" });
     }
+}
+
+#[tauri::command]
+pub fn remembered_sessions(hub: H) -> Vec<maya_core::remembered::RememberedRow> {
+    hub.remembered()
+}
+
+#[tauri::command(async)]
+pub fn resume_remembered(hub: H, rows: Vec<maya_core::remembered::RememberedRow>) -> Vec<maya_core::remembered::ResumeOutcome> {
+    hub.resume_remembered(&rows)
+}
+
+/// Off the page's path: an older assistant never answers `Forget`, and the
+/// send waits for it.
+#[tauri::command(async)]
+pub fn forget_remembered(hub: H, rows: Vec<maya_core::remembered::RememberedRow>) {
+    let hub = hub.inner().clone();
+    std::thread::spawn(move || hub.forget_remembered(&rows));
 }

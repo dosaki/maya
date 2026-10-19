@@ -144,7 +144,7 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
             "Prompt" => {
                 let s: String = blocks(&v).filter(|b| b["kind"] == "text").filter_map(|b| b["data"].as_str()).collect::<Vec<_>>().join("\n");
                 if !s.trim().is_empty() {
-                    out.push(Turn { kind: TurnKind::User, text: s.trim().to_string() });
+                    out.push(Turn::new(TurnKind::User, s.trim().to_string()));
                 }
             }
             "AssistantMessage" => {
@@ -152,10 +152,10 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
                     match b["kind"].as_str() {
                         Some("text") => {
                             if let Some(s) = b["data"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                                out.push(Turn { kind: TurnKind::Assistant, text: s.to_string() });
+                                out.push(Turn::new(TurnKind::Assistant, s.to_string()));
                             }
                         }
-                        Some("toolUse") => out.push(Turn { kind: TurnKind::Tool, text: tool_line(&b["data"]) }),
+                        Some("toolUse") => out.push(Turn::new(TurnKind::Tool, tool_line(&b["data"]))),
                         _ => {}
                     }
                 }

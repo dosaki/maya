@@ -50,8 +50,8 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
             continue;
         }
         match (v["source"].as_str(), v["type"].as_str()) {
-            (Some("USER_EXPLICIT"), _) => out.push(Turn { kind: TurnKind::User, text: user_request(content) }),
-            (Some("MODEL"), Some("PLANNER_RESPONSE")) => out.push(Turn { kind: TurnKind::Assistant, text: content.to_string() }),
+            (Some("USER_EXPLICIT"), _) => out.push(Turn::new(TurnKind::User, user_request(content))),
+            (Some("MODEL"), Some("PLANNER_RESPONSE")) => out.push(Turn::new(TurnKind::Assistant, content.to_string())),
             _ => {}
         }
     }

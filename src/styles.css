@@ -148,9 +148,9 @@ body { margin: 0; background: var(--bg); }
 .card__meter-fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; background: linear-gradient(180deg, var(--gold-bright), var(--gold)); }
 .modal__context { font-size: 12px; color: var(--muted); }
 .card__meta { display: flex; align-items: center; gap: 6px; }
-.card__harness, .modal__harness { width: 14px; height: 14px; border-radius: 3px; flex: none; }
+.card__harness, .modal__harness, .remembered__agent { width: 14px; height: 14px; border-radius: 3px; flex: none; }
 .modal__harness { align-self: center; }
-.card__harness--text, .modal__harness--text { width: auto; height: auto; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.card__harness--text, .modal__harness--text, .remembered__agent--text { width: auto; height: auto; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 10px; color: var(--muted); white-space: nowrap; }
 .modal__tweaks { display: flex; gap: 8px; align-items: center; padding: 8px 16px; border-top: 1px solid var(--border); }
 .modal__tweaks .newsession__field { flex: 1; }
 .modal__tweaks .newsession__label:empty { display: none; }
@@ -304,3 +304,78 @@ body { margin: 0; background: var(--bg); }
 
 .settings__git { display: flex; flex-direction: column; gap: 6px; padding: 8px 0 12px; border-bottom: 1px solid var(--border); }
 .settings__git-kinds { display: flex; gap: 12px; flex-wrap: wrap; }
+
+/* The Sessions banner: what was running when Maya last stopped. */
+.remembered-host:empty { display: none; }
+.remembered { margin: 8px 16px 0; padding: 10px 14px; border: 1px solid var(--gold-deep); border-radius: 10px; background: color-mix(in srgb, var(--gold) 8%, var(--panel)); display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.remembered__line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.remembered__text { flex: 1; min-width: 200px; }
+.remembered__line--failed .remembered__text { color: var(--muted); }
+.remembered__choose { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-height: 50vh; overflow-y: auto; overflow-x: hidden; }
+.remembered__machine { margin: 6px 0 2px; font-size: 12px; font-weight: 600; color: var(--gold); }
+.remembered__row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.remembered__name { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remembered__dir { flex: 1.4 1 0; }
+.remembered__age { flex: none; }
+.remembered__dir, .remembered__age { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remembered__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; flex: none; position: sticky; bottom: 0; padding-top: 6px; background: var(--panel); }
+
+/* The session viewer's two looks: chat (today's) and terminal. The markers
+   and the > prompt are always there; only the terminal look shows them. */
+.modal__theme { margin-left: 8px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--muted); font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; }
+.modal__theme[aria-pressed=true] { color: var(--gold); border-color: var(--gold-deep); }
+.turn__mark, .modal__prompt { display: none; }
+.modal--terminal .modal__panel { background: #0a0a0a; color: #e8e2d4; }
+.modal--terminal .modal__history { gap: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.modal--terminal .turn { display: grid; grid-template-columns: 2ch minmax(0, 1fr); column-gap: 4px; max-width: none; align-self: stretch; background: transparent; border: 0; border-radius: 0; padding: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: #e8e2d4; }
+.modal--terminal .turn > :not(.turn__mark) { grid-column: 2; }
+.modal--terminal .turn__mark { display: inline; grid-column: 1; }
+.modal--terminal .turn--user .turn__mark { color: var(--gold); }
+.modal--terminal .turn--user .turn__who, .modal--terminal .turn--assistant .turn__who { display: none; }
+.modal--terminal .turn--tool { color: #8a8478; }
+.modal--terminal .turn--tool .turn__text { white-space: pre-wrap; }
+.modal--terminal .turn__text .md pre { background: #161512; }
+.modal--terminal .modal__composer { align-items: flex-start; background: #0a0a0a; border-top-color: #2a2824; }
+.modal--terminal .modal__prompt { display: inline; padding-top: 8px; color: var(--gold); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.modal--terminal .modal__input { background: transparent; border: 0; color: #e8e2d4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.modal--terminal .modal__composer [data-action=send] { font-size: 0; }
+.modal--terminal .modal__composer [data-action=send]::after { content: "⏎"; font-size: 14px; }
+
+/* Tool calls. Chat look: a compact row that opens the output or diff. */
+.turn__row { all: unset; cursor: pointer; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+.turn__row:disabled { cursor: default; }
+.turn__fail { color: #dc2626; }
+.turn--tool > .turn__text { display: none; }
+.turn__result { display: none; margin-top: 4px; }
+.turn--open > .turn__result { display: block; }
+.turn__elbow { display: none; }
+.turn__out { margin: 0; line-height: 1.45; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.turn__out--preview { max-height: calc(4 * 1.45em); overflow: hidden; }
+.turn--failed .turn__out { color: #dc2626; }
+.turn__more { all: unset; cursor: pointer; color: var(--muted); font-size: 11.5px; }
+.turn__more:hover { color: var(--text); }
+.turn__row:focus-visible, .turn__more:focus-visible { outline: 1px solid var(--gold); outline-offset: 2px; }
+.turn__left { color: var(--muted); font-size: 11.5px; }
+.turn__diff { margin-top: 2px; }
+.diff__line { display: grid; grid-template-columns: 5ch 2ch minmax(0, 1fr); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; }
+.diff__no { color: var(--muted); text-align: right; padding-right: 1ch; }
+.diff__line--add { color: #8fdca8; background: rgba(46, 160, 67, .16); }
+.diff__line--del { color: #f4a3a3; background: rgba(248, 81, 73, .16); }
+/* Terminal look: the call as the agent wrote it, its result under ⎿. */
+.modal--terminal .turn__row { display: none; }
+.modal--terminal .turn--tool > .turn__text { display: block; }
+.modal--terminal .turn--tool > .turn__result { display: block; }
+.modal--terminal .turn--tool > .turn__result--out { display: grid; grid-template-columns: 3ch minmax(0, 1fr); }
+.modal--terminal .turn__result--out > :not(.turn__elbow) { grid-column: 2; }
+.modal--terminal .turn__elbow { display: inline; }
+.modal--terminal .turn--failed .turn__mark { color: #dc2626; }
+.modal--terminal .turn__summary .turn__elbow { margin-right: 1ch; }
+
+/* While the session works, and the status line: the terminal look's under the prompt, the chat look's in the header. */
+.modal__working { align-self: flex-start; font-size: 12px; color: var(--gold); }
+.modal--terminal .modal__working { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.modal__statusline--head { font-size: 12px; color: var(--muted); }
+.modal__statusline--head:empty { display: none; }
+.modal__statusline--foot { display: none; }
+.modal--terminal .modal__statusline--foot { display: block; padding: 0 16px 8px 32px; background: #0a0a0a; color: #8a8478; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.modal--terminal .modal__statusline--head { display: none; }

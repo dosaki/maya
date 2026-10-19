@@ -19,6 +19,9 @@ pub struct RemoteBoard {
     /// The agents this machine can start, as it last reported them; `None`
     /// for an older Maya, which starts Claude Code only.
     pub agents: Option<Vec<crate::agents::AgentInfo>>,
+    /// What was running on it when its Maya last stopped, as it last said;
+    /// `None` for an older Maya. Kept in memory for this run only.
+    pub remembered: Option<Vec<crate::remembered::Remembered>>,
     pub received_at: u64,
     pub connected: bool,
 }
@@ -52,6 +55,20 @@ pub fn merged(local: Vec<Card>, remotes: &[RemoteBoard], now_ms: u64) -> Vec<Car
             c.machine_platform = Some(b.platform.clone()).filter(|p| !p.is_empty());
             c.stale = stale;
             out.push(c);
+        }
+    }
+    out
+}
+
+/// The "was running" list the banner shows: this machine's first, then each
+/// assistant's last list, labelled with its machine and marked waiting while
+/// it is not connected. Kept for this run however old the board.
+pub fn remembered(local: Vec<crate::remembered::Remembered>, remotes: &[RemoteBoard]) -> Vec<crate::remembered::RememberedRow> {
+    use crate::remembered::RememberedRow;
+    let mut out: Vec<RememberedRow> = local.into_iter().map(|entry| RememberedRow { machine: None, waiting: false, entry }).collect();
+    for b in remotes {
+        for e in b.remembered.iter().flatten() {
+            out.push(RememberedRow { machine: Some(b.machine.clone()), waiting: !b.connected, entry: e.clone() });
         }
     }
     out
@@ -114,11 +131,11 @@ mod tests {
     use crate::model::{Card, Harness, State};
 
     fn card(id: &str, name: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None }
+        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None }
     }
 
     fn board(machine: &str, hostname: &str, ids: &[&str], received_at: u64, connected: bool) -> RemoteBoard {
-        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, received_at, connected }
+        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, remembered: None, received_at, connected }
     }
 
     #[test]
@@ -225,5 +242,18 @@ mod tests {
         assert_eq!(agents_of(&boards, "a").unwrap()[0].harness, crate::model::Harness::ClaudeCode);
         assert_eq!(agents_of(&boards, "b"), None);
         assert_eq!(agents_of(&boards, "zzz"), None);
+    }
+
+    #[test]
+    fn remembered_rows_put_this_machine_first_and_mark_an_away_assistant_waiting() {
+        let was = |id: &str| crate::remembered::Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: "/x".into(), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None };
+        let mut laptop = board("laptop", "laptop", &[], 1, false);
+        laptop.remembered = Some(vec![was("r1")]);
+        let mut pi = board("pi", "pi", &[], 1, true);
+        pi.remembered = Some(vec![was("p1")]);
+        let older = board("old", "old", &[], 1, true);
+        let rows = remembered(vec![was("l1")], &[laptop, pi, older]);
+        let got: Vec<(Option<&str>, bool, &str)> = rows.iter().map(|r| (r.machine.as_deref(), r.waiting, r.entry.session_id.as_str())).collect();
+        assert_eq!(got, [(None, false, "l1"), (Some("laptop"), true, "r1"), (Some("pi"), false, "p1")], "kept however old the board, for this run");
     }
 }

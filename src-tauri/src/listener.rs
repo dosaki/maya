@@ -209,6 +209,16 @@ pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Res
             resume_session(app.clone(), state.clone(), dir, latest.id, machine, Some(brain))?;
             Ok("Resuming.".into())
         }
+        "resume_all" => {
+            let scope = action["scope"].as_str().unwrap_or("all");
+            let rows = interpreter::resume_all_rows(&crate::remembered_app::rows(&state), scope);
+            if rows.is_empty() {
+                return Err("There's nothing to resume.".into());
+            }
+            let outcomes = crate::remembered_app::resume_rows(app, &rows);
+            let failed = outcomes.iter().filter(|o| o.error.is_some()).count();
+            Ok(interpreter::resume_all_said(outcomes.len() - failed, failed))
+        }
         "start" => {
             let dir = action["dir"].as_str().unwrap_or("").to_string();
             let prompt = action["prompt"].as_str().unwrap_or("").to_string();
@@ -251,6 +261,7 @@ pub(crate) struct VoiceContext {
     pub dirs: Vec<String>,
     pub machines: Vec<String>,
     pub prs: Vec<maya_core::reviews::ReviewPr>,
+    pub remembered: Vec<maya_core::remembered::RememberedRow>,
 }
 
 /// The board, the project dirs (a remote one as "<dir> (on <machine>)"),
@@ -271,7 +282,8 @@ pub(crate) fn voice_context(app: &AppHandle) -> VoiceContext {
         machines.push(board.machine);
     }
     let prs = state.reviews.lock().unwrap().prs.clone();
-    VoiceContext { cards, dirs, machines, prs }
+    let remembered = crate::remembered_app::rows(&state);
+    VoiceContext { cards, dirs, machines, prs, remembered }
 }
 
 /// The interpreter's reply as one of the three outcomes. The read-back for
@@ -280,7 +292,8 @@ pub(crate) fn decide(reply: &interpreter::Reply, ctx: &VoiceContext) -> Interpre
     let Some(proposed) = reply.action.as_ref().filter(|a| a["kind"] != "report") else {
         return Interpreted::Say(reply.say.clone());
     };
-    match interpreter::validate(proposed, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs) {
+    let validated = if proposed["kind"] == "resume_all" { interpreter::validate_resume_all(proposed, &ctx.remembered) } else { interpreter::validate(proposed, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs) };
+    match validated {
         Err(why) => Interpreted::Say(why),
         Ok(action) if interpreter::needs_confirm(&action) => {
             let say = spoken_for(&action).unwrap_or_else(|| "Shall I?".into());
@@ -992,6 +1005,7 @@ pub(crate) fn spoken_for(action: &serde_json::Value) -> Option<String> {
         "start" => format!("Starting a session in {}{on_machine}: {} Yes?", s("dir"), sentence(&s("prompt"))),
         // Resume always picks the newest session that is not running.
         "resume" => format!("Resuming the latest {}{on_machine} session. Yes?", s("dir")),
+        "resume_all" => interpreter::resume_all_readback(action),
         "focus" => format!("Focusing {}{on_machine}.", s("name")),
         "compact" => format!("Compacting {}{on_machine}.", s("name")),
         "review" => format!("Reviewing {} #{}, {}. Yes?", repo_name(&s("repo")), action["number"].as_u64().unwrap_or(0), s("title")),
@@ -1009,12 +1023,12 @@ mod tests {
         Card {
             session_id: id.into(), pid: 1, name: name.into(), cwd: format!("/Users/x/dev/{name}"), state: State::Awaiting, state_since: 42, snippet: "".into(),
             awaiting: Some(Awaiting { kind: AwaitKind::Text, detail: ask.into(), questions: vec![] }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None,
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None,
         }
     }
 
     fn ctx() -> VoiceContext {
-        VoiceContext { cards: vec![card("s1", "hexgrid", "Ship it?")], dirs: vec![], machines: vec![], prs: vec![] }
+        VoiceContext { cards: vec![card("s1", "hexgrid", "Ship it?")], dirs: vec![], machines: vec![], prs: vec![], remembered: vec![] }
     }
 
     fn reply(say: &str, action: Option<serde_json::Value>) -> interpreter::Reply {
@@ -1057,6 +1071,19 @@ mod tests {
     }
 
     use serde_json::json;
+
+    fn remembered_row(machine: Option<&str>, id: &str) -> maya_core::remembered::RememberedRow {
+        maya_core::remembered::RememberedRow { machine: machine.map(String::from), waiting: false, entry: maya_core::remembered::Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: "/x".into(), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None } }
+    }
+
+    #[test]
+    fn resume_all_is_read_back_with_the_split_and_nothing_to_resume_is_only_said() {
+        let asked = Some(json!({"kind": "resume_all", "scope": "all"}));
+        let with_rows = VoiceContext { remembered: vec![remembered_row(None, "a"), remembered_row(Some("Gnowee"), "g")], ..ctx() };
+        let Interpreted::Confirm(p) = decide(&reply("", asked.clone()), &with_rows) else { panic!("expected a confirmation") };
+        assert_eq!(p.say, "Resume 2 sessions, 1 here and 1 on Gnowee?");
+        assert_eq!(decide(&reply("", asked), &ctx()), Interpreted::Say("There's nothing to resume.".into()));
+    }
 
     #[test]
     fn read_backs_come_from_the_validated_action() {
