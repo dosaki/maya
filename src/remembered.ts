@@ -144,8 +144,21 @@ export function initRemembered(host: HTMLElement): void {
   const m: BannerModel = { rows: [], choosing: false, ticked: new Set(), busy: false };
   let shown = "";
   const paint = () => {
+    // A repaint replaces every element: what had keyboard focus (a row's
+    // checkbox, or a button) gets it back on its fresh twin.
+    const focused = document.activeElement instanceof HTMLElement && host.contains(document.activeElement) ? document.activeElement : null;
+    const key = focused?.closest<HTMLElement>("[data-key]")?.dataset.key;
+    const action = focused instanceof HTMLButtonElement ? focused.dataset.action : undefined;
     const banner = renderBanner(m, handlers, Date.now());
     host.replaceChildren(...(banner ? [banner] : []));
+    if (!focused) return;
+    const again =
+      key !== undefined
+        ? [...host.querySelectorAll<HTMLElement>("[data-key]")].find((e) => e.dataset.key === key)?.querySelector("input")
+        : action !== undefined
+          ? host.querySelector<HTMLButtonElement>(`button[data-action="${action}"]`)
+          : null;
+    again?.focus();
   };
   const set = (rows: RememberedRow[]) => {
     const text = JSON.stringify(rows);

@@ -139,6 +139,24 @@ describe("initRemembered", () => {
     expect(sent("resume_remembered")).toEqual([rowKey(rows[0])]);
   });
 
+  it("keeps keyboard focus on the same row's checkbox, or the same button, across a repaint", async () => {
+    const rows = [row("a", null), row("b", null)];
+    const host = await start(rows);
+    document.body.append(host);
+    click(host, "choose");
+    const box = () => host.querySelector<HTMLInputElement>(`[data-key="${rowKey(rows[1])}"] input`)!;
+    const before = box();
+    before.focus();
+    before.checked = false;
+    before.dispatchEvent(new Event("change"));
+    expect(box()).not.toBe(before);
+    expect(document.activeElement).toBe(box());
+    host.querySelector<HTMLButtonElement>("button[data-action=cancel]")!.focus();
+    tauri.listeners.remembered({ payload: [...rows, row("c", null)] });
+    expect(document.activeElement).toBe(host.querySelector("button[data-action=cancel]"));
+    host.remove();
+  });
+
   it("repaints from the remembered event", async () => {
     const host = await start([]);
     expect(host.childElementCount).toBe(0);
