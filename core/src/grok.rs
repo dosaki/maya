@@ -101,12 +101,12 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
         match v["type"].as_str() {
             Some("user") => {
                 if let Some(q) = user_text(&v) {
-                    out.push(Turn { kind: TurnKind::User, text: q });
+                    out.push(Turn::new(TurnKind::User, q));
                 }
             }
             Some("assistant") => {
                 if let Some(s) = v["content"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                    out.push(Turn { kind: TurnKind::Assistant, text: s.to_string() });
+                    out.push(Turn::new(TurnKind::Assistant, s.to_string()));
                 }
             }
             _ => {}

@@ -1829,7 +1829,7 @@ mod tests {
         std::fs::write(&path, format!("{line}\n")).unwrap();
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        assert_eq!(session_history(&l, "s1").unwrap(), vec![transcript::Turn { kind: transcript::TurnKind::Peer, text: "hello".into() }]);
+        assert_eq!(session_history(&l, "s1").unwrap(), vec![transcript::Turn::new(transcript::TurnKind::Peer, "hello".into())]);
     }
 
     #[test]

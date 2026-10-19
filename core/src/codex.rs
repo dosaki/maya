@@ -114,7 +114,7 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
         if text.is_empty() || text.starts_with("<environment_context>") {
             continue;
         }
-        out.push(Turn { kind, text: text.to_string() });
+        out.push(Turn::new(kind, text.to_string()));
     }
     if out.len() > max_turns {
         out.drain(..out.len() - max_turns);

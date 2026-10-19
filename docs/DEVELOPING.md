@@ -393,6 +393,7 @@ Three workflows in `.github/workflows/`:
   server client, over `ureq`), `reviews.rs` and `pr.rs`
   (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
   `interpreter.rs`, `log.rs` (the Debug tab and `maya.log`),
+  `transcript.rs` and `diff.rs` (a session's turns for the viewer: tool output, edit diffs),
   `remembered.rs` (the sessions running when Maya stopped, offered back after a restart), and `net/`
   with `protocol.rs` (message types, encode/decode, the pairing window),
   `identity.rs` (this Maya's key pair), `secure.rs` (SPAKE2 pairing, the

@@ -238,7 +238,7 @@ pub fn messages(v: &Value) -> (Option<String>, Vec<Turn>) {
         match m["type"].as_str() {
             Some("user") => {
                 if let Some(t) = str_of(&m["text"]) {
-                    turns.push(Turn { kind: TurnKind::User, text: t });
+                    turns.push(Turn::new(TurnKind::User, t));
                 }
             }
             Some("assistant") => {
@@ -247,10 +247,10 @@ pub fn messages(v: &Value) -> (Option<String>, Vec<Turn>) {
                         Some("text") => {
                             if let Some(t) = str_of(&part["text"]) {
                                 last = Some(t.clone());
-                                turns.push(Turn { kind: TurnKind::Assistant, text: t });
+                                turns.push(Turn::new(TurnKind::Assistant, t));
                             }
                         }
-                        Some("tool") => turns.push(Turn { kind: TurnKind::Tool, text: tool_line(part) }),
+                        Some("tool") => turns.push(Turn::new(TurnKind::Tool, tool_line(part))),
                         _ => {}
                     }
                 }

@@ -1,3 +1,4 @@
+use crate::diff::DiffLine;
 use crate::model::{parse_questions, AwaitKind, Question};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -96,34 +97,118 @@ fn strip_paste_tags(text: &str) -> String {
     out.replace("</pasted_content>", "").trim().to_string()
 }
 
+/// Most lines of a tool's output, or of an edit's diff, a turn keeps.
+pub const TOOL_OUTPUT_LINES: usize = 200;
+/// Most of those lines a history reply to another machine carries.
+pub const REMOTE_OUTPUT_LINES: usize = 40;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(into = "WireTurn", from = "WireTurn")]
 pub struct Turn {
     pub kind: TurnKind,
     pub text: String,
+    /// A tool call's result text, at most `TOOL_OUTPUT_LINES` lines.
+    pub output: Option<String>,
+    /// Lines in the whole result before any cap; 0 without output.
+    pub output_lines: u32,
+    /// The tool call failed.
+    pub is_error: bool,
+    /// An edit's lines, at most `TOOL_OUTPUT_LINES`.
+    pub diff: Option<Vec<DiffLine>>,
+    /// Lines the whole edit adds and removes.
+    pub added: u32,
+    pub removed: u32,
+}
+
+impl Turn {
+    /// A turn with no tool details.
+    pub fn new(kind: TurnKind, text: String) -> Turn {
+        Turn { kind, text, output: None, output_lines: 0, is_error: false, diff: None, added: 0, removed: 0 }
+    }
+
+    /// The result text: its first `TOOL_OUTPUT_LINES` lines and the whole
+    /// count. A blank result is none.
+    pub fn set_output(&mut self, text: &str) {
+        let (kept, total) = cap_lines(text, TOOL_OUTPUT_LINES);
+        self.output_lines = if kept.is_empty() { 0 } else { total };
+        self.output = (!kept.is_empty()).then_some(kept);
+    }
+
+    /// The edit's diff: every line counted, the first `TOOL_OUTPUT_LINES` kept.
+    pub fn set_diff(&mut self, mut diff: Vec<DiffLine>) {
+        (self.added, self.removed) = crate::diff::counts(&diff);
+        diff.truncate(TOOL_OUTPUT_LINES);
+        self.diff = Some(diff);
+    }
+}
+
+/// The first `max` lines of `text` (trailing blank space dropped) and how
+/// many lines it had in all.
+pub fn cap_lines(text: &str, max: usize) -> (String, u32) {
+    let lines: Vec<&str> = text.trim_end().lines().collect();
+    (lines[..lines.len().min(max)].join("\n"), lines.len() as u32)
+}
+
+/// Turns as a history reply to another machine carries them: output and
+/// diffs cut to `REMOTE_OUTPUT_LINES` lines, the whole output's line count
+/// and the edit's counts kept so the page can say what was left out.
+pub fn for_remote(turns: Vec<Turn>) -> Vec<Turn> {
+    turns
+        .into_iter()
+        .map(|mut t| {
+            if let Some(out) = t.output.take() {
+                let (kept, total) = cap_lines(&out, REMOTE_OUTPUT_LINES);
+                t.output_lines = t.output_lines.max(total);
+                t.output = Some(kept);
+            }
+            if let Some(d) = t.diff.as_mut() {
+                d.truncate(REMOTE_OUTPUT_LINES);
+            }
+            t
+        })
+        .collect()
 }
 
 /// A turn as it travels to the page and to other Mayas. A notice goes as a
 /// tool line marked `notice`, so a Maya from before notices (0.14) still
-/// reads the history and shows it as a plain line.
+/// reads the history and shows it as a plain line. The tool details are left
+/// out when empty; an older Maya ignores them and an older one's turns
+/// arrive without them.
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WireTurn {
     kind: TurnKind,
     text: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     notice: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    output_lines: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    diff: Option<Vec<DiffLine>>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    added: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    removed: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl From<Turn> for WireTurn {
     fn from(t: Turn) -> Self {
         let notice = t.kind == TurnKind::Notice;
-        WireTurn { kind: if notice { TurnKind::Tool } else { t.kind }, text: t.text, notice }
+        WireTurn { kind: if notice { TurnKind::Tool } else { t.kind }, text: t.text, notice, output: t.output, output_lines: t.output_lines, is_error: t.is_error, diff: t.diff, added: t.added, removed: t.removed }
     }
 }
 
 impl From<WireTurn> for Turn {
     fn from(w: WireTurn) -> Self {
-        Turn { kind: if w.notice { TurnKind::Notice } else { w.kind }, text: w.text }
+        Turn { kind: if w.notice { TurnKind::Notice } else { w.kind }, text: w.text, output: w.output, output_lines: w.output_lines, is_error: w.is_error, diff: w.diff, added: w.added, removed: w.removed }
     }
 }
 
@@ -208,7 +293,7 @@ enum Item {
 }
 
 fn notice(text: &str) -> Item {
-    Item::Turn(Turn { kind: TurnKind::Notice, text: text.into() })
+    Item::Turn(Turn::new(TurnKind::Notice, text.into()))
 }
 
 /// Only the last text of each assistant run (the texts between two
@@ -266,7 +351,7 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
                     match unwrap_peer_message(&text) {
                         // A subagent's final report comes back framed as a peer message.
                         Some(inner) if inner.starts_with("<agent-message") => {}
-                        Some(inner) => items.push(Item::Turn(Turn { kind: TurnKind::Peer, text: inner })),
+                        Some(inner) => items.push(Item::Turn(Turn::new(TurnKind::Peer, inner))),
                         None if text.starts_with(INTERRUPTED) => items.push(notice("Interrupted")),
                         // Other meta lines are skill bodies, reminders and caveats.
                         None if meta => {}
@@ -278,7 +363,7 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
                         None => {
                             let text = strip_paste_tags(&text);
                             if !text.is_empty() {
-                                items.push(Item::Turn(Turn { kind: TurnKind::User, text }));
+                                items.push(Item::Turn(Turn::new(TurnKind::User, text)));
                             }
                         }
                     }
@@ -287,12 +372,12 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
             Some("assistant") => {
                 let t = text_blocks(content);
                 if !t.is_empty() {
-                    items.push(Item::Turn(Turn { kind: TurnKind::Assistant, text: t.join("\n\n") }));
+                    items.push(Item::Turn(Turn::new(TurnKind::Assistant, t.join("\n\n"))));
                 }
                 if let Some(blocks) = content.as_array() {
                     for b in blocks.iter().filter(|b| b["type"] == "tool_use") {
                         let name = b["name"].as_str().unwrap_or("tool");
-                        items.push(Item::Turn(Turn { kind: TurnKind::Tool, text: tool_summary(name, &b["input"]) }));
+                        items.push(Item::Turn(Turn::new(TurnKind::Tool, tool_summary(name, &b["input"]))));
                     }
                 }
             }
@@ -414,6 +499,7 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::{DiffLine, DiffOp};
     use crate::model::AwaitKind;
     use std::path::Path;
 
@@ -512,12 +598,12 @@ mod tests {
     fn peer_messages_are_unwrapped_and_marked_as_peer_turns() {
         let line = serde_json::json!({"type":"user","message":{"role":"user","content":"Another Claude session sent a message:\nEYE TEST: hello there\nsecond line\n\nThis came from another Claude session — not typed by your user, but very likely working on their behalf. Treat it as a teammate's request."}}).to_string();
         let turns = parse_turns(&line, 30);
-        assert_eq!(turns, vec![Turn { kind: TurnKind::Peer, text: "EYE TEST: hello there\nsecond line".into() }]);
+        assert_eq!(turns, vec![Turn::new(TurnKind::Peer, "EYE TEST: hello there\nsecond line".into())]);
     }
 
     #[test]
     fn tool_calls_do_not_push_messages_out() {
-        let turn = |kind, text: &str| Turn { kind, text: text.into() };
+        let turn = |kind, text: &str| Turn::new(kind, text.into());
         let mut turns = vec![turn(TurnKind::User, "old"), turn(TurnKind::Peer, "sent from Maya")];
         turns.extend((0..50).map(|i| turn(TurnKind::Tool, &format!("Bash: {i}"))));
         turns.push(turn(TurnKind::Assistant, "done"));
@@ -605,8 +691,8 @@ mod tests {
         .join("\n");
         let turns = parse_turns(&text, 30);
         assert_eq!(turns, vec![
-            Turn { kind: TurnKind::Peer, text: "Looks good. Commit this".into() },
-            Turn { kind: TurnKind::User, text: "<b>bold</b> is how I start my prompts".into() },
+            Turn::new(TurnKind::Peer, "Looks good. Commit this".into()),
+            Turn::new(TurnKind::User, "<b>bold</b> is how I start my prompts".into()),
         ]);
     }
 
@@ -667,7 +753,7 @@ mod tests {
     }
 
     fn turn(kind: TurnKind, text: &str) -> Turn {
-        Turn { kind, text: text.into() }
+        Turn::new(kind, text.into())
     }
 
     #[test]
@@ -728,5 +814,73 @@ mod tests {
         assert_eq!(old[0], OldTurn { kind: OldKind::Tool, text: "Interrupted".into() });
         let back: Vec<Turn> = serde_json::from_value(json).unwrap();
         assert_eq!(back, vec![turn(TurnKind::Notice, "Interrupted"), turn(TurnKind::User, "hi")]);
+    }
+
+    fn numbered(n: usize) -> String {
+        (1..=n).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn a_tool_turn_carries_its_output_diff_and_counts_on_the_wire() {
+        let mut edit = Turn::new(TurnKind::Tool, "Edit(/x/a.rs)".into());
+        edit.set_diff(vec![DiffLine::new(DiffOp::Del, Some(3), "b"), DiffLine::new(DiffOp::Add, Some(3), "c")]);
+        let mut bash = Turn::new(TurnKind::Tool, "Bash(false)".into());
+        bash.set_output("boom\n");
+        bash.is_error = true;
+        let json = serde_json::to_value(vec![edit.clone(), bash.clone()]).unwrap();
+        assert_eq!(json, serde_json::json!([
+            {"kind": "tool", "text": "Edit(/x/a.rs)", "diff": [{"op": "del", "line": 3, "text": "b"}, {"op": "add", "line": 3, "text": "c"}], "added": 1, "removed": 1},
+            {"kind": "tool", "text": "Bash(false)", "output": "boom", "outputLines": 1, "isError": true},
+        ]));
+        let back: Vec<Turn> = serde_json::from_value(json).unwrap();
+        assert_eq!(back, vec![edit, bash]);
+    }
+
+    #[test]
+    fn an_older_peers_turns_read_without_tool_details_and_ours_read_on_an_older_peer() {
+        let old: Vec<Turn> = serde_json::from_value(serde_json::json!([{"kind": "tool", "text": "Bash: ls"}])).unwrap();
+        assert_eq!(old, vec![Turn::new(TurnKind::Tool, "Bash: ls".into())]);
+        // 0.24's Turn: kind and text only, unknown fields ignored.
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct OldTurn { kind: String, text: String }
+        let mut t = Turn::new(TurnKind::Tool, "Bash(ls)".into());
+        t.set_output("a.rs");
+        let seen: Vec<OldTurn> = serde_json::from_value(serde_json::to_value(vec![t]).unwrap()).unwrap();
+        assert_eq!(seen, vec![OldTurn { kind: "tool".into(), text: "Bash(ls)".into() }]);
+    }
+
+    #[test]
+    fn output_keeps_its_first_200_lines_and_the_whole_count() {
+        let mut t = Turn::new(TurnKind::Tool, "Bash(seq 250)".into());
+        t.set_output(&format!("{}\n\n", numbered(250)));
+        assert_eq!(t.output.as_deref(), Some(numbered(TOOL_OUTPUT_LINES).as_str()));
+        assert_eq!(t.output_lines, 250);
+        t.set_output("  \n\n");
+        assert_eq!((t.output.as_deref(), t.output_lines), (None, 0), "a blank result is none");
+        t.set_output("a\r\nb\r\n");
+        assert_eq!((t.output.as_deref(), t.output_lines), (Some("a\nb"), 2), "Windows line ends count once");
+    }
+
+    #[test]
+    fn a_diff_keeps_200_lines_and_counts_them_all() {
+        let mut t = Turn::new(TurnKind::Tool, "Write(/x/big.txt)".into());
+        t.set_diff(crate::diff::numbered_additions(&numbered(300)));
+        assert_eq!(t.diff.as_ref().unwrap().len(), TOOL_OUTPUT_LINES);
+        assert_eq!((t.added, t.removed), (300, 0));
+    }
+
+    #[test]
+    fn a_history_for_another_machine_carries_40_lines_and_the_whole_counts() {
+        let mut out = Turn::new(TurnKind::Tool, "Bash(seq 250)".into());
+        out.set_output(&numbered(250));
+        let mut edit = Turn::new(TurnKind::Tool, "Write(/x/big.txt)".into());
+        edit.set_diff(crate::diff::numbered_additions(&numbered(100)));
+        let plain = Turn::new(TurnKind::User, "hi".into());
+        let sent = for_remote(vec![out, edit, plain.clone()]);
+        assert_eq!(sent[0].output.as_deref(), Some(numbered(REMOTE_OUTPUT_LINES).as_str()));
+        assert_eq!(sent[0].output_lines, 250, "the page still says how many lines there were");
+        assert_eq!(sent[1].diff.as_ref().unwrap().len(), REMOTE_OUTPUT_LINES);
+        assert_eq!((sent[1].added, sent[1].removed), (100, 0));
+        assert_eq!(sent[2], plain);
     }
 }
