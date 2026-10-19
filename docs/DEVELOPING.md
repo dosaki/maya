@@ -392,7 +392,8 @@ Three workflows in `.github/workflows/`:
   `antigravity.rs`, `grok.rs`, `kiro.rs` (other agents), `opencode.rs` (OpenCode's
   server client, over `ureq`), `reviews.rs` and `pr.rs`
   (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
-  `interpreter.rs`, `log.rs` (the Debug tab and `maya.log`), and `net/`
+  `interpreter.rs`, `log.rs` (the Debug tab and `maya.log`),
+  `remembered.rs` (the sessions running when Maya stopped, offered back after a restart), and `net/`
   with `protocol.rs` (message types, encode/decode, the pairing window),
   `identity.rs` (this Maya's key pair), `secure.rs` (SPAKE2 pairing, the
   Noise handshakes and the encrypted `Channel`),
@@ -405,9 +406,10 @@ Three workflows in `.github/workflows/`:
   Tauri side: starting server and client, command execution),
   `terminal_app.rs` (opening Terminal windows), `terminal_win.rs` and
   `terminal_linux.rs` (their Windows and Linux counterparts), `focus.rs` and `dock.rs`
-  (AppKit), `keystore.rs` (the OS key store), `voice.rs` (ElevenLabs), and
+  (AppKit), `keystore.rs` (the OS key store), `voice.rs` (ElevenLabs),
   `ear.rs`, `wake.rs`,
-  `listener.rs`, `models.rs` (the voice assistant).
+  `listener.rs`, `models.rs` (the voice assistant), and
+  `remembered_app.rs` (resuming and forgetting what was running, for the banner and the voice; the heartbeat).
 - `cli/src/` — `main.rs` and `args.rs` (subcommand parsing), `commands.rs`
   (`pair`, `status`, `hooks`, `config`, `start`), `run_cmd.rs` (`run`, the headless
   loop), `executor.rs` (running the main's commands), `notify.rs` (writes the CLI's own status
@@ -415,7 +417,8 @@ Three workflows in `.github/workflows/`:
   or listens like the app), and `status_file.rs`
   (`~/.claude/maya/cli-status.json`, read by `maya status`).
 - `src/` — `main.ts`, `board.ts`, `card.ts`, `modal.ts`, `reviews.ts`,
-  `settings.ts`, `voice.ts`, `debug.ts`, `tabs.ts`.
+  `settings.ts`, `voice.ts`, `debug.ts`, `tabs.ts`,
+  `remembered.ts` (the Sessions banner offering back what ran before a restart, desktop and phone).
 - `src/mobile/` — the phone's page: `main.ts`, `strip.ts` (the column
   strip and the one-to-four-column layout), `network.ts`, `setup.ts`,
   `notify-tap.ts`, `mobile.css`; `src/machines.ts` is the dialogs'
