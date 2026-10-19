@@ -41,6 +41,17 @@ describe("tool turns", () => {
     expect(t.querySelector(".turn__more")).toBeNull();
   });
 
+  it("clamps the collapsed preview's height, and not the expanded result's", () => {
+    const t = renderToolTurn(bash);
+    expect(t.querySelector(".turn__out")?.classList.contains("turn__out--preview")).toBe(true);
+    t.querySelector<HTMLButtonElement>(".turn__more")!.click();
+    expect(t.querySelector(".turn__out")?.classList.contains("turn__out--preview")).toBe(false);
+    // Shown whole: nothing to expand into, so nothing is clamped away.
+    const short = renderToolTurn({ kind: "tool", text: "Bash(ls)", output: "a.rs", outputLines: 1 });
+    expect(short.querySelector(".turn__out")?.classList.contains("turn__out--preview")).toBe(false);
+    expect(styles).toContain(".turn__out--preview { max-height: calc(4 * 1.45em); overflow: hidden; }");
+  });
+
   it("counts lines the cap left out, and keeps an expanded result open across repaints", () => {
     const capped: Turn = { ...bash, output: lines(40), outputLines: 250 };
     const t = renderToolTurn(capped);

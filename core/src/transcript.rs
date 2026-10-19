@@ -214,6 +214,8 @@ fn strip_paste_tags(text: &str) -> String {
 pub const TOOL_OUTPUT_LINES: usize = 200;
 /// Most of those lines a history reply to another machine carries.
 pub const REMOTE_OUTPUT_LINES: usize = 40;
+/// Most characters of one output or diff line a turn keeps.
+pub const TOOL_LINE_MAX_CHARS: usize = 2_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(into = "WireTurn", from = "WireTurn")]
@@ -247,19 +249,33 @@ impl Turn {
         self.output = (!kept.is_empty()).then_some(kept);
     }
 
-    /// The edit's diff: every line counted, the first `TOOL_OUTPUT_LINES` kept.
+    /// The edit's diff: every line counted, the first `TOOL_OUTPUT_LINES`
+    /// kept, each clipped to `TOOL_LINE_MAX_CHARS`.
     pub fn set_diff(&mut self, mut diff: Vec<DiffLine>) {
         (self.added, self.removed) = crate::diff::counts(&diff);
         diff.truncate(TOOL_OUTPUT_LINES);
+        for d in &mut diff {
+            if let Some(clipped) = clip_line(&d.text) {
+                d.text = clipped;
+            }
+        }
         self.diff = Some(diff);
     }
 }
 
-/// The first `max` lines of `text` (trailing blank space dropped) and how
-/// many lines it had in all.
+/// `line` cut to `TOOL_LINE_MAX_CHARS` characters and `…`, or None when it
+/// is within them.
+fn clip_line(line: &str) -> Option<String> {
+    let (at, _) = line.char_indices().nth(TOOL_LINE_MAX_CHARS)?;
+    Some(format!("{}…", &line[..at]))
+}
+
+/// The first `max` lines of `text` (trailing blank space dropped), each
+/// clipped to `TOOL_LINE_MAX_CHARS`, and how many lines it had in all.
 pub fn cap_lines(text: &str, max: usize) -> (String, u32) {
     let lines: Vec<&str> = text.trim_end().lines().collect();
-    (lines[..lines.len().min(max)].join("\n"), lines.len() as u32)
+    let kept: Vec<std::borrow::Cow<str>> = lines[..lines.len().min(max)].iter().map(|l| clip_line(l).map_or((*l).into(), Into::into)).collect();
+    (kept.join("\n"), lines.len() as u32)
 }
 
 /// Turns as a history reply to another machine carries them: output and
@@ -1265,6 +1281,23 @@ mod tests {
         assert_eq!((t.output.as_deref(), t.output_lines), (None, 0), "a blank result is none");
         t.set_output("a\r\nb\r\n");
         assert_eq!((t.output.as_deref(), t.output_lines), (Some("a\nb"), 2), "Windows line ends count once");
+    }
+
+    #[test]
+    fn a_very_long_line_is_clipped_and_still_counts_once() {
+        let mut t = Turn::new(TurnKind::Tool, "Bash(cat min.js)".into());
+        t.set_output(&"é".repeat(30_000));
+        assert_eq!(t.output_lines, 1);
+        assert_eq!(t.output.as_deref(), Some(format!("{}…", "é".repeat(TOOL_LINE_MAX_CHARS)).as_str()));
+        assert_eq!(cap_lines(&format!("short\n{}", "x".repeat(2_001)), 10), (format!("short\n{}…", "x".repeat(2_000)), 2));
+        assert_eq!(cap_lines(&"x".repeat(2_000), 10), ("x".repeat(2_000), 1), "a line at the limit is whole");
+        let sent = for_remote(vec![t.clone()]);
+        assert_eq!(sent[0].output, t.output, "clipping twice changes nothing");
+        let mut w = Turn::new(TurnKind::Tool, "Write(/x/min.js)".into());
+        w.set_diff(crate::diff::numbered_additions(&format!("a\n{}", "y".repeat(5_000))));
+        let d = w.diff.unwrap();
+        assert_eq!((d[0].text.as_str(), d[1].text.clone()), ("a", format!("{}…", "y".repeat(TOOL_LINE_MAX_CHARS))));
+        assert_eq!((w.added, w.removed), (2, 0));
     }
 
     #[test]

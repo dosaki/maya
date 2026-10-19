@@ -349,7 +349,8 @@ body { margin: 0; background: var(--bg); }
 .turn__result { display: none; margin-top: 4px; }
 .turn--open > .turn__result { display: block; }
 .turn__elbow { display: none; }
-.turn__out { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.turn__out { margin: 0; line-height: 1.45; white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.turn__out--preview { max-height: calc(4 * 1.45em); overflow: hidden; }
 .turn--failed .turn__out { color: #dc2626; }
 .turn__more { all: unset; cursor: pointer; color: var(--muted); font-size: 11.5px; }
 .turn__more:hover { color: var(--text); }

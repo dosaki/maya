@@ -62,6 +62,7 @@ function renderOutput(t: Turn, key: string): HTMLElement {
   const pre = el("pre", "turn__out");
   result.append(el("span", "turn__elbow", "⎿"), pre);
   const showAll = () => {
+    pre.classList.remove("turn__out--preview");
     pre.textContent = lines.join("\n");
     // Lines a cap kept out of the turn cannot be shown, only counted.
     if (total > lines.length) result.append(el("span", "turn__left", `… +${total - lines.length} lines`));
@@ -71,6 +72,8 @@ function renderOutput(t: Turn, key: string): HTMLElement {
     showAll();
     return result;
   }
+  // Clamped too, so a few very long lines cannot fill the view.
+  pre.classList.add("turn__out--preview");
   pre.textContent = lines.slice(0, PREVIEW_LINES).join("\n");
   const more = el("button", "turn__more", `… +${hidden} lines`);
   more.type = "button";
