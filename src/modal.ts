@@ -554,21 +554,9 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const who = { user: "You", assistant: "Claude", peer: "From another session", tool: "", notice: "" }[kind];
     if (who) turn.append(el("div", "turn__who", who));
     const text = el("div", "turn__text");
-    if (kind === "tool") {
-      // The call, and under it its result when the transcript carries one.
-      const [call, ...result] = t.text.split("\n");
-      text.textContent = call;
-      turn.append(text);
-      if (result.join("").trim()) {
-        const res = el("div", "turn__result");
-        res.append(el("span", "turn__result-mark", "⎿ "), document.createTextNode(result.join("\n")));
-        turn.append(res);
-      }
-    } else {
-      if (kind === "notice") text.textContent = t.text;
-      else text.append(renderMarkdown(t.text));
-      turn.append(text);
-    }
+    if (kind === "tool" || kind === "notice") text.textContent = t.text;
+    else text.append(renderMarkdown(t.text));
+    turn.append(text);
     history.append(turn);
   }
   history.addEventListener("click", (ev) => {

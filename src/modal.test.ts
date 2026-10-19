@@ -590,18 +590,20 @@ describe("viewer theme", () => {
   });
 
   it("hides the markers in the chat look and draws the terminal look's colours and font", () => {
-    expect(styles).toContain(".turn__mark, .turn__result-mark, .modal__prompt { display: none; }");
+    expect(styles).toContain(".turn__mark, .modal__prompt { display: none; }");
     expect(styles).toContain(".modal--terminal .turn__mark { display: inline;");
     expect(styles).toContain(".modal--terminal .modal__panel { background: #0a0a0a; color: #e8e2d4; }");
     expect(styles).toContain("ui-monospace, SFMono-Regular, Menlo, monospace");
   });
 
-  it("puts a tool's result under a ⎿ line when the transcript has one", () => {
-    const el = renderModal({ card: base, turns: [{ kind: "tool", text: "Bash: ls\nsrc\ntests" }], status: null, draft: "", theme: "terminal" }, handlers());
-    expect(el.querySelector(".turn--tool .turn__text")?.textContent).toBe("Bash: ls");
-    expect(el.querySelector(".turn--tool .turn__result")?.textContent).toBe("⎿ src\ntests");
-    const single = renderModal({ card: base, turns: [{ kind: "tool", text: "Bash: ls" }], status: null, draft: "" }, handlers());
-    expect(single.querySelector(".turn__result")).toBeNull();
+  it("keeps a multi-line tool call whole in one .turn__text, in both looks", () => {
+    const text = "Bash(cat <<EOF\nline two\nEOF)";
+    for (const theme of ["terminal", undefined] as const) {
+      const el = renderModal({ card: base, turns: [{ kind: "tool", text }], status: null, draft: "", theme }, handlers());
+      expect(el.querySelectorAll(".turn--tool .turn__text").length).toBe(1);
+      expect(el.querySelector(".turn--tool .turn__text")?.textContent).toBe(text);
+      expect(el.querySelector(".turn__result")).toBeNull();
+    }
   });
 
   it("the header toggle asks for the other look, titled for what it switches to", () => {
