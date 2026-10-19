@@ -260,6 +260,58 @@ Two `feat`s on `feat/resume-sessions-and-terminal-theme` from `main`
 (0.24.0): ships as 0.25.0, set with `sh scripts/set-version.sh 0.25.0` in
 its own `chore(release): 0.25.0` commit.
 
+## Addendum (2026-10-19): the viewer shows what the terminal shows
+
+Seen side by side with an agent's terminal, the viewer showed the
+conversation but not tool output, edit diffs, the working line or the
+status line, so the terminal look read as "Maya in a monospace font". The
+user chose to show the same content, in both looks, keeping the terminal
+look's styling as it is.
+
+### Reading more of the transcript
+
+- Claude Code: a tool turn is now `Name(arg)` (e.g. `Bash(cargo test)`,
+  replacing `Bash: cargo test`) paired with its result from the matching
+  `tool_result` block: the result text, at most `TOOL_OUTPUT_LINES = 200`
+  lines kept, and whether it is an error (`is_error`).
+- Edit / MultiEdit / Write: the old and new text become a line diff (at
+  most 200 lines kept) with `+a −b` counts; a Write to a new file is all
+  additions.
+- Codex and OpenCode: the same where their transcripts carry tool outputs
+  (Codex `function_call_output`, OpenCode tool part `state.output`);
+  agents whose files carry none render as before.
+- The tool turn gains optional `output: Option<String>`, `diff:
+  Option<Vec<DiffLine>>`, `added`/`removed` counts and `is_error`, all
+  `#[serde(default)]` on the wire: older Mayas and phones ignore them, an
+  older assistant sends none. Output in a history reply across machines
+  is capped at `REMOTE_OUTPUT_LINES = 40` lines.
+
+### Showing it
+
+- Terminal look: `● Bash(cmd)`, then the first 4 lines of output under
+  `⎿`, then `… +N lines` which expands in place on click; edits as
+  `● Update(path)` with `⎿ Updated path (+a −b)` and the diff, red and
+  green lines with line numbers when known; an error result in red.
+- Chat look: each tool call is a compact row (`▸ Bash · cmd`, `▸ Update ·
+  path (+a −b)`, a red mark when it failed); clicking opens the output or
+  diff in a monospace block.
+- Both looks, while the session is working: a `✻ Working… (12m 4s)` line
+  from `state_since` (no token count: Maya has none live).
+- Status line: model · folder · branch · PR · ctx %. Terminal look: under
+  the `›` prompt; chat look: in the viewer header beside ctx %. The
+  branch comes from the same lookup as the PR badge; the agent's own
+  permission mode is not known and not shown.
+- Unchanged: the terminal look's colours and font, the panel chrome, the
+  Model/Effort pickers.
+
+### Testing
+
+Transcript fixtures: a Bash call and result, an error result, an Edit
+diff with counts, a Write to a new file, truncation at 200 lines, the
+40-line cap on the wire, an older peer's history without the fields.
+Rendering in both looks: the 4-line preview and expand, diff colours,
+the working line, the status line.
+
 ## Not in this change
 
 - Resuming automatically at startup without asking.
