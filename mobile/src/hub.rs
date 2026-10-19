@@ -14,6 +14,7 @@ use maya_core::net::protocol::{CommandKind, Request, CAP_FOLLOW, CAP_LEAD, CAP_M
 use maya_core::net::routing::MachineInfo;
 use maya_core::net::routing::{agents_reply, target_of, Target, ROUTE_TIMEOUT};
 use maya_core::net::server::{send_command_with, start_with, Notify, ServerHandle};
+use maya_core::remembered::{self, RememberedRow, ResumeOutcome};
 use maya_core::net::{self, promote, AssistantLink, MirrorAccess, NetworkStatus};
 use maya_core::notify::Notifier;
 use maya_core::store::now_ms;
@@ -26,6 +27,8 @@ use std::time::Duration;
 /// What the hub tells the outside: the page's events and the service.
 pub trait Sink: Send + Sync {
     fn sessions(&self, cards: &[Card]);
+    /// The "was running" list for the banner.
+    fn remembered(&self, _rows: &[RememberedRow]) {}
     fn network(&self, status: &NetworkStatus);
     fn service_start(&self, line: &str);
     fn service_stop(&self);
@@ -58,6 +61,7 @@ pub fn load_settings(maya_dir: &Path, model: &str) -> Settings {
 pub struct MirrorView {
     pub cards: Vec<Card>,
     pub machines: Vec<MachineInfo>,
+    pub remembered: Vec<RememberedRow>,
 }
 
 /// What this phone says it can do: follow a moved main, become the main,
@@ -155,6 +159,66 @@ impl Hub {
             return cards;
         }
         merge::merged(vec![], &self.boards(), (self.now)())
+    }
+
+    /// The "was running" list the banner shows: the joined main's, or every
+    /// assistant's as this phone's own server holds them.
+    pub fn remembered(&self) -> Vec<RememberedRow> {
+        if self.joined() {
+            return self.mirror.lock().unwrap().remembered.clone();
+        }
+        merge::remembered(vec![], &self.boards())
+    }
+
+    /// Resumes `rows`, each on its own machine, one at a time,
+    /// `RESUME_GAP_MS` apart; a waiting machine's rows are skipped.
+    pub fn resume_remembered(&self, rows: &[RememberedRow]) -> Vec<ResumeOutcome> {
+        let plan = remembered::plan(rows);
+        let mut out = Vec::new();
+        for e in &plan.here {
+            out.push(ResumeOutcome::of(None, e, &Err("This phone runs no sessions.".into())));
+        }
+        for (machine, entries) in &plan.remote {
+            for (i, e) in entries.iter().enumerate() {
+                if i > 0 {
+                    std::thread::sleep(Duration::from_millis(remembered::RESUME_GAP_MS));
+                }
+                let kind = CommandKind::Resume { dir: e.dir.clone(), session: e.session_id.clone(), agent: e.agent };
+                out.push(ResumeOutcome::of(Some(machine), e, &self.send_to(machine, kind).map(|_| ())));
+            }
+        }
+        for w in &plan.waiting {
+            let machine = w.machine.clone().unwrap_or_default();
+            out.push(ResumeOutcome::of(Some(&machine), &w.entry, &Err(remembered::waiting_for(&machine))));
+        }
+        self.refresh();
+        out
+    }
+
+    /// Forgets `rows` on their machines; as a main, also from what its own
+    /// server holds, so a machine that is away leaves the banner too. The
+    /// banner updates first; the `Forget` commands follow, and an older
+    /// assistant that never answers one is logged and ignored.
+    pub fn forget_remembered(&self, rows: &[RememberedRow]) {
+        let groups: Vec<_> = remembered::keys_by_machine(rows).into_iter().filter_map(|(m, w, k)| m.map(|m| (m, w, k))).collect();
+        for (machine, _, keys) in &groups {
+            if let Some(s) = self.handle() {
+                s.drop_remembered(machine, keys);
+            }
+        }
+        if self.joined() {
+            // The main's next mirror says so too; until then do not list them again.
+            self.mirror.lock().unwrap().remembered.retain(|r| !rows.iter().any(|f| f.machine == r.machine && f.entry.key() == r.entry.key()));
+        }
+        self.refresh();
+        for (machine, waiting, keys) in groups {
+            if waiting {
+                continue;
+            }
+            if let Err(e) = self.send_to(&machine, CommandKind::Forget { sessions: keys }) {
+                log::line("remembered", format!("{machine} did not forget its sessions: {e}"));
+            }
+        }
     }
 
     /// This phone listens to a main (joined, or after handing its role away).
@@ -277,6 +341,11 @@ impl Hub {
             }
         }
         self.sink.sessions(&cards);
+        let rows = self.remembered();
+        if let Some(s) = self.handle() {
+            s.mirror_remembered(rows.clone());
+        }
+        self.sink.remembered(&rows);
     }
 
     /// The status as the Network screen shows it: the server's, or the
@@ -776,6 +845,14 @@ impl ClientNotify for HubClientNotify {
         // So the voice's offer follows the link.
         self.refresh();
     }
+    fn mirrored_remembered(&self, rows: Vec<RememberedRow>) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(h) = self.hub.upgrade() {
+            h.mirror.lock().unwrap().remembered = rows;
+        }
+    }
     fn mirrored(&self, allowed: bool, cards: Vec<Card>, machines: Vec<MachineInfo>) {
         if self.stop.load(Ordering::SeqCst) {
             return;
@@ -791,7 +868,11 @@ impl ClientNotify for HubClientNotify {
         if !h.mirror_seeded.swap(true, Ordering::SeqCst) {
             h.notifier.lock().unwrap().seed(&cards);
         }
-        *h.mirror.lock().unwrap() = MirrorView { cards, machines };
+        {
+            let mut view = h.mirror.lock().unwrap();
+            view.cards = cards;
+            view.machines = machines;
+        }
         self.set(|l| l.mirror = Some(MirrorAccess::Allowed));
         h.refresh();
     }
@@ -1007,5 +1088,30 @@ mod tests {
         let e = NoSessions;
         assert_eq!(e.board(), (vec![], vec![]));
         assert_eq!(e.execute(CommandKind::Compact { session: "s".into() }).unwrap_err(), "This phone runs no sessions.");
+    }
+
+    fn remembered_row(machine: Option<&str>, waiting: bool, id: &str) -> maya_core::remembered::RememberedRow {
+        maya_core::remembered::RememberedRow { machine: machine.map(String::from), waiting, entry: maya_core::remembered::Remembered { agent: maya_core::model::Harness::ClaudeCode, session_id: id.into(), dir: "/x".into(), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, error: None } }
+    }
+
+    #[test]
+    fn a_joined_phone_shows_the_main_s_rows_and_skips_the_ones_waiting() {
+        let hub = test_hub();
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("desk".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
+        let rows = vec![remembered_row(Some("Gnowee"), true, "g1")];
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        notify.mirrored_remembered(rows.clone());
+        notify.mirrored(true, vec![], vec![]);
+        assert_eq!(hub.remembered(), rows, "the board that follows keeps the rows");
+        let out = hub.resume_remembered(&rows);
+        assert_eq!(out[0].error.as_deref(), Some("waiting for Gnowee"));
+    }
+
+    #[test]
+    fn a_phone_main_has_no_sessions_of_its_own_to_resume() {
+        let hub = test_hub();
+        assert!(hub.remembered().is_empty(), "no server, no assistants");
+        let out = hub.resume_remembered(&[remembered_row(None, false, "l1")]);
+        assert_eq!(out[0].error.as_deref(), Some("This phone runs no sessions."));
     }
 }

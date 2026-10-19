@@ -31,6 +31,10 @@ impl Sink for TauriSink {
         let _ = self.app.emit("sessions", cards);
     }
 
+    fn remembered(&self, rows: &[maya_core::remembered::RememberedRow]) {
+        let _ = self.app.emit("remembered", rows);
+    }
+
     fn network(&self, status: &NetworkStatus) {
         let _ = self.app.emit("network", status);
     }
@@ -115,6 +119,9 @@ pub fn run() {
             commands::list_agents,
             commands::list_resumable_sessions,
             commands::resume_session,
+            commands::remembered_sessions,
+            commands::resume_remembered,
+            commands::forget_remembered,
             commands::start_session,
             commands::network_status,
             commands::network_pair,

@@ -411,3 +411,21 @@ mod tests {
         assert_eq!(super::update_kind(), if cfg!(debug_assertions) { "off" } else { "notice" });
     }
 }
+
+#[tauri::command]
+pub fn remembered_sessions(hub: H) -> Vec<maya_core::remembered::RememberedRow> {
+    hub.remembered()
+}
+
+#[tauri::command(async)]
+pub fn resume_remembered(hub: H, rows: Vec<maya_core::remembered::RememberedRow>) -> Vec<maya_core::remembered::ResumeOutcome> {
+    hub.resume_remembered(&rows)
+}
+
+/// Off the page's path: an older assistant never answers `Forget`, and the
+/// send waits for it.
+#[tauri::command(async)]
+pub fn forget_remembered(hub: H, rows: Vec<maya_core::remembered::RememberedRow>) {
+    let hub = hub.inner().clone();
+    std::thread::spawn(move || hub.forget_remembered(&rows));
+}
