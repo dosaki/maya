@@ -51,36 +51,75 @@ pub fn read_tail(path: &Path, max_bytes: u64) -> TranscriptTail {
 
 pub const TURNS_TAIL_BYTES: u64 = 1_048_576;
 /// A transcript line longer than this (an image result, a huge paste) is
-/// skipped whole when reading the history.
+/// skipped whole when reading the history, unless emptying its long
+/// `"data"` strings brings it within this.
 pub const TURNS_LINE_MAX_BYTES: usize = 262_144;
 /// The history reads at most this many bytes from the end of the file.
 pub const TURNS_SCAN_MAX_BYTES: u64 = 8 * 1_048_576;
 const TURNS_CHUNK_BYTES: u64 = 1_048_576;
+/// A line longer than this is skipped without being held in memory.
+pub const TURNS_LINE_CEILING_BYTES: usize = 16 * 1_048_576;
 
-/// The newest whole lines of `path` that total `keep_bytes`, oldest first and
-/// joined with `\n`. Lines longer than `line_max` are skipped and cost
-/// nothing. Reads at most `scan_max` bytes from the end; the partial line at
-/// the start of the scanned region is dropped. None when the file cannot be
-/// read.
-pub(crate) fn tail_lines(path: &Path, keep_bytes: u64, line_max: usize, scan_max: u64) -> Option<String> {
-    tail_lines_chunked(path, keep_bytes, line_max, scan_max, TURNS_CHUNK_BYTES)
+/// A `"data"` string longer than this is emptied before a long line's
+/// length is checked: base64 image payloads sit under `source.data`.
+const DATA_STRIP_MIN: usize = 1024;
+
+/// `line` with every `"data":"…"` string over `DATA_STRIP_MIN` bytes
+/// emptied, found by scanning bytes, not by parsing. Inside a JSON string
+/// a quote is escaped, so `"data":"` can only be a key and its value.
+fn strip_long_data(line: &[u8]) -> Vec<u8> {
+    const KEY: &[u8] = b"\"data\":\"";
+    let mut out = Vec::with_capacity(line.len().min(4096));
+    let mut i = 0;
+    while let Some(at) = line[i..].windows(KEY.len()).position(|w| w == KEY) {
+        let start = i + at + KEY.len();
+        let mut end = start;
+        while end < line.len() && line[end] != b'"' {
+            end += if line[end] == b'\\' { 2 } else { 1 };
+        }
+        let end = end.min(line.len());
+        out.extend_from_slice(&line[i..start]);
+        if end - start <= DATA_STRIP_MIN {
+            out.extend_from_slice(&line[start..end]);
+        }
+        i = end;
+    }
+    out.extend_from_slice(&line[i..]);
+    out
 }
 
-fn tail_lines_chunked(path: &Path, keep_bytes: u64, line_max: usize, scan_max: u64, chunk: u64) -> Option<String> {
+/// The newest whole lines of `path` that total `keep_bytes`, oldest first and
+/// joined with `\n`. A line longer than `line_max` has its long `"data"`
+/// strings (image payloads) emptied and is kept when that brings it within
+/// `line_max`; otherwise it is skipped and costs nothing. Reads at most
+/// `scan_max` bytes from the end; the partial line at the start of the
+/// scanned region is dropped. None when the file cannot be read.
+pub(crate) fn tail_lines(path: &Path, keep_bytes: u64, line_max: usize, scan_max: u64) -> Option<String> {
+    tail_lines_chunked(path, keep_bytes, line_max, scan_max, TURNS_CHUNK_BYTES, TURNS_LINE_CEILING_BYTES)
+}
+
+/// `tail_lines`, reading `chunk` bytes at a time. A line is held whole
+/// until its start is read, so it can be stripped, unless it grows past
+/// `ceiling`: then it is skipped without holding the rest of it.
+fn tail_lines_chunked(path: &Path, keep_bytes: u64, line_max: usize, scan_max: u64, chunk: u64, ceiling: usize) -> Option<String> {
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
     let floor = len.saturating_sub(scan_max);
     let mut pos = len;
     // The front of the line whose start is still unread (newest side).
     let mut carry: Vec<u8> = Vec::new();
-    // The line being skipped as too long; its start is still unread.
+    // The line being skipped as past the ceiling; its start is still unread.
     let mut skipping = false;
     let mut kept: Vec<Vec<u8>> = Vec::new();
     let mut kept_bytes = 0u64;
-    let mut take = |line: &[u8], kept: &mut Vec<Vec<u8>>, kept_bytes: &mut u64| {
-        if !line.is_empty() && line.len() <= line_max {
+    let take = |line: &[u8], kept: &mut Vec<Vec<u8>>, kept_bytes: &mut u64| {
+        if line.is_empty() {
+            return;
+        }
+        let line = if line.len() > line_max { strip_long_data(line) } else { line.to_vec() };
+        if line.len() <= line_max {
             *kept_bytes += line.len() as u64 + 1;
-            kept.push(line.to_vec());
+            kept.push(line);
         }
     };
     while pos > floor && kept_bytes < keep_bytes {
@@ -106,10 +145,10 @@ fn tail_lines_chunked(path: &Path, keep_bytes: u64, line_max: usize, scan_max: u
             take(line, &mut kept, &mut kept_bytes);
         }
         let first = segs[0];
-        if first.len() > line_max {
-            skipping = pos > 0;
-        } else if pos == 0 {
+        if pos == 0 {
             take(first, &mut kept, &mut kept_bytes);
+        } else if first.len() > ceiling {
+            skipping = true;
         } else {
             carry.extend_from_slice(first);
         }
@@ -534,7 +573,7 @@ pub fn parse_turns(text: &str, max_turns: usize) -> Vec<Turn> {
 }
 
 /// Last `max_turns` turns from the newest 1 MB of the transcript's lines,
-/// skipping lines over 256 KB.
+/// skipping lines over 256 KB once their image payloads are emptied.
 pub fn read_turns(path: &Path, max_turns: usize) -> Vec<Turn> {
     tail_lines(path, TURNS_TAIL_BYTES, TURNS_LINE_MAX_BYTES, TURNS_SCAN_MAX_BYTES)
         .map(|t| parse_turns(&t, max_turns))
@@ -936,8 +975,66 @@ mod tests {
         let mut lines = message_lines(0, 6);
         lines.insert(3, giant_result_line(1));
         std::fs::write(&p, lines.join("\n") + "\n").unwrap();
-        let text = tail_lines_chunked(&p, 1_048_576, 262_144, 8 * 1_048_576, 64).unwrap();
+        let text = tail_lines_chunked(&p, 1_048_576, 262_144, 8 * 1_048_576, 64, TURNS_LINE_CEILING_BYTES).unwrap();
         assert_eq!(texts(&parse_turns(&text, 30)), (0..6).map(|i| format!("m{i}")).collect::<Vec<_>>());
+    }
+
+    fn image_prompt_line(text: &str, kb: usize) -> String {
+        serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":text},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"A".repeat(kb * 1024)}}]}}).to_string()
+    }
+
+    #[test]
+    fn a_prompt_with_a_pasted_image_keeps_its_text_and_the_answer_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        let lines = [user_line("q0", false), assistant_line("a1", None), image_prompt_line("look at this", 400), assistant_line("a2", None)];
+        assert!(lines[2].len() > TURNS_LINE_MAX_BYTES);
+        std::fs::write(&p, lines.join("\n") + "\n").unwrap();
+        assert_eq!(texts(&read_turns(&p, 30)), vec!["q0", "a1", "look at this", "a2"]);
+    }
+
+    #[test]
+    fn an_image_result_keeps_its_text_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        let call = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"r1","name":"Read","input":{"file_path":"/x/shot.png"}}]}}"#;
+        let result = serde_json::json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"r1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"A".repeat(400 * 1024)}},{"type":"text","text":"a 2x2 png"}]}]}}).to_string();
+        std::fs::write(&p, [user_line("q", false), call.to_string(), result].join("\n") + "\n").unwrap();
+        let turns = read_turns(&p, 30);
+        assert_eq!(texts(&turns), vec!["q", "Read(/x/shot.png)"]);
+        assert_eq!((turns[1].output.as_deref(), turns[1].output_lines), (Some("a 2x2 png"), 1), "the line is kept, not skipped");
+    }
+
+    #[test]
+    fn long_lines_across_small_chunks_are_stripped_or_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        let lines = [
+            user_line("m0", false),
+            assistant_line("m1", None),
+            // Long only for its image: stripped and kept.
+            image_prompt_line("m2", 2),
+            assistant_line("m3", None),
+            // Long text with no payload to strip: skipped.
+            assistant_line(&"x".repeat(500), None),
+            // Over the ceiling: skipped without being buffered.
+            giant_result_line(5),
+            user_line("m4", false),
+            assistant_line("m5", None),
+        ];
+        std::fs::write(&p, lines.join("\n") + "\n").unwrap();
+        let text = tail_lines_chunked(&p, 1_048_576, 200, 8 * 1_048_576, 64, 4096).unwrap();
+        assert_eq!(texts(&parse_turns(&text, 30)), (0..6).map(|i| format!("m{i}")).collect::<Vec<_>>());
+        assert!(!text.contains("xxxx"), "the long text line is skipped");
+        assert!(!text.contains(r#""t1""#), "the line past the ceiling is skipped, not stripped");
+        assert!(text.contains(r#""data":"""#), "the image prompt is kept stripped");
+    }
+
+    #[test]
+    fn stripping_empties_only_long_data_strings() {
+        let long = "B".repeat(2000);
+        let line = format!(r#"{{"a":{{"data":"short"}},"b":{{"data":"{long}"}},"c":{{"data":"x\"y{long}"}},"d":"data"}}"#);
+        assert_eq!(String::from_utf8(strip_long_data(line.as_bytes())).unwrap(), r#"{"a":{"data":"short"},"b":{"data":""},"c":{"data":""},"d":"data"}"#);
     }
 
     #[test]
