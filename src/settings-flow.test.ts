@@ -806,8 +806,8 @@ describe("settings flow", () => {
     enable.dispatchEvent(new Event("change"));
     await flush();
     expect(saved.git).toEqual([
-      { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" } },
-      { provider: "gitlab", enabled: true, baseUrl: null, token: { kind: "env", name: "GITLAB_TOKEN" } },
+      { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" }, clone: "ssh" },
+      { provider: "gitlab", enabled: true, baseUrl: null, token: { kind: "env", name: "GITLAB_TOKEN" }, clone: "ssh" },
     ]);
     localStorage.removeItem("maya.settingsGroup");
   });

@@ -216,6 +216,15 @@ pub enum TokenSource {
     Env { name: String },
 }
 
+/// How a review clones a repo: over SSH or over HTTPS.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloneProtocol {
+    #[default]
+    Ssh,
+    Https,
+}
+
 /// GitHub or GitLab, switched on or off, with where its token comes from.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -226,12 +235,15 @@ pub struct GitConnection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     pub token: TokenSource,
+    /// How a review clones from this forge; SSH unless chosen otherwise.
+    #[serde(default)]
+    pub clone: CloneProtocol,
 }
 
 impl GitConnection {
     /// GitHub on, GitLab off, each reading its default variable.
     pub fn default_for(provider: GitProvider) -> Self {
-        GitConnection { provider, enabled: provider == GitProvider::Github, base_url: None, token: TokenSource::Env { name: provider.default_env().into() } }
+        GitConnection { provider, enabled: provider == GitProvider::Github, base_url: None, token: TokenSource::Env { name: provider.default_env().into() }, clone: CloneProtocol::Ssh }
     }
 
     /// The web address repos live under, without a trailing slash.
@@ -819,15 +831,28 @@ mod tests {
         assert_eq!(older.git, None);
         let set = Config { git: Some(git_after_import(true)), ..Config::default() };
         let text = serde_json::to_string(&set).unwrap();
-        assert!(text.contains(r#""git":[{"provider":"github","enabled":true,"token":{"kind":"stored"}}"#), "{text}");
-        assert!(text.contains(r#"{"provider":"gitlab","enabled":false,"token":{"kind":"env","name":"GITLAB_TOKEN"}}"#), "{text}");
+        assert!(text.contains(r#""git":[{"provider":"github","enabled":true,"token":{"kind":"stored"},"clone":"ssh"}"#), "{text}");
+        assert!(text.contains(r#"{"provider":"gitlab","enabled":false,"token":{"kind":"env","name":"GITLAB_TOKEN"},"clone":"ssh"}"#), "{text}");
         let back: Config = serde_json::from_str(&text).unwrap();
         assert_eq!(back.git, set.git);
     }
 
     #[test]
+    fn a_git_connection_clones_over_ssh_unless_set_to_https() {
+        assert_eq!(GitConnection::default_for(GitProvider::Github).clone, CloneProtocol::Ssh);
+        assert_eq!(CloneProtocol::default(), CloneProtocol::Ssh);
+        let older: GitConnection = serde_json::from_str(r#"{"provider":"gitlab","enabled":true,"token":{"kind":"stored"}}"#).unwrap();
+        assert_eq!(older.clone, CloneProtocol::Ssh);
+        let https: GitConnection = serde_json::from_str(r#"{"provider":"github","enabled":true,"token":{"kind":"stored"},"clone":"https"}"#).unwrap();
+        assert_eq!(https.clone, CloneProtocol::Https);
+        let text = serde_json::to_string(&https).unwrap();
+        assert!(text.contains(r#""clone":"https""#), "{text}");
+        assert_eq!(serde_json::from_str::<GitConnection>(&text).unwrap(), https);
+    }
+
+    #[test]
     fn git_connections_fills_in_a_missing_provider_and_keeps_the_order() {
-        let only_gitlab = GitConnection { provider: GitProvider::Gitlab, enabled: true, base_url: Some("https://gitlab.acme.io".into()), token: TokenSource::Stored };
+        let only_gitlab = GitConnection { provider: GitProvider::Gitlab, enabled: true, base_url: Some("https://gitlab.acme.io".into()), token: TokenSource::Stored, clone: CloneProtocol::Ssh };
         let c = Config { git: Some(vec![only_gitlab.clone()]), ..Config::default() };
         let conns = c.git_connections();
         assert_eq!(conns[0], GitConnection::default_for(GitProvider::Github));

@@ -6,7 +6,8 @@ pub mod env;
 pub mod github;
 pub mod gitlab;
 
-use crate::config::{GitConnection, GitProvider, TokenSource};
+use crate::config::{CloneProtocol, GitConnection, GitProvider, TokenSource};
+use crate::reviews::ReviewPr;
 use serde::Serialize;
 use std::time::Duration;
 
@@ -17,11 +18,13 @@ pub struct ForgeSite {
     pub provider: GitProvider,
     /// `https://github.com`, or the GitLab URL; no trailing slash.
     pub web_base: String,
+    /// How a review clones from this forge.
+    pub clone: CloneProtocol,
 }
 
 impl ForgeSite {
     pub fn of(c: &GitConnection) -> ForgeSite {
-        ForgeSite { provider: c.provider, web_base: c.web_base() }
+        ForgeSite { provider: c.provider, web_base: c.web_base(), clone: c.clone }
     }
 
     pub fn api_base(&self) -> String {
@@ -55,6 +58,20 @@ impl ForgeSite {
 
     pub fn clone_url(&self, repo: &str) -> String {
         format!("{}/{repo}.git", self.web_base)
+    }
+
+    /// `git@<host>:<repo>.git`: the SSH address when the API gave none.
+    pub fn ssh_clone_url(&self, repo: &str) -> String {
+        format!("git@{}:{repo}.git", self.host())
+    }
+}
+
+/// What a review clones: the site's protocol, with the API's own address
+/// for the repo when it gave one, else one built from the site.
+pub fn clone_url_for(site: &ForgeSite, pr: &ReviewPr) -> String {
+    match site.clone {
+        CloneProtocol::Ssh => pr.ssh_url.clone().unwrap_or_else(|| site.ssh_clone_url(&pr.repo)),
+        CloneProtocol::Https => pr.https_url.clone().unwrap_or_else(|| site.clone_url(&pr.repo)),
     }
 }
 
@@ -362,6 +379,39 @@ mod tests {
         let gl = gitlab("https://Acme.io:8443/gitlab");
         assert_eq!((gl.api_base(), gl.graphql_url(), gl.host()), ("https://Acme.io:8443/gitlab/api/v4".into(), "https://Acme.io:8443/gitlab/api/graphql".into(), "acme.io".into()));
         assert_eq!(gl.clone_url("grp/sub/r"), "https://Acme.io:8443/gitlab/grp/sub/r.git");
+    }
+
+    fn with_clone(mut site: ForgeSite, clone: CloneProtocol) -> ForgeSite {
+        site.clone = clone;
+        site
+    }
+
+    fn review_pr(repo: &str, ssh: Option<&str>, https: Option<&str>) -> ReviewPr {
+        ReviewPr { number: 1, forge: GitProvider::Github, repo: repo.into(), title: String::new(), author: String::new(), url: String::new(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: ssh.map(Into::into), https_url: https.map(Into::into) }
+    }
+
+    #[test]
+    fn a_site_builds_an_ssh_address_from_its_host() {
+        assert_eq!(github().ssh_clone_url("Org/r"), "git@github.com:Org/r.git");
+        assert_eq!(gitlab("https://acme.io/gitlab").ssh_clone_url("grp/r"), "git@acme.io:grp/r.git");
+        assert_eq!(gitlab("https://Acme.io:8443/gitlab").ssh_clone_url("grp/sub/r"), "git@acme.io:grp/sub/r.git", "no port, no sub-path");
+    }
+
+    #[test]
+    fn the_clone_url_follows_the_protocol_and_prefers_the_apis_address() {
+        let ssh = with_clone(github(), CloneProtocol::Ssh);
+        let https = with_clone(github(), CloneProtocol::Https);
+        let api = review_pr("Org/r", Some("git@github.com:Org/api.git"), Some("https://github.com/Org/api.git"));
+        let bare = review_pr("Org/r", None, None);
+        assert_eq!(clone_url_for(&ssh, &api), "git@github.com:Org/api.git");
+        assert_eq!(clone_url_for(&ssh, &bare), "git@github.com:Org/r.git");
+        assert_eq!(clone_url_for(&https, &api), "https://github.com/Org/api.git");
+        assert_eq!(clone_url_for(&https, &bare), "https://github.com/Org/r.git");
+        let gl = with_clone(gitlab("https://acme.io/gitlab"), CloneProtocol::Ssh);
+        assert_eq!(clone_url_for(&gl, &review_pr("grp/r", None, None)), "git@acme.io:grp/r.git");
+        let gl = with_clone(gitlab("https://acme.io/gitlab"), CloneProtocol::Https);
+        assert_eq!(clone_url_for(&gl, &review_pr("grp/r", None, None)), "https://acme.io/gitlab/grp/r.git");
+        assert_eq!(ForgeSite::of(&GitConnection { clone: CloneProtocol::Https, ..GitConnection::default_for(GitProvider::Github) }).clone, CloneProtocol::Https);
     }
 
     #[test]

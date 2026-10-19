@@ -93,6 +93,9 @@ export interface ReviewPr {
   prReview: ReviewMark | null;
   /** Who gave `prReview`. */
   prReviewers: string[];
+  /** The repo's clone addresses from the forge's API; the page does not use them. */
+  sshUrl?: string | null;
+  httpsUrl?: string | null;
 }
 
 export type ReviewMark = "approved" | "commented" | "changesRequested";

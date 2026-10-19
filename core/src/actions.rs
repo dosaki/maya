@@ -695,7 +695,7 @@ pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, 
     if target.clone {
         std::fs::create_dir_all(&cwd).map_err(|e| format!("Could not create the clones folder {}: {e}.", cwd.display()))?;
     }
-    l.terminal.open(&crate::reviews::shell_command(agent, &target, &site.clone_url(&pr.repo), &crate::reviews::session_name(pr.forge, &pr.repo, pr.number), &file, grok_id.as_deref()), &cwd, &tmux_label())?;
+    l.terminal.open(&crate::reviews::shell_command(agent, &target, &crate::forge::clone_url_for(&site, pr), &crate::reviews::session_name(pr.forge, &pr.repo, pr.number), &file, grok_id.as_deref()), &cwd, &tmux_label())?;
     if agent != model::Harness::ClaudeCode {
         let name = crate::reviews::session_name(pr.forge, &pr.repo, pr.number);
         l.store.lock().unwrap().add_pending_name(crate::pending_names::PendingName::new(agent, &target.dir.to_string_lossy(), &name, now_ms(), known, grok_id));
@@ -1312,7 +1312,7 @@ mod tests {
         let store = with_agents(store, vec![agents::claude(), crate::agents::info_for(Harness::Codex, None)]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let pr = crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] };
+        let pr = crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None };
         assert!(!dir.path().join("clones").exists());
         let folder = start_review(&l, &pr).unwrap();
         assert!(Path::new(&folder).ends_with(Path::new("clones").join("bedrock-451")), "{folder}");
@@ -1320,7 +1320,7 @@ mod tests {
         assert!(dir.path().join("clones").is_dir());
         let calls = fake.calls.lock().unwrap();
         let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
-        assert!(command.contains("git clone 'https://github.com/Org/bedrock.git'") && command.ends_with("&& codex -- \"$p\""), "{command}");
+        assert!(command.contains("git clone 'git@github.com:Org/bedrock.git'") && command.ends_with("&& codex -- \"$p\""), "{command}");
         let file = command.split("cat '").nth(1).unwrap().split('\'').next().unwrap();
         assert_eq!(std::fs::read_to_string(file).unwrap(), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
         drop(calls);
@@ -1333,11 +1333,30 @@ mod tests {
     }
 
     #[test]
+    fn start_review_clones_over_https_when_the_connection_says_so() {
+        let (dir, store) = store_with_projects(&["elsewhere"]);
+        {
+            let mut s = store.lock().unwrap();
+            s.config.clones_dir = Some(dir.path().join("clones").to_string_lossy().into_owned());
+            let mut gh = crate::config::GitConnection::default_for(crate::config::GitProvider::Github);
+            gh.clone = crate::config::CloneProtocol::Https;
+            s.config.git = Some(vec![gh]);
+        }
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let pr = crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None };
+        start_review(&l, &pr).unwrap();
+        let calls = fake.calls.lock().unwrap();
+        let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
+        assert!(command.contains("git clone 'https://github.com/Org/bedrock.git'"), "{command}");
+    }
+
+    #[test]
     fn a_review_on_a_forge_that_is_off_says_so() {
         let (_dir, store) = store_with_projects(&["elsewhere"]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let pr = crate::reviews::ReviewPr { number: 3, forge: crate::config::GitProvider::Gitlab, repo: "grp/r".into(), title: "t".into(), author: "a".into(), url: "u".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] };
+        let pr = crate::reviews::ReviewPr { number: 3, forge: crate::config::GitProvider::Gitlab, repo: "grp/r".into(), title: "t".into(), author: "a".into(), url: "u".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None };
         assert_eq!(start_review(&l, &pr).unwrap_err(), "Turn on GitLab in Settings → Git first.");
     }
 
@@ -1348,7 +1367,7 @@ mod tests {
         let store = with_agents(store, vec![agents::claude()]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let pr = crate::reviews::ReviewPr { number: 1, forge: Default::default(), repo: "o/r".into(), title: String::new(), author: String::new(), url: "https://github.com/o/r/pull/1".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] };
+        let pr = crate::reviews::ReviewPr { number: 1, forge: Default::default(), repo: "o/r".into(), title: String::new(), author: String::new(), url: "https://github.com/o/r/pull/1".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None };
         assert_eq!(start_review(&l, &pr).unwrap_err(), "Grok Build is not installed on this machine.");
         assert!(fake.calls.lock().unwrap().is_empty());
     }

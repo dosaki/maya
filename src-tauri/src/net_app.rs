@@ -483,7 +483,7 @@ mod tests {
     }
 
     fn pr(repo: &str, number: u64) -> maya_core::reviews::ReviewPr {
-        maya_core::reviews::ReviewPr { number, forge: maya_core::config::GitProvider::Github, repo: repo.into(), title: format!("{repo} {number}"), author: "alex".into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: false, updated_at: "2026-10-01T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] }
+        maya_core::reviews::ReviewPr { number, forge: maya_core::config::GitProvider::Github, repo: repo.into(), title: format!("{repo} {number}"), author: "alex".into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: false, updated_at: "2026-10-01T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None }
     }
 
     #[test]

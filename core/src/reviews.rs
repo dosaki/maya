@@ -45,6 +45,11 @@ pub struct ReviewPr {
     pub pr_review: Option<ReviewMark>,
     /// Who gave `pr_review`.
     pub pr_reviewers: Vec<String>,
+    /// The repo's SSH and HTTPS clone addresses, as the forge's API gave them.
+    #[serde(default)]
+    pub ssh_url: Option<String>,
+    #[serde(default)]
+    pub https_url: Option<String>,
 }
 
 impl ReviewPr {
@@ -70,7 +75,7 @@ pub const QUERY: &str = r#"query {
 }
 fragment pr on PullRequest {
   number title url isDraft updatedAt
-  repository { nameWithOwner }
+  repository { nameWithOwner sshUrl url }
   author { login }
   latestOpinionatedReviews(first: 100) { nodes { state author { __typename login } } }
   latestReviews(first: 100) { nodes { state author { __typename login } } }
@@ -137,6 +142,9 @@ fn parse_node(p: &serde_json::Value, reason: Reason, login: &str) -> Option<Revi
         my_review: my_review(p, login),
         pr_review,
         pr_reviewers,
+        ssh_url: p["repository"]["sshUrl"].as_str().map(String::from),
+        // `url` is the repo's web address; the clone address adds `.git`.
+        https_url: p["repository"]["url"].as_str().map(|u| format!("{}.git", u.trim_end_matches('/'))),
     })
 }
 
@@ -370,6 +378,21 @@ mod tests {
         format!(
             r#"{{"number":{number},"title":"t{number}","url":"https://github.com/{repo}/pull/{number}","isDraft":false,"updatedAt":"{updated}","repository":{{"nameWithOwner":"{repo}"}},"author":{{"login":"{author}"}},"latestOpinionatedReviews":{{"nodes":[{opinionated}]}},"latestReviews":{{"nodes":[{latest}]}}}}"#
         )
+    }
+
+    #[test]
+    fn the_clone_addresses_come_from_the_repository() {
+        let with = r#"{"number":1,"title":"t","url":"https://github.com/o/r/pull/1","isDraft":false,"updatedAt":"","repository":{"nameWithOwner":"o/r","sshUrl":"git@github.com:o/r.git","url":"https://github.com/o/r"},"author":{"login":"jane"}}"#;
+        let p = parse_node(&serde_json::from_str(with).unwrap(), Reason::Review, "me").unwrap();
+        assert_eq!((p.ssh_url.as_deref(), p.https_url.as_deref()), (Some("git@github.com:o/r.git"), Some("https://github.com/o/r.git")));
+        let without = node(2, "o/r", "jane", "", "", "");
+        let p = parse_node(&serde_json::from_str(&without).unwrap(), Reason::Review, "me").unwrap();
+        assert_eq!((p.ssh_url, p.https_url), (None, None));
+    }
+
+    #[test]
+    fn the_query_asks_for_the_clone_addresses() {
+        assert!(QUERY.contains("repository { nameWithOwner sshUrl url }"));
     }
 
     fn review(login: &str, state: &str) -> String {
@@ -668,7 +691,7 @@ mod tests {
     }
 
     fn pr() -> ReviewPr {
-        ReviewPr { number: 451, forge: GitProvider::Github, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None, pr_review: None, pr_reviewers: vec![] }
+        ReviewPr { number: 451, forge: GitProvider::Github, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None }
     }
 
     #[test]

@@ -176,6 +176,7 @@ export interface SettingsHandlers {
   onGitTokenKind?(p: GitProvider, kind: "stored" | "env"): void;
   onGitEnvName?(p: GitProvider, name: string): void;
   onGitBaseUrl?(url: string): void;
+  onGitClone?(p: GitProvider, protocol: "ssh" | "https"): void;
   onGitToken?(p: GitProvider, token: string): void;
   onGitClearToken?(p: GitProvider): void;
   onGitTest?(p: GitProvider): void;
@@ -245,6 +246,8 @@ export interface GitConnectionJson {
   /** GitLab only; null is https://gitlab.com. */
   baseUrl?: string | null;
   token: { kind: "stored" } | { kind: "env"; name: string };
+  /** How a review clones; ssh when absent. */
+  clone?: "ssh" | "https";
 }
 
 const GIT_DEFAULT_ENV: Record<GitProvider, string> = { github: "GH_TOKEN", gitlab: "GITLAB_TOKEN" };
@@ -254,7 +257,7 @@ const GIT_LABEL: Record<GitProvider, string> = { github: "GitHub", gitlab: "GitL
 export function gitConnections(raw: GitConnectionJson[] | null | undefined): GitConnectionJson[] {
   return (["github", "gitlab"] as const).map((provider) => {
     const found = raw?.find((c) => c.provider === provider);
-    return found ? { ...found, baseUrl: found.baseUrl ?? null } : { provider, enabled: provider === "github", baseUrl: null, token: { kind: "env", name: GIT_DEFAULT_ENV[provider] } };
+    return found ? { ...found, baseUrl: found.baseUrl ?? null, clone: found.clone ?? "ssh" } : { provider, enabled: provider === "github", baseUrl: null, token: { kind: "env", name: GIT_DEFAULT_ENV[provider] }, clone: "ssh" };
   });
 }
 
@@ -736,6 +739,24 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     }
     box.append(kinds);
 
+    const clones = document.createElement("div");
+    clones.className = "settings__git-kinds";
+    clones.append(document.createTextNode("Clone with "));
+    for (const [protocol, text] of [["ssh", "SSH"], ["https", "HTTPS"]] as const) {
+      const l = document.createElement("label");
+      l.className = "settings__check";
+      const r = document.createElement("input");
+      r.type = "radio";
+      r.name = `gitClone-${p}`;
+      r.value = protocol;
+      r.checked = (conn.clone ?? "ssh") === protocol;
+      r.disabled = !conn.enabled;
+      r.addEventListener("change", () => h.onGitClone?.(p, protocol));
+      l.append(r, document.createTextNode(` ${text}`));
+      clones.append(l);
+    }
+    box.append(clones);
+
     if (conn.token.kind === "stored") {
       const tokLabel = document.createElement("label");
       tokLabel.textContent = `${GIT_LABEL[p]} token`;
@@ -793,7 +814,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   const gitHint = document.createElement("div");
   gitHint.className = "settings__hint";
-  gitHint.textContent = "Maya reads pull requests and merge requests with these tokens. GitHub needs the repo scope; GitLab needs read_api. Reviews clone with your own git credentials.";
+  gitHint.textContent = "Maya reads pull requests and merge requests with these tokens. GitHub needs the repo scope; GitLab needs read_api. Reviews clone over SSH or HTTPS with your own git credentials.";
   git.append(gitHint);
 
   const speakLabel = document.createElement("label");
@@ -1504,6 +1525,7 @@ export async function initSettings(): Promise<void> {
   const handlers: SettingsHandlers = {
     onGitEnabled: (p, on) => void saveGit(p, (c) => { c.enabled = on; }),
     onGitBaseUrl: (url) => void saveGit("gitlab", (c) => { c.baseUrl = url || null; }),
+    onGitClone: (p, protocol) => void saveGit(p, (c) => { c.clone = protocol; }),
     onGitTokenKind: (p, kind) => void saveGit(p, (c) => { c.token = kind === "stored" ? { kind: "stored" } : { kind: "env", name: GIT_DEFAULT_ENV[p] }; }),
     onGitEnvName: (p, name) => void saveGit(p, (c) => { c.token = { kind: "env", name }; }),
     onGitToken: (p, token) => void run(async () => { await invoke("store_git_token", { provider: p, token }); await loadGitStatus(); }),

@@ -17,7 +17,7 @@ pub const QUERY: &str = r#"query {
 }
 fragment mr on MergeRequest {
   iid title webUrl draft updatedAt
-  project { fullPath }
+  project { fullPath sshUrlToRepo httpUrlToRepo }
   author { username }
   reviewers { nodes { username bot mergeRequestInteraction { reviewState } } }
 }"#;
@@ -66,6 +66,8 @@ fn parse_node(m: &Value, reason: Reason, me: &str) -> Option<ReviewPr> {
         my_review,
         pr_review,
         pr_reviewers,
+        ssh_url: m["project"]["sshUrlToRepo"].as_str().map(String::from),
+        https_url: m["project"]["httpUrlToRepo"].as_str().map(String::from),
     })
 }
 
@@ -126,6 +128,16 @@ mod tests {
 
     fn reviewer(name: &str, state: &str, bot: bool) -> String {
         format!(r#"{{"username":"{name}","bot":{bot},"mergeRequestInteraction":{{"reviewState":"{state}"}}}}"#)
+    }
+
+    #[test]
+    fn the_clone_addresses_come_from_the_project() {
+        let with = r#"{"iid":"1","title":"t","webUrl":"https://gitlab.acme.io/grp/r/-/merge_requests/1","draft":false,"updatedAt":"","project":{"fullPath":"grp/r","sshUrlToRepo":"git@gitlab.acme.io:grp/r.git","httpUrlToRepo":"https://gitlab.acme.io/grp/r.git"},"author":{"username":"jane"}}"#;
+        let p = parse_node(&serde_json::from_str(with).unwrap(), Reason::Review, "me").unwrap();
+        assert_eq!((p.ssh_url.as_deref(), p.https_url.as_deref()), (Some("git@gitlab.acme.io:grp/r.git"), Some("https://gitlab.acme.io/grp/r.git")));
+        let p = parse_node(&serde_json::from_str(&mr(2, "jane", "", &[])).unwrap(), Reason::Review, "me").unwrap();
+        assert_eq!((p.ssh_url, p.https_url), (None, None));
+        assert!(QUERY.contains("project { fullPath sshUrlToRepo httpUrlToRepo }"));
     }
 
     fn mr(iid: u64, author: &str, updated: &str, reviewers: &[String]) -> String {

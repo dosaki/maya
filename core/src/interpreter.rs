@@ -456,7 +456,7 @@ mod tests {
     }
 
     fn pr(repo: &str, number: u64, title: &str, author: &str, draft: bool) -> crate::reviews::ReviewPr {
-        crate::reviews::ReviewPr { number, forge: crate::config::GitProvider::Github, repo: repo.into(), title: title.into(), author: author.into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: draft, updated_at: "2026-09-30T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![] }
+        crate::reviews::ReviewPr { number, forge: crate::config::GitProvider::Github, repo: repo.into(), title: title.into(), author: author.into(), url: format!("https://github.com/{repo}/pull/{number}"), is_draft: draft, updated_at: "2026-09-30T07:00:00Z".into(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None }
     }
 
     #[test]

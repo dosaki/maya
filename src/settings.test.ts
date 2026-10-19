@@ -997,10 +997,11 @@ describe("Settings → Git", () => {
 
   it("defaults to GitHub on reading GH_TOKEN and GitLab off reading GITLAB_TOKEN", () => {
     expect(gitConnections(undefined)).toEqual([
-      { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" } },
-      { provider: "gitlab", enabled: false, baseUrl: null, token: { kind: "env", name: "GITLAB_TOKEN" } },
+      { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" }, clone: "ssh" },
+      { provider: "gitlab", enabled: false, baseUrl: null, token: { kind: "env", name: "GITLAB_TOKEN" }, clone: "ssh" },
     ]);
-    expect(gitConnections([{ provider: "gitlab", enabled: true, token: { kind: "stored" } }])[1]).toEqual({ provider: "gitlab", enabled: true, baseUrl: null, token: { kind: "stored" } });
+    expect(gitConnections([{ provider: "gitlab", enabled: true, token: { kind: "stored" } }])[1]).toEqual({ provider: "gitlab", enabled: true, baseUrl: null, token: { kind: "stored" }, clone: "ssh" });
+    expect(gitConnections([{ provider: "github", enabled: true, token: { kind: "stored" }, clone: "https" }])[0].clone).toBe("https");
   });
 
   it("shows a block per provider, its fields disabled while it is off", () => {
@@ -1010,6 +1011,23 @@ describe("Settings → Git", () => {
     expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name^=gitBaseUrl]")!.disabled).toBe(true);
     expect(block(root, "gitlab").querySelector<HTMLInputElement>("input[name^=gitBaseUrl]")!.placeholder).toBe("https://gitlab.com");
     expect(block(root, "github").querySelector("input[name^=gitBaseUrl]")).toBeNull();
+  });
+
+  it("offers SSH or HTTPS to clone with, SSH by default, off with its provider", () => {
+    const h = { ...handlers(), onGitClone: vi.fn() };
+    const root = renderSettings(gitModel(), h);
+    const radio = (p: string, v: string) => block(root, p).querySelector<HTMLInputElement>(`input[name=gitClone-${p}][value=${v}]`)!;
+    expect([radio("github", "ssh").checked, radio("github", "https").checked]).toEqual([true, false]);
+    expect(radio("github", "ssh").disabled).toBe(false);
+    expect(radio("gitlab", "ssh").disabled && radio("gitlab", "https").disabled).toBe(true);
+    expect(block(root, "github").textContent).toContain("Clone with");
+    expect(block(root, "github").textContent).toContain("HTTPS");
+    const on = gitModel({ git: gitConnections([{ provider: "gitlab", enabled: true, token: { kind: "stored" }, clone: "https" }]) });
+    const root2 = renderSettings(on, h);
+    expect(block(root2, "gitlab").querySelector<HTMLInputElement>("input[name=gitClone-gitlab][value=https]")!.checked).toBe(true);
+    const https = block(root2, "gitlab").querySelector<HTMLInputElement>("input[name=gitClone-gitlab][value=https]")!;
+    https.dispatchEvent(new Event("change"));
+    expect(h.onGitClone).toHaveBeenCalledWith("gitlab", "https");
   });
 
   it("shows the variable field for env and the token field for stored, never filled", () => {
