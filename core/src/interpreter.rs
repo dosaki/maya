@@ -298,9 +298,10 @@ fn find_pr<'a>(prs: &'a [ReviewPr], wanted: &str) -> Result<&'a ReviewPr, String
 }
 
 /// The rows "resume my sessions" resumes: every one whose machine is here
-/// or connected; with `scope` "here", only this machine's.
+/// or connected and that has not already failed, as the banner's Resume all;
+/// with `scope` "here", only this machine's.
 pub fn resume_all_rows(rows: &[RememberedRow], scope: &str) -> Vec<RememberedRow> {
-    rows.iter().filter(|r| !r.waiting && (scope != "here" || r.machine.is_none())).cloned().collect()
+    rows.iter().filter(|r| !r.waiting && r.entry.error.is_none() && (scope != "here" || r.machine.is_none())).cloned().collect()
 }
 
 /// A `resume_all` checked against the "was running" list: its scope, and
@@ -800,6 +801,12 @@ mod tests {
         assert_eq!(validate_resume_all(&json!({"kind": "resume_all", "scope": "all"}), &waiting).unwrap_err(), "There's nothing to resume.");
         assert_eq!(validate_resume_all(&json!({"kind": "resume_all", "scope": "here"}), &[row(Some("Gnowee"), false, "g")]).unwrap_err(), "There's nothing to resume.");
         assert_eq!(validate_resume_all(&json!({"kind": "resume_all", "scope": "there"}), &waiting).unwrap_err(), "Should I resume them here or everywhere?");
+        let mut failed = row(None, false, "f");
+        failed.entry.error = Some("folder missing".into());
+        assert_eq!(validate_resume_all(&json!({"kind": "resume_all", "scope": "all"}), &[failed.clone()]).unwrap_err(), "There's nothing to resume.", "a row that already failed is not tried again");
+        let mixed = [failed, row(None, false, "ok")];
+        assert_eq!(resume_all_rows(&mixed, "all").iter().map(|r| r.entry.session_id.as_str()).collect::<Vec<_>>(), ["ok"]);
+        assert_eq!(validate_resume_all(&json!({"kind": "resume_all", "scope": "all"}), &mixed).unwrap()["count"], 1);
     }
 
     #[test]
