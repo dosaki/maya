@@ -19,7 +19,8 @@ the right terminal first.
 - Lets you reply, answer questions, and run slash commands and `!` shell lines from the card
 - Starts new sessions and resumes old ones
 - After a restart, offers to resume every session that was running, on this machine and on the paired ones, each in its own folder and terminal: from the Sessions tab, or by voice ("Maya, resume my sessions")
-- Shows a session as a chat or in a terminal look, like the agent's own terminal (Settings → Sessions, or the `>_` button on the session)
+- Shows what a session's terminal shows: the conversation, each command's output, edit diffs, how long it has been working, and its model, folder and branch
+  - As a chat or in a terminal look, like the agent's own terminal (Settings → Sessions, or the `>_` button on the session)
 - Tells you when a session needs you
   - Using built-in notifications, and/or a voice and/or a Dock badge
   - Keeps quiet under a Focus mode, or when you mute her from the top bar
@@ -28,7 +29,7 @@ the right terminal first.
 - Resumes old sessions of any of them, and reviews pull requests with the agent you chose, on a prompt you can edit in Settings
 - Shows the sessions of all your machines on one board.
 - Runs headless over SSH with the `maya` command.
-- Comes as an Android app too: a main Maya in your pocket, or a phone that joins your computer's Maya, shows every session and notifies you when one needs you.
+- Comes as an Android app too: a main Maya in your pocket, or a phone that joins your computer's Maya, shows every session, notifies you when one needs you and, joined to a computer, takes voice commands.
 
 ## Install
 
@@ -37,7 +38,7 @@ Run the commands below, or download Maya manually from the
 
 Requirements:
 
-- One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity, Grok Build, [Kiro CLI](https://kiro.dev/cli) or [OpenCode](https://opencode.ai), installed and signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
+- One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity, Grok Build, [Kiro CLI](https://kiro.dev/cli) or [OpenCode](https://opencode.ai), installed and, if applicable, signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
 - Pull requests: turn on GitHub or GitLab in Settings → Git and give it a token (or the name of a variable that holds one).
 - macOS on Apple Silicon or Intel (macOS 14 or later for voice).
 - Windows 10 or 11, 64-bit, with [Git for Windows](https://git-scm.com/download/win).
@@ -213,7 +214,17 @@ retyped on the assistants.
 
 Each ask and each finished turn is a notification you can turn off on the
 Network tab, or silence per channel in Android's settings; tapping one
-opens the card. There is no voice on the phone, and no Pull Requests tab.
+opens the card. There is no Pull Requests tab on the phone.
+
+A phone that has joined a computer's Maya also speaks and listens while
+the app is on screen. Tap the microphone and talk to Maya as you would on
+the computer: the computer's agent works out what you meant, and anything
+that sends text is read back and needs a "yes". With **Speak** on (the
+Network tab) the phone also says aloud when a session needs you; **Wake
+word "Maya"** (experimental) listens for her name without a tap. Android
+asks for the microphone the first time. Once the app leaves the screen
+the phone stops listening and speaking, and keeps to notifications. A
+phone that is the main has no voice.
 
 Hand checks for a new build, which CI cannot run: pair a computer, rotate
 between one and four columns, answer a decision from the phone, lock the
@@ -383,6 +394,8 @@ too, with no desktop and no app: the `maya` command line tool.
   stops a running `maya run` within seconds (exit 2).
 - **What works.** Every action the main can send an assistant: reply,
   answer, compact, rename, change model, effort or mode, start and resume.
+  It remembers the sessions running on its machine too, so after a restart
+  the main offers to resume them.
   Start and resume land in a tmux session named `maya-<8 hex>`, shown in the
   card's tooltip on the main as `attach: tmux attach -t …`; answering, slash
   commands and Shift+Tab need that session to be inside tmux — a `claude`
