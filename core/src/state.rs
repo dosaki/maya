@@ -155,17 +155,26 @@ pub fn derive(i: &DeriveInput) -> Card {
         }
     }
 
-    let is_busy = matches!(r.status.as_str(), "busy" | "shell");
+    // "shell": the turn has ended but a background command it started still runs.
+    let is_busy = r.status == "busy";
+    let shell_running = r.status == "shell";
+    // A turn that ended by asking in prose waits for a reply, however long ago
+    // and whatever it left running in the background.
+    let asked = match last_turn {
+        Some((true, ts)) if !is_busy => i.transcript.last_assistant_text.as_deref().and_then(asking_line).map(|line| (line, ts)),
+        _ => None,
+    };
 
     let (state, state_since, aw) = if let Some((a, ts, _)) = awaiting {
         (State::Awaiting, ts, Some(a))
     } else if is_busy {
         (State::Working, r.status_updated_at, None)
+    } else if let Some((line, ts)) = asked {
+        (State::Awaiting, ts, Some(Awaiting { kind: AwaitKind::Text, detail: truncate(&line, SNIPPET_CHARS), questions: vec![] }))
+    } else if shell_running {
+        (State::Working, r.status_updated_at, None)
     } else if let Some((true, ts)) = last_turn {
-        // A turn that ended by asking in prose waits for a reply, however long ago.
-        if let Some(line) = i.transcript.last_assistant_text.as_deref().and_then(asking_line) {
-            (State::Awaiting, ts, Some(Awaiting { kind: AwaitKind::Text, detail: truncate(&line, SNIPPET_CHARS), questions: vec![] }))
-        } else if i.now_ms.saturating_sub(ts) < i.completed_timeout_ms {
+        if i.now_ms.saturating_sub(ts) < i.completed_timeout_ms {
             (State::Completed, ts, None)
         } else {
             (State::Idle, ts + i.completed_timeout_ms, None)
@@ -442,6 +451,22 @@ mod tests {
         // A Stop whose text does not ask stays Completed.
         let plain = TranscriptTail { last_assistant_text: Some("All done.".into()), ..Default::default() };
         assert_eq!(run(&reg("idle", 2100), &evs, &plain, 3000).state, State::Completed);
+    }
+
+    #[test]
+    fn stop_with_a_question_while_a_background_shell_runs_is_awaiting() {
+        // The background command's tool events after the Stop do not hide the question.
+        let evs = [ev("UserPromptSubmit", 1000), ev("Stop", 2000), tool_ev("PostToolUse", "Bash", serde_json::json!({}), 2500)];
+        let tail = TranscriptTail { last_assistant_text: Some("Say the word and I'll start with the delete.".into()), ..Default::default() };
+        let c = run(&reg("shell", 2100), &evs, &tail, 3000);
+        assert_eq!(c.state, State::Awaiting);
+        assert_eq!(c.state_since, 2000);
+        assert_eq!(c.awaiting.unwrap().kind, AwaitKind::Text);
+        // Without a question the background shell keeps it Working.
+        let plain = TranscriptTail { last_assistant_text: Some("Watching the deploy.".into()), ..Default::default() };
+        assert_eq!(run(&reg("shell", 2100), &evs, &plain, 3000).state, State::Working);
+        // A turn still in progress stays Working whatever the last text says.
+        assert_eq!(run(&reg("busy", 2100), &evs, &tail, 3000).state, State::Working);
     }
 
     #[test]
