@@ -278,6 +278,53 @@ pub(crate) fn first_turn(primer: Option<String>, catch_up: Option<String>) -> Op
     }
 }
 
+/// Her handover summary being written: the request, who waits for its
+/// reply (none once they stopped waiting), and whether her turn on it runs.
+pub(crate) struct SummaryWait {
+    text: String,
+    tx: Option<Sender<String>>,
+    in_turn: bool,
+}
+
+impl SummaryWait {
+    pub(crate) fn new(text: &str, tx: Sender<String>) -> SummaryWait {
+        SummaryWait { text: text.to_string(), tx: Some(tx), in_turn: false }
+    }
+
+    /// `req` is going to her: her turn on the summary runs when it is the
+    /// summary request.
+    pub(crate) fn delivered(&mut self, req: &Request) {
+        if req.internal && req.via == Via::Maya && req.text == self.text {
+            self.in_turn = true;
+        }
+    }
+
+    /// Whether a reply that came back `via` is the summary.
+    pub(crate) fn takes(&self, via: Via) -> bool {
+        via == Via::Maya && self.in_turn
+    }
+
+    /// The summary came: to whoever still waits.
+    pub(crate) fn answer(self, say: &str) {
+        if let Some(tx) = self.tx {
+            let _ = tx.send(say.to_string());
+        }
+    }
+
+    /// Nobody waits any more; a late reply is still swallowed.
+    pub(crate) fn gave_up(&mut self) {
+        self.tx = None;
+    }
+}
+
+/// The summary wait after "stop": a stop ends her turn with no reply and
+/// clears her queue, so the summary will not come. The wait goes (its
+/// waiter hears at once and uses the digest), and no later reply of hers
+/// is taken for it.
+pub(crate) fn summary_after_stop(_wait: Option<SummaryWait>) -> Option<SummaryWait> {
+    None
+}
+
 /// The note the read-only Chat on an assistant shows.
 pub(crate) fn dormant_note(main: Option<&str>) -> String {
     match main.map(str::trim).filter(|m| !m.is_empty()) {
@@ -604,6 +651,42 @@ mod tests {
         assert_eq!(first_turn(Some("P".into()), None).as_deref(), Some("P"));
         assert_eq!(first_turn(None, Some("C".into())).as_deref(), Some("C"));
         assert_eq!(first_turn(Some("P".into()), Some("C".into())).as_deref(), Some("P\nC"));
+    }
+
+    #[test]
+    fn only_her_turn_on_the_summary_request_answers_it() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut w = SummaryWait::new("Write a summary", tx);
+        assert!(!w.takes(Via::Maya), "not sent yet: a reply of hers is not the summary");
+        w.delivered(&Request::new("Write a summary", Via::Maya));
+        w.delivered(&Request::internal("other", Via::Maya));
+        assert!(!w.takes(Via::Maya), "only the internal summary request");
+        w.delivered(&Request::internal("Write a summary", Via::Maya));
+        assert!(w.takes(Via::Maya));
+        assert!(!w.takes(Via::Chat));
+        w.answer("Did #52.");
+        assert_eq!(rx.try_recv().unwrap(), "Did #52.");
+    }
+
+    #[test]
+    fn a_stop_during_the_summary_ends_the_wait_at_once_and_takes_no_later_reply() {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let mut w = SummaryWait::new("Write a summary", tx);
+        w.delivered(&Request::internal("Write a summary", Via::Maya));
+        let after = summary_after_stop(Some(w));
+        assert!(after.is_none(), "no later Maya reply is taken for the summary");
+        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)), "the waiter goes to the digest at once");
+    }
+
+    #[test]
+    fn a_late_summary_is_swallowed_with_nobody_waiting() {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let mut w = SummaryWait::new("s", tx);
+        w.gave_up();
+        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)));
+        w.delivered(&Request::internal("s", Via::Maya));
+        assert!(w.takes(Via::Maya), "still taken, so it is never said");
+        w.answer("late");
     }
 
     #[test]

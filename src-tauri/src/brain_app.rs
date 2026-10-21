@@ -19,7 +19,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, may_act, one_line, phone_dropped_note, refusal_feedback, sort_actions, speaks, spoken, stop_line, Feedback, Outage, PhoneReply, PhoneWaiters, SummarySource, Waiter, Wake};
+use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, may_act, one_line, phone_dropped_note, refusal_feedback, sort_actions, speaks, spoken, stop_line, Feedback, Outage, PhoneReply, PhoneWaiters, SummarySource, SummaryWait, Waiter, Wake};
 pub(crate) use crate::brain_route::{brain_card, handoff};
 use crate::listener::{self, Interpreted};
 use crate::store::now_ms;
@@ -42,14 +42,6 @@ const RESUME_FAILED: &str = "I couldn't pick up my old session, so I've started 
 const PRIMER_TURNS: usize = 20;
 
 type SharedDriver = Arc<Mutex<Box<dyn Driver>>>;
-
-/// Her handover summary being written: the request, who waits for its
-/// reply (none once they stopped waiting), and whether her turn on it runs.
-struct HandoverWait {
-    text: String,
-    tx: Option<Sender<String>>,
-    in_turn: bool,
-}
 
 pub(crate) struct BrainState {
     /// Behind its own (leaf) lock: see the lock rule above.
@@ -114,7 +106,7 @@ pub(crate) struct BrainState {
     /// turn of hers ends, so a failed resume or a restart still delivers it.
     catch_up: Option<String>,
     /// Her handover summary for the Maya taking over, while it is written.
-    handover: Option<HandoverWait>,
+    handover: Option<SummaryWait>,
 }
 
 impl BrainState {
@@ -674,6 +666,10 @@ pub(crate) fn stop(app: &AppHandle, via: Via) {
         let state = app.state::<AppState>();
         let mut b = state.brain.lock().unwrap();
         b.stop_epoch += 1;
+        // Her summary turn, if one runs or waits, is stopped with the rest:
+        // the handover uses the digest now.
+        let wait = b.handover.take();
+        b.handover = brain_route::summary_after_stop(wait);
         if !b.ready || !(b.session.working() || b.replying > 0) {
             (vec![], vec![], false)
         } else {
@@ -795,7 +791,7 @@ fn ask_privately(app: &AppHandle, text: &str, timeout: Duration) -> Option<Strin
         if !b.ready {
             return None;
         }
-        b.handover = Some(HandoverWait { text: text.to_string(), tx: Some(tx), in_turn: false });
+        b.handover = Some(SummaryWait::new(text, tx));
     }
     submit(app, Request::internal(text, Via::Maya), None);
     let got = rx.recv_timeout(timeout).ok();
@@ -803,7 +799,7 @@ fn ask_privately(app: &AppHandle, text: &str, timeout: Duration) -> Option<Strin
         log::line("brain", "her handover summary did not come in time; using the digest");
         // A late reply is still swallowed, not said.
         if let Some(h) = app.state::<AppState>().brain.lock().unwrap().handover.as_mut() {
-            h.tx = None;
+            h.gave_up();
         }
     }
     got
@@ -926,9 +922,7 @@ fn deliver(app: &AppHandle, r: Option<Request>) {
         };
         let notes = if primer.is_some() { vec![] } else { b.session.take_notes() };
         if let (Some(h), Some(req)) = (b.handover.as_mut(), &r) {
-            if req.internal && req.via == Via::Maya && req.text == h.text {
-                h.in_turn = true;
-            }
+            h.delivered(req);
         }
         b.first_sent_at.get_or_insert_with(now_ms);
         b.last_heard = now_ms();
@@ -960,9 +954,9 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
             return;
         }
         // Her handover summary goes to the handover, never to Chat or aloud.
-        if via == Via::Maya && b.handover.as_ref().is_some_and(|h| h.in_turn) {
-            if let Some(tx) = b.handover.take().and_then(|h| h.tx) {
-                let _ = tx.send(say.to_string());
+        if b.handover.as_ref().is_some_and(|h| h.takes(via)) {
+            if let Some(h) = b.handover.take() {
+                h.answer(say);
             }
             log::line("brain", "she has written her handover summary");
             return;
