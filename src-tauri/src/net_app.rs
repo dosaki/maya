@@ -151,6 +151,8 @@ impl ClientNotify for TauriClientNotify {
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
         self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false, wake_word: None });
+        // The read-only Chat names the main that is awake.
+        crate::brain_app::emit_status(&self.app);
     }
     fn disconnected(&self, error: &str) {
         log::line("network", format!("disconnected: {error}"));
@@ -176,12 +178,18 @@ impl ClientNotify for TauriClientNotify {
         vec![CAP_FOLLOW.into(), CAP_LEAD.into()]
     }
 
+    /// From her record: None when this Maya never ran a brain.
+    fn brain_dormant_since(&self) -> Option<u64> {
+        let claude_dir = self.app.state::<AppState>().store.lock().unwrap().claude_dir().to_path_buf();
+        maya_core::brain::record::dormant_since(maya_core::brain::record::load(&claude_dir.join("maya").join("brain").join("record.json")).as_ref(), now_ms())
+    }
+
     /// Starts this Maya's server with the list, then saves the config as a
     /// main without `apply_config_change`: that would stop this very client
     /// before its answer is out. The client ends by itself once it is.
     /// Nothing is saved when the server cannot start, and the server stops
     /// again when the save fails, so either way this Maya stays an assistant.
-    fn promoted(&self, list: Vec<config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
+    fn promoted(&self, list: Vec<config::PairedAssistant>, summary: Option<String>) -> Result<u16, String> {
         let state = self.app.state::<AppState>();
         let (mut after, path) = {
             let store = state.store.lock().unwrap();
@@ -211,10 +219,10 @@ impl ClientNotify for TauriClientNotify {
         log::line("network", format!("promoted to main by {by}; {handed} assistants handed over"));
         let _ = self.app.emit("network", crate::network_status_of(&state));
         crate::refresh_and_emit(&self.app);
-        // A main runs her session, fresh: her old one belongs to the old main.
+        // A main runs her brain: she wakes on her own session, and the old
+        // main's summary is her first turn.
         let handle = self.app.clone();
-        let fresh = crate::brain_route::forced_fresh(NetworkRole::Assistant, after.network.role);
-        std::thread::spawn(move || crate::brain_app::restart(&handle, fresh));
+        std::thread::spawn(move || crate::brain_app::wake_as_main(&handle, &by, summary));
         Ok(port)
     }
 

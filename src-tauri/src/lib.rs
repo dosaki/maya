@@ -668,14 +668,23 @@ fn network_remove_assistant(app: AppHandle, state: TauriState<AppState>, id: Str
     Ok(network_status_of(&state))
 }
 
-/// Makes a connected assistant the main, moves the others to it, then saves
-/// this Maya as its assistant, which stops the server and starts the client.
+/// Makes a connected assistant the main with a summary of what her brain
+/// did while its brain was dormant, moves the others to it, then saves this
+/// Maya as its assistant, which stops the server and starts the client, and
+/// puts her brain to sleep.
 #[tauri::command(async)]
 fn network_promote(app: AppHandle, state: TauriState<AppState>, id: String) -> Result<NetworkStatus, String> {
     let server = state.network.lock().unwrap().server.clone().ok_or("Turn on \"Act as main Maya\" first.")?;
-    let out = server.promote(&id)?;
+    let mut new_main = None;
+    let out = server.promote_with_summary(&id, |to| {
+        new_main = Some(to.label.clone());
+        brain_app::handover_summary(&app, to)
+    })?;
     update_config(&app, |c| net::promote::as_assistant_of(c, &out.host, out.port, &out.main_key)).map_err(|e| format!("Could not save this Maya as an assistant: {}.", e.trim_end_matches('.')))?;
     log::line("network", format!("now an assistant of {}:{}", out.host, out.port));
+    if let Some(name) = new_main {
+        brain_app::post_line(&app, &brain_route::dormant_line(&name));
+    }
     Ok(network_status_of(&state))
 }
 
@@ -1267,10 +1276,11 @@ pub(crate) fn update_config(app: &AppHandle, f: impl FnOnce(&mut Config)) -> Res
 /// session after a config change.
 fn apply_config_change(app: &AppHandle, before: &Config, config: &Config) {
     let state = app.state::<AppState>();
+    // Becoming an assistant puts her to sleep, keeping her record; leaving
+    // the role wakes her on it.
     if brain_route::needs_restart(before, config) {
         let handle = app.clone();
-        let fresh = brain_route::forced_fresh(before.network.role, config.network.role);
-        std::thread::spawn(move || brain_app::restart(&handle, fresh));
+        std::thread::spawn(move || brain_app::restart(&handle));
     }
     match listener::listening_change(before, config) {
         listener::ListenChange::Restart => {

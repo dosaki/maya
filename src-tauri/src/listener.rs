@@ -1228,6 +1228,10 @@ pub(crate) fn chat_send(app: AppHandle, text: String) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
+    // On an assistant her brain is dormant and Chat is read-only.
+    if let Some(why) = crate::brain_route::chat_refusal(&app.state::<AppState>().store.lock().unwrap().config) {
+        return Err(why.into());
+    }
     window_cancel(app.clone());
     crate::brain_app::ask(&app, text, Via::Chat);
     Ok(())

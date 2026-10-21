@@ -19,7 +19,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, may_act, one_line, phone_dropped_note, refusal_feedback, sort_actions, speaks, spoken, stop_line, Feedback, Outage, PhoneReply, PhoneWaiters, Waiter};
+use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, may_act, one_line, phone_dropped_note, refusal_feedback, sort_actions, speaks, spoken, stop_line, Feedback, Outage, PhoneReply, PhoneWaiters, SummarySource, Waiter, Wake};
 pub(crate) use crate::brain_route::{brain_card, handoff};
 use crate::listener::{self, Interpreted};
 use crate::store::now_ms;
@@ -29,7 +29,8 @@ use maya_core::brain::driver::{self, Driver, Event, Launch};
 use maya_core::brain::record::{self, Record, Start};
 use maya_core::brain::session::{Out, Request, Session};
 use maya_core::brain::watch::Watches;
-use maya_core::brain::{notes, prompt};
+use maya_core::brain::{handover, notes, prompt};
+use maya_core::net::server::HandoverTo;
 use maya_core::model::{Card, Harness};
 use maya_core::window::Via;
 use serde_json::Value;
@@ -41,6 +42,14 @@ const RESUME_FAILED: &str = "I couldn't pick up my old session, so I've started 
 const PRIMER_TURNS: usize = 20;
 
 type SharedDriver = Arc<Mutex<Box<dyn Driver>>>;
+
+/// Her handover summary being written: the request, who waits for its
+/// reply (none once they stopped waiting), and whether her turn on it runs.
+struct HandoverWait {
+    text: String,
+    tx: Option<Sender<String>>,
+    in_turn: bool,
+}
 
 pub(crate) struct BrainState {
     /// Behind its own (leaf) lock: see the lock rule above.
@@ -99,6 +108,13 @@ pub(crate) struct BrainState {
     reply_epoch: u64,
     /// Replies being acted on now (said, validated, announced).
     replying: u32,
+    /// Her card's id while she is dormant (this machine is an assistant).
+    dormant: Option<String>,
+    /// The old main's summary, her first turn after Make main; kept until a
+    /// turn of hers ends, so a failed resume or a restart still delivers it.
+    catch_up: Option<String>,
+    /// Her handover summary for the Maya taking over, while it is written.
+    handover: Option<HandoverWait>,
 }
 
 impl BrainState {
@@ -138,6 +154,9 @@ impl BrainState {
             turn_epoch: 0,
             reply_epoch: 0,
             replying: 0,
+            dormant: None,
+            catch_up: None,
+            handover: None,
         }
     }
 }
@@ -147,11 +166,13 @@ fn brain_dir(claude_dir: &Path) -> PathBuf {
     claude_dir.join("maya").join("brain")
 }
 
-/// The brain's card, appended to the board the window sees. None until her
-/// session exists.
+/// The brain's card, appended to the board the window sees: greyed while
+/// she is dormant; None until her session exists.
 pub(crate) fn card(state: &AppState) -> Option<Card> {
     let b = state.brain.lock().unwrap();
-    let id = b.session_id.as_deref()?;
+    let Some(id) = b.session_id.as_deref() else {
+        return b.dormant.as_deref().map(|id| brain_route::dormant_card(id, b.agent, &b.cwd.to_string_lossy(), b.since));
+    };
     Some(brain_card(id, b.agent, &b.cwd.to_string_lossy(), b.session.working(), b.session.job(), &b.last_say, b.since))
 }
 
@@ -164,6 +185,9 @@ pub(crate) struct BrainStatus {
     pending: Option<PendingView>,
     job: Option<String>,
     ready: bool,
+    /// On an assistant, where her brain is dormant: the note the read-only
+    /// Chat shows. None where she runs.
+    dormant: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -173,7 +197,7 @@ struct PendingView {
     until: Option<u64>,
 }
 
-/// The status now. One lock at a time: window, then brain, then chat.
+/// The status now. One lock at a time: window, brain, chat, store, network.
 pub(crate) fn status(app: &AppHandle) -> BrainStatus {
     let state = app.state::<AppState>();
     let pending = state.window.lock().unwrap().pending().map(|b| PendingView { say: b.say.clone(), until: (b.until != u64::MAX).then_some(b.until) });
@@ -182,7 +206,11 @@ pub(crate) fn status(app: &AppHandle) -> BrainStatus {
         (b.session.working(), b.session.job().map(String::from), b.ready)
     };
     let dot = state.chat.lock().unwrap().dot(working);
-    BrainStatus { dot, pending, job, ready }
+    let runs = brain_route::runs_brain(&state.store.lock().unwrap().config);
+    let dormant = (!runs).then(|| brain_route::dormant_note(state.network.lock().unwrap().status.assistant.main_name.as_deref()));
+    // Her dot stays grey while she sleeps.
+    let dot = if runs { dot } else { Dot::Idle };
+    BrainStatus { dot, pending, job, ready, dormant }
 }
 
 /// Tells the page what she has waiting. Takes the window, brain and chat
@@ -208,16 +236,23 @@ pub(crate) fn ready(app: &AppHandle) -> bool {
 }
 
 /// Starts her session: on a main (or unnetworked) machine only, resuming the
-/// saved one when `record::decide` says so.
+/// saved one when `record::decide` says so. On an assistant she stays
+/// dormant.
 pub(crate) fn start(app: &AppHandle) {
-    start_run(app, None);
+    start_run(app, None, None);
 }
 
 /// `start`; with `forced_fresh`, a fresh session whatever the record says,
-/// posting that line once it is ready.
-fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
+/// posting that line once it is ready; with `catch_up`, her first turn
+/// (after a fresh session's primer) is that text. A catch-up still waiting
+/// from an earlier start is used when none is given.
+fn start_run(app: &AppHandle, forced_fresh: Option<&str>, catch_up: Option<String>) {
     // A start or shutdown that lands while this one spawns wins: see below.
-    let generation_at_start = app.state::<AppState>().brain.lock().unwrap().generation;
+    let (generation_at_start, catch_up) = {
+        let state = app.state::<AppState>();
+        let mut b = state.brain.lock().unwrap();
+        (b.generation, catch_up.or_else(|| b.catch_up.take()))
+    };
     let (runs, agent, model, claude_dir, projects) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
@@ -225,9 +260,11 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
         (brain_route::runs_brain(c), c.brain(), c.brain_model().map(String::from), store.claude_dir().to_path_buf(), c.projects_dir_path())
     };
     if !runs {
-        log::line("brain", "this machine is an assistant: the main runs her session");
+        sleep(app, &brain_dir(&claude_dir));
         return;
     }
+    // Awake on this machine: no dormant card, even if her agent is missing.
+    app.state::<AppState>().brain.lock().unwrap().dormant = None;
     let binary = match launch::find_binary(agent) {
         Ok(b) => b,
         Err(e) => {
@@ -245,8 +282,10 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
         Start::Resume(id) => (Some(id), None),
         Start::Fresh { reason } => (None, reason),
     };
-    // A fresh session reads the recent conversation first.
+    // A fresh session reads the recent conversation first; after Make main
+    // the old main's summary follows.
     let primer = resume.is_none().then(|| prompt::primer(&app.state::<AppState>().chat.lock().unwrap().last(PRIMER_TURNS)));
+    let primer = brain_route::first_turn(primer, catch_up.clone());
     let background = background_subagents(agent);
     let mut writable: Vec<PathBuf> = projects.into_iter().collect();
     writable.extend(launch::scratch_dir("x").parent().map(Path::to_path_buf));
@@ -280,6 +319,10 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
         let state = app.state::<AppState>();
         let mut b = state.brain.lock().unwrap();
         if !still_runs || b.generation != generation_at_start {
+            // The catch-up waits for the start that wins.
+            if b.catch_up.is_none() {
+                b.catch_up = catch_up;
+            }
             drop(b);
             // Shut down with no lock held: it may wait for the process.
             return superseded(spawned);
@@ -302,6 +345,8 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
         b.session_id = None;
         b.assumed_id = assumed;
         b.active = true;
+        b.dormant = None;
+        b.catch_up = catch_up;
         b.agent = agent;
         b.model = model;
         b.default_1m = default_1m;
@@ -336,6 +381,36 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
     let handle = app.clone();
     std::thread::spawn(move || watchdog(&handle, generation));
     act(app, outs);
+    emit_status(app);
+}
+
+/// This machine is an assistant: her brain sleeps. Her record, chat and
+/// watches stay; the record is marked dormant (once), and her old session
+/// stays hidden.
+fn sleep(app: &AppHandle, dir: &Path) {
+    let path = dir.join("record.json");
+    let saved = record::load(&path);
+    if let Some(r) = &saved {
+        let mut marked = r.clone();
+        if record::mark_dormant(&mut marked, now_ms()) {
+            if let Err(e) = record::save(&path, &marked) {
+                log::line("brain", format!("could not mark her record dormant: {e}"));
+            }
+        }
+        hide(app, r.session_id.clone());
+    }
+    log::line("brain", "this machine is an assistant: her brain is dormant, and the main's Maya is awake");
+    {
+        let state = app.state::<AppState>();
+        let mut b = state.brain.lock().unwrap();
+        b.dormant = Some(saved.as_ref().map_or("maya-brain", |r| r.session_id.as_str()).to_string());
+        if let Some(r) = &saved {
+            b.agent = r.agent;
+        }
+        b.cwd = dir.to_path_buf();
+        b.since = now_ms();
+    }
+    crate::refresh_and_emit(app);
     emit_status(app);
 }
 
@@ -384,7 +459,7 @@ fn watchdog(app: &AppHandle, generation: u64) {
     if say {
         post(app, STOPPED, Via::Maya);
     }
-    start_run(app, None);
+    start_run(app, None, None);
 }
 
 /// What an exit leaves to do once the brain lock is released.
@@ -445,6 +520,8 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
                         None => log::line("brain", "her session has no id to save"),
                     }
                     line = b.fresh_reason.take();
+                    // She has read the catch-up, if there was one.
+                    b.catch_up = None;
                 }
                 b.outage.turn_ended();
                 let percent = context_percent(b.model.as_deref(), *context_tokens, b.default_1m);
@@ -462,6 +539,8 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
                 b.session_id = None;
                 b.primer = None;
                 b.swallow_reply = false;
+                // A handover summary she was writing will not come.
+                b.handover = None;
                 exit = Some(Exit { drained, phones, failed_resume: failed, say_stopped, restart_after, driver: b.driver.take() });
             }
             _ => outs = b.session.on_event(&e, None),
@@ -497,7 +576,7 @@ fn exited(app: &AppHandle, generation: u64, x: Exit) {
     let handle = app.clone();
     if x.failed_resume {
         log::line("brain", "the resume failed; starting fresh");
-        std::thread::spawn(move || start_run(&handle, Some(RESUME_FAILED)));
+        std::thread::spawn(move || start_run(&handle, Some(RESUME_FAILED), None));
         return;
     }
     let wait = x.restart_after;
@@ -510,7 +589,7 @@ fn exited(app: &AppHandle, generation: u64, x: Exit) {
             b.generation == generation && b.driver.is_none() && b.active
         };
         if due {
-            start_run(&handle, None);
+            start_run(&handle, None, None);
         }
     });
 }
@@ -658,13 +737,81 @@ pub(crate) fn batch_done(app: &AppHandle, results: &[(Value, Result<String, Stri
 }
 
 /// Her brain, its model or this machine's role changed: her session stops
-/// and starts again (fresh or resumed, as `record::decide` says, or fresh
-/// with `forced_fresh` posted once she is ready), or stays stopped on an
-/// assistant.
-pub(crate) fn restart(app: &AppHandle, forced_fresh: Option<&str>) {
+/// and starts again (fresh or resumed, as `record::decide` says), or goes
+/// dormant on an assistant, keeping everything.
+pub(crate) fn restart(app: &AppHandle) {
     log::line("brain", "her settings changed; restarting her session");
     shutdown(app);
-    start_run(app, forced_fresh);
+    start_run(app, None, None);
+}
+
+/// This Maya was made main by `by`: her brain wakes on her own record (fresh
+/// when she never ran one), and the old main's summary, if it sent one,
+/// shows in Chat and is her first turn.
+pub(crate) fn wake_as_main(app: &AppHandle, by: &str, summary: Option<String>) {
+    let summary = summary.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let has_record = {
+        let claude_dir = app.state::<AppState>().store.lock().unwrap().claude_dir().to_path_buf();
+        record::load(&brain_dir(&claude_dir).join("record.json")).is_some()
+    };
+    match brain_route::wake(maya_core::config::NetworkRole::Assistant, maya_core::config::NetworkRole::Main, has_record, summary.is_some()) {
+        Wake::Fresh { .. } => log::line("brain", format!("made main by {by}; she never ran here, so her session starts fresh")),
+        _ => log::line("brain", format!("made main by {by}; she wakes on her own session")),
+    }
+    let catch_up = summary.map(|s| {
+        post(app, &brain_route::caught_up_line(by, &s), Via::Maya);
+        prompt::catch_up(by, &s)
+    });
+    shutdown(app);
+    start_run(app, None, catch_up);
+}
+
+/// The summary for the Maya taking the main role over (`to`): her brain
+/// writes it when it runs, bounded by `handover::ASK_MS`; otherwise, or when
+/// it takes too long, a digest of her Chat since `to`'s brain went dormant.
+/// A phone gets none. The caller holds no lock.
+pub(crate) fn handover_summary(app: &AppHandle, to: &HandoverTo) -> Option<String> {
+    let source = brain_route::summary_source(to.phone, ready(app));
+    log::line("brain", format!("handover summary for {}: {source:?}", to.label));
+    let asked = match source {
+        SummarySource::None => return None,
+        SummarySource::Digest => None,
+        SummarySource::Ask => ask_privately(app, &handover::request(&to.label, to.brain_dormant_since), Duration::from_millis(handover::ASK_MS)),
+    };
+    Some(brain_route::pick_summary(asked, || {
+        let turns = app.state::<AppState>().chat.lock().unwrap().last(maya_core::brain::chat::KEEP);
+        handover::digest(&turns, to.brain_dormant_since, handover::DIGEST_CHARS)
+    }))
+}
+
+/// Asks her something as Maya, not the user: nothing goes to Chat and
+/// nothing is said; her reply text comes back here. None when she is not
+/// running, gives no reply within `timeout`, or her session ends first.
+fn ask_privately(app: &AppHandle, text: &str, timeout: Duration) -> Option<String> {
+    let (tx, rx) = channel();
+    {
+        let state = app.state::<AppState>();
+        let mut b = state.brain.lock().unwrap();
+        if !b.ready {
+            return None;
+        }
+        b.handover = Some(HandoverWait { text: text.to_string(), tx: Some(tx), in_turn: false });
+    }
+    submit(app, Request::internal(text, Via::Maya), None);
+    let got = rx.recv_timeout(timeout).ok();
+    if got.is_none() {
+        log::line("brain", "her handover summary did not come in time; using the digest");
+        // A late reply is still swallowed, not said.
+        if let Some(h) = app.state::<AppState>().brain.lock().unwrap().handover.as_mut() {
+            h.tx = None;
+        }
+    }
+    got
+}
+
+/// Posts her line to Chat without saying it.
+pub(crate) fn post_line(app: &AppHandle, text: &str) {
+    post(app, text, Via::Maya);
 }
 
 /// Stops her session on purpose: no "stopped" line and no restart; the
@@ -681,6 +828,7 @@ fn shutdown(app: &AppHandle) {
         b.primer = None;
         b.swallow_reply = false;
         b.wake_when_ready = false;
+        b.handover = None;
         (b.driver.take(), handoff(&mut b.session), b.phones.drain())
     };
     if let Some(d) = driver {
@@ -777,6 +925,11 @@ fn deliver(app: &AppHandle, r: Option<Request>) {
             _ => None,
         };
         let notes = if primer.is_some() { vec![] } else { b.session.take_notes() };
+        if let (Some(h), Some(req)) = (b.handover.as_mut(), &r) {
+            if req.internal && req.via == Via::Maya && req.text == h.text {
+                h.in_turn = true;
+            }
+        }
         b.first_sent_at.get_or_insert_with(now_ms);
         b.last_heard = now_ms();
         b.turn_epoch = b.stop_epoch;
@@ -804,6 +957,14 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
         let mut b = state.brain.lock().unwrap();
         if via == Via::Maya && std::mem::take(&mut b.swallow_reply) {
             log::line("brain", "she has read the past conversation");
+            return;
+        }
+        // Her handover summary goes to the handover, never to Chat or aloud.
+        if via == Via::Maya && b.handover.as_ref().is_some_and(|h| h.in_turn) {
+            if let Some(tx) = b.handover.take().and_then(|h| h.tx) {
+                let _ = tx.send(say.to_string());
+            }
+            log::line("brain", "she has written her handover summary");
             return;
         }
         if let Some(s) = spoken(say) {

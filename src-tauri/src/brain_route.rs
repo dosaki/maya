@@ -218,11 +218,94 @@ pub(crate) fn follow_up(via: Via, text: &str) -> Request {
     Request::internal(text, via)
 }
 
-/// Why her session starts fresh whatever the saved record says: this
-/// machine just became the main (from an assistant), and her old session
-/// files belong to the machine that was main.
-pub(crate) fn forced_fresh(before: NetworkRole, after: NetworkRole) -> Option<&'static str> {
-    (before == NetworkRole::Assistant && after == NetworkRole::Main).then_some("This machine is now main, so I've started fresh.")
+/// What a role change does to her brain. Every Maya keeps her own: on an
+/// assistant it sleeps, and nothing of it is reset.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Wake {
+    /// This machine became an assistant: her session stops, and her record,
+    /// chat and watches stay, the record marked dormant.
+    Dormant,
+    /// It stopped being an assistant: she resumes her own record; with
+    /// `catch_up`, her first turn is the old main's summary.
+    Resume { catch_up: bool },
+    /// The same with no record: she starts fresh, primed with her Chat.
+    Fresh { catch_up: bool },
+    /// The role change does not touch her session.
+    Unchanged,
+}
+
+/// What a move from `before` to `after` does to her brain; `has_record`:
+/// she ran here before; `summary`: the old main sent one (Make main).
+pub(crate) fn wake(before: NetworkRole, after: NetworkRole, has_record: bool, summary: bool) -> Wake {
+    match (before == NetworkRole::Assistant, after == NetworkRole::Assistant) {
+        (false, true) => Wake::Dormant,
+        (true, false) if has_record => Wake::Resume { catch_up: summary },
+        (true, false) => Wake::Fresh { catch_up: summary },
+        _ => Wake::Unchanged,
+    }
+}
+
+/// Where the handover summary for the new main comes from.
+#[derive(Debug, PartialEq)]
+pub(crate) enum SummarySource {
+    /// Her brain writes it (bounded by `handover::ASK_MS`).
+    Ask,
+    /// A plain digest of her Chat: her brain is not running.
+    Digest,
+    /// None: a phone has no brain to read it.
+    None,
+}
+
+pub(crate) fn summary_source(phone: bool, brain_ready: bool) -> SummarySource {
+    match (phone, brain_ready) {
+        (true, _) => SummarySource::None,
+        (false, true) => SummarySource::Ask,
+        (false, false) => SummarySource::Digest,
+    }
+}
+
+/// Her written summary, or the digest when she gave none (timeout, error,
+/// a blank reply).
+pub(crate) fn pick_summary(asked: Option<String>, digest: impl FnOnce() -> String) -> String {
+    asked.map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).unwrap_or_else(digest)
+}
+
+/// Her first message: the primer of a fresh session, then the catch-up.
+pub(crate) fn first_turn(primer: Option<String>, catch_up: Option<String>) -> Option<String> {
+    match (primer, catch_up) {
+        (Some(p), Some(c)) => Some(format!("{p}\n{c}")),
+        (p, c) => p.or(c),
+    }
+}
+
+/// The note the read-only Chat on an assistant shows.
+pub(crate) fn dormant_note(main: Option<&str>) -> String {
+    match main.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => format!("Dormant: {m}'s Maya is awake."),
+        None => "Dormant: the main Maya is awake.".into(),
+    }
+}
+
+/// The quiet line the old main's Chat gets once it hands the role over.
+pub(crate) fn dormant_line(main: &str) -> String {
+    format!("I'm dormant now; {main} is awake.")
+}
+
+/// The new main's Chat line with the old main's summary.
+pub(crate) fn caught_up_line(by: &str, summary: &str) -> String {
+    format!("Caught up from {by}: {summary}")
+}
+
+/// What `chat_send` says on an assistant, where her brain is dormant.
+pub(crate) const DORMANT_CHAT: &str = "Maya's brain is dormant on this machine; talk to the main Maya.";
+
+pub(crate) fn chat_refusal(c: &Config) -> Option<&'static str> {
+    (!runs_brain(c)).then_some(DORMANT_CHAT)
+}
+
+/// Her card while she is dormant (Debug mode shows it): greyed, idle.
+pub(crate) fn dormant_card(session_id: &str, agent: Harness, cwd: &str, since: u64) -> Card {
+    Card { stale: true, ..brain_card(session_id, agent, cwd, false, None, "Dormant", since) }
 }
 
 /// Her session runs on every machine but an assistant.
@@ -487,12 +570,65 @@ mod tests {
     }
 
     #[test]
-    fn becoming_main_from_assistant_starts_fresh_and_says_so() {
-        assert_eq!(forced_fresh(NetworkRole::Assistant, NetworkRole::Main), Some("This machine is now main, so I've started fresh."));
-        assert_eq!(forced_fresh(NetworkRole::Off, NetworkRole::Main), None);
-        assert_eq!(forced_fresh(NetworkRole::Main, NetworkRole::Main), None);
-        assert_eq!(forced_fresh(NetworkRole::Assistant, NetworkRole::Off), None, "only the move into main");
-        assert_eq!(forced_fresh(NetworkRole::Main, NetworkRole::Assistant), None);
+    fn becoming_an_assistant_puts_her_to_sleep_and_becoming_main_wakes_her_own_session() {
+        use NetworkRole::*;
+        assert_eq!(wake(Main, Assistant, true, false), Wake::Dormant);
+        assert_eq!(wake(Off, Assistant, false, false), Wake::Dormant);
+        assert_eq!(wake(Assistant, Main, true, false), Wake::Resume { catch_up: false }, "her own record, not fresh");
+        assert_eq!(wake(Assistant, Main, true, true), Wake::Resume { catch_up: true });
+        assert_eq!(wake(Assistant, Main, false, true), Wake::Fresh { catch_up: true }, "never ran a brain: fresh");
+        assert_eq!(wake(Assistant, Off, false, false), Wake::Fresh { catch_up: false });
+        assert_eq!(wake(Main, Main, true, false), Wake::Unchanged);
+        assert_eq!(wake(Off, Main, true, false), Wake::Unchanged);
+        assert_eq!(wake(Assistant, Assistant, true, false), Wake::Unchanged);
+    }
+
+    #[test]
+    fn the_summary_comes_from_her_brain_when_ready_else_a_digest_and_a_phone_gets_none() {
+        assert_eq!(summary_source(false, true), SummarySource::Ask);
+        assert_eq!(summary_source(false, false), SummarySource::Digest);
+        assert_eq!(summary_source(true, true), SummarySource::None);
+        assert_eq!(summary_source(true, false), SummarySource::None);
+    }
+
+    #[test]
+    fn a_blank_or_missing_brain_summary_falls_back_to_the_digest() {
+        assert_eq!(pick_summary(Some(" Did #52. ".into()), || "digest".into()), "Did #52.");
+        assert_eq!(pick_summary(Some("  ".into()), || "digest".into()), "digest");
+        assert_eq!(pick_summary(None, || "digest".into()), "digest");
+    }
+
+    #[test]
+    fn a_catch_up_follows_the_primer_or_is_her_first_turn_alone() {
+        assert_eq!(first_turn(None, None), None);
+        assert_eq!(first_turn(Some("P".into()), None).as_deref(), Some("P"));
+        assert_eq!(first_turn(None, Some("C".into())).as_deref(), Some("C"));
+        assert_eq!(first_turn(Some("P".into()), Some("C".into())).as_deref(), Some("P\nC"));
+    }
+
+    #[test]
+    fn the_dormant_lines_name_the_main_or_say_the_main_maya() {
+        assert_eq!(dormant_note(Some("desk")), "Dormant: desk's Maya is awake.");
+        assert_eq!(dormant_note(None), "Dormant: the main Maya is awake.");
+        assert_eq!(dormant_note(Some(" ")), "Dormant: the main Maya is awake.");
+        assert_eq!(dormant_line("laptop"), "I'm dormant now; laptop is awake.");
+        assert_eq!(caught_up_line("desk", "Did #52."), "Caught up from desk: Did #52.");
+    }
+
+    #[test]
+    fn a_dormant_card_is_hers_greyed_idle_and_says_dormant() {
+        let c = dormant_card("u", Harness::ClaudeCode, "/x", 7);
+        assert!(c.brain && c.stale);
+        assert_eq!((c.state, c.snippet.as_str(), c.state_since), (State::Idle, "Dormant", 7));
+        assert!(c.awaiting.is_none());
+    }
+
+    #[test]
+    fn chat_is_refused_on_an_assistant_only() {
+        let mut c = Config::default();
+        assert_eq!(chat_refusal(&c), None);
+        c.network.role = NetworkRole::Assistant;
+        assert_eq!(chat_refusal(&c), Some(DORMANT_CHAT));
     }
 
     #[test]
