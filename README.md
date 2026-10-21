@@ -274,10 +274,18 @@ resume or start a session, open or review a pull request.
   Linux, too, has only *Built-in (Whisper)*; its built-in voice is
   speech-dispatcher's.
 - **Privacy.** Audio never leaves the computer; both recognisers run on the
-  device. Only the text of your command, the last few exchanges, and a
-  summary of the board and pull-request list go to Claude, through a
-  one-shot `claude -p` call with no tools. The one-off model download is
-  the Built-in recogniser's only network access.
+  device. The one-off model download is the Built-in recogniser's only
+  network access. What goes to the model depends on the brain:
+  - On the main machine with Claude Code as the brain, Maya runs one
+    long-lived Claude Code session in auto mode, with all its tools, in
+    `maya/brain/` inside your Claude directory. It gets the text of your
+    commands, the board and the pull-request list. It can read and change
+    files, run commands and hand jobs to background subagents. Her chat
+    log, her saved session and her watches live in that folder too.
+  - With the other brains, and on a machine in the assistant role, only
+    the text of your command, the last few exchanges and a summary of the
+    board and pull-request list go to the model, through a one-shot call
+    with no tools.
 
 ### Maya's brain
 
