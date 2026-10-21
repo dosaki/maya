@@ -105,7 +105,7 @@ fn card(id: &str, state: State, since: u64) -> Card {
         terminal: None,
         stale: false,
         model: None,
-        branch: None,
+        branch: None, brain: false,
     }
 }
 

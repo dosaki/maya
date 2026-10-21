@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "./actions";
 import { answerGuard } from "./answer";
-import { renderBoard, swapBoard } from "./board";
+import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
 import { openModal, refreshModal, setProgress } from "./modal";
 import { closeNewSession, openNewSession } from "./newsession";
@@ -10,6 +10,7 @@ import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
 import { makeReviewsView, OPEN_SETTINGS_GROUP, reviewActionFor, waitingCount } from "./reviews";
+export { boardCards, countable };
 import { filterCards, makeSessionSearch } from "./search";
 import { initRemembered } from "./remembered";
 import { makeTabs } from "./tabs";
@@ -84,16 +85,17 @@ function paint(): void {
   if (!host) return;
   const before = targetUnderPointer();
   const query = search?.query() ?? "";
-  const shown = filterCards(cards, query);
+  const shown = filterCards(boardCards(cards, debugMode), query);
   swapBoard(host, renderBoard(shown, Date.now(), (c) => progress.next(c), query.trim() ? "No matches" : undefined));
-  search?.setCount(shown.length, cards.length);
+  const counted = countable(cards);
+  search?.setCount(countable(shown).length, counted.length);
   guard.markPaint(Date.now(), { movedUnderPointer: targetUnderPointer() !== before });
   // Option buttons rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay(cards, Date.now());
   if (enableTimer) clearTimeout(enableTimer);
   enableTimer = delay === null ? undefined : setTimeout(() => { enableTimer = undefined; paint(); }, delay + 50);
   const counts = { idle: 0, working: 0, awaiting: 0, completed: 0 };
-  for (const c of cards) counts[c.state] += 1;
+  for (const c of counted) counts[c.state] += 1;
   tabs?.setSessionCounts(counts);
 }
 
@@ -168,6 +170,7 @@ export function applyDebugMode(on: boolean): void {
   debugMode = on;
   for (const btn of document.querySelectorAll<HTMLElement>("[data-tab=debug]")) btn.hidden = !on;
   if (!on && tabs?.current() === "debug") tabs.show("sessions");
+  paint();
 }
 
 export const isDebugMode = (): boolean => debugMode;

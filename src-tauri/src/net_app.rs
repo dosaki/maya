@@ -482,7 +482,7 @@ mod tests {
                 detail: "Ship it?".into(),
                 questions: vec![Question { question: "Ship it?".into(), header: "".into(), options: vec![Choice { label: "Yes".into(), description: "".into() }], multi_select: false }],
             }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None,
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false,
         }
     }
 

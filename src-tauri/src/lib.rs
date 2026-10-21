@@ -9,6 +9,7 @@ pub mod focus;
 pub mod listener;
 pub mod models;
 pub mod net_app;
+mod brain_app;
 mod remembered_app;
 #[cfg(target_os = "macos")]
 pub mod terminal_app;
@@ -517,7 +518,10 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
     actions::run_due_renames(&local(&app.state::<AppState>()));
     // Remote cards join after the store lock is released (lock order), so
     // the notifier below announces remote decisions too.
-    let cards = merge::merged(cards, &remote_boards(&app.state::<AppState>()), now_ms());
+    let mut cards = merge::merged(cards, &remote_boards(&app.state::<AppState>()), now_ms());
+    // Maya's own brain card is never announced, counted or mirrored: it only
+    // joins the list the window gets, which shows it in debug mode.
+    cards.retain(|c| !c.brain);
     // Track every refresh so a toggle-on later does not replay old events.
     let (fresh, finished) = {
         let state = app.state::<AppState>();
@@ -557,7 +561,9 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
             }
         }
     }
-    let _ = app.emit("sessions", &cards);
+    let mut shown = cards.clone();
+    shown.extend(brain_app::card(&app.state::<AppState>()));
+    let _ = app.emit("sessions", &shown);
     // Mirroring Mayas see what this page shows, and answer to the same word.
     let server = app.state::<AppState>().network.lock().unwrap().server.clone();
     if let Some(s) = server {
@@ -581,7 +587,9 @@ pub(crate) fn merged_cards(state: &AppState) -> Vec<Card> {
 
 #[tauri::command(async)]
 fn list_sessions(state: TauriState<AppState>) -> Vec<Card> {
-    merged_cards(&state)
+    let mut cards = merged_cards(&state);
+    cards.extend(brain_app::card(&state));
+    cards
 }
 
 /// What the Network section of Settings shows.
@@ -1506,7 +1514,7 @@ mod route_tests {
             machine: Some("laptop".into()),
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None
+            stale: false, model: None, branch: None, brain: false
         };
         assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));
         assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");

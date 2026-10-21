@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderBoard, swapBoard } from "./board";
+import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { renderCard } from "./card";
 import { formatAge, projectName } from "./format";
 import type { Card } from "./types";
@@ -23,6 +23,15 @@ function card(over: Partial<Card>): Card {
     ...over,
   };
 }
+
+describe("the brain card", () => {
+  it("shows the brain card only in debug mode and never counts it", () => {
+    const cards = [card({ sessionId: "a" }), card({ sessionId: "m", brain: true, state: "working" })];
+    expect(boardCards(cards, false).map((c) => c.sessionId)).toEqual(["a"]);
+    expect(boardCards(cards, true).map((c) => c.sessionId)).toEqual(["a", "m"]);
+    expect(countable(cards).map((c) => c.sessionId)).toEqual(["a"]);
+  });
+});
 
 describe("context meter", () => {
   it("shows a meter with the percent, colour band and tooltip, or nothing before the first turn", () => {

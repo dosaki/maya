@@ -143,6 +143,8 @@ export interface Card {
   branch?: string | null;
   /** True when the machine has not reported for a while or is disconnected. */
   stale?: boolean;
+  /** Maya's own resident session: shown only in debug mode and never counted. */
+  brain?: boolean;
 }
 
 /** The PR button: "PR #12" ("MR !12" on GitLab), with the state and URL in its tooltip. */

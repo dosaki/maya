@@ -63,6 +63,8 @@ pub struct Store {
     memory: Option<Memory>,
     /// The last save of the memory failed: the streak was logged already.
     memory_save_failing: bool,
+    /// The session id refresh drops from the cards and from memory (Maya's own brain).
+    hidden_session: Option<String>,
 }
 
 /// Text of the files names come from, read again only when they change.
@@ -165,7 +167,14 @@ impl Store {
             agents: std::sync::Arc::new(crate::agents::current),
             memory: None,
             memory_save_failing: false,
+            hidden_session: None,
         }
+    }
+
+    /// Sets the session id `refresh` leaves out of its cards and out of what
+    /// the store remembers; `None` shows every session again.
+    pub fn hide_session(&mut self, id: Option<String>) {
+        self.hidden_session = id;
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -507,6 +516,9 @@ impl Store {
             card.branch = self.prs.branch(&card.cwd);
             card
         }));
+        if let Some(hidden) = &self.hidden_session {
+            cards.retain(|c| &c.session_id != hidden);
+        }
         let due = self.pending.apply(&mut cards, now_ms);
         self.due_renames.extend(due);
         self.log_pending_events();
@@ -866,6 +878,33 @@ mod tests {
 
         let log = std::fs::read_to_string(claude.join("maya/events.jsonl")).unwrap();
         assert!(!log.contains("gone"));
+    }
+
+    #[test]
+    fn a_hidden_session_is_neither_shown_nor_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("maya")).unwrap();
+        for (pid, id) in [(7, "a"), (8, "brain-id")] {
+            std::fs::write(
+                claude.join(format!("sessions/{pid}.json")),
+                format!(r#"{{"pid":{pid},"sessionId":"{id}","cwd":"/Users/x/dev/eye","name":"n-{pid}","status":"idle","startedAt":1,"statusUpdatedAt":100}}"#),
+            ).unwrap();
+        }
+        let mut first = Store::new(claude.clone()).with_alive(|_| true);
+        first.start_remembering(1_000);
+        first.hide_session(Some("brain-id".into()));
+        let cards = first.refresh(2_000);
+        assert!(!cards.is_empty());
+        assert!(cards.iter().all(|c| c.session_id != "brain-id"));
+        first.heartbeat(30_000);
+        drop(first);
+        // The machine restarted: only the shown session is offered back.
+        let mut second = Store::new(claude).with_alive(|_| false);
+        let offered = second.start_remembering(400_000);
+        assert!(offered.iter().any(|e| e.session_id == "a"));
+        assert!(offered.iter().all(|e| e.session_id != "brain-id"));
     }
 
     use crate::foreign::ForeignSession;

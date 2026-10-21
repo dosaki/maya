@@ -140,6 +140,10 @@ pub struct Card {
     /// The branch checked out in `cwd`, from the same lookup as `pr`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Maya's own resident session: shown on the board only in debug mode,
+    /// never counted, announced or mirrored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub brain: bool,
 }
 
 #[cfg(test)]
@@ -152,6 +156,19 @@ mod tests {
         assert_eq!(pr.forge, crate::config::GitProvider::Github);
         let json = serde_json::to_value(PullRequest { forge: crate::config::GitProvider::Gitlab, ..pr }).unwrap();
         assert_eq!(json["forge"], "gitlab");
+    }
+
+    #[test]
+    fn a_brain_flag_is_omitted_when_false_and_read_back_when_true() {
+        let mut c: Card = serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "pid": 1, "name": "n", "cwd": "/x", "state": "idle", "stateSince": 0,
+            "snippet": "", "awaiting": null, "hasInbox": false, "harness": "claude-code", "pr": null, "context": null
+        }))
+        .unwrap();
+        assert!(!serde_json::to_string(&c).unwrap().contains("\"brain\""));
+        c.brain = true;
+        let back: Card = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(back.brain);
     }
 
     #[test]
@@ -207,7 +224,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None
+            stale: false, model: None, branch: None, brain: false
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["context"]["percent"], 62);

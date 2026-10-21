@@ -590,7 +590,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None
+            stale: false, model: None, branch: None, brain: false
         }
     }
 
@@ -656,7 +656,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None
+            stale: false, model: None, branch: None, brain: false
         }
     }
 
