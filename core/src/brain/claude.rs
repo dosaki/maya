@@ -50,8 +50,19 @@ pub fn stop_task_line(request_id: &str, task_id: &str) -> String {
 pub struct Parser {
     in_turn: bool,
     text: String,
+    /// Context size from the last assistant message of the turn.
+    last_context: Option<u64>,
     /// Live background tasks, shared with the driver so `interrupt` can stop them.
     pub tasks: Arc<Mutex<BTreeSet<String>>>,
+}
+
+/// input + cache read + cache creation tokens of a `usage` object.
+fn usage_total(u: &Value) -> Option<u64> {
+    if !u.is_object() {
+        return None;
+    }
+    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+    Some(n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens"))
 }
 
 impl Parser {
@@ -62,6 +73,9 @@ impl Parser {
         match kind {
             "assistant" => {
                 self.begin(&mut out);
+                if let Some(c) = usage_total(&v["message"]["usage"]) {
+                    self.last_context = Some(c);
+                }
                 if let Some(parts) = v["message"]["content"].as_array() {
                     for p in parts {
                         if p["type"] == "text" {
@@ -92,13 +106,7 @@ impl Parser {
                 let text = v["result"].as_str().map(str::to_string).unwrap_or_else(|| std::mem::take(&mut self.text));
                 self.text.clear();
                 self.in_turn = false;
-                let u = &v["usage"];
-                let context_tokens = if u.is_object() {
-                    let n = |k: &str| u[k].as_u64().unwrap_or(0);
-                    Some(n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens"))
-                } else {
-                    None
-                };
+                let context_tokens = self.last_context.take().or_else(|| usage_total(&v["usage"]));
                 out.push(Event::TurnEnded { text, context_tokens });
             }
             _ => {}
@@ -110,6 +118,7 @@ impl Parser {
         if !self.in_turn {
             self.in_turn = true;
             self.text.clear();
+            self.last_context = None;
             out.push(Event::TurnStarted);
         }
     }
@@ -142,8 +151,15 @@ impl ClaudeDriver {
         let tasks = parser.tasks.clone();
         let _ = events.send(Event::Ready { session_id });
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match reader.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&buf).into_owned();
                 for e in parser.line(&line) {
                     if events.send(e).is_err() {
                         return;
@@ -243,9 +259,17 @@ mod tests {
     #[test]
     fn a_result_ends_the_turn_with_its_text_and_context() {
         let mut p = Parser::default();
-        assert_eq!(p.line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hi"}]}}"#), vec![Event::TurnStarted]);
-        let e = p.line(r#"{"type":"result","subtype":"success","result":"Hi","usage":{"input_tokens":10,"cache_read_input_tokens":90,"cache_creation_input_tokens":0}}"#);
+        assert_eq!(p.line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":10,"cache_read_input_tokens":90,"cache_creation_input_tokens":0}}}"#), vec![Event::TurnStarted]);
+        let e = p.line(r#"{"type":"result","subtype":"success","result":"Hi","usage":{"input_tokens":50,"cache_read_input_tokens":450,"cache_creation_input_tokens":0}}"#);
         assert_eq!(e, vec![Event::TurnEnded { text: "Hi".into(), context_tokens: Some(100) }]);
+    }
+
+    #[test]
+    fn without_assistant_usage_the_result_usage_is_the_fallback() {
+        let mut p = Parser::default();
+        p.line(r#"{"type":"assistant","message":{"content":[]}}"#);
+        let e = p.line(r#"{"type":"result","subtype":"success","result":"x","usage":{"input_tokens":10,"cache_read_input_tokens":90,"cache_creation_input_tokens":0}}"#);
+        assert_eq!(e, vec![Event::TurnEnded { text: "x".into(), context_tokens: Some(100) }]);
     }
 
     #[test]
