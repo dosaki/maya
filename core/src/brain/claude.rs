@@ -70,6 +70,10 @@ impl Parser {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { return vec![] };
         let kind = v["type"].as_str().unwrap_or("");
         let mut out = vec![];
+        // A subagent's own messages: not her turn, her words or her context.
+        if kind != "system" && !v["parent_tool_use_id"].is_null() {
+            return out;
+        }
         match kind {
             "assistant" => {
                 self.begin(&mut out);
@@ -84,8 +88,10 @@ impl Parser {
                     }
                 }
             }
+            // Only her own messages and a result start a turn: an `init`
+            // can come with no turn after it (a resumed, idle session), and
+            // would leave her working for ever.
             "system" => match v["subtype"].as_str().unwrap_or("") {
-                "init" => self.begin(&mut out),
                 "task_started" if v["is_backgrounded"].as_bool() == Some(true) => {
                     if let Some(id) = v["task_id"].as_str() {
                         self.tasks.lock().unwrap().insert(id.to_string());
@@ -107,7 +113,9 @@ impl Parser {
                 self.text.clear();
                 self.in_turn = false;
                 let context_tokens = self.last_context.take().or_else(|| usage_total(&v["usage"]));
-                out.push(Event::TurnEnded { text, context_tokens });
+                // An error (an interrupt, a turn limit, an API error) is never spoken as her reply.
+                let failed = v["is_error"].as_bool() == Some(true) || v["subtype"].as_str().is_some_and(|s| s.starts_with("error"));
+                out.push(if failed { Event::TurnFailed { context_tokens } } else { Event::TurnEnded { text, context_tokens } });
             }
             _ => {}
         }
@@ -277,10 +285,37 @@ mod tests {
         let mut p = Parser::default();
         p.line(r#"{"type":"assistant","message":{"content":[]}}"#);
         p.line(r#"{"type":"result","subtype":"success","result":"a"}"#);
-        assert_eq!(p.line(r#"{"type":"system","subtype":"init"}"#), vec![Event::TurnStarted]);
+        assert!(!p.line(r#"{"type":"system","subtype":"init"}"#).contains(&Event::TurnStarted), "init alone starts nothing");
+        assert_eq!(p.line(r#"{"type":"assistant","message":{"content":[]}}"#), vec![Event::TurnStarted]);
         assert!(p.line(r#"{"type":"assistant","message":{"content":[]}}"#).is_empty());
         assert!(p.line(r#"{"type":"system","subtype":"session_state_changed","state":"idle"}"#).is_empty());
         assert_eq!(p.line(r#"{"type":"result","subtype":"success","result":"b"}"#), vec![Event::TurnEnded { text: "b".into(), context_tokens: None }]);
+    }
+
+    #[test]
+    fn a_resumed_idle_session_is_not_working_after_its_init() {
+        let mut p = Parser::default();
+        assert!(!p.line(r#"{"type":"system","subtype":"init","session_id":"u"}"#).contains(&Event::TurnStarted));
+        assert!(!p.line(r#"{"type":"system","subtype":"init","session_id":"u"}"#).contains(&Event::TurnStarted));
+    }
+
+    #[test]
+    fn subagent_lines_start_no_turn_and_add_no_text_or_usage() {
+        let mut p = Parser::default();
+        let sub = r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"text","text":"sub says"}],"usage":{"input_tokens":900000}}}"#;
+        assert!(p.line(sub).is_empty(), "a subagent's message is not her turn");
+        assert_eq!(p.line(r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"text","text":"Hi"}],"usage":{"input_tokens":10}}}"#), vec![Event::TurnStarted]);
+        assert!(p.line(sub).is_empty());
+        assert_eq!(p.line(r#"{"type":"result","subtype":"success"}"#), vec![Event::TurnEnded { text: "Hi".into(), context_tokens: Some(10) }]);
+    }
+
+    #[test]
+    fn an_error_result_fails_the_turn_and_its_text_is_never_her_reply() {
+        let mut p = Parser::default();
+        p.line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"half"}]}}"#);
+        assert_eq!(p.line(r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#), vec![Event::TurnFailed { context_tokens: None }]);
+        assert_eq!(p.line(r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: 500"}"#), vec![Event::TurnStarted, Event::TurnFailed { context_tokens: None }]);
+        assert_eq!(p.line(r#"{"type":"result","subtype":"error_max_turns"}"#), vec![Event::TurnStarted, Event::TurnFailed { context_tokens: None }]);
     }
 
     #[test]

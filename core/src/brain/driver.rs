@@ -12,6 +12,8 @@ pub enum Event {
     /// A turn began, including one she started herself (a subagent woke her).
     TurnStarted,
     TurnEnded { text: String, context_tokens: Option<u64> },
+    /// A turn ended in an error: whatever it wrote is not her reply.
+    TurnFailed { context_tokens: Option<u64> },
     /// Background subagents.
     TaskStarted(String),
     TaskEnded(String),

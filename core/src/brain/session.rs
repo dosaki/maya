@@ -17,6 +17,8 @@ const NOTES_DROPPED: &str = "(older changes dropped)";
 pub const CHECKING: &str = "checking my last actions";
 /// Her job during a turn of her own: a wake, notes, the primer.
 pub const LOOKING: &str = "looking at what changed";
+/// What the user hears when the turn answering them ended in an error.
+pub const TURN_FAILED: &str = "Something went wrong on my side; try again.";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
@@ -182,29 +184,40 @@ impl Session {
                 self.tasks.clear();
                 vec![]
             }
-            Event::TurnEnded { text, .. } => {
-                let stopped = std::mem::take(&mut self.stopped);
-                self.turn_running = false;
-                self.in_flight = None;
-                self.job = None;
-                let mut out = vec![];
-                if std::mem::take(&mut self.compacting) {
-                    // The compaction's own turn: nothing to say.
-                    self.current = None;
-                } else {
-                    let via = self.current.take().unwrap_or(Via::Maya);
-                    if !stopped {
+            Event::TurnEnded { text, .. } => self.turn_ended(Some(text), context_percent),
+            Event::TurnFailed { .. } => self.turn_ended(None, context_percent),
+        }
+    }
+
+    /// A turn ended with her reply `text`, or in an error (None): the
+    /// reply goes back the way the request came, unless she was stopped.
+    /// A failed answer to the user says so; a failed turn of her own is quiet.
+    fn turn_ended(&mut self, text: Option<&String>, context_percent: Option<u8>) -> Vec<Out> {
+        let stopped = std::mem::take(&mut self.stopped);
+        self.turn_running = false;
+        self.in_flight = None;
+        self.job = None;
+        let mut out = vec![];
+        if std::mem::take(&mut self.compacting) {
+            // The compaction's own turn: nothing to say.
+            self.current = None;
+        } else {
+            let via = self.current.take().unwrap_or(Via::Maya);
+            if !stopped {
+                out.push(match text {
+                    Some(text) => {
                         let p = protocol::parse(text);
-                        out.push(Out::Reply { via, say: p.say, actions: p.actions, errors: p.errors });
+                        Out::Reply { via, say: p.say, actions: p.actions, errors: p.errors }
                     }
-                    if let Some(p) = context_percent {
-                        self.compact_due = p >= COMPACT_AT_PERCENT;
-                    }
-                }
-                self.advance(&mut out);
-                out
+                    None => Out::Reply { via, say: if via == Via::Maya { String::new() } else { TURN_FAILED.into() }, actions: vec![], errors: vec![] },
+                });
+            }
+            if let Some(p) = context_percent {
+                self.compact_due = p >= COMPACT_AT_PERCENT;
             }
         }
+        self.advance(&mut out);
+        out
     }
 
     pub fn stop(&mut self, via: Via) -> Vec<Out> {
@@ -491,6 +504,19 @@ mod tests {
         assert_eq!(s.wake(), vec![Out::Deliver(None)]);
         assert_eq!(s.job(), Some(LOOKING));
     }
+    #[test]
+    fn a_failed_turn_says_so_to_the_user_and_nothing_for_her_own() {
+        let mut s = Session::new(true);
+        s.submit(req("a", Via::Chat));
+        assert_eq!(s.on_event(&Event::TurnFailed { context_tokens: None }, None), vec![Out::Reply { via: Via::Chat, say: TURN_FAILED.into(), actions: vec![], errors: vec![] }]);
+        assert!(!s.working());
+        s.on_event(&Event::TurnStarted, None);
+        assert_eq!(s.on_event(&Event::TurnFailed { context_tokens: None }, None), vec![Out::Reply { via: Via::Maya, say: String::new(), actions: vec![], errors: vec![] }]);
+        s.submit(req("b", Via::Voice));
+        s.stop(Via::Voice);
+        assert!(s.on_event(&Event::TurnFailed { context_tokens: None }, None).is_empty(), "an interrupted turn says nothing");
+    }
+
     #[test]
     fn notes_are_taken_once() {
         let mut s = Session::new(true);

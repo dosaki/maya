@@ -348,7 +348,7 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
                     outs.extend(b.session.wake());
                 }
             }
-            Event::TurnEnded { context_tokens, .. } => {
+            Event::TurnEnded { context_tokens, .. } | Event::TurnFailed { context_tokens } => {
                 b.turn_seen = true;
                 b.said_stopped = false;
                 let percent = context_percent(b.model.as_deref(), *context_tokens, b.default_1m);
