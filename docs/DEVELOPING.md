@@ -33,6 +33,27 @@ puts `Maya.app` in `target/release/bundle/macos/` (with `--target <triple>`,
 features only work from a bundle: the sidecar, the whisper framework and
 the microphone and speech permissions are all tied to it.
 
+## Maya's brain
+
+With Claude Code as the brain, Maya keeps one long-running `claude -p`
+session (`core/src/brain/`). Her files are in
+`<claude_dir>/maya/brain/`:
+
+- `record.json`: the saved session, to resume or start fresh.
+- `chat.json`: the conversation shared by voice and the Chat tab.
+- `watches.json`: sessions and pull requests she asked to hear about.
+
+The modules: `driver` (what every resident brain looks like), `claude`
+(the Claude Code driver, stream-json over stdin/stdout), `session` (queue,
+busy replies, stop, compaction; no process in it), `protocol` (her
+fenced `maya` action blocks), `prompt`, `notes` (board changes since her
+last turn), `chat`, `record` and `watch`. Actions run after a 5 second
+window unless the user says stop or corrects.
+
+Other brains and assistant machines use the quick one-shot interpreter
+with the same window; they have no resident session and no Chat tab.
+Settings → Debug (off by default) shows the Debug tab and her card.
+
 ## Git integration
 
 The Pull requests tab and each card's PR badge talk to GitHub's and

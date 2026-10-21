@@ -248,16 +248,19 @@ resume or start a session, open or review a pull request.
   system's volume.
 - **Off by default.** Turn on "Listen for 'Maya'" in Settings. A microphone
   appears in the top bar; clicking it opens the voice panel with the
-  conversation and a Yes / No for the current read-back. macOS asks for
+  conversation. The Chat tab (Claude Code brain only) is the same conversation by text. macOS asks for
   microphone and speech-recognition access the first time.
 - **The wake word is "Maya"**, or the word you type in Settings → Voice →
   Listening; a phone joined to this Maya listens for the same word. Say it
   with the command, or alone: she says "Yes?" and waits. When she asks you
   something back, answer without the wake word; she listens for eight
   seconds and remembers the last few exchanges, so "the second one" works.
-- **Sending is read back first.** Anything that sends text, answers a
-  question, starts or resumes a session or starts a review is read back and
-  needs a "yes". Reports, focus and compact happen at once.
+- **She acts after five seconds.** When Maya decides to do something (send
+  a reply, answer a question, start or resume a session, open a review) she
+  says what she is about to do and then does it after five seconds. Say
+  "stop", or correct her, in that time and she drops it. In Chat the action
+  shows a countdown and a Cancel button. Reports, focus and compact happen
+  at once. Say "Maya, stop" at any time to interrupt what she is working on.
 - **Two speech recognisers.** *System* uses Apple's on-device recognition,
   which needs Dictation turned on (System Settings › Keyboard › Dictation).
   On a work Mac where that switch is locked by a management profile,
@@ -272,6 +275,24 @@ resume or start a session, open or review a pull request.
   summary of the board and pull-request list go to Claude, through a
   one-shot `claude -p` call with no tools. The one-off model download is
   the Built-in recogniser's only network access.
+
+### Maya's brain
+
+With Claude Code as your brain, Maya is one long-running session that
+remembers the conversation. She decides where a request goes: to an
+existing session, to a new session (in a repository, or in a scratch
+folder under `/tmp` when it needs no repository), or to herself, when she
+can just answer. Her notes live in `maya/brain/` inside your Claude
+directory. The **Chat** tab, with a status dot showing whether she is idle
+or working, is the same conversation as voice. Assistant machines
+(headless) have no Chat tab and keep the quick interpreter.
+
+The other brains (Codex, Grok, Kiro, Antigravity, OpenCode) still use the
+quick one-shot interpreter, now with the five-second window, until they get
+their own resident session.
+
+**Debug mode** is off by default. Turn it on in Settings → Debug to show
+the Debug tab and her card.
 
 The Debug tab shows what she heard, what she made of it, what she asked
 Claude, what came back, what ran and what she said. The same lines go to
