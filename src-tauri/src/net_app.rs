@@ -211,6 +211,9 @@ impl ClientNotify for TauriClientNotify {
         log::line("network", format!("promoted to main by {by}; {handed} assistants handed over"));
         let _ = self.app.emit("network", crate::network_status_of(&state));
         crate::refresh_and_emit(&self.app);
+        // A main runs her session; an assistant did not.
+        let handle = self.app.clone();
+        std::thread::spawn(move || crate::brain_app::restart(&handle));
         Ok(port)
     }
 
@@ -273,6 +276,43 @@ pub(crate) fn interpret_data(outcome: &Interpreted) -> Value {
     }
 }
 
+/// Her session's reply to a phone, in the shape `interpret_data` gives: what
+/// she said, then the announcement of the actions that wait (built from the
+/// actions, as the desktop's is), which the phone waits out and runs. The
+/// phone says `pending.say` when there is one, so it carries both.
+pub(crate) fn phone_reply(said: &str, waiting: Vec<Value>) -> Value {
+    if waiting.is_empty() {
+        return said_data(said);
+    }
+    let announced = crate::brain_route::announcement(&waiting);
+    let say = [said.trim(), announced.as_str()].iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" ");
+    serde_json::json!({ "say": say, "pending": { "say": say, "actions": waiting, "action": waiting.first() } })
+}
+
+/// Her reply to a phone's request: actions that run at once (compact) run
+/// here and say what they did, focus and open are refused, and the rest
+/// wait on the phone.
+fn brain_reply_data(app: &AppHandle, say: &str, actions: Vec<Value>) -> Value {
+    let (waiting, now): (Vec<Value>, Vec<Value>) = actions.into_iter().partition(maya_core::interpreter::waits);
+    let mut lines: Vec<String> = Vec::new();
+    lines.extend(Some(say.trim().to_string()).filter(|s| !s.is_empty()));
+    let mut results = Vec::new();
+    for action in now {
+        if let Some(why) = refuse_remote(&action) {
+            lines.push(why);
+            continue;
+        }
+        let outcome = listener::execute_action(app, &action);
+        lines.push(match &outcome {
+            Ok(ok) => listener::spoken_for(&action).unwrap_or_else(|| ok.clone()),
+            Err(e) => e.clone(),
+        });
+        results.push((action, outcome));
+    }
+    crate::brain_app::batch_done(app, &results);
+    phone_reply(&lines.join(" "), waiting)
+}
+
 pub(crate) fn said_data(say: &str) -> Value {
     serde_json::json!({ "say": say })
 }
@@ -330,12 +370,20 @@ pub(crate) fn revalidate(action: &Value, ctx: &VoiceContext) -> Result<Value, St
     Ok(fresh)
 }
 
-/// A phone's voice request: interpret (running a compact at once), or run a
-/// confirmed action. Nothing is spoken here, and the desktop's own
-/// conversation is untouched.
+/// A phone's voice request: her session answers it when it runs (the
+/// request and her reply join her Chat), else the one-shot interpreter does
+/// (running a compact at once) and the desktop's conversation is untouched;
+/// or run a confirmed action. Nothing is spoken here.
 fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, String> {
     match request {
         Request::Interpret { command, history } => {
+            // Her session, when it runs, remembers the conversation itself.
+            if crate::brain_app::ready(app) {
+                return Ok(Some(match crate::brain_app::ask_and_wait(app, &command, maya_core::interpreter::TIMEOUT) {
+                    Some((say, actions)) => brain_reply_data(app, &say, actions),
+                    None => said_data("Sorry, that took too long."),
+                }));
+            }
             let pairs = listener::exchanges(history.iter().map(|t| (t.who.as_str(), t.text.as_str())));
             let outcome = listener::interpret_text(app, &command, &pairs);
             if let Interpreted::Run(action) = &outcome {
@@ -464,6 +512,18 @@ mod tests {
         let two = interpret_data(&Interpreted::Announce { say: "Two.".into(), actions: vec![serde_json::json!({"kind": "reply"}), serde_json::json!({"kind": "compact"})] });
         assert_eq!(two["pending"]["actions"].as_array().unwrap().len(), 2);
         assert_eq!(two["pending"]["action"]["kind"], "reply", "an older phone gets the first");
+    }
+
+    #[test]
+    fn her_reply_to_a_phone_says_her_words_then_the_announcement_and_waits_with_the_actions() {
+        assert_eq!(phone_reply("All quiet.", vec![]), serde_json::json!({"say": "All quiet."}));
+        let a = serde_json::json!({"kind":"reply","name":"api-fix","text":"open the PR"});
+        let r = phone_reply("Sure.", vec![a.clone()]);
+        assert_eq!(r["say"], "Sure. Telling api-fix: open the PR.");
+        assert_eq!(r["pending"]["say"], r["say"], "the phone says pending.say");
+        assert_eq!(r["pending"]["actions"], serde_json::json!([a.clone()]));
+        assert_eq!(r["pending"]["action"], a);
+        assert_eq!(phone_reply("", vec![a])["say"], "Telling api-fix: open the PR.");
     }
 
     #[test]

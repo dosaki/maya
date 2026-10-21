@@ -10,6 +10,7 @@ pub mod listener;
 pub mod models;
 pub mod net_app;
 mod brain_app;
+mod brain_route;
 mod remembered_app;
 #[cfg(target_os = "macos")]
 pub mod terminal_app;
@@ -141,6 +142,8 @@ pub struct AppState {
     pub chat: Mutex<maya_core::brain::chat::ChatLog>,
     /// The batch Maya announced and runs once its window has passed.
     pub window: Mutex<maya_core::window::Window>,
+    /// Her resident session. Lock rule: never held with another lock (see `brain_app`).
+    pub(crate) brain: Mutex<brain_app::BrainState>,
     /// Lock order: `network`, then the server's own mutex, then `store`.
     pub network: Mutex<net::NetworkState>,
     /// This Maya's network key pair, read from the key store at first use.
@@ -527,6 +530,8 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
     // Maya's own brain card is never announced, counted or mirrored: it only
     // joins the list the window gets, which shows it in debug mode.
     cards.retain(|c| !c.brain);
+    // What changed becomes her notes; a watched change wakes her.
+    brain_app::board_changed(app, &cards);
     // Track every refresh so a toggle-on later does not replay old events.
     let (fresh, finished) = {
         let state = app.state::<AppState>();
@@ -1258,9 +1263,14 @@ pub(crate) fn update_config(app: &AppHandle, f: impl FnOnce(&mut Config)) -> Res
     Ok(after)
 }
 
-/// Starts, stops or restarts the listener, the server and the client after a config change.
+/// Starts, stops or restarts the listener, the server, the client and her
+/// session after a config change.
 fn apply_config_change(app: &AppHandle, before: &Config, config: &Config) {
     let state = app.state::<AppState>();
+    if brain_route::needs_restart(before, config) {
+        let handle = app.clone();
+        std::thread::spawn(move || brain_app::restart(&handle));
+    }
     match listener::listening_change(before, config) {
         listener::ListenChange::Restart => {
             log::line("listener", "settings changed; restarting");
@@ -1306,10 +1316,11 @@ pub fn run() {
     let mut store = Store::new(dir.clone());
     store.compact_events();
     let chat = maya_core::brain::chat::ChatLog::load(store.claude_dir().join("maya").join("brain").join("chat.json"));
+    let brain = brain_app::BrainState::new(store.claude_dir());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
         .invoke_handler(tauri::generate_handler![
             git::get_git_status,
@@ -1449,16 +1460,20 @@ pub fn run() {
                     let _ = listener::start_listening(&voice_handle);
                 });
             }
+            // Her session; a no-op on an assistant, which keeps the quick interpreter.
+            let brain_handle = app.handle().clone();
+            std::thread::spawn(move || brain_app::start(&brain_handle));
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
             // A stalled model download otherwise keeps its curl child alive
             // under launchd after Maya quits, writing a 60-190 MB `.part`
             // file to nowhere.
             if let tauri::RunEvent::Exit = event {
                 models::abort_all();
+                brain_app::quit(app);
             }
         });
 }

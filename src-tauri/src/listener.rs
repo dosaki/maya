@@ -5,6 +5,7 @@
 //! Lock rule: never hold the store, voice or window lock while speaking,
 //! while the interpreter runs or while an action runs, and never take one of
 //! them while holding another; take what is needed, release, then act.
+//! `brain_app` extends the rule to the chat and brain locks.
 
 use crate::store::now_ms;
 use crate::{config, ear, eleven_settings, eleven_wanted, interpreter, launch, log, notify, wake};
@@ -99,7 +100,7 @@ fn push_turn(chat: &Mutex<ChatLog>, voice: &Mutex<VoiceState>, who: &str, text: 
 }
 
 /// Remembers a turn; the caller's next `voice` event tells the page.
-fn remember(app: &AppHandle, who: &str, text: &str, via: Via) {
+pub(crate) fn remember(app: &AppHandle, who: &str, text: &str, via: Via) {
     let state = app.state::<AppState>();
     push_turn(&state.chat, &state.voice, who, text, now_ms(), via);
 }
@@ -144,6 +145,11 @@ pub(crate) fn install_speech_hook(app: AppHandle) {
 /// Focus mode. Blank text, or a muted Maya, says nothing. False when run
 /// `generation` is no longer current, before or after speaking.
 fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
+    reply_aloud_as(app, generation, text, Via::Voice)
+}
+
+/// `reply_aloud`, with the line remembered as coming `via` that way.
+pub(crate) fn reply_aloud_as(app: &AppHandle, generation: u64, text: &str, via: Via) -> bool {
     if text.trim().is_empty() {
         return is_current(app, generation);
     }
@@ -156,7 +162,7 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
         v.status.said = text.to_string();
     }
     // History first, so a page that refetches it on this event sees the line.
-    remember(app, "maya", text, Via::Voice);
+    remember(app, "maya", text, via);
     emit_voice(app);
     let (muted, eleven, volume) = {
         let state = app.state::<AppState>();
@@ -372,14 +378,14 @@ pub(crate) fn interpret_text(app: &AppHandle, cmd: &str, history: &[(String, Str
 }
 
 /// The last exchanges as (user, maya) pairs, oldest first, for the interpreter.
-fn recent_exchanges(app: &AppHandle) -> Vec<(String, String)> {
+pub(crate) fn recent_exchanges(app: &AppHandle) -> Vec<(String, String)> {
     let state = app.state::<AppState>();
     let turns = state.chat.lock().unwrap().last(12);
     exchanges(turns.iter().map(|t| (t.who.as_str(), t.text.as_str())))
 }
 
 /// Says `text`, then shows idle; both only while run `generation` is current.
-fn reply_then_idle(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>) {
+pub(crate) fn reply_then_idle(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>) {
     if !reply_aloud(app, generation, text) {
         return;
     }
@@ -421,9 +427,28 @@ pub(crate) fn asks_question(text: &str) -> bool {
     text.trim_end().ends_with('?')
 }
 
-/// Sends a spoken command to the interpreter and acts on its reply. Every
-/// step after the interpreter returns checks that run `generation` is still
-/// current, so a stop while she thinks leaves nothing behind.
+/// Her reply to a spoken request that went to her session: said aloud (only
+/// shown when muted) for whoever listens now, then the flow's next state as
+/// `reply_then_idle` sets it; with the listener off it is only said. Blocks
+/// while speaking: the caller must hold no lock.
+pub(crate) fn answer_aloud(app: &AppHandle, text: &str) {
+    let (generation, listening) = {
+        let state = app.state::<AppState>();
+        let v = state.voice.lock().unwrap();
+        (v.generation, v.status.listening)
+    };
+    if listening {
+        reply_then_idle(app, generation, text, None);
+    } else {
+        reply_aloud(app, generation, text);
+    }
+}
+
+/// Sends a spoken command to her session when it runs, else to the one-shot
+/// interpreter, and acts on the interpreter's reply. Every step after the
+/// interpreter returns checks that run `generation` is still current, so a
+/// stop while she thinks leaves nothing behind. Her session's reply comes
+/// later, through `brain_app`; the state shows "thinking" until then.
 fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>) {
     let started = set_voice(app, generation, |st| {
         st.state = "thinking".into();
@@ -433,7 +458,18 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     if !started {
         return;
     }
+    if crate::brain_app::ready(app) {
+        log::line("action", "asking her session");
+        crate::brain_app::ask(app, cmd, Via::Voice);
+        return;
+    }
     let outcome = interpret_text(app, cmd, &recent_exchanges(app));
+    act_on(app, generation, outcome, inbox);
+}
+
+/// Says, announces or runs what the interpreter made of a spoken command,
+/// for listener run `generation`.
+pub(crate) fn act_on(app: &AppHandle, generation: u64, outcome: Interpreted, inbox: Option<&Inbox>) {
     if !is_current(app, generation) {
         log::line("listener", "run replaced while thinking; reply dropped");
         return;
@@ -582,7 +618,7 @@ fn close_window(v: &mut VoiceState, next: &str) {
 
 /// `close_window` on the voice state, then tells the page and her Chat.
 /// Takes the voice lock: the caller must hold none.
-fn settle(app: &AppHandle, next: &str) {
+pub(crate) fn settle(app: &AppHandle, next: &str) {
     {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
@@ -592,7 +628,7 @@ fn settle(app: &AppHandle, next: &str) {
     crate::brain_app::emit_status(app);
 }
 
-fn current_generation(app: &AppHandle) -> u64 {
+pub(crate) fn current_generation(app: &AppHandle) -> u64 {
     app.state::<AppState>().voice.lock().unwrap().generation
 }
 
@@ -756,9 +792,10 @@ pub(crate) fn failures_said(results: &[(Value, Result<String, String>)]) -> Opti
     (!failed.is_empty()).then(|| failed.join(" "))
 }
 
-/// A batch has run: says its failures aloud when it was spoken (a muted
-/// Maya only shows them), then shows idle. Task 13 adds her notes.
+/// A batch has run: leaves her a note per action, says its failures aloud
+/// when it was spoken (a muted Maya only shows them), then shows idle.
 pub(crate) fn on_batch_done(app: &AppHandle, results: Vec<(Value, Result<String, String>)>, origin: Via) {
+    crate::brain_app::batch_done(app, &results);
     if let Some(line) = failures_said(&results).filter(|_| matches!(origin, Via::Voice | Via::Maya)) {
         say(app, &line);
     }
