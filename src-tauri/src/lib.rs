@@ -136,6 +136,9 @@ pub struct AppState {
     pub reviews: Mutex<ReviewState>,
     pub pr_notifier: Mutex<reviews::PrNotifier>,
     pub voice: Mutex<VoiceState>,
+    /// One conversation for voice and Chat. Lock rule: never held with the
+    /// voice or store lock.
+    pub chat: Mutex<maya_core::brain::chat::ChatLog>,
     /// The batch Maya announced and runs once its window has passed.
     pub window: Mutex<maya_core::window::Window>,
     /// Lock order: `network`, then the server's own mutex, then `store`.
@@ -1302,10 +1305,11 @@ pub fn run() {
     let dir = claude_dir();
     let mut store = Store::new(dir.clone());
     store.compact_events();
+    let chat = maya_core::brain::chat::ChatLog::load(store.claude_dir().join("maya").join("brain").join("chat.json"));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), window: Mutex::new(maya_core::window::Window::default()), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
         .invoke_handler(tauri::generate_handler![
             git::get_git_status,

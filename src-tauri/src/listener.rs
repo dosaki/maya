@@ -11,6 +11,8 @@ use crate::{config, ear, eleven_settings, eleven_wanted, interpreter, launch, lo
 use crate::{answer_question, compact_session, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, AppState};
 use maya_core::window::{Batch, Via};
 use serde_json::Value;
+use maya_core::brain::chat::{ChatLog, ChatTurn};
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 
@@ -19,7 +21,6 @@ pub struct VoiceState {
     pub ear: Option<ear::Ear>,
     pub flow: Option<wake::Flow>,
     pub status: VoiceStatus,
-    pub history: Vec<VoiceTurn>,
     pub failures: u32,
     /// Bumped on every start and stop, so a listener thread from an earlier
     /// run ignores its sidecar's last events instead of touching the new one.
@@ -90,21 +91,17 @@ fn set_voice(app: &AppHandle, generation: u64, f: impl FnOnce(&mut VoiceStatus))
     true
 }
 
-/// Adds a turn to the history (the last 40 are kept) and counts it.
-fn push_turn(v: &mut VoiceState, who: &str, text: &str, at: u64) {
-    v.history.push(VoiceTurn { who: who.into(), text: text.into(), at });
-    if v.history.len() > 40 {
-        let extra = v.history.len() - 40;
-        v.history.drain(..extra);
-    }
-    v.status.turns += 1;
+/// Adds a turn to the chat log, then sets the status counter to the log's
+/// count. The chat lock is released before the voice lock is taken.
+fn push_turn(chat: &Mutex<ChatLog>, voice: &Mutex<VoiceState>, who: &str, text: &str, at: u64, via: Via) {
+    let turns = chat.lock().unwrap().push(ChatTurn { who: who.into(), text: text.into(), at, via });
+    voice.lock().unwrap().status.turns = turns;
 }
 
 /// Remembers a turn; the caller's next `voice` event tells the page.
-fn remember(app: &AppHandle, who: &str, text: &str) {
+fn remember(app: &AppHandle, who: &str, text: &str, via: Via) {
     let state = app.state::<AppState>();
-    let mut v = state.voice.lock().unwrap();
-    push_turn(&mut v, who, text, now_ms());
+    push_turn(&state.chat, &state.voice, who, text, now_ms(), via);
 }
 
 /// What the speech hook does to the voice state: pause the ear and remember
@@ -159,7 +156,7 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
         v.status.said = text.to_string();
     }
     // History first, so a page that refetches it on this event sees the line.
-    remember(app, "maya", text);
+    remember(app, "maya", text, Via::Voice);
     emit_voice(app);
     let (muted, eleven, volume) = {
         let state = app.state::<AppState>();
@@ -377,8 +374,8 @@ pub(crate) fn interpret_text(app: &AppHandle, cmd: &str, history: &[(String, Str
 /// The last exchanges as (user, maya) pairs, oldest first, for the interpreter.
 fn recent_exchanges(app: &AppHandle) -> Vec<(String, String)> {
     let state = app.state::<AppState>();
-    let v = state.voice.lock().unwrap();
-    exchanges(v.history.iter().map(|t| (t.who.as_str(), t.text.as_str())))
+    let turns = state.chat.lock().unwrap().last(12);
+    exchanges(turns.iter().map(|t| (t.who.as_str(), t.text.as_str())))
 }
 
 /// Says `text`, then shows idle; both only while run `generation` is current.
@@ -516,7 +513,7 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>)
         return;
     }
     if let Some(turn) = user_turn(&effects, &word) {
-        remember(app, "user", &turn);
+        remember(app, "user", &turn, Via::Voice);
     }
     for e in effects {
         match e {
@@ -1142,7 +1139,8 @@ pub(crate) fn voice_status(state: TauriState<AppState>) -> VoiceStatus {
 
 #[tauri::command]
 pub(crate) fn voice_history(state: TauriState<AppState>) -> Vec<VoiceTurn> {
-    state.voice.lock().unwrap().history.clone()
+    let turns = state.chat.lock().unwrap().last(40);
+    turns.into_iter().map(|t| VoiceTurn { who: t.who, text: t.text, at: t.at }).collect()
 }
 
 #[tauri::command(async)]
@@ -1414,14 +1412,15 @@ mod tests {
     }
 
     #[test]
-    fn each_remembered_turn_bumps_the_counter_even_once_the_history_is_full() {
-        let mut v = VoiceState::default();
-        for i in 0..45 {
-            push_turn(&mut v, "user", &format!("turn {i}"), i);
+    fn each_remembered_turn_bumps_the_counter_even_once_the_log_is_full() {
+        let chat = Mutex::new(ChatLog::in_memory());
+        let voice = Mutex::new(VoiceState::default());
+        for i in 0..505 {
+            push_turn(&chat, &voice, "user", &format!("turn {i}"), i, Via::Voice);
         }
-        assert_eq!(v.history.len(), 40, "the history keeps the last 40");
-        assert_eq!(v.history.last().unwrap().text, "turn 44");
-        assert_eq!(v.status.turns, 45, "the page refetches whenever this changes");
+        assert_eq!(chat.lock().unwrap().last(1000).len(), 500, "the log keeps the last 500");
+        assert_eq!(chat.lock().unwrap().last(1)[0].text, "turn 504");
+        assert_eq!(voice.lock().unwrap().status.turns, 505, "the page refetches whenever this changes");
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub mod agents;
 pub mod answer;
 pub mod antigravity;
 pub mod attachments;
+pub mod brain;
 pub mod codex;
 pub mod codex_hooks;
 pub mod config;
