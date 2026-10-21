@@ -176,6 +176,17 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
     is_current(app, generation)
 }
 
+/// How a `resume_all` went: any session left behind makes it a failure, so
+/// it is spoken after a batch (where only failures are).
+fn resume_all_outcome(resumed: usize, failed: usize) -> Result<String, String> {
+    let said = interpreter::resume_all_said(resumed, failed);
+    if failed == 0 {
+        Ok(said)
+    } else {
+        Err(said)
+    }
+}
+
 /// Why "focus" refuses a card that runs on another machine: its pid means
 /// nothing here, so the user is sent to open it there instead. None locally.
 fn remote_focus_refusal(machine: Option<&str>) -> Option<String> {
@@ -236,7 +247,7 @@ pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Res
             }
             let outcomes = crate::remembered_app::resume_rows(app, &rows);
             let failed = outcomes.iter().filter(|o| o.error.is_some()).count();
-            Ok(interpreter::resume_all_said(outcomes.len() - failed, failed))
+            resume_all_outcome(outcomes.len() - failed, failed)
         }
         "start" if action["scratch"].as_bool() == Some(true) => {
             let prompt = action["prompt"].as_str().unwrap_or("").to_string();
@@ -603,14 +614,35 @@ fn drop_batch(app: &AppHandle, id: u64) {
     }
 }
 
+/// Takes a batch that was asked for by voice out of the window: once its
+/// listener run stops or restarts, nobody can stop it by voice, and a request
+/// in the next run must not join it and inherit its deadline. A batch from
+/// Chat, the phone or Maya herself stays.
+fn drop_voice_batch(w: &mut maya_core::window::Window) -> Option<Batch> {
+    match w.pending() {
+        Some(b) if b.origin == Via::Voice => w.cancel(),
+        _ => None,
+    }
+}
+
+/// `drop_voice_batch` when listening stops or restarts, saying why in the
+/// log. Takes the window lock: the caller must hold none.
+fn drop_voice_batch_because(app: &AppHandle, why: &str) {
+    let dropped = drop_voice_batch(&mut app.state::<AppState>().window.lock().unwrap());
+    if let Some(batch) = dropped {
+        log::line("action", format!("dropped announced action (batch {}, {:?}): {why}", batch.id, batch.say));
+        crate::brain_app::emit_status(app);
+    }
+}
+
 /// Announces `actions` and runs them once the window has passed, unless a
 /// stop, a correction or the Cancel button drops them first. Opens a batch
 /// or joins the open one. A spoken request, or one from Maya herself, is
 /// said aloud (a muted Maya only shows it) and stopped by voice; the clock
 /// starts only once the announcement has been said, so the user always gets
-/// the whole window after hearing it. A voice request whose listener run is
-/// stopped or replaced while she announces it is dropped. Blocks while
-/// speaking: the caller must hold no lock.
+/// the whole window after hearing it. A voice request's batch is dropped
+/// when its listener run stops or restarts (`drop_voice_batch`), during the
+/// announcement or after it. Blocks while speaking: the caller must hold no lock.
 pub(crate) fn announce(app: &AppHandle, generation: Option<u64>, say: String, actions: Vec<Value>, origin: Via) {
     let state = app.state::<AppState>();
     let (id, shown) = {
@@ -663,14 +695,13 @@ pub(crate) fn announce(app: &AppHandle, generation: Option<u64>, say: String, ac
     emit_voice(app);
     crate::brain_app::emit_status(app);
     let handle = app.clone();
-    std::thread::spawn(move || wait_then_run(&handle, id, until, generation));
+    std::thread::spawn(move || wait_then_run(&handle, id, until));
 }
 
 /// The timer of batch `id`: sleeps until just past its deadline, then runs it
-/// unless it was cancelled, corrected or already run. A voice batch whose
-/// listener run has since stopped or been replaced is dropped instead, as a
-/// stop leaves nothing behind.
-fn wait_then_run(app: &AppHandle, id: u64, mut until: u64, generation: Option<u64>) {
+/// unless it was cancelled, corrected, dropped when listening stopped, or
+/// already run.
+fn wait_then_run(app: &AppHandle, id: u64, mut until: u64) {
     let batch = loop {
         std::thread::sleep(Duration::from_millis(until.saturating_sub(now_ms()) + 50));
         let state = app.state::<AppState>();
@@ -684,11 +715,6 @@ fn wait_then_run(app: &AppHandle, id: u64, mut until: u64, generation: Option<u6
             _ => return,
         }
     };
-    if generation.map_or(false, |g| !is_current(app, g)) {
-        log::line("action", format!("listener stopped; batch {} dropped", batch.id));
-        settle(app, "idle");
-        return;
-    }
     log::line("action", format!("batch {} runs: its window passed", batch.id));
     run_now(app, batch);
 }
@@ -859,6 +885,7 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
         v.generation += 1;
         (v.generation, v.ear.take())
     };
+    drop_voice_batch_because(app, "listening restarted");
     // Ear has no Drop: stop the one being replaced.
     if let Some(mut e) = old {
         e.stop();
@@ -1068,6 +1095,7 @@ pub(crate) fn stop_listening(app: &AppHandle) {
         v.failures = 0;
         v.ear.take()
     };
+    drop_voice_batch_because(app, "listening stopped");
     // Ear has no Drop: always stop it.
     if let Some(mut e) = dead {
         e.stop();
@@ -1124,10 +1152,6 @@ pub(crate) fn voice_selftest() -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// The user's turn to remember for a heard segment's effects: the command
-/// after the wake word (or the correction), or the yes, no or stop she recognised. Never the raw
-/// segment, which can hold talk from before the wake word; the history goes
-/// to the model, and only the command text may.
 /// One line for the log: what the flow decided to do with a segment.
 pub(crate) fn describe_effects(effects: &[wake::Effect]) -> String {
     if effects.is_empty() {
@@ -1147,6 +1171,10 @@ pub(crate) fn describe_effects(effects: &[wake::Effect]) -> String {
         .join(", ")
 }
 
+/// The user's turn to remember for a heard segment's effects: the command
+/// after the wake word (or the correction), or the yes, no or stop she
+/// recognised. Never the raw segment, which can hold talk from before the
+/// wake word; the history goes to the model, and only the command text may.
 pub(crate) fn user_turn(effects: &[wake::Effect], word: &str) -> Option<String> {
     effects.iter().find_map(|e| match e {
         wake::Effect::Interpret(cmd) => Some(cmd.clone()),
@@ -1168,15 +1196,15 @@ fn sentence(text: &str) -> String {
     }
 }
 
-/// What Maya says for a validated action, built from the action itself and
-/// never from the model's `say`: the announcement for actions that wait in
-/// the window, the line for focus and compact. None for a report, whose answer is the
-/// model's `say`.
 /// `owner/name` spoken as just `name`.
 fn repo_name(repo: &str) -> &str {
     repo.rsplit('/').next().unwrap_or(repo)
 }
 
+/// What Maya says for a validated action, built from the action itself and
+/// never from the model's `say`: the announcement for actions that wait in
+/// the window, the line for focus and compact. None for a report, whose
+/// answer is the model's `say`.
 pub(crate) fn spoken_for(action: &serde_json::Value) -> Option<String> {
     let s = |k: &str| action[k].as_str().unwrap_or("").trim().to_string();
     // " on <machine>" after the name (or the dir, for start/resume) when the
@@ -1332,6 +1360,40 @@ mod tests {
         assert_eq!(failures_said(&[sent.clone()]), None, "the announcement already said it");
         assert_eq!(failures_said(&[sent, changed.clone()]).as_deref(), Some("The question has changed; ask me again."));
         assert_eq!(failures_said(&[changed, gone]).as_deref(), Some("The question has changed; ask me again. Session is no longer running."));
+    }
+
+    #[test]
+    fn a_voice_batch_is_dropped_when_listening_stops_and_never_joined_by_the_next_run() {
+        use maya_core::window::Window;
+        let mut w = Window::default();
+        let old = w.open("Telling coral: go.".into(), vec![json!({"kind":"reply"})], Via::Voice);
+        w.start_clock(old, 0);
+        assert_eq!(drop_voice_batch(&mut w).map(|b| b.id), Some(old));
+        assert!(w.pending().is_none());
+        // The next run's request opens a batch of its own, with a full window.
+        let new = w.open("Telling hexgrid: ship it.".into(), vec![json!({"kind":"reply"})], Via::Voice);
+        assert_ne!(new, old);
+        assert_eq!(w.start_clock(new, 10_000), Some(10_000 + maya_core::window::WAIT_MS));
+        assert_eq!(w.pending().unwrap().actions.len(), 1);
+        // A batch from Chat, the phone or Maya herself does not hang on the microphone.
+        for origin in [Via::Chat, Via::Phone, Via::Maya] {
+            let mut w = Window::default();
+            w.open("x".into(), vec![json!(1)], origin);
+            assert!(drop_voice_batch(&mut w).is_none(), "{origin:?}");
+            assert!(w.pending().is_some());
+        }
+        assert!(drop_voice_batch(&mut Window::default()).is_none());
+    }
+
+    #[test]
+    fn a_resume_all_that_left_any_behind_is_a_failure_and_is_spoken() {
+        assert_eq!(resume_all_outcome(5, 0), Ok("Resuming 5.".to_string()));
+        assert_eq!(resume_all_outcome(4, 1), Err("Resumed 4; one couldn't be resumed.".to_string()));
+        assert_eq!(resume_all_outcome(0, 2), Err("None of them could be resumed.".to_string()));
+        let ran = |r| vec![(json!({"kind":"resume_all"}), r)];
+        assert_eq!(failures_said(&ran(resume_all_outcome(5, 0))), None);
+        assert_eq!(failures_said(&ran(resume_all_outcome(4, 1))).as_deref(), Some("Resumed 4; one couldn't be resumed."));
+        assert_eq!(failures_said(&ran(resume_all_outcome(0, 2))).as_deref(), Some("None of them could be resumed."));
     }
 
     #[test]
