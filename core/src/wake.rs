@@ -1,10 +1,10 @@
 //! The wake word and the short conversation around a command: "Maya" (or
 //! the word the user chose) then a command, or a command in the same breath;
-//! a pending action that waits for yes or no. Pure functions and a small
+//! the action window after Maya announces something, where a stop, a yes or
+//! a correction settles it. Pure functions and a small
 //! state machine, no I/O.
 
 pub const COMMAND_WAIT_MS: u64 = 8_000;
-pub const CONFIRM_WAIT_MS: u64 = 10_000;
 
 /// The wake word when the user has not chosen one.
 pub const DEFAULT_WAKE_WORD: &str = "Maya";
@@ -137,39 +137,43 @@ fn answer(segment: &str, fillers: &[String]) -> Answer {
     }
 }
 
-/// Words that may sit beside a no-word in a plain refusal ("never mind",
-/// "not now", "don't do it", "cancel that").
-const NO_COMPANIONS: &[&str] = &["mind", "now", "it", "that", "do"];
+/// Words that stop an announced action when they are the whole utterance.
+const STOP_WORDS: &[&str] = &["no", "nope", "stop", "wait", "cancel", "abort", "hold", "never", "nevermind", "don't"];
+/// Words that may sit beside a stop word ("hold on", "never mind", "stop that").
+const STOP_COMPANIONS: &[&str] = &["on", "mind", "now", "it", "that", "do", "thanks"];
 
-/// True when a command spoken after the wake word is only a yes or a no
-/// ("Maya, yes", "Maya, cancel"), not a new request that happens to contain
-/// a no-word ("Maya tell coral stop").
-fn plain_answer(command: &str, fillers: &[String]) -> bool {
-    match answer(command, fillers) {
-        Answer::Yes => true,
-        Answer::No => normalise(command).split_whitespace().filter(|w| !fillers.iter().any(|f| f == w)).all(|w| NO_WORDS.contains(&w) || NO_COMPANIONS.contains(&w)),
-        Answer::Other => false,
-    }
+fn is_stop_with(text: &str, fillers: &[String]) -> bool {
+    let n = normalise(text);
+    let words: Vec<&str> = n.split_whitespace().filter(|w| !fillers.iter().any(|f| f == w)).collect();
+    words.len() <= 4 && words.iter().any(|w| STOP_WORDS.contains(w)) && words.iter().all(|w| STOP_WORDS.contains(w) || STOP_COMPANIONS.contains(w))
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Pending {
-    pub say: String,
-    pub action: serde_json::Value,
+/// True when a short utterance is only a stop: no, stop, wait, cancel, hold
+/// on, never mind, don't. Loose like `answer`, but a request that merely holds
+/// one of these words ("tell coral to stop") is not a stop.
+pub fn is_stop(text: &str) -> bool {
+    is_stop_with(text, &fillers(DEFAULT_WAKE_WORD))
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     Say(String),
     Interpret(String),
-    Execute(serde_json::Value),
+    /// The user stopped the announced batch.
     Cancelled,
+    /// The user said yes: run the announced batch now.
+    RunNow,
+    /// The user corrected the announced batch: cancel it and interpret this.
+    Correct(String),
+    /// "Maya, stop" with nothing announced: stop what she is doing.
+    Stop,
 }
 
 enum State {
     Idle,
     AwaitingCommand { until: u64 },
-    AwaitingConfirm { pending: Pending, until: u64 },
+    /// An announced batch waits to run; the next segment settles it.
+    Window { until: u64 },
 }
 
 pub struct Flow {
@@ -202,12 +206,12 @@ impl Flow {
     }
 
     /// Remembers Maya's last spoken line so hearing it back does nothing.
-    /// The ear stays open while she says a short prompt ("Yes?"), so the
-    /// user may talk over it and the next segment can start with her words:
-    /// `on_segment` strips them from the front. A short line heard back on
-    /// its own is dropped except while a confirmation waits, where "yes" is
-    /// the user's real answer. The stored line is one-shot: it is cleared by
-    /// the very next `on_segment` call whether or not it matched.
+    /// The ear stays open while she speaks, so the user may talk over a short
+    /// prompt ("Yes?") and the next segment can start with her words:
+    /// `on_segment` strips them from the front. Her line heard back on its own
+    /// is always dropped, in the window too, where it must never read as a
+    /// correction. The stored line is one-shot: it is cleared by the very next
+    /// `on_segment` call whether or not it matched.
     pub fn ignore_line(&mut self, spoken: &str) {
         let n = normalise(spoken);
         if !n.is_empty() {
@@ -219,10 +223,8 @@ impl Flow {
     /// when the whole segment was just her line and should be dropped.
     fn without_ignored(&self, ignored: &str, text: &str) -> Option<String> {
         let seg = normalise(text);
-        let short = ignored.split_whitespace().count() < 3;
         if seg == ignored {
-            // Her own short prompt while a confirmation waits is the user's answer.
-            return if short && matches!(self.state, State::AwaitingConfirm { .. }) { Some(text.to_string()) } else { None };
+            return None;
         }
         match seg.strip_prefix(ignored) {
             Some(rest) if rest.starts_with(' ') => Some(rest.trim().to_string()),
@@ -236,44 +238,41 @@ impl Flow {
         self.state = State::AwaitingCommand { until: now_ms + COMMAND_WAIT_MS };
     }
 
-    pub fn set_pending(&mut self, p: Pending, now_ms: u64) {
-        self.state = State::AwaitingConfirm { pending: p, until: now_ms + CONFIRM_WAIT_MS };
+    /// An announced batch waits until `until` (milliseconds): the next
+    /// segment stops it, runs it now or corrects it.
+    pub fn open_window(&mut self, until: u64) {
+        self.state = State::Window { until };
     }
 
-    /// Holds a pending action with no deadline yet, while its read-back is
-    /// still being said: a yes may come at any point of it. `set_pending`
-    /// starts the answer window once the read-back has ended.
-    pub fn hold_pending(&mut self, p: Pending) {
-        self.state = State::AwaitingConfirm { pending: p, until: u64::MAX };
-    }
-
-    /// True while a pending action is held, whether or not its window has run
-    /// out; the next segment (or a new `set_pending`) settles it.
-    pub fn has_pending(&self) -> bool {
-        matches!(self.state, State::AwaitingConfirm { .. })
+    /// The batch ran or was cancelled from elsewhere (a button, the phone).
+    pub fn close_window(&mut self) {
+        if matches!(self.state, State::Window { .. }) {
+            self.state = State::Idle;
+        }
     }
 
     pub fn state(&self, now_ms: u64) -> &'static str {
         match &self.state {
             State::Idle => "idle",
             State::AwaitingCommand { until } if now_ms <= *until => "awaiting-command",
-            State::AwaitingConfirm { until, .. } if now_ms <= *until => "awaiting-confirm",
+            State::Window { until } if now_ms <= *until => "window",
             _ => "idle",
         }
-    }
-
-    /// Drops a pending action whose window has run out; true when one was dropped.
-    pub fn drop_expired(&mut self, now_ms: u64) -> bool {
-        let expired = self.has_pending() && self.state(now_ms) == "idle";
-        if expired {
-            self.state = State::Idle;
-        }
-        expired
     }
 
     fn expire(&mut self, now_ms: u64) {
         if self.state(now_ms) == "idle" {
             self.state = State::Idle;
+        }
+    }
+
+    /// A command after the wake word: a plain stop stops her, anything else is
+    /// interpreted.
+    fn command(&self, c: String) -> Vec<Effect> {
+        if is_stop_with(&c, &self.fillers) {
+            vec![Effect::Stop]
+        } else {
+            vec![Effect::Interpret(c)]
         }
     }
 
@@ -290,35 +289,26 @@ impl Flow {
             },
             None => text,
         };
-        // With the wake word and a command, the command wins over a no-word
-        // inside it: "Maya tell coral stop" is a new command, not a cancel.
-        if let (State::AwaitingConfirm { .. }, Wake::Command(c)) = (&self.state, extract(text, &self.spellings)) {
-            if !plain_answer(&c, &self.fillers) {
-                self.state = State::Idle;
-                return vec![Effect::Interpret(c)];
-            }
-        }
         match std::mem::replace(&mut self.state, State::Idle) {
-            State::AwaitingConfirm { pending, until } => match answer(text, &self.fillers) {
-                Answer::Yes => vec![Effect::Execute(pending.action)],
-                Answer::No => vec![Effect::Cancelled],
-                Answer::Other => {
-                    // A new command replaces the pending one; other chatter keeps it waiting.
-                    match extract(text, &self.spellings) {
-                        Wake::Command(c) => vec![Effect::Interpret(c)],
-                        Wake::Bare => {
-                            self.state = State::AwaitingCommand { until: now_ms + COMMAND_WAIT_MS };
-                            vec![Effect::Say("Yes?".into())]
-                        }
-                        Wake::None => {
-                            self.state = State::AwaitingConfirm { pending, until };
-                            vec![]
-                        }
-                    }
+            State::Window { .. } => {
+                let found = extract(text, &self.spellings);
+                let said = match &found {
+                    Wake::Command(c) => c.clone(),
+                    _ => text.trim().to_string(),
+                };
+                if is_stop_with(&said, &self.fillers) {
+                    vec![Effect::Cancelled]
+                } else if answer(&said, &self.fillers) == Answer::Yes {
+                    vec![Effect::RunNow]
+                } else if found == Wake::Bare {
+                    self.state = State::AwaitingCommand { until: now_ms + COMMAND_WAIT_MS };
+                    vec![Effect::Cancelled, Effect::Say("Yes?".into())]
+                } else {
+                    vec![Effect::Correct(said)]
                 }
-            },
+            }
             State::AwaitingCommand { .. } => match extract(text, &self.spellings) {
-                Wake::Command(c) => vec![Effect::Interpret(c)],
+                Wake::Command(c) => self.command(c),
                 Wake::Bare => {
                     self.state = State::AwaitingCommand { until: now_ms + COMMAND_WAIT_MS };
                     vec![Effect::Say("Yes?".into())]
@@ -326,7 +316,7 @@ impl Flow {
                 Wake::None => vec![Effect::Interpret(text.trim().to_string())],
             },
             State::Idle => match extract(text, &self.spellings) {
-                Wake::Command(c) => vec![Effect::Interpret(c)],
+                Wake::Command(c) => self.command(c),
                 Wake::Bare => {
                     self.state = State::AwaitingCommand { until: now_ms + COMMAND_WAIT_MS };
                     vec![Effect::Say("Yes?".into())]
@@ -381,10 +371,6 @@ mod tests {
         assert_eq!(answer("go for it maya", &fillers("Maya")), Answer::Yes);
     }
 
-    fn pending() -> Pending {
-        Pending { say: "Telling hexgrid: go ahead. Yes?".into(), action: serde_json::json!({"kind": "reply", "session": "hexgrid", "text": "go ahead"}) }
-    }
-
     #[test]
     fn bare_wake_word_waits_for_the_next_segment_then_times_out() {
         let mut f = Flow::new();
@@ -413,69 +399,76 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_action_is_confirmed_cancelled_or_replaced_and_expires() {
+    fn in_the_window_stop_words_cancel_yes_runs_now_and_anything_else_corrects() {
         let mut f = Flow::new();
-        f.set_pending(pending(), 1000);
-        assert_eq!(f.state(1500), "awaiting-confirm");
-        assert_eq!(f.on_segment("yes", 2000), vec![Effect::Execute(pending().action)]);
-        assert_eq!(f.state(2001), "idle");
-        f.set_pending(pending(), 3000);
-        assert_eq!(f.on_segment("no", 3500), vec![Effect::Cancelled]);
-        f.set_pending(pending(), 4000);
-        // Anything else is a new command and drops the pending one.
-        assert_eq!(f.on_segment("Maya tell coral yes instead", 4500), vec![Effect::Interpret("tell coral yes instead".into())]);
-        f.set_pending(pending(), 6000);
-        assert!(f.has_pending());
-        // Past its window but before any segment: expired for state(), still held.
-        assert_eq!(f.state(6000 + CONFIRM_WAIT_MS + 1), "idle");
-        assert!(f.has_pending(), "the variant is still held until a segment or a restart clears it");
-        assert_eq!(f.on_segment("yes", 6000 + CONFIRM_WAIT_MS + 1), vec![], "a late yes confirms nothing");
-        assert!(!f.has_pending(), "the late segment settled it");
-        assert_eq!(f.state(6000 + CONFIRM_WAIT_MS + 1), "idle");
-        f.set_pending(pending(), 6000 + CONFIRM_WAIT_MS + 5);
-        assert_eq!(f.on_segment("yes", 6000 + CONFIRM_WAIT_MS + 10), vec![Effect::Execute(pending().action)], "a restarted window confirms");
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("no", 1), vec![Effect::Cancelled]);
+        assert_eq!(f.state(2), "idle", "every answer closes the window");
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("go ahead", 1), vec![Effect::RunNow]);
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("the other one", 1), vec![Effect::Correct("the other one".into())]);
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("Maya tell coral to stop", 1), vec![Effect::Correct("tell coral to stop".into())]);
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("Maya, cancel", 1), vec![Effect::Cancelled]);
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("Maya yes", 1), vec![Effect::RunNow]);
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("wait", 1), vec![Effect::Cancelled]);
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("hold on", 1), vec![Effect::Cancelled]);
     }
 
     #[test]
-    fn a_wake_word_with_a_command_replaces_the_pending_action_even_with_a_no_word() {
+    fn a_bare_wake_word_in_the_window_cancels_it_and_listens() {
         let mut f = Flow::new();
-        f.set_pending(pending(), 1000);
-        assert_eq!(f.on_segment("Maya tell coral stop", 1500), vec![Effect::Interpret("tell coral stop".into())]);
-        f.set_pending(pending(), 2000);
-        assert_eq!(f.on_segment("Maya, don't touch hexgrid", 2500), vec![Effect::Interpret("don't touch hexgrid".into())]);
-        // The wake word in front of a plain answer still answers.
-        f.set_pending(pending(), 3000);
-        assert_eq!(f.on_segment("Maya, cancel", 3500), vec![Effect::Cancelled]);
-        f.set_pending(pending(), 4000);
-        assert_eq!(f.on_segment("Maya yes", 4500), vec![Effect::Execute(pending().action)]);
-        f.set_pending(pending(), 5000);
-        assert_eq!(f.on_segment("no Maya", 5500), vec![Effect::Cancelled]);
-        f.set_pending(pending(), 6000);
-        assert_eq!(f.on_segment("stop", 6500), vec![Effect::Cancelled], "without the wake word a no-word still cancels");
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("Maya", 1), vec![Effect::Cancelled, Effect::Say("Yes?".into())]);
+        assert_eq!(f.state(2), "awaiting-command");
     }
 
     #[test]
-    fn an_expired_pending_action_can_be_dropped_once() {
+    fn her_announcement_heard_back_is_not_a_correction() {
         let mut f = Flow::new();
-        f.set_pending(pending(), 1000);
-        assert!(!f.drop_expired(1000 + CONFIRM_WAIT_MS), "still inside its window");
-        assert!(f.has_pending());
-        assert!(f.drop_expired(1000 + CONFIRM_WAIT_MS + 1));
-        assert!(!f.has_pending());
-        assert!(!f.drop_expired(1000 + CONFIRM_WAIT_MS + 2), "nothing left to drop");
+        f.ignore_line("Telling api-fix: open the PR.");
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("telling api fix open the pr", 1), vec![]);
+        assert_eq!(f.state(2), "window", "the window stays open");
+        // Even a short line of hers is not an answer in the window.
+        f.ignore_line("Yes?");
+        assert_eq!(f.on_segment("Yes?", 3), vec![]);
+        assert_eq!(f.state(4), "window");
     }
 
     #[test]
-    fn a_held_pending_action_waits_until_its_window_is_set() {
+    fn maya_stop_outside_the_window_stops_her() {
         let mut f = Flow::new();
-        f.hold_pending(pending());
-        assert!(f.has_pending());
-        assert_eq!(f.state(1_000 + 10 * CONFIRM_WAIT_MS), "awaiting-confirm", "held for as long as the read-back lasts");
-        assert!(!f.drop_expired(1_000 + 10 * CONFIRM_WAIT_MS));
-        assert_eq!(f.on_segment("yes", 1_000 + 10 * CONFIRM_WAIT_MS), vec![Effect::Execute(pending().action)], "a yes during the read-back confirms");
-        f.hold_pending(pending());
-        f.set_pending(pending(), 50_000);
-        assert_eq!(f.state(50_000 + CONFIRM_WAIT_MS + 1), "idle", "once set, its window runs as usual");
+        assert_eq!(f.on_segment("Maya, stop", 1), vec![Effect::Stop]);
+        assert_eq!(f.on_segment("Maya stop that", 1), vec![Effect::Stop]);
+        assert_eq!(f.on_segment("Maya tell coral to stop", 1), vec![Effect::Interpret("tell coral to stop".into())]);
+    }
+
+    #[test]
+    fn an_expired_window_reads_idle() {
+        let mut f = Flow::new();
+        f.open_window(100);
+        assert_eq!(f.state(100), "window");
+        assert_eq!(f.state(101), "idle");
+        assert_eq!(f.on_segment("no", 101), vec![], "a late word cancels nothing");
+        f.open_window(100);
+        f.close_window();
+        assert_eq!(f.state(1), "idle");
+    }
+
+    #[test]
+    fn stop_words_are_loose_but_a_request_that_holds_one_is_not_a_stop() {
+        for s in ["no", "Stop.", "wait", "cancel", "hold on", "never mind", "don't", "stop that", "no thanks"] {
+            assert!(is_stop(s), "{s}");
+        }
+        for s in ["tell coral to stop", "yes", "the other one", ""] {
+            assert!(!is_stop(s), "{s}");
+        }
     }
 
     #[test]
@@ -502,9 +495,8 @@ mod tests {
         assert_eq!(f.on_segment("Maya here hexgrid needs a decision", 1000), vec![]);
         // Consumed: the same words later are a real command.
         assert_eq!(f.on_segment("Maya here hexgrid needs a decision", 2000), vec![Effect::Interpret("here hexgrid needs a decision".into())]);
-        f.set_pending(pending(), 3000);
         f.ignore_line("Yes?");
-        assert_eq!(f.on_segment("yes", 3500), vec![Effect::Execute(pending().action)], "a short prompt is never stored");
+        assert_eq!(f.on_segment("yes", 3500), vec![], "a short prompt of hers is dropped as well");
     }
 
     #[test]
@@ -533,12 +525,13 @@ mod tests {
     #[test]
     fn a_chosen_word_beside_a_yes_or_a_no_still_answers() {
         let mut f = Flow::for_word("Jarvis");
-        f.set_pending(pending(), 1_000);
-        assert_eq!(f.on_segment("Jarvis, yes", 1_500), vec![Effect::Execute(pending().action)]);
-        f.set_pending(pending(), 2_000);
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("Jarvis, yes", 1_500), vec![Effect::RunNow]);
+        f.open_window(10_000);
         assert_eq!(f.on_segment("no Jarvis", 2_500), vec![Effect::Cancelled]);
-        f.set_pending(pending(), 3_000);
-        assert_eq!(f.on_segment("Jarvis tell coral stop", 3_500), vec![Effect::Interpret("tell coral stop".into())]);
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("Jarvis tell coral stop", 3_500), vec![Effect::Correct("tell coral stop".into())]);
+        assert_eq!(f.on_segment("Jarvis stop", 4_000), vec![Effect::Stop]);
     }
 
     #[test]

@@ -37,6 +37,7 @@ pub mod tty;
 pub mod update;
 pub mod wake;
 pub mod watcher;
+pub mod window;
 #[cfg(windows)]
 pub mod notify_win;
 #[cfg(windows)]
