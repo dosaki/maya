@@ -17,6 +17,9 @@ const NOTES_DROPPED: &str = "(older changes dropped)";
 pub const CHECKING: &str = "checking my last actions";
 /// Her job during a turn of her own: a wake, notes, the primer.
 pub const LOOKING: &str = "looking at what changed";
+/// A brain with background subagents is busy only for a moment: the user
+/// still hears that their request waits.
+pub const STILL_ON_IT: &str = "I'm still on the last thing; I'll do that next.";
 /// What the user hears when the turn answering them ended in an error.
 pub const TURN_FAILED: &str = "Something went wrong on my side; try again.";
 
@@ -101,10 +104,12 @@ impl Session {
         if !self.turn_running {
             return vec![self.deliver(Some(req))];
         }
-        // Her own turns and Maya's follow-ups queue without a word.
-        let busy = (!self.background && req.from_user()).then(|| Out::Busy {
+        // A user's request always hears that it waits, so voice never goes
+        // dead; her own turns and Maya's follow-ups queue without a word.
+        let busy = req.from_user().then(|| Out::Busy {
             via: req.via,
             say: match &self.job {
+                _ if self.background => STILL_ON_IT.into(),
                 Some(job) => format!("I'm in the middle of {job}, I'll do that next."),
                 None => "I'm in the middle of something, I'll do that next.".into(),
             },
@@ -331,10 +336,15 @@ mod tests {
         assert_eq!(out[1], Out::Deliver(Some(req("what's waiting on me?", Via::Voice))));
     }
     #[test]
-    fn a_busy_brain_with_background_subagents_queues_quietly() {
+    fn a_busy_brain_with_background_subagents_says_it_is_still_on_the_last_thing() {
         let mut s = Session::new(true);
         s.submit(req("a", Via::Chat));
-        assert!(s.submit(req("b", Via::Voice)).is_empty());
+        let still = |via| vec![Out::Busy { via, say: STILL_ON_IT.into() }];
+        assert_eq!(s.submit(req("b", Via::Voice)), still(Via::Voice), "voice never goes dead");
+        assert_eq!(s.submit(req("c", Via::Phone)), still(Via::Phone));
+        assert_eq!(s.submit(req("d", Via::Chat)), still(Via::Chat), "posted in Chat");
+        assert!(s.submit(Request::internal("x", Via::Voice)).is_empty(), "Maya's own follow-up queues quietly");
+        assert!(s.submit(req("y", Via::Maya)).is_empty());
     }
     #[test]
     fn a_turn_she_starts_herself_replies_as_maya() {
