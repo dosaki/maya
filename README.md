@@ -291,9 +291,10 @@ resume or start a session, open or review a pull request.
 
 Type to Maya in the **Chat** tab. It is the same conversation as voice,
 and its status dot shows whether she is idle or working. Chat is on the
-main machine (or a machine on its own) whatever brain you choose. A
-machine in the assistant role (the laptop, say) has no Chat tab and keeps
-the quick interpreter.
+main machine (or a machine on its own) whatever brain you choose. Every
+Maya keeps her own brain: on a machine in the assistant role (the laptop,
+say) it is dormant, and Chat there is read-only. It shows her own history
+and says which Maya is awake; that machine keeps the quick interpreter.
 
 With Claude Code as your brain, Maya is one long-running session that
 remembers the conversation. She decides where a request goes: to an
@@ -371,11 +372,15 @@ quiet.
   connected assistant hands it the role. Every connected Maya follows the
   new main with no new pairing; an assistant that is offline at that
   moment still knows only the old main's key, so pair it with the new main
-  when it is back.
+  when it is back. The new main's Maya picks up her own session and gets a
+  short summary of what the old main's Maya did while she was dormant; it
+  shows in her Chat. The old main's Maya goes dormant. A phone made main
+  gets no summary.
 - **Versions.** Run the same Maya on every machine. The main notes an
   assistant that runs another version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
-  names and attachments (up to 20 MB). Commands run on the assistant; the
+  names and attachments (up to 20 MB), and at Make main a summary of
+  Maya's Chat. Commands run on the assistant; the
   main never touches the assistant's files.
 - **Remote cards.** On the main, an assistant's sessions sit in the same
   columns as local ones, with a remote glyph (its tooltip names the
