@@ -40,6 +40,10 @@ pub struct Session {
     notes: Vec<String>,
     background: bool,
     wake_pending: bool,
+    /// Context passed the limit; compaction waits for a quiet moment.
+    compact_due: bool,
+    /// The running turn is the compaction itself.
+    compacting: bool,
 }
 
 impl Session {
@@ -55,6 +59,8 @@ impl Session {
             notes: Vec::new(),
             background: background_subagents,
             wake_pending: false,
+            compact_due: false,
+            compacting: false,
         }
     }
 
@@ -103,7 +109,11 @@ impl Session {
             }
             Event::TaskEnded(id) => {
                 self.tasks.remove(id);
-                vec![]
+                let mut out = vec![];
+                if self.tasks.is_empty() && !self.turn_running {
+                    self.advance(&mut out);
+                }
+                out
             }
             Event::Exited(_) => {
                 self.turn_running = false;
@@ -111,28 +121,31 @@ impl Session {
                 self.job = None;
                 self.stopped = false;
                 self.wake_pending = false;
+                self.compact_due = false;
+                self.compacting = false;
                 self.tasks.clear();
                 vec![]
             }
             Event::TurnEnded { text, .. } => {
-                let via = self.current.take().unwrap_or(Via::Maya);
                 let stopped = std::mem::take(&mut self.stopped);
                 self.turn_running = false;
                 self.in_flight = None;
                 self.job = None;
                 let mut out = vec![];
-                if !stopped {
-                    let p = protocol::parse(text);
-                    out.push(Out::Reply { via, say: p.say, actions: p.actions, errors: p.errors });
+                if std::mem::take(&mut self.compacting) {
+                    // The compaction's own turn: nothing to say.
+                    self.current = None;
+                } else {
+                    let via = self.current.take().unwrap_or(Via::Maya);
+                    if !stopped {
+                        let p = protocol::parse(text);
+                        out.push(Out::Reply { via, say: p.say, actions: p.actions, errors: p.errors });
+                    }
+                    if let Some(p) = context_percent {
+                        self.compact_due = p >= COMPACT_AT_PERCENT;
+                    }
                 }
-                if context_percent.is_some_and(|p| p >= COMPACT_AT_PERCENT) {
-                    out.push(Out::Compact);
-                }
-                if let Some(next) = self.queue.pop_front() {
-                    out.push(self.deliver(Some(next)));
-                } else if std::mem::take(&mut self.wake_pending) {
-                    out.push(self.deliver(None));
-                }
+                self.advance(&mut out);
                 out
             }
         }
@@ -164,9 +177,29 @@ impl Session {
         self.in_flight.take().into_iter().chain(self.queue.drain(..)).collect()
     }
 
+    /// No turn is running: compact if due and quiet, else hand over the next
+    /// request or a pending wake.
+    fn advance(&mut self, out: &mut Vec<Out>) {
+        if self.compact_due && self.tasks.is_empty() {
+            self.compact_due = false;
+            self.compacting = true;
+            self.turn_running = true;
+            self.stopped = false;
+            self.current = Some(Via::Maya);
+            self.job = Some("tidying up my notes".into());
+            self.in_flight = None;
+            out.push(Out::Compact);
+        } else if let Some(next) = self.queue.pop_front() {
+            out.push(self.deliver(Some(next)));
+        } else if self.wake_pending {
+            out.push(self.deliver(None));
+        }
+    }
+
     fn deliver(&mut self, req: Option<Request>) -> Out {
         self.turn_running = true;
         self.stopped = false;
+        self.wake_pending = false;
         self.current = Some(req.as_ref().map_or(Via::Maya, |r| r.via));
         self.job = req.as_ref().map(|r| short_job(&r.text));
         self.in_flight = req.clone();
@@ -236,8 +269,46 @@ mod tests {
         s.submit(req("a", Via::Chat));
         s.submit(req("b", Via::Chat));
         let out = s.on_event(&Event::TurnEnded { text: "ok".into(), context_tokens: None }, Some(85));
-        assert_eq!(out[1], Out::Compact);
-        assert_eq!(out[2], Out::Deliver(Some(req("b", Via::Chat))));
+        assert_eq!(out, vec![Out::Reply { via: Via::Chat, say: "ok".into(), actions: vec![], errors: vec![] }, Out::Compact]);
+        let out = s.on_event(&Event::TurnEnded { text: "Compacted.".into(), context_tokens: None }, Some(10));
+        assert_eq!(out, vec![Out::Deliver(Some(req("b", Via::Chat)))]);
+    }
+    #[test]
+    fn compaction_waits_for_live_tasks() {
+        let mut s = Session::new(true);
+        s.submit(req("a", Via::Chat));
+        s.on_event(&Event::TaskStarted("t".into()), None);
+        let out = s.on_event(&Event::TurnEnded { text: "ok".into(), context_tokens: None }, Some(85));
+        assert!(!out.contains(&Out::Compact));
+        assert_eq!(s.on_event(&Event::TaskEnded("t".into()), None), vec![Out::Compact]);
+    }
+    #[test]
+    fn a_submit_during_compaction_is_queued() {
+        let mut s = Session::new(false);
+        s.submit(req("a", Via::Chat));
+        s.on_event(&Event::TurnEnded { text: "ok".into(), context_tokens: None }, Some(85));
+        let out = s.submit(req("b", Via::Voice));
+        assert_eq!(out, vec![Out::Busy { via: Via::Voice, say: "I'm in the middle of tidying up my notes, I'll do that next.".into() }]);
+        let out = s.on_event(&Event::TurnEnded { text: "x".into(), context_tokens: None }, None);
+        assert_eq!(out, vec![Out::Deliver(Some(req("b", Via::Voice)))]);
+    }
+    #[test]
+    fn a_delivery_clears_a_pending_wake() {
+        let mut s = Session::new(true);
+        s.submit(req("a", Via::Chat));
+        s.submit(req("b", Via::Chat));
+        assert!(s.wake().is_empty());
+        let out = s.on_event(&Event::TurnEnded { text: "x".into(), context_tokens: None }, None);
+        assert_eq!(out[1], Out::Deliver(Some(req("b", Via::Chat))));
+        let out = s.on_event(&Event::TurnEnded { text: "y".into(), context_tokens: None }, None);
+        assert_eq!(out.len(), 1);
+    }
+    #[test]
+    fn stop_with_only_tasks_live_interrupts_and_later_submits_deliver() {
+        let mut s = Session::new(true);
+        s.on_event(&Event::TaskStarted("t".into()), None);
+        assert_eq!(s.stop(Via::Chat), vec![Out::Interrupt, Out::Said { via: Via::Chat, say: "Stopped.".into() }]);
+        assert_eq!(s.submit(req("a", Via::Chat)), vec![Out::Deliver(Some(req("a", Via::Chat)))]);
     }
     #[test]
     fn stop_interrupts_and_clears_the_queue() {
