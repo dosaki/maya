@@ -618,11 +618,17 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
         }
     };
     let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
+    open_session(l, &target, how, &prompt, &options, &info, &maya_dir)
+}
+
+/// Starts the agent in `target`, which exists: through the server for
+/// OpenCode, else in a terminal running the prompt file.
+fn open_session(l: &Local, target: &Path, how: &str, prompt: &str, options: &launch::LaunchOptions, info: &crate::agents::AgentInfo, maya_dir: &Path) -> Result<StartResult, String> {
     if options.agent == model::Harness::OpenCode {
-        let terminal = start_opencode(l, &target, &prompt, options.chosen_name(), &options, &info)?;
+        let terminal = start_opencode(l, target, prompt, options.chosen_name(), options, info)?;
         return Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string(), terminal });
     }
-    let file = launch::write_prompt_file(&maya_dir, &prompt)?;
+    let file = launch::write_prompt_file(maya_dir, prompt)?;
     let grok_id = (options.agent == model::Harness::Grok).then(launch::new_session_uuid);
     // Sessions already running cannot be the new one. They come from a fresh
     // discovery: one started by hand seconds ago, not yet looked up by a
@@ -632,12 +638,36 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
         store.refresh(now_ms());
         store.live_session_ids()
     };
-    let terminal = l.terminal.open(&launch::session_command(&target, &file, &options, grok_id.as_deref()), &target, &tmux_label())?;
+    let terminal = l.terminal.open(&launch::session_command(target, &file, options, grok_id.as_deref()), target, &tmux_label())?;
     if let (Some(name), false) = (options.chosen_name(), options.agent == model::Harness::ClaudeCode) {
         let target = target.to_string_lossy();
         l.store.lock().unwrap().add_pending_name(crate::pending_names::PendingName::new(options.agent, &target, name, now_ms(), known, grok_id));
     }
     Ok(StartResult { dir: target.to_string_lossy().into_owned(), how: how.to_string(), terminal })
+}
+
+/// Like `start_session` for a request that fits no repository: the agent
+/// starts in a fresh folder under the temp directory, which is created
+/// here. It needs no projects directory.
+pub fn start_scratch(l: &Local, prompt: String, options: launch::LaunchOptions) -> Result<StartResult, String> {
+    if prompt.trim().is_empty() {
+        return Err("Type a prompt first.".into());
+    }
+    options.validate_shape()?;
+    let (maya_dir, agents) = {
+        let store = l.store.lock().unwrap();
+        (store.claude_dir().join("maya"), store.agents_source())
+    };
+    let info = if options.agent == model::Harness::ClaudeCode {
+        crate::agents::claude()
+    } else {
+        agents().into_iter().find(|a| a.harness == options.agent).ok_or_else(|| format!("{} is not installed on this machine.", launch::label(options.agent)))?
+    };
+    options.validate(&info.model_ids())?;
+    check_codex_effort(&info, &options)?;
+    let target = launch::scratch_dir(&short_id());
+    std::fs::create_dir_all(&target).map_err(|e| format!("cannot create {}: {e}", target.display()))?;
+    open_session(l, &target, "scratch", &prompt, &options, &info, &maya_dir)
 }
 
 /// Opens a terminal in the folder resuming `session_id` with `agent`. The id
@@ -662,7 +692,7 @@ pub fn resume_session(l: &Local, agent: model::Harness, dir: &str, session_id: &
 }
 
 /// Why a remembered session could not be resumed, as the banner words it.
-pub const FOLDER_MISSING: &str = "folder missing";
+pub const FOLDER_MISSING: &str = "Its folder is gone.";
 pub const SESSION_GONE: &str = "the agent no longer has that session";
 
 fn not_installed(agent: model::Harness) -> String {
@@ -842,9 +872,14 @@ pub fn project_path(store: &Store, dir: &str) -> Result<PathBuf, String> {
 
 /// A name for a new session's terminal: `maya-` and eight hex characters.
 pub fn tmux_label() -> String {
+    format!("maya-{}", short_id())
+}
+
+/// Eight random hex characters.
+pub fn short_id() -> String {
     let mut bytes = [0u8; 4];
     rand::rng().fill_bytes(&mut bytes);
-    format!("maya-{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1956,7 +1991,7 @@ mod tests {
             out,
             vec![
                 ("live1".to_string(), Ok(())),
-                ("lost".to_string(), Err("folder missing".to_string())),
+                ("lost".to_string(), Err("Its folder is gone.".to_string())),
                 ("nolog".to_string(), Err("the agent no longer has that session".to_string())),
                 ("cx1".to_string(), Err("Codex is not installed".to_string())),
             ]
@@ -1966,7 +2001,7 @@ mod tests {
         assert_eq!(
             left,
             vec![
-                ("lost".to_string(), Some("folder missing".to_string())),
+                ("lost".to_string(), Some("Its folder is gone.".to_string())),
                 ("nolog".to_string(), Some("the agent no longer has that session".to_string())),
                 ("cx1".to_string(), Some("Codex is not installed".to_string())),
             ]
@@ -1991,6 +2026,38 @@ mod tests {
         let opened = opened(&fake);
         assert_eq!(opened.len(), 1);
         assert_eq!(opened[0].0, format!("cd {} && claude --resume 'q1'", crate::launch::shell_single_quote(&dir.to_string_lossy())));
+    }
+
+    #[test]
+    fn resuming_a_session_whose_folder_is_gone_fails_with_a_reason() {
+        let (_t, claude, dir) = away_from_projects("gone");
+        knows(&claude, &dir, "g1");
+        let store = after_restart(&claude, vec![was(Harness::ClaudeCode, "g1", &dir, 1)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let entries = store.lock().unwrap().was_running();
+        let out = resume_remembered_with(&l, &entries, &mut |_| ());
+        assert_eq!(out[0].1.as_ref().unwrap_err(), "Its folder is gone.");
+        assert!(opened(&fake).is_empty(), "nothing is launched");
+    }
+
+    #[test]
+    fn a_scratch_start_makes_a_fresh_maya_folder_and_opens_the_agent_there() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let r = start_scratch(&l, "try a thing".into(), LaunchOptions::default()).unwrap();
+        let path = PathBuf::from(&r.dir);
+        assert_eq!(r.how, "scratch");
+        assert!(path.is_dir(), "the folder exists");
+        assert!(path.file_name().unwrap().to_string_lossy().starts_with("maya-"));
+        let opened = opened(&fake);
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].1, path);
+        assert!(opened[0].0.contains("claude"), "{opened:?}");
+        assert!(start_scratch(&l, "  ".into(), LaunchOptions::default()).is_err());
+        std::fs::remove_dir_all(&path).unwrap();
     }
 
     #[test]

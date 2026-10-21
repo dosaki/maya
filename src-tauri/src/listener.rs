@@ -230,6 +230,12 @@ pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Res
             let failed = outcomes.iter().filter(|o| o.error.is_some()).count();
             Ok(interpreter::resume_all_said(outcomes.len() - failed, failed))
         }
+        "start" if action["scratch"].as_bool() == Some(true) => {
+            let prompt = action["prompt"].as_str().unwrap_or("").to_string();
+            let brain = state.store.lock().unwrap().config.brain();
+            maya_core::actions::start_scratch(&crate::local(&state), prompt, launch::LaunchOptions { agent: brain, ..Default::default() })?;
+            Ok("Started.".into())
+        }
         "start" => {
             let dir = action["dir"].as_str().unwrap_or("").to_string();
             let prompt = action["prompt"].as_str().unwrap_or("").to_string();

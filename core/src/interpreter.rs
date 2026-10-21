@@ -424,6 +424,15 @@ pub fn validate(action: &Value, cards: &[Card], dirs: &[String], machines: &[Str
             }
             Ok(a)
         }
+        "start" if a["scratch"].as_bool() == Some(true) => {
+            if a["machine"].as_str().is_some_and(|m| !m.is_empty()) {
+                return Err("Scratch sessions start on this machine only.".into());
+            }
+            if a["prompt"].as_str().map_or(true, |t| t.trim().is_empty()) {
+                return Err("I need a prompt to start a session".into());
+            }
+            Ok(a)
+        }
         "resume" | "start" => {
             let dir = a["dir"].as_str().unwrap_or("").to_string();
             let found = dirs.iter().find(|d| loose(d) == loose(&dir)).ok_or_else(|| format!("I couldn't find a project called {dir}"))?.clone();
@@ -514,6 +523,15 @@ pub fn run(agent: crate::model::Harness, binary: &Path, model: Option<&str>, com
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_scratch_start_needs_no_dir_but_cannot_go_to_another_machine() {
+        let ok = validate(&json!({"kind":"start","scratch":true,"prompt":"try it"}), &[], &[], &[], &[]).unwrap();
+        assert_eq!(ok["scratch"], true);
+        let far = validate(&json!({"kind":"start","scratch":true,"prompt":"x","machine":"Gnowee"}), &[], &[], &["Gnowee".into()], &[]);
+        assert!(far.unwrap_err().contains("this machine"));
+        assert!(validate(&json!({"kind":"start","scratch":true,"prompt":" "}), &[], &[], &[], &[]).is_err());
+    }
+
     use super::*;
     use crate::model::{AwaitKind, Awaiting, Card, Harness, State};
     use serde_json::json;
