@@ -127,9 +127,20 @@ pub(crate) fn refusal_feedback(refused: &[String], streak: u32) -> Option<Feedba
     })
 }
 
-/// A resumed session that ends before its first turn did not resume.
-pub(crate) fn failed_resume(resumed: bool, turn_seen: bool) -> bool {
-    resumed && !turn_seen
+/// How soon after its spawn a resumed session must end to count as a failed resume.
+pub(crate) const RESUME_GRACE_MS: u64 = 15_000;
+
+/// A resumed session that ends within `RESUME_GRACE_MS` of its spawn and
+/// before its first turn did not resume; a later exit is an ordinary crash.
+pub(crate) fn failed_resume(resumed: bool, turn_seen: bool, ran_ms: u64) -> bool {
+    resumed && !turn_seen && ran_ms < RESUME_GRACE_MS
+}
+
+/// Why her session starts fresh whatever the saved record says: this
+/// machine just became the main (from an assistant), and her old session
+/// files belong to the machine that was main.
+pub(crate) fn forced_fresh(before: NetworkRole, after: NetworkRole) -> Option<&'static str> {
+    (before == NetworkRole::Assistant && after == NetworkRole::Main).then_some("This machine is now main, so I've started fresh.")
 }
 
 /// Her session runs on every machine but an assistant.
@@ -281,10 +292,21 @@ mod tests {
     }
 
     #[test]
-    fn a_resume_that_dies_before_its_first_turn_failed() {
-        assert!(failed_resume(true, false));
-        assert!(!failed_resume(true, true));
-        assert!(!failed_resume(false, false), "a fresh session that dies is a plain exit");
+    fn a_resume_that_dies_soon_and_before_its_first_turn_failed() {
+        assert!(failed_resume(true, false, 0));
+        assert!(failed_resume(true, false, RESUME_GRACE_MS - 1));
+        assert!(!failed_resume(true, false, RESUME_GRACE_MS), "a later exit is a crash: resume again");
+        assert!(!failed_resume(true, true, 1_000));
+        assert!(!failed_resume(false, false, 1_000), "a fresh session that dies is a plain exit");
+    }
+
+    #[test]
+    fn becoming_main_from_assistant_starts_fresh_and_says_so() {
+        assert_eq!(forced_fresh(NetworkRole::Assistant, NetworkRole::Main), Some("This machine is now main, so I've started fresh."));
+        assert_eq!(forced_fresh(NetworkRole::Off, NetworkRole::Main), None);
+        assert_eq!(forced_fresh(NetworkRole::Main, NetworkRole::Main), None);
+        assert_eq!(forced_fresh(NetworkRole::Assistant, NetworkRole::Off), None, "only the move into main");
+        assert_eq!(forced_fresh(NetworkRole::Main, NetworkRole::Assistant), None);
     }
 
     #[test]

@@ -1269,7 +1269,8 @@ fn apply_config_change(app: &AppHandle, before: &Config, config: &Config) {
     let state = app.state::<AppState>();
     if brain_route::needs_restart(before, config) {
         let handle = app.clone();
-        std::thread::spawn(move || brain_app::restart(&handle));
+        let fresh = brain_route::forced_fresh(before.network.role, config.network.role);
+        std::thread::spawn(move || brain_app::restart(&handle, fresh));
     }
     match listener::listening_change(before, config) {
         listener::ListenChange::Restart => {

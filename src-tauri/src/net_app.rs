@@ -211,9 +211,10 @@ impl ClientNotify for TauriClientNotify {
         log::line("network", format!("promoted to main by {by}; {handed} assistants handed over"));
         let _ = self.app.emit("network", crate::network_status_of(&state));
         crate::refresh_and_emit(&self.app);
-        // A main runs her session; an assistant did not.
+        // A main runs her session, fresh: her old one belongs to the old main.
         let handle = self.app.clone();
-        std::thread::spawn(move || crate::brain_app::restart(&handle));
+        let fresh = crate::brain_route::forced_fresh(NetworkRole::Assistant, after.network.role);
+        std::thread::spawn(move || crate::brain_app::restart(&handle, fresh));
         Ok(port)
     }
 

@@ -65,6 +65,8 @@ pub(crate) struct BrainState {
     /// This run resumed a saved session; with `turn_seen`, tells a failed resume.
     resumed: bool,
     turn_seen: bool,
+    /// When this run's driver was spawned.
+    spawned_at: u64,
     /// Why a fresh session started, posted to Chat once it is ready.
     fresh_reason: Option<String>,
     /// The past conversation a fresh session reads first; its reply is not shown.
@@ -101,6 +103,7 @@ impl BrainState {
             cwd: dir,
             resumed: false,
             turn_seen: false,
+            spawned_at: 0,
             fresh_reason: None,
             primer: None,
             swallow_reply: false,
@@ -230,6 +233,7 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
         b.cwd = dir;
         b.resumed = resume.is_some();
         b.turn_seen = false;
+        b.spawned_at = now_ms();
         b.fresh_reason = reason;
         b.primer = primer;
         b.swallow_reply = false;
@@ -302,7 +306,7 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
             Event::Exited(why) => {
                 log::line("brain", format!("her session ended: {why}"));
                 b.session.on_event(&e, None);
-                let failed = failed_resume(b.resumed, b.turn_seen);
+                let failed = failed_resume(b.resumed, b.turn_seen, now_ms().saturating_sub(b.spawned_at));
                 let say_stopped = !failed && !std::mem::replace(&mut b.said_stopped, true);
                 let drained = handoff(&mut b.session);
                 let phones = b.phones.drain();
@@ -490,12 +494,13 @@ pub(crate) fn batch_done(app: &AppHandle, results: &[(Value, Result<String, Stri
 }
 
 /// Her brain, its model or this machine's role changed: her session stops
-/// and starts again (fresh or resumed, as `record::decide` says), or stays
-/// stopped on an assistant.
-pub(crate) fn restart(app: &AppHandle) {
+/// and starts again (fresh or resumed, as `record::decide` says, or fresh
+/// with `forced_fresh` posted once she is ready), or stays stopped on an
+/// assistant.
+pub(crate) fn restart(app: &AppHandle, forced_fresh: Option<&str>) {
     log::line("brain", "her settings changed; restarting her session");
     shutdown(app);
-    start_run(app, None);
+    start_run(app, forced_fresh);
 }
 
 /// Stops her session on purpose: no "stopped" line and no restart; the
@@ -545,28 +550,40 @@ fn act(app: &AppHandle, outs: Vec<Out>) {
             Out::Reply { via, say, actions, errors } => reply(app, via, &say, &actions, errors),
             Out::Busy { via, say } | Out::Said { via, say } => say_line(app, via, &say),
             Out::Interrupt => {
-                with_driver(app, "interrupt her", |d| d.interrupt());
+                let _ = with_driver(app, "interrupt her", |d| d.interrupt());
                 let dropped = app.state::<AppState>().window.lock().unwrap().cancel();
                 if let Some(batch) = dropped {
                     log::line("action", format!("batch {} dropped by a stop", batch.id));
                     listener::settle(app, "idle");
                 }
             }
-            Out::Compact => with_driver(app, "compact her", |d| d.compact()),
+            Out::Compact => {
+                if !with_driver(app, "compact her", |d| d.compact()) {
+                    // A driver that compacts itself (or could not be written to): the
+                    // compaction turn ends here, so the queue does not wait on it.
+                    let next = app.state::<AppState>().brain.lock().unwrap().session.compact_skipped();
+                    act(app, next);
+                }
+            }
         }
     }
 }
 
-/// Writes to her process under the driver's own lock, taken alone.
-fn with_driver(app: &AppHandle, what: &str, f: impl FnOnce(&mut dyn Driver) -> Result<(), String>) {
+/// Writes to her process under the driver's own lock, taken alone. False
+/// when it could not.
+fn with_driver(app: &AppHandle, what: &str, f: impl FnOnce(&mut dyn Driver) -> Result<(), String>) -> bool {
     let driver = app.state::<AppState>().brain.lock().unwrap().driver.clone();
     let Some(driver) = driver else {
         log::line("brain", format!("could not {what}: her session is not running"));
-        return;
+        return false;
     };
     let mut d = driver.lock().unwrap();
-    if let Err(e) = f(d.as_mut()) {
-        log::line("brain", format!("could not {what}: {e}"));
+    match f(d.as_mut()) {
+        Ok(()) => true,
+        Err(e) => {
+            log::line("brain", format!("could not {what}: {e}"));
+            false
+        }
     }
 }
 
@@ -596,7 +613,7 @@ fn deliver(app: &AppHandle, r: Option<Request>) {
             prompt::turn(r.as_ref().map(|r| (r.text.as_str(), r.via)), &interpreter::board_summary(&cards, now_ms()), &interpreter::pr_summary(&prs), &notes)
         }
     };
-    with_driver(app, "send her a message", |d| d.send(&text));
+    let _ = with_driver(app, "send her a message", |d| d.send(&text));
 }
 
 /// Her reply: said back the way the request came, her actions validated and
