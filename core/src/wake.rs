@@ -259,6 +259,7 @@ impl Flow {
     pub fn close_window(&mut self) {
         if matches!(self.state, State::Window { .. }) {
             self.state = State::Idle;
+            self.ignore = None;
         }
     }
 
@@ -275,6 +276,11 @@ impl Flow {
         if self.state(now_ms) == "idle" {
             self.state = State::Idle;
         }
+    }
+
+    /// True when a segment is a plain stop or a plain yes.
+    fn settles(&self, text: &str) -> bool {
+        is_stop_with(text, &self.fillers) || answer(text, &self.fillers) == Answer::Yes
     }
 
     /// A command after the wake word: a plain stop stops her, anything else is
@@ -297,7 +303,8 @@ impl Flow {
         let ignored = if in_window { self.ignore.clone() } else { self.ignore.take() };
         let text = match ignored {
             Some(ignored) => match self.without_ignored(&ignored, text) {
-                Some(rest) if in_window && is_echo(&ignored, &rest) => return vec![],
+                // A stop or a yes always wins, even when her announcement holds the word.
+                Some(rest) if in_window && is_echo(&ignored, &rest) && !self.settles(&rest) => return vec![],
                 Some(rest) => {
                     owned = rest;
                     owned.as_str()
@@ -479,7 +486,27 @@ mod tests {
         f.ignore_line("Telling api-fix: open the PR.");
         f.open_window(10_000);
         f.close_window();
-        assert_eq!(f.on_segment("Maya open the pr", 8), vec![Effect::Interpret("open the pr".into())]);
+        // Her line is gone: the same words are now an answer, not an echo.
+        f.await_reply(8);
+        assert_eq!(f.on_segment("telling api fix open the pr", 9), vec![Effect::Interpret("telling api fix open the pr".into())]);
+    }
+
+    #[test]
+    fn a_stop_or_a_yes_is_never_taken_for_her_echo() {
+        let mut f = Flow::new();
+        f.ignore_line("Telling coral: stop the build");
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("stop", 1), vec![Effect::Cancelled]);
+        f.ignore_line("Telling coral: stop the build");
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("not now", 1), vec![Effect::Cancelled]);
+        f.ignore_line("Telling coral: go ahead");
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("go ahead", 1), vec![Effect::RunNow]);
+        // The rest of her line is still dropped.
+        f.ignore_line("Telling coral: stop the build");
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("the build", 1), vec![]);
     }
 
     #[test]
