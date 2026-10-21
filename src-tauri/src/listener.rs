@@ -672,6 +672,18 @@ fn drop_voice_batch_because(app: &AppHandle, why: &str) {
     }
 }
 
+/// Whether a batch from `origin` is announced and its failures reported
+/// aloud (a muted Maya only shows them): a spoken request's and her own.
+/// A typed or phone request's go to Chat as text.
+pub(crate) fn aloud(origin: Via) -> bool {
+    matches!(origin, Via::Voice | Via::Maya)
+}
+
+/// `announce_after` with nothing said before the announcement.
+pub(crate) fn announce(app: &AppHandle, generation: Option<u64>, say: String, actions: Vec<Value>, origin: Via) {
+    announce_after(app, generation, "", say, actions, origin);
+}
+
 /// Announces `actions` and runs them once the window has passed, unless a
 /// stop, a correction or the Cancel button drops them first. Opens a batch
 /// or joins the open one (`Window::open`); a batch from another user surface
@@ -682,7 +694,11 @@ fn drop_voice_batch_because(app: &AppHandle, why: &str) {
 /// the whole window after hearing it. A voice request's batch is dropped
 /// when its listener run stops or restarts (`drop_voice_batch`), during the
 /// announcement or after it. Blocks while speaking: the caller must hold no lock.
-pub(crate) fn announce(app: &AppHandle, generation: Option<u64>, say: String, actions: Vec<Value>, origin: Via) {
+///
+/// `lead`, her own words, goes first in the same utterance (or Chat line),
+/// so a short reply of hers is never said on its own just before the
+/// window opens. A typed request's announcement is posted to Chat.
+pub(crate) fn announce_after(app: &AppHandle, generation: Option<u64>, lead: &str, say: String, actions: Vec<Value>, origin: Via) {
     let state = app.state::<AppState>();
     let (id, shown, cancelled) = {
         let mut w = state.window.lock().unwrap();
@@ -697,7 +713,8 @@ pub(crate) fn announce(app: &AppHandle, generation: Option<u64>, say: String, ac
         remember(app, "maya", &format!("Cancelled: {}", old.say), old.origin);
     }
     log::line("action", format!("batch {id} announced: {say}"));
-    let spoken = matches!(origin, Via::Voice | Via::Maya);
+    let spoken = aloud(origin);
+    let line = crate::brain_route::one_line(&[lead, say.as_str()]);
     // Only the listener run that heard the request opens its flow's window.
     let ours = |v: &VoiceState| generation.map_or(true, |g| v.generation == g);
     if spoken {
@@ -711,11 +728,15 @@ pub(crate) fn announce(app: &AppHandle, generation: Option<u64>, say: String, ac
             show_window(&mut v, &shown, None);
         }
     }
+    if !spoken {
+        // A typed request leaves a record of what will run.
+        remember(app, "maya", &line, origin);
+    }
     emit_voice(app);
     crate::brain_app::emit_status(app);
     if spoken {
         let run = generation.unwrap_or_else(|| current_generation(app));
-        if !reply_aloud(app, run, &say) && origin == Via::Voice {
+        if !reply_aloud(app, run, &line) && origin == Via::Voice {
             log::line("action", format!("listener run replaced while announcing; batch {id} dropped"));
             drop_batch(app, id);
             crate::brain_app::emit_status(app);
@@ -796,13 +817,11 @@ pub(crate) fn failures_said(results: &[(Value, Result<String, String>)]) -> Opti
     (!failed.is_empty()).then(|| failed.join(" "))
 }
 
-/// A batch has run: leaves her a note per action, says its failures aloud
-/// when it was spoken (a muted Maya only shows them), then shows idle.
+/// A batch has run: leaves her a note per action, reports its failures
+/// (`report_failures`), then shows idle.
 pub(crate) fn on_batch_done(app: &AppHandle, results: Vec<(Value, Result<String, String>)>, origin: Via) {
     crate::brain_app::batch_done(app, &results);
-    if let Some(line) = failures_said(&results).filter(|_| matches!(origin, Via::Voice | Via::Maya)) {
-        say(app, &line);
-    }
+    report_failures(app, &results, origin);
     {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
@@ -811,6 +830,19 @@ pub(crate) fn on_batch_done(app: &AppHandle, results: Vec<(Value, Result<String,
         }
     }
     emit_voice(app);
+}
+
+/// Says a batch's failures aloud when it was spoken or hers (a muted Maya
+/// only shows them), and posts them to Chat when it was typed or came from
+/// the phone. Blocks while speaking: the caller must hold no lock.
+pub(crate) fn report_failures(app: &AppHandle, results: &[(Value, Result<String, String>)], origin: Via) {
+    let Some(line) = failures_said(results) else { return };
+    if aloud(origin) {
+        say(app, &line);
+    } else {
+        remember(app, "maya", &line, origin);
+        emit_voice(app);
+    }
 }
 
 /// The listener thread's view of the ear's events, able to throw away what
@@ -1339,6 +1371,14 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn announcements_and_failures_are_said_for_voice_and_her_and_posted_for_chat_and_the_phone() {
+        assert!(aloud(Via::Voice));
+        assert!(aloud(Via::Maya));
+        assert!(!aloud(Via::Chat));
+        assert!(!aloud(Via::Phone));
     }
 
     #[test]

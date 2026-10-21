@@ -50,6 +50,12 @@ pub(crate) fn spoken(text: &str) -> Option<String> {
     Some(text.trim()).filter(|t| !t.is_empty()).map(str::to_string)
 }
 
+/// The parts of her reply as one line to say or post, blank parts left
+/// out: said as one utterance, a short part ("Sure.") never plays alone.
+pub(crate) fn one_line<S: AsRef<str>>(parts: &[S]) -> String {
+    parts.iter().map(|p| p.as_ref().trim()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
 /// Whether her line goes through the voice path: a reply to a spoken request
 /// always does (the path itself only shows it when muted); her own lines
 /// only when Maya is not muted; replies to typed and phone requests never.
@@ -236,6 +242,13 @@ mod tests {
     use maya_core::model::{Harness, State};
     use maya_core::window::Via;
     use serde_json::json;
+
+    #[test]
+    fn her_words_and_what_ran_make_one_line() {
+        assert_eq!(one_line(&["Sure.", "", " Focusing api-fix. "]), "Sure. Focusing api-fix.");
+        assert_eq!(one_line(&["  ", ""]), "");
+        assert_eq!(one_line(&["", "Telling api-fix: open the PR."]), "Telling api-fix: open the PR.");
+    }
 
     #[test]
     fn a_blank_reply_is_neither_said_nor_posted() {

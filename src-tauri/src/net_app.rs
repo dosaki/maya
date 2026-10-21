@@ -403,8 +403,11 @@ fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, Strin
                 return Err(why);
             }
             let outcome = listener::execute_action(app, &fresh);
-            // She learns how an action she gave the phone ended.
-            crate::brain_app::batch_done(app, &[(fresh, outcome.clone())]);
+            // She learns how an action she gave the phone ended, and a failure
+            // is left in Chat too.
+            let results = [(fresh, outcome.clone())];
+            crate::brain_app::batch_done(app, &results);
+            listener::report_failures(app, &results, maya_core::window::Via::Phone);
             Ok(Some(said_data(&outcome?)))
         }
         _ => unreachable!("serve_voice is only called for voice requests"),

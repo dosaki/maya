@@ -19,7 +19,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, refusal_feedback, sort_actions, speaks, spoken, Feedback, PhoneReply, PhoneWaiters};
+use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, one_line, refusal_feedback, sort_actions, speaks, spoken, Feedback, PhoneReply, PhoneWaiters};
 pub(crate) use crate::brain_route::{brain_card, handoff};
 use crate::listener::{self, Interpreted};
 use crate::store::now_ms;
@@ -735,24 +735,28 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
             }
         }
         None => {
-            say_line(app, via, say);
-            // At-once actions say what they did before an announcement opens the window.
+            // Her words, what the at-once actions did, then the announcement:
+            // one utterance (or Chat line), so a short "Sure." is never said
+            // alone, heard back and taken for the user's answer.
+            let mut lines = vec![say.to_string()];
             if !sorted.run_now.is_empty() {
                 let results: Vec<(Value, Result<String, String>)> = sorted.run_now.into_iter().map(|a| {
                     let r = listener::execute_action(app, &a);
                     (a, r)
                 }).collect();
                 for (a, r) in &results {
-                    let line = match r {
+                    lines.push(match r {
                         Ok(ok) => listener::spoken_for(a).unwrap_or_else(|| ok.clone()),
                         Err(e) => e.clone(),
-                    };
-                    say_line(app, via, &line);
+                    });
                 }
                 batch_done(app, &results);
             }
-            if !sorted.announce.is_empty() {
-                listener::announce(app, None, announcement(&sorted.announce), sorted.announce, via);
+            let lead = one_line(&lines);
+            if sorted.announce.is_empty() {
+                say_line(app, via, &lead);
+            } else {
+                listener::announce_after(app, None, &lead, announcement(&sorted.announce), sorted.announce, via);
             }
         }
     }
