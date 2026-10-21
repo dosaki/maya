@@ -111,6 +111,9 @@ struct Peer {
     last_seen: u64,
     /// Its last board failed to decode; the one before it is kept.
     unreadable_board: bool,
+    /// When its brain went dormant, as its `hello` said; None when it never
+    /// ran one (or is an older Maya). Kept in memory only.
+    brain_dormant_since: Option<u64>,
 }
 
 pub(crate) const UNREADABLE_BOARD: &str = "sent a board this version cannot read; update Maya on both machines";
@@ -809,7 +812,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             return None;
         }
     };
-    let Up::Hello { protocol, app, name, hostname, platform, caps } = hello else {
+    let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since } = hello else {
         log::line("network", format!("{ip}: first message was not a hello"));
         bye(ch, "protocol");
         return None;
@@ -865,7 +868,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             match saved {
                 Ok(()) => {
                     let serial = s.next();
-                    s.peers.insert(id.clone(), Peer { app, caps: caps.into_iter().map(|c| clean(&c)).collect(), last_seen: now, unreadable_board: false });
+                    s.peers.insert(id.clone(), Peer { app, caps: caps.into_iter().map(|c| clean(&c)).collect(), last_seen: now, unreadable_board: false, brain_dormant_since });
                     // A newer connection replaces an older one; dropping its sender ends it.
                     s.conns.insert(id.clone(), Conn { tx, serial });
                     if let Some(b) = s.by_id.get_mut(&id) {
@@ -1327,6 +1330,16 @@ impl Drop for HandoverTurn<'_> {
     }
 }
 
+/// The Maya a handover goes to, for its summary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HandoverTo {
+    pub label: String,
+    /// A phone (a mirroring Maya): it has no brain and gets no summary.
+    pub phone: bool,
+    /// When its brain went dormant; None when it never ran one.
+    pub brain_dormant_since: Option<u64>,
+}
+
 impl ServerHandle {
     /// Makes the assistant `id` the main: closes pairing, sends it the paired
     /// list with this main's own new entry, and once
@@ -1337,8 +1350,19 @@ impl ServerHandle {
         self.promote_with_timeout(id, PROMOTE_TIMEOUT)
     }
 
+    /// `promote`, with a handover summary from `summary`: called once the
+    /// handover is checked and begun, with no lock held, before `promote`
+    /// goes out. It must bound its own wait.
+    pub fn promote_with_summary(&self, id: &str, summary: impl FnOnce(&HandoverTo) -> Option<String>) -> Result<Promotion, String> {
+        self.promote_inner(id, PROMOTE_TIMEOUT, summary)
+    }
+
     pub fn promote_with_timeout(&self, id: &str, timeout: Duration) -> Result<Promotion, String> {
-        let (label, host, main_key, list) = {
+        self.promote_inner(id, timeout, |_| None)
+    }
+
+    fn promote_inner(&self, id: &str, timeout: Duration, summary: impl FnOnce(&HandoverTo) -> Option<String>) -> Result<Promotion, String> {
+        let (label, host, main_key, list, to) = {
             let mut s = lock(&self.shared);
             if s.handover {
                 return Err("A handover is already running.".into());
@@ -1361,12 +1385,15 @@ impl ServerHandle {
             s.pairing = None;
             let me = super::promote::own_entry(&self.ctx.main_name, self.ctx.own_mirror.load(Ordering::SeqCst), &self.ctx.identity.public_b64());
             let list = super::promote::handover_list(&s.paired, id, &me);
-            (label, entry.address, entry.key, list)
+            let peer = s.peers.get(id);
+            let to = HandoverTo { label: label.clone(), phone: entry.mirror || peer.is_some_and(|p| p.caps.iter().any(|c| c == CAP_MIRROR)), brain_dormant_since: peer.and_then(|p| p.brain_dormant_since) };
+            (label, entry.address, entry.key, list, to)
         };
         let _turn = HandoverTurn(&self.shared);
         self.ctx.announce();
-        log::line("network", format!("{label}: handing over the main role ({} assistants)", list.len()));
-        let data = send_command_to(&self.shared, id, CommandKind::Promote { list }, timeout).map_err(|e| {
+        let summary = summary(&to);
+        log::line("network", format!("{label}: handing over the main role ({} assistants{})", list.len(), if summary.is_some() { ", with a summary" } else { "" }));
+        let data = send_command_to(&self.shared, id, CommandKind::Promote { list, summary }, timeout).map_err(|e| {
             // A dropped connection leaves the same doubt as silence: G may already be a main.
             if e.ends_with(NO_ANSWER) || e.ends_with(LEFT_BEFORE_ANSWER) {
                 format!("{label} did not answer; it may have become a main on its own. Check it before trying again.")
@@ -1544,7 +1571,7 @@ mod tests {
     }
 
     pub(crate) fn hello_up(name: &str, caps: &[&str]) -> Up {
-        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect() }
+        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect(), brain_dormant_since: None }
     }
 
     /// Pairs a new Maya (key `me`) whose `hello` carries `caps`; returns its
@@ -1741,7 +1768,7 @@ mod tests {
         assert!(matches!(recv(&mut phone), Down::Response { id: 3, ok: true, .. }));
         let seen: Vec<Option<String>> = counter.requests.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
         assert_eq!(seen, [None, None, Some("laptop".to_string())], "the main's own name means the main");
-        send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::Promote { list: vec![] }) });
+        send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::Promote { list: vec![], summary: None }) });
         assert_eq!(recv(&mut phone), Down::Response { id: 4, ok: false, error: Some("That cannot be requested.".into()), data: None });
         handle.stop();
     }
@@ -1753,8 +1780,37 @@ mod tests {
         let (mut g, g_id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
         let h = handle.clone();
         let t = std::thread::spawn(move || h.promote(&g_id));
-        let Down::Command { id: cmd, kind: CommandKind::Promote { list } } = recv(&mut g) else { panic!("expected promote") };
+        let Down::Command { id: cmd, kind: CommandKind::Promote { list, .. } } = recv(&mut g) else { panic!("expected promote") };
         assert!(list.last().unwrap().mirror);
+        send(&mut g, &Up::Result { id: cmd, ok: true, error: None, data: Some(serde_json::json!({ "port": 5001 })) });
+        assert!(t.join().unwrap().is_ok());
+        handle.stop();
+    }
+
+    #[test]
+    fn promote_asks_for_a_summary_with_the_assistant_s_dormant_time_and_sends_it() {
+        let (handle, port) = test_server();
+        let (ch, g_id, me) = pair_client(&handle, port, "laptop");
+        drop(ch);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == g_id && a.connected));
+        let mut ws = connect(port);
+        let noise = secure::connect(&mut ws, &me, &handle.public_key(), soon(), &|| false).unwrap();
+        let mut g = Channel::new(ws, noise);
+        let Up::Hello { protocol, app, name, hostname, platform, caps, .. } = hello_up("laptop", &["follow", "lead"]) else { panic!() };
+        send(&mut g, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since: Some(77) });
+        assert!(matches!(recv(&mut g), Down::Welcome { .. }));
+        let h = handle.clone();
+        let asked = Arc::new(Mutex::new(None));
+        let seen = asked.clone();
+        let t = std::thread::spawn(move || {
+            h.promote_with_summary(&g_id, |to| {
+                *seen.lock().unwrap() = Some(to.clone());
+                Some("User asked for #52.".into())
+            })
+        });
+        let Down::Command { id: cmd, kind: CommandKind::Promote { summary, .. } } = recv(&mut g) else { panic!("expected promote") };
+        assert_eq!(summary.as_deref(), Some("User asked for #52."));
+        assert_eq!(*asked.lock().unwrap(), Some(HandoverTo { label: "laptop".into(), phone: false, brain_dormant_since: Some(77) }));
         send(&mut g, &Up::Result { id: cmd, ok: true, error: None, data: Some(serde_json::json!({ "port": 5001 })) });
         assert!(t.join().unwrap().is_ok());
         handle.stop();
@@ -1785,7 +1841,7 @@ mod tests {
         handle.open_pairing(crate::store::now_ms()).unwrap();
         let h = handle.clone();
         let t = std::thread::spawn(move || h.promote(&g_id));
-        let Down::Command { id: cmd, kind: CommandKind::Promote { list } } = recv(&mut g) else { panic!("expected promote") };
+        let Down::Command { id: cmd, kind: CommandKind::Promote { list, .. } } = recv(&mut g) else { panic!("expected promote") };
         assert!(handle.status().code.is_none(), "pairing closes for the handover");
         let key_of = |k: &Keypair| crate::net::identity::encode_key(&k.public);
         assert!(list.iter().all(|p| !p.key.is_empty()), "every entry carries its key");
@@ -2327,7 +2383,7 @@ mod tests {
         let mut raw = connect(port);
         let (noise, _) = secure::pair(&mut raw, &twin_key, &code, soon(), &|| false).unwrap();
         let mut same = Channel::new(raw, noise);
-        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![] });
+        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None });
         assert!(matches!(recv(&mut same), Down::Welcome { .. }));
         let twin = lock(&handle.shared).paired.iter().find(|p| p.key == crate::net::identity::encode_key(&twin_key.public)).unwrap().id.clone();
         assert_eq!(handle.status().assistants.iter().find(|a| a.id == twin).unwrap().note, None);
@@ -2479,7 +2535,7 @@ mod tests {
         fn caps(&self) -> Vec<String> {
             self.caps.clone()
         }
-        fn promoted(&self, list: Vec<crate::config::PairedAssistant>) -> Result<u16, String> {
+        fn promoted(&self, list: Vec<crate::config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
             *self.promoted.lock().unwrap() = Some(list);
             self.promote_result.lock().unwrap().clone().unwrap_or(Ok(6000))
         }
@@ -2875,7 +2931,7 @@ mod tests {
         fn caps(&self) -> Vec<String> {
             vec!["follow".into(), "lead".into()]
         }
-        fn promoted(&self, list: Vec<crate::config::PairedAssistant>) -> Result<u16, String> {
+        fn promoted(&self, list: Vec<crate::config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
             if self.port_taken {
                 return Err("Could not listen on port 4127: Address already in use. Choose another port.".into());
             }

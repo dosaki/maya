@@ -113,8 +113,15 @@ pub trait ClientNotify: Send + Sync {
     /// `Ok(port)` once its server listens; on `Err` nothing changed. Runs on
     /// a command thread; the client ends by itself once the answer is out,
     /// so this must not stop or join the client.
-    fn promoted(&self, _assistants: Vec<crate::config::PairedAssistant>) -> Result<u16, String> {
+    /// `summary`: what the old main's Maya did while this one's brain was
+    /// dormant; none from a phone or an older main.
+    fn promoted(&self, _assistants: Vec<crate::config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
         Err(CANNOT_LEAD.into())
+    }
+    /// When this Maya's brain went dormant, sent in `hello`; None when it
+    /// never ran one.
+    fn brain_dormant_since(&self) -> Option<u64> {
+        None
     }
     /// The main is now at `host:port` with the public key `key`: save both.
     /// Runs on the connection thread.
@@ -511,7 +518,7 @@ fn connection(config: &NetworkConfig, identity: &Keypair, exec: &Arc<dyn Executo
 /// `learned` is the main's key from a pairing, kept only once welcomed.
 fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, learned: Option<[u8; 32]>, deadline: Instant) -> Result<(String, Option<bool>, Vec<String>), String> {
     let hostname = super::local_hostname();
-    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps() };
+    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps(), brain_dormant_since: notify.brain_dormant_since() };
     send_up(ch, &hello)?;
     loop {
         match read_down(ch, stop, deadline)? {
@@ -607,12 +614,12 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
 
 fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, tx: &Sender<Up>, leaving: &Arc<AtomicBool>) -> Result<(), String> {
     match down {
-        Down::Command { id, kind: CommandKind::Promote { list } } => {
+        Down::Command { id, kind: CommandKind::Promote { list, summary } } => {
             log::line("network", format!("command {id} promote"));
             let (notify, out, leaving) = (notify.clone(), tx.clone(), leaving.clone());
             // On its own thread, as every command: becoming the main starts a server.
             let spawned = std::thread::Builder::new().name("net-promote".into()).spawn(move || {
-                match notify.promoted(list) {
+                match notify.promoted(list, summary) {
                     Ok(port) => {
                         let _ = out.send(Up::Result { id, ok: true, error: None, data: Some(serde_json::json!({ "port": port })) });
                         leaving.store(true, Ordering::SeqCst);

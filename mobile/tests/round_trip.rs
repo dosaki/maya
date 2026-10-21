@@ -311,7 +311,7 @@ impl ClientNotify for Lead {
     fn caps(&self) -> Vec<String> {
         vec!["follow".into(), "lead".into()]
     }
-    fn promoted(&self, list: Vec<maya_core::config::PairedAssistant>) -> Result<u16, String> {
+    fn promoted(&self, list: Vec<maya_core::config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
         let mut c = Config::default();
         c.network = self.config.lock().unwrap().clone();
         maya_core::net::promote::as_main(&mut c, list);

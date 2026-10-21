@@ -181,7 +181,7 @@ impl ClientNotify for TauriClientNotify {
     /// before its answer is out. The client ends by itself once it is.
     /// Nothing is saved when the server cannot start, and the server stops
     /// again when the save fails, so either way this Maya stays an assistant.
-    fn promoted(&self, list: Vec<config::PairedAssistant>) -> Result<u16, String> {
+    fn promoted(&self, list: Vec<config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
         let state = self.app.state::<AppState>();
         let (mut after, path) = {
             let store = state.store.lock().unwrap();

@@ -907,7 +907,7 @@ impl ClientNotify for HubClientNotify {
     /// Saves the config as a main with the list and starts the server; if
     /// it cannot listen, the old config goes back. The client ends by
     /// itself once the answer is out, so it is dropped here, not stopped.
-    fn promoted(&self, list: Vec<PairedAssistant>) -> Result<u16, String> {
+    fn promoted(&self, list: Vec<PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
         let h = self.hub.upgrade().ok_or("the app is gone")?;
         let handed = list.len().saturating_sub(1);
         let by = h.link.lock().unwrap().main_name.clone().unwrap_or_else(|| "the main Maya".into());

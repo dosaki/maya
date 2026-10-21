@@ -53,6 +53,11 @@ pub enum Up {
         /// What this Maya can do (`CAP_FOLLOW`, `CAP_LEAD`); an older Maya sends none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         caps: Vec<String>,
+        /// When this Maya's brain went dormant (epoch ms), so a handover
+        /// summary covers what she missed; None when she never ran one, or
+        /// from an older Maya.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        brain_dormant_since: Option<u64>,
     },
     Board {
         cards: Vec<Card>,
@@ -161,8 +166,14 @@ pub enum CommandKind {
     History { session: String },
     /// Forget these remembered sessions (Dismiss, Forget unticked).
     Forget { sessions: Vec<(crate::model::Harness, String)> },
-    /// Become the main with this paired list (public keys only).
-    Promote { list: Vec<crate::config::PairedAssistant> },
+    /// Become the main with this paired list (public keys only), and what
+    /// the old main's Maya did while this one's brain was dormant (none for
+    /// a phone, or from an older main).
+    Promote {
+        list: Vec<crate::config::PairedAssistant>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
 }
 
 pub fn encode<T: Serialize>(m: &T) -> String {
@@ -296,7 +307,7 @@ mod tests {
 
     #[test]
     fn messages_round_trip_with_a_type_tag() {
-        let up = Up::Hello { protocol: PROTOCOL, app: "0.1.0".into(), name: "laptop".into(), hostname: "tiagos-mbp".into(), platform: "macos".into(), caps: vec![] };
+        let up = Up::Hello { protocol: PROTOCOL, app: "0.1.0".into(), name: "laptop".into(), hostname: "tiagos-mbp".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None };
         let s = encode(&up);
         assert!(s.contains("\"type\":\"hello\""), "{s}");
         assert_eq!(decode_up(&s).unwrap(), up);
@@ -388,7 +399,7 @@ mod tests {
         let old = r#"{"type":"hello","protocol":2,"app":"0.15.0","name":"n","hostname":"h","platform":"macos"}"#;
         let Up::Hello { caps, .. } = decode_up(old).unwrap() else { panic!() };
         assert!(caps.is_empty());
-        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![CAP_FOLLOW.into(), CAP_LEAD.into()] };
+        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![CAP_FOLLOW.into(), CAP_LEAD.into()], brain_dormant_since: None };
         let s = encode(&hello);
         assert!(s.contains(r#""caps":["follow","lead"]"#), "{s}");
         assert_eq!(decode_up(&s).unwrap(), hello);
@@ -401,10 +412,36 @@ mod tests {
         assert!(s.contains(r#""type":"move""#) && s.contains(r#""key":"a2V5""#), "{s}");
         assert_eq!(decode_down(&s).unwrap(), mv);
         let entry = crate::config::PairedAssistant { id: "a1".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), key: "a2V5".into(), address: String::new(), last_seen: None, mirror: false };
-        let p = Down::Command { id: 3, kind: CommandKind::Promote { list: vec![entry] } };
+        let p = Down::Command { id: 3, kind: CommandKind::Promote { list: vec![entry], summary: None } };
         let s = encode(&p);
         assert!(s.contains(r#""kind":"promote""#) && s.contains(r#""key":"a2V5""#) && !s.contains("token"), "{s}");
         assert_eq!(decode_down(&s).unwrap(), p);
+    }
+
+    #[test]
+    fn promote_carries_a_summary_only_when_there_is_one_and_an_old_promote_has_none() {
+        let with = Down::Command { id: 3, kind: CommandKind::Promote { list: vec![], summary: Some("User asked for #52; done.".into()) } };
+        let s = encode(&with);
+        assert!(s.contains(r#""summary":"User asked for #52; done.""#), "{s}");
+        assert_eq!(decode_down(&s).unwrap(), with);
+        let without = Down::Command { id: 4, kind: CommandKind::Promote { list: vec![], summary: None } };
+        assert!(!encode(&without).contains("summary"), "no summary, no field");
+        assert_eq!(decode_down(&encode(&without)).unwrap(), without);
+        let old = r#"{"type":"command","id":5,"kind":"promote","list":[]}"#;
+        assert_eq!(decode_down(old).unwrap(), Down::Command { id: 5, kind: CommandKind::Promote { list: vec![], summary: None } });
+    }
+
+    #[test]
+    fn hello_says_when_her_brain_went_dormant_and_an_older_hello_says_never() {
+        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: Some(42) };
+        let s = encode(&hello);
+        assert!(s.contains(r#""brain_dormant_since":42"#), "{s}");
+        assert_eq!(decode_up(&s).unwrap(), hello);
+        let never = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None };
+        assert!(!encode(&never).contains("brain_dormant_since"));
+        let old = r#"{"type":"hello","protocol":2,"app":"0.26.0","name":"n","hostname":"h","platform":"macos","caps":["lead"]}"#;
+        let Up::Hello { brain_dormant_since, .. } = decode_up(old).unwrap() else { panic!() };
+        assert_eq!(brain_dormant_since, None);
     }
 
     fn was(id: &str) -> crate::remembered::Remembered {
