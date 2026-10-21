@@ -670,9 +670,9 @@ fn drop_voice_batch_because(app: &AppHandle, why: &str) {
 
 /// Announces `actions` and runs them once the window has passed, unless a
 /// stop, a correction or the Cancel button drops them first. Opens a batch
-/// or joins the open one when it came the same way; a batch from another
-/// origin is cancelled first and "Cancelled: …" is posted to Chat, so two
-/// surfaces never share one window. A spoken request, or one from Maya herself, is
+/// or joins the open one (`Window::open`); a batch from another user surface
+/// is cancelled first and "Cancelled: …" is posted to Chat, so two surfaces
+/// never share one window. A spoken request, or one from Maya herself, is
 /// said aloud (a muted Maya only shows it) and stopped by voice; the clock
 /// starts only once the announcement has been said, so the user always gets
 /// the whole window after hearing it. A voice request's batch is dropped

@@ -35,14 +35,19 @@ pub struct Window {
 }
 
 impl Window {
-    /// Opens a batch, or joins the open one when it came the same way (its
-    /// actions appended, its `say` joined with " "); the deadline is unset
-    /// (`u64::MAX`) until `start_clock`. A batch from another origin is not
-    /// joined: it is cancelled and returned, so two surfaces never share one
-    /// window. Returns the batch id and the batch cancelled, if any.
+    /// Opens a batch, or joins the open one (its actions appended, its `say`
+    /// joined with " ", its deadline kept); a new batch's deadline is unset
+    /// (`u64::MAX`) until `start_clock`. Two user surfaces (voice, Chat, the
+    /// phone) never share a window: a batch from another one is cancelled
+    /// and returned, and a new batch opens. Her own (`Via::Maya`) actions
+    /// join whatever batch waits, and a user's join hers, which then takes
+    /// the user's origin. Returns the batch id and the batch cancelled, if any.
     pub fn open(&mut self, say: String, actions: Vec<serde_json::Value>, origin: Via) -> (u64, Option<Batch>) {
         let cancelled = match &mut self.batch {
-            Some(b) if b.origin == origin => {
+            Some(b) if b.origin == origin || origin == Via::Maya || b.origin == Via::Maya => {
+                if b.origin == Via::Maya {
+                    b.origin = origin;
+                }
                 b.actions.extend(actions);
                 if !say.is_empty() {
                     if !b.say.is_empty() {
@@ -143,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn an_open_from_another_origin_cancels_the_pending_batch_and_opens_its_own() {
+    fn an_open_from_another_user_surface_cancels_the_pending_batch_and_opens_its_own() {
         let mut w = Window::default();
         let (a, _) = w.open("A.".into(), vec![json!(1)], Via::Voice);
         w.start_clock(a, 0);
@@ -156,6 +161,28 @@ mod tests {
         let (c, none) = w.open("C.".into(), vec![json!(3)], Via::Chat);
         assert_eq!(c, b, "the same origin joins");
         assert!(none.is_none());
+    }
+
+    #[test]
+    fn her_own_open_joins_a_users_batch_and_keeps_its_origin_and_deadline() {
+        let mut w = Window::default();
+        let (a, _) = w.open("A.".into(), vec![json!(1)], Via::Chat);
+        let until = w.start_clock(a, 0).unwrap();
+        let (b, cancelled) = w.open("B.".into(), vec![json!(2)], Via::Maya);
+        assert_eq!((b, cancelled), (a, None));
+        let p = w.pending().unwrap();
+        assert_eq!((p.origin, p.until, p.actions.len(), p.say.as_str()), (Via::Chat, until, 2, "A. B."));
+    }
+
+    #[test]
+    fn a_user_open_joins_her_own_batch_and_takes_the_users_origin() {
+        let mut w = Window::default();
+        let (a, _) = w.open("A.".into(), vec![json!(1)], Via::Maya);
+        let until = w.start_clock(a, 0).unwrap();
+        let (b, cancelled) = w.open("B.".into(), vec![json!(2)], Via::Phone);
+        assert_eq!((b, cancelled), (a, None));
+        let p = w.pending().unwrap();
+        assert_eq!((p.origin, p.until, p.actions.len()), (Via::Phone, until, 2));
     }
 
     #[test]
