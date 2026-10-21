@@ -256,6 +256,8 @@ impl Driver for ClaudeDriver {
     }
 }
 
+/// Shutting down waits for the process (or kills and waits), so a brain
+/// that exited on its own leaves no zombie behind once dropped.
 impl Drop for ClaudeDriver {
     fn drop(&mut self) {
         self.shutdown();
@@ -375,6 +377,29 @@ mod tests {
         let s: serde_json::Value = serde_json::from_str(stop_task_line("r2", "t1").trim_end()).unwrap();
         assert_eq!(s["request"]["subtype"], "stop_task");
         assert_eq!(s["request"]["task_id"], "t1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_brain_that_exited_is_reaped_when_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("maya-fake-claude-{}", crate::launch::new_session_uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut l = launch();
+        l.binary = bin;
+        l.cwd = dir.join("work");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let d = ClaudeDriver::spawn(&l, tx).unwrap();
+        let pid = d.child.id().to_string();
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Exited(_)));
+        let alive = || std::process::Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
+        assert!(alive(), "an exited child stays a zombie until it is waited for");
+        drop(d);
+        assert!(!alive(), "dropping the driver reaps it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
