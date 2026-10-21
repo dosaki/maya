@@ -45,7 +45,7 @@ describe("banner text", () => {
   });
 
   it("names each failure with its reason", () => {
-    expect(failuresText([row("raffinad-3c", null, { name: "raffinad-3c", error: "folder missing" })])).toBe("Couldn't resume 1: raffinad-3c (folder missing)");
+    expect(failuresText([row("raffinad-3c", null, { name: "raffinad-3c", error: "its folder is gone" })])).toBe("Couldn't resume 1: raffinad-3c (its folder is gone)");
   });
 
   it("sums up a resume, naming a single failure and the machines skipped", () => {
@@ -86,8 +86,8 @@ describe("renderBanner", () => {
 
   it("puts failures on their own line with a Dismiss", () => {
     const h = handlers();
-    const el = renderBanner(model([row("lost", null, { name: "raffinad-3c", error: "folder missing" })]), h, NOW)!;
-    expect(el.textContent).toContain("Couldn't resume 1: raffinad-3c (folder missing)");
+    const el = renderBanner(model([row("lost", null, { name: "raffinad-3c", error: "its folder is gone" })]), h, NOW)!;
+    expect(el.textContent).toContain("Couldn't resume 1: raffinad-3c (its folder is gone)");
     expect(el.querySelector("button[data-action=resume-all]")).toBeNull();
     click(el, "dismiss-failed");
     expect(h.onDismissFailed).toHaveBeenCalled();
@@ -106,7 +106,7 @@ describe("initRemembered", () => {
   const sent = (cmd: string) => (tauri.calls.filter((c) => c.cmd === cmd).pop()?.args as { rows: RememberedRow[] }).rows.map(rowKey);
 
   it("Resume all sends every row not failed, waiting ones included so the toast can say so", async () => {
-    const rows = [row("a", null), row("g", "Gnowee", { waiting: true }), row("x", null, { error: "folder missing" })];
+    const rows = [row("a", null), row("g", "Gnowee", { waiting: true }), row("x", null, { error: "its folder is gone" })];
     const host = await start(rows);
     click(host, "resume-all");
     await flush();

@@ -50,7 +50,7 @@ pub struct Remembered {
     /// When it was first offered; an offer is carried for `OFFER_TTL_MS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offered_at_ms: Option<u64>,
-    /// Why its last resume failed ("folder missing"…).
+    /// Why its last resume failed ("its folder is gone"…).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -627,9 +627,9 @@ mod tests {
         let (_t, mut m) = memory();
         m.classify_at_start(1);
         m.observe(&[live("a"), live("b")], 2);
-        m.failed(&(Harness::ClaudeCode, "b".into()), "folder missing");
+        m.failed(&(Harness::ClaudeCode, "b".into()), "its folder is gone");
         m.failed(&(Harness::Codex, "b".into()), "not this one");
-        assert_eq!(m.entry(Harness::ClaudeCode, "b").unwrap().error.as_deref(), Some("folder missing"));
+        assert_eq!(m.entry(Harness::ClaudeCode, "b").unwrap().error.as_deref(), Some("its folder is gone"));
         m.forget(&[(Harness::ClaudeCode, "a".into()), (Harness::Codex, "b".into())]);
         assert_eq!(ids(m.sessions()), ["b"]);
     }
@@ -660,8 +660,8 @@ mod tests {
         assert_eq!(serde_json::from_value::<RememberedRow>(v).unwrap(), r);
         let local: RememberedRow = serde_json::from_str(r#"{"agent":"codex","sessionId":"c1","dir":"/x","name":"c","firstSeenMs":1,"lastSeenMs":2}"#).unwrap();
         assert_eq!((local.machine, local.waiting, local.entry.offered), (None, false, false));
-        let out = ResumeOutcome::of(Some("pi"), &entry("p"), &Err("folder missing".into()));
-        assert_eq!((out.machine.as_deref(), out.name.as_str(), out.error.as_deref()), (Some("pi"), "p-name", Some("folder missing")));
+        let out = ResumeOutcome::of(Some("pi"), &entry("p"), &Err("its folder is gone".into()));
+        assert_eq!((out.machine.as_deref(), out.name.as_str(), out.error.as_deref()), (Some("pi"), "p-name", Some("its folder is gone")));
     }
 
     #[test]

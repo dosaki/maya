@@ -691,8 +691,9 @@ pub fn resume_session(l: &Local, agent: model::Harness, dir: &str, session_id: &
     l.terminal.open(&resume::resume_command(agent, &path, session_id), &path, &tmux_label()).map(|_| ())
 }
 
-/// Why a remembered session could not be resumed, as the banner words it.
-pub const FOLDER_MISSING: &str = "Its folder is gone.";
+/// Why a remembered session could not be resumed, as the banner words it:
+/// lowercase and with no full stop, inside "Couldn't resume 1: <name> (…)".
+pub const FOLDER_MISSING: &str = "its folder is gone";
 pub const SESSION_GONE: &str = "the agent no longer has that session";
 
 fn not_installed(agent: model::Harness) -> String {
@@ -1991,7 +1992,7 @@ mod tests {
             out,
             vec![
                 ("live1".to_string(), Ok(())),
-                ("lost".to_string(), Err("Its folder is gone.".to_string())),
+                ("lost".to_string(), Err("its folder is gone".to_string())),
                 ("nolog".to_string(), Err("the agent no longer has that session".to_string())),
                 ("cx1".to_string(), Err("Codex is not installed".to_string())),
             ]
@@ -2001,7 +2002,7 @@ mod tests {
         assert_eq!(
             left,
             vec![
-                ("lost".to_string(), Some("Its folder is gone.".to_string())),
+                ("lost".to_string(), Some("its folder is gone".to_string())),
                 ("nolog".to_string(), Some("the agent no longer has that session".to_string())),
                 ("cx1".to_string(), Some("Codex is not installed".to_string())),
             ]
@@ -2038,7 +2039,7 @@ mod tests {
         let l = Local { store: &store, terminal: &fake };
         let entries = store.lock().unwrap().was_running();
         let out = resume_remembered_with(&l, &entries, &mut |_| ());
-        assert_eq!(out[0].1.as_ref().unwrap_err(), "Its folder is gone.");
+        assert_eq!(out[0].1.as_ref().unwrap_err(), "its folder is gone", "lowercase, no stop, like the other reasons");
         assert!(opened(&fake).is_empty(), "nothing is launched");
     }
 

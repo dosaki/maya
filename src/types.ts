@@ -233,7 +233,7 @@ export interface Remembered {
   offered?: boolean;
   /** When it was first offered; carried for a day after. */
   offeredAtMs?: number | null;
-  /** Why its last resume failed ("folder missing"…). */
+  /** Why its last resume failed ("its folder is gone"…). */
   error?: string | null;
 }
 

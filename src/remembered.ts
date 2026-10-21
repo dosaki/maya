@@ -32,7 +32,7 @@ export function bannerText(rows: RememberedRow[]): string {
   return `${head} · ${[...groups].map(([label, count]) => `${count} ${label}`).join(" · ")}`;
 }
 
-/** "Couldn't resume 1: raffinad-3c (folder missing)". */
+/** "Couldn't resume 1: raffinad-3c (its folder is gone)". */
 export function failuresText(rows: RememberedRow[]): string {
   return `Couldn't resume ${rows.length}: ${rows.map((r) => `${r.name} (${r.error})`).join(", ")}`;
 }

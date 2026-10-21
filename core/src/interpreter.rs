@@ -91,7 +91,7 @@ pub fn pr_summary(prs: &[ReviewPr]) -> String {
 }
 
 /// How a request that names no session finds its session. Shared with the brain's own prompt.
-pub const ROUTING_RULES: &str = "Routing: A request that does not name a session goes to the session that most recently moved into completed or awaiting and fits the request; the board shows how long each session has been in its state. If two fit equally, ask which one. A request about a repository with no fitting session starts a new session there. A request that fits no repository starts one in a scratch folder (\"scratch\":true, no dir). Anything you can answer from the board is a report.";
+pub const ROUTING_RULES: &str = "Routing: A request that does not name a session goes to the session that most recently moved into completed or awaiting and fits the request; the board shows how long each session has been in its state. If two fit equally, ask which one. A request about a repository with no fitting session starts a new session there. A request that fits no repository starts one in a scratch folder (\"scratch\":true, no dir). Anything you can answer from the board, answer it directly (a report).";
 
 /// The action list both the fallback interpreter and the brain describe, one JSON shape per line.
 pub const ACTIONS: &str = r#"{"kind":"report"}                                   nothing to do; the answer is in say
@@ -572,6 +572,8 @@ mod tests {
         assert!(p.contains(ROUTING_RULES));
         assert!(ROUTING_RULES.contains("most recently"));
         assert!(ROUTING_RULES.contains("scratch"));
+        // Works for both prompts: the brain writes no report block.
+        assert!(ROUTING_RULES.contains("answer it directly (a report)"));
     }
 
     #[test]
@@ -865,7 +867,7 @@ mod tests {
         assert_eq!(validate_resume_all(&json!({"kind": "resume_all", "scope": "here"}), &[row(Some("Gnowee"), false, "g")]).unwrap_err(), "There's nothing to resume.");
         assert_eq!(validate_resume_all(&json!({"kind": "resume_all", "scope": "there"}), &waiting).unwrap_err(), "Should I resume them here or everywhere?");
         let mut failed = row(None, false, "f");
-        failed.entry.error = Some("folder missing".into());
+        failed.entry.error = Some(crate::actions::FOLDER_MISSING.into());
         assert_eq!(validate_resume_all(&json!({"kind": "resume_all", "scope": "all"}), &[failed.clone()]).unwrap_err(), "There's nothing to resume.", "a row that already failed is not tried again");
         let mixed = [failed, row(None, false, "ok")];
         assert_eq!(resume_all_rows(&mixed, "all").iter().map(|r| r.entry.session_id.as_str()).collect::<Vec<_>>(), ["ok"]);
