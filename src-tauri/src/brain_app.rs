@@ -19,7 +19,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, one_line, Outage, refusal_feedback, sort_actions, speaks, spoken, Feedback, PhoneReply, PhoneWaiters};
+use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, one_line, phone_dropped_note, refusal_feedback, sort_actions, speaks, spoken, Feedback, Outage, PhoneReply, PhoneWaiters, Waiter};
 pub(crate) use crate::brain_route::{brain_card, handoff};
 use crate::listener::{self, Interpreted};
 use crate::store::now_ms;
@@ -810,16 +810,39 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
         // The phone announces, waits out the window and runs them itself.
         Some(waiter) => {
             let said = spoken(say);
-            if let Some(s) = &said {
-                post(app, s, Via::Phone);
-            }
             let mut acts = sorted.announce;
             acts.extend(sorted.run_now);
-            let sent = waiter.is_some_and(|tx| tx.send((said.unwrap_or_default(), acts.clone())).is_ok());
-            if !sent && !acts.is_empty() {
-                log::line("brain", "the phone stopped waiting; her actions for it are dropped");
-                let note = format!("The phone stopped waiting, so these did not run: {}", announcement(&acts));
-                app.state::<AppState>().brain.lock().unwrap().session.note(note);
+            let gave_up = match waiter {
+                Waiter::Waiting(tx) => match tx.send((said.clone().unwrap_or_default(), acts.clone())) {
+                    Ok(()) => None,
+                    Err(_) => Some(true),
+                },
+                Waiter::GaveUp => Some(true),
+                Waiter::NotWaiting => Some(false),
+            };
+            match gave_up {
+                // The phone says it; Chat keeps it.
+                None => {
+                    if let Some(s) = &said {
+                        post(app, s, Via::Phone);
+                    }
+                }
+                // No phone hears it: it goes to Chat, and is said on the
+                // computer unless Maya is muted. Her actions do not run.
+                Some(gave_up) => {
+                    if let Some(s) = &said {
+                        let muted = app.state::<AppState>().store.lock().unwrap().config.muted;
+                        if speaks(Via::Maya, muted) {
+                            listener::reply_aloud_as(app, listener::current_generation(app), s, Via::Phone);
+                        } else {
+                            post(app, s, Via::Phone);
+                        }
+                    }
+                    if let Some(note) = phone_dropped_note(gave_up, &acts) {
+                        log::line("brain", "no phone waits for her reply; her actions for it are dropped");
+                        app.state::<AppState>().brain.lock().unwrap().session.note(note);
+                    }
+                }
             }
         }
         None => {

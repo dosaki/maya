@@ -382,7 +382,8 @@ fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, Strin
             if crate::brain_app::ready(app) {
                 return Ok(Some(match crate::brain_app::ask_and_wait(app, &command, maya_core::interpreter::TIMEOUT) {
                     Some((say, actions)) => brain_reply_data(app, &say, actions),
-                    None => said_data("Sorry, that took too long."),
+                    // She carries on: her answer will be in Chat.
+                    None => said_data(crate::brain_route::PHONE_STILL_WORKING),
                 }));
             }
             let pairs = listener::exchanges(history.iter().map(|t| (t.who.as_str(), t.text.as_str())));

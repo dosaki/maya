@@ -247,41 +247,83 @@ pub(crate) fn context_percent(model: Option<&str>, tokens: Option<u64>, default_
 /// Her reply to a phone: what she said and her validated actions.
 pub(crate) type PhoneReply = (String, Vec<Value>);
 
+/// What a phone hears when her reply takes longer than it waits.
+pub(crate) const PHONE_STILL_WORKING: &str = "I'm still working on that; the answer will be in Chat on the computer.";
+
+/// The note her actions for a phone leave when no phone took them: they did
+/// not run, and why. `gave_up`: the phone stopped waiting; otherwise it was
+/// never waiting for this reply (it got a busy line, or this answers one of
+/// Maya's follow-ups). None when there were no actions.
+pub(crate) fn phone_dropped_note(gave_up: bool, actions: &[Value]) -> Option<String> {
+    if actions.is_empty() {
+        return None;
+    }
+    let why = if gave_up { "The phone stopped waiting" } else { "The phone was not waiting for this reply" };
+    Some(format!("{why}, so these did not run: {}", announcement(actions)))
+}
+
+/// One phone request's place in line.
+#[derive(Debug)]
+pub(crate) enum Waiter {
+    /// The phone waits for her reply.
+    Waiting(Sender<PhoneReply>),
+    /// The phone stopped waiting: her reply came too late.
+    GaveUp,
+    /// No phone waits: it already got a busy line, or the request is one of
+    /// Maya's follow-ups.
+    NotWaiting,
+}
+
 /// The phones waiting for her replies, one entry per phone request in the
 /// order they were asked; the session answers them in that order. An entry
 /// whose phone stopped waiting keeps its place, so the replies behind it
 /// still reach their own phones.
 #[derive(Default)]
 pub(crate) struct PhoneWaiters {
-    entries: VecDeque<(u64, Option<Sender<PhoneReply>>)>,
+    entries: VecDeque<(u64, Waiter)>,
     next: u64,
 }
 
 impl PhoneWaiters {
     pub(crate) fn push(&mut self, waiter: Option<Sender<PhoneReply>>) -> u64 {
         self.next += 1;
-        self.entries.push_back((self.next, waiter));
+        self.entries.push_back((self.next, waiter.map_or(Waiter::NotWaiting, Waiter::Waiting)));
         self.next
     }
 
     /// The phone of request `id` stopped waiting: its reply goes to Chat only.
     pub(crate) fn give_up(&mut self, id: u64) {
-        let _ = self.take(id);
+        if let Some((_, w)) = self.entries.iter_mut().find(|(i, w)| *i == id && matches!(w, Waiter::Waiting(_))) {
+            *w = Waiter::GaveUp;
+        }
     }
 
-    /// Takes request `id`'s waiter, leaving its place in line.
+    /// Takes request `id`'s waiter to answer it now, leaving its place in line.
     pub(crate) fn take(&mut self, id: u64) -> Option<Sender<PhoneReply>> {
-        self.entries.iter_mut().find(|(i, _)| *i == id).and_then(|(_, w)| w.take())
+        let (_, w) = self.entries.iter_mut().find(|(i, _)| *i == id)?;
+        match std::mem::replace(w, Waiter::NotWaiting) {
+            Waiter::Waiting(tx) => Some(tx),
+            other => {
+                *w = other;
+                None
+            }
+        }
     }
 
-    /// The oldest request's waiter, if it still waits; its place is gone.
-    pub(crate) fn pop(&mut self) -> Option<Sender<PhoneReply>> {
-        self.entries.pop_front().and_then(|(_, w)| w)
+    /// The oldest request's place, which is gone after this.
+    pub(crate) fn pop(&mut self) -> Waiter {
+        self.entries.pop_front().map_or(Waiter::NotWaiting, |(_, w)| w)
     }
 
     /// Every waiter still waiting, oldest first, and the line emptied.
     pub(crate) fn drain(&mut self) -> Vec<Option<Sender<PhoneReply>>> {
-        self.entries.drain(..).map(|(_, w)| w).collect()
+        self.entries
+            .drain(..)
+            .map(|(_, w)| match w {
+                Waiter::Waiting(tx) => Some(tx),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -465,11 +507,12 @@ mod tests {
         let a = w.push(Some(tx1));
         let _b = w.push(Some(tx2));
         w.give_up(a);
-        assert!(w.pop().is_none(), "the first request's waiter gave up");
-        w.pop().unwrap().send(("two".into(), vec![])).unwrap();
+        assert!(matches!(w.pop(), Waiter::GaveUp), "the first request's phone gave up");
+        let Waiter::Waiting(tx) = w.pop() else { panic!("the second still waits") };
+        tx.send(("two".into(), vec![])).unwrap();
         assert!(rx1.try_recv().is_err());
         assert_eq!(rx2.try_recv().unwrap().0, "two");
-        assert!(w.pop().is_none());
+        assert!(matches!(w.pop(), Waiter::NotWaiting));
     }
 
     #[test]
@@ -479,10 +522,21 @@ mod tests {
         let a = w.push(Some(tx));
         let (tx2, _rx2) = std::sync::mpsc::channel();
         w.push(Some(tx2));
+        w.push(None);
         assert!(w.take(a).is_some());
-        assert!(w.pop().is_none(), "the busy request's reply goes to Chat only");
-        assert!(w.pop().is_some());
+        assert!(matches!(w.pop(), Waiter::NotWaiting), "the busy request's reply goes to Chat only, and the phone did not give up");
+        assert!(matches!(w.pop(), Waiter::Waiting(_)));
+        assert!(matches!(w.pop(), Waiter::NotWaiting), "a follow-up has no phone waiting");
         assert_eq!(w.drain().len(), 0);
+    }
+
+    #[test]
+    fn a_late_phone_reply_drops_its_actions_with_the_true_reason() {
+        let a = [json!({"kind":"reply","name":"api-fix","text":"open the PR"})];
+        assert_eq!(phone_dropped_note(true, &a).as_deref(), Some("The phone stopped waiting, so these did not run: Telling api-fix: open the PR."));
+        assert_eq!(phone_dropped_note(false, &a).as_deref(), Some("The phone was not waiting for this reply, so these did not run: Telling api-fix: open the PR."));
+        assert_eq!(phone_dropped_note(true, &[]), None);
+        assert!(PHONE_STILL_WORKING.contains("Chat on the computer"));
     }
 
     #[test]
