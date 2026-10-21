@@ -9,6 +9,9 @@ use super::driver::Event;
 use super::protocol;
 
 pub const COMPACT_AT_PERCENT: u8 = 80;
+/// Board notes kept between turns; older ones are dropped.
+pub const MAX_NOTES: usize = 50;
+const NOTES_DROPPED: &str = "(older changes dropped)";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
@@ -37,7 +40,9 @@ pub struct Session {
     stopped: bool,
     job: Option<String>,
     tasks: HashSet<String>,
-    notes: Vec<String>,
+    notes: VecDeque<String>,
+    /// Notes were dropped since they were last taken.
+    notes_dropped: bool,
     background: bool,
     wake_pending: bool,
     /// Context passed the limit; compaction waits for a quiet moment.
@@ -56,7 +61,8 @@ impl Session {
             stopped: false,
             job: None,
             tasks: HashSet::new(),
-            notes: Vec::new(),
+            notes: VecDeque::new(),
+            notes_dropped: false,
             background: background_subagents,
             wake_pending: false,
             compact_due: false,
@@ -79,8 +85,13 @@ impl Session {
         busy.into_iter().collect()
     }
 
+    /// Adds a note for her next message, keeping the latest `MAX_NOTES`.
     pub fn note(&mut self, line: String) {
-        self.notes.push(line);
+        self.notes.push_back(line);
+        while self.notes.len() > MAX_NOTES {
+            self.notes.pop_front();
+            self.notes_dropped = true;
+        }
     }
 
     pub fn wake(&mut self) -> Vec<Out> {
@@ -91,8 +102,27 @@ impl Session {
         vec![self.deliver(None)]
     }
 
+    /// The notes since the last take, led by a marker when older ones were dropped.
     pub fn take_notes(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.notes)
+        let dropped = std::mem::take(&mut self.notes_dropped).then(|| NOTES_DROPPED.to_string());
+        dropped.into_iter().chain(self.notes.drain(..)).collect()
+    }
+
+    /// The driver cannot compact on request (it compacts itself): the
+    /// compaction turn ends with nothing to swallow, and the next request
+    /// or a pending wake goes out. A no-op when no compaction runs.
+    pub fn compact_skipped(&mut self) -> Vec<Out> {
+        if !self.compacting {
+            return vec![];
+        }
+        self.compacting = false;
+        self.compact_due = false;
+        self.turn_running = false;
+        self.current = None;
+        self.job = None;
+        let mut out = vec![];
+        self.advance(&mut out);
+        out
     }
 
     pub fn on_event(&mut self, e: &Event, context_percent: Option<u8>) -> Vec<Out> {
@@ -157,6 +187,7 @@ impl Session {
         }
         self.queue.clear();
         self.notes.clear();
+        self.notes_dropped = false;
         self.wake_pending = false;
         self.in_flight = None;
         if self.turn_running {
@@ -367,6 +398,44 @@ mod tests {
         assert!(!s.working());
         assert_eq!(s.drain(), vec![req("a", Via::Chat), req("b", Via::Voice)]);
         assert!(s.drain().is_empty());
+    }
+    #[test]
+    fn notes_keep_the_latest_fifty_and_say_when_older_ones_were_dropped() {
+        let mut s = Session::new(true);
+        for i in 0..53 {
+            s.note(format!("n{i}"));
+        }
+        let notes = s.take_notes();
+        assert_eq!(notes.len(), MAX_NOTES + 1);
+        assert_eq!(notes[0], "(older changes dropped)");
+        assert_eq!(notes[1], "n3");
+        assert_eq!(notes.last().unwrap(), "n52");
+        s.note("next".into());
+        assert_eq!(s.take_notes(), vec!["next".to_string()], "the marker goes once");
+    }
+    #[test]
+    fn a_skipped_compaction_delivers_the_next_request_and_swallows_nothing() {
+        let mut s = Session::new(false);
+        s.submit(req("a", Via::Chat));
+        s.submit(req("b", Via::Voice));
+        let out = s.on_event(&Event::TurnEnded { text: "ok".into(), context_tokens: None }, Some(90));
+        assert_eq!(out.last(), Some(&Out::Compact));
+        assert_eq!(s.compact_skipped(), vec![Out::Deliver(Some(req("b", Via::Voice)))]);
+        let out = s.on_event(&Event::TurnEnded { text: "b done".into(), context_tokens: None }, Some(10));
+        assert_eq!(out, vec![Out::Reply { via: Via::Voice, say: "b done".into(), actions: vec![], errors: vec![] }]);
+    }
+    #[test]
+    fn a_skipped_compaction_goes_quiet_or_wakes_and_is_a_no_op_otherwise() {
+        let mut s = Session::new(true);
+        s.submit(req("a", Via::Chat));
+        s.on_event(&Event::TurnEnded { text: "ok".into(), context_tokens: None }, Some(90));
+        assert!(s.compact_skipped().is_empty());
+        assert!(!s.working());
+        assert!(s.compact_skipped().is_empty(), "nothing to skip");
+        s.submit(req("c", Via::Chat));
+        s.wake();
+        s.on_event(&Event::TurnEnded { text: "ok".into(), context_tokens: None }, Some(90));
+        assert_eq!(s.compact_skipped(), vec![Out::Deliver(None)]);
     }
     #[test]
     fn notes_are_taken_once() {
