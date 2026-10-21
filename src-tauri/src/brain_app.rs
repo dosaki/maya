@@ -436,7 +436,8 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
                 if !std::mem::replace(&mut b.turn_seen, true) {
                     match b.session_id.clone().or_else(|| b.assumed_id.clone()) {
                         Some(id) => {
-                            let r = Record { agent: b.agent, model: b.model.clone(), session_id: id };
+                            // Running again: the dormant mark goes.
+                            let r = Record { agent: b.agent, model: b.model.clone(), session_id: id, dormant_since: None };
                             if let Err(err) = record::save(&b.record_path, &r) {
                                 log::line("brain", format!("could not save her record: {err}"));
                             }
