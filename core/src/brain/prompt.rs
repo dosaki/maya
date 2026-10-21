@@ -127,6 +127,8 @@ mod tests {
         let p = system_prompt(true);
         assert!(p.contains("A pure answer needs no ```maya block"));
         assert!(p.contains("Never write a report block"));
+        assert!(!p.contains("the answer is in say"), "the fallback's report line is not hers");
+        assert!(!p.contains(r#"{"kind":"report"}"#));
         assert!(p.contains("reply with an empty message"));
     }
     #[test]
