@@ -93,6 +93,8 @@ export interface SettingsModel {
   notifyOnAwaiting: boolean;
   /** Banner when a PR assigned to the user is approved or needs changes; absent reads as on. */
   notifyOnPrReview?: boolean;
+  /** Show the Debug tab and Maya's own card; absent reads as off. */
+  debugMode?: boolean;
   speakNotifications: boolean;
   /** False when Maya cannot tell whether a Focus mode is on (macOS without Full Disk Access). */
   focusVisible?: boolean;
@@ -196,6 +198,7 @@ export interface SettingsHandlers {
   onProjectsDir(path: string): void;
   onNotify(enabled: boolean): void;
   onNotifyPrReview?(enabled: boolean): void;
+  onDebugMode?(on: boolean): void;
   onClonesDir(path: string): void;
   onSpeak(enabled: boolean): void;
   onFullDiskAccess?(): void;
@@ -278,6 +281,7 @@ interface ConfigJson {
   clonesDir?: string | null;
   notifyOnAwaiting: boolean;
   notifyOnPrReview?: boolean;
+  debugMode?: boolean;
   speakNotifications: boolean;
   voiceProvider: VoiceProvider;
   elevenlabsVoiceId?: string | null;
@@ -302,6 +306,7 @@ export const SETTINGS_GROUPS = [
   ["notifications", "Notifications"],
   ["voice", "Voice"],
   ["network", "Network"],
+  ["debug", "Debug"],
 ] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number][0];
 
@@ -503,7 +508,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   nav.append(...navButtons);
   content.append(...Object.values(sections));
   show(model.settingsGroup ?? "general");
-  const { general, sessions, git, reviews, notifications, voice, network } = sections;
+  const { general, sessions, git, reviews, notifications, voice, network, debug } = sections;
   const speaking = subsection("Speaking");
   const listening = subsection("Listening");
   voice.append(speaking, listening);
@@ -715,6 +720,16 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   prBox.addEventListener("change", () => h.onNotifyPrReview?.(prBox.checked));
   prLabel.append(prBox, document.createTextNode(" Notify me when a PR assigned to me is approved or needs changes"));
   reviews.append(prLabel);
+
+  const debugLabel = document.createElement("label");
+  debugLabel.className = "settings__check";
+  const debugBox = document.createElement("input");
+  debugBox.type = "checkbox";
+  debugBox.name = "debug-mode";
+  debugBox.checked = model.debugMode === true;
+  debugBox.addEventListener("change", () => h.onDebugMode?.(debugBox.checked));
+  debugLabel.append(debugBox, document.createTextNode(" Debug mode: show the Debug tab and Maya's own card"));
+  debug.append(debugLabel);
 
   for (const conn of model.git ?? gitConnections(null)) {
     const p = conn.provider;
@@ -1512,6 +1527,7 @@ export async function initSettings(): Promise<void> {
     model.clonesDir = c.clonesDir ?? "";
     model.notifyOnAwaiting = c.notifyOnAwaiting;
     model.notifyOnPrReview = c.notifyOnPrReview !== false;
+    model.debugMode = c.debugMode === true;
     model.speakNotifications = c.speakNotifications;
     model.voiceProvider = c.voiceProvider;
     model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
@@ -1607,6 +1623,11 @@ export async function initSettings(): Promise<void> {
     onProjectsDir: (path) => void run(() => saveConfig({ projectsDir: path || null })),
     onNotify: (enabled) => void run(() => saveConfig({ notifyOnAwaiting: enabled })),
     onNotifyPrReview: (enabled) => void run(() => saveConfig({ notifyOnPrReview: enabled })),
+    onDebugMode: (on) =>
+      void run(async () => {
+        await saveConfig({ debugMode: on });
+        window.dispatchEvent(new CustomEvent("maya:config-changed"));
+      }),
     onClonesDir: (path) => void run(() => saveConfig({ clonesDir: path || null })),
     onSpeak: (enabled) => void run(() => saveConfig({ speakNotifications: enabled })),
     onFullDiskAccess: () => void run(() => invoke<void>("open_full_disk_access")),

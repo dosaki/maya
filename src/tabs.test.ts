@@ -41,6 +41,12 @@ describe("makeTabs", () => {
     expect(makeTabs().current()).toBe("debug");
   });
 
+  it("falls back to sessions when the stored tab is a hidden Debug tab", () => {
+    localStorage.setItem("maya.tab", "debug");
+    document.querySelector<HTMLElement>("[data-tab=debug]")!.hidden = true;
+    expect(makeTabs().current()).toBe("sessions");
+  });
+
   it("tells its listener which tab shows, the first one included", () => {
     const seen: string[] = [];
     const tabs = makeTabs((tab) => seen.push(tab));

@@ -97,6 +97,9 @@ pub struct Config {
     /// The phone listens for its main's wake word while its app is on screen. The desktop ignores it.
     #[serde(default)]
     pub wake_word: bool,
+    /// Show the Debug tab and Maya's own card. Off by default.
+    #[serde(default)]
+    pub debug_mode: bool,
     /// Make no sound at all: no spoken lines and silent banners. Banners,
     /// the badge and the Dock bounce still come.
     #[serde(default)]
@@ -376,6 +379,7 @@ impl Default for Config {
             notify_on_pr_review: true,
             speak_notifications: true,
             wake_word: false,
+            debug_mode: false,
             muted: false,
             voice_provider: Default::default(),
             voice_volume: default_voice_volume(),
@@ -622,6 +626,17 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "notifyOnAwaiting": false}"#).unwrap();
         assert!(!c.notify_on_awaiting);
         assert!(serde_json::to_string(&c).unwrap().contains("\"notifyOnAwaiting\":false"));
+    }
+
+    #[test]
+    fn debug_mode_defaults_off_and_round_trips() {
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
+        assert!(!c.debug_mode);
+        assert!(!Config::default().debug_mode);
+        let mut on = Config::default();
+        on.debug_mode = true;
+        let text = serde_json::to_string(&on).unwrap();
+        assert!(text.contains("\"debugMode\":true"), "{text}");
     }
 
     #[test]

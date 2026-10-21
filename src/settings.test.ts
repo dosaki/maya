@@ -212,6 +212,16 @@ describe("renderSettings", () => {
     expect(renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: false, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h).querySelector<HTMLInputElement>("input[name=notify]")!.checked).toBe(false);
   });
 
+  it("has a Debug group with a debug mode switch that saves", () => {
+    const h = { ...handlers(), onDebugMode: vi.fn() };
+    const el = renderSettings({ ...voiceBase, debugMode: false }, h);
+    const box = el.querySelector<HTMLInputElement>("input[name=debug-mode]")!;
+    expect(box.checked).toBe(false);
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    expect(h.onDebugMode).toHaveBeenCalledWith(true);
+  });
+
   it("has a PR review notification toggle, on unless the config says off", () => {
     const h = { ...handlers(), onNotifyPrReview: vi.fn() };
     const model = { hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null };
@@ -312,12 +322,12 @@ describe("renderSettings", () => {
   it("lists the groups in a sidebar, one titled section each, and shows only General at first", () => {
     const el = renderSettings(voiceBase, handlers());
     const nav = [...el.querySelectorAll<HTMLButtonElement>(".settings__nav button")];
-    expect(nav.map((b) => b.textContent)).toEqual(["General", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network"]);
-    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network"]);
+    expect(nav.map((b) => b.textContent)).toEqual(["General", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug"]);
+    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug"]);
     const sections = [...el.querySelectorAll<HTMLElement>(".settings__section")];
-    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "sessions", "git", "reviews", "notifications", "voice", "network"]);
+    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "sessions", "git", "reviews", "notifications", "voice", "network", "debug"]);
     expect(sections.filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["general"]);
-    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null]);
+    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null, null]);
   });
 
   it("puts each setting in its group", () => {

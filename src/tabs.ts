@@ -1,12 +1,12 @@
 import { STATE_LABEL, type CardState } from "./types";
 
-export type Tab = "sessions" | "reviews" | "debug" | "settings";
+export type Tab = "sessions" | "reviews" | "debug" | "settings" | "chat";
 
 const KEY = "maya.tab";
-const PANES: Record<Tab, string> = { sessions: "board", reviews: "reviews", debug: "debug", settings: "settings" };
+const PANES: Record<Tab, string> = { sessions: "board", reviews: "reviews", debug: "debug", settings: "settings", chat: "chat" };
 
 function asTab(v: string | null | undefined): Tab {
-  return v === "reviews" || v === "debug" || v === "settings" ? v : "sessions";
+  return v === "reviews" || v === "debug" || v === "settings" || v === "chat" ? v : "sessions";
 }
 
 function stored(): Tab {
@@ -26,7 +26,9 @@ function stored(): Tab {
  * the panes but belongs to one (the phone's column strip).
  */
 export function makeTabs(onChange?: (tab: Tab) => void) {
-  let current: Tab = stored();
+  // A remembered tab whose button is hidden (Debug with debug mode off) is not a place to land.
+  const remembered = stored();
+  let current: Tab = document.querySelector<HTMLElement>(`[data-tab=${remembered}]`)?.hidden ? "sessions" : remembered;
   const show = (tab: Tab) => {
     current = tab;
     for (const [name, id] of Object.entries(PANES) as [Tab, string][]) {

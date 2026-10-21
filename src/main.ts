@@ -160,6 +160,26 @@ async function answer(card: Card, questionIndex: number, optionIndex: number, bu
   }
 }
 
+/** Debug mode, as last read from the config; the board filter (Maya's own card) reads it. */
+let debugMode = false;
+
+/** Show or hide the Debug tab; hiding it while it is open returns to Sessions. */
+export function applyDebugMode(on: boolean): void {
+  debugMode = on;
+  for (const btn of document.querySelectorAll<HTMLElement>("[data-tab=debug]")) btn.hidden = !on;
+  if (!on && tabs?.current() === "debug") tabs.show("sessions");
+}
+
+export const isDebugMode = (): boolean => debugMode;
+
+async function loadDebugMode(): Promise<void> {
+  try {
+    applyDebugMode((await invoke<{ debugMode?: boolean }>("get_config")).debugMode === true);
+  } catch {
+    /* no config yet: the Debug tab stays as the page has it */
+  }
+}
+
 async function start(): Promise<void> {
   void initSettings();
   void updates.init();
@@ -176,6 +196,8 @@ async function start(): Promise<void> {
     if (searchHost) searchHost.hidden = tab !== "sessions";
     if (rememberedHost) rememberedHost.hidden = tab !== "sessions";
   });
+  void loadDebugMode();
+  window.addEventListener("maya:config-changed", () => void loadDebugMode());
   // Cmd+F (Ctrl+F) finds a session, unless a dialog is open over the board.
   window.addEventListener("keydown", (ev) => {
     if (ev.key.toLowerCase() === "f" && (ev.metaKey || ev.ctrlKey) && !ev.shiftKey && !ev.altKey && tabs?.current() === "sessions" && !document.getElementById("modal-host")?.childElementCount) {
