@@ -138,14 +138,25 @@ fn answer(segment: &str, fillers: &[String]) -> Answer {
 }
 
 /// Words that stop an announced action when they are the whole utterance.
-const STOP_WORDS: &[&str] = &["no", "nope", "stop", "wait", "cancel", "abort", "hold", "never", "nevermind", "don't"];
+const STOP_WORDS: &[&str] = &["no", "nope", "stop", "wait", "cancel", "abort", "hold", "never", "nevermind", "don't", "not", "nah"];
 /// Words that may sit beside a stop word ("hold on", "never mind", "stop that").
-const STOP_COMPANIONS: &[&str] = &["on", "mind", "now", "it", "that", "do", "thanks"];
+const STOP_COMPANIONS: &[&str] = &["on", "mind", "now", "it", "that", "do", "thanks", "yet"];
 
 fn is_stop_with(text: &str, fillers: &[String]) -> bool {
     let n = normalise(text);
     let words: Vec<&str> = n.split_whitespace().filter(|w| !fillers.iter().any(|f| f == w)).collect();
     words.len() <= 4 && words.iter().any(|w| STOP_WORDS.contains(w)) && words.iter().all(|w| STOP_WORDS.contains(w) || STOP_COMPANIONS.contains(w))
+}
+
+/// Sounds a recogniser hears in silence or hesitation; never a correction.
+const NOISE_WORDS: &[&str] = &["um", "uh", "er", "erm", "ah", "hmm", "mm", "mhm"];
+
+/// True when a segment heard in the window is only her own announcement
+/// coming back (every word is one of hers) or noise, so it settles nothing.
+fn is_echo(ignored: &str, text: &str) -> bool {
+    let n = normalise(text);
+    let ours: Vec<&str> = ignored.split_whitespace().collect();
+    n.split_whitespace().all(|w| NOISE_WORDS.contains(&w) || ours.contains(&w))
 }
 
 /// True when a short utterance is only a stop: no, stop, wait, cancel, hold
@@ -255,7 +266,7 @@ impl Flow {
         match &self.state {
             State::Idle => "idle",
             State::AwaitingCommand { until } if now_ms <= *until => "awaiting-command",
-            State::Window { until } if now_ms <= *until => "window",
+            State::Window { until } if now_ms < *until => "window",
             _ => "idle",
         }
     }
@@ -279,16 +290,26 @@ impl Flow {
     pub fn on_segment(&mut self, text: &str, now_ms: u64) -> Vec<Effect> {
         self.expire(now_ms);
         let owned;
-        let text = match self.ignore.take() {
+        let in_window = matches!(self.state, State::Window { .. });
+        // Her line is one-shot, except while a window is open: the recogniser
+        // may split or garble her announcement over several segments, so it
+        // stays until the window closes.
+        let ignored = if in_window { self.ignore.clone() } else { self.ignore.take() };
+        let text = match ignored {
             Some(ignored) => match self.without_ignored(&ignored, text) {
+                Some(rest) if in_window && is_echo(&ignored, &rest) => return vec![],
                 Some(rest) => {
                     owned = rest;
                     owned.as_str()
                 }
                 None => return vec![],
             },
+            None if in_window && is_echo("", text) => return vec![],
             None => text,
         };
+        if in_window {
+            self.ignore = None;
+        }
         match std::mem::replace(&mut self.state, State::Idle) {
             State::Window { .. } => {
                 let found = extract(text, &self.spellings);
@@ -442,6 +463,41 @@ mod tests {
     }
 
     #[test]
+    fn a_split_or_garbled_echo_and_noise_leave_the_window_open() {
+        let mut f = Flow::new();
+        f.ignore_line("Telling api-fix: open the PR.");
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("telling api fix", 1), vec![]);
+        assert_eq!(f.on_segment("open the pr", 2), vec![]);
+        assert_eq!(f.on_segment("um", 3), vec![], "filler-only segments are dropped");
+        assert_eq!(f.on_segment("api fix", 4), vec![], "a variant made of her words is still her");
+        assert_eq!(f.state(5), "window");
+        // A real correction holds a word she did not say.
+        assert_eq!(f.on_segment("the other one", 6), vec![Effect::Correct("the other one".into())]);
+        assert_eq!(f.state(7), "idle");
+        // Closing the window ends the echo filter.
+        f.ignore_line("Telling api-fix: open the PR.");
+        f.open_window(10_000);
+        f.close_window();
+        assert_eq!(f.on_segment("Maya open the pr", 8), vec![Effect::Interpret("open the pr".into())]);
+    }
+
+    #[test]
+    fn not_now_is_a_stop_but_not_that_one_is_a_correction() {
+        for s in ["not now", "not yet", "nah"] {
+            assert!(is_stop(s), "{s}");
+        }
+        assert!(!is_stop("not that one"));
+        let mut f = Flow::new();
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("not now", 1), vec![Effect::Cancelled]);
+        f.open_window(10_000);
+        assert_eq!(f.on_segment("not that one", 1), vec![Effect::Correct("not that one".into())]);
+        assert_eq!(f.on_segment("Maya, not now", 2), vec![Effect::Stop]);
+        assert_eq!(f.on_segment("Maya, nah", 3), vec![Effect::Stop]);
+    }
+
+    #[test]
     fn maya_stop_outside_the_window_stops_her() {
         let mut f = Flow::new();
         assert_eq!(f.on_segment("Maya, stop", 1), vec![Effect::Stop]);
@@ -453,7 +509,8 @@ mod tests {
     fn an_expired_window_reads_idle() {
         let mut f = Flow::new();
         f.open_window(100);
-        assert_eq!(f.state(100), "window");
+        assert_eq!(f.state(99), "window");
+        assert_eq!(f.state(100), "idle", "the deadline itself is out of the window, as in Window::take_due");
         assert_eq!(f.state(101), "idle");
         assert_eq!(f.on_segment("no", 101), vec![], "a late word cancels nothing");
         f.open_window(100);
@@ -489,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn her_own_last_line_is_ignored_once_but_short_prompts_never_are() {
+    fn her_own_last_line_outside_the_window_is_ignored_once() {
         let mut f = Flow::new();
         f.ignore_line("Maya here. hexgrid needs a decision");
         assert_eq!(f.on_segment("Maya here hexgrid needs a decision", 1000), vec![]);
