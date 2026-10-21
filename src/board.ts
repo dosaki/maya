@@ -55,10 +55,6 @@ export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) =>
   return board;
 }
 
-/**
- * Replaces the board inside `host` with `fresh`, carrying each column's
- * scroll position over so a repaint does not jump the lists back to the top.
- */
 /** The cards the board shows: Maya's own brain card only in debug mode. */
 export function boardCards(cards: Card[], debug: boolean): Card[] {
   return debug ? cards : cards.filter((c) => !c.brain);
@@ -69,6 +65,10 @@ export function countable(cards: Card[]): Card[] {
   return cards.filter((c) => !c.brain);
 }
 
+/**
+ * Replaces the board inside `host` with `fresh`, carrying each column's
+ * scroll position over so a repaint does not jump the lists back to the top.
+ */
 export function swapBoard(host: HTMLElement, fresh: HTMLElement): void {
   const scroll = new Map<string, number>();
   for (const col of host.querySelectorAll<HTMLElement>(".column")) {

@@ -10,7 +10,6 @@ import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
 import { makeReviewsView, OPEN_SETTINGS_GROUP, reviewActionFor, waitingCount } from "./reviews";
-export { boardCards, countable };
 import { filterCards, makeSessionSearch } from "./search";
 import { initRemembered } from "./remembered";
 import { makeTabs } from "./tabs";
