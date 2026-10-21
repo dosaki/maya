@@ -505,13 +505,13 @@ fn announcement(speak_notifications: bool, muted: bool, focus: bool) -> (bool, b
 }
 
 pub(crate) fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify, speak, muted, eleven_voice, assistant, volume) = {
+    let (cards, wants_notify, speak, muted, eleven_voice, assistant, volume, wake_word) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
         let cards = local_cards(&mut store);
         let c = &store.config;
         let eleven = if c.speak_notifications && !c.muted { eleven_wanted(c, store.claude_dir()) } else { None };
-        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant, c.voice_loudness())
+        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant, c.voice_loudness(), c.listen_word())
     };
     // Due names are typed into the terminals with no lock held.
     actions::run_due_renames(&local(&app.state::<AppState>()));
@@ -558,9 +558,10 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
         }
     }
     let _ = app.emit("sessions", &cards);
-    // Mirroring Mayas see what this page shows.
+    // Mirroring Mayas see what this page shows, and answer to the same word.
     let server = app.state::<AppState>().network.lock().unwrap().server.clone();
     if let Some(s) = server {
+        s.mirror_wake_word(Some(wake_word));
         s.mirror(cards.clone());
     }
     remembered_app::publish(app);
@@ -1216,6 +1217,10 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
         before
     };
     apply_config_change(&app, &before, &config);
+    // The voice panel names the word.
+    if before.listen_word() != config.listen_word() {
+        listener::emit_voice(&app);
+    }
     if before.git_connections() != config.git_connections() {
         git::settings_changed(&app);
     }

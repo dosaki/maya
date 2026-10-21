@@ -273,6 +273,23 @@ describe("renderSettings", () => {
     expect(h.onClonesDir).toHaveBeenCalledWith("~/tmp/reviews");
   });
 
+  it("takes a wake word, names it on the listen switch, and shows Maya when blank", () => {
+    const h = { ...handlers(), onListenWord: vi.fn() };
+    const blank = renderSettings({ ...voiceBase }, h);
+    const input = blank.querySelector<HTMLInputElement>("input[name=listenWord]")!;
+    expect(input.placeholder).toBe("Maya");
+    expect(input.value).toBe("");
+    expect(blank.textContent).toContain('Listen for "Maya"');
+    input.value = "  Jarvis ";
+    input.dispatchEvent(new Event("change"));
+    expect(h.onListenWord).toHaveBeenCalledWith("Jarvis");
+    const named = renderSettings({ ...voiceBase, listenWord: "Jarvis" }, h);
+    expect(named.querySelector<HTMLInputElement>("input[name=listenWord]")!.value).toBe("Jarvis");
+    expect(named.textContent).toContain('Listen for "Jarvis"');
+    const assistant = renderSettings({ ...voiceBase, networkRole: "assistant", network: { role: "assistant", code: null, assistants: [], assistant: { connected: true, mainName: "desk", error: null } } }, h);
+    expect(assistant.querySelector<HTMLInputElement>("input[name=listenWord]")!.disabled).toBe(true);
+  });
+
   it("shows the projects directory and reports changes", () => {
     const h = handlers();
     const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);

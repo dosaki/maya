@@ -34,11 +34,13 @@ pub struct VoiceStatus {
     pub pending: Option<String>,
     /// Turns ever added to the history; the page refetches it when this changes.
     pub turns: u64,
+    /// The word she listens for, filled in from the config as the page reads it.
+    pub word: String,
 }
 
 impl Default for VoiceStatus {
     fn default() -> Self {
-        Self { listening: false, state: "off".into(), detail: String::new(), level: 0.0, heard: String::new(), said: String::new(), pending: None, turns: 0 }
+        Self { listening: false, state: "off".into(), detail: String::new(), level: 0.0, heard: String::new(), said: String::new(), pending: None, turns: 0, word: wake::DEFAULT_WAKE_WORD.into() }
     }
 }
 
@@ -50,8 +52,17 @@ pub struct VoiceTurn {
     pub at: u64,
 }
 
-fn emit_voice(app: &AppHandle) {
-    let status = app.state::<AppState>().voice.lock().unwrap().status.clone();
+/// The status as the page gets it. Takes the store lock, then the voice
+/// lock, one after the other: the caller must hold neither.
+fn page_status(state: &AppState) -> VoiceStatus {
+    let word = state.store.lock().unwrap().config.listen_word();
+    let mut status = state.voice.lock().unwrap().status.clone();
+    status.word = word;
+    status
+}
+
+pub(crate) fn emit_voice(app: &AppHandle) {
+    let status = page_status(&app.state::<AppState>());
     let _ = app.emit("voice", &status);
 }
 
@@ -476,6 +487,8 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
 /// Handles one final segment heard during listener run `generation` (or a
 /// yes/no from the page). Nothing happens once that run is stopped or replaced.
 fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>) {
+    // Read first: the store lock is not held with the voice lock.
+    let word = app.state::<AppState>().store.lock().unwrap().config.listen_word();
     let effects = {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
@@ -486,7 +499,10 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>)
         let now = now_ms();
         let before = v.flow.as_ref().map_or("none", |f| f.state(now)).to_string();
         let effects = match v.flow.as_mut() {
-            Some(f) => f.on_segment(text, now),
+            Some(f) => {
+                f.set_word(&word);
+                f.on_segment(text, now)
+            }
             None => vec![],
         };
         log::line("wake", format!("heard ({before}): {text:?} → {}", describe_effects(&effects)));
@@ -506,7 +522,7 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>)
         emit_voice(app);
         return;
     }
-    if let Some(turn) = user_turn(&effects) {
+    if let Some(turn) = user_turn(&effects, &word) {
         remember(app, "user", &turn);
     }
     for e in effects {
@@ -930,7 +946,7 @@ pub(crate) fn voice_confirm(app: AppHandle, yes: bool) {
 
 #[tauri::command]
 pub(crate) fn voice_status(state: TauriState<AppState>) -> VoiceStatus {
-    state.voice.lock().unwrap().status.clone()
+    page_status(&state)
 }
 
 #[tauri::command]
@@ -966,10 +982,10 @@ pub(crate) fn describe_effects(effects: &[wake::Effect]) -> String {
         .join(", ")
 }
 
-pub(crate) fn user_turn(effects: &[wake::Effect]) -> Option<String> {
+pub(crate) fn user_turn(effects: &[wake::Effect], word: &str) -> Option<String> {
     effects.iter().find_map(|e| match e {
         wake::Effect::Interpret(cmd) => Some(cmd.clone()),
-        wake::Effect::Say(_) => Some("Maya".into()),
+        wake::Effect::Say(_) => Some(word.into()),
         wake::Effect::Execute(_) => Some("yes".into()),
         wake::Effect::Cancelled => Some("no".into()),
     })
@@ -1122,11 +1138,12 @@ mod tests {
         let mut f = Flow::new();
         // Talk before the wake word stays out of the history.
         let heard = f.on_segment("the password is hunter2 anyway Maya what's waiting", 1000);
-        assert_eq!(user_turn(&heard).as_deref(), Some("what's waiting"));
-        assert_eq!(user_turn(&[Effect::Say("Yes?".into())]).as_deref(), Some("Maya"));
-        assert_eq!(user_turn(&[Effect::Execute(json!({"kind":"reply"}))]).as_deref(), Some("yes"));
-        assert_eq!(user_turn(&[Effect::Cancelled]).as_deref(), Some("no"));
-        assert_eq!(user_turn(&[]), None);
+        assert_eq!(user_turn(&heard, "Maya").as_deref(), Some("what's waiting"));
+        assert_eq!(user_turn(&[Effect::Say("Yes?".into())], "Maya").as_deref(), Some("Maya"));
+        assert_eq!(user_turn(&[Effect::Say("Yes?".into())], "Jarvis").as_deref(), Some("Jarvis"), "a bare wake is the word she was called by");
+        assert_eq!(user_turn(&[Effect::Execute(json!({"kind":"reply"}))], "Maya").as_deref(), Some("yes"));
+        assert_eq!(user_turn(&[Effect::Cancelled], "Maya").as_deref(), Some("no"));
+        assert_eq!(user_turn(&[], "Maya"), None);
     }
 
     #[test]

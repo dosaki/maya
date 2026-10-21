@@ -158,6 +158,8 @@ pub struct Server {
     /// The main's last board for mirroring Mayas: one board and the serial it was taken at.
     mirror: Option<MirrorBoard>,
     mirror_serial: u64,
+    /// The word this main listens for, sent with its board; `None` sends none.
+    wake_word: Option<String>,
     /// This main's name, so an assistant with the same name gets a label of
     /// its own (the main's own name means the main in a request).
     main_name: String,
@@ -172,7 +174,7 @@ struct MirrorBoard {
 
 impl Server {
     fn new(paired: Vec<PairedAssistant>, main_name: String) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, main_name }
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, wake_word: None, main_name }
     }
 
     /// The entry `id` lets its Maya mirror.
@@ -477,6 +479,16 @@ impl ServerHandle {
         s.mirror = Some(MirrorBoard { serial: s.mirror_serial, cards, remembered });
     }
 
+    /// The word this main listens for, which mirroring Mayas answer to as
+    /// well; a change goes out with the board on the next tick.
+    pub fn mirror_wake_word(&self, word: Option<String>) {
+        let mut s = lock(&self.shared);
+        if s.wake_word != word {
+            s.wake_word = word;
+            s.bump_mirror();
+        }
+    }
+
     /// The merged "was running" list for mirroring Mayas; it goes out with
     /// the board on the next tick when it changed.
     pub fn mirror_remembered(&self, rows: Vec<RememberedRow>) {
@@ -519,7 +531,7 @@ impl ServerHandle {
             if on {
                 s.bump_mirror();
             } else if let Some(c) = s.conns.get(id) {
-                let _ = c.tx.send(Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![] });
+                let _ = c.tx.send(Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![], wake_word: None });
             }
             (s.label(id), s.status(now_ms()))
         };
@@ -1005,7 +1017,7 @@ fn mirror_due(ctx: &Ctx, link: &Link) -> Option<Down> {
         .collect();
     link.mirror_sent.set(board.serial);
     link.mirror_at.set(Some(Instant::now()));
-    Some(Down::Mirror { allowed: true, cards, machines: s.mirror_machines(&ctx.main_name, &link.id), remembered })
+    Some(Down::Mirror { allowed: true, cards, machines: s.mirror_machines(&ctx.main_name, &link.id), remembered, wake_word: s.wake_word.clone() })
 }
 
 /// Runs a registered connection until it closes; returns why.
@@ -1658,6 +1670,22 @@ mod tests {
     }
 
     #[test]
+    fn the_main_sends_its_wake_word_with_the_board_and_again_when_it_changes() {
+        let (handle, port) = test_server();
+        let (mut phone, id, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        handle.mirror_wake_word(Some("Jarvis".into()));
+        handle.mirror(vec![]);
+        let Down::Mirror { wake_word, .. } = recv(&mut phone) else { panic!("expected a mirror") };
+        assert_eq!(wake_word.as_deref(), Some("Jarvis"));
+        handle.mirror_wake_word(Some("Jarvis".into()));
+        handle.mirror_wake_word(Some("Friday".into()));
+        let Down::Mirror { wake_word, .. } = recv(&mut phone) else { panic!("expected a mirror") };
+        assert_eq!(wake_word.as_deref(), Some("Friday"), "a new word goes out without a board change");
+        handle.stop();
+    }
+
+    #[test]
     fn turning_the_switch_off_tells_the_maya_and_refuses_its_requests_and_on_mirrors_again() {
         let counter = Arc::new(Counter::default());
         let (handle, port) = test_server_with(counter.clone());
@@ -1665,7 +1693,7 @@ mod tests {
         wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
         handle.set_mirror(&id, false).unwrap();
         assert!(!counter.saved.lock().unwrap().iter().find(|a| a.id == id).unwrap().mirror, "the switch is saved");
-        assert_eq!(recv(&mut phone), Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![] });
+        assert_eq!(recv(&mut phone), Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![], wake_word: None });
         send(&mut phone, &Up::Request { id: 1, machine: None, request: Request::Command(CommandKind::Compact { session: "s1".into() }) });
         let Down::Response { id: 1, ok: false, error: Some(e), .. } = recv(&mut phone) else { panic!("expected a refusal") };
         assert!(e.ends_with("has not allowed this Maya to control its sessions."), "{e}");

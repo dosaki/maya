@@ -109,6 +109,10 @@ pub enum Down {
         /// The main's merged "was running" list; its own rows carry its name.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remembered: Vec<crate::remembered::RememberedRow>,
+        /// The word the main listens for, which a mirroring Maya's voice
+        /// answers to too; an older main, or a phone main, sends none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wake_word: Option<String>,
     },
     /// The answer to the `request` with this id.
     Response { id: u64, ok: bool, #[serde(default)] error: Option<String>, #[serde(default)] data: Option<Value> },
@@ -249,9 +253,13 @@ mod tests {
         assert_eq!(decode_up(&encode(&dirs)).unwrap(), dirs);
         let resp = Down::Response { id: 7, ok: false, error: Some("no".into()), data: None };
         assert_eq!(decode_down(&encode(&resp)).unwrap(), resp);
-        let mirror = Down::Mirror { allowed: true, cards: vec![], machines: vec![MachineInfo { name: "desk".into(), hostname: "desk".into(), platform: "macos".into(), connected: true }], remembered: vec![] };
+        let mirror = Down::Mirror { allowed: true, cards: vec![], machines: vec![MachineInfo { name: "desk".into(), hostname: "desk".into(), platform: "macos".into(), connected: true }], remembered: vec![], wake_word: None };
         assert_eq!(decode_down(&encode(&mirror)).unwrap(), mirror);
-        assert_eq!(decode_down(r#"{"type":"mirror","allowed":false}"#).unwrap(), Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![] });
+        assert_eq!(decode_down(r#"{"type":"mirror","allowed":false}"#).unwrap(), Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![], wake_word: None });
+        assert!(!encode(&mirror).contains("wake_word"), "no word, no field");
+        let worded = Down::Mirror { allowed: true, cards: vec![], machines: vec![], remembered: vec![], wake_word: Some("Jarvis".into()) };
+        assert!(encode(&worded).contains(r#""wake_word":"Jarvis""#));
+        assert_eq!(decode_down(&encode(&worded)).unwrap(), worded);
         let offered = Down::Welcome { name: "desk".into(), mirror: Some(true), caps: vec![] };
         assert_eq!(decode_down(&encode(&offered)).unwrap(), offered);
         assert!(!encode(&Down::Welcome { name: "desk".into(), mirror: None, caps: vec![] }).contains("mirror"), "no offer, no field");
@@ -432,8 +440,8 @@ mod tests {
     #[test]
     fn a_mirror_carries_the_remembered_rows_only_when_there_are_some() {
         let rows = vec![crate::remembered::RememberedRow { machine: Some("desk".into()), waiting: false, entry: was("s1") }];
-        let m = Down::Mirror { allowed: true, cards: vec![], machines: vec![], remembered: rows };
+        let m = Down::Mirror { allowed: true, cards: vec![], machines: vec![], remembered: rows, wake_word: None };
         assert_eq!(decode_down(&encode(&m)).unwrap(), m);
-        assert!(!encode(&Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![] }).contains("remembered"));
+        assert!(!encode(&Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![], wake_word: None }).contains("remembered"));
     }
 }

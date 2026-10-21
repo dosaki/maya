@@ -818,7 +818,7 @@ impl ClientNotify for HubClientNotify {
     fn paired(&self, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
-        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false });
+        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false, wake_word: None });
         self.refresh();
     }
     fn disconnected(&self, error: &str) {
@@ -859,6 +859,16 @@ impl ClientNotify for HubClientNotify {
         self.set(|l| l.voice = voice);
         // So the voice's offer follows the link.
         self.refresh();
+    }
+    fn main_wake_word(&self, word: Option<&str>) {
+        let Some(h) = self.hub.upgrade() else { return };
+        if h.link.lock().unwrap().wake_word.as_deref() == word {
+            return;
+        }
+        self.set(|l| l.wake_word = word.map(String::from));
+        if let Some(v) = h.voice.get() {
+            v.set_wake_word(&maya_core::wake::wake_word(word));
+        }
     }
     fn mirrored_remembered(&self, rows: Vec<RememberedRow>) {
         if self.stop.load(Ordering::SeqCst) {
@@ -1138,6 +1148,19 @@ mod tests {
         // away machine so its next mirror does not bring them back.
         let tried = maya_core::log::lines().iter().any(|l| l.source == "remembered" && l.text.starts_with(&format!("{machine} did not forget its sessions")));
         assert!(tried, "the Forget was sent through the main, not skipped");
+    }
+
+    #[test]
+    fn a_joined_phone_shows_the_main_s_wake_word() {
+        let hub = test_hub();
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("desk".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        let word = || hub.link.lock().unwrap().wake_word.clone();
+        assert_eq!(word(), None, "nothing until the main says");
+        notify.main_wake_word(Some("Jarvis"));
+        assert_eq!(word().as_deref(), Some("Jarvis"), "the page's status carries the link");
+        notify.main_wake_word(None);
+        assert_eq!(word(), None, "an older main says nothing");
     }
 
     #[test]

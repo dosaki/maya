@@ -50,6 +50,8 @@ export interface AssistantLink {
   retrying?: boolean;
   /** What the main said about mirroring at the last connect. */
   mirror?: "allowed" | "refused" | "unsupported" | null;
+  /** The word the main listens for, from its last board; none from an older main. */
+  wakeWord?: string | null;
 }
 
 /** The live `network_status`/`network` event payload. */
@@ -102,6 +104,8 @@ export interface SettingsModel {
   voiceVolume?: number;
   error: string | null;
   listen: boolean;
+  /** The word Maya listens for; blank (or absent) is "Maya". */
+  listenWord?: string;
   microphone: string;
   microphones: string[];
   /** The agent that powers Maya; null until chosen (the first-start modal asks). */
@@ -202,6 +206,7 @@ export interface SettingsHandlers {
   onTryVoice(): void;
   onVoiceVolume(percent: number): void;
   onListen(on: boolean): void;
+  onListenWord?(word: string): void;
   onMicrophone(name: string): void;
   onAgent(agent: Harness): void;
   /** Saves the model paired with the agent the Agent select shows. */
@@ -278,6 +283,7 @@ interface ConfigJson {
   elevenlabsVoiceId?: string | null;
   voiceVolume?: number;
   listen: boolean;
+  listenWord?: string | null;
   microphone?: string | null;
   agent?: Harness | null;
   agentModel?: string;
@@ -873,7 +879,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   listenBox.checked = isAssistant ? false : model.listen;
   listenBox.disabled = isAssistant;
   listenBox.addEventListener("change", () => h.onListen(listenBox.checked));
-  listenLabel.append(listenBox, document.createTextNode(' Listen for "Maya" (on-device speech recognition)'));
+  const word = model.listenWord?.trim() || "Maya";
+  listenLabel.append(listenBox, document.createTextNode(` Listen for "${word}" (on-device speech recognition)`));
   listening.append(listenLabel);
   if (isAssistant) {
     // The main Maya owns notifications and listening while this machine is
@@ -893,6 +900,23 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     err.textContent = model.listenError;
     listening.append(err);
   }
+
+  const wordLabel = document.createElement("label");
+  wordLabel.textContent = "Wake word";
+  const wordInput = document.createElement("input");
+  wordInput.type = "text";
+  wordInput.name = "listenWord";
+  wordInput.placeholder = "Maya";
+  wordInput.value = model.listenWord ?? "";
+  wordInput.disabled = isAssistant;
+  wordInput.addEventListener("change", () => h.onListenWord?.(wordInput.value.trim()));
+  wordLabel.append(wordInput);
+  listening.append(wordLabel);
+  const wordHint = document.createElement("div");
+  wordHint.className = "settings__hint";
+  wordHint.dataset.for = "listenWord";
+  wordHint.textContent = "Blank is \"Maya\". A phone joined to this Maya listens for the same word. Pick a word the speech recognition spells the way you type it.";
+  listening.append(wordHint);
 
   const recLabel = document.createElement("label");
   recLabel.textContent = "Speech recognition";
@@ -1493,6 +1517,7 @@ export async function initSettings(): Promise<void> {
     model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
     model.voiceVolume = c.voiceVolume ?? 100;
     model.listen = c.listen;
+    model.listenWord = c.listenWord ?? "";
     model.microphone = c.microphone ?? "";
     model.agent = c.agent ?? null;
     model.agentModel = c.agentModel ?? "";
@@ -1591,6 +1616,7 @@ export async function initSettings(): Promise<void> {
     onTryVoice: () => void run(() => invoke("try_voice")),
     onVoiceVolume: (percent) => void run(() => saveConfig({ voiceVolume: percent })),
     onListen: (on) => void run(async () => { await invoke("voice_listen", { on }); model.listen = on; }),
+    onListenWord: (word) => void run(() => saveConfig({ listenWord: word || null })),
     onMicrophone: (name) => void run(() => saveConfig({ microphone: name || null })),
     onAgent: (agent) => void run(() => saveConfig({ agent, agentModel: "" })),
     onAgentModel: (agent, id) => void run(() => saveConfig({ agent, agentModel: id })),

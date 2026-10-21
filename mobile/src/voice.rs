@@ -186,6 +186,11 @@ impl Voice {
         self.publish(&mut i);
     }
 
+    /// The word to answer to, the main's; the conversation so far stays.
+    pub fn set_wake_word(&self, word: &str) {
+        self.inner.lock().unwrap().flow.set_word(word);
+    }
+
     pub fn set_wake(&self, on: bool) {
         let mut i = self.inner.lock().unwrap();
         i.wake = on;
@@ -204,7 +209,7 @@ impl Voice {
     /// Off screen, or voice withdrawn: stop at once and forget the turn.
     fn reset(&self, i: &mut Inner) {
         i.generation += 1;
-        i.flow = Flow::new();
+        i.flow.reset();
         i.speaking = false;
         i.thinking = false;
         i.after = After::Idle;
@@ -266,7 +271,7 @@ impl Voice {
                 return;
             }
             if i.flow.state(now) == "awaiting-command" {
-                i.flow = Flow::new();
+                i.flow.reset();
                 self.io.stop_listening();
                 self.carry_on(&mut i);
                 self.publish(&mut i);
@@ -392,7 +397,7 @@ impl Voice {
         let window = i.flow.state((self.now)()) != "idle";
         if fatal || !i.wake || window {
             i.view.error = Some(message.to_string());
-            i.flow = Flow::new();
+            i.flow.reset();
             // A fatal error would fail again at once: no wake loop this session.
             if fatal {
                 i.wake = false;
@@ -688,7 +693,7 @@ impl Voice {
             Ok(Some(d)) => d,
             Ok(None) => Value::Null,
             Err(e) => {
-                i.flow = Flow::new();
+                i.flow.reset();
                 self.say(&mut i, &e, After::Idle);
                 self.publish(&mut i);
                 return;
@@ -911,6 +916,25 @@ mod tests {
         assert_eq!(io.take(), vec!["say Yes?"]);
         v.spoken(true);
         assert_eq!(io.take(), vec!["listen"]);
+    }
+
+    #[test]
+    fn the_wake_word_follows_the_main_and_survives_leaving_the_screen() {
+        let (v, io, _) = voice(vec![]);
+        v.set_wake_word("Jarvis");
+        v.set_wake(true);
+        io.take();
+        v.heard("Maya");
+        assert_eq!(io.take(), vec!["listen wake"], "Maya is chatter once the main's word is Jarvis");
+        v.heard("Jarvis");
+        assert_eq!(io.take(), vec!["say Yes?"]);
+        v.spoken(true);
+        io.take();
+        v.screen(false);
+        v.screen(true);
+        io.take();
+        v.heard("Jarvis");
+        assert_eq!(io.take(), vec!["say Yes?"], "the word outlives a reset");
     }
 
     #[test]

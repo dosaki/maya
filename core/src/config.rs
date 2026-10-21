@@ -94,7 +94,7 @@ pub struct Config {
     /// voice instead of playing the notification sound.
     #[serde(default = "default_true")]
     pub speak_notifications: bool,
-    /// The phone listens for "Maya" while its app is on screen. The desktop ignores it.
+    /// The phone listens for its main's wake word while its app is on screen. The desktop ignores it.
     #[serde(default)]
     pub wake_word: bool,
     /// Make no sound at all: no spoken lines and silent banners. Banners,
@@ -113,9 +113,13 @@ pub struct Config {
     /// Where PR review clones go when the project checkout is missing or busy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clones_dir: Option<String>,
-    /// Listen for the "Maya" wake word while the app runs.
+    /// Listen for the wake word while the app runs.
     #[serde(default)]
     pub listen: bool,
+    /// The wake word the user typed; read through `listen_word()`, which
+    /// gives "Maya" when it is blank. A phone follows its main's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_word: Option<String>,
     /// Microphone name for the listener; None picks the built-in one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub microphone: Option<String>,
@@ -378,6 +382,7 @@ impl Default for Config {
             elevenlabs_voice_id: None,
             clones_dir: None,
             listen: false,
+            listen_word: None,
             microphone: None,
             agent: None,
             agent_model: String::new(),
@@ -393,6 +398,11 @@ impl Default for Config {
 }
 
 impl Config {
+    /// The word Maya answers to: the typed one, or "Maya" when it is blank.
+    pub fn listen_word(&self) -> String {
+        crate::wake::wake_word(self.listen_word.as_deref())
+    }
+
     /// The voice volume in percent, kept within `MIN_VOICE_VOLUME`..=100.
     pub fn voice_volume(&self) -> u8 {
         self.voice_volume.clamp(MIN_VOICE_VOLUME, 100)
@@ -621,6 +631,16 @@ mod tests {
         assert!(c.wake_word);
         let old: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
         assert!(!old.wake_word);
+    }
+
+    #[test]
+    fn the_listen_word_defaults_to_maya_and_round_trips() {
+        assert_eq!(Config::default().listen_word(), "Maya");
+        assert!(!serde_json::to_string(&Config::default()).unwrap().contains("listenWord"));
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30,"listenWord":" Jarvis "}"#).unwrap();
+        assert_eq!(c.listen_word(), "Jarvis");
+        let blank: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30,"listenWord":""}"#).unwrap();
+        assert_eq!(blank.listen_word(), "Maya");
     }
 
     #[test]
