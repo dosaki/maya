@@ -176,6 +176,23 @@ impl Outage {
     }
 }
 
+/// What she says to "stop": "Cancelled." for a batch that was waiting in
+/// the window, "Stopped." for her own work, both, or "Nothing to stop.".
+pub(crate) fn stop_line(cancelled_batch: bool, stopped_work: bool) -> &'static str {
+    match (cancelled_batch, stopped_work) {
+        (true, true) => "Cancelled and stopped.",
+        (true, false) => "Cancelled.",
+        (false, true) => "Stopped.",
+        (false, false) => "Nothing to stop.",
+    }
+}
+
+/// Whether a reply may announce or run its actions: only when no stop came
+/// since its turn began (`turn_epoch` is the stop count then).
+pub(crate) fn may_act(turn_epoch: u64, stop_epoch: u64) -> bool {
+    turn_epoch == stop_epoch
+}
+
 /// How long an interrupted turn has to end.
 pub(crate) const INTERRUPT_GRACE_MS: u64 = 10_000;
 /// How long a turn may go without a line from her process.
@@ -446,6 +463,20 @@ mod tests {
         assert_eq!(stalled(t, true, t - SILENT_TURN_MS + 1, None), None);
         assert_eq!(stalled(t, true, t - SILENT_TURN_MS, None), Some("her turn went silent"));
         assert_eq!(stalled(5, true, 10, Some(10)), None, "a clock that went back is not a stall");
+    }
+
+    #[test]
+    fn a_stop_says_what_it_stopped_and_nothing_to_stop_only_when_nothing_was() {
+        assert_eq!(stop_line(true, false), "Cancelled.");
+        assert_eq!(stop_line(false, true), "Stopped.");
+        assert_eq!(stop_line(true, true), "Cancelled and stopped.");
+        assert_eq!(stop_line(false, false), "Nothing to stop.");
+    }
+
+    #[test]
+    fn a_reply_whose_turn_began_before_the_latest_stop_runs_nothing() {
+        assert!(may_act(3, 3));
+        assert!(!may_act(2, 3));
     }
 
     #[test]

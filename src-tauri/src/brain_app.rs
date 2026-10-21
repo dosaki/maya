@@ -19,7 +19,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, one_line, phone_dropped_note, refusal_feedback, sort_actions, speaks, spoken, Feedback, Outage, PhoneReply, PhoneWaiters, Waiter};
+use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, may_act, one_line, phone_dropped_note, refusal_feedback, sort_actions, speaks, spoken, stop_line, Feedback, Outage, PhoneReply, PhoneWaiters, Waiter};
 pub(crate) use crate::brain_route::{brain_card, handoff};
 use crate::listener::{self, Interpreted};
 use crate::store::now_ms;
@@ -91,6 +91,14 @@ pub(crate) struct BrainState {
     last_heard: u64,
     /// When her running turn was interrupted; None once it ended.
     interrupted_at: Option<u64>,
+    /// Stops so far; a turn records the count it began with, and a reply
+    /// from before the latest stop runs nothing.
+    stop_epoch: u64,
+    turn_epoch: u64,
+    /// The count the turn being replied to began with.
+    reply_epoch: u64,
+    /// Replies being acted on now (said, validated, announced).
+    replying: u32,
 }
 
 impl BrainState {
@@ -126,6 +134,10 @@ impl BrainState {
             outage: Outage::default(),
             last_heard: now_ms(),
             interrupted_at: None,
+            stop_epoch: 0,
+            turn_epoch: 0,
+            reply_epoch: 0,
+            replying: 0,
         }
     }
 }
@@ -403,6 +415,13 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
         if matches!(e, Event::TurnEnded { .. } | Event::TurnFailed { .. } | Event::Exited(_)) {
             b.interrupted_at = None;
         }
+        // A turn she starts herself begins now; a delivered one began when sent.
+        if e == Event::TurnStarted && !b.session.in_turn() {
+            b.turn_epoch = b.stop_epoch;
+        }
+        if matches!(e, Event::TurnEnded { .. } | Event::TurnFailed { .. }) {
+            b.reply_epoch = b.turn_epoch;
+        }
         let was_working = b.session.working();
         match &e {
             // Her agent names her session: that id is hidden and, once a turn
@@ -562,25 +581,35 @@ fn submit(app: &AppHandle, req: Request, waiter: Option<Sender<PhoneReply>>) -> 
     id
 }
 
-/// "Maya, stop": stops her running turn, her subagents and her queue.
+/// "Maya, stop": drops any batch waiting in the window, whoever asked for
+/// it, and stops her running turn, her subagents and her queue. A reply
+/// still being acted on runs nothing more (`may_act`).
 pub(crate) fn stop(app: &AppHandle, via: Via) {
-    let (outs, phones) = {
+    let dropped = app.state::<AppState>().window.lock().unwrap().cancel();
+    if let Some(batch) = &dropped {
+        log::line("action", format!("batch {} dropped by a stop", batch.id));
+        listener::settle(app, "idle");
+    }
+    let (outs, phones, stopped) = {
         let state = app.state::<AppState>();
         let mut b = state.brain.lock().unwrap();
-        if !b.ready {
-            (vec![Out::Said { via, say: "Nothing to stop.".into() }], vec![])
+        b.stop_epoch += 1;
+        if !b.ready || !(b.session.working() || b.replying > 0) {
+            (vec![], vec![], false)
         } else {
             // A stopped primer turn ends with no reply to swallow.
             b.swallow_reply = false;
-            let outs = b.session.stop(via);
+            // What to say is decided below, with the batch.
+            let outs: Vec<Out> = b.session.stop(via).into_iter().filter(|o| !matches!(o, Out::Said { .. })).collect();
             let phones = if outs.contains(&Out::Interrupt) { b.phones.drain() } else { vec![] };
-            (outs, phones)
+            (outs, phones, true)
         }
     };
     for tx in phones.into_iter().flatten() {
         let _ = tx.send(("Stopped.".into(), vec![]));
     }
     act(app, outs);
+    say_line(app, via, stop_line(dropped.is_some(), stopped));
     emit_status(app);
 }
 
@@ -680,7 +709,11 @@ fn act(app: &AppHandle, outs: Vec<Out>) {
     for o in outs {
         match o {
             Out::Deliver(r) => deliver(app, r),
-            Out::Reply { via, say, actions, errors } => reply(app, via, &say, &actions, errors),
+            Out::Reply { via, say, actions, errors } => {
+                app.state::<AppState>().brain.lock().unwrap().replying += 1;
+                reply(app, via, &say, &actions, errors);
+                app.state::<AppState>().brain.lock().unwrap().replying -= 1;
+            }
             Out::Busy { via, say } | Out::Said { via, say } => say_line(app, via, &say),
             Out::Interrupt => {
                 if with_driver(app, "interrupt her", |d| d.interrupt()) {
@@ -745,6 +778,7 @@ fn deliver(app: &AppHandle, r: Option<Request>) {
         let notes = if primer.is_some() { vec![] } else { b.session.take_notes() };
         b.first_sent_at.get_or_insert_with(now_ms);
         b.last_heard = now_ms();
+        b.turn_epoch = b.stop_epoch;
         (primer, notes)
     };
     let text = match primer {
@@ -776,7 +810,7 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
         }
     }
     let ctx = listener::voice_context(app);
-    let sorted = sort_actions(actions, |a| {
+    let mut sorted = sort_actions(actions, |a| {
         if a["kind"] == "resume_all" {
             interpreter::validate_resume_all(a, &ctx.remembered)
         } else {
@@ -784,10 +818,19 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
         }
     });
     let mut refused = errors;
-    refused.extend(sorted.refused);
+    refused.extend(std::mem::take(&mut sorted.refused));
     let (feedback, waiter) = {
         let state = app.state::<AppState>();
         let mut b = state.brain.lock().unwrap();
+        // The user said stop since this turn began: none of it runs.
+        if !may_act(b.reply_epoch, b.stop_epoch) {
+            log::line("brain", "a stop came since this turn began; its actions are dropped");
+            sorted.announce.clear();
+            sorted.run_now.clear();
+            sorted.watch.clear();
+            sorted.unwatch.clear();
+            refused.clear();
+        }
         for w in &sorted.watch {
             match b.watches.add(w, &ctx.cards) {
                 Ok(id) => b.session.note(format!("Watch {id} is set.")),
