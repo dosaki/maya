@@ -87,6 +87,10 @@ pub(crate) struct BrainState {
     /// Her session stopping on its own: the restart back-off and the one
     /// "my session stopped" line.
     outage: Outage,
+    /// When her process last wrote a line, or was last sent a message.
+    last_heard: u64,
+    /// When her running turn was interrupted; None once it ended.
+    interrupted_at: Option<u64>,
 }
 
 impl BrainState {
@@ -120,6 +124,8 @@ impl BrainState {
             last_say: String::new(),
             since: now_ms(),
             outage: Outage::default(),
+            last_heard: now_ms(),
+            interrupted_at: None,
         }
     }
 }
@@ -296,6 +302,8 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
         b.primer = primer.clone();
         b.swallow_reply = false;
         b.since = now_ms();
+        b.last_heard = now_ms();
+        b.interrupted_at = None;
         // A fresh session reads the past conversation first; a watch that
         // fired while she was down wakes her.
         let mut outs = Vec::new();
@@ -313,6 +321,8 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
     }
     let handle = app.clone();
     std::thread::spawn(move || events(&handle, generation, rx));
+    let handle = app.clone();
+    std::thread::spawn(move || watchdog(&handle, generation));
     act(app, outs);
     emit_status(app);
 }
@@ -331,6 +341,38 @@ fn events(app: &AppHandle, generation: u64, rx: Receiver<Event>) {
             break;
         }
     }
+}
+
+/// Watches run `generation` for a turn that ignores a stop or goes silent
+/// (`brain_route::stalled`), and restarts her session when one does; ends
+/// with the run.
+fn watchdog(app: &AppHandle, generation: u64) {
+    let why = loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let state = app.state::<AppState>();
+        let b = state.brain.lock().unwrap();
+        if b.generation != generation {
+            return;
+        }
+        if let Some(why) = brain_route::stalled(now_ms(), b.session.in_turn(), b.last_heard, b.interrupted_at) {
+            break why;
+        }
+    };
+    log::line("brain", format!("{why}; restarting her session"));
+    let say = {
+        let state = app.state::<AppState>();
+        let mut b = state.brain.lock().unwrap();
+        if b.generation != generation {
+            return;
+        }
+        b.outage.say_once()
+    };
+    // The quick interpreter takes what she had; she resumes where she was.
+    shutdown(app);
+    if say {
+        post(app, STOPPED, Via::Maya);
+    }
+    start_run(app, None);
 }
 
 /// What an exit leaves to do once the brain lock is released.
@@ -356,6 +398,10 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
         let mut b = state.brain.lock().unwrap();
         if b.generation != generation {
             return false;
+        }
+        b.last_heard = now_ms();
+        if matches!(e, Event::TurnEnded { .. } | Event::TurnFailed { .. } | Event::Exited(_)) {
+            b.interrupted_at = None;
         }
         let was_working = b.session.working();
         match &e {
@@ -637,7 +683,14 @@ fn act(app: &AppHandle, outs: Vec<Out>) {
             Out::Reply { via, say, actions, errors } => reply(app, via, &say, &actions, errors),
             Out::Busy { via, say } | Out::Said { via, say } => say_line(app, via, &say),
             Out::Interrupt => {
-                let _ = with_driver(app, "interrupt her", |d| d.interrupt());
+                if with_driver(app, "interrupt her", |d| d.interrupt()) {
+                    // Her turn must end soon now: the watchdog checks it does.
+                    let state = app.state::<AppState>();
+                    let mut b = state.brain.lock().unwrap();
+                    if b.session.in_turn() {
+                        b.interrupted_at.get_or_insert(now_ms());
+                    }
+                }
                 let dropped = app.state::<AppState>().window.lock().unwrap().cancel();
                 if let Some(batch) = dropped {
                     log::line("action", format!("batch {} dropped by a stop", batch.id));
@@ -645,6 +698,7 @@ fn act(app: &AppHandle, outs: Vec<Out>) {
                 }
             }
             Out::Compact => {
+                app.state::<AppState>().brain.lock().unwrap().last_heard = now_ms();
                 if !with_driver(app, "compact her", |d| d.compact()) {
                     // A driver that compacts itself (or could not be written to): the
                     // compaction turn ends here, so the queue does not wait on it.
@@ -690,6 +744,7 @@ fn deliver(app: &AppHandle, r: Option<Request>) {
         };
         let notes = if primer.is_some() { vec![] } else { b.session.take_notes() };
         b.first_sent_at.get_or_insert_with(now_ms);
+        b.last_heard = now_ms();
         (primer, notes)
     };
     let text = match primer {

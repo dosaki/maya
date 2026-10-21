@@ -176,6 +176,25 @@ impl Outage {
     }
 }
 
+/// How long an interrupted turn has to end.
+pub(crate) const INTERRUPT_GRACE_MS: u64 = 10_000;
+/// How long a turn may go without a line from her process.
+pub(crate) const SILENT_TURN_MS: u64 = 600_000;
+
+/// Why her session must be restarted now, if it must: her turn did not end
+/// within `INTERRUPT_GRACE_MS` of an interrupt, or her process said nothing
+/// for `SILENT_TURN_MS` while a turn ran (`last_heard` is the later of her
+/// last line and the last message sent). Either way voice would go dead.
+pub(crate) fn stalled(now: u64, in_turn: bool, last_heard: u64, interrupted_at: Option<u64>) -> Option<&'static str> {
+    if !in_turn {
+        return None;
+    }
+    if interrupted_at.is_some_and(|t| now.saturating_sub(t) >= INTERRUPT_GRACE_MS) {
+        return Some("her turn did not stop");
+    }
+    (now.saturating_sub(last_heard) >= SILENT_TURN_MS).then_some("her turn went silent")
+}
+
 /// Maya's follow-up to one of her replies (its refused actions): internal,
 /// and carrying that reply's via, so her answer goes back the same way.
 pub(crate) fn follow_up(via: Via, text: &str) -> Request {
@@ -374,6 +393,17 @@ mod tests {
         assert!(o.say_once(), "a stall reports a new outage");
         assert!(!o.say_once());
         assert_eq!(o.exited(), (std::time::Duration::from_secs(30), false), "the stall's outage was reported already");
+    }
+
+    #[test]
+    fn a_turn_that_ignores_a_stop_or_goes_silent_restarts_her_session() {
+        let t = 1_000_000;
+        assert_eq!(stalled(t, false, 0, Some(0)), None, "no turn runs: nothing to wait for");
+        assert_eq!(stalled(t, true, t, Some(t - INTERRUPT_GRACE_MS + 1)), None);
+        assert_eq!(stalled(t, true, t, Some(t - INTERRUPT_GRACE_MS)), Some("her turn did not stop"));
+        assert_eq!(stalled(t, true, t - SILENT_TURN_MS + 1, None), None);
+        assert_eq!(stalled(t, true, t - SILENT_TURN_MS, None), Some("her turn went silent"));
+        assert_eq!(stalled(5, true, 10, Some(10)), None, "a clock that went back is not a stall");
     }
 
     #[test]

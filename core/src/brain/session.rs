@@ -235,6 +235,12 @@ impl Session {
         vec![Out::Interrupt, Out::Said { via, say: "Stopped.".into() }]
     }
 
+    /// Her own turn runs (a delivered message, one she started herself, or
+    /// a compaction); her background tasks do not count.
+    pub fn in_turn(&self) -> bool {
+        self.turn_running
+    }
+
     pub fn working(&self) -> bool {
         self.turn_running || !self.tasks.is_empty()
     }
@@ -515,6 +521,18 @@ mod tests {
         s.submit(req("b", Via::Voice));
         s.stop(Via::Voice);
         assert!(s.on_event(&Event::TurnFailed { context_tokens: None }, None).is_empty(), "an interrupted turn says nothing");
+    }
+
+    #[test]
+    fn in_turn_is_her_turn_alone_not_her_tasks() {
+        let mut s = Session::new(true);
+        assert!(!s.in_turn());
+        s.submit(req("a", Via::Chat));
+        assert!(s.in_turn());
+        s.on_event(&Event::TaskStarted("t".into()), None);
+        s.on_event(&Event::TurnEnded { text: "ok".into(), context_tokens: None }, None);
+        assert!(!s.in_turn());
+        assert!(s.working(), "a task still runs");
     }
 
     #[test]
