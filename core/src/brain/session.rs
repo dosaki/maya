@@ -13,10 +13,35 @@ pub const COMPACT_AT_PERCENT: u8 = 80;
 pub const MAX_NOTES: usize = 50;
 const NOTES_DROPPED: &str = "(older changes dropped)";
 
+/// Her job while she answers one of Maya's own follow-ups (refused actions).
+pub const CHECKING: &str = "checking my last actions";
+/// Her job during a turn of her own: a wake, notes, the primer.
+pub const LOOKING: &str = "looking at what changed";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
     pub text: String,
+    /// How the reply goes back. An internal request carries the via of the
+    /// user request it follows up, so her answer goes back the same way.
     pub via: Via,
+    /// Maya's own follow-up, not the user's words: never posted to Chat as a
+    /// user turn and never answered with a busy line.
+    pub internal: bool,
+}
+
+impl Request {
+    pub fn new(text: &str, via: Via) -> Request {
+        Request { text: text.into(), via, internal: false }
+    }
+
+    pub fn internal(text: &str, via: Via) -> Request {
+        Request { text: text.into(), via, internal: true }
+    }
+
+    /// A request the user made, as opposed to one of Maya's or her own.
+    fn from_user(&self) -> bool {
+        !self.internal && self.via != Via::Maya
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,7 +99,8 @@ impl Session {
         if !self.turn_running {
             return vec![self.deliver(Some(req))];
         }
-        let busy = (!self.background).then(|| Out::Busy {
+        // Her own turns and Maya's follow-ups queue without a word.
+        let busy = (!self.background && req.from_user()).then(|| Out::Busy {
             via: req.via,
             say: match &self.job {
                 Some(job) => format!("I'm in the middle of {job}, I'll do that next."),
@@ -232,7 +258,11 @@ impl Session {
         self.stopped = false;
         self.wake_pending = false;
         self.current = Some(req.as_ref().map_or(Via::Maya, |r| r.via));
-        self.job = req.as_ref().map(|r| short_job(&r.text));
+        self.job = Some(match &req {
+            Some(r) if r.internal => CHECKING.to_string(),
+            Some(r) if r.via != Via::Maya => short_job(&r.text),
+            _ => LOOKING.to_string(),
+        });
         self.in_flight = req.clone();
         Out::Deliver(req)
     }
@@ -261,7 +291,7 @@ mod tests {
     use super::*;
 
     fn req(text: &str, via: Via) -> Request {
-        Request { text: text.into(), via }
+        Request::new(text, via)
     }
 
     #[test]
@@ -436,6 +466,30 @@ mod tests {
         s.wake();
         s.on_event(&Event::TurnEnded { text: "ok".into(), context_tokens: None }, Some(90));
         assert_eq!(s.compact_skipped(), vec![Out::Deliver(None)]);
+    }
+    #[test]
+    fn an_internal_request_queues_silently_under_a_fixed_label() {
+        let mut s = Session::new(false);
+        s.submit(req("a", Via::Chat));
+        s.on_event(&Event::TurnStarted, None);
+        let inner = Request::internal("<Maya> These actions were refused: x.", Via::Chat);
+        assert!(s.submit(inner.clone()).is_empty(), "no busy line for her own follow-up");
+        let out = s.on_event(&Event::TurnEnded { text: "ok".into(), context_tokens: None }, None);
+        assert_eq!(out[1], Out::Deliver(Some(inner)));
+        assert_eq!(s.job(), Some(CHECKING));
+        let out = s.on_event(&Event::TurnEnded { text: "fixed".into(), context_tokens: None }, None);
+        assert_eq!(out, vec![Out::Reply { via: Via::Chat, say: "fixed".into(), actions: vec![], errors: vec![] }], "answered the original way");
+    }
+    #[test]
+    fn her_own_turns_are_labelled_and_never_busy() {
+        let mut s = Session::new(false);
+        s.submit(req("a", Via::Chat));
+        assert!(s.submit(req("primer", Via::Maya)).is_empty());
+        s.on_event(&Event::TurnEnded { text: "x".into(), context_tokens: None }, None);
+        assert_eq!(s.job(), Some(LOOKING));
+        s.on_event(&Event::TurnEnded { text: "".into(), context_tokens: None }, None);
+        assert_eq!(s.wake(), vec![Out::Deliver(None)]);
+        assert_eq!(s.job(), Some(LOOKING));
     }
     #[test]
     fn notes_are_taken_once() {

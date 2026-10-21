@@ -130,10 +130,18 @@ pub(crate) fn refusal_feedback(refused: &[String], streak: u32) -> Option<Feedba
 /// How soon after its spawn a resumed session must end to count as a failed resume.
 pub(crate) const RESUME_GRACE_MS: u64 = 15_000;
 
-/// A resumed session that ends within `RESUME_GRACE_MS` of its spawn and
-/// before its first turn did not resume; a later exit is an ordinary crash.
-pub(crate) fn failed_resume(resumed: bool, turn_seen: bool, ran_ms: u64) -> bool {
-    resumed && !turn_seen && ran_ms < RESUME_GRACE_MS
+/// A resumed session that ends before its first turn, and within
+/// `RESUME_GRACE_MS` of its spawn or of the first message sent to it (a bad
+/// resume may fail only once that message arrives), did not resume; any
+/// other exit is an ordinary crash.
+pub(crate) fn failed_resume(resumed: bool, turn_seen: bool, ran_ms: u64, since_first_message_ms: Option<u64>) -> bool {
+    resumed && !turn_seen && (ran_ms < RESUME_GRACE_MS || since_first_message_ms.is_some_and(|m| m < RESUME_GRACE_MS))
+}
+
+/// Maya's follow-up to one of her replies (its refused actions): internal,
+/// and carrying that reply's via, so her answer goes back the same way.
+pub(crate) fn follow_up(via: Via, text: &str) -> Request {
+    Request::internal(text, via)
 }
 
 /// Why her session starts fresh whatever the saved record says: this
@@ -292,12 +300,22 @@ mod tests {
     }
 
     #[test]
-    fn a_resume_that_dies_soon_and_before_its_first_turn_failed() {
-        assert!(failed_resume(true, false, 0));
-        assert!(failed_resume(true, false, RESUME_GRACE_MS - 1));
-        assert!(!failed_resume(true, false, RESUME_GRACE_MS), "a later exit is a crash: resume again");
-        assert!(!failed_resume(true, true, 1_000));
-        assert!(!failed_resume(false, false, 1_000), "a fresh session that dies is a plain exit");
+    fn a_resume_that_dies_soon_after_its_spawn_or_its_first_message_and_before_its_first_turn_failed() {
+        let g = RESUME_GRACE_MS;
+        assert!(failed_resume(true, false, 0, None));
+        assert!(failed_resume(true, false, g - 1, None));
+        assert!(!failed_resume(true, false, g, None), "a later exit with nothing sent is a crash: resume again");
+        assert!(failed_resume(true, false, 10 * g, Some(g - 1)), "a bad resume may fail only once the first message arrives");
+        assert!(!failed_resume(true, false, 10 * g, Some(g)));
+        assert!(!failed_resume(true, true, 1_000, Some(1_000)), "a turn ended: it resumed");
+        assert!(!failed_resume(false, false, 1_000, Some(1_000)), "a fresh session that dies is a plain exit");
+    }
+
+    #[test]
+    fn follow_ups_go_back_internally_the_way_the_request_came() {
+        assert_eq!(follow_up(Via::Chat, "m"), Request::internal("m", Via::Chat));
+        assert_eq!(follow_up(Via::Phone, "m").via, Via::Phone);
+        assert!(follow_up(Via::Maya, "m").internal);
     }
 
     #[test]
@@ -375,8 +393,8 @@ mod tests {
     #[test]
     fn handoff_is_the_in_flight_request_then_the_queue() {
         let mut s = Session::new(true);
-        s.submit(Request { text: "a".into(), via: Via::Phone });
-        s.submit(Request { text: "b".into(), via: Via::Chat });
+        s.submit(Request::new("a", Via::Phone));
+        s.submit(Request::new("b", Via::Chat));
         assert_eq!(handoff(&mut s).into_iter().map(|r| r.via).collect::<Vec<_>>(), vec![Via::Phone, Via::Chat]);
     }
 

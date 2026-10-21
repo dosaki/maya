@@ -402,8 +402,10 @@ fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, Strin
             if let Some(why) = refuse_remote(&fresh) {
                 return Err(why);
             }
-            let said = listener::execute_action(app, &fresh)?;
-            Ok(Some(said_data(&said)))
+            let outcome = listener::execute_action(app, &fresh);
+            // She learns how an action she gave the phone ended.
+            crate::brain_app::batch_done(app, &[(fresh, outcome.clone())]);
+            Ok(Some(said_data(&outcome?)))
         }
         _ => unreachable!("serve_voice is only called for voice requests"),
     }

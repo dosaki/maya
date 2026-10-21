@@ -19,7 +19,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, refusal_feedback, sort_actions, speaks, spoken, Feedback, PhoneReply, PhoneWaiters};
+use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, refusal_feedback, sort_actions, speaks, spoken, Feedback, PhoneReply, PhoneWaiters};
 pub(crate) use crate::brain_route::{brain_card, handoff};
 use crate::listener::{self, Interpreted};
 use crate::store::now_ms;
@@ -65,8 +65,9 @@ pub(crate) struct BrainState {
     /// This run resumed a saved session; with `turn_seen`, tells a failed resume.
     resumed: bool,
     turn_seen: bool,
-    /// When this run's driver was spawned.
+    /// When this run's driver was spawned, and when it was first sent a message.
     spawned_at: u64,
+    first_sent_at: Option<u64>,
     /// Why a fresh session started, posted to Chat once it is ready.
     fresh_reason: Option<String>,
     /// The past conversation a fresh session reads first; its reply is not shown.
@@ -104,6 +105,7 @@ impl BrainState {
             resumed: false,
             turn_seen: false,
             spawned_at: 0,
+            first_sent_at: None,
             fresh_reason: None,
             primer: None,
             swallow_reply: false,
@@ -165,6 +167,8 @@ pub(crate) fn start(app: &AppHandle) {
 /// `start`; with `forced_fresh`, a fresh session whatever the record says,
 /// posting that line once it is ready.
 fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
+    // A start or shutdown that lands while this one spawns wins: see below.
+    let generation_at_start = app.state::<AppState>().brain.lock().unwrap().generation;
     let (runs, agent, model, claude_dir, projects) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
@@ -199,6 +203,10 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
     writable.extend(launch::scratch_dir("x").parent().map(Path::to_path_buf));
     let l = Launch { agent, binary, model: model.clone(), cwd: dir.clone(), system_prompt: prompt::system_prompt(background), resume: resume.clone(), writable };
     let default_1m = std::fs::read_to_string(claude_dir.join("settings.json")).map(|t| maya_core::context::default_is_1m(&t)).unwrap_or(false);
+    // Her old session stays hidden until the next Ready names the new one.
+    if let Some(id) = &resume {
+        hide(app, id.clone());
+    }
     let (tx, rx) = channel();
     let spawned = match driver::spawn(&l, tx) {
         Ok(d) => d,
@@ -211,9 +219,17 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
         Some(id) => format!("resuming her session {id}"),
         None => "starting her session fresh".to_string(),
     });
-    let (generation, old) = {
+    // Read apart from the brain lock (lock rule); a role change since bumps
+    // the generation through `shutdown`, which the check below sees too.
+    let still_runs = brain_route::runs_brain(&app.state::<AppState>().store.lock().unwrap().config);
+    let installed = {
         let state = app.state::<AppState>();
         let mut b = state.brain.lock().unwrap();
+        if !still_runs || b.generation != generation_at_start {
+            drop(b);
+            // Shut down with no lock held: it may wait for the process.
+            return superseded(spawned);
+        }
         b.generation += 1;
         let old = b.driver.replace(Arc::new(Mutex::new(spawned)));
         // Notes the last run left ride along with her first message.
@@ -234,17 +250,25 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
         b.resumed = resume.is_some();
         b.turn_seen = false;
         b.spawned_at = now_ms();
+        b.first_sent_at = None;
         b.fresh_reason = reason;
         b.primer = primer;
         b.swallow_reply = false;
         b.since = now_ms();
         (b.generation, old)
     };
+    let (generation, old) = installed;
     if let Some(old) = old {
         old.lock().unwrap().shutdown();
     }
     let handle = app.clone();
     std::thread::spawn(move || events(&handle, generation, rx));
+}
+
+/// A driver spawned for a start that another start or a shutdown overtook.
+fn superseded(mut d: Box<dyn Driver>) {
+    log::line("brain", "another start or a shutdown came first; this new session stops");
+    d.shutdown();
 }
 
 /// The event thread of driver run `generation`; it ends with the driver.
@@ -291,7 +315,7 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
                 hide_id = Some(session_id.clone());
                 line = b.fresh_reason.take();
                 if let Some(p) = b.primer.clone() {
-                    outs.extend(b.session.submit(Request { text: p, via: Via::Maya }));
+                    outs.extend(b.session.submit(Request::new(&p, Via::Maya)));
                 }
                 if std::mem::take(&mut b.wake_when_ready) {
                     outs.extend(b.session.wake());
@@ -306,7 +330,8 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
             Event::Exited(why) => {
                 log::line("brain", format!("her session ended: {why}"));
                 b.session.on_event(&e, None);
-                let failed = failed_resume(b.resumed, b.turn_seen, now_ms().saturating_sub(b.spawned_at));
+                let now = now_ms();
+                let failed = failed_resume(b.resumed, b.turn_seen, now.saturating_sub(b.spawned_at), b.first_sent_at.map(|t| now.saturating_sub(t)));
                 let say_stopped = !failed && !std::mem::replace(&mut b.said_stopped, true);
                 let drained = handoff(&mut b.session);
                 let phones = b.phones.drain();
@@ -323,7 +348,7 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
         }
     }
     if let Some(id) = hide_id {
-        hide(app, Some(id));
+        hide(app, id);
     }
     if let Some(l) = line {
         post(app, &l, Via::Maya);
@@ -341,7 +366,6 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
 /// and her session starts again (at once and fresh after a failed resume).
 fn exited(app: &AppHandle, generation: u64, x: Exit) {
     drop(x.driver);
-    hide(app, None);
     if x.say_stopped {
         post(app, STOPPED, Via::Maya);
     }
@@ -365,24 +389,24 @@ fn exited(app: &AppHandle, generation: u64, x: Exit) {
     });
 }
 
-/// Leaves her session out of the board (and of what the store remembers),
-/// or shows every session again.
-fn hide(app: &AppHandle, id: Option<String>) {
-    app.state::<AppState>().store.lock().unwrap().hide_session(id);
+/// Leaves her session out of the board and of what the store remembers. It
+/// stays hidden after her process ends, until the next Ready names a new one.
+fn hide(app: &AppHandle, id: String) {
+    app.state::<AppState>().store.lock().unwrap().hide_session(Some(id));
 }
 
 /// Sends a request to her session; the reply comes back later, the way the
 /// request came. While her session is not running the quick interpreter
 /// answers it instead.
 pub(crate) fn ask(app: &AppHandle, text: &str, via: Via) {
-    submit(app, text, via, None);
+    submit(app, Request::new(text, via), None);
 }
 
 /// `ask` for a phone, waiting up to `timeout` for her reply: what she said
 /// and her validated actions. None when she took too long or was stopped.
 pub(crate) fn ask_and_wait(app: &AppHandle, text: &str, timeout: Duration) -> Option<PhoneReply> {
     let (tx, rx) = channel();
-    let id = submit(app, text, Via::Phone, Some(tx));
+    let id = submit(app, Request::new(text, Via::Phone), Some(tx));
     match rx.recv_timeout(timeout) {
         Ok(reply) => Some(reply),
         Err(_) => {
@@ -395,10 +419,12 @@ pub(crate) fn ask_and_wait(app: &AppHandle, text: &str, timeout: Duration) -> Op
 }
 
 /// Queues or delivers a request; the phone request's place in line, if any.
-fn submit(app: &AppHandle, text: &str, via: Via, waiter: Option<Sender<PhoneReply>>) -> Option<u64> {
-    // Spoken turns are remembered by the listener as they are heard.
-    if matches!(via, Via::Chat | Via::Phone) {
-        listener::remember(app, "user", text, via);
+fn submit(app: &AppHandle, req: Request, waiter: Option<Sender<PhoneReply>>) -> Option<u64> {
+    let via = req.via;
+    // Spoken turns are remembered by the listener as they are heard; Maya's
+    // own follow-ups are not the user's words.
+    if !req.internal && matches!(via, Via::Chat | Via::Phone) {
+        listener::remember(app, "user", &req.text, via);
         listener::emit_voice(app);
     }
     let mut busy = None;
@@ -407,14 +433,15 @@ fn submit(app: &AppHandle, text: &str, via: Via, waiter: Option<Sender<PhoneRepl
         let mut b = state.brain.lock().unwrap();
         if !b.ready {
             drop(b);
-            hand_to_fallback(app, vec![Request { text: text.into(), via }], vec![waiter]);
+            hand_to_fallback(app, vec![req], vec![waiter]);
             return None;
         }
-        if via != Via::Maya {
+        if !req.internal && via != Via::Maya {
             b.refusal_streak = 0;
         }
+        // A follow-up on a phone's request answers in its turn too, to no one waiting.
         let id = (via == Via::Phone).then(|| b.phones.push(waiter));
-        let outs = b.session.submit(Request { text: text.into(), via });
+        let outs = b.session.submit(req);
         // A busy line answers the phone now; her real reply goes to Chat.
         if let (Some(id), Some(Out::Busy { say, .. })) = (id, outs.iter().find(|o| matches!(o, Out::Busy { .. }))) {
             busy = b.phones.take(id).map(|tx| (tx, say.clone()));
@@ -519,7 +546,6 @@ fn shutdown(app: &AppHandle) {
         b.wake_when_ready = false;
         (b.driver.take(), handoff(&mut b.session), b.phones.drain())
     };
-    hide(app, None);
     if let Some(d) = driver {
         d.lock().unwrap().shutdown();
     }
@@ -595,13 +621,14 @@ fn deliver(app: &AppHandle, r: Option<Request>) {
         let state = app.state::<AppState>();
         let mut b = state.brain.lock().unwrap();
         let primer = match &r {
-            Some(req) if req.via == Via::Maya && b.primer.as_deref() == Some(req.text.as_str()) => {
+            Some(req) if req.via == Via::Maya && !req.internal && b.primer.as_deref() == Some(req.text.as_str()) => {
                 b.swallow_reply = true;
                 b.primer.take()
             }
             _ => None,
         };
         let notes = if primer.is_some() { vec![] } else { b.session.take_notes() };
+        b.first_sent_at.get_or_insert_with(now_ms);
         (primer, notes)
     };
     let text = match primer {
@@ -610,7 +637,8 @@ fn deliver(app: &AppHandle, r: Option<Request>) {
             let state = app.state::<AppState>();
             let cards = crate::merged_cards(&state);
             let prs = state.reviews.lock().unwrap().prs.clone();
-            prompt::turn(r.as_ref().map(|r| (r.text.as_str(), r.via)), &interpreter::board_summary(&cards, now_ms()), &interpreter::pr_summary(&prs), &notes)
+            // Maya's follow-ups are labelled as hers, not as the user's words.
+            prompt::turn(r.as_ref().map(|r| (r.text.as_str(), if r.internal { Via::Maya } else { r.via })), &interpreter::board_summary(&cards, now_ms()), &interpreter::pr_summary(&prs), &notes)
         }
     };
     let _ = with_driver(app, "send her a message", |d| d.send(&text));
@@ -701,7 +729,9 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
         }
     }
     match feedback {
-        Some(Feedback::Ask(m)) => ask(app, &m, Via::Maya),
+        Some(Feedback::Ask(m)) => {
+            submit(app, follow_up(via, &m), None);
+        }
         Some(Feedback::GiveUp(m)) => post(app, &m, Via::Maya),
         None => {}
     }
@@ -759,6 +789,10 @@ fn hand_to_fallback(app: &AppHandle, drained: Vec<Request>, phones: Vec<Option<S
 /// Answers one request with the one-shot interpreter, the way the listener,
 /// Chat and the phone did before her session existed.
 fn fallback(app: &AppHandle, r: Request, waiter: Option<Sender<PhoneReply>>) {
+    if r.internal {
+        log::line("brain", "her session is gone; Maya's follow-up to it is dropped");
+        return;
+    }
     log::line("brain", format!("the quick interpreter takes a {:?} request", r.via));
     match r.via {
         // Maya's own messages to her session mean nothing to the interpreter.
@@ -812,7 +846,7 @@ mod tests {
     use maya_core::model::{Harness, State};
 
     fn req(text: &str, via: Via) -> Request {
-        Request { text: text.into(), via }
+        Request::new(text, via)
     }
 
     #[test]
