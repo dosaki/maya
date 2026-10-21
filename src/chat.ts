@@ -44,6 +44,14 @@ export function secondsLeft(until: number | null, now = Date.now()): number | nu
   return until === null ? null : Math.max(0, Math.ceil((until - now) / 1000));
 }
 
+/** Sets the pending box's seconds label in `root` and touches nothing else. */
+export function tickCountdown(root: HTMLElement, until: number | null, now = Date.now()): void {
+  const label = root.querySelector<HTMLElement>(".chat__pending-left");
+  if (!label) return;
+  const left = secondsLeft(until, now);
+  label.textContent = left === null ? "" : `${left}s`;
+}
+
 /** The conversation, the pending box, the input and Stop. Her text is set as text, never as markup. */
 export function renderChat(m: ChatModel, h: ChatHandlers): HTMLElement {
   const root = el("div", "chat");
@@ -131,7 +139,8 @@ export function initChat(): void {
       box?.focus();
       box?.setSelectionRange(draft.length, draft.length);
     }
-    // The countdown repaints each second while a batch waits.
+    // The countdown ticks each second while a batch waits: only its label
+    // changes, so the input keeps its caret and an IME its composition.
     if (timer === undefined && status.pending?.until != null) {
       timer = window.setInterval(() => {
         if (!status.pending) {
@@ -139,7 +148,7 @@ export function initChat(): void {
           timer = undefined;
           return;
         }
-        paint();
+        if (pane) tickCountdown(pane, status.pending.until);
       }, 1000);
     } else if (timer !== undefined && !status.pending) {
       window.clearInterval(timer);

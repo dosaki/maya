@@ -55,4 +55,25 @@ describe("chat flow", () => {
     box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
     expect(invoke).toHaveBeenCalledWith("chat_send", { text: "what's waiting?" });
   });
+
+  it("ticks the countdown in place, leaving the input and its caret alone", async () => {
+    initChat();
+    await flush();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      on<BrainStatus>("brain")({ payload: status({ pending: { say: "Telling api-fix: open the PR.", until: Date.now() + 5000 } }) });
+      const box = document.querySelector<HTMLTextAreaElement>("textarea[name=chat]")!;
+      const pending = document.querySelector(".chat__pending")!;
+      box.value = "no, the oth";
+      box.setSelectionRange(3, 3);
+      expect(document.querySelector(".chat__pending-left")!.textContent).toBe("5s");
+      vi.advanceTimersByTime(1000);
+      expect(document.querySelector(".chat__pending-left")!.textContent).toBe("4s");
+      expect(document.querySelector("textarea[name=chat]")).toBe(box);
+      expect(document.querySelector(".chat__pending")).toBe(pending);
+      expect(box.selectionStart).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
