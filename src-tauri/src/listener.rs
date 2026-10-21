@@ -102,7 +102,11 @@ fn push_turn(chat: &Mutex<ChatLog>, voice: &Mutex<VoiceState>, who: &str, text: 
 /// Remembers a turn; the caller's next `voice` event tells the page.
 pub(crate) fn remember(app: &AppHandle, who: &str, text: &str, via: Via) {
     let state = app.state::<AppState>();
-    push_turn(&state.chat, &state.voice, who, text, now_ms(), via);
+    let at = now_ms();
+    push_turn(&state.chat, &state.voice, who, text, at, via);
+    // No lock is held here: the page hears the turn, then the dot it may change.
+    let _ = app.emit("chat", ChatTurn { who: who.into(), text: text.into(), at, via });
+    crate::brain_app::emit_status(app);
 }
 
 /// What the speech hook does to the voice state: pause the ear and remember
@@ -1176,6 +1180,32 @@ pub(crate) fn window_cancel(app: AppHandle) {
     if matches!(batch.origin, Via::Voice | Via::Maya) {
         say(&app, "Cancelled.");
     }
+}
+
+/// The whole conversation, voice and typed, oldest first.
+#[tauri::command]
+pub(crate) fn chat_history(state: TauriState<AppState>) -> Vec<ChatTurn> {
+    state.chat.lock().unwrap().last(maya_core::brain::chat::KEEP)
+}
+
+/// The Chat tab's input. An open batch is dropped first: typing is a
+/// correction. Her session answers; without it the quick interpreter does.
+#[tauri::command(async)]
+pub(crate) fn chat_send(app: AppHandle, text: String) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(());
+    }
+    window_cancel(app.clone());
+    crate::brain_app::ask(&app, text, Via::Chat);
+    Ok(())
+}
+
+/// The user has looked at Chat: the dot stops being "unread".
+#[tauri::command]
+pub(crate) fn chat_seen(app: AppHandle) {
+    app.state::<AppState>().chat.lock().unwrap().seen(now_ms());
+    crate::brain_app::emit_status(&app);
 }
 
 #[tauri::command]

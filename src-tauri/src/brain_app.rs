@@ -24,6 +24,7 @@ pub(crate) use crate::brain_route::{brain_card, handoff};
 use crate::listener::{self, Interpreted};
 use crate::store::now_ms;
 use crate::{interpreter, launch, log, AppState};
+use maya_core::brain::chat::Dot;
 use maya_core::brain::driver::{self, Driver, Event, Launch};
 use maya_core::brain::record::{self, Record, Start};
 use maya_core::brain::session::{Out, Request, Session};
@@ -132,11 +133,15 @@ pub(crate) fn card(state: &AppState) -> Option<Card> {
     Some(brain_card(id, b.agent, &b.cwd.to_string_lossy(), b.session.working(), b.session.job(), &b.last_say, b.since))
 }
 
-/// What the `brain` event carries; for now only the batch waiting in the
-/// action window.
+/// What the `brain` event and `brain_status` carry: the Chat tab's dot, the
+/// batch waiting in the action window, what she is working on, and whether
+/// her session takes requests.
 #[derive(Clone, serde::Serialize)]
-struct BrainStatus {
+pub(crate) struct BrainStatus {
+    dot: Dot,
     pending: Option<PendingView>,
+    job: Option<String>,
+    ready: bool,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -146,11 +151,33 @@ struct PendingView {
     until: Option<u64>,
 }
 
-/// Tells the page what she has waiting. Takes the window lock: the caller
-/// must hold none.
+/// The status now. One lock at a time: window, then brain, then chat.
+pub(crate) fn status(app: &AppHandle) -> BrainStatus {
+    let state = app.state::<AppState>();
+    let pending = state.window.lock().unwrap().pending().map(|b| PendingView { say: b.say.clone(), until: (b.until != u64::MAX).then_some(b.until) });
+    let (working, job, ready) = {
+        let b = state.brain.lock().unwrap();
+        (b.session.working(), b.session.job().map(String::from), b.ready)
+    };
+    let dot = state.chat.lock().unwrap().dot(working);
+    BrainStatus { dot, pending, job, ready }
+}
+
+/// Tells the page what she has waiting. Takes the window, brain and chat
+/// locks in turn: the caller must hold none.
 pub(crate) fn emit_status(app: &AppHandle) {
-    let pending = app.state::<AppState>().window.lock().unwrap().pending().map(|b| PendingView { say: b.say.clone(), until: (b.until != u64::MAX).then_some(b.until) });
-    let _ = app.emit("brain", BrainStatus { pending });
+    let _ = app.emit("brain", status(app));
+}
+
+#[tauri::command]
+pub(crate) fn brain_status(app: AppHandle) -> BrainStatus {
+    status(&app)
+}
+
+/// The Chat tab's Stop button.
+#[tauri::command(async)]
+pub(crate) fn brain_stop(app: AppHandle) {
+    stop(&app, Via::Chat);
 }
 
 /// True while her session runs and takes requests.
@@ -452,6 +479,7 @@ fn submit(app: &AppHandle, req: Request, waiter: Option<Sender<PhoneReply>>) -> 
         let _ = tx.send((say, vec![]));
     }
     act(app, outs);
+    emit_status(app);
     id
 }
 

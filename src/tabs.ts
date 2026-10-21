@@ -18,7 +18,7 @@ function stored(): Tab {
 }
 
 /**
- * Four panes, one visible: Sessions and Pull Requests on the left, Debug and
+ * Five panes, one visible: Sessions, Pull Requests and Chat on the left, Debug and
  * Settings on the right. Sessions is the default; the choice is remembered
  * per browser. Switching only toggles `hidden`, so the board keeps its
  * scroll positions and the session watcher keeps running underneath.
@@ -45,6 +45,7 @@ export function makeTabs(onChange?: (tab: Tab) => void) {
       /* private mode: nothing to remember */
     }
     onChange?.(tab);
+    window.dispatchEvent(new CustomEvent("maya:tab", { detail: tab }));
   };
   for (const btn of document.querySelectorAll<HTMLElement>("[data-tab]")) {
     btn.addEventListener("click", () => show(asTab(btn.dataset.tab)));

@@ -19,6 +19,7 @@ import { showToast } from "./toast";
 import { prRef, remoteTerminalToast, type Card, type ReviewState } from "./types";
 import { initMute } from "./mute";
 import { initVoice } from "./voice";
+import { initChat } from "./chat";
 import { initDebug } from "./debug";
 import { maybeShowFirstRun } from "./firstrun";
 import { updates } from "./update";
@@ -173,11 +174,20 @@ export function applyDebugMode(on: boolean): void {
   paint();
 }
 
+/** Her session and Chat live on the main only: an assistant has no Chat tab. */
+export function applyChatRole(role: string | undefined): void {
+  const off = role === "assistant";
+  for (const btn of document.querySelectorAll<HTMLElement>("[data-tab=chat]")) btn.hidden = off;
+  if (off && tabs?.current() === "chat") tabs.show("sessions");
+}
+
 export const isDebugMode = (): boolean => debugMode;
 
 async function loadDebugMode(): Promise<void> {
   try {
-    applyDebugMode((await invoke<{ debugMode?: boolean }>("get_config")).debugMode === true);
+    const cfg = await invoke<{ debugMode?: boolean; network?: { role?: string } }>("get_config");
+    applyChatRole(cfg.network?.role);
+    applyDebugMode(cfg.debugMode === true);
   } catch {
     /* no config yet: the Debug tab stays as the page has it */
   }
@@ -188,6 +198,7 @@ async function start(): Promise<void> {
   void updates.init();
   void initMute();
   void initVoice();
+  initChat();
   void initDebug();
   void maybeShowFirstRun();
   const searchHost = document.getElementById("session-search");
