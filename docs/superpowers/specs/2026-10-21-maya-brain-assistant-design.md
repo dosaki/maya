@@ -142,13 +142,22 @@ The "Yes?" read-back goes. Instead:
 - **Restarts.** When Maya restarts, it resumes her session like any other
   remembered session, so she keeps her memory. If it cannot be resumed,
   she starts fresh and says so in Chat.
-- **Changing brain, model or main machine** **(my call)**. Sessions
-  cannot move between agents, and her session files stay on the machine
-  that ran them. When Settings → brain changes, or "Make main" moves the
-  main role, she starts a fresh session, primed with the recent Chat
-  history, and says so in Chat. A model-only change keeps the session
-  where the agent allows a model switch on resume, and starts fresh
-  otherwise.
+- **Changing brain or model** **(my call)**. Sessions cannot move between
+  agents. When Settings → brain changes, she starts a fresh session,
+  primed with the recent Chat history, and says so in Chat. A model-only
+  change keeps the session where the agent allows a model switch on
+  resume, and starts fresh otherwise.
+- **Every Maya keeps her own brain** (the user, 2026-10-21). On an
+  assistant machine her brain is dormant: no agent process runs, but her
+  saved session, chat history and watches stay on that machine. Becoming
+  an assistant puts her to sleep; it does not reset her.
+- **Handing over the main role** (the user, 2026-10-21). When a main
+  promotes an assistant ("Make main"), the outgoing main gives the new
+  main a compacted summary of what happened while the new main's brain
+  was dormant. The promoted Maya resumes her own session, and her first
+  turn is that summary; it also shows in her Chat. The old main's brain
+  then goes dormant. (The previous call, "Make main starts fresh", is
+  withdrawn.)
 - **Fallback.** While her session is starting, broken or not resumable
   yet, commands go to today's one-shot interpreter, so voice keeps
   working with today's behaviour. That code stays.
@@ -267,9 +276,19 @@ How the tools are exposed is the builder's call (see below).
 
 - Her session runs on the main machine only, and sees cards from every
   connected machine, as the board does.
-- The Chat tab exists only in the main machine's desktop app. Another
-  desktop Maya (the laptop) hides it **(my call)**; carrying Chat over the
-  network is left for later, like the phone's.
+- On another desktop Maya (an assistant, such as the laptop) the Chat
+  tab is read-only (the user, 2026-10-21): it shows her own history with
+  a note that the main's Maya is awake, and has no text box, Stop or
+  countdown. Carrying Chat over the network is left for later, like the
+  phone's.
+- Handover details **(my calls)**: assistants report when their brain
+  went dormant when they connect, so the main knows what period to
+  summarise (an assistant that never ran a brain gets a summary of the
+  main's whole chat history, capped in length). If the outgoing main's
+  brain is not running or takes longer than about 60 seconds, the summary
+  falls back to a plain digest of her recent Chat turns, so handover never
+  stalls. A phone made main has no brain and gets no summary. In Debug
+  mode an assistant shows her card greyed as "Dormant".
 - Voice from the laptop or phone reaches her the same way it reaches the
   interpreter today (`net_app.rs` → `interpret_text`).
 
