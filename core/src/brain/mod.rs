@@ -3,6 +3,7 @@
 pub mod chat;
 pub mod claude;
 pub mod driver;
+pub mod handover;
 pub mod notes;
 pub mod prompt;
 pub mod protocol;
