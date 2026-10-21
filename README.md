@@ -218,8 +218,9 @@ opens the card. There is no Pull Requests tab on the phone.
 
 A phone that has joined a computer's Maya also speaks and listens while
 the app is on screen. Tap the microphone and talk to Maya as you would on
-the computer: the computer's agent works out what you meant, and anything
-that sends text is read back and needs a "yes". With **Speak** on (the
+the computer: the computer's agent works out what you meant, says what it
+is about to do, and does it after five seconds unless you say "stop" or
+"no", or correct it; a Cancel button stops it too. With **Speak** on (the
 Network tab) the phone also says aloud when a session needs you; **Wake
 word "Maya"** (experimental) listens for her name without a tap. Android
 asks for the microphone the first time. Once the app leaves the screen
@@ -248,8 +249,9 @@ resume or start a session, open or review a pull request.
   system's volume.
 - **Off by default.** Turn on "Listen for 'Maya'" in Settings. A microphone
   appears in the top bar; clicking it opens the voice panel with the
-  conversation. The Chat tab (Claude Code brain only) is the same conversation by text. macOS asks for
-  microphone and speech-recognition access the first time.
+  conversation. The Chat tab on the main machine is the same conversation
+  by text. macOS asks for microphone and speech-recognition access the
+  first time.
 - **The wake word is "Maya"**, or the word you type in Settings → Voice →
   Listening; a phone joined to this Maya listens for the same word. Say it
   with the command, or alone: she says "Yes?" and waits. When she asks you
@@ -259,8 +261,8 @@ resume or start a session, open or review a pull request.
   a reply, answer a question, start or resume a session, open a review) she
   says what she is about to do and then does it after five seconds. Say
   "stop", or correct her, in that time and she drops it. In Chat the action
-  shows a countdown and a Cancel button. Reports, focus and compact happen
-  at once. Say "Maya, stop" at any time to interrupt what she is working on.
+  shows a countdown and a Cancel button. Reports, focus, compact and open
+  happen at once. Say "Maya, stop" at any time to interrupt what she is working on.
 - **Two speech recognisers.** *System* uses Apple's on-device recognition,
   which needs Dictation turned on (System Settings › Keyboard › Dictation).
   On a work Mac where that switch is locked by a management profile,
@@ -284,8 +286,8 @@ existing session, to a new session (in a repository, or in a scratch
 folder under `/tmp` when it needs no repository), or to herself, when she
 can just answer. Her notes live in `maya/brain/` inside your Claude
 directory. The **Chat** tab, with a status dot showing whether she is idle
-or working, is the same conversation as voice. Assistant machines
-(headless) have no Chat tab and keep the quick interpreter.
+or working, is the same conversation as voice. A machine in the assistant role
+(the laptop, say) has no Chat tab and keep the quick interpreter.
 
 The other brains (Codex, Grok, Kiro, Antigravity, OpenCode) still use the
 quick one-shot interpreter, now with the five-second window, until they get
