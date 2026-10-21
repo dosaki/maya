@@ -50,9 +50,16 @@ fenced `maya` action blocks), `prompt`, `notes` (board changes since her
 last turn), `chat`, `record` and `watch`. Actions run after a 5 second
 window unless the user says stop or corrects.
 
-Other brains and assistant machines use the quick one-shot interpreter
-with the same window; they have no resident session and no Chat tab.
-Settings → Debug (off by default) shows the Debug tab and her card.
+Other brains use the quick one-shot interpreter with the same window:
+they have no resident session yet, but the Chat tab works with them as
+it does with Claude Code. An assistant machine runs no session of hers
+and hides the Chat tab. Settings → Debug (off by default) shows the
+Debug tab and her card.
+
+When her session stops on its own, the quick interpreter takes what she
+held and Maya starts her again after 30 s, then 60 s, 120 s and 300 s
+while it keeps failing. A turn still running 10 s after a stop, or
+silent for 10 minutes, restarts her the same way.
 
 ## Git integration
 

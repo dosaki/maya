@@ -262,7 +262,8 @@ resume or start a session, open or review a pull request.
   says what she is about to do and then does it after five seconds. Say
   "stop", or correct her, in that time and she drops it. In Chat the action
   shows a countdown and a Cancel button. Reports, focus, compact and open
-  happen at once. Say "Maya, stop" at any time to interrupt what she is working on.
+  happen at once. Say "Maya, stop" at any time to interrupt what she is
+  working on.
 - **Two speech recognisers.** *System* uses Apple's on-device recognition,
   which needs Dictation turned on (System Settings › Keyboard › Dictation).
   On a work Mac where that switch is locked by a management profile,
@@ -280,14 +281,18 @@ resume or start a session, open or review a pull request.
 
 ### Maya's brain
 
+Type to Maya in the **Chat** tab. It is the same conversation as voice,
+and its status dot shows whether she is idle or working. Chat is on the
+main machine (or a machine on its own) whatever brain you choose. A
+machine in the assistant role (the laptop, say) has no Chat tab and keeps
+the quick interpreter.
+
 With Claude Code as your brain, Maya is one long-running session that
 remembers the conversation. She decides where a request goes: to an
 existing session, to a new session (in a repository, or in a scratch
 folder under `/tmp` when it needs no repository), or to herself, when she
 can just answer. Her notes live in `maya/brain/` inside your Claude
-directory. The **Chat** tab, with a status dot showing whether she is idle
-or working, is the same conversation as voice. A machine in the assistant role
-(the laptop, say) has no Chat tab and keep the quick interpreter.
+directory.
 
 The other brains (Codex, Grok, Kiro, Antigravity, OpenCode) still use the
 quick one-shot interpreter, now with the five-second window, until they get
