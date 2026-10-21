@@ -353,6 +353,8 @@ impl Voice {
             match e {
                 Effect::Say(s) => self.say(&mut i, &s, After::Command),
                 Effect::Interpret(cmd) => {
+                    // A new request never joins an old batch.
+                    i.window.cancel();
                     // The history sent is what came before this command.
                     let history = last(&i.history);
                     push(&mut i.history, "user", &cmd);
@@ -387,8 +389,13 @@ impl Voice {
                     }
                 }
                 Effect::Stop => {
-                    // Nothing announced: whatever she is saying has stopped already.
-                    self.carry_on(&mut i);
+                    // A batch left open without its window dies with the stop.
+                    if i.window.cancel().is_some() {
+                        push(&mut i.history, "user", "no");
+                        self.say(&mut i, "Cancelled.", After::Idle);
+                    } else {
+                        self.carry_on(&mut i);
+                    }
                 }
             }
         }
@@ -432,11 +439,22 @@ impl Voice {
         if fatal || !i.wake || window {
             i.view.error = Some(message.to_string());
             i.flow.reset();
+            // With the window's ear gone nothing could stop the batch: drop it.
+            let dropped = i.window.cancel().is_some();
+            if dropped {
+                push(&mut i.history, "user", "no");
+                if i.speaking {
+                    self.io.stop_speaking();
+                    i.speaking = false;
+                }
+            }
             // A fatal error would fail again at once: no wake loop this session.
             if fatal {
                 i.wake = false;
             }
-            if !i.speaking && !i.thinking {
+            if dropped && !i.thinking {
+                self.say(&mut i, "Cancelled.", After::Idle);
+            } else if !i.speaking && !i.thinking {
                 self.carry_on(&mut i);
             }
             self.publish(&mut i);
@@ -1041,6 +1059,54 @@ mod tests {
     }
 
     #[test]
+    fn a_recogniser_failure_in_the_window_drops_the_batch() {
+        let (v, io, asked) = voice(vec![announce_answer("Telling x: y.", vec![reply()])]);
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        io.take();
+        v.failed("the recogniser is busy", false);
+        assert_eq!(io.take(), vec!["say Cancelled."]);
+        assert_eq!(v.view().pending, None);
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        assert_eq!(executed(&asked), 0);
+    }
+
+    #[test]
+    fn a_stop_cancels_a_batch_left_open_without_its_window() {
+        let (v, io, asked) = voice(vec![announce_answer("Telling x: y.", vec![reply()])]);
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        v.inner.lock().unwrap().flow.reset();
+        io.take();
+        v.heard("Maya stop");
+        assert_eq!(io.take(), vec!["say Cancelled."]);
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        assert_eq!(executed(&asked), 0);
+    }
+
+    #[test]
+    fn a_new_command_never_joins_an_old_batch() {
+        let one = serde_json::json!({"kind": "reply", "n": 1});
+        let two = serde_json::json!({"kind": "reply", "n": 2});
+        let (v, _, asked) = voice(vec![announce_answer("One.", vec![one]), announce_answer("Two.", vec![two])]);
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        v.inner.lock().unwrap().flow.reset();
+        v.heard("Maya tell z w");
+        v.spoken(true);
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        let asked = asked.lock().unwrap();
+        let ran: Vec<u64> = asked.iter().filter_map(|r| match r { Request::Execute { action } => action["n"].as_u64(), _ => None }).collect();
+        assert_eq!(ran, vec![2]);
+    }
+
+    #[test]
     fn every_announced_action_runs_in_order() {
         let (v, _, asked) = voice(vec![announce_answer("Two things.", vec![serde_json::json!({"kind": "reply", "n": 1}), serde_json::json!({"kind": "compact", "n": 2})])]);
         v.tap();
@@ -1106,8 +1172,6 @@ mod tests {
         v.finish_execute(v.begin_request(), vec!["Resumed 2; 1 could not be resumed.".into()]);
         assert_eq!(io.take(), vec!["say Resumed 2; 1 could not be resumed."]);
     }
-
-
 
     #[test]
     fn silence_after_a_tap_goes_idle() {
@@ -1260,7 +1324,6 @@ mod tests {
         assert_eq!(history.last().unwrap().text, "a8");
     }
 
-
     #[test]
     fn an_event_queued_behind_a_question_is_spoken_when_the_window_closes() {
         let (v, io, _) = voice(vec![Ok(serde_json::json!({"say": "Which one?"}))]);
@@ -1296,7 +1359,6 @@ mod tests {
         assert_eq!(v.view().state, "thinking");
         let _ = release.send(());
     }
-
 
     #[test]
     fn only_failures_in_a_row_stop_the_wake_loop_and_it_stays_stopped() {
@@ -1551,8 +1613,6 @@ mod tests {
         v.heard("yes");
         assert_eq!(executed(&asked), 1);
     }
-
-
 
     #[test]
     fn a_stopped_window_still_runs_out_and_the_wake_loop_comes_back() {
