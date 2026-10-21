@@ -2,7 +2,9 @@
 //! messages and reports turns, whichever agent runs it.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use crate::model::Harness;
 
@@ -44,6 +46,12 @@ pub trait Driver: Send {
     /// The session id Maya started it with, when the agent takes one; the
     /// real one comes with `Event::Ready`.
     fn assumed_session_id(&self) -> Option<String> {
+        None
+    }
+    /// When her process last wrote a line (epoch ms; 0 before any), stamped
+    /// by its reader for every line, events or not. Shared, so it is read
+    /// without the driver's lock. None for a driver that keeps no clock.
+    fn output_clock(&self) -> Option<Arc<AtomicU64>> {
         None
     }
     fn shutdown(&mut self);

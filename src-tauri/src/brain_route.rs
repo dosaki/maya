@@ -198,6 +198,14 @@ pub(crate) const INTERRUPT_GRACE_MS: u64 = 10_000;
 /// How long a turn may go without a line from her process.
 pub(crate) const SILENT_TURN_MS: u64 = 600_000;
 
+/// When she was last heard from: the later of her last parsed event (or
+/// the last message sent) and the last line her process wrote (0 for a
+/// driver with no output clock). A long turn that keeps writing lines no
+/// event comes from is alive.
+pub(crate) fn heard_at(last_event: u64, last_output: u64) -> u64 {
+    last_event.max(last_output)
+}
+
 /// Why her session must be restarted now, if it must: her turn did not end
 /// within `INTERRUPT_GRACE_MS` of an interrupt, or her process said nothing
 /// for `SILENT_TURN_MS` while a turn ran (`last_heard` is the later of her
@@ -596,6 +604,17 @@ mod tests {
         assert_eq!(stalled(t, true, t - SILENT_TURN_MS + 1, None), None);
         assert_eq!(stalled(t, true, t - SILENT_TURN_MS, None), Some("her turn went silent"));
         assert_eq!(stalled(5, true, 10, Some(10)), None, "a clock that went back is not a stall");
+    }
+
+    #[test]
+    fn a_long_turn_that_keeps_writing_is_not_silent() {
+        let t = 10_000_000;
+        // No parsed event for longer than the limit, but her process wrote a line a second ago.
+        let heard = heard_at(t - SILENT_TURN_MS - 1, t - 1_000);
+        assert_eq!(heard, t - 1_000);
+        assert_eq!(stalled(t, true, heard, None), None);
+        assert_eq!(heard_at(t - 5, 0), t - 5, "a driver with no output clock");
+        assert_eq!(stalled(t, true, heard_at(t - SILENT_TURN_MS, t - SILENT_TURN_MS - 1), None), Some("her turn went silent"));
     }
 
     #[test]

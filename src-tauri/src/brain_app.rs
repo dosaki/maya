@@ -88,8 +88,10 @@ pub(crate) struct BrainState {
     /// Her session stopping on its own: the restart back-off and the one
     /// "my session stopped" line.
     outage: Outage,
-    /// When her process last wrote a line, or was last sent a message.
+    /// When her process last made an event, or was last sent a message.
     last_heard: u64,
+    /// When her process last wrote any line (`Driver::output_clock`).
+    output_clock: Option<Arc<std::sync::atomic::AtomicU64>>,
     /// When her running turn was interrupted; None once it ended.
     interrupted_at: Option<u64>,
     /// Stops so far; a turn records the count it began with, and a reply
@@ -141,6 +143,7 @@ impl BrainState {
             since: now_ms(),
             outage: Outage::default(),
             last_heard: now_ms(),
+            output_clock: None,
             interrupted_at: None,
             stop_epoch: 0,
             turn_epoch: 0,
@@ -320,6 +323,7 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>, catch_up: Option<Strin
             return superseded(spawned);
         }
         let assumed = spawned.assumed_session_id();
+        b.output_clock = spawned.output_clock();
         b.generation += 1;
         let old = b.driver.replace(Arc::new(Mutex::new(spawned)));
         // Notes the last run left ride along with her first message.
@@ -432,35 +436,50 @@ fn events(app: &AppHandle, generation: u64, rx: Receiver<Event>) {
 }
 
 /// Watches run `generation` for a turn that ignores a stop or goes silent
-/// (`brain_route::stalled`), and restarts her session when one does; ends
-/// with the run.
+/// (`brain_route::stalled`, hearing any line her process writes), and
+/// restarts her session when one does; ends with the run.
 fn watchdog(app: &AppHandle, generation: u64) {
-    let why = loop {
+    loop {
         std::thread::sleep(Duration::from_secs(1));
-        let state = app.state::<AppState>();
-        let b = state.brain.lock().unwrap();
-        if b.generation != generation {
-            return;
+        let Some(why) = stall(app, generation) else { return };
+        let Some(why) = why else { continue };
+        log::line("brain", format!("{why}; restarting her session"));
+        // Checked again under the lock it acts under: a turn that ended or
+        // spoke since is left alone.
+        let say = {
+            let state = app.state::<AppState>();
+            let mut b = state.brain.lock().unwrap();
+            if b.generation != generation {
+                return;
+            }
+            if stalled_now(&b).is_none() {
+                log::line("brain", "she was heard from again; not restarting");
+                continue;
+            }
+            b.outage.say_once()
+        };
+        // The quick interpreter takes what she had; she resumes where she was.
+        shutdown(app);
+        if say {
+            post(app, STOPPED, Via::Maya);
         }
-        if let Some(why) = brain_route::stalled(now_ms(), b.session.in_turn(), b.last_heard, b.interrupted_at) {
-            break why;
-        }
-    };
-    log::line("brain", format!("{why}; restarting her session"));
-    let say = {
-        let state = app.state::<AppState>();
-        let mut b = state.brain.lock().unwrap();
-        if b.generation != generation {
-            return;
-        }
-        b.outage.say_once()
-    };
-    // The quick interpreter takes what she had; she resumes where she was.
-    shutdown(app);
-    if say {
-        post(app, STOPPED, Via::Maya);
+        start_run(app, None, None);
+        return;
     }
-    start_run(app, None, None);
+}
+
+/// Run `generation`'s stall, if any; None once the run has been replaced.
+fn stall(app: &AppHandle, generation: u64) -> Option<Option<&'static str>> {
+    let state = app.state::<AppState>();
+    let b = state.brain.lock().unwrap();
+    (b.generation == generation).then(|| stalled_now(&b))
+}
+
+/// `brain_route::stalled` on her state now; the output clock is an atomic,
+/// read without the driver's lock.
+fn stalled_now(b: &BrainState) -> Option<&'static str> {
+    let output = b.output_clock.as_ref().map_or(0, |c| c.load(std::sync::atomic::Ordering::SeqCst));
+    brain_route::stalled(now_ms(), b.session.in_turn(), brain_route::heard_at(b.last_heard, output), b.interrupted_at)
 }
 
 /// What an exit leaves to do once the brain lock is released.

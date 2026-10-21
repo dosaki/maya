@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -161,6 +162,8 @@ pub struct ClaudeDriver {
     stdin: Option<ChildStdin>,
     tasks: Arc<Mutex<BTreeSet<String>>>,
     next_request: u32,
+    /// When she last wrote a line: see `Driver::output_clock`.
+    last_output: Arc<AtomicU64>,
 }
 
 impl ClaudeDriver {
@@ -182,6 +185,8 @@ impl ClaudeDriver {
         // Ready comes from her init line, not from the spawn: see `Parser`.
         let mut parser = Parser::new(&session_id);
         let tasks = parser.tasks.clone();
+        let last_output = Arc::new(AtomicU64::new(0));
+        let stamp = last_output.clone();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut buf = Vec::new();
@@ -191,6 +196,8 @@ impl ClaudeDriver {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {}
                 }
+                // Any line shows she is alive, whether or not it is an event.
+                stamp.store(crate::now_ms(), Ordering::SeqCst);
                 let line = String::from_utf8_lossy(&buf).into_owned();
                 for e in parser.line(&line) {
                     if events.send(e).is_err() {
@@ -200,7 +207,7 @@ impl ClaudeDriver {
             }
             let _ = events.send(Event::Exited("the Claude Code process ended".into()));
         });
-        Ok(Self { child, session_id, stdin, tasks, next_request: 0 })
+        Ok(Self { child, session_id, stdin, tasks, next_request: 0, last_output })
     }
 
     fn write(&mut self, line: &str) -> Result<(), String> {
@@ -240,6 +247,10 @@ impl Driver for ClaudeDriver {
 
     fn assumed_session_id(&self) -> Option<String> {
         Some(self.session_id.clone())
+    }
+
+    fn output_clock(&self) -> Option<Arc<AtomicU64>> {
+        Some(self.last_output.clone())
     }
 
     fn shutdown(&mut self) {
@@ -399,6 +410,34 @@ mod tests {
         assert!(alive(), "an exited child stays a zombie until it is waited for");
         drop(d);
         assert!(!alive(), "dropping the driver reaps it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_line_she_writes_stamps_the_output_clock_even_one_no_event_comes_from() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("maya-fake-claude-{}", crate::launch::new_session_uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nread line\necho 'not json, still output'\ncat >/dev/null\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut l = launch();
+        l.binary = bin;
+        l.cwd = dir.join("work");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut d = super::super::driver::spawn(&l, tx).unwrap();
+        let clock = d.output_clock().expect("Claude has an output clock");
+        assert_eq!(clock.load(std::sync::atomic::Ordering::SeqCst), 0, "nothing written yet");
+        let before = crate::now_ms();
+        d.send("hi").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while clock.load(std::sync::atomic::Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(clock.load(std::sync::atomic::Ordering::SeqCst) >= before);
+        assert!(rx.try_recv().is_err(), "the line made no event");
+        d.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
