@@ -146,7 +146,7 @@ pub fn run() {
             commands::pending_tap,
             commands::voice_view,
             commands::voice_tap,
-            commands::voice_confirm,
+            commands::voice_cancel,
             commands::voice_open_settings
         ])
         .setup(|app| {

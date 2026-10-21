@@ -1,12 +1,12 @@
 // The phone's mic bar. The conversation runs in Rust, which hears the
 // voice plugin's events and asks for the microphone itself; the page only
-// shows the `voice` view and sends taps and Yes/No.
+// shows the `voice` view and sends taps and Cancel.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export interface VoiceView {
-  state: "off" | "idle" | "listening" | "thinking" | "awaiting-command" | "awaiting-confirm" | "speaking";
+  state: "off" | "idle" | "listening" | "thinking" | "awaiting-command" | "window" | "speaking";
   heard: string;
   said: string;
   pending: string | null;
@@ -19,7 +19,7 @@ export interface VoiceView {
 
 export interface VoiceHandlers {
   onTap(): void;
-  onConfirm(yes: boolean): void;
+  onCancel(): void;
   onOpenSettings(): void;
 }
 
@@ -55,18 +55,16 @@ export function renderVoiceBar(v: VoiceView, h: VoiceHandlers): HTMLElement {
     if (v.said) said.append(line("voicebar__said", v.said));
   }
   bar.append(mic, said);
-  // From the start of the read-back: a yes may come before it ends.
+  // From the start of the announcement: she runs it after 5 seconds unless stopped.
   if (v.pending) {
     const answer = document.createElement("div");
     answer.className = "voicebar__answer";
-    for (const [label, yes] of [["Yes", true], ["No", false]] as const) {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.dataset.action = yes ? "yes" : "no";
-      b.textContent = label;
-      b.addEventListener("click", () => h.onConfirm(yes));
-      answer.append(b);
-    }
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.action = "cancel";
+    b.textContent = "Cancel";
+    b.addEventListener("click", () => h.onCancel());
+    answer.append(b);
     bar.append(answer);
   }
   if (v.note && v.state === "idle" && !v.offer) bar.append(line("voicebar__note", v.note));
@@ -88,7 +86,7 @@ export async function initVoice(): Promise<void> {
   if (!host) return;
   const handlers: VoiceHandlers = {
     onTap: () => void invoke("voice_tap").catch(() => undefined),
-    onConfirm: (yes) => void invoke("voice_confirm", { yes }).catch(() => undefined),
+    onCancel: () => void invoke("voice_cancel").catch(() => undefined),
     onOpenSettings: () => void invoke("voice_open_settings").catch(() => undefined),
   };
   const paint = (v: VoiceView) => host.replaceChildren(renderVoiceBar(v, handlers));

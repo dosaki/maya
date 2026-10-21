@@ -302,8 +302,8 @@ pub fn voice_open_settings(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn voice_confirm(hub: H, yes: bool) -> Result<(), String> {
-    voice(&hub)?.confirm(yes);
+pub fn voice_cancel(hub: H) -> Result<(), String> {
+    voice(&hub)?.cancel();
     Ok(())
 }
 

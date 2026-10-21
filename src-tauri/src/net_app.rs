@@ -260,13 +260,14 @@ impl Executor for TauriExecutor {
     }
 }
 
-/// What a phone's `Interpret` gets back: the line to say, and the action to
-/// run on its yes when there is one.
+/// What a phone's `Interpret` gets back: the line to say, and the announced
+/// actions it runs when its window ends when there are any.
 pub(crate) fn interpret_data(outcome: &Interpreted) -> Value {
     match outcome {
         Interpreted::Say(s) => serde_json::json!({ "say": s }),
-        // The phone still asks for a yes and runs one action (Task 7 moves it to the window).
-        Interpreted::Announce { say, actions } => serde_json::json!({ "say": say, "pending": { "say": say, "action": actions.first() } }),
+        // The phone waits out the window and then sends one `Execute` per action;
+        // `action` is the first, for a phone on an older Maya.
+        Interpreted::Announce { say, actions } => serde_json::json!({ "say": say, "pending": { "say": say, "actions": actions, "action": actions.first() } }),
         // Run is executed before answering; see `serve_voice`.
         Interpreted::Run(_) => serde_json::json!({ "say": "" }),
     }
@@ -348,8 +349,9 @@ fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, Strin
         }
         Request::Execute { action } => {
             let fresh = revalidate(&action, &listener::voice_context(app))?;
+            // An error, not a line: the phone speaks only what went wrong.
             if let Some(why) = refuse_remote(&fresh) {
-                return Ok(Some(said_data(&why)));
+                return Err(why);
             }
             let said = listener::execute_action(app, &fresh)?;
             Ok(Some(said_data(&said)))
@@ -458,6 +460,10 @@ mod tests {
         assert_eq!(asked["say"], "Answering hexgrid with \"Yes\".");
         assert_eq!(asked["pending"]["say"], asked["say"]);
         assert_eq!(asked["pending"]["action"]["kind"], "answer");
+        assert_eq!(asked["pending"]["actions"][0]["kind"], "answer");
+        let two = interpret_data(&Interpreted::Announce { say: "Two.".into(), actions: vec![serde_json::json!({"kind": "reply"}), serde_json::json!({"kind": "compact"})] });
+        assert_eq!(two["pending"]["actions"].as_array().unwrap().len(), 2);
+        assert_eq!(two["pending"]["action"]["kind"], "reply", "an older phone gets the first");
     }
 
     #[test]

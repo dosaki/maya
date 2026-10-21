@@ -1,12 +1,14 @@
 //! The phone's voice conversation: the shared wake-word `Flow`, the turns
 //! sent with each command, and what to say and when to listen. The main
-//! interprets (`Request::Interpret`) and runs (`Request::Execute`); the
+//! interprets (`Request::Interpret`), and runs each announced action
+//! (`Request::Execute`) once its 5-second window ends; the
 //! recogniser and the voice sit behind `VoiceIo` so this is tested on the
 //! host. Nothing here listens or speaks while the app is off screen.
 
 use maya_core::log;
 use maya_core::net::protocol::{Request, VoiceTurn};
-use maya_core::wake::{Effect, Flow, Pending};
+use maya_core::wake::{Effect, Flow};
+use maya_core::window::{self, Batch, Via, Window};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -35,7 +37,7 @@ pub struct VoiceView {
     pub state: String,
     pub heard: String,
     pub said: String,
-    /// The read-back waiting for yes or no.
+    /// The announcement of the actions that run when the window ends.
     pub pending: Option<String>,
     pub error: Option<String>,
     /// Why voice is not offered; `None` when it is.
@@ -64,8 +66,8 @@ enum After {
     Idle,
     /// Listen for a command (after "Yes?" or a question back).
     Command,
-    /// Restart the confirmation window and listen for yes or no.
-    Confirm(Pending),
+    /// Start the clock of this batch and listen for a stop, a yes or a correction.
+    Window(u64),
 }
 
 struct Inner {
@@ -82,9 +84,8 @@ struct Inner {
     /// `play_queued` asks the gate and speaks it. Busy meanwhile.
     playing: bool,
     generation: u64,
-    /// Bumped by each confirmation held or armed: an older window's
-    /// expiry timer finds it changed and does nothing.
-    epoch: u64,
+    /// The announced actions waiting for their window to end.
+    window: Window,
     failures: u32,
     backoffs: Vec<u64>,
     view: VoiceView,
@@ -116,7 +117,7 @@ impl Voice {
     fn build(io: Arc<dyn VoiceIo>, ask: Ask, show: Show, now: fn() -> u64, sync: bool) -> Arc<Voice> {
         let inner = Inner {
             flow: Flow::new(), history: vec![], on_screen: false, wake: false, offer: Some(NO_MAIN.into()), speaking: false, thinking: false,
-            after: After::Idle, events: VecDeque::new(), playing: false, generation: 0, epoch: 0, failures: 0, backoffs: vec![], view: VoiceView { state: "off".into(), ..Default::default() },
+            after: After::Idle, events: VecDeque::new(), playing: false, generation: 0, window: Window::default(), failures: 0, backoffs: vec![], view: VoiceView { state: "off".into(), ..Default::default() },
         };
         let v = Arc::new(Voice { inner: Mutex::new(inner), io, ask, show, now, sync, me: Mutex::new(std::sync::Weak::new()), gate: Mutex::new(None) });
         *v.me.lock().unwrap() = Arc::downgrade(&v);
@@ -155,7 +156,7 @@ impl Voice {
             }
         }
         .to_string();
-        i.view.pending = if i.flow.has_pending() { i.view.pending.clone() } else { None };
+        i.view.pending = i.window.pending().map(|b| b.say.clone());
         i.view.offer = i.offer.clone();
         (self.show)(&i.view);
     }
@@ -210,6 +211,7 @@ impl Voice {
     fn reset(&self, i: &mut Inner) {
         i.generation += 1;
         i.flow.reset();
+        i.window.cancel();
         i.speaking = false;
         i.thinking = false;
         i.after = After::Idle;
@@ -235,10 +237,10 @@ impl Voice {
     }
 
     /// The mic button. While Maya speaks it cuts her off and listens, for
-    /// yes or no when she was reading an action back. While a command
-    /// window listens it stops listening; a waiting confirmation stops
-    /// listening too but keeps its action and its buttons. Otherwise it
-    /// listens for one command.
+    /// a stop or a yes when she was announcing actions. While a command
+    /// window listens it stops listening; a waiting window stops
+    /// listening too but keeps its actions and its Cancel button, and they
+    /// still run when it ends. Otherwise it listens for one command.
     pub fn tap(&self) {
         self.tap_now();
         self.play_queued();
@@ -255,17 +257,19 @@ impl Voice {
         if i.speaking {
             self.io.stop_speaking();
             i.speaking = false;
-            if let After::Confirm(p) = std::mem::replace(&mut i.after, After::Idle) {
-                self.arm_confirm(&mut i, p);
+            if let After::Window(id) = std::mem::replace(&mut i.after, After::Idle) {
+                self.start_window(&mut i, id);
                 self.io.listen(false);
                 self.publish(&mut i);
                 return;
             }
         } else {
-            if i.flow.drop_expired(now) {
-                i.view.pending = None;
+            if let Some(batch) = Self::take_due(&mut i, (self.now)()) {
+                self.io.stop_listening();
+                self.execute_batch(i, batch.actions);
+                return;
             }
-            if i.flow.has_pending() {
+            if i.window.pending().is_some() {
                 self.io.stop_listening();
                 self.publish(&mut i);
                 return;
@@ -290,8 +294,8 @@ impl Voice {
             return;
         }
         i.view.heard = text.to_string();
-        // Still talking: a command window lasts until the words stop. A
-        // confirmation keeps its own window and its pending action.
+        // Still talking: a command window lasts until the words stop. An
+        // announced batch keeps its own deadline.
         let now = (self.now)();
         if i.flow.state(now) == "awaiting-command" {
             i.flow.await_reply(now);
@@ -299,15 +303,26 @@ impl Voice {
         self.publish(&mut i);
     }
 
-    pub fn confirm(&self, yes: bool) {
+    /// The Cancel button: the announced actions are dropped, as by "stop".
+    pub fn cancel(&self) {
         {
-            let i = self.inner.lock().unwrap();
-            if !i.flow.has_pending() {
+            let mut i = self.inner.lock().unwrap();
+            if i.window.pending().is_none() || !Self::active(&i) {
                 return;
             }
+            i.window.cancel();
+            i.flow.close_window();
+            push(&mut i.history, "user", "no");
+            // Her announcement may still be playing: the cancel cuts it off.
+            if i.speaking {
+                self.io.stop_speaking();
+                i.speaking = false;
+            }
+            self.io.stop_listening();
+            self.say(&mut i, "Cancelled.", After::Idle);
+            self.publish(&mut i);
         }
-        self.io.stop_listening();
-        self.heard(if yes { "yes" } else { "no" });
+        self.play_queued();
     }
 
     pub fn heard(&self, text: &str) {
@@ -333,6 +348,7 @@ impl Voice {
             self.publish(&mut i);
             return;
         }
+        let say_follows = effects.iter().any(|e| matches!(e, Effect::Say(_)));
         for e in effects {
             match e {
                 Effect::Say(s) => self.say(&mut i, &s, After::Command),
@@ -343,16 +359,36 @@ impl Voice {
                     self.request(i, Request::Interpret { command: cmd, history });
                     return;
                 }
-                Effect::Execute(action) => {
+                Effect::RunNow => {
                     push(&mut i.history, "user", "yes");
-                    i.view.pending = None;
-                    self.request(i, Request::Execute { action });
+                    match i.window.take_now() {
+                        Some(batch) => self.execute_batch(i, batch.actions),
+                        None => {
+                            self.carry_on(&mut i);
+                            self.publish(&mut i);
+                        }
+                    }
+                    return;
+                }
+                Effect::Correct(cmd) => {
+                    // Cancelled silently: what she heard is a new command.
+                    i.window.cancel();
+                    let history = last(&i.history);
+                    push(&mut i.history, "user", &cmd);
+                    self.request(i, Request::Interpret { command: cmd, history });
                     return;
                 }
                 Effect::Cancelled => {
+                    i.window.cancel();
                     push(&mut i.history, "user", "no");
-                    i.view.pending = None;
-                    self.say(&mut i, "OK.", After::Idle);
+                    // A bare wake word cancels and asks "Yes?" in the same breath.
+                    if !say_follows {
+                        self.say(&mut i, "Cancelled.", After::Idle);
+                    }
+                }
+                Effect::Stop => {
+                    // Nothing announced: whatever she is saying has stopped already.
+                    self.carry_on(&mut i);
                 }
             }
         }
@@ -371,13 +407,11 @@ impl Voice {
         }
         // The recogniser ran to its end: the failures are no longer in a row.
         i.failures = 0;
-        let now = (self.now)();
-        if i.flow.drop_expired(now) {
-            i.view.pending = None;
-            self.say(&mut i, "OK.", After::Idle);
-        } else {
-            self.carry_on(&mut i);
+        if let Some(batch) = Self::take_due(&mut i, (self.now)()) {
+            self.execute_batch(i, batch.actions);
+            return;
         }
+        self.carry_on(&mut i);
         self.publish(&mut i);
     }
 
@@ -391,7 +425,7 @@ impl Voice {
         if !Self::active(&i) {
             return;
         }
-        // Inside a tap, follow-up or confirmation window the failed
+        // Inside a tap, follow-up or announcement window the failed
         // recogniser was that window's, not the wake loop's: end the window
         // as without the wake word, and carry on (the wake loop resumes).
         let window = i.flow.state((self.now)()) != "idle";
@@ -433,10 +467,10 @@ impl Voice {
 
     /// A backoff ran out: restart the wake loop if nothing else has taken
     /// the recogniser or the conversation since. A tap, a question's reply
-    /// or a confirmation listens in a window of its own; the wake loop
+    /// or an announced batch listens in a window of its own; the wake loop
     /// comes back by itself once that window closes, since every way one
     /// closes carries on: heard, ended, a failure (`failed` ends the
-    /// window), a second tap, or a confirmation's own expiry timer.
+    /// window), a second tap, or a batch's own expiry timer.
     fn retry_wake(&self, generation: u64) {
         let i = self.inner.lock().unwrap();
         let idle = i.flow.state((self.now)()) == "idle";
@@ -445,53 +479,59 @@ impl Voice {
         }
     }
 
-    /// Starts a confirmation's answer window, and a timer that ends it
-    /// even when nothing is listening (a tap stopped the mic): the timer
-    /// thread holds only a `Weak`, and the generation and epoch tell it
-    /// whether this window is still the one waiting.
-    fn arm_confirm(&self, i: &mut Inner, p: Pending) {
-        i.flow.set_pending(p, (self.now)());
-        i.epoch += 1;
+    /// The announcement of batch `id` has been said (or cut off): its
+    /// 5 seconds start now, the flow listens for a stop, a yes or a
+    /// correction, and a timer runs the batch even when nothing is listening
+    /// (a tap stopped the mic). The timer thread holds only a `Weak`; the
+    /// generation and the batch id tell it whether this is still the batch
+    /// waiting.
+    fn start_window(&self, i: &mut Inner, id: u64) {
+        let Some(until) = i.window.start_clock(id, (self.now)()) else { return };
+        i.flow.open_window(until);
         if self.sync {
             return;
         }
-        let (generation, epoch) = (i.generation, i.epoch);
+        let generation = i.generation;
         let me = self.me.lock().unwrap().clone();
         std::thread::spawn(move || {
-            let mut wait = maya_core::wake::CONFIRM_WAIT_MS + 1;
+            let mut wait = window::WAIT_MS + 1;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(wait));
                 match me.upgrade() {
-                    Some(v) if v.expire_pending(generation, epoch) => wait = 250,
+                    Some(v) if v.expire_window(generation, id) => wait = 250,
                     _ => break,
                 }
             }
         });
     }
 
-    /// A confirmation's timer ran out: as `ended` does for an expired
-    /// action, say "OK." and carry on once it is said. True when the
-    /// window is still open (a clock that lagged the sleep): try again.
-    fn expire_pending(&self, generation: u64, epoch: u64) -> bool {
-        let mut i = self.inner.lock().unwrap();
-        // Speaking or thinking, what follows settles the action itself.
-        if i.generation != generation || i.epoch != epoch || !Self::active(&i) || i.speaking || i.thinking || !i.flow.has_pending() {
-            return false;
-        }
-        if !i.flow.drop_expired((self.now)()) {
-            return true;
-        }
-        i.view.pending = None;
-        self.say(&mut i, "OK.", After::Idle);
-        self.publish(&mut i);
-        false
+    /// The open batch, when its deadline has come.
+    fn take_due(i: &mut Inner, now: u64) -> Option<Batch> {
+        let id = i.window.pending()?.id;
+        i.window.take_due(id, now)
     }
 
-    /// The generation and epoch a confirmation's timer now carries; a test seam.
+    /// A batch's timer ran out: run its actions. True when the batch is
+    /// still waiting (a clock that lagged the sleep): try again.
+    fn expire_window(&self, generation: u64, id: u64) -> bool {
+        let mut i = self.inner.lock().unwrap();
+        if i.generation != generation || !Self::active(&i) {
+            return false;
+        }
+        match i.window.take_due(id, (self.now)()) {
+            Some(batch) => {
+                self.execute_batch(i, batch.actions);
+                false
+            }
+            None => i.window.pending().is_some_and(|b| b.id == id),
+        }
+    }
+
+    /// The generation and batch id a window's timer now carries; a test seam.
     #[cfg(test)]
-    fn confirm_epoch(&self) -> (u64, u64) {
+    fn window_timer(&self) -> (u64, u64) {
         let i = self.inner.lock().unwrap();
-        (i.generation, i.epoch)
+        (i.generation, i.window.pending().map_or(0, |b| b.id))
     }
 
     #[cfg(test)]
@@ -533,8 +573,8 @@ impl Voice {
         }
         let now = (self.now)();
         match std::mem::replace(&mut i.after, After::Idle) {
-            After::Confirm(p) => {
-                self.arm_confirm(&mut i, p);
+            After::Window(id) => {
+                self.start_window(&mut i, id);
                 self.io.listen(false);
             }
             After::Command => {
@@ -645,9 +685,8 @@ impl Voice {
     /// Sends `request` (with the history) and acts on the answer, on a
     /// thread unless `sync`. The lock is released while the main thinks.
     fn request(&self, mut i: std::sync::MutexGuard<'_, Inner>, request: Request) {
-        let execute = matches!(request, Request::Execute { .. });
-        // The user has moved on: a read-back still being said must not re-arm
-        // its confirmation when it finishes.
+        // The user has moved on: an announcement still being said must not
+        // start a window when it finishes.
         i.after = After::Idle;
         if i.speaking {
             self.io.stop_speaking();
@@ -663,11 +702,37 @@ impl Voice {
         let run = move || {
             let answer = ask(request);
             if let Some(v) = me.upgrade() {
-                if execute {
-                    v.finish_execute(generation, answer);
-                } else {
-                    v.finish_interpret(generation, answer);
-                }
+                v.finish_interpret(generation, answer);
+            }
+        };
+        if self.sync {
+            run();
+        } else {
+            std::thread::spawn(run);
+        }
+    }
+
+    /// Runs the actions of a batch whose window ended (or that got a yes),
+    /// one `Execute` each, in order, on a thread unless `sync`. Only what
+    /// went wrong is spoken afterwards.
+    fn execute_batch(&self, mut i: std::sync::MutexGuard<'_, Inner>, actions: Vec<Value>) {
+        i.flow.close_window();
+        i.after = After::Idle;
+        if i.speaking {
+            self.io.stop_speaking();
+            i.speaking = false;
+        }
+        i.thinking = true;
+        let generation = i.generation;
+        self.io.stop_listening();
+        self.publish(&mut i);
+        drop(i);
+        let ask = self.ask.clone();
+        let me = self.me.lock().unwrap().clone();
+        let run = move || {
+            let failures: Vec<String> = actions.into_iter().filter_map(|action| ask(Request::Execute { action }).err()).collect();
+            if let Some(v) = me.upgrade() {
+                v.finish_execute(generation, failures);
             }
         };
         if self.sync {
@@ -700,17 +765,23 @@ impl Voice {
             }
         };
         let say = data["say"].as_str().unwrap_or("").to_string();
-        let pending = data.get("pending").filter(|p| !p.is_null()).map(|p| Pending { say: p["say"].as_str().unwrap_or(&say).to_string(), action: p["action"].clone() });
-        // The turn is what Maya says: the read-back when there is one.
-        push(&mut i.history, "maya", pending.as_ref().map_or(&say, |p| &p.say));
-        match pending {
-            Some(p) => {
-                // Held while it is read back; `spoken` starts its window.
-                i.flow.hold_pending(p.clone());
-                i.epoch += 1;
-                let line = p.say.clone();
+        // The announced actions; a main from before the window sends only `action`.
+        let announced = data.get("pending").filter(|p| !p.is_null()).and_then(|p| {
+            let actions: Vec<Value> = match p["actions"].as_array() {
+                Some(list) => list.clone(),
+                None if !p["action"].is_null() => vec![p["action"].clone()],
+                None => vec![],
+            };
+            (!actions.is_empty()).then(|| (p["say"].as_str().unwrap_or(&say).to_string(), actions))
+        });
+        // The turn is what Maya says: the announcement when there is one.
+        push(&mut i.history, "maya", announced.as_ref().map_or(&say, |(line, _)| line));
+        match announced {
+            Some((line, actions)) => {
+                // Held while it is announced; `spoken` starts its clock.
+                let id = i.window.open(line.clone(), actions, Via::Phone);
                 i.view.pending = Some(line.clone());
-                self.say(&mut i, &line, After::Confirm(p));
+                self.say(&mut i, &line, After::Window(id));
             }
             None if say.trim_end().ends_with('?') => self.say(&mut i, &say, After::Command),
             None if say.trim().is_empty() => self.carry_on(&mut i),
@@ -719,18 +790,24 @@ impl Voice {
         self.publish(&mut i);
     }
 
-    fn finish_execute(&self, generation: u64, answer: Result<Option<Value>, String>) {
+    fn finish_execute(&self, generation: u64, failures: Vec<String>) {
+        self.finish_execute_now(generation, failures);
+        self.play_queued();
+    }
+
+    fn finish_execute_now(&self, generation: u64, failures: Vec<String>) {
         let mut i = self.inner.lock().unwrap();
         if i.generation != generation {
             return;
         }
         i.thinking = false;
-        let say = match answer {
-            Ok(d) => d.and_then(|d| d["say"].as_str().map(str::to_string)).unwrap_or_else(|| "Done.".into()),
-            Err(e) => e,
-        };
-        push(&mut i.history, "maya", &say);
-        self.say(&mut i, &say, After::Idle);
+        if failures.is_empty() {
+            self.carry_on(&mut i);
+        } else {
+            let say = failures.join(" ");
+            push(&mut i.history, "maya", &say);
+            self.say(&mut i, &say, After::Idle);
+        }
         self.publish(&mut i);
     }
 }
@@ -804,6 +881,20 @@ mod tests {
         }
     }
 
+    /// What the main answers to a command it announces actions for.
+    fn announce_answer(say: &str, actions: Vec<Value>) -> Result<Value, String> {
+        Ok(serde_json::json!({"say": say, "pending": {"say": say, "actions": actions, "action": actions.first()}}))
+    }
+
+    fn reply() -> Value {
+        serde_json::json!({"kind": "reply", "session": "s1"})
+    }
+
+    /// How many `Execute` requests the main has been sent.
+    fn executed(asked: &Mutex<Vec<Request>>) -> usize {
+        asked.lock().unwrap().iter().filter(|r| matches!(r, Request::Execute { .. })).count()
+    }
+
     /// A voice whose requests answer with `answers` in order, synchronously.
     fn voice(answers: Vec<Result<Value, String>>) -> (Arc<Voice>, Arc<FakeIo>, Arc<Mutex<Vec<Request>>>) {
         let io = Arc::new(FakeIo::default());
@@ -811,7 +902,12 @@ mod tests {
         let queue = Arc::new(Mutex::new(answers));
         let (a, q) = (asked.clone(), queue.clone());
         let ask: Ask = Arc::new(move |r| {
+            let execute = matches!(r, Request::Execute { .. });
             a.lock().unwrap().push(r);
+            // An action that runs succeeds; the answers are for the commands.
+            if execute {
+                return Ok(Some(serde_json::json!({"say": "Sent."})));
+            }
             q.lock().unwrap().remove(0).map(Some)
         });
         let v = Voice::new_sync(io.clone(), ask, Arc::new(|_| {}), now);
@@ -846,52 +942,172 @@ mod tests {
     }
 
     #[test]
-    fn a_read_back_then_yes_runs_the_action() {
-        let action = serde_json::json!({"kind": "answer", "session": "s1", "askId": 42});
-        let (v, io, asked) = voice(vec![
-            Ok(serde_json::json!({"say": "Answering hexgrid with \"Yes\". Yes?", "pending": {"say": "Answering hexgrid with \"Yes\". Yes?", "action": action}})),
-            Ok(serde_json::json!({"say": "Answered."})),
-        ]);
+    fn an_announced_action_runs_after_the_window_unless_cancelled() {
+        let (v, io, asked) = voice(vec![announce_answer("Telling x: y.", vec![reply()])]);
         v.tap();
-        io.take();
-        v.heard("answer hexgrid yes");
-        assert_eq!(io.take(), vec!["say Answering hexgrid with \"Yes\". Yes?"]);
-        assert_eq!(v.view().pending.as_deref(), Some("Answering hexgrid with \"Yes\". Yes?"));
+        v.heard("tell x y");
+        assert_eq!(io.take(), vec!["listen", "say Telling x: y."]);
+        assert_eq!(v.view().pending.as_deref(), Some("Telling x: y."));
         v.spoken(true);
         assert_eq!(io.take(), vec!["listen"]);
-        v.heard("yes");
-        assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { action: a } if a["askId"] == 42));
-        assert_eq!(io.take(), vec!["say Answered."]);
-        assert_eq!(v.view().pending, None);
-    }
-
-    #[test]
-    fn the_buttons_answer_a_read_back_like_words() {
-        let action = serde_json::json!({"kind": "reply", "session": "s1"});
-        let (v, io, asked) = voice(vec![Ok(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action}}))]);
-        v.tap();
-        v.heard("tell x y");
-        v.spoken(true);
-        io.take();
-        v.confirm(false);
-        assert_eq!(io.take(), vec!["stop listening", "say OK."]);
-        assert_eq!(asked.lock().unwrap().len(), 1, "no means nothing runs");
-    }
-
-    #[test]
-    fn no_answer_to_a_read_back_cancels() {
-        let action = serde_json::json!({"kind": "reply", "session": "s1"});
-        let (v, io, asked) = voice(vec![Ok(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action}}))]);
-        v.tap();
-        v.heard("tell x y");
-        v.spoken(true);
-        io.take();
-        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
+        assert_eq!(v.view().state, "window");
+        advance(window::WAIT_MS - 1);
         v.ended();
-        assert_eq!(io.take(), vec!["say OK."]);
+        assert_eq!(executed(&asked), 0, "not before the 5 seconds");
+        io.take();
+        advance(2);
+        v.ended();
+        assert_eq!(executed(&asked), 1);
         assert_eq!(v.view().pending, None);
-        assert_eq!(asked.lock().unwrap().len(), 1);
+        assert_eq!(io.take(), vec!["stop listening"], "nothing is spoken for a success");
     }
+
+    #[test]
+    fn the_clock_starts_when_the_announcement_ends() {
+        let (v, io, asked) = voice(vec![announce_answer("Telling x: y.", vec![reply()])]);
+        v.tap();
+        v.heard("tell x y");
+        advance(window::WAIT_MS + 1);
+        v.spoken(true);
+        io.take();
+        v.ended();
+        assert_eq!(executed(&asked), 0, "a long announcement does not eat the window");
+        advance(window::WAIT_MS - 1);
+        v.heard("yes");
+        assert_eq!(executed(&asked), 1);
+    }
+
+    #[test]
+    fn no_during_the_window_cancels_the_announced_action() {
+        let (v, io, asked) = voice(vec![announce_answer("Telling x: y.", vec![reply()])]);
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        io.take();
+        v.heard("no");
+        assert_eq!(io.take(), vec!["say Cancelled."]);
+        assert_eq!(v.view().pending, None);
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        assert_eq!(executed(&asked), 0);
+    }
+
+    #[test]
+    fn yes_during_the_window_runs_the_batch_at_once() {
+        let (v, _, asked) = voice(vec![announce_answer("Telling x: y.", vec![reply()])]);
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        v.heard("yes");
+        assert_eq!(executed(&asked), 1);
+        assert_eq!(v.view().pending, None);
+    }
+
+    #[test]
+    fn something_else_in_the_window_cancels_silently_and_is_a_new_command() {
+        let (v, io, asked) = voice(vec![
+            announce_answer("Telling x: y.", vec![reply()]),
+            Ok(serde_json::json!({"say": "Two sessions need you."})),
+        ]);
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        io.take();
+        v.heard("actually what needs me");
+        assert!(matches!(&asked.lock().unwrap()[1], Request::Interpret { command, .. } if command == "actually what needs me"));
+        assert_eq!(io.take(), vec!["say Two sessions need you."], "no Cancelled. in between");
+        v.spoken(true);
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        assert_eq!(executed(&asked), 0);
+    }
+
+    #[test]
+    fn the_cancel_button_drops_the_batch_even_while_it_is_announced() {
+        let (v, io, asked) = voice(vec![announce_answer("Telling x: y.", vec![reply()])]);
+        v.tap();
+        v.heard("tell x y");
+        io.take();
+        v.cancel();
+        assert_eq!(io.take(), vec!["stop speaking", "stop listening", "say Cancelled."]);
+        assert_eq!(v.view().pending, None);
+        v.spoken(true);
+        v.ended();
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        assert_eq!(executed(&asked), 0);
+        v.cancel();
+        assert_eq!(io.take(), Vec::<String>::new(), "nothing to cancel");
+    }
+
+    #[test]
+    fn every_announced_action_runs_in_order() {
+        let (v, _, asked) = voice(vec![announce_answer("Two things.", vec![serde_json::json!({"kind": "reply", "n": 1}), serde_json::json!({"kind": "compact", "n": 2})])]);
+        v.tap();
+        v.heard("do two things");
+        v.spoken(true);
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        let asked = asked.lock().unwrap();
+        let order: Vec<u64> = asked.iter().filter_map(|r| match r { Request::Execute { action } => action["n"].as_u64(), _ => None }).collect();
+        assert_eq!(order, vec![1, 2]);
+    }
+
+    #[test]
+    fn a_main_from_before_the_window_sends_only_the_first_action() {
+        let old = Ok(serde_json::json!({"say": "Telling x: y.", "pending": {"say": "Telling x: y.", "action": reply()}}));
+        let (v, _, asked) = voice(vec![old]);
+        v.tap();
+        v.heard("tell x y");
+        v.spoken(true);
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        assert_eq!(executed(&asked), 1);
+    }
+
+    #[test]
+    fn only_failures_are_spoken_after_the_actions_run() {
+        let answers = vec![announce_answer("Two things.", vec![reply(), reply(), reply()])];
+        let io = Arc::new(FakeIo::default());
+        let asked = Arc::new(Mutex::new(vec![]));
+        let queue = Arc::new(Mutex::new(answers));
+        let (a, q) = (asked.clone(), queue.clone());
+        let ask: Ask = Arc::new(move |r| {
+            let execute = matches!(r, Request::Execute { .. });
+            let n = a.lock().unwrap().len();
+            a.lock().unwrap().push(r);
+            if !execute {
+                return q.lock().unwrap().remove(0).map(Some);
+            }
+            // The second action fails; the others succeed with a line nobody hears.
+            if n == 2 { Err("Hexgrid has gone.".into()) } else { Ok(Some(serde_json::json!({"say": "Sent."}))) }
+        });
+        let v = Voice::new_sync(io.clone(), ask, Arc::new(|_| {}), now);
+        v.screen(true);
+        v.set_offer(None);
+        v.tap();
+        v.heard("do three things");
+        v.spoken(true);
+        io.take();
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        assert_eq!(io.take(), vec!["stop listening", "say Hexgrid has gone."]);
+        assert_eq!(executed(&asked), 3, "a failure does not stop the others");
+    }
+
+    #[test]
+    fn a_partial_resume_all_failure_from_the_main_is_spoken() {
+        let (v, io, _) = voice(vec![announce_answer("Resuming all.", vec![serde_json::json!({"kind": "resume_all"})])]);
+        v.tap();
+        v.heard("resume everything");
+        v.spoken(true);
+        io.take();
+        // The main's `Execute` answers a resume_all that left sessions behind with an error.
+        v.finish_execute(v.begin_request(), vec!["Resumed 2; 1 could not be resumed.".into()]);
+        assert_eq!(io.take(), vec!["say Resumed 2; 1 could not be resumed."]);
+    }
+
+
 
     #[test]
     fn silence_after_a_tap_goes_idle() {
@@ -938,9 +1154,8 @@ mod tests {
     }
 
     #[test]
-    fn leaving_the_screen_stops_everything_and_drops_a_pending_action() {
-        let action = serde_json::json!({"kind": "reply", "session": "s1"});
-        let (v, io, _) = voice(vec![Ok(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action}}))]);
+    fn leaving_the_screen_stops_everything_and_drops_an_announced_action() {
+        let (v, io, asked) = voice(vec![announce_answer("Telling x: y.", vec![reply()])]);
         v.tap();
         v.heard("tell x y");
         io.take();
@@ -950,7 +1165,10 @@ mod tests {
         assert_eq!(v.view().pending, None);
         v.screen(true);
         v.heard("yes");
-        assert_eq!(io.take(), Vec::<String>::new(), "a yes after coming back confirms nothing");
+        assert_eq!(io.take(), Vec::<String>::new(), "a yes after coming back runs nothing");
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        assert_eq!(executed(&asked), 0);
     }
 
     #[test]
@@ -966,15 +1184,14 @@ mod tests {
 
     #[test]
     fn an_event_waits_for_the_conversation() {
-        let action = serde_json::json!({"kind": "reply", "session": "s1"});
-        let (v, io, _) = voice(vec![Ok(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action}}))]);
+        let (v, io, _) = voice(vec![announce_answer("Telling x: y.", vec![reply()])]);
         v.tap();
         v.heard("tell x y");
         io.take();
         assert!(v.announce("laptop needs a decision"));
-        assert_eq!(io.take(), Vec::<String>::new(), "not during a read-back");
-        v.confirm(false);
-        assert_eq!(io.take(), vec!["stop listening", "say OK."]);
+        assert_eq!(io.take(), Vec::<String>::new(), "not during an announcement");
+        v.cancel();
+        assert_eq!(io.take(), vec!["stop speaking", "stop listening", "say Cancelled."]);
         v.spoken(true);
         assert_eq!(io.take(), vec!["say laptop needs a decision"]);
     }
@@ -1043,23 +1260,6 @@ mod tests {
         assert_eq!(history.last().unwrap().text, "a8");
     }
 
-    #[test]
-    fn chatter_during_a_read_back_keeps_the_mic_open() {
-        let action = serde_json::json!({"kind": "reply", "session": "s1"});
-        let (v, io, asked) = voice(vec![
-            Ok(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action}})),
-            Ok(serde_json::json!({"say": "Sent."})),
-        ]);
-        v.tap();
-        v.heard("tell x y");
-        v.spoken(true);
-        io.take();
-        v.heard("hmm let me think");
-        assert_eq!(io.take(), vec!["listen"], "the read-back still waits, so the mic reopens");
-        assert_eq!(v.view().state, "awaiting-confirm");
-        v.heard("yes");
-        assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { .. }));
-    }
 
     #[test]
     fn an_event_queued_behind_a_question_is_spoken_when_the_window_closes() {
@@ -1097,42 +1297,6 @@ mod tests {
         let _ = release.send(());
     }
 
-    #[test]
-    fn a_yes_during_the_read_back_runs_the_action_once() {
-        let action = serde_json::json!({"kind": "reply", "session": "s1"});
-        let io = Arc::new(FakeIo::default());
-        let asked = Arc::new(Mutex::new(vec![]));
-        let me: Arc<Mutex<std::sync::Weak<Voice>>> = Arc::new(Mutex::new(std::sync::Weak::new()));
-        let (a, m) = (asked.clone(), me.clone());
-        let ask: Ask = Arc::new(move |r: Request| {
-            let execute = matches!(r, Request::Execute { .. });
-            a.lock().unwrap().push(r);
-            if !execute {
-                return Ok(Some(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action.clone()}})));
-            }
-            // The read-back finishes while the main runs the action.
-            let v = m.lock().unwrap().upgrade();
-            if let Some(v) = v {
-                v.spoken(true);
-            }
-            Ok(Some(serde_json::json!({"say": "Sent."})))
-        });
-        let v = Voice::new_sync(io.clone(), ask, Arc::new(|_| {}), now);
-        *me.lock().unwrap() = Arc::downgrade(&v);
-        v.screen(true);
-        v.set_offer(None);
-        v.tap();
-        v.heard("tell x y");
-        io.take();
-        v.confirm(true);
-        assert_eq!(io.take(), vec!["stop listening", "stop speaking", "say Sent."]);
-        v.spoken(true);
-        assert_eq!(io.take(), Vec::<String>::new(), "no mic reopened for a confirm");
-        assert_eq!(v.view().pending, None);
-        v.heard("okay");
-        let asked = asked.lock().unwrap();
-        assert_eq!(asked.iter().filter(|r| matches!(r, Request::Execute { .. })).count(), 1);
-    }
 
     #[test]
     fn only_failures_in_a_row_stop_the_wake_loop_and_it_stays_stopped() {
@@ -1195,10 +1359,9 @@ mod tests {
     }
 
     #[test]
-    fn history_records_the_read_back_that_was_spoken() {
-        let action = serde_json::json!({"kind": "reply", "session": "s1"});
+    fn history_records_the_announcement_that_was_spoken() {
         let (v, _, asked) = voice(vec![
-            Ok(serde_json::json!({"say": "I'll tell x.", "pending": {"say": "Telling x: y. Yes?", "action": action}})),
+            Ok(serde_json::json!({"say": "I'll tell x.", "pending": {"say": "Telling x: y.", "actions": [reply()]}})),
             Ok(serde_json::json!({"say": ""})),
             Ok(serde_json::json!({"say": "Done."})),
             Ok(serde_json::json!({"say": "Done."})),
@@ -1209,7 +1372,7 @@ mod tests {
         v.heard("Maya tell z w");
         {
             let Request::Interpret { history, .. } = &asked.lock().unwrap()[1] else { panic!() };
-            assert_eq!(history.last().unwrap().text, "Telling x: y. Yes?");
+            assert_eq!(history.last().unwrap().text, "Telling x: y.");
         }
         v.tap();
         v.heard("q3");
@@ -1218,11 +1381,7 @@ mod tests {
     }
 
     fn read_back() -> Vec<Result<Value, String>> {
-        let action = serde_json::json!({"kind": "reply", "session": "s1"});
-        vec![
-            Ok(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action}})),
-            Ok(serde_json::json!({"say": "Sent."})),
-        ]
+        vec![announce_answer("Telling x: y.", vec![reply()])]
     }
 
     #[test]
@@ -1241,16 +1400,18 @@ mod tests {
     }
 
     #[test]
-    fn a_partial_during_a_read_back_keeps_it_a_confirmation() {
+    fn a_partial_during_the_window_keeps_its_deadline() {
         let (v, io, asked) = voice(read_back());
         v.tap();
         v.heard("tell x y");
         v.spoken(true);
         io.take();
+        advance(window::WAIT_MS - 1_000);
         v.partial("ye");
-        assert_eq!(v.view().state, "awaiting-confirm");
-        v.heard("yes");
-        assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { .. }));
+        assert_eq!(v.view().state, "window");
+        advance(1_001);
+        v.ended();
+        assert_eq!(executed(&asked), 1, "talking does not push the batch's deadline");
     }
 
     #[test]
@@ -1337,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_during_a_confirmation_stops_listening_but_keeps_it() {
+    fn a_tap_during_the_window_stops_listening_but_keeps_the_batch() {
         let (v, io, asked) = voice(read_back());
         v.tap();
         v.heard("tell x y");
@@ -1345,25 +1506,25 @@ mod tests {
         io.take();
         v.tap();
         assert_eq!(io.take(), vec!["stop listening"]);
-        assert_eq!(v.view().pending.as_deref(), Some("Telling x: y. Yes?"));
-        assert_eq!(v.view().state, "awaiting-confirm");
-        v.confirm(true);
-        assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { .. }));
+        assert_eq!(v.view().pending.as_deref(), Some("Telling x: y."));
+        assert_eq!(v.view().state, "window");
+        advance(window::WAIT_MS + 1);
+        v.ended();
+        assert_eq!(executed(&asked), 1, "it still runs when the window ends");
     }
 
     #[test]
-    fn a_tap_after_a_stopped_confirmation_ran_out_starts_a_command() {
-        let (v, io, _) = voice(read_back());
+    fn a_tap_after_the_window_ran_out_runs_the_batch() {
+        let (v, io, asked) = voice(read_back());
         v.tap();
         v.heard("tell x y");
         v.spoken(true);
         v.tap();
         io.take();
-        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
+        advance(window::WAIT_MS + 1);
         v.tap();
-        assert_eq!(io.take(), vec!["listen"]);
+        assert_eq!(executed(&asked), 1);
         assert_eq!(v.view().pending, None);
-        assert_eq!(v.view().state, "awaiting-command");
     }
 
     #[test]
@@ -1378,87 +1539,61 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_during_the_read_back_listens_for_yes_or_no() {
+    fn a_tap_during_the_announcement_cuts_it_off_and_starts_the_window() {
         let (v, io, asked) = voice(read_back());
         v.tap();
         v.heard("tell x y");
         io.take();
         v.tap();
         assert_eq!(io.take(), vec!["stop speaking", "listen"]);
-        assert_eq!(v.view().state, "awaiting-confirm");
-        assert_eq!(v.view().pending.as_deref(), Some("Telling x: y. Yes?"));
+        assert_eq!(v.view().state, "window");
+        assert_eq!(v.view().pending.as_deref(), Some("Telling x: y."));
         v.heard("yes");
-        assert!(matches!(&asked.lock().unwrap()[1], Request::Execute { .. }));
+        assert_eq!(executed(&asked), 1);
     }
 
-    #[test]
-    fn a_yes_during_a_long_read_back_still_confirms() {
-        let (v, io, asked) = voice(read_back());
-        v.tap();
-        v.heard("tell x y");
-        io.take();
-        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
-        assert_eq!(v.view().pending.as_deref(), Some("Telling x: y. Yes?"), "Yes and No still show");
-        v.confirm(true);
-        assert!(matches!(asked.lock().unwrap().get(1), Some(Request::Execute { .. })), "the window starts when the read-back ends");
-    }
+
 
     #[test]
-    fn the_answer_window_starts_when_the_read_back_ends() {
-        let (v, io, asked) = voice(read_back());
-        v.tap();
-        v.heard("tell x y");
-        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
-        v.spoken(true);
-        io.take();
-        assert_eq!(v.view().state, "awaiting-confirm");
-        advance(maya_core::wake::CONFIRM_WAIT_MS - 1);
-        v.heard("yes");
-        assert!(matches!(asked.lock().unwrap().get(1), Some(Request::Execute { .. })));
-    }
-
-    #[test]
-    fn a_stopped_confirmation_still_runs_out_and_the_wake_loop_comes_back() {
+    fn a_stopped_window_still_runs_out_and_the_wake_loop_comes_back() {
         let (v, io, asked) = voice(read_back());
         v.set_wake(true);
         v.tap();
         v.heard("tell x y");
         v.spoken(true);
-        let (generation, epoch) = v.confirm_epoch();
+        let (generation, id) = v.window_timer();
         v.tap();
         io.take();
-        assert!(v.expire_pending(generation, epoch), "still inside its window: try again later");
+        assert!(v.expire_window(generation, id), "still inside its window: try again later");
         assert_eq!(io.take(), Vec::<String>::new());
-        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
-        assert!(!v.expire_pending(generation, epoch));
-        assert_eq!(io.take(), vec!["say OK."]);
+        advance(window::WAIT_MS + 1);
+        assert!(!v.expire_window(generation, id));
+        assert_eq!(io.take(), vec!["stop listening", "listen wake"]);
         assert_eq!(v.view().pending, None);
-        v.spoken(true);
-        assert_eq!(io.take(), vec!["listen wake"]);
-        assert_eq!(asked.lock().unwrap().len(), 1, "nothing ran");
+        assert_eq!(executed(&asked), 1);
     }
 
     #[test]
-    fn an_older_window_s_timer_does_not_end_a_newer_confirmation() {
-        let action = serde_json::json!({"kind": "reply", "session": "s1"});
-        let (v, io, _) = voice(vec![
-            Ok(serde_json::json!({"say": "Telling x: y. Yes?", "pending": {"say": "Telling x: y. Yes?", "action": action}})),
-            Ok(serde_json::json!({"say": "Telling z: w. Yes?", "pending": {"say": "Telling z: w. Yes?", "action": action}})),
+    fn an_older_batch_s_timer_does_not_run_a_newer_batch() {
+        let (v, io, asked) = voice(vec![
+            announce_answer("Telling x: y.", vec![reply()]),
+            announce_answer("Telling z: w.", vec![reply()]),
         ]);
         v.tap();
         v.heard("tell x y");
         v.spoken(true);
-        let (generation, older) = v.confirm_epoch();
+        let (generation, older) = v.window_timer();
         v.heard("Maya tell z w");
         v.spoken(true);
-        let (_, newer) = v.confirm_epoch();
+        let (_, newer) = v.window_timer();
+        assert_ne!(older, newer);
         v.tap();
         io.take();
-        advance(maya_core::wake::CONFIRM_WAIT_MS + 1);
-        assert!(!v.expire_pending(generation, older));
-        assert_eq!(io.take(), Vec::<String>::new(), "the older timer is stale");
-        v.expire_pending(generation, newer);
-        assert_eq!(io.take(), vec!["say OK."]);
+        advance(window::WAIT_MS + 1);
+        assert!(!v.expire_window(generation, older));
+        assert_eq!(executed(&asked), 0, "the older timer is stale");
+        v.expire_window(generation, newer);
+        assert_eq!(executed(&asked), 1);
     }
 
     #[test]
@@ -1479,10 +1614,10 @@ mod tests {
             assert!(v.announce("laptop needs a decision"));
             io.take();
             gate_open.store(allowed, std::sync::atomic::Ordering::SeqCst);
-            v.confirm(false);
+            v.cancel();
             v.spoken(true);
             let next = if allowed { "say laptop needs a decision" } else { "listen wake" };
-            assert_eq!(io.take(), vec!["stop listening", "say OK.", next], "allowed: {allowed}");
+            assert_eq!(io.take(), vec!["stop speaking", "stop listening", "say Cancelled.", next], "allowed: {allowed}");
             let unlocked = unlocked.lock().unwrap();
             assert!(!unlocked.is_empty() && unlocked.iter().all(|u| *u), "asked at playback, never under the lock: {unlocked:?}");
         }
