@@ -5,3 +5,5 @@ pub mod notes;
 pub mod prompt;
 pub mod protocol;
 pub mod watch;
+pub mod claude;
+pub mod driver;
