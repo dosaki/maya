@@ -5,7 +5,11 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use super::notes::state_note;
-use crate::model::{Card, PullRequest};
+use crate::model::{Card, PullRequest, State};
+
+/// Added to a watch that fired because its session finished or needs a
+/// decision: Maya's built-in announcement has said so already.
+pub const ANNOUNCED: &str = "Maya has already announced this; do not repeat it; only act if the watch asked for an action.";
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,7 +120,10 @@ impl Watches {
         for w in &self.list {
             let what = if let Some(sid) = &w.session {
                 before.iter().find(|c| &c.session_id == sid).and_then(|b| match after.iter().find(|a| &a.session_id == sid) {
-                    Some(a) => state_note(b, a),
+                    Some(a) => state_note(b, a).map(|n| match a.state {
+                        State::Completed | State::Awaiting => format!("{n}. {ANNOUNCED}"),
+                        _ => n,
+                    }),
                     None => Some(format!("{} ended", b.name)),
                 })
             } else if let Some(reference) = &w.pr {
@@ -153,7 +160,7 @@ impl Watches {
 mod tests {
     use super::super::notes::tests::card;
     use super::*;
-    use crate::model::{PullRequest, State};
+    use crate::model::PullRequest;
     use serde_json::json;
 
     fn dir() -> tempfile::TempDir {
@@ -169,8 +176,22 @@ mod tests {
         let w2 = Watches::load(path);
         assert_eq!(w2.list().len(), 1);
         let fired = w.fired(&[card("1", "api-fix", State::Working)], &[card("1", "api-fix", State::Completed)]);
-        assert_eq!(fired, vec![format!("Watch {id} (tell the user): api-fix moved to completed")]);
+        assert_eq!(fired, vec![format!("Watch {id} (tell the user): api-fix moved to completed. {ANNOUNCED}")]);
         assert!(w.fired(&[card("1", "api-fix", State::Completed)], &[card("1", "api-fix", State::Working)]).is_empty());
+    }
+
+    #[test]
+    fn a_watch_fired_by_a_finish_or_a_decision_says_maya_announced_it_already() {
+        let d = dir();
+        let mut w = Watches::load(d.path().join("w.json"));
+        let cards = [card("1", "api-fix", State::Working)];
+        let id = w.add(&json!({"kind":"watch","session":"api-fix","note":"n"}), &cards).unwrap();
+        assert_eq!(
+            w.fired(&cards, &[card("1", "api-fix", State::Awaiting)]),
+            vec![format!("Watch {id} (n): api-fix moved to awaiting. Maya has already announced this; do not repeat it; only act if the watch asked for an action.")]
+        );
+        let id = w.add(&json!({"kind":"watch","session":"api-fix","note":"n"}), &cards).unwrap();
+        assert_eq!(w.fired(&cards, &[card("1", "api-fix", State::Idle)]), vec![format!("Watch {id} (n): api-fix moved to idle")], "nothing announced an idle session");
     }
 
     #[test]

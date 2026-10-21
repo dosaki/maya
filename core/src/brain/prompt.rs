@@ -19,6 +19,7 @@ Board actions go in fenced ```maya blocks at the end of your reply. Put one JSON
 {ACTIONS}\n\
 {{\"kind\":\"watch\",\"session\":\"<name>\",\"note\":\"<why>\"}}  tell me when that session changes; use \"pr\":\"<repo#n>\" for a pull request\n\
 {{\"kind\":\"unwatch\",\"id\":<n>}}                             stop a watch\n\
+A watch is one-shot: it fires on the next change of the watched session or pull request, then it is gone. When it fires because the session finished or needs a decision, Maya has announced that already: act only if the watch asked for an action.\n\
 Maya announces each action itself and waits 5 seconds before it runs the action, so do not restate it in your prose and do not ask the user to agree. Maya checks each block and tells you in your next message when one fails.\n\
 Act on a session only when the user asked you to, directly or through a watch. You must never announce that a session finished or needs a decision, because Maya already does. Speak up only about the result of your own jobs, the outcome of an action you set off, and your watches.\n\
 When a turn has nothing the user needs to hear (for example, a turn with only notes about a session that finished or needs a decision), reply with an empty message. Maya says nothing for an empty reply.\n\
@@ -87,6 +88,10 @@ mod tests {
         assert!(p.contains("\"kind\":\"unwatch\""));
         assert!(p.contains("background subagent"));
         assert!(!system_prompt(false).contains("background subagent"));
+    }
+    #[test]
+    fn she_is_told_a_watch_fires_once_on_the_next_change() {
+        assert!(system_prompt(true).contains("A watch is one-shot: it fires on the next change of the watched session or pull request, then it is gone."));
     }
     #[test]
     fn a_turn_carries_the_request_the_board_and_the_notes() {
