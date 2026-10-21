@@ -225,7 +225,9 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
   root.append(notifications);
 
   const voice = section("Voice");
-  for (const [which, label, on] of [["speak", "Speak", m.speak], ["wakeWord", "Wake word \"Maya\" (experimental)", m.wakeWord]] as const) {
+  // The phone answers to its main's word; "Maya" until the main says.
+  const word = m.status.assistant.wakeWord?.trim() || "Maya";
+  for (const [which, label, on] of [["speak", "Speak", m.speak], ["wakeWord", `Wake word "${word}" (experimental)`, m.wakeWord]] as const) {
     const l = el("label", "settings__switch");
     const box = el("input", "");
     box.type = "checkbox";
@@ -235,7 +237,7 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers, nowMs: number
     l.append(box, document.createTextNode(` ${label}`));
     voice.append(l);
   }
-  voice.append(el("p", "settings__hint", "While Maya is on screen she reads out sessions that need you, and with the wake word on she listens for \"Maya\". She never listens with the app closed. Voice needs a desktop main."));
+  voice.append(el("p", "settings__hint", `While Maya is on screen she reads out sessions that need you, and with the wake word on she listens for "${word}", the word set on the desktop main. She never listens with the app closed. Voice needs a desktop main.`));
   root.append(voice);
 
   const viewer = section("Session viewer");

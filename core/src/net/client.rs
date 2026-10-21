@@ -128,6 +128,9 @@ pub trait ClientNotify: Send + Sync {
     /// What the main said it can do at `welcome` (`CAP_VOICE`); empty for
     /// an older main. Called right after `mirror_offer`.
     fn main_caps(&self, _caps: &[String]) {}
+    /// The word the main listens for (`None` from an older main), with
+    /// each board it shares, before `mirrored_remembered`.
+    fn main_wake_word(&self, _word: Option<&str>) {}
     /// The main's "was running" rows, just before `mirrored` with its board.
     fn mirrored_remembered(&self, _rows: Vec<crate::remembered::RememberedRow>) {}
     /// A board from the main, or `allowed: false` once its switch went off.
@@ -654,7 +657,10 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
             notify.moved(&host, port, &key).map_err(|e| format!("Could not follow the main Maya to {host}: {e}"))?;
             return Err(MOVED.into());
         }
-        Down::Mirror { allowed, cards, machines, remembered } => {
+        Down::Mirror { allowed, cards, machines, remembered, wake_word } => {
+            if allowed {
+                notify.main_wake_word(wake_word.as_deref());
+            }
             notify.mirrored_remembered(remembered);
             notify.mirrored(allowed, cards, machines);
         }

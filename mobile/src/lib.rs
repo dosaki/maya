@@ -77,6 +77,8 @@ fn make_voice(handle: &AppHandle, hub: &Arc<Hub>) {
     // Read first: the settings lock is not held while the voice runs.
     let wake = hub.settings.lock().unwrap().config.wake_word;
     v.set_wake(wake);
+    let word = hub.link.lock().unwrap().wake_word.clone();
+    v.set_wake_word(&maya_core::wake::wake_word(word.as_deref()));
     let _ = hub.voice.set(v.clone());
     let quiet = handle.clone();
     let _ = hub.silenced.set(Box::new(move || android::silenced(&quiet)));

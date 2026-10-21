@@ -17,6 +17,11 @@ describe("voice indicator", () => {
     expect(err.title).toContain("no microphone");
     expect(on({ level: 0.5 }).style.getPropertyValue("--level")).toBe("0.5");
   });
+  it("names the wake word while idle, and Maya when none came", () => {
+    expect(renderIndicator(status())!.title).toBe('Listening for "Maya".');
+    expect(renderIndicator(status({ word: "Jarvis" }))!.title).toBe('Listening for "Jarvis".');
+    expect(renderIndicator(status({ word: "Jarvis", state: "thinking" }))!.title).toBe("Thinking…");
+  });
 });
 
 describe("voice panel", () => {
@@ -33,5 +38,6 @@ describe("voice panel", () => {
     const quiet = renderVoicePanel(status(), [], h);
     expect(quiet.querySelector(".voice__pending")).toBeNull();
     expect(quiet.querySelector(".voice__empty")?.textContent).toContain("Say \"Maya\"");
+    expect(renderVoicePanel(status({ word: "Jarvis" }), [], h).querySelector(".voice__empty")?.textContent).toContain('Say "Jarvis"');
   });
 });

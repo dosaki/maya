@@ -11,6 +11,8 @@ export interface VoiceStatus {
   pending: string | null;
   /** Counts turns added to the history, so the page knows when to refetch it. */
   turns: number;
+  /** The word she listens for; absent from an older app reads as "Maya". */
+  word?: string;
 }
 
 export interface VoiceTurn {
@@ -23,14 +25,22 @@ export interface VoiceHandlers {
   onConfirm(yes: boolean): void;
 }
 
-const LABEL: Record<VoiceStatus["state"], string> = {
+/** What the microphone button says; idle names the wake word (`stateLabel`). */
+const LABEL: Record<Exclude<VoiceStatus["state"], "idle">, string> = {
   off: "Not listening.",
-  idle: "Listening for \"Maya\".",
   "awaiting-command": "Listening for your reply.",
   "awaiting-confirm": "Waiting for yes or no.",
   thinking: "Thinking…",
   error: "Listener stopped",
 };
+
+function wakeWord(s: VoiceStatus): string {
+  return s.word?.trim() || "Maya";
+}
+
+function stateLabel(s: VoiceStatus): string {
+  return s.state === "idle" ? `Listening for "${wakeWord(s)}".` : LABEL[s.state];
+}
 
 /**
  * The top-bar microphone button; its class carries the state, --level the
@@ -44,7 +54,7 @@ export function renderIndicator(s: VoiceStatus): HTMLButtonElement | null {
   b.dataset.action = "voice";
   const cls = s.state === "awaiting-command" || s.state === "awaiting-confirm" ? "awaiting" : s.state;
   b.className = `voice voice--${cls}`;
-  b.title = s.state === "error" && s.detail ? `${LABEL.error}: ${s.detail}` : LABEL[s.state];
+  b.title = s.state === "error" && s.detail ? `${LABEL.error}: ${s.detail}` : stateLabel(s);
   b.setAttribute("aria-label", b.title);
   b.style.setProperty("--level", String(Math.max(0, Math.min(1, s.level))));
   b.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="5.5" y="1.5" width="5" height="8" rx="2.5" fill="currentColor"/><path d="M3.5 7.5 a4.5 4.5 0 0 0 9 0 M8 12 V14.5 M5.5 14.5 H10.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
@@ -65,7 +75,7 @@ export function renderVoicePanel(s: VoiceStatus, turns: VoiceTurn[], h: VoiceHan
   if (turns.length === 0) {
     const empty = document.createElement("div");
     empty.className = "voice__empty";
-    empty.textContent = 'Say "Maya" and then what you need: what\'s waiting, reply to a session, focus, compact, resume or start one.';
+    empty.textContent = `Say "${wakeWord(s)}" and then what you need: what's waiting, reply to a session, focus, compact, resume or start one.`;
     list.append(empty);
   }
   for (const t of turns) {

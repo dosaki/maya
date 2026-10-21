@@ -250,6 +250,14 @@ describe("the Voice card", () => {
     expect(h.onSwitch).toHaveBeenCalledWith("wakeWord", true);
     expect(el.textContent).toContain("experimental");
   });
+  it("names the main's wake word, and Maya until the main says", () => {
+    const h = handlers();
+    expect(renderNetwork(base, h).textContent).toContain('Wake word "Maya"');
+    const joined = { ...base, status: { ...base.status, role: "assistant" as const, assistant: { connected: true, mainName: "desk", error: null, wakeWord: "Jarvis" } } };
+    const el = renderNetwork(joined, h);
+    expect(el.textContent).toContain('Wake word "Jarvis"');
+    expect(el.textContent).toContain('listens for "Jarvis"');
+  });
   it("offers the viewer's look and saves the choice", () => {
     const h = { ...handlers(), onViewerTheme: vi.fn() };
     const el = renderNetwork({ ...base, viewerTheme: "terminal" }, h, NOW);

@@ -250,10 +250,11 @@ resume or start a session, open or review a pull request.
   appears in the top bar; clicking it opens the voice panel with the
   conversation and a Yes / No for the current read-back. macOS asks for
   microphone and speech-recognition access the first time.
-- **The wake word is "Maya".** Say it with the command, or alone: she says
-  "Yes?" and waits. When she asks you something back, answer without the
-  wake word; she listens for eight seconds and remembers the last few
-  exchanges, so "the second one" works.
+- **The wake word is "Maya"**, or the word you type in Settings → Voice →
+  Listening; a phone joined to this Maya listens for the same word. Say it
+  with the command, or alone: she says "Yes?" and waits. When she asks you
+  something back, answer without the wake word; she listens for eight
+  seconds and remembers the last few exchanges, so "the second one" works.
 - **Sending is read back first.** Anything that sends text, answers a
   question, starts or resumes a session or starts a review is read back and
   needs a "yes". Reports, focus and compact happen at once.
