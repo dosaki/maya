@@ -261,6 +261,7 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>, catch_up: Option<Strin
         Ok(b) => b,
         Err(e) => {
             log::line("brain", format!("her session cannot start: {e}"));
+            keep_catch_up(app, catch_up);
             return;
         }
     };
@@ -292,6 +293,7 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>, catch_up: Option<Strin
         Ok(d) => d,
         Err(e) => {
             log::line("brain", format!("her session cannot start: {e}"));
+            keep_catch_up(app, catch_up);
             return;
         }
     };
@@ -311,11 +313,9 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>, catch_up: Option<Strin
         let state = app.state::<AppState>();
         let mut b = state.brain.lock().unwrap();
         if !still_runs || b.generation != generation_at_start {
-            // The catch-up waits for the start that wins.
-            if b.catch_up.is_none() {
-                b.catch_up = catch_up;
-            }
             drop(b);
+            // The catch-up waits for the start that wins.
+            keep_catch_up(app, catch_up);
             // Shut down with no lock held: it may wait for the process.
             return superseded(spawned);
         }
@@ -374,6 +374,15 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>, catch_up: Option<Strin
     std::thread::spawn(move || watchdog(&handle, generation));
     act(app, outs);
     emit_status(app);
+}
+
+/// A start that did not happen keeps its catch-up for the next one.
+fn keep_catch_up(app: &AppHandle, catch_up: Option<String>) {
+    let state = app.state::<AppState>();
+    let mut b = state.brain.lock().unwrap();
+    if b.catch_up.is_none() {
+        b.catch_up = catch_up;
+    }
 }
 
 /// This machine is an assistant: her brain sleeps. Her record, chat and
@@ -745,7 +754,7 @@ pub(crate) fn restart(app: &AppHandle) {
 /// when she never ran one), and the old main's summary, if it sent one,
 /// shows in Chat and is her first turn.
 pub(crate) fn wake_as_main(app: &AppHandle, by: &str, summary: Option<String>) {
-    let summary = summary.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let summary = summary.as_deref().and_then(handover::received);
     let has_record = {
         let claude_dir = app.state::<AppState>().store.lock().unwrap().claude_dir().to_path_buf();
         record::load(&brain_dir(&claude_dir).join("record.json")).is_some()
@@ -754,12 +763,13 @@ pub(crate) fn wake_as_main(app: &AppHandle, by: &str, summary: Option<String>) {
         Wake::Fresh { .. } => log::line("brain", format!("made main by {by}; she never ran here, so her session starts fresh")),
         _ => log::line("brain", format!("made main by {by}; she wakes on her own session")),
     }
-    let catch_up = summary.map(|s| {
-        post(app, &brain_route::caught_up_line(by, &s), Via::Maya);
-        prompt::catch_up(by, &s)
-    });
     shutdown(app);
-    start_run(app, None, catch_up);
+    // A fresh session's primer is built from Chat as it is now, so the
+    // summary's Chat line goes in after: she reads it once, as the catch-up.
+    start_run(app, None, summary.as_deref().map(|s| prompt::catch_up(by, s)));
+    if let Some(s) = summary {
+        post(app, &brain_route::caught_up_line(by, &s), Via::Maya);
+    }
 }
 
 /// The summary for the Maya taking the main role over (`to`): her brain

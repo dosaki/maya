@@ -8,6 +8,8 @@ use super::chat::ChatTurn;
 pub const ASK_MS: u64 = 60_000;
 /// The digest's length cap, in characters.
 pub const DIGEST_CHARS: usize = 3_000;
+/// The longest summary a Maya made main takes from the old main.
+pub const RECEIVED_CHARS: usize = 4_000;
 /// The digest when no turn falls in the period.
 pub const NOTHING: &str = "Nothing happened in Chat.";
 
@@ -34,6 +36,19 @@ pub fn digest(turns: &[ChatTurn], since: Option<u64>, max_chars: usize) -> Strin
     }
     kept.reverse();
     kept.join("\n")
+}
+
+/// A summary as the Maya made main takes it: trimmed, at most
+/// `RECEIVED_CHARS` characters (cut with "…"); None when blank.
+pub fn received(summary: &str) -> Option<String> {
+    let s = summary.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if s.chars().count() <= RECEIVED_CHARS {
+        return Some(s.to_string());
+    }
+    Some(s.chars().take(RECEIVED_CHARS - 1).chain(std::iter::once('…')).collect())
 }
 
 /// One turn on one line: who said it, then the words, whitespace collapsed.
@@ -105,6 +120,16 @@ mod tests {
         assert!(r.starts_with("Write a compact handover summary for laptop, whose brain has been dormant since 2026-10-21 "), "{r}");
         assert!(r.contains("no ```maya blocks"));
         assert!(request("laptop", None).contains("dormant since it first started"));
+    }
+
+    #[test]
+    fn a_received_summary_is_trimmed_capped_and_blank_is_none() {
+        assert_eq!(received("  Did #52. \n"), Some("Did #52.".to_string()));
+        assert_eq!(received(" \n "), None);
+        let long = received(&"x".repeat(RECEIVED_CHARS + 50)).unwrap();
+        assert_eq!(long.chars().count(), RECEIVED_CHARS);
+        assert!(long.ends_with('…'));
+        assert_eq!(received(&"é".repeat(RECEIVED_CHARS)).unwrap().chars().count(), RECEIVED_CHARS, "at the cap, kept whole");
     }
 
     #[test]
