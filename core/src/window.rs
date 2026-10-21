@@ -35,24 +35,29 @@ pub struct Window {
 }
 
 impl Window {
-    /// Opens a batch, or joins the open one (its actions appended, its `say`
-    /// joined with " "); the deadline is unset (`u64::MAX`) until
-    /// `start_clock`. Returns the batch id.
-    pub fn open(&mut self, say: String, actions: Vec<serde_json::Value>, origin: Via) -> u64 {
-        if let Some(b) = &mut self.batch {
-            b.actions.extend(actions);
-            if !say.is_empty() {
-                if !b.say.is_empty() {
-                    b.say.push(' ');
+    /// Opens a batch, or joins the open one when it came the same way (its
+    /// actions appended, its `say` joined with " "); the deadline is unset
+    /// (`u64::MAX`) until `start_clock`. A batch from another origin is not
+    /// joined: it is cancelled and returned, so two surfaces never share one
+    /// window. Returns the batch id and the batch cancelled, if any.
+    pub fn open(&mut self, say: String, actions: Vec<serde_json::Value>, origin: Via) -> (u64, Option<Batch>) {
+        let cancelled = match &mut self.batch {
+            Some(b) if b.origin == origin => {
+                b.actions.extend(actions);
+                if !say.is_empty() {
+                    if !b.say.is_empty() {
+                        b.say.push(' ');
+                    }
+                    b.say.push_str(&say);
                 }
-                b.say.push_str(&say);
+                return (b.id, None);
             }
-            return b.id;
-        }
+            _ => self.batch.take(),
+        };
         self.next += 1;
         let id = self.next;
         self.batch = Some(Batch { id, say, actions, origin, until: u64::MAX });
-        id
+        (id, cancelled)
     }
 
     /// Starts the wait of batch `id`, once its announcement has been said, and
@@ -98,7 +103,7 @@ mod tests {
     #[test]
     fn a_batch_waits_five_seconds_from_its_clock_start() {
         let mut w = Window::default();
-        let id = w.open("Telling api-fix: open the PR.".into(), vec![json!({"kind":"reply"})], Via::Voice);
+        let (id, _) = w.open("Telling api-fix: open the PR.".into(), vec![json!({"kind":"reply"})], Via::Voice);
         assert!(w.take_due(id, 1_000_000).is_none()); // no clock yet
         assert_eq!(w.start_clock(id, 10_000), Some(15_000));
         assert!(w.take_due(id, 14_999).is_none());
@@ -108,9 +113,9 @@ mod tests {
     #[test]
     fn a_second_open_joins_the_running_batch_and_keeps_its_deadline() {
         let mut w = Window::default();
-        let a = w.open("One.".into(), vec![json!(1)], Via::Voice);
+        let (a, _) = w.open("One.".into(), vec![json!(1)], Via::Voice);
         w.start_clock(a, 0);
-        let b = w.open("Two.".into(), vec![json!(2)], Via::Voice);
+        let (b, _) = w.open("Two.".into(), vec![json!(2)], Via::Voice);
         assert_eq!(a, b);
         let due = w.take_due(a, WAIT_MS).unwrap();
         assert_eq!(due.actions, vec![json!(1), json!(2)]);
@@ -120,9 +125,9 @@ mod tests {
     #[test]
     fn a_stale_timer_does_not_run_a_newer_batch() {
         let mut w = Window::default();
-        let a = w.open("A.".into(), vec![json!(1)], Via::Chat);
+        let (a, _) = w.open("A.".into(), vec![json!(1)], Via::Chat);
         w.cancel();
-        let b = w.open("B.".into(), vec![json!(2)], Via::Chat);
+        let (b, _) = w.open("B.".into(), vec![json!(2)], Via::Chat);
         w.start_clock(b, 0);
         assert!(w.take_due(a, WAIT_MS).is_none());
     }
@@ -130,11 +135,27 @@ mod tests {
     #[test]
     fn take_now_runs_the_batch_before_its_deadline() {
         let mut w = Window::default();
-        let id = w.open("A.".into(), vec![json!(1)], Via::Phone);
+        let (id, _) = w.open("A.".into(), vec![json!(1)], Via::Phone);
         w.start_clock(id, 0);
         assert_eq!(w.take_now().unwrap().origin, Via::Phone);
         assert!(w.pending().is_none());
         assert!(w.take_now().is_none());
+    }
+
+    #[test]
+    fn an_open_from_another_origin_cancels_the_pending_batch_and_opens_its_own() {
+        let mut w = Window::default();
+        let (a, _) = w.open("A.".into(), vec![json!(1)], Via::Voice);
+        w.start_clock(a, 0);
+        let (b, cancelled) = w.open("B.".into(), vec![json!(2)], Via::Chat);
+        assert_ne!(a, b);
+        assert_eq!(cancelled.map(|c| (c.id, c.say)), Some((a, "A.".to_string())));
+        let p = w.pending().unwrap();
+        assert_eq!((p.origin, p.actions.clone(), p.until, p.say.as_str()), (Via::Chat, vec![json!(2)], u64::MAX, "B."));
+        assert!(w.take_due(a, WAIT_MS).is_none(), "the cancelled batch's timer finds nothing");
+        let (c, none) = w.open("C.".into(), vec![json!(3)], Via::Chat);
+        assert_eq!(c, b, "the same origin joins");
+        assert!(none.is_none());
     }
 
     #[test]

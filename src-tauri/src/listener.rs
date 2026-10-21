@@ -634,7 +634,9 @@ fn drop_voice_batch_because(app: &AppHandle, why: &str) {
 
 /// Announces `actions` and runs them once the window has passed, unless a
 /// stop, a correction or the Cancel button drops them first. Opens a batch
-/// or joins the open one. A spoken request, or one from Maya herself, is
+/// or joins the open one when it came the same way; a batch from another
+/// origin is cancelled first and "Cancelled: …" is posted to Chat, so two
+/// surfaces never share one window. A spoken request, or one from Maya herself, is
 /// said aloud (a muted Maya only shows it) and stopped by voice; the clock
 /// starts only once the announcement has been said, so the user always gets
 /// the whole window after hearing it. A voice request's batch is dropped
@@ -642,11 +644,18 @@ fn drop_voice_batch_because(app: &AppHandle, why: &str) {
 /// announcement or after it. Blocks while speaking: the caller must hold no lock.
 pub(crate) fn announce(app: &AppHandle, generation: Option<u64>, say: String, actions: Vec<Value>, origin: Via) {
     let state = app.state::<AppState>();
-    let (id, shown) = {
+    let (id, shown, cancelled) = {
         let mut w = state.window.lock().unwrap();
-        let id = w.open(say.clone(), actions, origin);
-        (id, w.pending().map(|b| b.say.clone()).unwrap_or_default())
+        let (id, cancelled) = w.open(say.clone(), actions, origin);
+        (id, w.pending().map(|b| b.say.clone()).unwrap_or_default(), cancelled)
     };
+    if let Some(old) = cancelled {
+        log::line("action", format!("batch {} cancelled by a request from elsewhere ({origin:?})", old.id));
+        if matches!(old.origin, Via::Voice | Via::Maya) {
+            close_window(&mut state.voice.lock().unwrap(), "idle");
+        }
+        remember(app, "maya", &format!("Cancelled: {}", old.say), old.origin);
+    }
     log::line("action", format!("batch {id} announced: {say}"));
     let spoken = matches!(origin, Via::Voice | Via::Maya);
     // Only the listener run that heard the request opens its flow's window.
@@ -1364,12 +1373,12 @@ mod tests {
     fn a_voice_batch_is_dropped_when_listening_stops_and_never_joined_by_the_next_run() {
         use maya_core::window::Window;
         let mut w = Window::default();
-        let old = w.open("Telling coral: go.".into(), vec![json!({"kind":"reply"})], Via::Voice);
+        let (old, _) = w.open("Telling coral: go.".into(), vec![json!({"kind":"reply"})], Via::Voice);
         w.start_clock(old, 0);
         assert_eq!(drop_voice_batch(&mut w).map(|b| b.id), Some(old));
         assert!(w.pending().is_none());
         // The next run's request opens a batch of its own, with a full window.
-        let new = w.open("Telling hexgrid: ship it.".into(), vec![json!({"kind":"reply"})], Via::Voice);
+        let (new, _) = w.open("Telling hexgrid: ship it.".into(), vec![json!({"kind":"reply"})], Via::Voice);
         assert_ne!(new, old);
         assert_eq!(w.start_clock(new, 10_000), Some(10_000 + maya_core::window::WAIT_MS));
         assert_eq!(w.pending().unwrap().actions.len(), 1);

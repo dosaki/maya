@@ -797,7 +797,8 @@ impl Voice {
         match announced {
             Some((line, actions)) => {
                 // Held while it is announced; `spoken` starts its clock.
-                let id = i.window.open(line.clone(), actions, Via::Phone);
+                // Every batch here comes from the phone: nothing is cancelled.
+                let (id, _) = i.window.open(line.clone(), actions, Via::Phone);
                 i.view.pending = Some(line.clone());
                 self.say(&mut i, &line, After::Window(id));
             }
