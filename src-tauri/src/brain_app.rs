@@ -19,7 +19,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, one_line, refusal_feedback, sort_actions, speaks, spoken, Feedback, PhoneReply, PhoneWaiters};
+use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, one_line, Outage, refusal_feedback, sort_actions, speaks, spoken, Feedback, PhoneReply, PhoneWaiters};
 pub(crate) use crate::brain_route::{brain_card, handoff};
 use crate::listener::{self, Interpreted};
 use crate::store::now_ms;
@@ -35,8 +35,6 @@ use maya_core::window::Via;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// How long after her session stops Maya starts it again.
-const RESTART_AFTER: Duration = Duration::from_secs(30);
 const STOPPED: &str = "My session stopped; I'm using the quick interpreter until it's back.";
 const RESUME_FAILED: &str = "I couldn't pick up my old session, so I've started fresh.";
 /// The Chat turns a fresh session is primed with.
@@ -53,8 +51,12 @@ pub(crate) struct BrainState {
     /// The board at the last refresh; None until the first refresh after a
     /// start, so a board not read yet is never compared with a real one.
     last_cards: Option<Vec<Card>>,
+    /// Her session takes requests (from its spawn until it stops).
     ready: bool,
+    /// Her session's id as she reported it (Ready); None until then.
     session_id: Option<String>,
+    /// The id her session was started with, saved if she never reports one.
+    assumed_id: Option<String>,
     /// Her session runs on this machine (started, and not an assistant).
     active: bool,
     /// Bumped on every start and shutdown: a replaced driver's events are ignored.
@@ -69,7 +71,7 @@ pub(crate) struct BrainState {
     /// When this run's driver was spawned, and when it was first sent a message.
     spawned_at: u64,
     first_sent_at: Option<u64>,
-    /// Why a fresh session started, posted to Chat once it is ready.
+    /// Why a fresh session started, posted to Chat once her first turn ends.
     fresh_reason: Option<String>,
     /// The past conversation a fresh session reads first; its reply is not shown.
     primer: Option<String>,
@@ -82,8 +84,9 @@ pub(crate) struct BrainState {
     last_say: String,
     /// When her card last went working or idle.
     since: u64,
-    /// "My session stopped" was posted, and no turn has ended since.
-    said_stopped: bool,
+    /// Her session stopping on its own: the restart back-off and the one
+    /// "my session stopped" line.
+    outage: Outage,
 }
 
 impl BrainState {
@@ -97,6 +100,7 @@ impl BrainState {
             last_cards: None,
             ready: false,
             session_id: None,
+            assumed_id: None,
             active: false,
             generation: 0,
             agent: Harness::ClaudeCode,
@@ -115,7 +119,7 @@ impl BrainState {
             refusal_streak: 0,
             last_say: String::new(),
             since: now_ms(),
-            said_stopped: false,
+            outage: Outage::default(),
         }
     }
 }
@@ -242,6 +246,11 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
             return;
         }
     };
+    // A fresh session is hidden by the id it was started with until her
+    // Ready names it.
+    if let Some(id) = spawned.assumed_session_id().filter(|_| resume.is_none()) {
+        hide(app, id);
+    }
     log::line("brain", match &resume {
         Some(id) => format!("resuming her session {id}"),
         None => "starting her session fresh".to_string(),
@@ -257,6 +266,7 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
             // Shut down with no lock held: it may wait for the process.
             return superseded(spawned);
         }
+        let assumed = spawned.assumed_session_id();
         b.generation += 1;
         let old = b.driver.replace(Arc::new(Mutex::new(spawned)));
         // Notes the last run left ride along with her first message.
@@ -267,8 +277,12 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
         }
         b.record_path = record_path;
         b.last_cards = None;
-        b.ready = false;
+        // She takes requests from now: her agent may report her session
+        // (Ready) only once the first message arrives. Whatever she has when
+        // she dies before her first turn goes back to the quick interpreter.
+        b.ready = true;
         b.session_id = None;
+        b.assumed_id = assumed;
         b.active = true;
         b.agent = agent;
         b.model = model;
@@ -279,17 +293,28 @@ fn start_run(app: &AppHandle, forced_fresh: Option<&str>) {
         b.spawned_at = now_ms();
         b.first_sent_at = None;
         b.fresh_reason = reason;
-        b.primer = primer;
+        b.primer = primer.clone();
         b.swallow_reply = false;
         b.since = now_ms();
-        (b.generation, old)
+        // A fresh session reads the past conversation first; a watch that
+        // fired while she was down wakes her.
+        let mut outs = Vec::new();
+        if let Some(p) = primer {
+            outs.extend(b.session.submit(Request::new(&p, Via::Maya)));
+        }
+        if std::mem::take(&mut b.wake_when_ready) {
+            outs.extend(b.session.wake());
+        }
+        (b.generation, old, outs)
     };
-    let (generation, old) = installed;
+    let (generation, old, outs) = installed;
     if let Some(old) = old {
         old.lock().unwrap().shutdown();
     }
     let handle = app.clone();
     std::thread::spawn(move || events(&handle, generation, rx));
+    act(app, outs);
+    emit_status(app);
 }
 
 /// A driver spawned for a start that another start or a shutdown overtook.
@@ -314,6 +339,8 @@ struct Exit {
     phones: Vec<Option<Sender<PhoneReply>>>,
     failed_resume: bool,
     say_stopped: bool,
+    /// How long to wait before starting her again (`Outage`).
+    restart_after: Duration,
     driver: Option<SharedDriver>,
 }
 
@@ -332,25 +359,28 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
         }
         let was_working = b.session.working();
         match &e {
+            // Her agent names her session: that id is hidden and, once a turn
+            // has ended, saved.
             Event::Ready { session_id } => {
-                b.ready = true;
                 b.session_id = Some(session_id.clone());
-                let r = Record { agent: b.agent, model: b.model.clone(), session_id: session_id.clone() };
-                if let Err(err) = record::save(&b.record_path, &r) {
-                    log::line("brain", format!("could not save her record: {err}"));
-                }
                 hide_id = Some(session_id.clone());
-                line = b.fresh_reason.take();
-                if let Some(p) = b.primer.clone() {
-                    outs.extend(b.session.submit(Request::new(&p, Via::Maya)));
-                }
-                if std::mem::take(&mut b.wake_when_ready) {
-                    outs.extend(b.session.wake());
-                }
             }
             Event::TurnEnded { context_tokens, .. } | Event::TurnFailed { context_tokens } => {
-                b.turn_seen = true;
-                b.said_stopped = false;
+                // Her first turn proves the session: only now is it saved to
+                // resume, and a fresh start explained.
+                if !std::mem::replace(&mut b.turn_seen, true) {
+                    match b.session_id.clone().or_else(|| b.assumed_id.clone()) {
+                        Some(id) => {
+                            let r = Record { agent: b.agent, model: b.model.clone(), session_id: id };
+                            if let Err(err) = record::save(&b.record_path, &r) {
+                                log::line("brain", format!("could not save her record: {err}"));
+                            }
+                        }
+                        None => log::line("brain", "her session has no id to save"),
+                    }
+                    line = b.fresh_reason.take();
+                }
+                b.outage.turn_ended();
                 let percent = context_percent(b.model.as_deref(), *context_tokens, b.default_1m);
                 outs = b.session.on_event(&e, percent);
             }
@@ -359,14 +389,14 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
                 b.session.on_event(&e, None);
                 let now = now_ms();
                 let failed = failed_resume(b.resumed, b.turn_seen, now.saturating_sub(b.spawned_at), b.first_sent_at.map(|t| now.saturating_sub(t)));
-                let say_stopped = !failed && !std::mem::replace(&mut b.said_stopped, true);
+                let (restart_after, say_stopped) = if failed { (Duration::ZERO, false) } else { b.outage.exited() };
                 let drained = handoff(&mut b.session);
                 let phones = b.phones.drain();
                 b.ready = false;
                 b.session_id = None;
                 b.primer = None;
                 b.swallow_reply = false;
-                exit = Some(Exit { drained, phones, failed_resume: failed, say_stopped, driver: b.driver.take() });
+                exit = Some(Exit { drained, phones, failed_resume: failed, say_stopped, restart_after, driver: b.driver.take() });
             }
             _ => outs = b.session.on_event(&e, None),
         }
@@ -390,7 +420,8 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
 }
 
 /// Her session ended on its own: the quick interpreter takes what she had,
-/// and her session starts again (at once and fresh after a failed resume).
+/// and her session starts again (at once and fresh after a failed resume,
+/// else after `Outage`'s back-off).
 fn exited(app: &AppHandle, generation: u64, x: Exit) {
     drop(x.driver);
     if x.say_stopped {
@@ -403,8 +434,10 @@ fn exited(app: &AppHandle, generation: u64, x: Exit) {
         std::thread::spawn(move || start_run(&handle, Some(RESUME_FAILED)));
         return;
     }
+    let wait = x.restart_after;
     std::thread::spawn(move || {
-        std::thread::sleep(RESTART_AFTER);
+        log::line("brain", format!("starting her session again in {} s", wait.as_secs()));
+        std::thread::sleep(wait);
         let due = {
             let state = handle.state::<AppState>();
             let b = state.brain.lock().unwrap();

@@ -8,6 +8,8 @@ use crate::model::Harness;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
+    /// Her session has started and names its id: from the agent's own
+    /// report, not from the spawn.
     Ready { session_id: String },
     /// A turn began, including one she started herself (a subagent woke her).
     TurnStarted,
@@ -39,6 +41,11 @@ pub trait Driver: Send {
     /// `Err("unsupported")` where the agent compacts itself.
     fn compact(&mut self) -> Result<(), String>;
     fn background_subagents(&self) -> bool;
+    /// The session id Maya started it with, when the agent takes one; the
+    /// real one comes with `Event::Ready`.
+    fn assumed_session_id(&self) -> Option<String> {
+        None
+    }
     fn shutdown(&mut self);
 }
 

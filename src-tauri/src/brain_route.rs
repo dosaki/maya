@@ -144,6 +144,38 @@ pub(crate) fn failed_resume(resumed: bool, turn_seen: bool, ran_ms: u64, since_f
     resumed && !turn_seen && (ran_ms < RESUME_GRACE_MS || since_first_message_ms.is_some_and(|m| m < RESUME_GRACE_MS))
 }
 
+/// How long after her session's `n`th exit in a row (from 0) it starts again.
+const RESTART_DELAYS: [u64; 4] = [30, 60, 120, 300];
+
+/// Her session stopping on its own, again and again: each restart waits
+/// longer (30 s, 60 s, 120 s, then 300 s), and Chat hears about it once,
+/// until a turn ends.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Outage {
+    exits: u32,
+    said: bool,
+}
+
+impl Outage {
+    /// Her session exited: how long to wait before starting it again, and
+    /// whether to post "my session stopped".
+    pub(crate) fn exited(&mut self) -> (std::time::Duration, bool) {
+        let secs = RESTART_DELAYS[(self.exits as usize).min(RESTART_DELAYS.len() - 1)];
+        self.exits += 1;
+        (std::time::Duration::from_secs(secs), self.say_once())
+    }
+
+    /// Whether to post that her session stopped: once per outage.
+    pub(crate) fn say_once(&mut self) -> bool {
+        !std::mem::replace(&mut self.said, true)
+    }
+
+    /// A turn ended: she works again, and the outage is over.
+    pub(crate) fn turn_ended(&mut self) {
+        *self = Outage::default();
+    }
+}
+
 /// Maya's follow-up to one of her replies (its refused actions): internal,
 /// and carrying that reply's via, so her answer goes back the same way.
 pub(crate) fn follow_up(via: Via, text: &str) -> Request {
@@ -322,6 +354,26 @@ mod tests {
         assert!(!failed_resume(true, false, 10 * g, Some(g)));
         assert!(!failed_resume(true, true, 1_000, Some(1_000)), "a turn ended: it resumed");
         assert!(!failed_resume(false, false, 1_000, Some(1_000)), "a fresh session that dies is a plain exit");
+    }
+
+    #[test]
+    fn restarts_back_off_to_five_minutes_and_an_outage_is_reported_once() {
+        let mut o = Outage::default();
+        let secs = |d: std::time::Duration| d.as_secs();
+        let (d, say) = o.exited();
+        assert_eq!((secs(d), say), (30, true));
+        let (d, say) = o.exited();
+        assert_eq!((secs(d), say), (60, false), "one line per outage");
+        assert_eq!(secs(o.exited().0), 120);
+        assert_eq!(secs(o.exited().0), 300);
+        assert_eq!(secs(o.exited().0), 300, "capped");
+        assert!(!o.say_once());
+        o.turn_ended();
+        assert_eq!((secs(o.exited().0), true), (30, true));
+        o.turn_ended();
+        assert!(o.say_once(), "a stall reports a new outage");
+        assert!(!o.say_once());
+        assert_eq!(o.exited(), (std::time::Duration::from_secs(30), false), "the stall's outage was reported already");
     }
 
     #[test]

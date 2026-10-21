@@ -45,9 +45,13 @@ pub fn stop_task_line(request_id: &str, task_id: &str) -> String {
 }
 
 /// Turns stdout lines into events. A turn ends on `result`, not on the
-/// `idle` state, which waits for background agents too.
+/// `idle` state, which waits for background agents too. `Ready` comes once,
+/// from her `init` line, which names the session she really runs.
 #[derive(Default)]
 pub struct Parser {
+    /// The id Maya started her with: the session's when `init` names none.
+    assumed_id: Option<String>,
+    ready: bool,
     in_turn: bool,
     text: String,
     /// Context size from the last assistant message of the turn.
@@ -66,6 +70,21 @@ fn usage_total(u: &Value) -> Option<u64> {
 }
 
 impl Parser {
+    pub fn new(assumed_id: &str) -> Parser {
+        Parser { assumed_id: Some(assumed_id.to_string()), ..Parser::default() }
+    }
+
+    /// `Ready` with `id` (else the assumed one), the first time only.
+    fn ready(&mut self, id: Option<&str>, out: &mut Vec<Event>) {
+        if self.ready {
+            return;
+        }
+        if let Some(session_id) = id.map(str::to_string).or_else(|| self.assumed_id.clone()) {
+            self.ready = true;
+            out.push(Event::Ready { session_id });
+        }
+    }
+
     pub fn line(&mut self, line: &str) -> Vec<Event> {
         let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { return vec![] };
         let kind = v["type"].as_str().unwrap_or("");
@@ -92,6 +111,7 @@ impl Parser {
             // can come with no turn after it (a resumed, idle session), and
             // would leave her working for ever.
             "system" => match v["subtype"].as_str().unwrap_or("") {
+                "init" => self.ready(v["session_id"].as_str().filter(|id| !id.is_empty()), &mut out),
                 "task_started" if v["is_backgrounded"].as_bool() == Some(true) => {
                     if let Some(id) = v["task_id"].as_str() {
                         self.tasks.lock().unwrap().insert(id.to_string());
@@ -108,6 +128,8 @@ impl Parser {
                 _ => {}
             },
             "result" => {
+                // No init came: a turn that ended proves the session Maya started.
+                self.ready(None, &mut out);
                 self.begin(&mut out);
                 let text = v["result"].as_str().map(str::to_string).unwrap_or_else(|| std::mem::take(&mut self.text));
                 self.text.clear();
@@ -134,6 +156,8 @@ impl Parser {
 
 pub struct ClaudeDriver {
     child: Child,
+    /// The id she was started with (`--session-id` or `--resume`).
+    session_id: String,
     stdin: Option<ChildStdin>,
     tasks: Arc<Mutex<BTreeSet<String>>>,
     next_request: u32,
@@ -155,9 +179,9 @@ impl ClaudeDriver {
         let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", l.binary.display()))?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().ok_or("no stdout")?;
-        let mut parser = Parser::default();
+        // Ready comes from her init line, not from the spawn: see `Parser`.
+        let mut parser = Parser::new(&session_id);
         let tasks = parser.tasks.clone();
-        let _ = events.send(Event::Ready { session_id });
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             let mut buf = Vec::new();
@@ -176,7 +200,7 @@ impl ClaudeDriver {
             }
             let _ = events.send(Event::Exited("the Claude Code process ended".into()));
         });
-        Ok(Self { child, stdin, tasks, next_request: 0 })
+        Ok(Self { child, session_id, stdin, tasks, next_request: 0 })
     }
 
     fn write(&mut self, line: &str) -> Result<(), String> {
@@ -212,6 +236,10 @@ impl Driver for ClaudeDriver {
 
     fn background_subagents(&self) -> bool {
         true
+    }
+
+    fn assumed_session_id(&self) -> Option<String> {
+        Some(self.session_id.clone())
     }
 
     fn shutdown(&mut self) {
@@ -293,6 +321,18 @@ mod tests {
     }
 
     #[test]
+    fn ready_comes_once_from_the_init_line_with_its_session_id() {
+        let mut p = Parser::new("assumed");
+        assert_eq!(p.line(r#"{"type":"system","subtype":"init","session_id":"real"}"#), vec![Event::Ready { session_id: "real".into() }]);
+        assert!(p.line(r#"{"type":"system","subtype":"init","session_id":"real"}"#).is_empty());
+        let mut p = Parser::new("assumed");
+        assert_eq!(p.line(r#"{"type":"system","subtype":"init"}"#), vec![Event::Ready { session_id: "assumed".into() }], "an init without an id: the one Maya chose");
+        let mut p = Parser::new("assumed");
+        assert_eq!(p.line(r#"{"type":"assistant","message":{"content":[]}}"#), vec![Event::TurnStarted]);
+        assert_eq!(p.line(r#"{"type":"result","subtype":"success","result":"x"}"#), vec![Event::Ready { session_id: "assumed".into() }, Event::TurnEnded { text: "x".into(), context_tokens: None }], "no init at all: ready by the first result");
+    }
+
+    #[test]
     fn a_resumed_idle_session_is_not_working_after_its_init() {
         let mut p = Parser::default();
         assert!(!p.line(r#"{"type":"system","subtype":"init","session_id":"u"}"#).contains(&Event::TurnStarted));
@@ -344,15 +384,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("maya-fake-claude-{}", crate::launch::new_session_uuid()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
-        std::fs::write(&bin, "#!/bin/sh\nread line\necho '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}'\ncat >/dev/null\n").unwrap();
+        std::fs::write(&bin, "#!/bin/sh\nread line\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"fake-1\"}'\necho '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}'\ncat >/dev/null\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut l = launch();
         l.binary = bin;
         l.cwd = dir.join("work");
         let (tx, rx) = std::sync::mpsc::channel();
         let mut d = super::super::driver::spawn(&l, tx).unwrap();
-        assert!(matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Ready { .. }));
+        assert!(d.assumed_session_id().is_some());
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "not ready until her init line");
         d.send("hi").unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Ready { session_id: "fake-1".into() });
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::TurnStarted);
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::TurnEnded { text: "ok".into(), context_tokens: None });
         d.shutdown();
