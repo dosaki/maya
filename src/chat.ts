@@ -16,6 +16,8 @@ export interface BrainStatus {
   pending: { say: string; until: number | null } | null;
   job: string | null;
   ready: boolean;
+  /** On an assistant, where her brain is dormant: the note Chat shows instead of the input. */
+  dormant?: string | null;
 }
 
 export interface ChatModel {
@@ -30,7 +32,7 @@ export interface ChatHandlers {
   onStop(): void;
 }
 
-const IDLE: BrainStatus = { dot: "idle", pending: null, job: null, ready: false };
+const IDLE: BrainStatus = { dot: "idle", pending: null, job: null, ready: false, dormant: null };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
   const e = document.createElement(tag);
@@ -52,7 +54,10 @@ export function tickCountdown(root: HTMLElement, until: number | null, now = Dat
   label.textContent = left === null ? "" : `${left}s`;
 }
 
-/** The conversation, the pending box, the input and Stop. Her text is set as text, never as markup. */
+/**
+ * The conversation, the pending box, the input and Stop. Her text is set as text, never as markup.
+ * While her brain is dormant (an assistant) only the conversation and the dormant note show.
+ */
 export function renderChat(m: ChatModel, h: ChatHandlers): HTMLElement {
   const root = el("div", "chat");
   const log = el("div", "chat__log");
@@ -63,6 +68,12 @@ export function renderChat(m: ChatModel, h: ChatHandlers): HTMLElement {
     log.append(turn);
   }
   root.append(log);
+
+  if (m.status.dormant) {
+    root.classList.add("chat--dormant");
+    root.append(el("p", "chat__dormant", m.status.dormant));
+    return root;
+  }
 
   const p = m.status.pending;
   if (p) {
@@ -110,6 +121,8 @@ export function initChat(): void {
   let status: BrainStatus = IDLE;
   let timer: number | undefined;
   let open = false;
+  // Kept while the pane is read-only, so a draft survives a role change.
+  let draft = "";
 
   const paintDot = () => {
     const dot = document.querySelector<HTMLElement>(".tab__dot");
@@ -121,7 +134,7 @@ export function initChat(): void {
     if (!pane) return;
     const old = pane.querySelector<HTMLTextAreaElement>("textarea[name=chat]");
     const log = pane.querySelector<HTMLElement>(".chat__log");
-    const draft = old?.value ?? "";
+    if (old) draft = old.value;
     const focused = !!old && document.activeElement === old;
     const atEnd = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 40;
     const scroll = log?.scrollTop ?? 0;
@@ -176,9 +189,15 @@ export function initChat(): void {
     turns = t;
     paint();
   }).catch(() => undefined);
-  void invoke<BrainStatus>("brain_status").then((s) => {
-    status = s;
-    paint();
-  }).catch(() => undefined);
+  const refresh = () =>
+    void invoke<BrainStatus>("brain_status").then((s) => {
+      status = s;
+      paint();
+    }).catch(() => undefined);
+  // Live or read-only follows the role: re-read it when the settings or
+  // the network change (Make main, an assistant connecting to its main).
+  void listen("network", () => refresh());
+  window.addEventListener("maya:config-changed", () => refresh());
+  refresh();
   paint();
 }

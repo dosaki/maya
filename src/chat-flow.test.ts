@@ -76,4 +76,34 @@ describe("chat flow", () => {
       vi.useRealTimers();
     }
   });
+
+  it("follows the role at runtime: read-only while dormant, live again, the tab always there", async () => {
+    let current = status({ dormant: "Dormant: desk's Maya is awake.", ready: false });
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "chat_history") return Promise.resolve([{ who: "user", text: "hi", at: 1, via: "chat" }]);
+      if (cmd === "brain_status") return Promise.resolve(current);
+      return Promise.resolve(undefined);
+    });
+    makeTabs();
+    initChat();
+    await flush();
+    const tab = document.querySelector<HTMLElement>("[data-tab=chat]")!;
+    expect(tab.hidden).toBe(false);
+    expect(document.querySelector(".chat__dormant")!.textContent).toBe("Dormant: desk's Maya is awake.");
+    expect(document.querySelector("textarea[name=chat]")).toBeNull();
+    expect(document.querySelector(".chat__turn")!.textContent).toBe("hi");
+    // Made main: the next status (re-read when the network changes) is live.
+    current = status();
+    on<unknown>("network")({ payload: {} });
+    await flush();
+    expect(document.querySelector(".chat__dormant")).toBeNull();
+    expect(document.querySelector("textarea[name=chat]")).not.toBeNull();
+    // Settings made it an assistant again: re-read on config-changed.
+    current = status({ dormant: "Dormant: the main Maya is awake." });
+    window.dispatchEvent(new Event("maya:config-changed"));
+    await flush();
+    expect(document.querySelector(".chat__dormant")!.textContent).toBe("Dormant: the main Maya is awake.");
+    expect(document.querySelector("textarea[name=chat]")).toBeNull();
+    expect(tab.hidden).toBe(false);
+  });
 });

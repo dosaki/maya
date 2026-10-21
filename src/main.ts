@@ -173,19 +173,11 @@ export function applyDebugMode(on: boolean): void {
   paint();
 }
 
-/** Her session and Chat live on the main only: an assistant has no Chat tab. */
-export function applyChatRole(role: string | undefined): void {
-  const off = role === "assistant";
-  for (const btn of document.querySelectorAll<HTMLElement>("[data-tab=chat]")) btn.hidden = off;
-  if (off && tabs?.current() === "chat") tabs.show("sessions");
-}
-
 export const isDebugMode = (): boolean => debugMode;
 
 async function loadDebugMode(): Promise<void> {
   try {
-    const cfg = await invoke<{ debugMode?: boolean; network?: { role?: string } }>("get_config");
-    applyChatRole(cfg.network?.role);
+    const cfg = await invoke<{ debugMode?: boolean }>("get_config");
     applyDebugMode(cfg.debugMode === true);
   } catch {
     /* no config yet: the Debug tab stays as the page has it */

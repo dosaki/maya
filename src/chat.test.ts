@@ -39,4 +39,15 @@ describe("renderChat", () => {
     expect(el.querySelector(".chat__turn b")).toBeNull();
     expect(el.querySelector(".chat__turn")!.textContent).toBe("<b>hi</b>");
   });
+
+  it("is read-only while her brain is dormant: history and the note, no input, Cancel or Stop", () => {
+    const h = { onSend: vi.fn(), onCancel: vi.fn(), onStop: vi.fn() };
+    const el = renderChat({ turns: [turn("user", "make it a PR", "chat"), turn("maya", "Done.", "chat")], status: { dot: "working", pending: { say: "Focusing x.", until: Date.now() + 5000 }, job: "j", ready: false, dormant: "Dormant: desk's Maya is awake." }, draft: "half" }, h);
+    expect([...el.querySelectorAll(".chat__turn")].map((t) => t.textContent)).toEqual(["make it a PR", "Done."]);
+    expect(el.querySelector(".chat__dormant")!.textContent).toBe("Dormant: desk's Maya is awake.");
+    expect(el.querySelector("textarea")).toBeNull();
+    expect(el.querySelector("button[data-action=brain-stop]")).toBeNull();
+    expect(el.querySelector("button[data-action=window-cancel]")).toBeNull();
+    expect(el.querySelector(".chat__pending")).toBeNull();
+  });
 });
