@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use super::notes::state_note;
-use crate::model::Card;
+use crate::model::{Card, PullRequest};
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,19 +24,36 @@ pub struct Watches {
     path: PathBuf,
 }
 
-/// Splits "repo#n" or "repo!n" into the repo part (lowercase) and the number.
-fn split_ref(reference: &str) -> Option<(String, u64)> {
+/// Splits "repo#n" or "repo!n" into the sigil, the repo path (lowercase) and the number.
+fn split_ref(reference: &str) -> Option<(char, String, u64)> {
     let r = reference.trim();
     let at = r.rfind(['#', '!'])?;
     let number = r[at + 1..].trim().parse().ok()?;
-    Some((r[..at].trim().to_lowercase(), number))
+    Some((r[at..].chars().next()?, r[..at].trim().to_lowercase(), number))
 }
 
-/// A card carries only a PR number and url, not its repo, so a reference
-/// matches on the number and on the repo text appearing in the url.
+/// A card carries only a PR number and url, not its repo, so a reference is
+/// matched against the url path: the repo part must equal the segment(s)
+/// right before `/pull/<n>` (`#`) or `/-/merge_requests/<n>` (`!`).
+fn pr_matches(pr: &PullRequest, reference: &str) -> bool {
+    let Some((sigil, repo, number)) = split_ref(reference) else { return false };
+    let path = pr.url.split("://").last().unwrap_or("");
+    let segs: Vec<String> = path.split('/').skip(1).filter(|s| !s.is_empty()).map(str::to_lowercase).collect();
+    let (marker, back) = if sigil == '#' { ("pull", 0) } else { ("merge_requests", 1) };
+    let Some(i) = segs.iter().position(|s| s == marker) else { return false };
+    if segs.get(i + 1).and_then(|n| n.parse::<u64>().ok()) != Some(number) || pr.number != number {
+        return false;
+    }
+    if back == 1 && (i == 0 || segs[i - 1] != "-") {
+        return false;
+    }
+    let repo_segs = &segs[..i - back];
+    let want: Vec<&str> = repo.split('/').filter(|s| !s.is_empty()).collect();
+    want.is_empty() || (want.len() <= repo_segs.len() && repo_segs[repo_segs.len() - want.len()..].iter().map(String::as_str).eq(want.iter().copied()))
+}
+
 fn card_matches_pr(card: &Card, reference: &str) -> bool {
-    let Some((repo, number)) = split_ref(reference) else { return false };
-    card.pr.as_ref().map_or(false, |p| p.number == number && (repo.is_empty() || p.url.to_lowercase().contains(&repo)))
+    card.pr.as_ref().map_or(false, |p| pr_matches(p, reference))
 }
 
 impl Watches {
@@ -52,6 +69,9 @@ impl Watches {
     }
 
     fn save(&self) {
+        if let Some(dir) = self.path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         let result = serde_json::to_vec_pretty(&self.list).map_err(|e| e.to_string()).and_then(|b| crate::config::write_private_atomic(&self.path, &b));
         if let Err(e) = result {
             crate::log::line("watch", format!("could not save the watches: {e}"));
@@ -100,10 +120,18 @@ impl Watches {
                     None => Some(format!("{} ended", b.name)),
                 })
             } else if let Some(reference) = &w.pr {
-                after.iter().filter(|a| card_matches_pr(a, reference)).find_map(|a| {
-                    let b = before.iter().find(|b| b.session_id == a.session_id)?;
-                    let (old, new) = (b.pr.as_ref()?, a.pr.as_ref()?);
-                    (old.state != new.state).then(|| format!("{reference} moved to {}", new.state))
+                before.iter().find(|b| card_matches_pr(b, reference)).and_then(|b| {
+                    let old = b.pr.as_ref()?;
+                    match after.iter().find(|a| card_matches_pr(a, reference)) {
+                        Some(a) => {
+                            let new = a.pr.as_ref()?;
+                            (old.state != new.state).then(|| format!("{reference} moved to {}", new.state))
+                        }
+                        None if !after.iter().any(|a| a.session_id == b.session_id) => {
+                            Some(format!("{} ended; its PR {reference} was {}", b.name, old.state))
+                        }
+                        None => None,
+                    }
                 })
             } else {
                 None
@@ -173,6 +201,48 @@ mod tests {
         };
         assert!(w.fired(&[with("open")], &[with("open")]).is_empty());
         assert_eq!(w.fired(&[with("open")], &[with("merged")]), vec![format!("Watch {id} (merge news): Org/bedrock#451 moved to merged")]);
+    }
+
+    fn pr_card(id: &str, url: &str, n: u64, state: &str) -> Card {
+        let mut c = card(id, "api-fix", State::Working);
+        c.pr = Some(PullRequest { number: n, url: url.into(), state: state.into(), forge: Default::default() });
+        c
+    }
+
+    #[test]
+    fn a_pr_reference_matches_the_url_path_exactly() {
+        let gh = |u: &str, n| PullRequest { number: n, url: u.into(), state: "open".into(), forge: Default::default() };
+        assert!(!pr_matches(&gh("https://github.com/o/rapid-api/pull/12", 12), "api#12"));
+        assert!(pr_matches(&gh("https://github.com/o/api/pull/12", 12), "api#12"));
+        assert!(!pr_matches(&gh("https://github.com/org/bedrock-fork/pull/3", 3), "org/bedrock#3"));
+        assert!(pr_matches(&gh("https://github.com/Org/bedrock/pull/3", 3), "org/bedrock#3"));
+        assert!(pr_matches(&gh("https://gitlab.com/g/proj/-/merge_requests/4", 4), "proj!4"));
+        assert!(!pr_matches(&gh("https://github.com/g/proj/pull/4", 4), "proj!4"));
+        assert!(!pr_matches(&gh("https://gitlab.com/g/proj/-/merge_requests/4", 4), "proj#4"));
+    }
+
+    #[test]
+    fn a_pr_watch_fires_when_its_session_ends_or_the_pr_moves_to_another_card() {
+        let d = dir();
+        let mut w = Watches::load(d.path().join("w.json"));
+        let url = "https://github.com/o/r/pull/7";
+        let id = w.add(&json!({"kind":"watch","pr":"o/r#7","note":"n"}), &[]).unwrap();
+        assert_eq!(w.fired(&[pr_card("1", url, 7, "open")], &[]), vec![format!("Watch {id} (n): api-fix ended; its PR o/r#7 was open")]);
+        let id = w.add(&json!({"kind":"watch","pr":"o/r#7","note":"n"}), &[]).unwrap();
+        assert_eq!(w.fired(&[pr_card("1", url, 7, "open")], &[pr_card("2", url, 7, "merged")]), vec![format!("Watch {id} (n): o/r#7 moved to merged")]);
+    }
+
+    #[test]
+    fn saving_creates_the_parent_folder_and_remove_forgets_a_watch() {
+        let d = dir();
+        let path = d.path().join("brain").join("watches.json");
+        let mut w = Watches::load(path.clone());
+        let id = w.add(&json!({"kind":"watch","pr":"o/r#1","note":""}), &[]).unwrap();
+        assert_eq!(Watches::load(path.clone()).list().len(), 1);
+        assert!(!w.remove(id + 1));
+        assert!(w.remove(id));
+        assert!(w.list().is_empty());
+        assert!(Watches::load(path).list().is_empty());
     }
 
     #[test]
