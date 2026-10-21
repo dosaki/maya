@@ -218,8 +218,11 @@ pub(crate) fn follow_up(via: Via, text: &str) -> Request {
     Request::internal(text, via)
 }
 
-/// What a role change does to her brain. Every Maya keeps her own: on an
-/// assistant it sleeps, and nothing of it is reset.
+/// What a role change does to her brain, described for the log. Every Maya
+/// keeps her own: on an assistant it sleeps, and nothing of it is reset.
+/// The choices themselves are made elsewhere: `runs_brain` (dormant or
+/// not, in `brain_app::start_run`) and `record::decide` (resume or fresh,
+/// which also starts fresh after a brain or model change).
 #[derive(Debug, PartialEq)]
 pub(crate) enum Wake {
     /// This machine became an assistant: her session stops, and her record,
@@ -234,8 +237,8 @@ pub(crate) enum Wake {
     Unchanged,
 }
 
-/// What a move from `before` to `after` does to her brain; `has_record`:
-/// she ran here before; `summary`: the old main sent one (Make main).
+/// What a move from `before` to `after` does to her brain, for the log;
+/// `has_record`: she ran here before; `summary`: the old main sent one.
 pub(crate) fn wake(before: NetworkRole, after: NetworkRole, has_record: bool, summary: bool) -> Wake {
     match (before == NetworkRole::Assistant, after == NetworkRole::Assistant) {
         (false, true) => Wake::Dormant,
@@ -617,8 +620,13 @@ mod tests {
     }
 
     #[test]
-    fn becoming_an_assistant_puts_her_to_sleep_and_becoming_main_wakes_her_own_session() {
+    fn the_logged_wake_matches_what_runs_brain_and_record_decide_do() {
         use NetworkRole::*;
+        // Dormant exactly where `runs_brain` says she does not run.
+        for (before, after) in [(Main, Assistant), (Off, Assistant), (Assistant, Main), (Assistant, Off)] {
+            let c = Config { network: maya_core::config::NetworkConfig { role: after, ..Default::default() }, ..Default::default() };
+            assert_eq!(wake(before, after, true, false) == Wake::Dormant, !runs_brain(&c), "{before:?} -> {after:?}");
+        }
         assert_eq!(wake(Main, Assistant, true, false), Wake::Dormant);
         assert_eq!(wake(Off, Assistant, false, false), Wake::Dormant);
         assert_eq!(wake(Assistant, Main, true, false), Wake::Resume { catch_up: false }, "her own record, not fresh");
