@@ -95,7 +95,9 @@ impl ChatLog {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Ok(bytes) = serde_json::to_vec(&self.turns) {
-            let _ = config::write_private(path, &bytes);
+            if let Err(e) = config::write_private_atomic(path, &bytes) {
+                crate::log::line("chat", format!("could not save the chat log: {e}"));
+            }
         }
     }
 }
@@ -108,8 +110,10 @@ mod tests {
         ChatTurn { who: who.into(), text: text.into(), at, via: Via::Chat }
     }
 
-    fn tmp() -> PathBuf {
-        tempfile::tempdir().unwrap().keep().join("brain").join("chat.json")
+    fn tmp() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("brain").join("chat.json");
+        (dir, p)
     }
 
     #[test]
@@ -127,9 +131,11 @@ mod tests {
 
     #[test]
     fn the_dot_is_working_then_unread_then_waiting_then_idle() {
-        let mut log = ChatLog::load(tmp());
+        let (_dir, p) = tmp();
+        let mut log = ChatLog::load(p);
         assert_eq!(log.dot(true), Dot::Working);
         log.push(turn("maya", "Done, it's #52.", 10));
+        assert_eq!(log.dot(true), Dot::Working, "working beats unread");
         assert_eq!(log.dot(false), Dot::Unread);
         log.seen(11);
         assert_eq!(log.dot(false), Dot::Idle);
@@ -138,5 +144,17 @@ mod tests {
         assert_eq!(log.dot(false), Dot::Waiting);
         log.push(turn("user", "maya", 14));
         assert_eq!(log.dot(false), Dot::Idle);
+    }
+
+    #[test]
+    fn a_corrupt_log_loads_empty_and_the_next_push_writes_a_valid_file() {
+        let (_dir, p) = tmp();
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"[{\"who\":\"us").unwrap();
+        let mut log = ChatLog::load(p.clone());
+        assert!(log.last(10).is_empty());
+        log.push(turn("user", "hi", 1));
+        let back = ChatLog::load(p);
+        assert_eq!(back.last(10), vec![turn("user", "hi", 1)]);
     }
 }

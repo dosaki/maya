@@ -561,6 +561,21 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
+/// Writes `bytes` to a sibling temp file with the same private permissions as
+/// `write_private`, then renames it over `path`, so a crash mid-write leaves
+/// the old file whole. `std::fs::rename` replaces an existing file on Windows
+/// too (it uses MoveFileEx with replace).
+pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut name = path.file_name().ok_or("no file name")?.to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    write_private(&tmp, bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

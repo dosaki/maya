@@ -9,9 +9,9 @@
 use crate::store::now_ms;
 use crate::{config, ear, eleven_settings, eleven_wanted, interpreter, launch, log, notify, wake};
 use crate::{answer_question, compact_session, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, AppState};
+use maya_core::brain::chat::{ChatLog, ChatTurn};
 use maya_core::window::{Batch, Via};
 use serde_json::Value;
-use maya_core::brain::chat::{ChatLog, ChatTurn};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
