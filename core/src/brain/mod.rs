@@ -6,4 +6,6 @@ pub mod driver;
 pub mod notes;
 pub mod prompt;
 pub mod protocol;
+pub mod record;
+pub mod session;
 pub mod watch;
