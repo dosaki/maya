@@ -255,7 +255,7 @@ fn find_among<'a>(pool: &[&'a Card], name: &str, wanted: &str) -> Result<&'a Car
 /// side names a machine on the board (or "this mac" for a local session), the
 /// left side is resolved only among that machine's cards; otherwise the whole
 /// string is treated as a name across every card.
-fn find_session<'a>(cards: &'a [Card], wanted: &str) -> Result<&'a Card, String> {
+pub(crate) fn find_session<'a>(cards: &'a [Card], wanted: &str) -> Result<&'a Card, String> {
     if loose(wanted).is_empty() {
         return Err(format!("I couldn't find a session called {wanted}"));
     }
