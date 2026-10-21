@@ -3,12 +3,15 @@ import { listen } from "@tauri-apps/api/event";
 
 export interface VoiceStatus {
   listening: boolean;
-  state: "off" | "idle" | "awaiting-command" | "awaiting-confirm" | "thinking" | "error";
+  state: "off" | "idle" | "awaiting-command" | "window" | "thinking" | "error";
   detail: string;
   level: number;
   heard: string;
   said: string;
+  /** The announced batch waiting in the action window, as she said it. */
   pending: string | null;
+  /** When that batch runs (ms since the epoch); null until she has said it. */
+  until?: number | null;
   /** Counts turns added to the history, so the page knows when to refetch it. */
   turns: number;
   /** The word she listens for; absent from an older app reads as "Maya". */
@@ -22,14 +25,14 @@ export interface VoiceTurn {
 }
 
 export interface VoiceHandlers {
-  onConfirm(yes: boolean): void;
+  onCancel(): void;
 }
 
 /** What the microphone button says; idle names the wake word (`stateLabel`). */
 const LABEL: Record<Exclude<VoiceStatus["state"], "idle">, string> = {
   off: "Not listening.",
   "awaiting-command": "Listening for your reply.",
-  "awaiting-confirm": "Waiting for yes or no.",
+  window: "Say stop to cancel.",
   thinking: "Thinking…",
   error: "Listener stopped",
 };
@@ -52,7 +55,7 @@ export function renderIndicator(s: VoiceStatus): HTMLButtonElement | null {
   const b = document.createElement("button");
   b.type = "button";
   b.dataset.action = "voice";
-  const cls = s.state === "awaiting-command" || s.state === "awaiting-confirm" ? "awaiting" : s.state;
+  const cls = s.state === "awaiting-command" || s.state === "window" ? "awaiting" : s.state;
   b.className = `voice voice--${cls}`;
   b.title = s.state === "error" && s.detail ? `${LABEL.error}: ${s.detail}` : stateLabel(s);
   b.setAttribute("aria-label", b.title);
@@ -89,19 +92,21 @@ export function renderVoicePanel(s: VoiceStatus, turns: VoiceTurn[], h: VoiceHan
     const pending = document.createElement("div");
     pending.className = "voice__pending";
     pending.textContent = s.pending;
-    const yes = document.createElement("button");
-    yes.type = "button";
-    yes.className = "card__btn card__btn--primary";
-    yes.dataset.action = "voice-yes";
-    yes.textContent = "Yes";
-    yes.addEventListener("click", () => h.onConfirm(true));
-    const no = document.createElement("button");
-    no.type = "button";
-    no.className = "card__btn";
-    no.dataset.action = "voice-no";
-    no.textContent = "No";
-    no.addEventListener("click", () => h.onConfirm(false));
-    pending.append(document.createElement("br"), yes, no);
+    pending.append(document.createElement("br"));
+    if (s.until != null) {
+      const left = Math.ceil((s.until - Date.now()) / 1000);
+      const countdown = document.createElement("span");
+      countdown.className = "voice__countdown";
+      countdown.textContent = left > 0 ? `Running in ${left} s.` : "Running now.";
+      pending.append(countdown, " ");
+    }
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "card__btn";
+    cancel.dataset.action = "window-cancel";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => h.onCancel());
+    pending.append(cancel);
     root.append(pending);
   }
   return root;
@@ -115,13 +120,21 @@ export async function initVoice(): Promise<void> {
   let status: VoiceStatus = { listening: false, state: "off", detail: "", level: 0, heard: "", said: "", pending: null, turns: 0 };
   let turns: VoiceTurn[] = [];
   const handlers: VoiceHandlers = {
-    onConfirm: (yes) => void invoke("voice_confirm", { yes }),
+    onCancel: () => void invoke("window_cancel"),
+  };
+  // Repaints the countdown each second while a batch waits with its clock running.
+  let tick: ReturnType<typeof setInterval> | undefined;
+  const keepCounting = () => {
+    const counting = !!status.pending && status.until != null;
+    if (counting && tick === undefined) tick = setInterval(() => { if (!panel.hidden) panel.replaceChildren(renderVoicePanel(status, turns, handlers)); }, 1000);
+    if (!counting && tick !== undefined) { clearInterval(tick); tick = undefined; }
   };
   const paintIndicator = () => {
     const b = renderIndicator(status);
     if (b) host.replaceChildren(b); else host.replaceChildren();
   };
   const paint = () => {
+    keepCounting();
     if (!status.listening) panel.hidden = true;
     paintIndicator();
     if (!panel.hidden) panel.replaceChildren(renderVoicePanel(status, turns, handlers));

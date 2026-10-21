@@ -265,7 +265,8 @@ impl Executor for TauriExecutor {
 pub(crate) fn interpret_data(outcome: &Interpreted) -> Value {
     match outcome {
         Interpreted::Say(s) => serde_json::json!({ "say": s }),
-        Interpreted::Confirm(p) => serde_json::json!({ "say": p.say, "pending": { "say": p.say, "action": p.action } }),
+        // The phone still asks for a yes and runs one action (Task 7 moves it to the window).
+        Interpreted::Announce { say, actions } => serde_json::json!({ "say": say, "pending": { "say": say, "action": actions.first() } }),
         // Run is executed before answering; see `serve_voice`.
         Interpreted::Run(_) => serde_json::json!({ "say": "" }),
     }
@@ -453,9 +454,8 @@ mod tests {
     fn interpret_answers_say_and_a_pending_action() {
         let said = interpret_data(&Interpreted::Say("All quiet.".into()));
         assert_eq!(said, serde_json::json!({"say": "All quiet."}));
-        let pending = maya_core::wake::Pending { say: "Answering hexgrid with \"Yes\". Yes?".into(), action: serde_json::json!({"kind": "answer"}) };
-        let asked = interpret_data(&Interpreted::Confirm(pending));
-        assert_eq!(asked["say"], "Answering hexgrid with \"Yes\". Yes?");
+        let asked = interpret_data(&Interpreted::Announce { say: "Answering hexgrid with \"Yes\".".into(), actions: vec![serde_json::json!({"kind": "answer"})] });
+        assert_eq!(asked["say"], "Answering hexgrid with \"Yes\".");
         assert_eq!(asked["pending"]["say"], asked["say"]);
         assert_eq!(asked["pending"]["action"]["kind"], "answer");
     }

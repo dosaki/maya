@@ -62,4 +62,13 @@ describe("voice flow", () => {
     expect(panel.hidden).toBe(true);
     expect(host.querySelector("button")).toBeNull();
   });
+
+  it("the Cancel button cancels the window", async () => {
+    invoke.mockImplementation((cmd: string) => (cmd === "voice_status" ? Promise.resolve(status({ state: "window", pending: "Telling coral: go.", until: Date.now() + 5000 })) : Promise.resolve([])));
+    await initVoice();
+    document.getElementById("voice-host")!.querySelector<HTMLButtonElement>("button")!.click();
+    await flush();
+    document.getElementById("voice-panel")!.querySelector<HTMLButtonElement>("button[data-action=window-cancel]")!.click();
+    expect(invoke).toHaveBeenCalledWith("window_cancel");
+  });
 });

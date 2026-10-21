@@ -136,6 +136,8 @@ pub struct AppState {
     pub reviews: Mutex<ReviewState>,
     pub pr_notifier: Mutex<reviews::PrNotifier>,
     pub voice: Mutex<VoiceState>,
+    /// The batch Maya announced and runs once its window has passed.
+    pub window: Mutex<maya_core::window::Window>,
     /// Lock order: `network`, then the server's own mutex, then `store`.
     pub network: Mutex<net::NetworkState>,
     /// This Maya's network key pair, read from the key store at first use.
@@ -1303,7 +1305,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), window: Mutex::new(maya_core::window::Window::default()), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
         .invoke_handler(tauri::generate_handler![
             git::get_git_status,
@@ -1352,7 +1354,7 @@ pub fn run() {
             list_elevenlabs_voices,
             try_voice,
             listener::voice_listen,
-            listener::voice_confirm,
+            listener::window_cancel,
             listener::voice_status,
             listener::voice_history,
             listener::voice_selftest,

@@ -1,12 +1,16 @@
 //! Voice assistant: the listener thread, the wake-word conversation, spoken
-//! replies with listening paused around them, and confirmed actions.
+//! replies with listening paused around them, and announced actions that run
+//! once the action window has passed.
 //!
-//! Lock rule: never hold the store lock or the voice lock while speaking or
-//! while the interpreter runs; take what is needed, release, then act.
+//! Lock rule: never hold the store, voice or window lock while speaking,
+//! while the interpreter runs or while an action runs, and never take one of
+//! them while holding another; take what is needed, release, then act.
 
 use crate::store::now_ms;
 use crate::{config, ear, eleven_settings, eleven_wanted, interpreter, launch, log, notify, wake};
 use crate::{answer_question, compact_session, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, AppState};
+use maya_core::window::{Batch, Via};
+use serde_json::Value;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 
@@ -31,7 +35,11 @@ pub struct VoiceStatus {
     pub level: f64,
     pub heard: String,
     pub said: String,
+    /// The announced batch waiting in the action window, as she said it.
     pub pending: Option<String>,
+    /// When that batch runs (milliseconds since the epoch); None until her
+    /// announcement has been said and the clock starts.
+    pub until: Option<u64>,
     /// Turns ever added to the history; the page refetches it when this changes.
     pub turns: u64,
     /// The word she listens for, filled in from the config as the page reads it.
@@ -40,7 +48,7 @@ pub struct VoiceStatus {
 
 impl Default for VoiceStatus {
     fn default() -> Self {
-        Self { listening: false, state: "off".into(), detail: String::new(), level: 0.0, heard: String::new(), said: String::new(), pending: None, turns: 0, word: wake::DEFAULT_WAKE_WORD.into() }
+        Self { listening: false, state: "off".into(), detail: String::new(), level: 0.0, heard: String::new(), said: String::new(), pending: None, until: None, turns: 0, word: wake::DEFAULT_WAKE_WORD.into() }
     }
 }
 
@@ -175,7 +183,7 @@ fn remote_focus_refusal(machine: Option<&str>) -> Option<String> {
 }
 
 /// Runs a validated action through the same paths as the page's buttons;
-/// the Ok text is what Maya says after a confirmed action.
+/// the Ok text is what Maya says after an action that runs at once.
 pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Result<String, String> {
     let state = app.state::<AppState>();
     let kind = action["kind"].as_str().unwrap_or("");
@@ -206,7 +214,7 @@ pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Res
             Ok("Sent.".into())
         }
         "answer" => {
-            // The ask the user confirmed, captured at validation: a newer ask is refused.
+            // The ask the user heard announced, captured at validation: a newer ask is refused.
             let ask_id = action["askId"].as_u64().ok_or("The question has changed; ask me again.")?;
             let n = action["option"].as_u64().unwrap_or(1) as usize;
             answer_question(app.clone(), state.clone(), session, ask_id, 0, n.saturating_sub(1))?;
@@ -266,10 +274,10 @@ pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Res
 pub(crate) enum Interpreted {
     /// Say this; nothing runs.
     Say(String),
-    /// Read this back, and run its action on a yes.
-    Confirm(wake::Pending),
+    /// Announce this, then run the actions once the window has passed.
+    Announce { say: String, actions: Vec<Value> },
     /// Run this at once (focus, compact) and say what it did.
-    Run(serde_json::Value),
+    Run(Value),
 }
 
 /// What the interpreter sees and checks an action against.
@@ -303,8 +311,8 @@ pub(crate) fn voice_context(app: &AppHandle) -> VoiceContext {
     VoiceContext { cards, dirs, machines, prs, remembered }
 }
 
-/// The interpreter's reply as one of the three outcomes. The read-back for
-/// a confirmation is what will run (`spoken_for`), never the model's `say`.
+/// The interpreter's reply as one of the three outcomes. The announcement
+/// is what will run (`spoken_for`), never the model's `say`.
 pub(crate) fn decide(reply: &interpreter::Reply, ctx: &VoiceContext) -> Interpreted {
     let Some(proposed) = reply.action.as_ref().filter(|a| a["kind"] != "report") else {
         return Interpreted::Say(reply.say.clone());
@@ -312,9 +320,9 @@ pub(crate) fn decide(reply: &interpreter::Reply, ctx: &VoiceContext) -> Interpre
     let validated = if proposed["kind"] == "resume_all" { interpreter::validate_resume_all(proposed, &ctx.remembered) } else { interpreter::validate(proposed, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs) };
     match validated {
         Err(why) => Interpreted::Say(why),
-        Ok(action) if interpreter::needs_confirm(&action) => {
-            let say = spoken_for(&action).unwrap_or_else(|| "Shall I?".into());
-            Interpreted::Confirm(wake::Pending { say, action })
+        Ok(action) if interpreter::waits(&action) => {
+            let say = spoken_for(&action).unwrap_or_else(|| "Running that.".into());
+            Interpreted::Announce { say, actions: vec![action] }
         }
         Ok(action) => Interpreted::Run(action),
     }
@@ -412,6 +420,7 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     let started = set_voice(app, generation, |st| {
         st.state = "thinking".into();
         st.pending = None;
+        st.until = None;
     });
     if !started {
         return;
@@ -426,52 +435,18 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
             log::line("action", "nothing to run");
             reply_then_idle(app, generation, &s, inbox)
         }
-        Interpreted::Confirm(pending) => {
-            let say = pending.say.clone();
-            log::line("action", format!("needs confirmation: {}", pending.action));
-            // Stored before the read-back so a tap on the page can answer it.
-            let accepted = {
-                let state = app.state::<AppState>();
-                let mut v = state.voice.lock().unwrap();
-                if v.generation != generation {
-                    return;
-                }
-                match v.flow.as_mut() {
-                    Some(f) => {
-                        f.set_pending(pending.clone(), now_ms());
-                        v.status.pending = Some(say.clone());
-                        v.status.state = "awaiting-confirm".into();
-                        true
-                    }
-                    None => false,
-                }
-            };
-            if !accepted {
-                return;
-            }
-            emit_voice(app);
-            if !reply_aloud(app, generation, &say) {
-                return;
-            }
-            // Anything heard before the read-back ended (an "okay" said to
-            // someone while she was thinking) sits queued and would confirm
-            // an action the user had not heard yet. Throw it away: a person
-            // who spoke before the read-back must say it again, which is
-            // safer than a stray word confirming.
+        Interpreted::Announce { say, actions } => {
+            log::line("action", format!("announcing: {}", actions.iter().map(Value::to_string).collect::<Vec<_>>().join(", ")));
+            announce(app, Some(generation), say, actions, Via::Voice);
+            // Anything heard before the announcement ended (an "okay" said to
+            // someone while she was thinking) sits queued and would settle a
+            // batch the user had not heard yet. Throw it away: a person who
+            // spoke before the announcement must say it again, which is safer
+            // than a stray word running or correcting it.
             if let Some(inbox) = inbox {
                 let n = inbox.discard_heard();
                 if n > 0 {
-                    log::line("listener", format!("discarded {n} segment(s) heard before the read-back ended"));
-                }
-            }
-            // The confirmation window starts when the read-back ends (the ear
-            // was paused while she spoke), unless it was answered meanwhile.
-            // A read-back longer than the window must still restart it.
-            let state = app.state::<AppState>();
-            let mut v = state.voice.lock().unwrap();
-            if v.generation == generation {
-                if let Some(f) = v.flow.as_mut().filter(|f| f.has_pending()) {
-                    f.set_pending(pending, now_ms());
+                    log::line("listener", format!("discarded {n} segment(s) heard before the announcement ended"));
                 }
             }
         }
@@ -490,8 +465,8 @@ fn interpret(app: &AppHandle, generation: u64, cmd: &str, inbox: Option<&Inbox>)
     }
 }
 
-/// Handles one final segment heard during listener run `generation` (or a
-/// yes/no from the page). Nothing happens once that run is stopped or replaced.
+/// Handles one final segment heard during listener run `generation`.
+/// Nothing happens once that run is stopped or replaced.
 fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>) {
     // Read first: the store lock is not held with the voice lock.
     let word = app.state::<AppState>().store.lock().unwrap().config.listen_word();
@@ -512,14 +487,15 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>)
             None => vec![],
         };
         log::line("wake", format!("heard ({before}): {text:?} → {}", describe_effects(&effects)));
-        // Nothing to do, but a pending confirmation may still be waiting
+        // Nothing to do, but an announced batch may still be waiting
         // (chatter, or her own line heard back): show the flow's state.
         // When not listening, "off" or "error" stays as it is.
         if effects.is_empty() && v.status.listening {
             let shown = v.flow.as_ref().map_or("idle", |f| f.state(now));
             v.status.state = shown.into();
-            if shown != "awaiting-confirm" {
+            if shown != "window" {
                 v.status.pending = None;
+                v.status.until = None;
             }
         }
         effects
@@ -540,36 +516,228 @@ fn on_heard(app: &AppHandle, generation: u64, text: &str, inbox: Option<&Inbox>)
                 reply_aloud(app, generation, &s);
             }
             wake::Effect::Interpret(cmd) => interpret(app, generation, &cmd, inbox),
-            wake::Effect::Execute(action) => {
-                let go = set_voice(app, generation, |st| {
-                    st.pending = None;
-                    st.state = "thinking".into();
-                });
-                if !go {
-                    return;
-                }
-                log::line("action", format!("confirmed, running: {action}"));
-                let said = match execute_action(app, &action) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::line("action", format!("failed: {e}"));
-                        e
+            wake::Effect::RunNow => {
+                let taken = app.state::<AppState>().window.lock().unwrap().take_now();
+                match taken {
+                    Some(batch) => {
+                        log::line("action", format!("batch {} runs now on a yes", batch.id));
+                        run_now(app, batch);
                     }
-                };
-                reply_then_idle(app, generation, &said, inbox);
+                    // Its timer took it a moment ago: it is running already.
+                    None => settle(app, "idle"),
+                }
+            }
+            wake::Effect::Correct(cmd) => {
+                let dropped = app.state::<AppState>().window.lock().unwrap().cancel();
+                if let Some(batch) = dropped {
+                    log::line("action", format!("batch {} dropped for a correction", batch.id));
+                }
+                settle(app, "idle");
+                interpret(app, generation, &cmd, inbox);
             }
             wake::Effect::Cancelled => {
-                let shown = set_voice(app, generation, |st| {
-                    st.pending = None;
-                    st.state = "idle".into();
-                });
-                if !shown {
-                    return;
+                let dropped = app.state::<AppState>().window.lock().unwrap().cancel();
+                if let Some(batch) = &dropped {
+                    log::line("action", format!("batch {} cancelled", batch.id));
                 }
-                reply_aloud(app, generation, "Cancelled.");
+                settle(app, "idle");
+                // Nothing left to cancel: its timer took it as the stop was heard.
+                reply_aloud(app, generation, if dropped.is_some() { "Cancelled." } else { "Too late." });
             }
+            wake::Effect::Stop => crate::brain_app::stop(app, Via::Voice),
         }
     }
+}
+
+/// Shows the announced batch in the panel; `until` once its clock runs.
+/// The state reads "window" only while listening: "off" and "error" stay.
+fn show_window(v: &mut VoiceState, say: &str, until: Option<u64>) {
+    v.status.pending = Some(say.to_string());
+    v.status.until = until;
+    if v.status.listening {
+        v.status.state = "window".into();
+    }
+}
+
+/// Ends the flow's window and clears the panel's batch, once it ran or was
+/// dropped; a state still showing the window becomes `next`.
+fn close_window(v: &mut VoiceState, next: &str) {
+    if let Some(f) = v.flow.as_mut() {
+        f.close_window();
+    }
+    v.status.pending = None;
+    v.status.until = None;
+    if v.status.listening && v.status.state == "window" {
+        v.status.state = next.into();
+    }
+}
+
+/// `close_window` on the voice state, then tells the page and her Chat.
+/// Takes the voice lock: the caller must hold none.
+fn settle(app: &AppHandle, next: &str) {
+    {
+        let state = app.state::<AppState>();
+        let mut v = state.voice.lock().unwrap();
+        close_window(&mut v, next);
+    }
+    emit_voice(app);
+    crate::brain_app::emit_status(app);
+}
+
+fn current_generation(app: &AppHandle) -> u64 {
+    app.state::<AppState>().voice.lock().unwrap().generation
+}
+
+/// Says `text` aloud for whoever is listening now (a muted Maya only shows
+/// it). Blocks while speaking: the caller must hold no lock.
+pub(crate) fn say(app: &AppHandle, text: &str) {
+    reply_aloud(app, current_generation(app), text);
+}
+
+/// Drops batch `id` if it is still the one waiting.
+fn drop_batch(app: &AppHandle, id: u64) {
+    let state = app.state::<AppState>();
+    let mut w = state.window.lock().unwrap();
+    if w.pending().map(|b| b.id) == Some(id) {
+        w.cancel();
+    }
+}
+
+/// Announces `actions` and runs them once the window has passed, unless a
+/// stop, a correction or the Cancel button drops them first. Opens a batch
+/// or joins the open one. A spoken request, or one from Maya herself, is
+/// said aloud (a muted Maya only shows it) and stopped by voice; the clock
+/// starts only once the announcement has been said, so the user always gets
+/// the whole window after hearing it. A voice request whose listener run is
+/// stopped or replaced while she announces it is dropped. Blocks while
+/// speaking: the caller must hold no lock.
+pub(crate) fn announce(app: &AppHandle, generation: Option<u64>, say: String, actions: Vec<Value>, origin: Via) {
+    let state = app.state::<AppState>();
+    let (id, shown) = {
+        let mut w = state.window.lock().unwrap();
+        let id = w.open(say.clone(), actions, origin);
+        (id, w.pending().map(|b| b.say.clone()).unwrap_or_default())
+    };
+    log::line("action", format!("batch {id} announced: {say}"));
+    let spoken = matches!(origin, Via::Voice | Via::Maya);
+    // Only the listener run that heard the request opens its flow's window.
+    let ours = |v: &VoiceState| generation.map_or(true, |g| v.generation == g);
+    if spoken {
+        // Open before she speaks, so a stop or the Cancel button works from
+        // the first word; the deadline is set once she has finished.
+        let mut v = state.voice.lock().unwrap();
+        if ours(&v) {
+            if let Some(f) = v.flow.as_mut() {
+                f.open_window(u64::MAX);
+            }
+            show_window(&mut v, &shown, None);
+        }
+    }
+    emit_voice(app);
+    crate::brain_app::emit_status(app);
+    if spoken {
+        let run = generation.unwrap_or_else(|| current_generation(app));
+        if !reply_aloud(app, run, &say) && origin == Via::Voice {
+            log::line("action", format!("listener run replaced while announcing; batch {id} dropped"));
+            drop_batch(app, id);
+            crate::brain_app::emit_status(app);
+            return;
+        }
+    }
+    let started = {
+        let mut w = state.window.lock().unwrap();
+        w.start_clock(id, now_ms()).map(|until| (until, w.pending().map(|b| b.say.clone()).unwrap_or_default()))
+    };
+    // Cancelled, corrected or run while she spoke: whoever did it settled the panel.
+    let Some((until, shown)) = started else { return };
+    if spoken {
+        let mut v = state.voice.lock().unwrap();
+        // A cancel between the clock starting and here has closed the window already.
+        if ours(&v) && v.flow.as_ref().map_or(false, |f| f.state(now_ms()) == "window") {
+            if let Some(f) = v.flow.as_mut() {
+                f.open_window(until);
+            }
+            show_window(&mut v, &shown, Some(until));
+        }
+    }
+    emit_voice(app);
+    crate::brain_app::emit_status(app);
+    let handle = app.clone();
+    std::thread::spawn(move || wait_then_run(&handle, id, until, generation));
+}
+
+/// The timer of batch `id`: sleeps until just past its deadline, then runs it
+/// unless it was cancelled, corrected or already run. A voice batch whose
+/// listener run has since stopped or been replaced is dropped instead, as a
+/// stop leaves nothing behind.
+fn wait_then_run(app: &AppHandle, id: u64, mut until: u64, generation: Option<u64>) {
+    let batch = loop {
+        std::thread::sleep(Duration::from_millis(until.saturating_sub(now_ms()) + 50));
+        let state = app.state::<AppState>();
+        let mut w = state.window.lock().unwrap();
+        match w.pending().map(|b| (b.id, b.until)) {
+            Some((pending, deadline)) if pending == id => match w.take_due(id, now_ms()) {
+                Some(batch) => break batch,
+                // The clock went back: wait for the deadline again.
+                None => until = deadline,
+            },
+            _ => return,
+        }
+    };
+    if generation.map_or(false, |g| !is_current(app, g)) {
+        log::line("action", format!("listener stopped; batch {} dropped", batch.id));
+        settle(app, "idle");
+        return;
+    }
+    log::line("action", format!("batch {} runs: its window passed", batch.id));
+    run_now(app, batch);
+}
+
+/// Runs a batch taken from the window and reports how it went.
+fn run_now(app: &AppHandle, batch: Batch) {
+    let origin = batch.origin;
+    settle(app, "thinking");
+    let results = run_batch(app, batch);
+    on_batch_done(app, results, origin);
+}
+
+/// Runs each action of `batch` in order, through the page's own paths.
+pub(crate) fn run_batch(app: &AppHandle, batch: Batch) -> Vec<(Value, Result<String, String>)> {
+    batch
+        .actions
+        .into_iter()
+        .map(|action| {
+            log::line("action", format!("running: {action}"));
+            let outcome = execute_action(app, &action);
+            if let Err(e) = &outcome {
+                log::line("action", format!("failed: {e}"));
+            }
+            (action, outcome)
+        })
+        .collect()
+}
+
+/// What she says once a batch ran: only its failures, since the
+/// announcement already said what it would do. None when all went well.
+pub(crate) fn failures_said(results: &[(Value, Result<String, String>)]) -> Option<String> {
+    let failed: Vec<String> = results.iter().filter_map(|(_, r)| r.as_ref().err()).map(|e| sentence(e)).collect();
+    (!failed.is_empty()).then(|| failed.join(" "))
+}
+
+/// A batch has run: says its failures aloud when it was spoken (a muted
+/// Maya only shows them), then shows idle. Task 13 adds her notes.
+pub(crate) fn on_batch_done(app: &AppHandle, results: Vec<(Value, Result<String, String>)>, origin: Via) {
+    if let Some(line) = failures_said(&results).filter(|_| matches!(origin, Via::Voice | Via::Maya)) {
+        say(app, &line);
+    }
+    {
+        let state = app.state::<AppState>();
+        let mut v = state.voice.lock().unwrap();
+        if v.status.listening && v.status.state == "thinking" {
+            v.status.state = v.flow.as_ref().map_or("idle", |f| f.state(now_ms())).into();
+        }
+    }
+    emit_voice(app);
 }
 
 /// The listener thread's view of the ear's events, able to throw away what
@@ -660,7 +828,7 @@ pub(crate) fn should_start_after_download(config: &config::Config, id: &str) -> 
 }
 
 /// Shows `why` as an error and clears whatever a previous run left behind
-/// (a pending confirmation, partial transcript, last spoken line) so nothing
+/// (an announced batch shown, partial transcript, last spoken line) so nothing
 /// stale can still be answered while the listener is not running; mirrors
 /// what `stop_listening` clears. A no-op once `generation` is no longer
 /// current.
@@ -676,6 +844,7 @@ fn fail_to_start(app: &AppHandle, generation: u64, why: &str) {
         v.status.state = "error".into();
         v.status.detail = why.to_string();
         v.status.pending = None;
+        v.status.until = None;
         v.status.heard.clear();
         v.status.said.clear();
     }
@@ -745,6 +914,7 @@ pub(crate) fn start_listening(app: &AppHandle) -> Result<(), String> {
             v.status.state = "idle".into();
             v.status.detail.clear();
             v.status.pending = None;
+            v.status.until = None;
             v.status.heard.clear();
             v.status.said.clear();
             v.status.level = 0.0;
@@ -924,30 +1094,17 @@ pub(crate) fn voice_listen(app: AppHandle, state: TauriState<AppState>, on: bool
     }
 }
 
-/// The page's yes/no buttons; ignored unless a confirmation is waiting. A
-/// tap after the window ran out drops the action and says so.
+/// The page's Cancel button: drops the announced batch while it waits. A
+/// spoken one is answered aloud, as a spoken stop would be.
 #[tauri::command(async)]
-pub(crate) fn voice_confirm(app: AppHandle, yes: bool) {
-    let (generation, expired) = {
-        let state = app.state::<AppState>();
-        let mut v = state.voice.lock().unwrap();
-        let generation = v.generation;
-        let expired = match v.flow.as_mut() {
-            Some(f) if f.has_pending() => f.drop_expired(now_ms()),
-            _ => return,
-        };
-        if expired {
-            v.status.pending = None;
-            v.status.state = "idle".into();
-        }
-        (generation, expired)
-    };
-    if expired {
-        emit_voice(&app);
-        reply_aloud(&app, generation, "That expired. Ask me again.");
-        return;
+pub(crate) fn window_cancel(app: AppHandle) {
+    let dropped = app.state::<AppState>().window.lock().unwrap().cancel();
+    let Some(batch) = dropped else { return };
+    log::line("action", format!("batch {} cancelled from the page", batch.id));
+    settle(&app, "idle");
+    if matches!(batch.origin, Via::Voice | Via::Maya) {
+        say(&app, "Cancelled.");
     }
-    on_heard(&app, generation, if yes { "yes" } else { "no" }, None);
 }
 
 #[tauri::command]
@@ -968,7 +1125,7 @@ pub(crate) fn voice_selftest() -> Result<String, String> {
 }
 
 /// The user's turn to remember for a heard segment's effects: the command
-/// after the wake word, or the yes or no she recognised. Never the raw
+/// after the wake word (or the correction), or the yes, no or stop she recognised. Never the raw
 /// segment, which can hold talk from before the wake word; the history goes
 /// to the model, and only the command text may.
 /// One line for the log: what the flow decided to do with a segment.
@@ -981,8 +1138,10 @@ pub(crate) fn describe_effects(effects: &[wake::Effect]) -> String {
         .map(|e| match e {
             wake::Effect::Say(s) => format!("say {s:?}"),
             wake::Effect::Interpret(c) => format!("command {c:?}"),
-            wake::Effect::Execute(a) => format!("confirmed {}", a["kind"].as_str().unwrap_or("?")),
+            wake::Effect::RunNow => "run now".into(),
+            wake::Effect::Correct(c) => format!("correction {c:?}"),
             wake::Effect::Cancelled => "cancelled".into(),
+            wake::Effect::Stop => "stop".into(),
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -992,8 +1151,10 @@ pub(crate) fn user_turn(effects: &[wake::Effect], word: &str) -> Option<String> 
     effects.iter().find_map(|e| match e {
         wake::Effect::Interpret(cmd) => Some(cmd.clone()),
         wake::Effect::Say(_) => Some(word.into()),
-        wake::Effect::Execute(_) => Some("yes".into()),
+        wake::Effect::Correct(cmd) => Some(cmd.clone()),
+        wake::Effect::RunNow => Some("yes".into()),
         wake::Effect::Cancelled => Some("no".into()),
+        wake::Effect::Stop => Some("stop".into()),
     })
 }
 
@@ -1008,8 +1169,8 @@ fn sentence(text: &str) -> String {
 }
 
 /// What Maya says for a validated action, built from the action itself and
-/// never from the model's `say`: the read-back for actions that need a yes,
-/// the line for focus and compact. None for a report, whose answer is the
+/// never from the model's `say`: the announcement for actions that wait in
+/// the window, the line for focus and compact. None for a report, whose answer is the
 /// model's `say`.
 /// `owner/name` spoken as just `name`.
 fn repo_name(repo: &str) -> &str {
@@ -1022,15 +1183,16 @@ pub(crate) fn spoken_for(action: &serde_json::Value) -> Option<String> {
     // action runs on a remote machine; nothing for a local one.
     let on_machine = action["machine"].as_str().filter(|m| !m.is_empty()).map(|m| format!(" on {m}")).unwrap_or_default();
     Some(match action["kind"].as_str()? {
-        "reply" => format!("Telling {}{on_machine}: {} Yes?", s("name"), sentence(&s("text"))),
-        "answer" => format!("Answering {}{on_machine} with \"{}\". Yes?", s("name"), s("label")),
-        "start" => format!("Starting a session in {}{on_machine}: {} Yes?", s("dir"), sentence(&s("prompt"))),
+        "reply" => format!("Telling {}{on_machine}: {}", s("name"), sentence(&s("text"))),
+        "answer" => format!("Answering {}{on_machine} with \"{}\".", s("name"), s("label")),
+        "start" if action["scratch"].as_bool() == Some(true) => format!("Starting a session in a scratch folder: {}", sentence(&s("prompt"))),
+        "start" => format!("Starting a session in {}{on_machine}: {}", s("dir"), sentence(&s("prompt"))),
         // Resume always picks the newest session that is not running.
-        "resume" => format!("Resuming the latest {}{on_machine} session. Yes?", s("dir")),
-        "resume_all" => interpreter::resume_all_readback(action),
+        "resume" => format!("Resuming the latest {}{on_machine} session.", s("dir")),
+        "resume_all" => interpreter::resume_all_announcement(action),
         "focus" => format!("Focusing {}{on_machine}.", s("name")),
         "compact" => format!("Compacting {}{on_machine}.", s("name")),
-        "review" => format!("Reviewing {} #{}, {}. Yes?", repo_name(&s("repo")), action["number"].as_u64().unwrap_or(0), s("title")),
+        "review" => sentence(&format!("Reviewing {} #{}, {}", repo_name(&s("repo")), action["number"].as_u64().unwrap_or(0), s("title"))),
         "open" => format!("Opening {} #{}.", repo_name(&s("repo")), action["number"].as_u64().unwrap_or(0)),
         _ => return None,
     })
@@ -1064,16 +1226,22 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_waits_for_a_yes_with_the_main_read_back() {
-        let r = reply("Sure!", Some(serde_json::json!({"kind": "reply", "session": "hexgrid", "text": "ship it"})));
-        let Interpreted::Confirm(p) = decide(&r, &ctx()) else { panic!("expected a confirmation") };
-        assert_eq!(p.say, "Telling hexgrid: ship it. Yes?");
-        assert_eq!(p.action["session"], "s1");
+    fn a_reply_is_announced_without_asking() {
+        let out = decide(&reply("", Some(json!({"kind":"reply","session":"hexgrid","text":"go ahead"}))), &ctx());
+        match out {
+            Interpreted::Announce { say, actions } => {
+                assert_eq!(say, "Telling hexgrid: go ahead.");
+                assert!(!say.ends_with("Yes?"));
+                assert_eq!(actions.len(), 1);
+                assert_eq!(actions[0]["session"], "s1", "the announced action is the validated one");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
-    fn compact_runs_at_once() {
-        let r = reply("Compacting.", Some(serde_json::json!({"kind": "compact", "session": "hexgrid"})));
+    fn compact_still_runs_at_once() {
+        let r = reply("Compacting.", Some(json!({"kind": "compact", "session": "hexgrid"})));
         assert!(matches!(decide(&r, &ctx()), Interpreted::Run(a) if a["kind"] == "compact"));
     }
 
@@ -1099,37 +1267,39 @@ mod tests {
     }
 
     #[test]
-    fn resume_all_is_read_back_with_the_split_and_nothing_to_resume_is_only_said() {
+    fn resume_all_is_announced_with_the_split_and_nothing_to_resume_is_only_said() {
         let asked = Some(json!({"kind": "resume_all", "scope": "all"}));
         let with_rows = VoiceContext { remembered: vec![remembered_row(None, "a"), remembered_row(Some("Gnowee"), "g")], ..ctx() };
-        let Interpreted::Confirm(p) = decide(&reply("", asked.clone()), &with_rows) else { panic!("expected a confirmation") };
-        assert_eq!(p.say, "Resume 2 sessions, 1 here and 1 on Gnowee?");
+        let Interpreted::Announce { say, actions } = decide(&reply("", asked.clone()), &with_rows) else { panic!("expected an announcement") };
+        assert_eq!(say, "Resuming 2 sessions, 1 here and 1 on Gnowee.");
+        assert_eq!(actions[0]["count"], 2);
         assert_eq!(decide(&reply("", asked), &ctx()), Interpreted::Say("There's nothing to resume.".into()));
     }
 
     #[test]
-    fn read_backs_come_from_the_validated_action() {
+    fn announcements_come_from_the_validated_action_and_never_ask() {
         let reply = json!({"kind":"reply","session":"id-1","name":"hexgrid-d3","text":"go ahead and ship it"});
-        assert_eq!(spoken_for(&reply).unwrap(), "Telling hexgrid-d3: go ahead and ship it. Yes?");
+        assert_eq!(spoken_for(&reply).unwrap(), "Telling hexgrid-d3: go ahead and ship it.");
         let asked = json!({"kind":"reply","session":"id-1","name":"coral","text":"ready?"});
-        assert_eq!(spoken_for(&asked).unwrap(), "Telling coral: ready? Yes?");
+        assert_eq!(spoken_for(&asked).unwrap(), "Telling coral: ready?");
         let answer = json!({"kind":"answer","session":"id-1","name":"hexgrid","option":2,"label":"SQLite","askId":5});
-        assert_eq!(spoken_for(&answer).unwrap(), "Answering hexgrid with \"SQLite\". Yes?");
+        assert_eq!(spoken_for(&answer).unwrap(), "Answering hexgrid with \"SQLite\".");
         let start = json!({"kind":"start","dir":"maya","prompt":"fix the build"});
-        assert_eq!(spoken_for(&start).unwrap(), "Starting a session in maya: fix the build. Yes?");
+        assert_eq!(spoken_for(&start).unwrap(), "Starting a session in maya: fix the build.");
         let resume = json!({"kind":"resume","dir":"maya"});
-        assert_eq!(spoken_for(&resume).unwrap(), "Resuming the latest maya session. Yes?");
+        assert_eq!(spoken_for(&resume).unwrap(), "Resuming the latest maya session.");
         assert_eq!(spoken_for(&json!({"kind":"focus","session":"id-1","name":"coral"})).unwrap(), "Focusing coral.");
         assert_eq!(spoken_for(&json!({"kind":"compact","session":"id-1","name":"coral"})).unwrap(), "Compacting coral.");
-        assert_eq!(spoken_for(&json!({"kind":"review","repo":"dosaki/collector","number":14,"title":"Add ERD overlay"})).unwrap(), "Reviewing collector #14, Add ERD overlay. Yes?");
+        assert_eq!(spoken_for(&json!({"kind":"review","repo":"dosaki/collector","number":14,"title":"Add ERD overlay"})).unwrap(), "Reviewing collector #14, Add ERD overlay.");
         assert_eq!(spoken_for(&json!({"kind":"open","repo":"dosaki/collector","number":14,"title":"Add ERD overlay"})).unwrap(), "Opening collector #14.");
+        assert_eq!(spoken_for(&json!({"kind":"start","scratch":true,"prompt":"try the new parser"})).unwrap(), "Starting a session in a scratch folder: try the new parser.");
         assert_eq!(spoken_for(&json!({"kind":"report"})), None, "a report speaks the model's own answer");
     }
 
     #[test]
-    fn read_backs_name_the_machine() {
-        assert_eq!(spoken_for(&json!({"kind":"reply","session":"id","name":"hexgrid","machine":"laptop","text":"go"})).unwrap(), "Telling hexgrid on laptop: go. Yes?");
-        assert_eq!(spoken_for(&json!({"kind":"start","dir":"maya","machine":"laptop","prompt":"fix it"})).unwrap(), "Starting a session in maya on laptop: fix it. Yes?");
+    fn announcements_name_the_machine() {
+        assert_eq!(spoken_for(&json!({"kind":"reply","session":"id","name":"hexgrid","machine":"laptop","text":"go"})).unwrap(), "Telling hexgrid on laptop: go.");
+        assert_eq!(spoken_for(&json!({"kind":"start","dir":"maya","machine":"laptop","prompt":"fix it"})).unwrap(), "Starting a session in maya on laptop: fix it.");
     }
 
     #[test]
@@ -1147,9 +1317,38 @@ mod tests {
         assert_eq!(user_turn(&heard, "Maya").as_deref(), Some("what's waiting"));
         assert_eq!(user_turn(&[Effect::Say("Yes?".into())], "Maya").as_deref(), Some("Maya"));
         assert_eq!(user_turn(&[Effect::Say("Yes?".into())], "Jarvis").as_deref(), Some("Jarvis"), "a bare wake is the word she was called by");
-        assert_eq!(user_turn(&[Effect::Execute(json!({"kind":"reply"}))], "Maya").as_deref(), Some("yes"));
+        assert_eq!(user_turn(&[Effect::RunNow], "Maya").as_deref(), Some("yes"));
         assert_eq!(user_turn(&[Effect::Cancelled], "Maya").as_deref(), Some("no"));
+        assert_eq!(user_turn(&[Effect::Correct("the other one".into())], "Maya").as_deref(), Some("the other one"), "a correction is remembered as the new command");
+        assert_eq!(user_turn(&[Effect::Stop], "Maya").as_deref(), Some("stop"));
         assert_eq!(user_turn(&[], "Maya"), None);
+    }
+
+    #[test]
+    fn only_failures_are_spoken_after_a_batch() {
+        let sent = (json!({"kind":"reply"}), Ok("Sent.".to_string()));
+        let changed = (json!({"kind":"answer"}), Err("The question has changed; ask me again.".to_string()));
+        let gone = (json!({"kind":"focus"}), Err("Session is no longer running".to_string()));
+        assert_eq!(failures_said(&[sent.clone()]), None, "the announcement already said it");
+        assert_eq!(failures_said(&[sent, changed.clone()]).as_deref(), Some("The question has changed; ask me again."));
+        assert_eq!(failures_said(&[changed, gone]).as_deref(), Some("The question has changed; ask me again. Session is no longer running."));
+    }
+
+    #[test]
+    fn closing_the_window_clears_what_the_panel_shows() {
+        let mut v = VoiceState { flow: Some(wake::Flow::new()), ..Default::default() };
+        v.status.listening = true;
+        v.flow.as_mut().unwrap().open_window(u64::MAX);
+        show_window(&mut v, "Telling coral: go.", Some(5_000));
+        assert_eq!((v.status.state.as_str(), v.status.pending.as_deref(), v.status.until), ("window", Some("Telling coral: go."), Some(5_000)));
+        close_window(&mut v, "thinking");
+        assert_eq!(v.flow.as_ref().unwrap().state(1), "idle", "a stop after the batch ran settles nothing");
+        assert_eq!((v.status.state.as_str(), v.status.pending, v.status.until), ("thinking", None, None));
+        // Not listening, the state stays as it is ("off").
+        let mut off = VoiceState::default();
+        show_window(&mut off, "Telling coral: go.", None);
+        close_window(&mut off, "idle");
+        assert_eq!((off.status.state.as_str(), off.status.pending), ("off", None));
     }
 
     #[test]
@@ -1164,7 +1363,7 @@ mod tests {
     }
 
     #[test]
-    fn speech_queued_before_the_read_back_is_discarded_but_state_changes_are_kept() {
+    fn speech_queued_before_the_announcement_is_discarded_but_state_changes_are_kept() {
         use ear::EarEvent;
         let (tx, rx) = std::sync::mpsc::channel();
         let inbox = Inbox::new(rx);
@@ -1195,7 +1394,7 @@ mod tests {
     fn only_lines_of_three_words_or_more_mute_the_ear() {
         assert!(!pauses_ear_for("Yes?"));
         assert!(!pauses_ear_for("Cancelled."));
-        assert!(pauses_ear_for("Telling hexgrid: go ahead. Yes?"));
+        assert!(pauses_ear_for("Telling hexgrid: go ahead."));
         assert!(pauses_ear_for("Nothing is waiting on you."));
     }
 
@@ -1204,8 +1403,8 @@ mod tests {
         assert!(asks_question("Which one: Hexgrid 1 or Hexgrid 2?"));
         assert!(asks_question("I couldn't find voice test. Did you mean voice-test? "));
         assert!(!asks_question("Nothing is waiting on you."));
-        // A read-back is a question too; the confirm window handles it before this check runs.
-        assert!(asks_question("Telling hexgrid: ready? Yes?"));
+        // An announcement never asks: she waits for a stop, not a yes.
+        assert!(!asks_question("Telling hexgrid: go ahead."));
         assert!(!asks_question(""));
     }
 
