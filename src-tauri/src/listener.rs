@@ -342,7 +342,7 @@ pub(crate) fn interpret_text(app: &AppHandle, cmd: &str, history: &[(String, Str
     let Ok(binary) = launch::find_binary(brain) else {
         return Interpreted::Say(format!("I can't find the {} command.", launch::binary_name(brain)));
     };
-    match interpreter::run(brain, &binary, model.as_deref(), cmd, &ctx.cards, &ctx.prs, history, &maya_dir, interpreter::TIMEOUT) {
+    match interpreter::run(brain, &binary, model.as_deref(), cmd, &ctx.cards, &ctx.prs, now_ms(), history, &maya_dir, interpreter::TIMEOUT) {
         Ok(reply) => decide(&reply, &ctx),
         Err(interpreter::RunError::TimedOut) => Interpreted::Say("Sorry, that took too long.".into()),
         Err(_) => Interpreted::Say("Sorry, I didn't catch that.".into()),
