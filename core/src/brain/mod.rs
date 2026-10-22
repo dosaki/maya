@@ -3,6 +3,7 @@
 pub mod acp;
 pub mod chat;
 pub mod claude;
+pub mod codex_drv;
 pub mod driver;
 pub mod handover;
 pub mod notes;
