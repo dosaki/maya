@@ -73,7 +73,8 @@ return "not found""#,
 }
 
 /// Brings the Terminal tab on `tty` and its window forward, then presses Esc
-/// (key code 53) through System Events: `do script` always ends with a
+/// (key code 53) through System Events once Terminal is frontmost (it answers
+/// "not front" and presses nothing if it never is): `do script` always ends with a
 /// carriage return, so it cannot send a bare Esc.
 pub fn applescript_press_escape(tty: &str) -> String {
     format!(
@@ -84,7 +85,14 @@ pub fn applescript_press_escape(tty: &str) -> String {
         set selected of t to true
         set index of w to 1
         activate
-        tell application "System Events" to key code 53
+        tell application "System Events"
+          repeat 20 times
+            if frontmost of application process "Terminal" then exit repeat
+            delay 0.05
+          end repeat
+          if not (frontmost of application process "Terminal") then return "not front"
+          key code 53
+        end tell
         return "ok"
       end if
     end repeat
@@ -94,9 +102,9 @@ return "not found""#
     )
 }
 
-/// What osascript says when Maya may not send keys (-1719, -25211).
+/// What osascript says when Maya may not send keys (-1719, -25211, 1002).
 fn needs_accessibility(stderr: &str) -> bool {
-    stderr.contains("-1719") || stderr.contains("-25211") || stderr.contains("not allowed assistive access")
+    ["-1719", "-25211", "not allowed assistive access", "not allowed to send keystrokes", "(1002)"].iter().any(|m| stderr.contains(m))
 }
 
 pub fn type_into_tty(tty: &str, text: &str) -> Result<(), String> {
@@ -141,10 +149,10 @@ impl Terminal for TerminalApp {
             }
             return Err(format!("osascript failed: {}", stderr.trim()));
         }
-        if String::from_utf8_lossy(&out.stdout).trim() == "ok" {
-            Ok(())
-        } else {
-            Err(format!("No Terminal tab found for {tty}."))
+        match String::from_utf8_lossy(&out.stdout).trim() {
+            "ok" => Ok(()),
+            "not front" => Err("Terminal did not come to the front, so Esc was not pressed.".into()),
+            _ => Err(format!("No Terminal tab found for {tty}.")),
         }
     }
     /// One script for the whole reply. A script that ran but failed may have
@@ -187,6 +195,19 @@ mod tests {
         assert!(s.contains("tty of t is \"/dev/ttys004\""), "{s}");
         assert!(s.contains("key code 53"), "{s}");
         assert!(!s.contains("do script"), "{s}");
+        assert!(s.find("frontmost of application process").unwrap() < s.find("key code 53").unwrap(), "{s}");
+    }
+
+    #[test]
+    fn missing_permission_is_recognised_in_osascripts_messages() {
+        for e in [
+            "execution error: osascript is not allowed to send keystrokes. (1002)",
+            "System Events got an error: osascript is not allowed assistive access. (-25211)",
+            "execution error: Not authorized (-1719)",
+        ] {
+            assert!(needs_accessibility(e), "{e}");
+        }
+        assert!(!needs_accessibility("execution error: Can't get window 1. (-1728)"));
     }
 
     #[test]
