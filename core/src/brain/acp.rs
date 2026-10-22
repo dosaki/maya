@@ -101,12 +101,15 @@ fn reply_error(id: &Value, code: i64, message: &str) -> String {
     format!("{}\n", json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}))
 }
 
-/// The option a permission request is answered with: `allow_once`, else
-/// the first `allow_*` one. None when nothing allows.
-fn allow_option(options: &Value) -> Option<&str> {
+/// The option a permission request is answered with: `reject_once`, else
+/// the first `reject_*` one. None when nothing rejects. In Grok's auto mode
+/// a request means its auto-mode check declined the call, and approving it
+/// would turn auto mode into approve-everything; Kiro trusts all tools and
+/// should never ask.
+fn reject_option(options: &Value) -> Option<&str> {
     let opts = options.as_array()?;
     let kind = |o: &&Value| o["kind"].as_str().unwrap_or("").to_string();
-    opts.iter().find(|o| kind(o) == "allow_once").or_else(|| opts.iter().find(|o| kind(o).starts_with("allow"))).and_then(|o| o["optionId"].as_str())
+    opts.iter().find(|o| kind(o) == "reject_once").or_else(|| opts.iter().find(|o| kind(o).starts_with("reject"))).and_then(|o| o["optionId"].as_str())
 }
 
 /// An update kind with case and underscores folded: `TurnEnd`, `turn_end`.
@@ -256,20 +259,15 @@ impl Parser {
         }
     }
 
-    /// A request from her agent. Only permission is answered; anything else
-    /// is refused, never left hanging.
+    /// A request from her agent. A permission request is refused (see
+    /// `reject_option`); anything else gets method-not-found, never silence.
     fn request(&mut self, method: &str, id: &Value, params: &Value) -> String {
         if method == "session/request_permission" {
             let title = params["toolCall"]["title"].as_str().unwrap_or("a tool");
-            return match allow_option(&params["options"]) {
-                Some(option) => {
-                    crate::log::line("brain", format!("{} asked to run {title}: allowed ({option})", self.label()));
-                    reply(id, json!({"outcome": {"outcome": "selected", "optionId": option}}))
-                }
-                None => {
-                    crate::log::line("brain", format!("{} asked to run {title} with no option to allow it: cancelled", self.label()));
-                    reply(id, json!({"outcome": {"outcome": "cancelled"}}))
-                }
+            crate::log::line("brain", format!("{}: refused {title} — the auto-mode check declined it", self.label()));
+            return match reject_option(&params["options"]) {
+                Some(option) => reply(id, json!({"outcome": {"outcome": "selected", "optionId": option}})),
+                None => reply(id, json!({"outcome": {"outcome": "cancelled"}})),
             };
         }
         crate::log::line("brain", format!("{} asked for {method}, which Maya does not handle", self.label()));
@@ -918,22 +916,26 @@ mod tests {
     }
 
     #[test]
-    fn a_permission_request_is_answered_allow_once() {
+    fn a_permission_request_is_answered_reject_once() {
         let mut p = open(Harness::Grok);
         let opts = json!([
             {"optionId": "always", "kind": "allow_always", "name": "Always"},
             {"optionId": "once", "kind": "allow_once", "name": "Allow"},
+            {"optionId": "never", "kind": "reject_always", "name": "Never"},
             {"optionId": "no", "kind": "reject_once", "name": "Reject"}
         ]);
         let (e, w) = p.line(&permission(opts));
         assert!(e.is_empty());
         let v = json_of(&w.unwrap());
         assert_eq!(v["id"], 41);
-        assert_eq!(v["result"]["outcome"], json!({"outcome": "selected", "optionId": "once"}));
-        let (_, w) = p.line(&permission(json!([{"optionId": "no", "kind": "reject_once"}, {"optionId": "yes", "kind": "allow_always"}])));
-        assert_eq!(json_of(&w.unwrap())["result"]["outcome"]["optionId"], "yes", "no allow_once: the first allow option");
-        let (_, w) = p.line(&permission(json!([{"optionId": "no", "kind": "reject_once"}])));
-        assert_eq!(json_of(&w.unwrap())["result"]["outcome"], json!({"outcome": "cancelled"}), "nothing to allow");
+        assert_eq!(v["result"]["outcome"], json!({"outcome": "selected", "optionId": "no"}), "auto mode's check declined it: never approved behind its back");
+        let (_, w) = p.line(&permission(json!([{"optionId": "yes", "kind": "allow_once"}, {"optionId": "never", "kind": "reject_always"}])));
+        assert_eq!(json_of(&w.unwrap())["result"]["outcome"]["optionId"], "never", "no reject_once: the first reject option");
+        let (_, w) = p.line(&permission(json!([{"optionId": "yes", "kind": "allow_once"}])));
+        assert_eq!(json_of(&w.unwrap())["result"]["outcome"], json!({"outcome": "cancelled"}), "nothing to reject with");
+        let mut p = open(Harness::Kiro);
+        let (_, w) = p.line(&permission(json!([{"optionId": "yes", "kind": "allow_once"}, {"optionId": "no", "kind": "reject_once"}])));
+        assert_eq!(json_of(&w.unwrap())["result"]["outcome"]["optionId"], "no", "Kiro trusts all tools; if it asks anyway, the same rule");
     }
 
     #[test]
@@ -975,7 +977,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_fake_acp_agent_opens_runs_a_turn_and_is_answered() {
+    fn a_fake_acp_agent_opens_runs_a_turn_and_its_permission_request_is_refused() {
         let script = r#"got
 echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
 got
@@ -1005,7 +1007,7 @@ cat >/dev/null
         assert_eq!(methods, ["initialize", "session/new", "session/prompt", ""]);
         let first = got[2]["params"]["prompt"][0]["text"].as_str().unwrap();
         assert!(first.starts_with("You are Maya.") && first.ends_with("hi"), "{first}");
-        assert_eq!((got[3]["id"].as_u64(), got[3]["result"]["outcome"]["optionId"].as_str()), (Some(9), Some("ok-once")));
+        assert_eq!((got[3]["id"].as_u64(), got[3]["result"]["outcome"]["optionId"].as_str()), (Some(9), Some("no")));
         d.shutdown();
         assert!(matches!(rx.recv_timeout(wait).unwrap(), Event::Exited(_)));
         let _ = std::fs::remove_dir_all(&dir);
