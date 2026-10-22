@@ -1,11 +1,12 @@
 //! A brain process spoken to in lines on stdin and stdout, whatever the
 //! protocol: the process, a reader that stamps the output clock and feeds
-//! the protocol, and a ticker for what time alone ends.
+//! the protocol, a ticker for what time alone ends, and the last bit of its
+//! stderr for the reason it ended.
 //!
 //! The protocol, her stdin and the events share one lock, so the lines
 //! written and the events sent keep their order.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -13,6 +14,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::driver::{Driver, Event, Launch};
+
+/// How much of her stderr is kept for the reason her process ended.
+pub const STDERR_TAIL_BYTES: usize = 2_048;
+/// How long the end of her stdout waits for the end of her stderr.
+const STDERR_WAIT: Duration = Duration::from_millis(500);
 
 /// A protocol with no process in it: lines in, events and lines to write
 /// out (one string may hold several lines, each newline-terminated).
@@ -42,10 +48,36 @@ pub trait Protocol: Send + 'static {
     }
 }
 
+/// The last `STDERR_TAIL_BYTES` of her stderr.
+#[derive(Clone, Default)]
+struct Tail(Arc<Mutex<Vec<u8>>>);
+
+impl Tail {
+    fn push(&self, bytes: &[u8]) {
+        let mut t = self.0.lock().unwrap();
+        t.extend_from_slice(bytes);
+        let over = t.len().saturating_sub(STDERR_TAIL_BYTES);
+        t.drain(..over);
+    }
+
+    /// `why`, with what she last wrote to stderr, on one line.
+    fn reason(&self, why: String) -> String {
+        let t = self.0.lock().unwrap();
+        let text = String::from_utf8_lossy(&t);
+        let said: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        if said.is_empty() {
+            why
+        } else {
+            format!("{why} (stderr: {})", said.join(" | "))
+        }
+    }
+}
+
 struct Shared<P> {
     protocol: P,
     stdin: Option<ChildStdin>,
     events: Sender<Event>,
+    stderr: Tail,
     /// `Exited` went out: nothing follows it.
     done: bool,
 }
@@ -66,16 +98,21 @@ impl<P: Protocol> Shared<P> {
     }
 
     /// Sends `events` in order; an `Exited` among them ends her session:
-    /// her stdin closes and nothing more is sent.
+    /// her stdin closes, the reason gets her stderr's tail, and nothing
+    /// more is sent.
     fn emit(&mut self, events: Vec<Event>) {
         for e in events {
             if self.done {
                 return;
             }
-            if matches!(e, Event::Exited(_)) {
-                self.done = true;
-                self.stdin = None;
-            }
+            let e = match e {
+                Event::Exited(why) => {
+                    self.done = true;
+                    self.stdin = None;
+                    Event::Exited(self.stderr.reason(why))
+                }
+                e => e,
+            };
             let _ = self.events.send(e);
         }
     }
@@ -105,13 +142,29 @@ pub fn spawn<P: Protocol>(l: &Launch, args: Vec<String>, env: &[(&str, &str)], m
         .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", l.binary.display()))?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().ok_or("no stdout")?;
+    let stderr = child.stderr.take();
+    let tail = Tail::default();
+    let (stderr_done, stderr_ended) = std::sync::mpsc::channel::<()>();
+    if let Some(mut err) = stderr {
+        let tail = tail.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            while let Ok(n) = err.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                tail.push(&buf[..n]);
+            }
+            let _ = stderr_done.send(());
+        });
+    }
     let first = protocol.start();
     let (background, assumed) = (protocol.background_subagents(), protocol.assumed_session_id());
-    let shared = Arc::new(Mutex::new(Shared { protocol, stdin, events, done: false }));
+    let shared = Arc::new(Mutex::new(Shared { protocol, stdin, events, stderr: tail, done: false }));
     shared.lock().unwrap().write_logged(first);
     let last_output = Arc::new(AtomicU64::new(0));
     let (stamp, reader_shared) = (last_output.clone(), shared.clone());
@@ -135,6 +188,8 @@ pub fn spawn<P: Protocol>(l: &Launch, args: Vec<String>, env: &[(&str, &str)], m
             s.write_logged(back);
             s.emit(events);
         }
+        // Her last words on stderr come with the reason.
+        let _ = stderr_ended.recv_timeout(STDERR_WAIT);
         reader_shared.lock().unwrap().emit(vec![Event::Exited(format!("the {label} process ended"))]);
     });
     let (clock, ticker_shared) = (last_output.clone(), shared.clone());
@@ -228,6 +283,19 @@ mod tests {
     use super::*;
     use crate::model::Harness;
 
+    #[test]
+    fn the_stderr_tail_keeps_the_last_bytes_on_one_line() {
+        let t = Tail::default();
+        assert_eq!(t.reason("ended".into()), "ended", "nothing on stderr: the reason alone");
+        t.push(&vec![b'x'; 3_000]);
+        t.push(b"\nError: Not logged in\n\n  run codex login\n");
+        let r = t.reason("the Codex process ended".into());
+        assert!(r.starts_with("the Codex process ended (stderr: "), "{r}");
+        assert!(r.ends_with("| Error: Not logged in | run codex login)"), "{r}");
+        assert!(!r.contains('\n'));
+        assert!(t.0.lock().unwrap().len() <= STDERR_TAIL_BYTES);
+    }
+
     /// Echoes each message back as her reply, one line per turn.
     struct Echo;
 
@@ -262,6 +330,20 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let l = Launch { agent: Harness::Other, binary: bin, model: None, cwd: dir.join("work"), system_prompt: String::new(), resume: None, writable: vec![] };
         (dir, l)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_that_fails_to_start_ends_with_its_stderr() {
+        let (dir, l) = fake("read -r first\necho \"Error: Not logged in ($first)\" >&2\nexit 1\n");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let d = spawn(&l, vec![], &[], Echo, tx).unwrap();
+        match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Event::Exited(why) => assert_eq!(why, "the Echo process ended (stderr: Error: Not logged in (hello))"),
+            e => panic!("{e:?}"),
+        }
+        drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
