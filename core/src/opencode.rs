@@ -64,8 +64,7 @@ impl Client {
     }
 
     fn auth(&self) -> String {
-        use base64::Engine;
-        format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("opencode:{}", self.password)))
+        basic_auth(&self.password)
     }
 
     fn read(r: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<Value, Failure> {
@@ -92,6 +91,29 @@ impl Client {
     pub fn patch(&self, path: &str, body: Value) -> Result<Value, String> {
         Self::read(self.agent.patch(format!("{}{path}", self.base)).header("Authorization", &self.auth()).send_json(body)).map_err(|e| e.to_string())
     }
+
+    /// A POST to a route that takes no body (`/interrupt`).
+    pub fn post_empty(&self, path: &str) -> Result<Value, String> {
+        Self::read(self.agent.post(format!("{}{path}", self.base)).header("Authorization", &self.auth()).send_empty()).map_err(|e| e.to_string())
+    }
+
+    /// A DELETE with `query`; its reply's body, if any, is not read.
+    pub fn delete(&self, path: &str, query: &[(&str, &str)]) -> Result<(), String> {
+        let mut r = self.agent.delete(format!("{}{path}", self.base)).header("Authorization", &self.auth());
+        for (k, v) in query {
+            r = r.query(*k, *v);
+        }
+        r.call().map(|_| ()).map_err(|e| match e {
+            ureq::Error::StatusCode(code) => Failure::Status(code).to_string(),
+            e => Failure::Transport(format!("OpenCode's server: {e}")).to_string(),
+        })
+    }
+}
+
+/// The server's password as the basic auth every request carries.
+pub fn basic_auth(password: &str) -> String {
+    use base64::Engine;
+    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}")))
 }
 
 /// Why a call failed: the server answered with an error status (this

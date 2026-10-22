@@ -104,7 +104,7 @@ pub const DEFAULT_COMPACT_THRESHOLD_BYTES: u64 = 5 * 1024 * 1024;
 /// by default); on Windows `%LOCALAPPDATA%\opencode\state\service.json`
 /// when that file exists, else the same `~/.local/state` layout (unverified
 /// on Windows; see the README).
-fn opencode_state_file(home: &Path) -> PathBuf {
+pub(crate) fn opencode_state_file(home: &Path) -> PathBuf {
     #[cfg(windows)]
     if let Some(local) = dirs::data_local_dir() {
         let candidate = local.join("opencode").join("state").join("service.json");

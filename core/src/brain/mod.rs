@@ -9,6 +9,7 @@ pub mod driver;
 pub mod handover;
 pub mod jsonrpc;
 pub mod notes;
+pub mod opencode_drv;
 pub mod prompt;
 pub mod protocol;
 pub mod record;
