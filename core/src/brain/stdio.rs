@@ -220,13 +220,14 @@ fn attach<P: Protocol>(shared: &Arc<Mutex<Shared<P>>>, child: &mut Child, genera
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
             }
-            // Any line shows she is alive, whether or not it is an event.
-            stamp.store(crate::now_ms(), Ordering::SeqCst);
             let line = String::from_utf8_lossy(&buf).into_owned();
             let mut s = reader_shared.lock().unwrap();
             if s.done || s.generation != generation {
                 return;
             }
+            // Any line of hers shows she is alive, whether or not it is an
+            // event; a stopped process's late lines do not.
+            stamp.store(crate::now_ms(), Ordering::SeqCst);
             let Some((events, back)) = s.guarded("a line", |p| p.line(&line)) else { return };
             s.write_logged(back);
             s.emit(events);
