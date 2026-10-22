@@ -244,13 +244,13 @@ pub fn answer_pick(l: &Local, session_id: &str, ask_id: u64, question: usize, pi
         }
         return Err("This session is not waiting for a question.".into());
     }
-    let (steps, tty) = {
+    let (steps, tty, claude) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
         answer::check_pick(&card, ask_id, question, pick, now_ms())?;
         let tty = session_tty(&store, session_id, card.pid)?;
         let questions = &card.awaiting.as_ref().ok_or("This session is not waiting for a question.")?.questions;
-        (answer::steps_for_pick(&questions[question], question, questions.len(), pick), tty)
+        (answer::steps_for_pick(&questions[question], question, questions.len(), pick), tty, card.harness == model::Harness::ClaudeCode)
     };
     // All the steps of one pick under one hold of `TYPING`; the store is not locked.
     let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
@@ -259,6 +259,11 @@ pub fn answer_pick(l: &Local, session_id: &str, ask_id: u64, question: usize, pi
             answer::Step::Line(text) => l.terminal.type_line(&tty, &text)?,
             answer::Step::Pause(ms) => std::thread::sleep(Duration::from_millis(ms)),
         }
+    }
+    // "Chat about this" dismisses the question like Esc, and Claude's hooks
+    // say nothing of it: set the ask aside here, or the card keeps it.
+    if claude && matches!(pick, answer::Pick::Chat) {
+        l.store.lock().unwrap().mark_interrupted(session_id, now_ms());
     }
     Ok(())
 }
@@ -1933,13 +1938,31 @@ mod tests {
         let l = Local { store: &store, terminal: &fake };
         let t = |text: &str| Call::Type { tty: "/dev/pts/3".into(), text: text.into() };
         answer_pick(&l, "s1", card.state_since, 0, &answer::Pick::Own { text: "use redis".into() }).unwrap();
-        answer_pick(&l, "s1", card.state_since, 1, &answer::Pick::Chat).unwrap();
         answer_pick(&l, "s1", card.state_since, 1, &answer::Pick::Option { index: 1 }).unwrap();
+        assert_eq!(answer_pick(&l, "s1", card.state_since + 1, 0, &answer::Pick::Chat).unwrap_err(), "The question has changed; look again.");
+        answer_pick(&l, "s1", card.state_since, 1, &answer::Pick::Chat).unwrap();
         assert_eq!(
             *fake.calls.lock().unwrap(),
-            vec![t("\x1b[B\x1b[Buse redis"), t("\x1b[B\x1b[B\x1b[B"), t("\x1b[B"), t("")]
+            vec![t("\x1b[B\x1b[Buse redis"), t("\x1b[B"), t(""), t("\x1b[B\x1b[B\x1b[B")]
         );
-        assert_eq!(answer_pick(&l, "s1", card.state_since + 1, 0, &answer::Pick::Chat).unwrap_err(), "The question has changed; look again.");
+    }
+
+    #[test]
+    fn a_chat_pick_sets_the_ask_aside_but_an_option_pick_does_not() {
+        let ask = r#"{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"A?","header":"a","options":[{"label":"x","description":""},{"label":"y","description":""}]}]}}"#;
+        let fake = FakeTerminal::default();
+        let (_d, store) = store_with_status("busy");
+        let maya = store.lock().unwrap().claude_dir().join("maya");
+        crate::hook_install::append_record_named(&maya, "events.jsonl", ask, now_ms() - 5000).unwrap();
+        let card = store.lock().unwrap().card_for("s1", now_ms()).unwrap();
+        let l = Local { store: &store, terminal: &fake };
+        answer_pick(&l, "s1", card.state_since, 0, &answer::Pick::Option { index: 0 }).unwrap();
+        let after = store.lock().unwrap().card_for("s1", now_ms() + 1).unwrap();
+        assert!(after.awaiting.is_some());
+        answer_pick(&l, "s1", card.state_since, 0, &answer::Pick::Chat).unwrap();
+        let after = store.lock().unwrap().card_for("s1", now_ms() + 1).unwrap();
+        assert!(after.awaiting.is_none());
+        assert!(answer::check_free(&after).is_ok());
     }
 
     #[test]

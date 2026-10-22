@@ -417,7 +417,9 @@ impl Store {
     /// left open is over, and no hook of Claude's says so.
     pub fn mark_interrupted(&mut self, session_id: &str, now_ms: u64) {
         let payload = serde_json::json!({ "session_id": session_id, "hook_event_name": "MayaInterrupt" }).to_string();
-        let _ = crate::hook_install::append_record_named(&self.claude_dir.join("maya"), "events.jsonl", &payload, now_ms);
+        if let Err(e) = crate::hook_install::append_record_named(&self.claude_dir.join("maya"), "events.jsonl", &payload, now_ms) {
+            crate::log::line("stop", format!("could not record the interrupt of {session_id}: {e}"));
+        }
     }
 
     /// Drops event-log lines for sessions no longer in the registry. A Codex
