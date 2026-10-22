@@ -129,6 +129,9 @@ impl Terminal for WindowsTerminal {
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
         win_console::type_line(pid_of(tty)?, text)
     }
+    fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
+        win_console::press_keys(pid_of(tty)?, keys)
+    }
     /// The whole reply in one write. A write that failed partway may have
     /// typed some lines, so only one that typed nothing counts as none.
     fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {

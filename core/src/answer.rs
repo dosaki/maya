@@ -6,6 +6,9 @@ pub const COMPACT: &str = "/compact";
 /// The slash command that ends a Claude Code session.
 pub const EXIT: &str = "/exit";
 
+/// Escape, which interrupts the agent in a running session.
+pub const ESC: &str = "\x1b";
+
 /// Shift+Tab, which cycles the permission mode in a running session.
 pub const SHIFT_TAB: &str = "\x1b[Z";
 

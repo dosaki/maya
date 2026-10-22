@@ -72,6 +72,33 @@ return "not found""#,
     )
 }
 
+/// Brings the Terminal tab on `tty` and its window forward, then presses Esc
+/// (key code 53) through System Events: `do script` always ends with a
+/// carriage return, so it cannot send a bare Esc.
+pub fn applescript_press_escape(tty: &str) -> String {
+    format!(
+        r#"tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if tty of t is "{tty}" then
+        set selected of t to true
+        set index of w to 1
+        activate
+        tell application "System Events" to key code 53
+        return "ok"
+      end if
+    end repeat
+  end repeat
+end tell
+return "not found""#
+    )
+}
+
+/// What osascript says when Maya may not send keys (-1719, -25211).
+fn needs_accessibility(stderr: &str) -> bool {
+    stderr.contains("-1719") || stderr.contains("-25211") || stderr.contains("not allowed assistive access")
+}
+
 pub fn type_into_tty(tty: &str, text: &str) -> Result<(), String> {
     let out = Command::new("osascript")
         .arg("-e")
@@ -100,6 +127,25 @@ impl Terminal for TerminalApp {
     }
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
         type_into_tty(tty, text)
+    }
+    /// Only Esc: through System Events, which needs Accessibility permission.
+    fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
+        if keys != maya_core::answer::ESC {
+            return Err("Only Esc can be pressed in Terminal.app.".into());
+        }
+        let out = Command::new("osascript").arg("-e").arg(applescript_press_escape(tty)).output().map_err(|e| format!("could not run osascript: {e}"))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            if needs_accessibility(&stderr) {
+                return Err("Maya needs Accessibility permission to press Esc in Terminal (System Settings → Privacy & Security → Accessibility).".into());
+            }
+            return Err(format!("osascript failed: {}", stderr.trim()));
+        }
+        if String::from_utf8_lossy(&out.stdout).trim() == "ok" {
+            Ok(())
+        } else {
+            Err(format!("No Terminal tab found for {tty}."))
+        }
     }
     /// One script for the whole reply. A script that ran but failed may have
     /// typed some lines, so only a missing tab or osascript counts as none.
@@ -133,6 +179,19 @@ mod tests {
         assert!(s.contains("do script \"a\\\"b\\\\c\" in t"), "{s}");
         assert!(!s.contains("activate"));
         assert!(s.contains("return \"not found\""));
+    }
+
+    #[test]
+    fn escape_script_targets_the_tab_and_presses_key_code_53() {
+        let s = applescript_press_escape("/dev/ttys004");
+        assert!(s.contains("tty of t is \"/dev/ttys004\""), "{s}");
+        assert!(s.contains("key code 53"), "{s}");
+        assert!(!s.contains("do script"), "{s}");
+    }
+
+    #[test]
+    fn only_escape_can_be_pressed_in_terminal_app() {
+        assert_eq!(TerminalApp.press_keys("/dev/ttys004", "x"), Err("Only Esc can be pressed in Terminal.app.".into()));
     }
 
     #[test]

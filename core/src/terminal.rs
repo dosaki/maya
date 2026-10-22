@@ -8,6 +8,9 @@ pub trait Terminal: Send + Sync {
     fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String>;
     /// Types `text` then Enter into the terminal hosting `tty`.
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String>;
+    /// Presses `keys` in the terminal hosting `tty` exactly as given, with
+    /// no Enter after them (`type_line` always adds one).
+    fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String>;
     /// Types `lines` (from `answer::reply_lines`) into the Claude Code
     /// session on `tty` as one message, `answer::NEW_LINE` between them,
     /// then sends it with `answer::SEND`, as close together as the terminal
@@ -50,6 +53,7 @@ pub mod test_support {
         Open { command: String, cwd: PathBuf, label: String },
         Type { tty: String, text: String },
         Focus { tty: String },
+        Keys { tty: String, keys: String },
     }
 
     #[derive(Default)]
@@ -84,6 +88,13 @@ pub mod test_support {
                 return Err(format!("{tty} is gone"));
             }
             self.calls.lock().unwrap().push(Call::Type { tty: tty.into(), text: text.into() });
+            Ok(())
+        }
+        fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
+            if self.dead.lock().unwrap().contains(tty) {
+                return Err(format!("{tty} is gone"));
+            }
+            self.calls.lock().unwrap().push(Call::Keys { tty: tty.into(), keys: keys.into() });
             Ok(())
         }
         /// Records each line as typed, without the keys between them.
@@ -121,6 +132,15 @@ mod tests {
         let calls = t.calls.lock().unwrap();
         assert!(matches!(&calls[0], Call::Open { label, .. } if label == "maya-1a2b3c4d"));
         assert!(matches!(&calls[1], Call::Type { text, .. } if text == "/compact"));
+    }
+
+    #[test]
+    fn fake_terminal_records_raw_keys() {
+        let t = FakeTerminal::default();
+        t.press_keys("/dev/pts/3", crate::answer::ESC).unwrap();
+        let calls = t.calls.lock().unwrap();
+        assert_eq!(*calls, vec![Call::Keys { tty: "/dev/pts/3".into(), keys: "\x1b".into() }]);
+        assert!(!calls.iter().any(|c| matches!(c, Call::Type { .. })));
     }
 
     #[test]

@@ -138,6 +138,10 @@ impl Terminal for LinuxTerminal {
         self.tmux.type_line(tty, text)
     }
 
+    fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
+        self.tmux.press_keys(tty, keys)
+    }
+
     fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
         self.tmux.type_reply(tty, lines)
     }
