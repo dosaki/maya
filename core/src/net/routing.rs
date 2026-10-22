@@ -99,7 +99,7 @@ pub enum Target {
 pub fn target_of(kind: &super::protocol::CommandKind) -> Target {
     use super::protocol::CommandKind::*;
     match kind {
-        Reply { session, .. } | Answer { session, .. } | Compact { session } | Close { session } | Rename { session, .. } | SetOption { session, .. } | CycleMode { session } | Slash { session, .. } | History { session } => Target::Session(session.clone()),
+        Reply { session, .. } | Answer { session, .. } | Stop { session } | Pick { session, .. } | Compact { session } | Close { session } | Rename { session, .. } | SetOption { session, .. } | CycleMode { session } | Slash { session, .. } | History { session } => Target::Session(session.clone()),
         Start { .. } | Resume { .. } | ListResumable { .. } | Promote { .. } | Forget { .. } => Target::Machine,
     }
 }
@@ -133,6 +133,14 @@ mod tests {
         let options = LaunchOptions { agent: Harness::Kiro, ..Default::default() };
         assert_eq!(agent_of(&CommandKind::Start { dir: None, prompt: "go".into(), options }), Some(Harness::Kiro));
         assert_eq!(agent_of(&CommandKind::Compact { session: "s1".into() }), None);
+    }
+
+    #[test]
+    fn stop_and_pick_target_their_session() {
+        use crate::answer::Pick;
+        use crate::net::protocol::CommandKind;
+        assert_eq!(target_of(&CommandKind::Stop { session: "s1".into() }), Target::Session("s1".into()));
+        assert_eq!(target_of(&CommandKind::Pick { session: "s2".into(), ask_id: 1, question: 0, pick: Pick::Chat }), Target::Session("s2".into()));
     }
 
     #[test]

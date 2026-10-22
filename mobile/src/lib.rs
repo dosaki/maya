@@ -105,6 +105,8 @@ pub fn run() {
             commands::session_history,
             commands::send_reply,
             commands::answer_question,
+            commands::answer_pick,
+            commands::stop_session,
             commands::set_session_option,
             commands::cycle_session_mode,
             commands::send_slash_command,

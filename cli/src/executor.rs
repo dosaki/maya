@@ -62,6 +62,8 @@ impl Executor for CliExecutor {
                 client::reply_with_attachments(&maya_dir, exists, &text, attachments, now_ms(), |text| actions::send_reply(&l, &session, &text)).map(|route| Some(route.data()))
             }
             CommandKind::Answer { session, ask_id, question, option } => done(actions::answer_question(&l, &session, ask_id, question, option)),
+            CommandKind::Stop { session } => done(actions::stop_session(&l, &session)),
+            CommandKind::Pick { session, ask_id, question, pick } => done(actions::answer_pick(&l, &session, ask_id, question, &pick)),
             CommandKind::Compact { session } => done(actions::compact_session(&l, &session)),
             CommandKind::Close { session } => done(actions::close_session(&l, &session)),
             CommandKind::Rename { session, name } => done(actions::rename_session(&l, &session, &name)),

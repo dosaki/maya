@@ -1243,6 +1243,8 @@ pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
     match kind {
         CommandKind::Reply { .. } => "reply",
         CommandKind::Answer { .. } => "answer",
+        CommandKind::Stop { .. } => "stop",
+        CommandKind::Pick { .. } => "pick",
         CommandKind::Compact { .. } => "compact",
         CommandKind::Close { .. } => "close",
         CommandKind::Forget { .. } => "forget",
@@ -1908,6 +1910,19 @@ mod tests {
         assert!(matches!(recv(&mut g), Down::Command { kind: CommandKind::Promote { .. }, .. }));
         drop(g);
         assert_eq!(t.join().unwrap().unwrap_err(), "laptop did not answer; it may have become a main on its own. Check it before trying again.");
+        handle.stop();
+    }
+
+    #[test]
+    fn an_assistant_error_reaches_the_caller() {
+        // What an older Maya sends back for a command it cannot decode.
+        let (handle, port) = test_server();
+        let (mut g, _, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        let shared = handle.shared.clone();
+        let t = std::thread::spawn(move || send_command_with(&shared, "laptop", CommandKind::Stop { session: "r1".into() }, Duration::from_secs(5)));
+        let Down::Command { id: cmd, kind: CommandKind::Stop { .. } } = recv(&mut g) else { panic!("expected stop") };
+        send(&mut g, &Up::Result { id: cmd, ok: false, error: Some("unknown variant `stop`".into()), data: None });
+        assert_eq!(t.join().unwrap(), Err("unknown variant `stop`".to_string()));
         handle.stop();
     }
 
