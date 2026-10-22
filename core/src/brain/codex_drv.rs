@@ -10,8 +10,8 @@
 //!
 //! Auto mode: `on-request` approvals reviewed by Codex's own auto-review,
 //! the `workspace-write` sandbox with her writable folders added. An
-//! approval request that still reaches Maya is declined, never approved:
-//! approving it would bypass that review. Codex's multi-agent tools are off
+//! approval request that reaches Maya is declined: Maya never approves on
+//! the agent's behalf. Codex's multi-agent tools are off
 //! for her server: its subagents do not wake her when they finish.
 
 use std::collections::{HashMap, VecDeque};
@@ -52,7 +52,9 @@ fn overrides(l: &Launch) -> Value {
         "approvalsReviewer": "auto_review",
         "sandbox": "workspace-write",
         "developerInstructions": l.system_prompt,
-        "config": {"sandbox_workspace_write": {"writable_roots": roots}},
+        // A dotted key, so it merges with her own [sandbox_workspace_write]
+        // settings instead of replacing the table.
+        "config": {"sandbox_workspace_write.writable_roots": roots},
     });
     if let Some(m) = &l.model {
         p["model"] = json!(m);
@@ -80,11 +82,6 @@ pub fn turn_interrupt(id: u64, thread_id: &str, turn_id: &str) -> String {
     RPC.request(id, "turn/interrupt", json!({"threadId": thread_id, "turnId": turn_id}))
 }
 
-/// Compaction on request; it runs as a turn of its own.
-pub fn compact_start(id: u64, thread_id: &str) -> String {
-    RPC.request(id, "thread/compact/start", json!({"threadId": thread_id}))
-}
-
 /// The answer to a request from Codex, by method: approvals are declined,
 /// anything else is refused with method-not-found, never left unanswered.
 fn answer(method: &str) -> Option<Value> {
@@ -98,16 +95,46 @@ fn answer(method: &str) -> Option<Value> {
     }
 }
 
-/// A short name for what an approval request asked for, for the log.
-fn asked_for(params: &Value) -> String {
-    let c = &params["command"];
-    if let Some(s) = c.as_str() {
-        return s.to_string();
+/// What a request Maya declines asked for, for the log: its kind, and the
+/// command, files or message it names.
+fn asked_for(method: &str, params: &Value) -> String {
+    let text = |k: &str| params[k].as_str().filter(|s| !s.is_empty());
+    let why = |s: String| match text("reason") {
+        Some(r) => format!("{s} ({r})"),
+        None => s,
+    };
+    match method {
+        "item/commandExecution/requestApproval" | "execCommandApproval" => {
+            let c = &params["command"];
+            let command = c.as_str().map(str::to_string).or_else(|| c.as_array().map(|parts| parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")));
+            match command {
+                Some(c) => format!("a command approval for {c}"),
+                None => why("a command approval".into()),
+            }
+        }
+        "item/fileChange/requestApproval" => why(match text("grantRoot") {
+            Some(root) => format!("a file change approval under {root}"),
+            None => "a file change approval".into(),
+        }),
+        "applyPatchApproval" => {
+            let files: Vec<&str> = params["fileChanges"].as_object().map(|m| m.keys().map(String::as_str).collect()).unwrap_or_default();
+            if files.is_empty() {
+                "a patch approval".into()
+            } else {
+                format!("a patch approval for {}", files.join(", "))
+            }
+        }
+        "item/permissions/requestApproval" => why("a permissions request".into()),
+        "mcpServer/elicitation/request" => {
+            format!("an MCP elicitation from {}: {}", text("serverName").unwrap_or("a server"), text("message").unwrap_or(""))
+        }
+        _ => method.to_string(),
     }
-    if let Some(parts) = c.as_array() {
-        return parts.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ");
-    }
-    params["reason"].as_str().unwrap_or("a change").to_string()
+}
+
+/// The log line for a declined request.
+fn declined(method: &str, params: &Value) -> String {
+    format!("Codex: declined {} (Maya never approves on the agent's behalf)", asked_for(method, params))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -121,7 +148,7 @@ enum Phase {
     Failed,
 }
 
-/// A `turn/start` or `thread/compact/start` without an answer.
+/// A `turn/start` without an answer.
 #[derive(Default)]
 struct Pending {
     /// Its turn already ended here (a stop's grace ran out): the turn it
@@ -224,6 +251,9 @@ impl Parser {
     }
 
     fn turn_line(&mut self, text: &str, out: &mut Vec<Event>) -> String {
+        // Starts already failed by their stop are forgotten: a turn that
+        // starts from now on is not taken for theirs.
+        self.pending.retain(|_, p| !p.settled);
         let id = self.id();
         self.pending.insert(id, Pending::default());
         self.begin(out);
@@ -257,18 +287,6 @@ impl Parser {
         }
     }
 
-    /// Asks Codex to compact her thread: the turn it runs starts now.
-    pub fn compact(&mut self) -> Result<(Vec<Event>, String), String> {
-        if self.phase != Phase::Open {
-            return Err("her thread is not open".into());
-        }
-        let id = self.id();
-        self.pending.insert(id, Pending::default());
-        let mut out = vec![];
-        self.begin(&mut out);
-        Ok((out, compact_start(id, self.thread())))
-    }
-
     /// What time alone ends: a stopped turn with no `turn/completed`
     /// within `CANCEL_GRACE_MS` fails.
     pub fn tick(&mut self, now_ms: u64) -> Vec<Event> {
@@ -295,7 +313,7 @@ impl Parser {
     fn request(&mut self, method: &str, id: &Value, params: &Value) -> String {
         match answer(method) {
             Some(result) => {
-                crate::log::line("brain", format!("Codex: declined {method} for {} — the auto-review did not approve it", asked_for(params)));
+                crate::log::line("brain", declined(method, params));
                 RPC.reply(id, result)
             }
             None => {
@@ -398,7 +416,9 @@ impl Parser {
                 if turn.is_empty() {
                     None
                 } else if !self.in_turn && self.pending.values().any(|p| p.settled) {
-                    // The turn of a start whose stop already failed it.
+                    // The turn of a start whose stop already failed it:
+                    // stopped, and that start forgotten.
+                    self.pending.retain(|_, p| !p.settled);
                     self.stop_stray(&turn)
                 } else {
                     self.named(&turn, &mut out)
@@ -510,11 +530,10 @@ impl Protocol for Parser {
         Parser::tick(self, now_ms)
     }
 
-    /// `thread/compact/start`. Maya never asks in practice: no context
-    /// size is reported for Codex, which compacts itself.
-    fn compact(&mut self) -> Result<(Vec<Event>, String), String> {
-        Parser::compact(self)
-    }
+    // compact: the default, unsupported. Codex compacts itself. Its
+    // `thread/compact/start {threadId}` (stable schema, empty response)
+    // waits on a live check that it runs as a turn with turn/started and
+    // turn/completed before Maya uses it.
 
     fn background_subagents(&self) -> bool {
         false
@@ -625,7 +644,8 @@ mod tests {
         assert_eq!(p["approvalsReviewer"], "auto_review");
         assert_eq!(p["sandbox"], "workspace-write");
         assert_eq!(p["developerInstructions"], "You are Maya.");
-        assert_eq!(p["config"]["sandbox_workspace_write"]["writable_roots"], json!(["/Users/me/dev", "/tmp"]));
+        // A dotted key merges with her own [sandbox_workspace_write] settings.
+        assert_eq!(p["config"], json!({"sandbox_workspace_write.writable_roots": ["/Users/me/dev", "/tmp"]}));
         assert!(p.get("model").is_none(), "no model: Codex's default");
         let mut l = launch();
         l.model = Some("gpt-5.5".into());
@@ -663,8 +683,6 @@ mod tests {
         assert_eq!(v["method"], "turn/start");
         assert_eq!(v["params"]["threadId"], "th-1");
         assert_eq!(v["params"]["input"], json!([{"type": "text", "text": "hi"}]));
-        let v = json_of(&compact_start(5, "th-1"));
-        assert_eq!((v["method"].as_str(), v["params"]["threadId"].as_str()), (Some("thread/compact/start"), Some("th-1")));
     }
 
     #[test]
@@ -915,22 +933,65 @@ mod tests {
     }
 
     #[test]
-    fn compaction_runs_as_a_turn() {
-        let mut p = Parser::new(&launch());
-        p.start();
-        assert!(p.compact().is_err(), "no thread yet");
+    fn codex_compacts_itself() {
         let mut p = open();
-        let (e, w) = p.compact().unwrap();
-        assert_eq!(e, vec![Event::TurnStarted]);
-        let v = json_of(&w);
-        assert_eq!((v["method"].as_str(), v["params"]["threadId"].as_str()), (Some("thread/compact/start"), Some("th-1")));
-        let id = v["id"].as_u64().unwrap();
-        assert!(p.line(&json!({"id": id, "result": {}}).to_string()).0.is_empty());
-        assert!(p.line(&turn_started("tu-c")).0.is_empty());
-        assert_eq!(p.line(&completed("tu-c", "completed")).0, ended(""));
-        let (_, w) = p.compact().unwrap();
-        let id = json_of(&w)["id"].as_u64().unwrap();
-        assert_eq!(p.line(&json!({"id": id, "error": {"code": -1, "message": "nothing to compact"}}).to_string()).0, failed());
+        assert_eq!(Protocol::compact(&mut p), Err("unsupported".into()));
+        assert_eq!(sent(&mut p, "hi"), 3, "nothing was sent");
+    }
+
+    #[test]
+    fn a_turn_completed_before_the_turn_start_answer_ends_the_turn_once() {
+        let mut p = open();
+        let id = sent(&mut p, "hi");
+        assert!(p.line(&agent_message("tu-1", "early", None)).0.is_empty());
+        assert_eq!(p.line(&completed("tu-1", "completed")).0, ended("early"), "no turn/started, no answer yet");
+        assert_eq!(p.line(&started(id, "tu-1")), (vec![], None), "the late answer is silent");
+        let id = sent(&mut p, "again");
+        assert!(p.line(&turn_started("tu-2")).0.is_empty());
+        p.line(&agent_message("tu-2", "later", None));
+        assert_eq!(p.line(&completed("tu-2", "completed")).0, ended("later"), "turn/started, no answer yet");
+        assert_eq!(p.line(&started(id, "tu-2")), (vec![], None), "the late answer is silent");
+        assert!(p.tick(60_000).is_empty());
+    }
+
+    #[test]
+    fn a_stray_is_forgotten_once_it_is_stopped() {
+        let mut p = open();
+        let _ = sent(&mut p, "hi");
+        p.cancel(1_000);
+        assert_eq!(p.tick(6_000), failed());
+        assert!(p.line(&turn_started("tu-1")).1.is_some(), "the stray is stopped");
+        assert!(p.line(&completed("tu-1", "interrupted")).0.is_empty());
+        assert_eq!(p.line(&turn_started("tu-own")).0, vec![Event::TurnStarted], "a later turn of her own is hers");
+    }
+
+    #[test]
+    fn a_stray_is_forgotten_once_she_is_sent_more() {
+        let mut p = open();
+        let _ = sent(&mut p, "hi");
+        p.cancel(1_000);
+        assert_eq!(p.tick(6_000), failed());
+        let id = sent(&mut p, "next");
+        p.line(&started(id, "tu-2"));
+        assert_eq!(p.line(&completed("tu-2", "completed")).0, ended(""));
+        assert_eq!(p.line(&turn_started("tu-own")).0, vec![Event::TurnStarted], "a later turn of her own is hers");
+    }
+
+    #[test]
+    fn a_decline_names_what_was_asked() {
+        let cases = [
+            ("item/commandExecution/requestApproval", json!({"command": "curl evil"}), "a command approval for curl evil"),
+            ("execCommandApproval", json!({"command": ["rm", "-rf", "x"]}), "a command approval for rm -rf x"),
+            ("item/fileChange/requestApproval", json!({"reason": "write outside the workspace", "grantRoot": "/etc"}), "a file change approval under /etc (write outside the workspace)"),
+            ("item/fileChange/requestApproval", json!({}), "a file change approval"),
+            ("applyPatchApproval", json!({"fileChanges": {"/x/a.rs": {}, "/x/b.rs": {}}}), "a patch approval for /x/a.rs, /x/b.rs"),
+            ("item/permissions/requestApproval", json!({"reason": "network"}), "a permissions request (network)"),
+            ("mcpServer/elicitation/request", json!({"serverName": "github", "message": "Sign in?"}), "an MCP elicitation from github: Sign in?"),
+        ];
+        for (method, params, want) in cases {
+            assert_eq!(asked_for(method, &params), want, "{method}");
+        }
+        assert_eq!(declined("item/commandExecution/requestApproval", &json!({"command": "ls"})), "Codex: declined a command approval for ls (Maya never approves on the agent's behalf)");
     }
 
     #[test]
@@ -987,6 +1048,7 @@ cat >/dev/null
         let mut d = super::super::driver::spawn(&l, tx).unwrap();
         assert!(!d.background_subagents(), "Codex's subagents do not wake her");
         assert_eq!(d.assumed_session_id(), None);
+        assert_eq!(d.compact(), Err("unsupported".into()), "Codex compacts itself");
         let wait = Duration::from_secs(5);
         assert_eq!(rx.recv_timeout(wait).unwrap(), Event::Ready { session_id: "th-fake".into() }, "Codex names her thread");
         let clock = d.output_clock().expect("an output clock");
