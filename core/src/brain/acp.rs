@@ -25,6 +25,9 @@ use crate::model::Harness;
 pub const QUIET_MS: u64 = 2_000;
 /// A cancelled turn whose prompt gets no answer within this is failed.
 pub const CANCEL_GRACE_MS: u64 = 5_000;
+/// A turn she started herself ends after this much quiet even with a tool
+/// call open: one whose end never came would keep her working for ever.
+pub const STUCK_MS: u64 = 30_000;
 
 /// The arguments after the binary. Grok's agent options go before the mode,
 /// and `--no-leader` keeps her agent in her own process (Grok's config may
@@ -152,6 +155,10 @@ pub struct Parser {
     /// Tool calls of this turn still running.
     tools: HashSet<String>,
     cancel_at: Option<u64>,
+    /// A turn ended without its turn-end update (by the prompt's answer or
+    /// the cancel grace): the next turn-end update, before any other update,
+    /// is that turn's, late.
+    stray_end: bool,
 }
 
 impl Parser {
@@ -172,6 +179,7 @@ impl Parser {
             text_stale: false,
             tools: HashSet::new(),
             cancel_at: None,
+            stray_end: false,
         }
     }
 
@@ -192,7 +200,8 @@ impl Parser {
     }
 
     /// A message for her: the prompt to write now, or nothing while her
-    /// session has not opened yet (it goes out once it has).
+    /// session has not opened yet (it goes out once it has). Her turn
+    /// starts either way.
     pub fn send(&mut self, text: &str) -> (Vec<Event>, Option<String>) {
         match self.phase {
             Phase::Open => {
@@ -202,7 +211,9 @@ impl Parser {
             }
             Phase::Starting | Phase::Opening => {
                 self.waiting.push(text.to_string());
-                (vec![], None)
+                let mut out = vec![];
+                self.begin(&mut out);
+                (out, None)
             }
             Phase::Failed => (vec![], None),
         }
@@ -220,19 +231,26 @@ impl Parser {
     }
 
     /// Stops the running turn: the `session/cancel` to write, or None when
-    /// no turn runs. Messages still waiting for her session are dropped.
-    pub fn cancel(&mut self, now_ms: u64) -> Option<String> {
+    /// no turn runs. Before her session opens, the messages waiting for it
+    /// are dropped and her turn fails at once: no agent turn runs to cancel.
+    pub fn cancel(&mut self, now_ms: u64) -> (Vec<Event>, Option<String>) {
+        let mut out = vec![];
         self.waiting.clear();
-        if self.phase != Phase::Open || !self.in_turn {
-            return None;
+        if self.phase != Phase::Open {
+            self.end(false, &mut out);
+            return (out, None);
+        }
+        if !self.in_turn {
+            return (out, None);
         }
         self.cancel_at = Some(now_ms);
-        Some(cancel(self.session_id.as_deref().unwrap_or("")))
+        (out, Some(cancel(self.session_id.as_deref().unwrap_or(""))))
     }
 
     /// What time alone ends: a cancelled turn with no answer within
-    /// `CANCEL_GRACE_MS` fails; a turn of her own, with no tool running,
-    /// ends after `QUIET_MS` with no line from her.
+    /// `CANCEL_GRACE_MS` fails; a turn of her own ends after `QUIET_MS`
+    /// with no line from her and no tool running, or after `STUCK_MS`
+    /// whatever tool calls are still open.
     pub fn tick(&mut self, now_ms: u64, last_output_ms: u64) -> Vec<Event> {
         let mut out = vec![];
         if !self.in_turn {
@@ -241,8 +259,12 @@ impl Parser {
         if self.cancel_at.is_some_and(|t| now_ms.saturating_sub(t) >= CANCEL_GRACE_MS) {
             self.settled.extend(self.in_flight.drain(..));
             self.end(false, &mut out);
-        } else if self.in_flight.is_empty() && self.tools.is_empty() && now_ms.saturating_sub(last_output_ms) >= QUIET_MS {
-            self.end(true, &mut out);
+            self.stray_end = true;
+        } else if self.in_flight.is_empty() {
+            let quiet = now_ms.saturating_sub(last_output_ms);
+            if (self.tools.is_empty() && quiet >= QUIET_MS) || quiet >= STUCK_MS {
+                self.end(true, &mut out);
+            }
         }
         out
     }
@@ -318,6 +340,8 @@ impl Parser {
             let ok = error.is_none() && matches!(v["result"]["stopReason"].as_str(), None | Some("end_turn"));
             self.begin(&mut out);
             self.end(ok, &mut out);
+            // Its turn-end update, if one comes, comes late.
+            self.stray_end = true;
             if !self.in_flight.is_empty() {
                 self.begin(&mut out);
             }
@@ -337,7 +361,17 @@ impl Parser {
         }
         let u = &params["update"];
         let standard = method == "session/update";
-        match folded(u["sessionUpdate"].as_str().unwrap_or("")).as_str() {
+        let kind = folded(u["sessionUpdate"].as_str().unwrap_or(""));
+        let turn_end = matches!(kind.as_str(), "turnend" | "turnended" | "turncompleted" | "endturn");
+        if turn_end && std::mem::take(&mut self.stray_end) {
+            // The turn already ended: its own turn end, late.
+            return out;
+        }
+        if standard && matches!(kind.as_str(), "agentmessagechunk" | "agentthoughtchunk" | "toolcall" | "toolcallupdate") {
+            // Her agent has moved on: a turn end from now on is this turn's.
+            self.stray_end = false;
+        }
+        match kind.as_str() {
             "agentmessagechunk" if standard => {
                 self.begin(&mut out);
                 if std::mem::take(&mut self.text_stale) {
@@ -361,7 +395,7 @@ impl Parser {
             }
             // Kiro's turn end, and Grok's (`_x.ai/session/update`). Grok's
             // ends only a turn of her own: a prompt's answer is the sure end.
-            "turnend" | "turnended" | "turncompleted" | "endturn" if self.in_turn && (self.l.agent == Harness::Kiro || self.in_flight.is_empty()) => {
+            _ if turn_end && self.in_turn && (self.l.agent == Harness::Kiro || self.in_flight.is_empty()) => {
                 if let Some(id) = self.in_flight.pop_front() {
                     self.settled.insert(id);
                 }
@@ -541,10 +575,13 @@ impl Driver for AcpDriver {
     /// (ACP has no call to stop one).
     fn interrupt(&mut self) -> Result<(), String> {
         let mut s = self.shared.lock().unwrap();
-        match s.parser.cancel(crate::now_ms()) {
+        let (events, line) = s.parser.cancel(crate::now_ms());
+        let wrote = match line {
             Some(line) => s.write(&line),
             None => Ok(()),
-        }
+        };
+        s.emit(events);
+        wrote
     }
 
     fn compact(&mut self) -> Result<(), String> {
@@ -728,10 +765,10 @@ mod tests {
     fn a_message_before_her_session_opens_waits_for_it() {
         let mut p = Parser::new(&launch(Harness::Grok));
         p.start();
-        assert_eq!(p.send("early"), (vec![], None), "nothing to send to yet");
+        assert_eq!(p.send("early"), (vec![Event::TurnStarted], None), "nothing to send to yet, but her turn has started");
         p.line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
         let (e, w) = p.line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s-1"}}"#);
-        assert_eq!(e, vec![Event::Ready { session_id: "s-1".into() }, Event::TurnStarted]);
+        assert_eq!(e, vec![Event::Ready { session_id: "s-1".into() }]);
         let v = json_of(&w.unwrap());
         assert_eq!((v["method"].as_str(), v["params"]["sessionId"].as_str()), (Some("session/prompt"), Some("s-1")));
         assert_eq!(v["params"]["prompt"][0]["text"], "early");
@@ -815,6 +852,37 @@ mod tests {
     }
 
     #[test]
+    fn a_late_kiro_turn_end_does_not_end_the_next_prompt() {
+        let mut p = open(Harness::Kiro);
+        let end = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s-1", "update": {"sessionUpdate": "TurnEnd"}}}).to_string();
+        let id = sent(&mut p, "one");
+        p.line(&chunk("first"));
+        assert_eq!(p.line(&response(id, "end_turn")).0, vec![Event::TurnEnded { text: "first".into(), context_tokens: None }], "no turn end seen: the answer ends it");
+        let id = sent(&mut p, "two");
+        assert!(p.line(&end).0.is_empty(), "the first prompt's late turn end, before anything of the second");
+        p.line(&chunk("second"));
+        assert_eq!(p.line(&end).0, vec![Event::TurnEnded { text: "second".into(), context_tokens: None }], "the second's own turn end");
+        assert!(p.line(&response(id, "end_turn")).0.is_empty());
+        // Once an update of the new prompt arrived, a turn end is its own.
+        let id = sent(&mut p, "three");
+        p.line(&chunk("x"));
+        let _ = p.line(&response(id, "end_turn"));
+        let _ = sent(&mut p, "four");
+        p.line(&chunk("y"));
+        assert_eq!(p.line(&end).0, vec![Event::TurnEnded { text: "y".into(), context_tokens: None }], "after an update of the new prompt, the turn end counts");
+    }
+
+    #[test]
+    fn a_turn_of_her_own_with_a_stuck_tool_ends_after_a_long_quiet() {
+        let mut p = open(Harness::Grok);
+        p.line(&update("tool_call"));
+        assert!(p.tick(38_999, 9_000).is_empty(), "29.999 s: the tool may still run");
+        assert_eq!(p.tick(39_000, 9_000), vec![Event::TurnEnded { text: String::new(), context_tokens: None }]);
+        let _ = sent(&mut p, "hi");
+        assert!(p.tick(100_000, 9_000).is_empty(), "a prompted turn still waits for its answer");
+    }
+
+    #[test]
     fn grok_waits_for_the_prompts_answer_to_end_a_prompted_turn() {
         let mut p = open(Harness::Grok);
         let id = sent(&mut p, "hi");
@@ -875,7 +943,9 @@ mod tests {
     fn cancel_sends_session_cancel_and_the_cancelled_response_fails_the_turn() {
         let mut p = open(Harness::Grok);
         let id = sent(&mut p, "hi");
-        let v = json_of(&p.cancel(1_000).unwrap());
+        let (e, w) = p.cancel(1_000);
+        assert!(e.is_empty(), "the answer ends it");
+        let v = json_of(&w.unwrap());
         assert_eq!((v["method"].as_str(), v["params"]["sessionId"].as_str()), (Some("session/cancel"), Some("s-1")));
         assert_eq!(p.line(&response(id, "cancelled")).0, vec![Event::TurnFailed { context_tokens: None }]);
         assert!(p.tick(60_000, 0).is_empty(), "nothing left to fail");
@@ -895,18 +965,18 @@ mod tests {
     #[test]
     fn cancel_with_nothing_running_sends_nothing() {
         let mut p = open(Harness::Grok);
-        assert_eq!(p.cancel(1_000), None);
+        assert_eq!(p.cancel(1_000), (vec![], None));
         let mut p = Parser::new(&launch(Harness::Grok));
         p.start();
-        assert_eq!(p.cancel(1_000), None, "no session yet");
+        assert_eq!(p.cancel(1_000), (vec![], None), "no session yet");
     }
 
     #[test]
     fn a_cancel_drops_messages_still_waiting_for_her_session() {
         let mut p = Parser::new(&launch(Harness::Grok));
         p.start();
-        p.send("early");
-        p.cancel(1_000);
+        assert_eq!(p.send("early"), (vec![Event::TurnStarted], None), "her turn starts when it is sent");
+        assert_eq!(p.cancel(1_000), (vec![Event::TurnFailed { context_tokens: None }], None), "a stop before her session opens ends it at once");
         p.line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
         assert_eq!(p.line(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s-1"}}"#), (vec![Event::Ready { session_id: "s-1".into() }], None));
     }
@@ -1033,6 +1103,33 @@ cat >/dev/null
         drop(d);
         let alive = std::process::Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
         assert!(!alive, "dropping the driver reaps it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stop_before_her_session_opens_fails_the_turn_at_once() {
+        let script = r#"got
+echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+got
+sleep 3
+echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"acp-1"}}'
+cat >/dev/null
+"#;
+        let (dir, l) = fake(Harness::Grok, script);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut d = super::super::driver::spawn(&l, tx).unwrap();
+        d.send("hi").unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Event::TurnStarted);
+        let asked = Instant::now();
+        d.interrupt().unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Event::TurnFailed { context_tokens: None });
+        assert!(asked.elapsed() < Duration::from_secs(1), "before her session opens");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Ready { session_id: "acp-1".into() });
+        assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "the dropped message is not sent once she opens");
+        let got = std::fs::read_to_string(dir.join("in.log")).unwrap();
+        assert!(!got.contains("session/prompt"), "{got}");
+        d.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
