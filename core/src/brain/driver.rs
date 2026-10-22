@@ -25,6 +25,7 @@ pub enum Event {
     Exited(String),
 }
 
+#[derive(Clone)]
 pub struct Launch {
     pub agent: Harness,
     pub binary: PathBuf,
@@ -62,6 +63,7 @@ pub trait Driver: Send {
 pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<Box<dyn Driver>, String> {
     match l.agent {
         Harness::ClaudeCode => Ok(Box::new(super::claude::ClaudeDriver::spawn(l, events)?)),
+        Harness::Grok | Harness::Kiro => Ok(Box::new(super::acp::AcpDriver::spawn(l, events)?)),
         other => Err(format!("no resident brain for {}", crate::launch::label(other))),
     }
 }
