@@ -54,17 +54,18 @@ pub enum Incoming {
     Response { id: Option<u64>, result: Value, error: Option<String> },
 }
 
-/// None for a line that is not JSON or not a message.
+/// None for a line that is not JSON or not a message (a JSON value that
+/// is not an object included: nothing here indexes into one mutably).
 pub fn parse(line: &str) -> Option<Incoming> {
-    let mut v = serde_json::from_str::<Value>(line.trim()).ok()?;
-    let id = v.get("id").filter(|i| !i.is_null()).cloned();
-    let params = v["params"].take();
-    match (v["method"].as_str(), id) {
+    let Value::Object(mut v) = serde_json::from_str::<Value>(line.trim()).ok()? else { return None };
+    let id = v.remove("id").filter(|i| !i.is_null());
+    let params = v.remove("params").unwrap_or_default();
+    match (v.get("method").and_then(Value::as_str), id) {
         (Some(m), Some(id)) => Some(Incoming::Request { id, method: m.to_string(), params }),
         (Some(m), None) => Some(Incoming::Notification { method: m.to_string(), params }),
         (None, Some(id)) => {
             let error = v.get("error").filter(|e| !e.is_null()).map(|e| e["message"].as_str().unwrap_or("an error").to_string());
-            Some(Incoming::Response { id: id.as_u64(), result: v["result"].take(), error })
+            Some(Incoming::Response { id: id.as_u64(), result: v.remove("result").unwrap_or_default(), error })
         }
         _ => None,
     }
@@ -99,5 +100,8 @@ mod tests {
         assert_eq!(parse(r#"{"id":2,"error":{"code":-1,"message":"bad"}}"#), Some(Incoming::Response { id: Some(2), result: Value::Null, error: Some("bad".into()) }));
         assert_eq!(parse("not json"), None);
         assert_eq!(parse("{}"), None);
+        for not_an_object in ["42", "[1]", "true", "\"x\"", "null"] {
+            assert_eq!(parse(not_an_object), None, "{not_an_object}");
+        }
     }
 }

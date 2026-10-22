@@ -4,9 +4,11 @@
 //! stderr for the reason it ended.
 //!
 //! The protocol, her stdin and the events share one lock, so the lines
-//! written and the events sent keep their order.
+//! written and the events sent keep their order. A protocol that panics
+//! ends her session with `Exited` rather than poisoning that lock.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -93,6 +95,24 @@ impl<P: Protocol> Shared<P> {
         if let Some(line) = line {
             if let Err(e) = self.write(&line) {
                 crate::log::line("brain", format!("{}: {e}", self.protocol.label()));
+            }
+        }
+    }
+
+    /// Runs `f` on the protocol. A panic in it ends her session with
+    /// `Exited` (the protocol's state is not trusted again) and gives None;
+    /// it is caught under the lock, so the lock is not poisoned.
+    fn guarded<T>(&mut self, what: &str, f: impl FnOnce(&mut P) -> T) -> Option<T> {
+        if self.done {
+            return None;
+        }
+        match catch_unwind(AssertUnwindSafe(|| f(&mut self.protocol))) {
+            Ok(t) => Some(t),
+            Err(_) => {
+                let why = format!("Maya could not handle {what} from {}", self.protocol.label());
+                crate::log::line("brain", &why);
+                self.emit(vec![Event::Exited(why)]);
+                None
             }
         }
     }
@@ -184,7 +204,7 @@ pub fn spawn<P: Protocol>(l: &Launch, args: Vec<String>, env: &[(&str, &str)], m
             if s.done {
                 return;
             }
-            let (events, back) = s.protocol.line(&line);
+            let Some((events, back)) = s.guarded("a line", |p| p.line(&line)) else { return };
             s.write_logged(back);
             s.emit(events);
         }
@@ -199,7 +219,7 @@ pub fn spawn<P: Protocol>(l: &Launch, args: Vec<String>, env: &[(&str, &str)], m
         if s.done {
             return;
         }
-        let events = s.protocol.tick(crate::now_ms(), clock.load(Ordering::SeqCst));
+        let Some(events) = s.guarded("the time", |p| p.tick(crate::now_ms(), clock.load(Ordering::SeqCst))) else { return };
         s.emit(events);
     });
     Ok(LineDriver { child, shared, background, assumed, last_output })
@@ -217,7 +237,7 @@ impl<P: Protocol> Driver for LineDriver<P> {
         if s.done {
             return Err("her session has ended".into());
         }
-        let (events, line) = s.protocol.send(text);
+        let (events, line) = s.guarded("a message", |p| p.send(text)).ok_or("her session has ended")?;
         if let Some(line) = line {
             s.write(&line)?;
         }
@@ -227,7 +247,7 @@ impl<P: Protocol> Driver for LineDriver<P> {
 
     fn interrupt(&mut self) -> Result<(), String> {
         let mut s = self.shared.lock().unwrap();
-        let (events, line) = s.protocol.cancel(crate::now_ms());
+        let Some((events, line)) = s.guarded("a stop", |p| p.cancel(crate::now_ms())) else { return Ok(()) };
         let wrote = match line {
             Some(line) => s.write(&line),
             None => Ok(()),
@@ -238,7 +258,7 @@ impl<P: Protocol> Driver for LineDriver<P> {
 
     fn compact(&mut self) -> Result<(), String> {
         let mut s = self.shared.lock().unwrap();
-        let (events, line) = s.protocol.compact()?;
+        let (events, line) = s.guarded("a compaction", |p| p.compact()).ok_or("her session has ended")??;
         s.write(&line)?;
         s.emit(events);
         Ok(())
@@ -281,6 +301,7 @@ impl<P: Protocol> Drop for LineDriver<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::model::Harness;
 
     #[test]
@@ -297,8 +318,10 @@ mod tests {
     }
 
     /// Echoes each message back as her reply, one line per turn.
+    #[cfg(unix)]
     struct Echo;
 
+    #[cfg(unix)]
     impl Protocol for Echo {
         fn label(&self) -> &'static str {
             "Echo"
@@ -307,6 +330,7 @@ mod tests {
             Some("hello\n".into())
         }
         fn line(&mut self, line: &str) -> (Vec<Event>, Option<String>) {
+            assert_ne!(line.trim(), "boom", "a protocol bug");
             (vec![Event::TurnEnded { text: line.trim().into(), context_tokens: None }], None)
         }
         fn send(&mut self, text: &str) -> (Vec<Event>, Option<String>) {
@@ -342,6 +366,23 @@ mod tests {
             Event::Exited(why) => assert_eq!(why, "the Echo process ended (stderr: Error: Not logged in (hello))"),
             e => panic!("{e:?}"),
         }
+        drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_protocol_that_panics_ends_her_session_without_poisoning_the_lock() {
+        let (dir, l) = fake("read -r first\necho boom\ncat >/dev/null\n");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut d = spawn(&l, vec![], &[], Echo, tx).unwrap();
+        match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Event::Exited(why) => assert!(why.starts_with("Maya could not handle a line from Echo"), "{why}"),
+            e => panic!("{e:?}"),
+        }
+        assert_eq!(d.send("hi"), Err("her session has ended".into()), "the lock still works");
+        assert_eq!(d.interrupt(), Ok(()));
+        assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "Exited is the last event");
         drop(d);
         let _ = std::fs::remove_dir_all(&dir);
     }

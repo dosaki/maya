@@ -480,9 +480,13 @@ pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<AcpDriver, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use super::super::driver::Driver;
+    #[cfg(unix)]
     use std::process::Stdio;
+    #[cfg(unix)]
     use std::sync::atomic::Ordering;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     fn launch(agent: Harness) -> Launch {
@@ -778,6 +782,9 @@ mod tests {
         let other = json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sub-1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "sub"}}}}).to_string();
         assert!(p.line(&other).0.is_empty(), "another session's update (a subagent) is not her turn");
         assert!(p.line("not json").0.is_empty());
+        for not_an_object in ["42", "[1]", "true", "\"x\""] {
+            assert_eq!(p.line(not_an_object), (vec![], None), "{not_an_object}");
+        }
     }
 
     #[test]

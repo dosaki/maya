@@ -220,7 +220,9 @@ pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<ClaudeDriver, String> 
 mod tests {
     use super::*;
     use crate::model::Harness;
+    #[cfg(unix)]
     use std::process::Stdio;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     fn launch() -> Launch {

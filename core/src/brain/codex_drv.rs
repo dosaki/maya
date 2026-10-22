@@ -551,7 +551,9 @@ pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<CodexDriver, String> {
 mod tests {
     use super::*;
     use crate::model::Harness;
+    #[cfg(unix)]
     use std::sync::atomic::Ordering;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     fn launch() -> Launch {
@@ -806,7 +808,7 @@ mod tests {
         p.line(&other);
         p.line(&agent_message("tu-1", "mine", None));
         assert_eq!(p.line(&completed("tu-1", "completed")).0, ended("mine"));
-        for noise in [r#"{"method":"thread/tokenUsage/updated","params":{"threadId":"th-1"}}"#, r#"{"method":"item/agentMessage/delta","params":{"threadId":"th-1","turnId":"tu-1","itemId":"m","delta":"x"}}"#, "not json"] {
+        for noise in [r#"{"method":"thread/tokenUsage/updated","params":{"threadId":"th-1"}}"#, r#"{"method":"item/agentMessage/delta","params":{"threadId":"th-1","turnId":"tu-1","itemId":"m","delta":"x"}}"#, "not json", "42", "[1]", "true", "\"x\""] {
             assert_eq!(p.line(noise), (vec![], None), "{noise}");
         }
     }
