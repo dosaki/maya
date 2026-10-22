@@ -46,8 +46,18 @@ export function makeAnswerGuard(send: (args: PickArgs) => Promise<void>) {
   };
 }
 
-/** The app-wide guard, backed by the Tauri command. */
-export const answerGuard = makeAnswerGuard((args) => invoke("answer_pick", { ...args }));
+/**
+ * Sends a pick through the right Tauri command. A plain option keeps
+ * `answer_question`, so a card on an assistant running an older Maya, which
+ * has no `answer_pick`, still answers as before; the other picks need it.
+ */
+export function sendPick({ pick, ...rest }: PickArgs): Promise<void> {
+  if (pick.kind === "option") return invoke("answer_question", { ...rest, optionIndex: pick.index });
+  return invoke("answer_pick", { ...rest, pick });
+}
+
+/** The app-wide guard, backed by the Tauri commands. */
+export const answerGuard = makeAnswerGuard(sendPick);
 
 /**
  * Sends Stop once per turn. Two Escs open Claude's rewind menu, so after a

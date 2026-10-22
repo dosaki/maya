@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { makeAnswerGuard, makeStopGuard, stopButton } from "./answer";
+
+const invoke = vi.fn();
+vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
+
+import { makeAnswerGuard, makeStopGuard, sendPick, stopButton } from "./answer";
 import type { Card } from "./types";
 
 const card: Card = { sessionId: "s", pid: 1, name: "n", cwd: "/x", state: "awaiting", stateSince: 500, snippet: "", hasInbox: true, harness: "claude-code", pr: null, context: null,
@@ -52,6 +56,21 @@ describe("makeAnswerGuard", () => {
     await expect(p).rejects.toThrow("Maya could not type into the terminal.");
     expect(rows.getAttribute("aria-disabled")).toBeNull();
     expect(document.querySelector("textarea")!.disabled).toBe(false);
+  });
+});
+
+describe("sendPick", () => {
+  it("sends an option pick through answer_question, so an older Maya still answers it, and the rest through answer_pick", async () => {
+    invoke.mockReset();
+    invoke.mockResolvedValue(null);
+    await sendPick({ sessionId: "s", askId: 500, questionIndex: 1, pick: { kind: "option", index: 2 } });
+    await sendPick({ sessionId: "s", askId: 500, questionIndex: 0, pick: { kind: "own", text: "Redis" } });
+    await sendPick({ sessionId: "s", askId: 500, questionIndex: 0, pick: { kind: "chat" } });
+    expect(invoke.mock.calls).toEqual([
+      ["answer_question", { sessionId: "s", askId: 500, questionIndex: 1, optionIndex: 2 }],
+      ["answer_pick", { sessionId: "s", askId: 500, questionIndex: 0, pick: { kind: "own", text: "Redis" } }],
+      ["answer_pick", { sessionId: "s", askId: 500, questionIndex: 0, pick: { kind: "chat" } }],
+    ]);
   });
 });
 

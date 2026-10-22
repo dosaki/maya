@@ -805,11 +805,11 @@ describe("the open session view while a session asks", () => {
     const card = { ...asking, sessionId: "m4", stateSince: Date.now() - 5000 };
     await openModal(card);
     key(document, "1");
-    expect(calls("answer_pick")).toHaveLength(0);
+    expect(calls("answer_question")).toHaveLength(0);
     const menu = host().querySelector<HTMLElement>(".menu")!;
     menu.focus();
     key(menu, "1");
-    expect(calls("answer_pick")).toEqual([["answer_pick", { sessionId: "m4", askId: card.stateSince, questionIndex: 0, pick: { kind: "option", index: 0 } }]]);
+    expect(calls("answer_question")).toEqual([["answer_question", { sessionId: "m4", askId: card.stateSince, questionIndex: 0, optionIndex: 0 }]]);
     await flush();
     expect(host().querySelector(".modal__status")?.textContent).toBe("Answer sent to the terminal");
     closeModal();
