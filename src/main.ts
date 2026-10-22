@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "./actions";
 import { answerGuard } from "./answer";
-import { renderBoard, swapBoard } from "./board";
+import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
 import { openModal, refreshModal, setProgress } from "./modal";
 import { closeNewSession, openNewSession } from "./newsession";
@@ -18,6 +18,7 @@ import { showToast } from "./toast";
 import { prRef, remoteTerminalToast, type Card, type ReviewState } from "./types";
 import { initMute } from "./mute";
 import { initVoice } from "./voice";
+import { initChat } from "./chat";
 import { initDebug } from "./debug";
 import { maybeShowFirstRun } from "./firstrun";
 import { updates } from "./update";
@@ -84,16 +85,17 @@ function paint(): void {
   if (!host) return;
   const before = targetUnderPointer();
   const query = search?.query() ?? "";
-  const shown = filterCards(cards, query);
+  const shown = filterCards(boardCards(cards, debugMode), query);
   swapBoard(host, renderBoard(shown, Date.now(), (c) => progress.next(c), query.trim() ? "No matches" : undefined));
-  search?.setCount(shown.length, cards.length);
+  const counted = countable(cards);
+  search?.setCount(countable(shown).length, counted.length);
   guard.markPaint(Date.now(), { movedUnderPointer: targetUnderPointer() !== before });
   // Option buttons rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay(cards, Date.now());
   if (enableTimer) clearTimeout(enableTimer);
   enableTimer = delay === null ? undefined : setTimeout(() => { enableTimer = undefined; paint(); }, delay + 50);
   const counts = { idle: 0, working: 0, awaiting: 0, completed: 0 };
-  for (const c of cards) counts[c.state] += 1;
+  for (const c of counted) counts[c.state] += 1;
   tabs?.setSessionCounts(counts);
 }
 
@@ -160,11 +162,34 @@ async function answer(card: Card, questionIndex: number, optionIndex: number, bu
   }
 }
 
+/** Debug mode, as last read from the config; the board filter (Maya's own card) reads it. */
+let debugMode = false;
+
+/** Show or hide the Debug tab; hiding it while it is open returns to Sessions. */
+export function applyDebugMode(on: boolean): void {
+  debugMode = on;
+  for (const btn of document.querySelectorAll<HTMLElement>("[data-tab=debug]")) btn.hidden = !on;
+  if (!on && tabs?.current() === "debug") tabs.show("sessions");
+  paint();
+}
+
+export const isDebugMode = (): boolean => debugMode;
+
+async function loadDebugMode(): Promise<void> {
+  try {
+    const cfg = await invoke<{ debugMode?: boolean }>("get_config");
+    applyDebugMode(cfg.debugMode === true);
+  } catch {
+    /* no config yet: the Debug tab stays as the page has it */
+  }
+}
+
 async function start(): Promise<void> {
   void initSettings();
   void updates.init();
   void initMute();
   void initVoice();
+  initChat();
   void initDebug();
   void maybeShowFirstRun();
   const searchHost = document.getElementById("session-search");
@@ -176,6 +201,8 @@ async function start(): Promise<void> {
     if (searchHost) searchHost.hidden = tab !== "sessions";
     if (rememberedHost) rememberedHost.hidden = tab !== "sessions";
   });
+  void loadDebugMode();
+  window.addEventListener("maya:config-changed", () => void loadDebugMode());
   // Cmd+F (Ctrl+F) finds a session, unless a dialog is open over the board.
   window.addEventListener("keydown", (ev) => {
     if (ev.key.toLowerCase() === "f" && (ev.metaKey || ev.ctrlKey) && !ev.shiftKey && !ev.altKey && tabs?.current() === "sessions" && !document.getElementById("modal-host")?.childElementCount) {

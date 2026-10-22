@@ -3,8 +3,8 @@ import { makeTabs } from "./tabs";
 
 function dom() {
   document.body.innerHTML = `
-    <nav><button data-tab="sessions">Sessions <span class="tab__count tab__count--idle" data-count="idle"></span><span class="tab__count tab__count--working" data-count="working"></span><span class="tab__count tab__count--awaiting" data-count="awaiting"></span><span class="tab__count tab__count--completed" data-count="completed"></span></button><button data-tab="reviews">Pull Requests <span id="reviews-count"></span></button><button data-tab="debug">Debug</button><button data-tab="settings">Settings</button></nav>
-    <div id="board"></div><div id="reviews" hidden></div><div id="debug" hidden></div><div id="settings" hidden></div>`;
+    <nav><button data-tab="sessions">Sessions <span class="tab__count tab__count--idle" data-count="idle"></span><span class="tab__count tab__count--working" data-count="working"></span><span class="tab__count tab__count--awaiting" data-count="awaiting"></span><span class="tab__count tab__count--completed" data-count="completed"></span></button><button data-tab="reviews">Pull Requests <span id="reviews-count"></span></button><button data-tab="chat">Chat <span class="tab__dot"></span></button><button data-tab="debug">Debug</button><button data-tab="settings">Settings</button></nav>
+    <div id="board"></div><div id="reviews" hidden></div><div id="chat" hidden></div><div id="debug" hidden></div><div id="settings" hidden></div>`;
 }
 
 describe("makeTabs", () => {
@@ -39,6 +39,12 @@ describe("makeTabs", () => {
     expect(document.getElementById("settings")!.hidden).toBe(true);
     dom();
     expect(makeTabs().current()).toBe("debug");
+  });
+
+  it("falls back to sessions when the stored tab is a hidden Debug tab", () => {
+    localStorage.setItem("maya.tab", "debug");
+    document.querySelector<HTMLElement>("[data-tab=debug]")!.hidden = true;
+    expect(makeTabs().current()).toBe("sessions");
   });
 
   it("tells its listener which tab shows, the first one included", () => {
@@ -76,5 +82,16 @@ describe("makeTabs", () => {
     expect(document.getElementById("reviews-count")!.textContent).toBe("3");
     tabs.setCount(0);
     expect(document.getElementById("reviews-count")!.textContent).toBe("");
+  });
+
+  it("shows the Chat pane and announces the switch", () => {
+    const heard: string[] = [];
+    window.addEventListener("maya:tab", (e) => heard.push((e as CustomEvent<string>).detail));
+    const tabs = makeTabs();
+    document.querySelector<HTMLButtonElement>("[data-tab=chat]")!.click();
+    expect(tabs.current()).toBe("chat");
+    expect(document.getElementById("chat")!.hidden).toBe(false);
+    expect(document.getElementById("board")!.hidden).toBe(true);
+    expect(heard).toContain("chat");
   });
 });

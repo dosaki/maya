@@ -3,6 +3,7 @@ pub mod agents;
 pub mod answer;
 pub mod antigravity;
 pub mod attachments;
+pub mod brain;
 pub mod codex;
 pub mod codex_hooks;
 pub mod config;
@@ -37,6 +38,7 @@ pub mod tty;
 pub mod update;
 pub mod wake;
 pub mod watcher;
+pub mod window;
 #[cfg(windows)]
 pub mod notify_win;
 #[cfg(windows)]

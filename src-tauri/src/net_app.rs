@@ -151,6 +151,8 @@ impl ClientNotify for TauriClientNotify {
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
         self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false, wake_word: None });
+        // The read-only Chat names the main that is awake.
+        crate::brain_app::emit_status(&self.app);
     }
     fn disconnected(&self, error: &str) {
         log::line("network", format!("disconnected: {error}"));
@@ -176,12 +178,18 @@ impl ClientNotify for TauriClientNotify {
         vec![CAP_FOLLOW.into(), CAP_LEAD.into()]
     }
 
+    /// From her record: None when this Maya never ran a brain.
+    fn brain_dormant_since(&self) -> Option<u64> {
+        let claude_dir = self.app.state::<AppState>().store.lock().unwrap().claude_dir().to_path_buf();
+        maya_core::brain::record::dormant_since(maya_core::brain::record::load(&claude_dir.join("maya").join("brain").join("record.json")).as_ref(), now_ms())
+    }
+
     /// Starts this Maya's server with the list, then saves the config as a
     /// main without `apply_config_change`: that would stop this very client
     /// before its answer is out. The client ends by itself once it is.
     /// Nothing is saved when the server cannot start, and the server stops
     /// again when the save fails, so either way this Maya stays an assistant.
-    fn promoted(&self, list: Vec<config::PairedAssistant>) -> Result<u16, String> {
+    fn promoted(&self, list: Vec<config::PairedAssistant>, summary: Option<String>) -> Result<u16, String> {
         let state = self.app.state::<AppState>();
         let (mut after, path) = {
             let store = state.store.lock().unwrap();
@@ -211,6 +219,10 @@ impl ClientNotify for TauriClientNotify {
         log::line("network", format!("promoted to main by {by}; {handed} assistants handed over"));
         let _ = self.app.emit("network", crate::network_status_of(&state));
         crate::refresh_and_emit(&self.app);
+        // A main runs her brain: she wakes on her own session, and the old
+        // main's summary is her first turn.
+        let handle = self.app.clone();
+        std::thread::spawn(move || crate::brain_app::wake_as_main(&handle, &by, summary));
         Ok(port)
     }
 
@@ -260,15 +272,54 @@ impl Executor for TauriExecutor {
     }
 }
 
-/// What a phone's `Interpret` gets back: the line to say, and the action to
-/// run on its yes when there is one.
+/// What a phone's `Interpret` gets back: the line to say, and the announced
+/// actions it runs when its window ends when there are any.
 pub(crate) fn interpret_data(outcome: &Interpreted) -> Value {
     match outcome {
         Interpreted::Say(s) => serde_json::json!({ "say": s }),
-        Interpreted::Confirm(p) => serde_json::json!({ "say": p.say, "pending": { "say": p.say, "action": p.action } }),
+        // The phone waits out the window and then sends one `Execute` per action;
+        // `action` is the first, for a phone on an older Maya.
+        Interpreted::Announce { say, actions } => serde_json::json!({ "say": say, "pending": { "say": say, "actions": actions, "action": actions.first() } }),
         // Run is executed before answering; see `serve_voice`.
         Interpreted::Run(_) => serde_json::json!({ "say": "" }),
     }
+}
+
+/// Her session's reply to a phone, in the shape `interpret_data` gives: what
+/// she said, then the announcement of the actions that wait (built from the
+/// actions, as the desktop's is), which the phone waits out and runs. The
+/// phone says `pending.say` when there is one, so it carries both.
+pub(crate) fn phone_reply(said: &str, waiting: Vec<Value>) -> Value {
+    if waiting.is_empty() {
+        return said_data(said);
+    }
+    let announced = crate::brain_route::announcement(&waiting);
+    let say = [said.trim(), announced.as_str()].iter().filter(|p| !p.is_empty()).copied().collect::<Vec<_>>().join(" ");
+    serde_json::json!({ "say": say, "pending": { "say": say, "actions": waiting, "action": waiting.first() } })
+}
+
+/// Her reply to a phone's request: actions that run at once (compact) run
+/// here and say what they did, focus and open are refused, and the rest
+/// wait on the phone.
+fn brain_reply_data(app: &AppHandle, say: &str, actions: Vec<Value>) -> Value {
+    let (waiting, now): (Vec<Value>, Vec<Value>) = actions.into_iter().partition(maya_core::interpreter::waits);
+    let mut lines: Vec<String> = Vec::new();
+    lines.extend(Some(say.trim().to_string()).filter(|s| !s.is_empty()));
+    let mut results = Vec::new();
+    for action in now {
+        if let Some(why) = refuse_remote(&action) {
+            lines.push(why);
+            continue;
+        }
+        let outcome = listener::execute_action(app, &action);
+        lines.push(match &outcome {
+            Ok(ok) => listener::spoken_for(&action).unwrap_or_else(|| ok.clone()),
+            Err(e) => e.clone(),
+        });
+        results.push((action, outcome));
+    }
+    crate::brain_app::batch_done(app, &results);
+    phone_reply(&lines.join(" "), waiting)
 }
 
 pub(crate) fn said_data(say: &str) -> Value {
@@ -328,12 +379,21 @@ pub(crate) fn revalidate(action: &Value, ctx: &VoiceContext) -> Result<Value, St
     Ok(fresh)
 }
 
-/// A phone's voice request: interpret (running a compact at once), or run a
-/// confirmed action. Nothing is spoken here, and the desktop's own
-/// conversation is untouched.
+/// A phone's voice request: her session answers it when it runs (the
+/// request and her reply join her Chat), else the one-shot interpreter does
+/// (running a compact at once) and the desktop's conversation is untouched;
+/// or run a confirmed action. Nothing is spoken here.
 fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, String> {
     match request {
         Request::Interpret { command, history } => {
+            // Her session, when it runs, remembers the conversation itself.
+            if crate::brain_app::ready(app) {
+                return Ok(Some(match crate::brain_app::ask_and_wait(app, &command, maya_core::interpreter::TIMEOUT) {
+                    Some((say, actions)) => brain_reply_data(app, &say, actions),
+                    // She carries on: her answer will be in Chat.
+                    None => said_data(crate::brain_route::PHONE_STILL_WORKING),
+                }));
+            }
             let pairs = listener::exchanges(history.iter().map(|t| (t.who.as_str(), t.text.as_str())));
             let outcome = listener::interpret_text(app, &command, &pairs);
             if let Interpreted::Run(action) = &outcome {
@@ -347,11 +407,17 @@ fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, Strin
         }
         Request::Execute { action } => {
             let fresh = revalidate(&action, &listener::voice_context(app))?;
+            // An error, not a line: the phone speaks only what went wrong.
             if let Some(why) = refuse_remote(&fresh) {
-                return Ok(Some(said_data(&why)));
+                return Err(why);
             }
-            let said = listener::execute_action(app, &fresh)?;
-            Ok(Some(said_data(&said)))
+            let outcome = listener::execute_action(app, &fresh);
+            // She learns how an action she gave the phone ended, and a failure
+            // is left in Chat too.
+            let results = [(fresh, outcome.clone())];
+            crate::brain_app::batch_done(app, &results);
+            listener::report_failures(app, &results, maya_core::window::Via::Phone);
+            Ok(Some(said_data(&outcome?)))
         }
         _ => unreachable!("serve_voice is only called for voice requests"),
     }
@@ -453,11 +519,26 @@ mod tests {
     fn interpret_answers_say_and_a_pending_action() {
         let said = interpret_data(&Interpreted::Say("All quiet.".into()));
         assert_eq!(said, serde_json::json!({"say": "All quiet."}));
-        let pending = maya_core::wake::Pending { say: "Answering hexgrid with \"Yes\". Yes?".into(), action: serde_json::json!({"kind": "answer"}) };
-        let asked = interpret_data(&Interpreted::Confirm(pending));
-        assert_eq!(asked["say"], "Answering hexgrid with \"Yes\". Yes?");
+        let asked = interpret_data(&Interpreted::Announce { say: "Answering hexgrid with \"Yes\".".into(), actions: vec![serde_json::json!({"kind": "answer"})] });
+        assert_eq!(asked["say"], "Answering hexgrid with \"Yes\".");
         assert_eq!(asked["pending"]["say"], asked["say"]);
         assert_eq!(asked["pending"]["action"]["kind"], "answer");
+        assert_eq!(asked["pending"]["actions"][0]["kind"], "answer");
+        let two = interpret_data(&Interpreted::Announce { say: "Two.".into(), actions: vec![serde_json::json!({"kind": "reply"}), serde_json::json!({"kind": "compact"})] });
+        assert_eq!(two["pending"]["actions"].as_array().unwrap().len(), 2);
+        assert_eq!(two["pending"]["action"]["kind"], "reply", "an older phone gets the first");
+    }
+
+    #[test]
+    fn her_reply_to_a_phone_says_her_words_then_the_announcement_and_waits_with_the_actions() {
+        assert_eq!(phone_reply("All quiet.", vec![]), serde_json::json!({"say": "All quiet."}));
+        let a = serde_json::json!({"kind":"reply","name":"api-fix","text":"open the PR"});
+        let r = phone_reply("Sure.", vec![a.clone()]);
+        assert_eq!(r["say"], "Sure. Telling api-fix: open the PR.");
+        assert_eq!(r["pending"]["say"], r["say"], "the phone says pending.say");
+        assert_eq!(r["pending"]["actions"], serde_json::json!([a.clone()]));
+        assert_eq!(r["pending"]["action"], a);
+        assert_eq!(phone_reply("", vec![a])["say"], "Telling api-fix: open the PR.");
     }
 
     #[test]
@@ -482,7 +563,7 @@ mod tests {
                 detail: "Ship it?".into(),
                 questions: vec![Question { question: "Ship it?".into(), header: "".into(), options: vec![Choice { label: "Yes".into(), description: "".into() }], multi_select: false }],
             }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None,
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false,
         }
     }
 

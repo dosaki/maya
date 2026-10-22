@@ -218,7 +218,7 @@ async function start(): Promise<void> {
     act(target);
   });
   await listen<Card[]>("sessions", (e) => {
-    cards = e.payload;
+    cards = e.payload.filter((c) => !c.brain);
     for (const c of cards) if (c.state !== "awaiting") progress.reset(c.sessionId);
     for (const id of known) if (!cards.some((c) => c.sessionId === id)) progress.reset(id);
     known = new Set(cards.map((c) => c.sessionId));
@@ -230,7 +230,7 @@ async function start(): Promise<void> {
       openFromTap(id);
     }
   });
-  cards = await invoke<Card[]>("list_sessions");
+  cards = (await invoke<Card[]>("list_sessions")).filter((c) => !c.brain);
   paint();
   void watchTaps(openFromTap);
   setInterval(paint, 10_000);

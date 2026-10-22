@@ -55,6 +55,16 @@ export function renderBoard(cards: Card[], nowMs: number, nextFor?: (c: Card) =>
   return board;
 }
 
+/** The cards the board shows: Maya's own brain card only in debug mode. */
+export function boardCards(cards: Card[], debug: boolean): Card[] {
+  return debug ? cards : cards.filter((c) => !c.brain);
+}
+
+/** The cards that count (tab counts, search total): never the brain card. */
+export function countable(cards: Card[]): Card[] {
+  return cards.filter((c) => !c.brain);
+}
+
 /**
  * Replaces the board inside `host` with `fresh`, carrying each column's
  * scroll position over so a repaint does not jump the lists back to the top.

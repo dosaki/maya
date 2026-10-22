@@ -58,7 +58,7 @@
    Not `.voice`: styles.css, loaded first, uses that for the desktop's 28 px button. */
 .voicebar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
 .voicebar__mic { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--gold-deep); background: var(--panel); color: var(--gold-bright); font-size: 20px; }
-.voicebar--listening .voicebar__mic, .voicebar--awaiting-command .voicebar__mic, .voicebar--awaiting-confirm .voicebar__mic { background: var(--gold); color: var(--on-gold); }
+.voicebar--listening .voicebar__mic, .voicebar--awaiting-command .voicebar__mic, .voicebar--window .voicebar__mic { background: var(--gold); color: var(--on-gold); }
 .voicebar__mic:disabled { opacity: .5; }
 .voicebar__line { flex: 1; min-width: 0; font-size: 14px; }
 .voicebar__heard { color: var(--muted); }

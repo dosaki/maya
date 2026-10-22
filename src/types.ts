@@ -143,6 +143,8 @@ export interface Card {
   branch?: string | null;
   /** True when the machine has not reported for a while or is disconnected. */
   stale?: boolean;
+  /** Maya's own resident session: shown only in debug mode and never counted. */
+  brain?: boolean;
 }
 
 /** The PR button: "PR #12" ("MR !12" on GitLab), with the state and URL in its tooltip. */
@@ -231,7 +233,7 @@ export interface Remembered {
   offered?: boolean;
   /** When it was first offered; carried for a day after. */
   offeredAtMs?: number | null;
-  /** Why its last resume failed ("folder missing"…). */
+  /** Why its last resume failed ("its folder is gone"…). */
   error?: string | null;
 }
 

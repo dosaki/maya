@@ -218,8 +218,9 @@ opens the card. There is no Pull Requests tab on the phone.
 
 A phone that has joined a computer's Maya also speaks and listens while
 the app is on screen. Tap the microphone and talk to Maya as you would on
-the computer: the computer's agent works out what you meant, and anything
-that sends text is read back and needs a "yes". With **Speak** on (the
+the computer: the computer's agent works out what you meant, says what it
+is about to do, and does it after five seconds unless you say "stop" or
+"no", or correct it; a Cancel button stops it too. With **Speak** on (the
 Network tab) the phone also says aloud when a session needs you; **Wake
 word "Maya"** (experimental) listens for her name without a tap. Android
 asks for the microphone the first time. Once the app leaves the screen
@@ -248,16 +249,21 @@ resume or start a session, open or review a pull request.
   system's volume.
 - **Off by default.** Turn on "Listen for 'Maya'" in Settings. A microphone
   appears in the top bar; clicking it opens the voice panel with the
-  conversation and a Yes / No for the current read-back. macOS asks for
-  microphone and speech-recognition access the first time.
+  conversation. The Chat tab on the main machine is the same conversation
+  by text. macOS asks for microphone and speech-recognition access the
+  first time.
 - **The wake word is "Maya"**, or the word you type in Settings → Voice →
   Listening; a phone joined to this Maya listens for the same word. Say it
   with the command, or alone: she says "Yes?" and waits. When she asks you
   something back, answer without the wake word; she listens for eight
   seconds and remembers the last few exchanges, so "the second one" works.
-- **Sending is read back first.** Anything that sends text, answers a
-  question, starts or resumes a session or starts a review is read back and
-  needs a "yes". Reports, focus and compact happen at once.
+- **She acts after five seconds.** When Maya decides to do something (send
+  a reply, answer a question, start or resume a session, open a review) she
+  says what she is about to do and then does it after five seconds. Say
+  "stop", or correct her, in that time and she drops it. In Chat the action
+  shows a countdown and a Cancel button. Reports, focus, compact and open
+  happen at once. Say "Maya, stop" at any time to interrupt what she is
+  working on.
 - **Two speech recognisers.** *System* uses Apple's on-device recognition,
   which needs Dictation turned on (System Settings › Keyboard › Dictation).
   On a work Mac where that switch is locked by a management profile,
@@ -268,10 +274,41 @@ resume or start a session, open or review a pull request.
   Linux, too, has only *Built-in (Whisper)*; its built-in voice is
   speech-dispatcher's.
 - **Privacy.** Audio never leaves the computer; both recognisers run on the
-  device. Only the text of your command, the last few exchanges, and a
-  summary of the board and pull-request list go to Claude, through a
-  one-shot `claude -p` call with no tools. The one-off model download is
-  the Built-in recogniser's only network access.
+  device. The one-off model download is the Built-in recogniser's only
+  network access. What goes to the model depends on the brain:
+  - On the main machine with Claude Code as the brain, Maya runs one
+    long-lived Claude Code session in auto mode, with all its tools, in
+    `maya/brain/` inside your Claude directory. It gets the text of your
+    commands, the board and the pull-request list. It can read and change
+    files, run commands and hand jobs to background subagents. Her chat
+    log, her saved session and her watches live in that folder too.
+  - With the other brains, and on a machine in the assistant role, only
+    the text of your command, the last few exchanges and a summary of the
+    board and pull-request list go to the model, through a one-shot call
+    with no tools.
+
+### Maya's brain
+
+Type to Maya in the **Chat** tab. It is the same conversation as voice,
+and its status dot shows whether she is idle or working. Chat is on the
+main machine (or a machine on its own) whatever brain you choose. Every
+Maya keeps her own brain: on a machine in the assistant role (the laptop,
+say) it is dormant, and Chat there is read-only. It shows her own history
+and says which Maya is awake; that machine keeps the quick interpreter.
+
+With Claude Code as your brain, Maya is one long-running session that
+remembers the conversation. She decides where a request goes: to an
+existing session, to a new session (in a repository, or in a scratch
+folder under `/tmp` when it needs no repository), or to herself, when she
+can just answer. Her notes live in `maya/brain/` inside your Claude
+directory.
+
+The other brains (Codex, Grok, Kiro, Antigravity, OpenCode) still use the
+quick one-shot interpreter, now with the five-second window, until they get
+their own resident session.
+
+**Debug mode** is off by default. Turn it on in Settings → Debug to show
+the Debug tab and her card.
 
 The Debug tab shows what she heard, what she made of it, what she asked
 Claude, what came back, what ran and what she said. The same lines go to
@@ -335,11 +372,15 @@ quiet.
   connected assistant hands it the role. Every connected Maya follows the
   new main with no new pairing; an assistant that is offline at that
   moment still knows only the old main's key, so pair it with the new main
-  when it is back.
+  when it is back. The new main's Maya picks up her own session and gets a
+  short summary of what the old main's Maya did while she was dormant; it
+  shows in her Chat. The old main's Maya goes dormant. A phone made main
+  gets no summary.
 - **Versions.** Run the same Maya on every machine. The main notes an
   assistant that runs another version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
-  names and attachments (up to 20 MB). Commands run on the assistant; the
+  names and attachments (up to 20 MB), and at Make main a summary of
+  Maya's Chat. Commands run on the assistant; the
   main never touches the assistant's files.
 - **Remote cards.** On the main, an assistant's sessions sit in the same
   columns as local ones, with a remote glyph (its tooltip names the

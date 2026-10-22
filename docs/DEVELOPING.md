@@ -33,6 +33,42 @@ puts `Maya.app` in `target/release/bundle/macos/` (with `--target <triple>`,
 features only work from a bundle: the sidecar, the whisper framework and
 the microphone and speech permissions are all tied to it.
 
+## Maya's brain
+
+With Claude Code as the brain, Maya keeps one long-running `claude -p`
+session (`core/src/brain/`). Her files are in
+`<claude_dir>/maya/brain/`:
+
+- `record.json`: the saved session, to resume or start fresh, and when
+  her brain went dormant (`dormantSince`) on an assistant.
+- `chat.json`: the conversation shared by voice and the Chat tab.
+- `watches.json`: sessions and pull requests she asked to hear about.
+
+The modules: `driver` (what every resident brain looks like), `claude`
+(the Claude Code driver, stream-json over stdin/stdout), `session` (queue,
+busy replies, stop, compaction; no process in it), `protocol` (her
+fenced `maya` action blocks), `prompt`, `notes` (board changes since her
+last turn), `chat`, `record`, `watch` and `handover` (the summary for a
+Maya made main). Actions run after a 5 second
+window unless the user says stop or corrects.
+
+Other brains use the quick one-shot interpreter with the same window:
+they have no resident session yet, but the Chat tab works with them as
+it does with Claude Code. Every Maya keeps her own brain: on an assistant
+machine it is dormant (no process runs, nothing is reset), Chat is
+read-only there, and her card in Debug mode is greyed as "Dormant". An
+assistant's `hello` says when its brain went dormant. Make main asks the
+outgoing main's brain for a handover summary (60 s at most; otherwise a
+digest of her Chat since then, and none for a phone), sent with
+`promote`; the new main resumes her own session and reads the summary as
+her first turn. Settings → Debug (off by default) shows the Debug tab
+and her card.
+
+When her session stops on its own, the quick interpreter takes what she
+held and Maya starts her again after 30 s, then 60 s, 120 s and 300 s
+while it keeps failing. A turn still running 10 s after a stop, or
+silent for 10 minutes, restarts her the same way.
+
 ## Git integration
 
 The Pull requests tab and each card's PR badge talk to GitHub's and

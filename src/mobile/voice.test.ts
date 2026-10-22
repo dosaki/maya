@@ -2,11 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { MIC_OFF, renderVoiceBar, type VoiceView } from "./voice";
 
 const base: VoiceView = { state: "idle", heard: "", said: "", pending: null, error: null, offer: null, note: null };
-const handlers = () => ({ onTap: vi.fn(), onConfirm: vi.fn(), onOpenSettings: vi.fn() });
+const handlers = () => ({ onTap: vi.fn(), onCancel: vi.fn(), onOpenSettings: vi.fn() });
 
 describe("renderVoiceBar", () => {
   it("uses its own class names, not the desktop's 28 px .voice button", () => {
-    const el = renderVoiceBar({ ...base, state: "listening", pending: "Telling x: y. Yes?", error: MIC_OFF, note: "n" }, handlers());
+    const el = renderVoiceBar({ ...base, state: "listening", pending: "Telling x: y.", error: MIC_OFF, note: "n" }, handlers());
     expect(el.className).toBe("voicebar voicebar--listening");
     const classes = [el, ...el.querySelectorAll("*")].flatMap((e) => [...e.classList]);
     expect(classes.filter((c) => c === "voice" || c.startsWith("voice-") || c.startsWith("voice_"))).toEqual([]);
@@ -39,23 +39,23 @@ describe("renderVoiceBar", () => {
     expect(renderVoiceBar({ ...base, state: "thinking" }, handlers()).textContent).toContain("Thinking…");
   });
 
-  it("shows Yes and No while a read-back waits", () => {
+  it("shows one Cancel button while an announced action waits", () => {
     const h = handlers();
-    const el = renderVoiceBar({ ...base, state: "awaiting-confirm", pending: "Telling x: y. Yes?" }, h);
-    el.querySelector<HTMLButtonElement>("button[data-action=yes]")!.click();
-    el.querySelector<HTMLButtonElement>("button[data-action=no]")!.click();
-    expect(h.onConfirm.mock.calls).toEqual([[true], [false]]);
-    expect(renderVoiceBar(base, h).querySelector("button[data-action=yes]")).toBeNull();
+    const el = renderVoiceBar({ ...base, state: "window", pending: "Telling x: y." }, h);
+    el.querySelector<HTMLButtonElement>("button[data-action=cancel]")!.click();
+    expect(h.onCancel).toHaveBeenCalledTimes(1);
+    expect(el.querySelector("button[data-action=yes]")).toBeNull();
+    expect(el.querySelector("button[data-action=no]")).toBeNull();
+    expect(renderVoiceBar(base, h).querySelector("button[data-action=cancel]")).toBeNull();
   });
 
-  it("shows Yes and No during the read-back itself", () => {
+  it("shows Cancel during the announcement itself", () => {
     const h = handlers();
-    const el = renderVoiceBar({ ...base, state: "speaking", pending: "Telling x: y. Yes?" }, h);
-    el.querySelector<HTMLButtonElement>("button[data-action=yes]")!.click();
-    expect(h.onConfirm.mock.calls).toEqual([[true]]);
+    const el = renderVoiceBar({ ...base, state: "speaking", pending: "Telling x: y." }, h);
+    el.querySelector<HTMLButtonElement>("button[data-action=cancel]")!.click();
+    expect(h.onCancel).toHaveBeenCalledTimes(1);
     const done = renderVoiceBar({ ...base, state: "speaking", pending: null }, h);
-    expect(done.querySelector("button[data-action=yes]")).toBeNull();
-    expect(done.querySelector("button[data-action=no]")).toBeNull();
+    expect(done.querySelector("button[data-action=cancel]")).toBeNull();
   });
 
   it("notes an online recogniser while idle", () => {

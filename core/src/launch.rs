@@ -629,6 +629,16 @@ fn prune_prompt_files(dir: &Path) {
     }
 }
 
+/// A fresh folder for a session that fits no repository: `/tmp/maya-<label>`
+/// on unix, the same under the temp directory elsewhere.
+pub fn scratch_dir(label: &str) -> PathBuf {
+    #[cfg(unix)]
+    let base = PathBuf::from("/tmp");
+    #[cfg(not(unix))]
+    let base = std::env::temp_dir();
+    base.join(format!("maya-{label}"))
+}
+
 /// Saves the first prompt to `<eye_dir>/prompts/<epoch-millis>.txt`.
 pub fn write_prompt_file(eye_dir: &Path, prompt: &str) -> Result<PathBuf, String> {
     let dir = eye_dir.join("prompts");
@@ -716,6 +726,13 @@ pub fn resolve_target(root: &Path, dirs: &[String], dir: Option<&str>, picked: O
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn a_scratch_folder_is_a_maya_folder_under_tmp() {
+        let d = scratch_dir("ab12cd34");
+        assert_eq!(d, std::path::Path::new("/tmp").join("maya-ab12cd34"));
+    }
+
     use super::*;
     use std::time::Duration;
     #[cfg(unix)]
