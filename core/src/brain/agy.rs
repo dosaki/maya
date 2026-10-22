@@ -9,6 +9,7 @@
 //! agy has no system-prompt flag either: on a fresh conversation the
 //! system prompt leads her first message.
 
+use std::collections::HashSet;
 use std::sync::mpsc::Sender;
 
 use serde_json::{json, Value};
@@ -47,6 +48,25 @@ fn field<'a>(v: &'a Value, kind: &str, keys: &[&str]) -> Option<&'a str> {
 /// Her conversation's id, as agy may spell it.
 const CONVERSATION: &[&str] = &["conversation_id", "conversationId"];
 
+/// Result statuses that fail her turn (compared folded to lower case).
+/// agy's success word is not known, so any other status, or none, is a
+/// success: a wrong guess the other way would fail every turn.
+const FAILED: &[&str] = &["interrupted", "error", "failed", "failure", "canceled", "cancelled", "timeout", "needs-setup", "halted"];
+/// Statuses known, or all but sure, to be a success: no log line for them.
+const SUCCEEDED: &[&str] = &["success", "succeeded", "done", "completed", "complete", "ok", "finished"];
+
+/// Whether a result failed: an error-like status, or an error on it.
+fn failed(v: &Value, kind: &str) -> bool {
+    let error = [&v[kind]["error"], &v["error"]].into_iter().any(|e| match e {
+        Value::Null | Value::Bool(false) => false,
+        Value::String(t) => !t.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        _ => true,
+    });
+    error || field(v, kind, &["status"]).is_some_and(|s| FAILED.contains(&s.to_ascii_lowercase().as_str()))
+}
+
 /// Her agy conversation as a line protocol, with no process in it.
 pub struct Parser {
     l: Launch,
@@ -65,11 +85,15 @@ pub struct Parser {
     waiting: Vec<String>,
     /// The arguments a stop asked to start her again with, until taken.
     relaunch: Option<Vec<String>>,
+    /// The conversation this process was asked to resume, until it names one.
+    asked: Option<String>,
+    /// Result statuses already logged as unknown.
+    unknown: HashSet<String>,
 }
 
 impl Parser {
     pub fn new(l: &Launch) -> Parser {
-        let mut p = Parser { l: l.clone(), conversation: l.resume.clone(), named: None, lead: None, unanswered: 0, in_turn: false, relaunching: false, waiting: vec![], relaunch: None };
+        let mut p = Parser { l: l.clone(), conversation: l.resume.clone(), named: None, lead: None, unanswered: 0, in_turn: false, relaunching: false, waiting: vec![], relaunch: None, asked: l.resume.clone(), unknown: HashSet::new() };
         p.lead = p.fresh_lead();
         p
     }
@@ -90,7 +114,12 @@ impl Parser {
                 self.name(field(&v, kind, CONVERSATION), &mut out);
                 // One with no message of hers before it: a turn she started herself.
                 self.begin(&mut out);
-                let ok = field(&v, kind, &["status"]).is_some_and(|s| s.eq_ignore_ascii_case("success"));
+                let ok = !failed(&v, kind);
+                if let Some(status) = field(&v, kind, &["status"]).map(str::to_ascii_lowercase) {
+                    if ok && !SUCCEEDED.contains(&status.as_str()) && self.unknown.insert(status.clone()) {
+                        crate::log::line("brain", format!("Antigravity: result status {status:?} is not known; taken as a success"));
+                    }
+                }
                 let text = field(&v, kind, &["response"]).unwrap_or("").to_string();
                 self.end(ok.then_some(text), &mut out);
                 self.unanswered = self.unanswered.saturating_sub(1);
@@ -106,6 +135,14 @@ impl Parser {
     /// `Ready` for `id`, unless it is the conversation already named.
     fn name(&mut self, id: Option<&str>, out: &mut Vec<Event>) {
         let Some(id) = id else { return };
+        // agy could not open the conversation asked for and began another,
+        // which has not had her system prompt: her next message leads with it.
+        if let Some(asked) = self.asked.take().filter(|a| a != id) {
+            crate::log::line("brain", format!("Antigravity did not resume conversation {asked}: it began {id} instead, and her system prompt goes again with her next message"));
+            if !self.l.system_prompt.is_empty() {
+                self.lead = Some(self.l.system_prompt.clone());
+            }
+        }
         self.conversation = Some(id.to_string());
         if self.named.as_deref() != Some(id) {
             self.named = Some(id.to_string());
@@ -152,6 +189,7 @@ impl Parser {
             }
             let mut l = self.l.clone();
             l.resume = self.conversation.clone();
+            self.asked = self.conversation.clone();
             self.relaunch = Some(args(&l));
         }
         out
@@ -304,6 +342,75 @@ mod tests {
         }
         sent(&mut p, "hi");
         assert_eq!(p.line(&result("SUCCESS", "ok")), vec![Event::TurnEnded { text: "ok".into(), context_tokens: None }], "the case of the status does not matter");
+    }
+
+    #[test]
+    fn only_an_error_like_status_fails_the_turn() {
+        let mut p = Parser::new(&launch());
+        p.line(INIT);
+        for status in ["completed", "DONE", "something-new"] {
+            sent(&mut p, "hi");
+            assert_eq!(p.line(&result(status, "ok")), vec![Event::TurnEnded { text: "ok".into(), context_tokens: None }], "{status}");
+        }
+        sent(&mut p, "hi");
+        let no_status = json!({"event": "result", "result": {"conversation_id": "c-1", "response": "ok"}}).to_string();
+        assert_eq!(p.line(&no_status), vec![Event::TurnEnded { text: "ok".into(), context_tokens: None }], "no status at all");
+        for status in ["INTERRUPTED", "error", "Canceled", "cancelled", "needs-setup", "timeout", "halted", "failure"] {
+            sent(&mut p, "hi");
+            assert_eq!(p.line(&result(status, "half")), vec![Event::TurnFailed { context_tokens: None }], "{status}");
+        }
+        sent(&mut p, "hi");
+        let errored = json!({"event": "result", "result": {"conversation_id": "c-1", "status": "DONE", "response": "x", "error": {"message": "quota"}}}).to_string();
+        assert_eq!(p.line(&errored), vec![Event::TurnFailed { context_tokens: None }], "an error on the result");
+        sent(&mut p, "hi");
+        let no_error = json!({"event": "result", "result": {"conversation_id": "c-1", "status": "DONE", "response": "x", "error": null}}).to_string();
+        assert_eq!(p.line(&no_error), vec![Event::TurnEnded { text: "x".into(), context_tokens: None }], "a null error is none");
+    }
+
+    #[test]
+    fn a_resumed_conversation_agy_could_not_open_gets_the_system_prompt() {
+        let mut l = launch();
+        l.resume = Some("stale".into());
+        // Named before any message: the first one leads with it.
+        let mut p = Parser::new(&l);
+        assert_eq!(p.line(INIT), vec![Event::Ready { session_id: "c-1".into() }]);
+        assert_eq!(sent(&mut p, "hi").1, "You are Maya.\n\nhi");
+        assert_eq!(sent(&mut p, "again").1, "again");
+        // Named after a message went out: the next one leads with it.
+        let mut p = Parser::new(&l);
+        assert_eq!(sent(&mut p, "hi").1, "hi");
+        assert_eq!(p.line(&result("success", "ok")), vec![Event::Ready { session_id: "c-1".into() }, Event::TurnEnded { text: "ok".into(), context_tokens: None }]);
+        assert_eq!(sent(&mut p, "next").1, "You are Maya.\n\nnext");
+        // The conversation asked for: nothing to add.
+        l.resume = Some("c-1".into());
+        let mut p = Parser::new(&l);
+        p.line(INIT);
+        assert_eq!(sent(&mut p, "hi").1, "hi");
+    }
+
+    #[test]
+    fn a_relaunch_on_her_conversation_that_agy_could_not_open_gets_the_system_prompt() {
+        let mut p = Parser::new(&launch());
+        p.line(INIT);
+        sent(&mut p, "one");
+        p.cancel();
+        p.relaunch();
+        p.start();
+        assert_eq!(p.line(r#"{"event":"init","conversation_id":"c-2"}"#), vec![Event::Ready { session_id: "c-2".into() }]);
+        assert_eq!(sent(&mut p, "two").1, "You are Maya.\n\ntwo");
+    }
+
+    #[test]
+    fn a_stop_before_init_on_a_resumed_conversation_relaunches_on_it_without_the_system_prompt() {
+        let mut l = launch();
+        l.resume = Some("c-9".into());
+        let mut p = Parser::new(&l);
+        assert_eq!(sent(&mut p, "hi"), (vec![Event::TurnStarted], "hi".to_string()));
+        assert_eq!(p.cancel(), vec![Event::TurnFailed { context_tokens: None }]);
+        let a = p.relaunch().expect("a relaunch");
+        assert!(a.windows(2).any(|w| w[0] == "--conversation" && w[1] == "c-9"), "{a:?}");
+        assert_eq!(p.start(), None);
+        assert_eq!(sent(&mut p, "again").1, "again");
     }
 
     #[test]
