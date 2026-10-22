@@ -367,8 +367,8 @@ pub(crate) fn revalidate(action: &Value, ctx: &VoiceContext) -> Result<Value, St
         _ => {}
     }
     let fresh = maya_core::interpreter::validate(&asked, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs)?;
-    // An answer must still be for the ask the user heard read back.
-    if action["kind"] == "answer" && fresh["askId"] != action["askId"] {
+    // An answer, or words for an own-words row, must still be for the ask the user heard read back.
+    if matches!(action["kind"].as_str(), Some("answer" | "reply")) && fresh["askId"] != action["askId"] {
         return Err("The question has changed; ask me again.".into());
     }
     // A pull request that has gone must not resolve to another with its number.
@@ -571,6 +571,24 @@ mod tests {
 
     fn board(cards: Vec<Card>) -> VoiceContext {
         VoiceContext { cards, dirs: vec![], machines: vec![], prs: vec![], remembered: vec![] }
+    }
+
+    #[test]
+    fn own_words_for_an_ask_answered_at_the_desk_are_refused_and_a_stop_is_revalidated() {
+        let own = |since| {
+            let mut c = asking("s1", "hexgrid", since);
+            c.awaiting.as_mut().unwrap().questions[0].own = Some(maya_core::model::OwnRow { label: "Type something.".into(), row: 2 });
+            c
+        };
+        let action = serde_json::json!({"kind": "reply", "session": "s1", "name": "hexgrid", "text": "MariaDB", "own": true, "askId": 42});
+        assert_eq!(revalidate(&action, &board(vec![own(42)])).unwrap()["askId"], 42);
+        assert_eq!(revalidate(&action, &board(vec![own(99)])).unwrap_err(), "The question has changed; ask me again.");
+        let mut working = asking("s1", "hexgrid", 5);
+        working.state = State::Working;
+        working.awaiting = None;
+        let stop = serde_json::json!({"kind": "stop", "session": "s1", "name": "hexgrid"});
+        assert_eq!(revalidate(&stop, &board(vec![working])).unwrap()["session"], "s1");
+        assert!(revalidate(&stop, &board(vec![])).is_err());
     }
 
     #[test]

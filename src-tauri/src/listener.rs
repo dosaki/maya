@@ -9,7 +9,7 @@
 
 use crate::store::now_ms;
 use crate::{config, ear, eleven_settings, eleven_wanted, interpreter, launch, log, notify, wake};
-use crate::{answer_question, compact_session, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, AppState};
+use crate::{answer_pick, answer_question, compact_session, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, stop_session, AppState};
 use maya_core::brain::chat::{ChatLog, ChatTurn};
 use maya_core::window::{Batch, Via};
 use serde_json::Value;
@@ -225,6 +225,17 @@ pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Res
             // its own machine, never typed into a local (nonexistent) tty.
             compact_session(app.clone(), state.clone(), session)?;
             Ok("Compacting.".into())
+        }
+        "stop" => {
+            stop_session(app.clone(), state.clone(), session)?;
+            Ok("Stopping.".into())
+        }
+        "reply" if action["own"].as_bool() == Some(true) => {
+            // The words go in the menu's own-words row, for the ask captured at validation.
+            let ask_id = action["askId"].as_u64().ok_or("The question has changed; ask me again.")?;
+            let text = action["text"].as_str().unwrap_or("").to_string();
+            answer_pick(app.clone(), state.clone(), session, ask_id, 0, maya_core::answer::Pick::Own { text })?;
+            Ok("Sent.".into())
         }
         "reply" => {
             let text = action["text"].as_str().unwrap_or("").to_string();
@@ -1330,6 +1341,7 @@ pub(crate) fn spoken_for(action: &serde_json::Value) -> Option<String> {
         "resume_all" => interpreter::resume_all_announcement(action),
         "focus" => format!("Focusing {}{on_machine}.", s("name")),
         "compact" => format!("Compacting {}{on_machine}.", s("name")),
+        "stop" => format!("Stopping {}{on_machine}.", s("name")),
         "review" => sentence(&format!("Reviewing {} #{}, {}", repo_name(&s("repo")), action["number"].as_u64().unwrap_or(0), s("title"))),
         "open" => format!("Opening {} #{}.", repo_name(&s("repo")), action["number"].as_u64().unwrap_or(0)),
         _ => return None,
@@ -1389,6 +1401,39 @@ mod tests {
     fn compact_still_runs_at_once() {
         let r = reply("Compacting.", Some(json!({"kind": "compact", "session": "hexgrid"})));
         assert!(matches!(decide(&r, &ctx()), Interpreted::Run(a) if a["kind"] == "compact"));
+    }
+
+    #[test]
+    fn spoken_stop() {
+        assert_eq!(spoken_for(&json!({"kind":"stop","session":"id-1","name":"hexgrid"})).unwrap(), "Stopping hexgrid.");
+        assert_eq!(spoken_for(&json!({"kind":"stop","session":"id-1","name":"hexgrid","machine":"laptop"})).unwrap(), "Stopping hexgrid on laptop.");
+        let r = reply("", Some(json!({"kind": "stop", "session": "hexgrid"})));
+        let mut c = ctx();
+        c.cards[0].state = maya_core::model::State::Working;
+        c.cards[0].awaiting = None;
+        assert!(matches!(decide(&r, &c), Interpreted::Run(a) if a["kind"] == "stop"), "a stop runs at once");
+    }
+
+    fn with_question(own: bool, kind: AwaitKind) -> VoiceContext {
+        use maya_core::model::{Choice, OwnRow, Question};
+        let mut c = ctx();
+        let aw = c.cards[0].awaiting.as_mut().unwrap();
+        aw.kind = kind;
+        aw.questions = vec![Question { question: "Which?".into(), header: "".into(), multi_select: false, own: own.then(|| OwnRow { label: "Type something.".into(), row: 3 }), chat_row: None, options: vec![Choice { label: "A".into(), description: "".into() }] }];
+        c
+    }
+
+    #[test]
+    fn a_spoken_reply_to_a_question_is_its_own_answer() {
+        let r = reply("", Some(json!({"kind":"reply","session":"hexgrid","text":"MariaDB"})));
+        let Interpreted::Announce { actions, .. } = decide(&r, &with_question(true, AwaitKind::Question)) else { panic!("expected an announcement") };
+        assert_eq!((actions[0]["own"].as_bool(), actions[0]["askId"].as_u64()), (Some(true), Some(42)));
+    }
+
+    #[test]
+    fn a_spoken_reply_to_a_permission_is_refused() {
+        let r = reply("", Some(json!({"kind":"reply","session":"hexgrid","text":"yes"})));
+        assert_eq!(decide(&r, &with_question(false, AwaitKind::Permission)), Interpreted::Say("Pick one of its numbered options, or answer it in the terminal.".into()));
     }
 
     #[test]
