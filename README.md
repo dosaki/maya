@@ -276,16 +276,22 @@ resume or start a session, open or review a pull request.
 - **Privacy.** Audio never leaves the computer; both recognisers run on the
   device. The one-off model download is the Built-in recogniser's only
   network access. What goes to the model depends on the brain:
-  - On the main machine with Claude Code as the brain, Maya runs one
-    long-lived Claude Code session in auto mode, with all its tools, in
-    `maya/brain/` inside your Claude directory. It gets the text of your
-    commands, the board and the pull-request list. It can read and change
-    files, run commands and hand jobs to background subagents. Her chat
-    log, her saved session and her watches live in that folder too.
-  - With the other brains, and on a machine in the assistant role, only
-    the text of your command, the last few exchanges and a summary of the
-    board and pull-request list go to the model, through a one-shot call
-    with no tools.
+  - On the main machine, whichever brain you choose (Claude Code, Codex,
+    Grok, Kiro, Antigravity or OpenCode), Maya runs one long-lived session
+    of it in auto mode, in `maya/brain/` inside your Claude directory. It
+    gets the text of your commands, the board and the pull-request list.
+    It can read and change files, run commands and hand jobs to
+    background subagents where the agent has them. Her chat log, her
+    saved session and her watches live in that folder too. Maya never
+    approves a permission prompt for the agent: Kiro and OpenCode approve
+    everything, as you chose; Codex and Grok use their own auto-mode
+    checks, and anything they escalate is declined; Antigravity's own auto
+    mode refuses what it will not run. Her OpenCode
+    session lives on your own OpenCode server, hidden from the board.
+  - On a machine in the assistant role, and whenever her session is down,
+    only the text of your command, the last few exchanges and a summary
+    of the board and pull-request list go to the model, through a
+    one-shot call with no tools.
 
 ### Maya's brain
 
@@ -296,16 +302,30 @@ Maya keeps her own brain: on a machine in the assistant role (the laptop,
 say) it is dormant, and Chat there is read-only. It shows her own history
 and says which Maya is awake; that machine keeps the quick interpreter.
 
-With Claude Code as your brain, Maya is one long-running session that
-remembers the conversation. She decides where a request goes: to an
-existing session, to a new session (in a repository, or in a scratch
-folder under `/tmp` when it needs no repository), or to herself, when she
-can just answer. Her notes live in `maya/brain/` inside your Claude
-directory.
+With any brain, Maya is one long-running session that remembers the
+conversation. She decides where a request goes: to an existing session, to
+a new session (in a repository, or in a scratch folder under `/tmp` when it
+needs no repository), or to herself, when she can just answer. Her notes
+live in `maya/brain/` inside your Claude directory. The quick one-shot
+interpreter is only the fallback, when her session is down or on a machine
+in the assistant role.
 
-The other brains (Codex, Grok, Kiro, Antigravity, OpenCode) still use the
-quick one-shot interpreter, now with the five-second window, until they get
-their own resident session.
+What differs between brains:
+
+- Codex and Kiro have no background subagents. During a long job she says
+  "I'm in the middle of ..., I'll do that next."
+- Grok has no way to list or stop background subagents, so "stop" does not
+  reach them and they do not show as working.
+- Antigravity does not report its subagents, so they do not show as
+  working. "Stop" while she is idle does nothing; during a turn it
+  interrupts and restarts her, which also ends any background subagent
+  with no report.
+- Codex runs with workspace writes and no network, and Maya declines every
+  escalation, so jobs that need the network (`gh`, `git fetch`) fail with
+  the Codex brain.
+- OpenCode runs with an allow-everything ruleset, as you chose.
+- Only the Claude brain is compacted by Maya; the others compact
+  themselves.
 
 **Debug mode** is off by default. Turn it on in Settings → Debug to show
 the Debug tab and her card.

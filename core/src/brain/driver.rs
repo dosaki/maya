@@ -25,6 +25,7 @@ pub enum Event {
     Exited(String),
 }
 
+#[derive(Clone)]
 pub struct Launch {
     pub agent: Harness,
     pub binary: PathBuf,
@@ -61,7 +62,11 @@ pub trait Driver: Send {
 /// `Exited` is the last one.
 pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<Box<dyn Driver>, String> {
     match l.agent {
-        Harness::ClaudeCode => Ok(Box::new(super::claude::ClaudeDriver::spawn(l, events)?)),
+        Harness::ClaudeCode => Ok(Box::new(super::claude::spawn(l, events)?)),
+        Harness::Grok | Harness::Kiro => Ok(Box::new(super::acp::spawn(l, events)?)),
+        Harness::Codex => Ok(Box::new(super::codex_drv::spawn(l, events)?)),
+        Harness::Antigravity => Ok(Box::new(super::agy::spawn(l, events)?)),
+        Harness::OpenCode => Ok(Box::new(super::opencode_drv::spawn(l, events)?)),
         other => Err(format!("no resident brain for {}", crate::launch::label(other))),
     }
 }
@@ -71,9 +76,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn other_agents_have_no_resident_brain_yet() {
-        let l = Launch { agent: Harness::Codex, binary: "codex".into(), model: None, cwd: std::env::temp_dir(), system_prompt: String::new(), resume: None, writable: vec![] };
+    fn an_unknown_agent_has_no_resident_brain() {
+        let l = Launch { agent: Harness::Other, binary: "future-agent".into(), model: None, cwd: std::env::temp_dir(), system_prompt: String::new(), resume: None, writable: vec![] };
         let (tx, _rx) = std::sync::mpsc::channel();
-        assert_eq!(spawn(&l, tx).err().as_deref(), Some("no resident brain for Codex"));
+        assert_eq!(spawn(&l, tx).err().as_deref(), Some("no resident brain for Unknown agent"));
     }
 }
