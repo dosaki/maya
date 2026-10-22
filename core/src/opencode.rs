@@ -307,6 +307,13 @@ pub struct Fetched {
     pub card: Card,
 }
 
+/// A session in Maya's data folder or under it, compared by path
+/// component: her one-shots, and her brain session in `<data>/brain` (once
+/// another brain has taken her hidden slot, this alone keeps it off the board).
+fn mayas_own(directory: &str, data_dir: &str) -> bool {
+    std::path::Path::new(directory).starts_with(data_dir)
+}
+
 /// Asks the server for its sessions and the running ones, then for each
 /// candidate its pending permission, question and newest messages, and
 /// builds the cards. `windows` are the open OpenCode terminals as
@@ -317,7 +324,7 @@ pub fn fetch(client: &Client, server_pid: i32, windows: &[(i32, String)], data_d
     let Ok(active) = client.get("/api/session/active").map(|v| active_ids(&v)) else { return vec![] };
     let mut out = Vec::new();
     for s in sessions(&list) {
-        if s.parent_id.is_some() || s.directory == data_dir {
+        if s.parent_id.is_some() || mayas_own(&s.directory, data_dir) {
             continue;
         }
         let window = windows.iter().filter(|(_, dir)| *dir == s.directory).map(|(pid, _)| *pid).max();
@@ -498,11 +505,11 @@ pub struct Live {
 }
 
 /// The card for a session, or None when it is not on the board: a subagent
-/// child, one of Maya's own one-shots (in its data folder), or a quiet
+/// child, one of Maya's own (in her data folder or under it), or a quiet
 /// session past the completed timeout with no window open on its folder.
 #[allow(clippy::too_many_arguments)]
 pub fn card_for(s: &SessionInfo, live: &Live, snippet: Option<String>, context_window: Option<u64>, window_pid: Option<i32>, server_pid: i32, data_dir: &str, now_ms: u64, timeout_ms: u64) -> Option<Card> {
-    if s.parent_id.is_some() || s.directory == data_dir {
+    if s.parent_id.is_some() || mayas_own(&s.directory, data_dir) {
         return None;
     }
     let last = s.updated_ms.max(s.idle_ms.unwrap_or(0)).max(s.viewed_ms.unwrap_or(0));
@@ -701,6 +708,29 @@ mod tests {
         assert!(card_for(&session("ses_2", "/maya", 1_000), &Live { running: true, ..quiet.clone() }, None, None, None, 7, "/maya", 5_000, 30 * min).is_none(), "Maya's own one-shot");
         let child = SessionInfo { parent_id: Some("ses_1".into()), ..session("ses_3", "/p", 1_000) };
         assert!(card_for(&child, &Live { running: true, ..quiet }, None, None, None, 7, "/maya", 5_000, 30 * min).is_none(), "a subagent child");
+    }
+
+    #[test]
+    fn her_own_sessions_under_mayas_folder_are_never_cards() {
+        let min = 60_000;
+        let running = Live { running: true, permission: None, form: None };
+        let card = |dir: &str| card_for(&session("ses_9", dir, 1_000), &running, None, None, None, 7, "/c/maya", 5_000, 30 * min);
+        assert!(card("/c/maya/brain").is_none(), "her brain session, even once another brain has replaced her hidden slot");
+        assert!(card("/c/maya/brain/deeper").is_none());
+        assert!(card("/c/maya-other").is_some(), "a folder that only shares the name's start is someone else's");
+        assert!(card("/c").is_some());
+    }
+
+    #[test]
+    fn fetch_skips_her_brain_session_without_asking_about_it() {
+        let (base, hits) = fake::fake_server(vec![
+            ("GET /api/session?limit=50", r#"{"data":[{"id":"ses_brain","agent":"build","time":{"created":1000,"updated":1000},"title":"Maya","location":{"directory":"/c/maya/brain"}},{"id":"ses_user","agent":"build","time":{"created":1000,"updated":1000},"title":"work","location":{"directory":"/c/work"}}]}"#),
+            ("GET /api/session/active", r#"{"data":{"ses_brain":{"type":"running"},"ses_user":{"type":"running"}}}"#),
+        ]);
+        let c = Client::new(&Service { url: base, pid: 1, password: "pw".into() });
+        let got = fetch(&c, 1, &[], "/c/maya", 5_000, 30 * 60_000, |_, _| None);
+        assert_eq!(got.iter().map(|f| f.session.id.as_str()).collect::<Vec<_>>(), vec!["ses_user"]);
+        assert!(!hits.lock().unwrap().iter().any(|r| r.contains("ses_brain")), "nothing is asked about her own session");
     }
 
     #[test]
