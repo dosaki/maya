@@ -2,16 +2,13 @@
 //! stream-json on stdin and read the same way on stdout.
 
 use std::collections::BTreeSet;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::driver::{Driver, Event, Launch};
+use super::driver::{Event, Launch};
+use super::stdio::{self, LineDriver, Protocol};
 
 /// The arguments for the long-lived process. A fresh brain gets
 /// `--session-id`; a resumed one gets `--resume` with the same id.
@@ -155,90 +152,49 @@ impl Parser {
     }
 }
 
-pub struct ClaudeDriver {
-    child: Child,
+/// Her Claude Code session as a line protocol: the parser, plus the
+/// control requests she is sent.
+pub struct Claude {
+    parser: Parser,
     /// The id she was started with (`--session-id` or `--resume`).
     session_id: String,
-    stdin: Option<ChildStdin>,
-    tasks: Arc<Mutex<BTreeSet<String>>>,
     next_request: u32,
-    /// When she last wrote a line: see `Driver::output_clock`.
-    last_output: Arc<AtomicU64>,
 }
 
-impl ClaudeDriver {
-    pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<Self, String> {
-        let session_id = l.resume.clone().unwrap_or_else(crate::launch::new_session_uuid);
-        std::fs::create_dir_all(&l.cwd).map_err(|e| format!("cannot create {}: {e}", l.cwd.display()))?;
-        let mut cmd = crate::command(&l.binary);
-        cmd.args(args(l, &session_id))
-            .current_dir(&l.cwd)
-            .env_clear()
-            .envs(crate::launch::clean_env(std::env::vars()))
-            .env("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", l.binary.display()))?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take().ok_or("no stdout")?;
-        // Ready comes from her init line, not from the spawn: see `Parser`.
-        let mut parser = Parser::new(&session_id);
-        let tasks = parser.tasks.clone();
-        let last_output = Arc::new(AtomicU64::new(0));
-        let stamp = last_output.clone();
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-                // Any line shows she is alive, whether or not it is an event.
-                stamp.store(crate::now_ms(), Ordering::SeqCst);
-                let line = String::from_utf8_lossy(&buf).into_owned();
-                for e in parser.line(&line) {
-                    if events.send(e).is_err() {
-                        return;
-                    }
-                }
-            }
-            let _ = events.send(Event::Exited("the Claude Code process ended".into()));
-        });
-        Ok(Self { child, session_id, stdin, tasks, next_request: 0, last_output })
-    }
-
-    fn write(&mut self, line: &str) -> Result<(), String> {
-        let stdin = self.stdin.as_mut().ok_or("the brain is shut down")?;
-        stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).map_err(|e| format!("cannot write to the brain: {e}"))
-    }
-
+impl Claude {
     fn request_id(&mut self) -> String {
         self.next_request += 1;
         format!("r{}", self.next_request)
     }
 }
 
-impl Driver for ClaudeDriver {
-    fn send(&mut self, text: &str) -> Result<(), String> {
-        self.write(&user_line(text))
+impl Protocol for Claude {
+    fn label(&self) -> &'static str {
+        "Claude Code"
     }
 
-    fn interrupt(&mut self) -> Result<(), String> {
+    fn line(&mut self, line: &str) -> (Vec<Event>, Option<String>) {
+        (self.parser.line(line), None)
+    }
+
+    fn send(&mut self, text: &str) -> (Vec<Event>, Option<String>) {
+        (vec![], Some(user_line(text)))
+    }
+
+    /// Interrupts her turn and stops every live background task.
+    fn cancel(&mut self, _now_ms: u64) -> (Vec<Event>, Option<String>) {
         let id = self.request_id();
-        self.write(&interrupt_line(&id))?;
-        let live: Vec<String> = self.tasks.lock().unwrap().iter().cloned().collect();
+        let mut lines = interrupt_line(&id);
+        let live: Vec<String> = self.parser.tasks.lock().unwrap().iter().cloned().collect();
         for t in live {
             let id = self.request_id();
-            self.write(&stop_task_line(&id, &t))?;
+            lines.push_str(&stop_task_line(&id, &t));
         }
-        Ok(())
+        (vec![], Some(lines))
     }
 
-    fn compact(&mut self) -> Result<(), String> {
-        self.write(&user_line("/compact"))
+    fn compact(&mut self) -> Result<(Vec<Event>, String), String> {
+        Ok((vec![], user_line("/compact")))
     }
 
     fn background_subagents(&self) -> bool {
@@ -248,37 +204,24 @@ impl Driver for ClaudeDriver {
     fn assumed_session_id(&self) -> Option<String> {
         Some(self.session_id.clone())
     }
-
-    fn output_clock(&self) -> Option<Arc<AtomicU64>> {
-        Some(self.last_output.clone())
-    }
-
-    fn shutdown(&mut self) {
-        self.stdin = None;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
-/// Shutting down waits for the process (or kills and waits), so a brain
-/// that exited on its own leaves no zombie behind once dropped.
-impl Drop for ClaudeDriver {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
+pub type ClaudeDriver = LineDriver<Claude>;
+
+/// Starts her `claude -p`; Ready comes from her init line, not from the
+/// spawn: see `Parser`.
+pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<ClaudeDriver, String> {
+    let session_id = l.resume.clone().unwrap_or_else(crate::launch::new_session_uuid);
+    let protocol = Claude { parser: Parser::new(&session_id), session_id: session_id.clone(), next_request: 0 };
+    stdio::spawn(l, args(l, &session_id), &[("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS", "1")], protocol, events)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::Harness;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
 
     fn launch() -> Launch {
         Launch { agent: Harness::ClaudeCode, binary: "claude".into(), model: Some("sonnet".into()), cwd: std::env::temp_dir(), system_prompt: "sys".into(), resume: None, writable: vec![] }
@@ -403,8 +346,8 @@ mod tests {
         l.binary = bin;
         l.cwd = dir.join("work");
         let (tx, rx) = std::sync::mpsc::channel();
-        let d = ClaudeDriver::spawn(&l, tx).unwrap();
-        let pid = d.child.id().to_string();
+        let d = spawn(&l, tx).unwrap();
+        let pid = d.pid().to_string();
         assert!(matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Exited(_)));
         let alive = || std::process::Command::new("kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
         assert!(alive(), "an exited child stays a zombie until it is waited for");

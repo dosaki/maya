@@ -62,9 +62,9 @@ pub trait Driver: Send {
 /// `Exited` is the last one.
 pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<Box<dyn Driver>, String> {
     match l.agent {
-        Harness::ClaudeCode => Ok(Box::new(super::claude::ClaudeDriver::spawn(l, events)?)),
-        Harness::Grok | Harness::Kiro => Ok(Box::new(super::acp::AcpDriver::spawn(l, events)?)),
-        Harness::Codex => Ok(Box::new(super::codex_drv::CodexDriver::spawn(l, events)?)),
+        Harness::ClaudeCode => Ok(Box::new(super::claude::spawn(l, events)?)),
+        Harness::Grok | Harness::Kiro => Ok(Box::new(super::acp::spawn(l, events)?)),
+        Harness::Codex => Ok(Box::new(super::codex_drv::spawn(l, events)?)),
         other => Err(format!("no resident brain for {}", crate::launch::label(other))),
     }
 }

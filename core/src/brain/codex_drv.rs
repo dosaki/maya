@@ -15,16 +15,16 @@
 //! for her server: its subagents do not wake her when they finish.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::driver::{Driver, Event, Launch};
+use super::driver::{Event, Launch};
+use super::jsonrpc::{self, Envelope, Incoming};
+use super::stdio::{self, LineDriver, Protocol};
+
+/// Codex's messages carry no `"jsonrpc"` field.
+const RPC: Envelope = Envelope::Bare;
 
 /// A stopped turn with no `turn/completed` within this is failed.
 pub const CANCEL_GRACE_MS: u64 = 5_000;
@@ -37,25 +37,9 @@ pub fn command() -> Vec<String> {
     ["app-server", "--disable", "multi_agent", "--disable", "multi_agent_v2"].map(String::from).to_vec()
 }
 
-fn request(id: u64, method: &str, params: Value) -> String {
-    format!("{}\n", json!({"id": id, "method": method, "params": params}))
-}
-
-fn notification(method: &str) -> String {
-    format!("{}\n", json!({"method": method}))
-}
-
-fn reply(id: &Value, result: Value) -> String {
-    format!("{}\n", json!({"id": id, "result": result}))
-}
-
-fn reply_error(id: &Value, code: i64, message: &str) -> String {
-    format!("{}\n", json!({"id": id, "error": {"code": code, "message": message}}))
-}
-
 /// Only stable API: no experimental opt-in.
 pub fn initialize(id: u64) -> String {
-    request(id, "initialize", json!({"clientInfo": {"name": "maya", "title": "Maya", "version": env!("CARGO_PKG_VERSION")}}))
+    RPC.request(id, "initialize", json!({"clientInfo": {"name": "maya", "title": "Maya", "version": env!("CARGO_PKG_VERSION")}}))
 }
 
 /// What `thread/start` and `thread/resume` both set: auto mode, her
@@ -77,7 +61,7 @@ fn overrides(l: &Launch) -> Value {
 }
 
 pub fn thread_start(id: u64, l: &Launch) -> String {
-    request(id, "thread/start", overrides(l))
+    RPC.request(id, "thread/start", overrides(l))
 }
 
 /// `thread/resume` with the same overrides; her past turns are not sent back.
@@ -85,20 +69,20 @@ pub fn thread_resume(id: u64, thread_id: &str, l: &Launch) -> String {
     let mut p = overrides(l);
     p["threadId"] = json!(thread_id);
     p["excludeTurns"] = json!(true);
-    request(id, "thread/resume", p)
+    RPC.request(id, "thread/resume", p)
 }
 
 pub fn turn_start(id: u64, thread_id: &str, text: &str) -> String {
-    request(id, "turn/start", json!({"threadId": thread_id, "input": [{"type": "text", "text": text}]}))
+    RPC.request(id, "turn/start", json!({"threadId": thread_id, "input": [{"type": "text", "text": text}]}))
 }
 
 pub fn turn_interrupt(id: u64, thread_id: &str, turn_id: &str) -> String {
-    request(id, "turn/interrupt", json!({"threadId": thread_id, "turnId": turn_id}))
+    RPC.request(id, "turn/interrupt", json!({"threadId": thread_id, "turnId": turn_id}))
 }
 
 /// Compaction on request; it runs as a turn of its own.
 pub fn compact_start(id: u64, thread_id: &str) -> String {
-    request(id, "thread/compact/start", json!({"threadId": thread_id}))
+    RPC.request(id, "thread/compact/start", json!({"threadId": thread_id}))
 }
 
 /// The answer to a request from Codex, by method: approvals are declined,
@@ -300,13 +284,11 @@ impl Parser {
 
     /// One line from Codex: the events it makes and what to write back.
     pub fn line(&mut self, line: &str) -> (Vec<Event>, Option<String>) {
-        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { return (vec![], None) };
-        let id = v.get("id").filter(|i| !i.is_null());
-        match (v["method"].as_str(), id) {
-            (Some(m), Some(id)) => (vec![], Some(self.request(m, id, &v["params"]))),
-            (Some(m), None) => self.notification(m, &v["params"]),
-            (None, Some(id)) => self.response(id.as_u64(), &v),
-            _ => (vec![], None),
+        match jsonrpc::parse(line) {
+            Some(Incoming::Request { id, method, params }) => (vec![], Some(self.request(&method, &id, &params))),
+            Some(Incoming::Notification { method, params }) => self.notification(&method, &params),
+            Some(Incoming::Response { id, result, error }) => self.response(id, &result, error),
+            None => (vec![], None),
         }
     }
 
@@ -314,18 +296,17 @@ impl Parser {
         match answer(method) {
             Some(result) => {
                 crate::log::line("brain", format!("Codex: declined {method} for {} — the auto-review did not approve it", asked_for(params)));
-                reply(id, result)
+                RPC.reply(id, result)
             }
             None => {
                 crate::log::line("brain", format!("Codex asked for {method}, which Maya does not handle"));
-                reply_error(id, -32601, &format!("Method not found: {method}"))
+                RPC.reply_error(id, jsonrpc::METHOD_NOT_FOUND, &format!("Method not found: {method}"))
             }
         }
     }
 
-    fn response(&mut self, id: Option<u64>, v: &Value) -> (Vec<Event>, Option<String>) {
+    fn response(&mut self, id: Option<u64>, result: &Value, error: Option<String>) -> (Vec<Event>, Option<String>) {
         let Some(id) = id else { return (vec![], None) };
-        let error = v.get("error").filter(|e| !e.is_null()).map(|e| e["message"].as_str().unwrap_or("an error").to_string());
         let mut out = vec![];
         if self.init_id == Some(id) {
             self.init_id = None;
@@ -339,14 +320,14 @@ impl Parser {
                 Some(thread) => thread_resume(id, &thread, &self.l),
                 None => thread_start(id, &self.l),
             };
-            return (out, Some(notification("initialized") + &open));
+            return (out, Some(RPC.notification("initialized", None) + &open));
         }
         if self.open_id == Some(id) {
             self.open_id = None;
             if let Some(e) = error {
                 return (vec![self.fail(format!("her Codex thread did not open: {e}"))], None);
             }
-            let Some(thread) = v["result"]["thread"]["id"].as_str().map(str::to_string) else {
+            let Some(thread) = result["thread"]["id"].as_str().map(str::to_string) else {
                 return (vec![self.fail("her Codex thread opened with no id".into())], None);
             };
             self.thread_id = Some(thread.clone());
@@ -368,7 +349,7 @@ impl Parser {
             }
             return (out, None);
         }
-        let back = match v["result"]["turn"]["id"].as_str() {
+        let back = match result["turn"]["id"].as_str() {
             Some(turn) if p.settled => self.stop_stray(turn),
             Some(turn) => self.named(turn, &mut out),
             None => None,
@@ -503,175 +484,48 @@ impl Parser {
     }
 }
 
-/// What the reader, the ticker and the driver share: the protocol, her
-/// stdin and the events, under one lock so lines and events keep order.
-struct Shared {
-    parser: Parser,
-    stdin: Option<ChildStdin>,
-    events: Sender<Event>,
-    /// `Exited` went out: nothing follows it.
-    done: bool,
-}
-
-impl Shared {
-    fn write(&mut self, line: &str) -> Result<(), String> {
-        let stdin = self.stdin.as_mut().ok_or("the brain is shut down")?;
-        stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).map_err(|e| format!("cannot write to the brain: {e}"))
+impl Protocol for Parser {
+    fn label(&self) -> &'static str {
+        "Codex"
     }
 
-    /// Sends `events` in order; an `Exited` among them ends her session:
-    /// her stdin closes and nothing more is sent.
-    fn emit(&mut self, events: Vec<Event>) {
-        for e in events {
-            if self.done {
-                return;
-            }
-            if matches!(e, Event::Exited(_)) {
-                self.done = true;
-                self.stdin = None;
-            }
-            let _ = self.events.send(e);
-        }
+    fn start(&mut self) -> Option<String> {
+        Some(Parser::start(self))
     }
-}
 
-pub struct CodexDriver {
-    child: Child,
-    shared: Arc<Mutex<Shared>>,
-    /// When she last wrote a line: see `Driver::output_clock`.
-    last_output: Arc<AtomicU64>,
-}
-
-impl CodexDriver {
-    pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<Self, String> {
-        std::fs::create_dir_all(&l.cwd).map_err(|e| format!("cannot create {}: {e}", l.cwd.display()))?;
-        let mut cmd = crate::command(&l.binary);
-        cmd.args(command())
-            .current_dir(&l.cwd)
-            .env_clear()
-            .envs(crate::launch::clean_env(std::env::vars()))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", l.binary.display()))?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take().ok_or("no stdout")?;
-        let mut parser = Parser::new(l);
-        let first = parser.start();
-        let shared = Arc::new(Mutex::new(Shared { parser, stdin, events, done: false }));
-        // Ready comes from Codex's answer to the thread request.
-        if let Err(e) = shared.lock().unwrap().write(&first) {
-            crate::log::line("brain", format!("Codex: {e}"));
-        }
-        let last_output = Arc::new(AtomicU64::new(0));
-        let (stamp, reader_shared) = (last_output.clone(), shared.clone());
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-                // Any line shows she is alive, whether or not it is an event.
-                stamp.store(crate::now_ms(), Ordering::SeqCst);
-                let line = String::from_utf8_lossy(&buf).into_owned();
-                let mut s = reader_shared.lock().unwrap();
-                if s.done {
-                    return;
-                }
-                let (events, back) = s.parser.line(&line);
-                if let Some(back) = back {
-                    if let Err(e) = s.write(&back) {
-                        crate::log::line("brain", format!("Codex: {e}"));
-                    }
-                }
-                s.emit(events);
-            }
-            reader_shared.lock().unwrap().emit(vec![Event::Exited("the Codex process ended".into())]);
-        });
-        let ticker_shared = shared.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(200));
-            let mut s = ticker_shared.lock().unwrap();
-            if s.done {
-                return;
-            }
-            let events = s.parser.tick(crate::now_ms());
-            s.emit(events);
-        });
-        Ok(Self { child, shared, last_output })
+    fn line(&mut self, line: &str) -> (Vec<Event>, Option<String>) {
+        Parser::line(self, line)
     }
-}
 
-impl Driver for CodexDriver {
-    fn send(&mut self, text: &str) -> Result<(), String> {
-        let mut s = self.shared.lock().unwrap();
-        if s.done {
-            return Err("her session has ended".into());
-        }
-        let (events, line) = s.parser.send(text);
-        if let Some(line) = line {
-            s.write(&line)?;
-        }
-        s.emit(events);
-        Ok(())
+    fn send(&mut self, text: &str) -> (Vec<Event>, Option<String>) {
+        Parser::send(self, text)
     }
 
     /// Interrupts her turn (`turn/interrupt`); she runs no subagents.
-    fn interrupt(&mut self) -> Result<(), String> {
-        let mut s = self.shared.lock().unwrap();
-        let (events, line) = s.parser.cancel(crate::now_ms());
-        let wrote = match line {
-            Some(line) => s.write(&line),
-            None => Ok(()),
-        };
-        s.emit(events);
-        wrote
+    fn cancel(&mut self, now_ms: u64) -> (Vec<Event>, Option<String>) {
+        Parser::cancel(self, now_ms)
+    }
+
+    fn tick(&mut self, now_ms: u64, _last_output_ms: u64) -> Vec<Event> {
+        Parser::tick(self, now_ms)
     }
 
     /// `thread/compact/start`. Maya never asks in practice: no context
     /// size is reported for Codex, which compacts itself.
-    fn compact(&mut self) -> Result<(), String> {
-        let mut s = self.shared.lock().unwrap();
-        if s.done {
-            return Err("her session has ended".into());
-        }
-        let (events, line) = s.parser.compact()?;
-        s.write(&line)?;
-        s.emit(events);
-        Ok(())
+    fn compact(&mut self) -> Result<(Vec<Event>, String), String> {
+        Parser::compact(self)
     }
 
     fn background_subagents(&self) -> bool {
         false
     }
-
-    fn output_clock(&self) -> Option<Arc<AtomicU64>> {
-        Some(self.last_output.clone())
-    }
-
-    fn shutdown(&mut self) {
-        self.shared.lock().unwrap().stdin = None;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
-/// Shutting down waits for the process (or kills and waits), so a server
-/// that exited on its own leaves no zombie behind once dropped.
-impl Drop for CodexDriver {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
+pub type CodexDriver = LineDriver<Parser>;
+
+/// Starts her app server; Ready comes from Codex's answer to the thread request.
+pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<CodexDriver, String> {
+    stdio::spawn(l, command(), &[], Parser::new(l), events)
 }
 
 #[cfg(test)]

@@ -9,17 +9,17 @@
 //! ends on a turn-end update or after `QUIET_MS` of silence.
 
 use std::collections::{HashSet, VecDeque};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use super::driver::{Driver, Event, Launch};
+use super::driver::{Event, Launch};
+use super::jsonrpc::{self, Envelope, Incoming};
+use super::stdio::{self, LineDriver, Protocol};
 use crate::model::Harness;
+
+/// ACP messages carry `"jsonrpc": "2.0"`.
+const RPC: Envelope = Envelope::Versioned;
 
 /// A turn she started herself, with no tool running, ends after this much quiet.
 pub const QUIET_MS: u64 = 2_000;
@@ -53,13 +53,9 @@ pub fn command(l: &Launch) -> Vec<String> {
     a
 }
 
-fn request(id: u64, method: &str, params: Value) -> String {
-    format!("{}\n", json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
-}
-
 /// The client offers no files or terminal: her agent uses its own tools.
 pub fn initialize(id: u64) -> String {
-    request(id, "initialize", json!({"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "maya", "version": env!("CARGO_PKG_VERSION")}}))
+    RPC.request(id, "initialize", json!({"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "maya", "version": env!("CARGO_PKG_VERSION")}}))
 }
 
 /// Grok's session options: auto permission mode and her system prompt as rules.
@@ -74,7 +70,7 @@ pub fn new_session(id: u64, l: &Launch) -> String {
     if let Some(m) = grok_meta(l) {
         p["_meta"] = m;
     }
-    request(id, "session/new", p)
+    RPC.request(id, "session/new", p)
 }
 
 /// `session/load`. Grok gets its `_meta` again: whether it keeps the
@@ -84,24 +80,16 @@ pub fn load_session(id: u64, session_id: &str, l: &Launch) -> String {
     if let Some(m) = grok_meta(l) {
         p["_meta"] = m;
     }
-    request(id, "session/load", p)
+    RPC.request(id, "session/load", p)
 }
 
 pub fn prompt(id: u64, session_id: &str, text: &str) -> String {
-    request(id, "session/prompt", json!({"sessionId": session_id, "prompt": [{"type": "text", "text": text}]}))
+    RPC.request(id, "session/prompt", json!({"sessionId": session_id, "prompt": [{"type": "text", "text": text}]}))
 }
 
 /// The `session/cancel` notification.
 pub fn cancel(session_id: &str) -> String {
-    format!("{}\n", json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session_id}}))
-}
-
-fn reply(id: &Value, result: Value) -> String {
-    format!("{}\n", json!({"jsonrpc": "2.0", "id": id, "result": result}))
-}
-
-fn reply_error(id: &Value, code: i64, message: &str) -> String {
-    format!("{}\n", json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}}))
+    RPC.notification("session/cancel", Some(json!({"sessionId": session_id})))
 }
 
 /// The option a permission request is answered with: `reject_once`, else
@@ -271,13 +259,11 @@ impl Parser {
 
     /// One line from her agent: the events it makes and what to write back.
     pub fn line(&mut self, line: &str) -> (Vec<Event>, Option<String>) {
-        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { return (vec![], None) };
-        let id = v.get("id").filter(|i| !i.is_null());
-        match (v["method"].as_str(), id) {
-            (Some(m), Some(id)) => (vec![], Some(self.request(m, id, &v["params"]))),
-            (Some(m), None) => (self.notification(m, &v["params"]), None),
-            (None, Some(id)) => self.response(id.as_u64(), &v),
-            _ => (vec![], None),
+        match jsonrpc::parse(line) {
+            Some(Incoming::Request { id, method, params }) => (vec![], Some(self.request(&method, &id, &params))),
+            Some(Incoming::Notification { method, params }) => (self.notification(&method, &params), None),
+            Some(Incoming::Response { id, result, error }) => self.response(id, &result, error),
+            None => (vec![], None),
         }
     }
 
@@ -288,17 +274,16 @@ impl Parser {
             let title = params["toolCall"]["title"].as_str().unwrap_or("a tool");
             crate::log::line("brain", format!("{}: refused {title} — the auto-mode check declined it", self.label()));
             return match reject_option(&params["options"]) {
-                Some(option) => reply(id, json!({"outcome": {"outcome": "selected", "optionId": option}})),
-                None => reply(id, json!({"outcome": {"outcome": "cancelled"}})),
+                Some(option) => RPC.reply(id, json!({"outcome": {"outcome": "selected", "optionId": option}})),
+                None => RPC.reply(id, json!({"outcome": {"outcome": "cancelled"}})),
             };
         }
         crate::log::line("brain", format!("{} asked for {method}, which Maya does not handle", self.label()));
-        reply_error(id, -32601, &format!("Method not found: {method}"))
+        RPC.reply_error(id, jsonrpc::METHOD_NOT_FOUND, &format!("Method not found: {method}"))
     }
 
-    fn response(&mut self, id: Option<u64>, v: &Value) -> (Vec<Event>, Option<String>) {
+    fn response(&mut self, id: Option<u64>, result: &Value, error: Option<String>) -> (Vec<Event>, Option<String>) {
         let Some(id) = id else { return (vec![], None) };
-        let error = v.get("error").filter(|e| !e.is_null()).map(|e| e["message"].as_str().unwrap_or("an error").to_string());
         let mut out = vec![];
         if self.init_id == Some(id) {
             self.init_id = None;
@@ -320,7 +305,7 @@ impl Parser {
                 return (vec![self.fail(format!("her {} session did not open: {e}", self.label()))], None);
             }
             // A load answers with no id of its own: it confirms the one asked for.
-            let Some(sid) = v["result"]["sessionId"].as_str().map(str::to_string).or_else(|| self.l.resume.clone()) else {
+            let Some(sid) = result["sessionId"].as_str().map(str::to_string).or_else(|| self.l.resume.clone()) else {
                 return (vec![self.fail(format!("her {} session opened with no id", self.label()))], None);
             };
             self.session_id = Some(sid.clone());
@@ -337,7 +322,7 @@ impl Parser {
         }
         if let Some(pos) = self.in_flight.iter().position(|p| *p == id) {
             self.in_flight.remove(pos);
-            let ok = error.is_none() && matches!(v["result"]["stopReason"].as_str(), None | Some("end_turn"));
+            let ok = error.is_none() && matches!(result["stopReason"].as_str(), None | Some("end_turn"));
             self.begin(&mut out);
             self.end(ok, &mut out);
             // Its turn-end update, if one comes, comes late.
@@ -453,174 +438,52 @@ impl Parser {
     }
 }
 
-/// What the reader, the ticker and the driver share: the protocol, her
-/// stdin and the events, under one lock so lines and events keep order.
-struct Shared {
-    parser: Parser,
-    stdin: Option<ChildStdin>,
-    events: Sender<Event>,
-    /// `Exited` went out: nothing follows it.
-    done: bool,
-}
-
-impl Shared {
-    fn write(&mut self, line: &str) -> Result<(), String> {
-        let stdin = self.stdin.as_mut().ok_or("the brain is shut down")?;
-        stdin.write_all(line.as_bytes()).and_then(|_| stdin.flush()).map_err(|e| format!("cannot write to the brain: {e}"))
+impl Protocol for Parser {
+    fn label(&self) -> &'static str {
+        Parser::label(self)
     }
 
-    /// Sends `events` in order; an `Exited` among them ends her session:
-    /// her stdin closes and nothing more is sent.
-    fn emit(&mut self, events: Vec<Event>) {
-        for e in events {
-            if self.done {
-                return;
-            }
-            if matches!(e, Event::Exited(_)) {
-                self.done = true;
-                self.stdin = None;
-            }
-            let _ = self.events.send(e);
-        }
+    fn start(&mut self) -> Option<String> {
+        Some(Parser::start(self))
     }
-}
 
-pub struct AcpDriver {
-    child: Child,
-    agent: Harness,
-    shared: Arc<Mutex<Shared>>,
-    /// When she last wrote a line: see `Driver::output_clock`.
-    last_output: Arc<AtomicU64>,
-}
-
-impl AcpDriver {
-    pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<Self, String> {
-        let label = crate::launch::label(l.agent);
-        std::fs::create_dir_all(&l.cwd).map_err(|e| format!("cannot create {}: {e}", l.cwd.display()))?;
-        let mut cmd = crate::command(&l.binary);
-        cmd.args(command(l))
-            .current_dir(&l.cwd)
-            .env_clear()
-            .envs(crate::launch::clean_env(std::env::vars()))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", l.binary.display()))?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take().ok_or("no stdout")?;
-        let mut parser = Parser::new(l);
-        let first = parser.start();
-        let shared = Arc::new(Mutex::new(Shared { parser, stdin, events, done: false }));
-        // Ready comes from her agent's answer to the session request.
-        if let Err(e) = shared.lock().unwrap().write(&first) {
-            crate::log::line("brain", format!("{label}: {e}"));
-        }
-        let last_output = Arc::new(AtomicU64::new(0));
-        let (stamp, reader_shared) = (last_output.clone(), shared.clone());
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stdout);
-            let mut buf = Vec::new();
-            loop {
-                buf.clear();
-                match reader.read_until(b'\n', &mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-                // Any line shows she is alive, whether or not it is an event.
-                stamp.store(crate::now_ms(), Ordering::SeqCst);
-                let line = String::from_utf8_lossy(&buf).into_owned();
-                let mut s = reader_shared.lock().unwrap();
-                if s.done {
-                    return;
-                }
-                let (events, back) = s.parser.line(&line);
-                if let Some(back) = back {
-                    if let Err(e) = s.write(&back) {
-                        crate::log::line("brain", format!("{label}: {e}"));
-                    }
-                }
-                s.emit(events);
-            }
-            reader_shared.lock().unwrap().emit(vec![Event::Exited(format!("the {label} process ended"))]);
-        });
-        let (clock, ticker_shared) = (last_output.clone(), shared.clone());
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(200));
-            let mut s = ticker_shared.lock().unwrap();
-            if s.done {
-                return;
-            }
-            let events = s.parser.tick(crate::now_ms(), clock.load(Ordering::SeqCst));
-            s.emit(events);
-        });
-        Ok(Self { child, agent: l.agent, shared, last_output })
+    fn line(&mut self, line: &str) -> (Vec<Event>, Option<String>) {
+        Parser::line(self, line)
     }
-}
 
-impl Driver for AcpDriver {
-    fn send(&mut self, text: &str) -> Result<(), String> {
-        let mut s = self.shared.lock().unwrap();
-        if s.done {
-            return Err("her session has ended".into());
-        }
-        let (events, line) = s.parser.send(text);
-        if let Some(line) = line {
-            s.write(&line)?;
-        }
-        s.emit(events);
-        Ok(())
+    fn send(&mut self, text: &str) -> (Vec<Event>, Option<String>) {
+        Parser::send(self, text)
     }
 
     /// Cancels her turn; a Grok subagent she started is left to the agent
     /// (ACP has no call to stop one).
-    fn interrupt(&mut self) -> Result<(), String> {
-        let mut s = self.shared.lock().unwrap();
-        let (events, line) = s.parser.cancel(crate::now_ms());
-        let wrote = match line {
-            Some(line) => s.write(&line),
-            None => Ok(()),
-        };
-        s.emit(events);
-        wrote
+    fn cancel(&mut self, now_ms: u64) -> (Vec<Event>, Option<String>) {
+        Parser::cancel(self, now_ms)
     }
 
-    fn compact(&mut self) -> Result<(), String> {
-        Err("unsupported".into())
+    fn tick(&mut self, now_ms: u64, last_output_ms: u64) -> Vec<Event> {
+        Parser::tick(self, now_ms, last_output_ms)
     }
 
     fn background_subagents(&self) -> bool {
-        self.agent == Harness::Grok
-    }
-
-    fn output_clock(&self) -> Option<Arc<AtomicU64>> {
-        Some(self.last_output.clone())
-    }
-
-    fn shutdown(&mut self) {
-        self.shared.lock().unwrap().stdin = None;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < deadline {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.l.agent == Harness::Grok
     }
 }
 
-/// Shutting down waits for the process (or kills and waits), so an agent
-/// that exited on its own leaves no zombie behind once dropped.
-impl Drop for AcpDriver {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
+pub type AcpDriver = LineDriver<Parser>;
+
+/// Starts her ACP agent; Ready comes from its answer to the session request.
+pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<AcpDriver, String> {
+    stdio::spawn(l, command(l), &[], Parser::new(l), events)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::driver::Driver;
+    use std::process::Stdio;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
 
     fn launch(agent: Harness) -> Launch {
         Launch { agent, binary: "x".into(), model: None, cwd: "/tmp/maya-brain".into(), system_prompt: "You are Maya.".into(), resume: None, writable: vec![] }
@@ -1092,9 +955,9 @@ cat >/dev/null
 "#;
         let (dir, l) = fake(Harness::Grok, script);
         let (tx, rx) = std::sync::mpsc::channel();
-        let d = AcpDriver::spawn(&l, tx).unwrap();
+        let d = spawn(&l, tx).unwrap();
         assert!(d.background_subagents(), "Grok's subagents run in the background");
-        let pid = d.child.id().to_string();
+        let pid = d.pid().to_string();
         match rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             Event::Exited(why) => assert!(why.contains("Authentication required"), "{why}"),
             e => panic!("{e:?}"),
