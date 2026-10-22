@@ -145,6 +145,8 @@ export interface Card {
   stale?: boolean;
   /** Maya's own resident session: shown only in debug mode and never counted. */
   brain?: boolean;
+  /** Working only because a background shell outlived the turn: there is no turn to stop. */
+  shell?: boolean;
 }
 
 /** The PR button: "PR #12" ("MR !12" on GitLab), with the state and URL in its tooltip. */

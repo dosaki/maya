@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 pub const CLASSIFIER_TIMEOUT: Duration = Duration::from_secs(90);
 
-use crate::model::Harness;
+use crate::model::{AwaitKind, Card, Harness, State};
 
 /// Model aliases `claude --model` accepts. Fixed lists keep the launch command
 /// free of anything the user typed.
@@ -87,23 +87,38 @@ pub struct Capabilities {
     pub shell_lines: bool,
     /// `/exit` ends the session, so Close can type it and then close the terminal.
     pub close: bool,
+    /// The key that stops the running turn (`"server"` where it is a server call); None where none is proven.
+    pub stop: Option<&'static str>,
 }
 
 pub fn capabilities(agent: Harness) -> Capabilities {
     let shift_tab = Some(crate::answer::SHIFT_TAB);
+    let esc = Some(crate::answer::ESC);
     match agent {
-        Harness::ClaudeCode => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true, close: true },
+        Harness::ClaudeCode => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true, close: true, stop: esc },
         // `/model` and `/permissions` open pickers in Codex; a typed value does nothing.
-        Harness::Codex => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: true, shell_lines: false, close: true },
-        Harness::Antigravity => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false, close: true },
+        Harness::Codex => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: true, shell_lines: false, close: true, stop: esc },
+        Harness::Antigravity => Capabilities { compact: true, model_switch: false, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false, close: true, stop: None },
         // Grok's `--help` lists no effort values, so none can be checked before typing.
-        Harness::Grok => Capabilities { compact: true, model_switch: true, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false, close: true },
+        Harness::Grok => Capabilities { compact: true, model_switch: true, effort_switch: false, mode_cycle: shift_tab, slash_lines: true, shell_lines: false, close: true, stop: None },
         // Kiro's /compact summarises the conversation; /model and /effort take a value.
-        Harness::Kiro => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true, close: true },
+        Harness::Kiro => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: shift_tab, slash_lines: true, shell_lines: true, close: true, stop: None },
         // Every control is a server call; `agent` names the build/plan switch.
-        Harness::OpenCode => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: Some("agent"), slash_lines: true, shell_lines: true, close: true },
-        Harness::Other => Capabilities { compact: false, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: false, shell_lines: false, close: false },
+        Harness::OpenCode => Capabilities { compact: true, model_switch: true, effort_switch: true, mode_cycle: Some("agent"), slash_lines: true, shell_lines: true, close: true, stop: Some("server") },
+        Harness::Other => Capabilities { compact: false, model_switch: false, effort_switch: false, mode_cycle: None, slash_lines: false, shell_lines: false, close: false, stop: None },
     }
+}
+
+/// Whether Stop applies to the card: a turn is running or is waiting on a
+/// choice (not a prose question, not a background shell), and the agent has a
+/// stop that is known to work.
+pub fn can_stop(card: &Card) -> bool {
+    let turn = match card.state {
+        State::Working => !card.shell,
+        State::Awaiting => card.awaiting.as_ref().map_or(false, |a| a.kind != AwaitKind::Text),
+        State::Idle | State::Completed => false,
+    };
+    turn && !card.brain && capabilities(card.harness).stop.is_some()
 }
 
 /// A model id is put in a shell line only when it is plain: letters,
@@ -1157,6 +1172,32 @@ mod tests {
         let oc = capabilities(Harness::OpenCode);
         assert!(oc.compact && oc.model_switch && oc.effort_switch && oc.slash_lines && oc.shell_lines && oc.close);
         assert_eq!(oc.mode_cycle, Some("agent"), "the cycle is a server call, not a key");
+        assert_eq!(c.stop, Some(crate::answer::ESC));
+        assert_eq!(x.stop, Some(crate::answer::ESC));
+        assert_eq!(oc.stop, Some("server"));
+        assert!([Harness::Grok, Harness::Kiro, Harness::Antigravity, Harness::Other].iter().all(|a| capabilities(*a).stop.is_none()), "unproven until probed");
+    }
+
+    #[test]
+    fn can_stop_only_with_a_turn_to_stop() {
+        use crate::model::{AwaitKind, Awaiting};
+        let card = |harness: Harness, state: State, kind: Option<AwaitKind>| Card {
+            session_id: "s".into(), pid: 1, name: "n".into(), cwd: "/x".into(), state, state_since: 0, snippet: String::new(),
+            awaiting: kind.map(|kind| Awaiting { kind, detail: String::new(), questions: vec![] }),
+            has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false,
+        };
+        let working = card(Harness::ClaudeCode, State::Working, None);
+        assert!(can_stop(&working));
+        for kind in [AwaitKind::Question, AwaitKind::Permission, AwaitKind::Plan] {
+            assert!(can_stop(&card(Harness::ClaudeCode, State::Awaiting, Some(kind))));
+        }
+        assert!(!can_stop(&Card { shell: true, ..working.clone() }), "a background shell is not a turn");
+        assert!(!can_stop(&card(Harness::ClaudeCode, State::Awaiting, Some(AwaitKind::Text))));
+        assert!(!can_stop(&card(Harness::ClaudeCode, State::Idle, None)));
+        assert!(!can_stop(&card(Harness::ClaudeCode, State::Completed, None)));
+        assert!(!can_stop(&Card { brain: true, ..working.clone() }));
+        assert!(!can_stop(&card(Harness::Grok, State::Working, None)), "Grok's stop key is unproven");
+        assert!(can_stop(&card(Harness::OpenCode, State::Working, None)));
     }
 
     #[test]

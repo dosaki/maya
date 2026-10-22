@@ -183,6 +183,8 @@ pub fn derive(i: &DeriveInput) -> Card {
         (State::Idle, r.status_updated_at, None)
     };
 
+    // Working on the shell alone, with no turn behind it.
+    let shell = shell_running && state == State::Working;
     Card {
         session_id: r.session_id.clone(),
         pid: r.pid,
@@ -199,7 +201,7 @@ pub fn derive(i: &DeriveInput) -> Card {
         machine: None,
         machine_address: None, machine_platform: None,
         terminal: None,
-        stale: false, model: None, branch: None, brain: false
+        stale: false, model: None, branch: None, brain: false, shell
     }
 }
 
@@ -264,6 +266,13 @@ mod tests {
         let c = run(&reg("idle", 1), &[], &TranscriptTail::default(), 5);
         assert_eq!(c.harness, crate::model::Harness::ClaudeCode);
         assert_eq!(c.pr, None, "the PR comes from the cache, not from derive");
+    }
+
+    #[test]
+    fn a_shell_left_running_marks_the_card() {
+        let c = run(&reg("shell", 1), &[], &TranscriptTail::default(), 5);
+        assert!(c.state == State::Working && c.shell);
+        assert!(!run(&reg("busy", 1), &[], &TranscriptTail::default(), 5).shell);
     }
 
     #[test]

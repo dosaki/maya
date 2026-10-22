@@ -144,6 +144,10 @@ pub struct Card {
     /// never counted, announced or mirrored.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub brain: bool,
+    /// True when the card is Working only because a background shell the
+    /// turn started still runs: there is no turn to stop.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shell: bool,
 }
 
 #[cfg(test)]
@@ -224,7 +228,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None, brain: false
+            stale: false, model: None, branch: None, brain: false, shell: false
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["context"]["percent"], 62);

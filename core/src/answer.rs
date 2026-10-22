@@ -222,7 +222,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None, brain: false
+            stale: false, model: None, branch: None, brain: false, shell: false
         }
     }
 
