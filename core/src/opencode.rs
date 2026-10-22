@@ -397,6 +397,11 @@ pub fn rename(c: &Client, id: &str, title: &str) -> Result<(), String> {
     ok(c.patch(&format!("/api/session/{id}"), serde_json::json!({ "title": title })))
 }
 
+/// Interrupts the session's running turn, or dismisses what it waits on.
+pub fn interrupt(c: &Client, id: &str) -> Result<(), String> {
+    c.post_empty(&format!("/api/session/{id}/interrupt")).map(|_| ())
+}
+
 pub fn compact(c: &Client, id: &str) -> Result<(), String> {
     ok(c.post(&format!("/api/session/{id}/compact"), serde_json::json!({})))
 }

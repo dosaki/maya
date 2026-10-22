@@ -141,6 +141,8 @@ pub fn derive(i: &DeriveInput) -> Card {
                 awaiting = None;
                 last_turn = Some((true, e.received_at));
             }
+            // Written by Maya when it presses Esc: Claude's hooks say nothing of an interrupt.
+            "MayaInterrupt" if e.agent_id.is_none() => awaiting = None,
             "UserPromptSubmit" if e.agent_id.is_none() => {
                 awaiting = None;
                 last_turn = Some((false, e.received_at));
@@ -406,6 +408,14 @@ mod tests {
         let c = run(&reg("busy", 0), &[e], &TranscriptTail::default(), 20);
         assert_eq!(c.state, State::Awaiting);
         assert_eq!(c.awaiting.unwrap().kind, AwaitKind::Permission);
+    }
+
+    #[test]
+    fn a_maya_interrupt_clears_the_ask() {
+        let evs = [tool_ev("PermissionRequest", "Bash", serde_json::json!({"command": "git push"}), 10), ev("MayaInterrupt", 11)];
+        let c = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 20);
+        assert!(c.awaiting.is_none());
+        assert_eq!(c.state, State::Working);
     }
 
     #[test]
