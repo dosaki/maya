@@ -144,6 +144,15 @@ pub(crate) fn failed_resume(resumed: bool, turn_seen: bool, ran_ms: u64, since_f
     resumed && !turn_seen && (ran_ms < RESUME_GRACE_MS || since_first_message_ms.is_some_and(|m| m < RESUME_GRACE_MS))
 }
 
+/// The id to save her record with when her agent names her session
+/// (`Ready`): only once her first turn has saved one, and only when it
+/// names another (Antigravity relaunched on a conversation it could not
+/// open, or afresh after a stop before it named one). Before her first
+/// turn, that turn saves it.
+pub(crate) fn resave_on_ready(turn_seen: bool, saved: Option<&str>, named: &str) -> Option<String> {
+    (turn_seen && saved != Some(named)).then(|| named.to_string())
+}
+
 /// How long after her session's `n`th exit in a row (from 0) it starts again.
 const RESTART_DELAYS: [u64; 4] = [30, 60, 120, 300];
 
@@ -488,6 +497,15 @@ impl PhoneWaiters {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_renamed_after_her_first_turn_is_saved_again() {
+        assert_eq!(resave_on_ready(false, None, "c-1"), None, "her first turn saves it");
+        assert_eq!(resave_on_ready(false, Some("c-0"), "c-1"), None, "her first turn saves it");
+        assert_eq!(resave_on_ready(true, Some("c-1"), "c-1"), None, "the same session: nothing new");
+        assert_eq!(resave_on_ready(true, Some("c-1"), "c-2").as_deref(), Some("c-2"));
+        assert_eq!(resave_on_ready(true, None, "c-2").as_deref(), Some("c-2"));
+    }
     use maya_core::brain::session::{Request, Session};
     use maya_core::config::{Config, NetworkRole};
     use maya_core::model::{Harness, State};

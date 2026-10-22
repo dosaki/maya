@@ -482,6 +482,14 @@ fn stalled_now(b: &BrainState) -> Option<&'static str> {
     brain_route::stalled(now_ms(), b.session.in_turn(), brain_route::heard_at(b.last_heard, output), b.interrupted_at)
 }
 
+/// Saves her record to resume `session_id`; running again, the dormant mark goes.
+fn save_record(b: &BrainState, session_id: String) {
+    let r = Record { agent: b.agent, model: b.model.clone(), session_id, dormant_since: None };
+    if let Err(err) = record::save(&b.record_path, &r) {
+        log::line("brain", format!("could not save her record: {err}"));
+    }
+}
+
 /// What an exit leaves to do once the brain lock is released.
 struct Exit {
     drained: Vec<Request>,
@@ -520,8 +528,13 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
         let was_working = b.session.working();
         match &e {
             // Her agent names her session: that id is hidden and, once a turn
-            // has ended, saved.
+            // has ended, saved (again, when it names another after that).
             Event::Ready { session_id } => {
+                let saved = b.session_id.clone().or_else(|| b.assumed_id.clone());
+                if let Some(id) = brain_route::resave_on_ready(b.turn_seen, saved.as_deref(), session_id) {
+                    log::line("brain", format!("her session is now {id}"));
+                    save_record(&b, id);
+                }
                 b.session_id = Some(session_id.clone());
                 hide_id = Some(session_id.clone());
             }
@@ -530,13 +543,7 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
                 // resume, and a fresh start explained.
                 if !std::mem::replace(&mut b.turn_seen, true) {
                     match b.session_id.clone().or_else(|| b.assumed_id.clone()) {
-                        Some(id) => {
-                            // Running again: the dormant mark goes.
-                            let r = Record { agent: b.agent, model: b.model.clone(), session_id: id, dormant_since: None };
-                            if let Err(err) = record::save(&b.record_path, &r) {
-                                log::line("brain", format!("could not save her record: {err}"));
-                            }
-                        }
+                        Some(id) => save_record(&b, id),
                         None => log::line("brain", "her session has no id to save"),
                     }
                     line = b.fresh_reason.take();
