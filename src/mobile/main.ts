@@ -4,7 +4,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "../actions";
-import { answerGuard } from "../answer";
+import { answerGuard, stopGuard } from "../answer";
 import { renderBoard, swapBoard } from "../board";
 import { makeClickGuard } from "../clickguard";
 import { initDebug } from "../debug";
@@ -27,7 +27,7 @@ import { initSetup } from "./setup";
 import { activeColumn, columnWidth, columnsFor, openingColumn, renderStrip, scrollLeftFor, visibleColumns } from "./strip";
 
 setLocalMachine(false);
-setComposerOptions({ attachButton: true });
+setComposerOptions({ attachButton: true, keyboardHints: false });
 
 let cards: Card[] = [];
 let status: NetworkStatus | null = null;
@@ -145,8 +145,22 @@ function act(target: Element): void {
   else if (action.kind === "pr") void run("Pull request", () => invoke("open_pr", { sessionId: card.sessionId }));
   else if (action.kind === "compact") void run("Compact", () => invoke("compact_session", { sessionId: card.sessionId }), "Sent /compact to the terminal");
   else if (action.kind === "close") void run("Close", () => invoke("close_session", { sessionId: card.sessionId }), `Closed ${card.name}`);
+  else if (action.kind === "stop") void stop(card, target);
   else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex, target);
   else open(card);
+}
+
+/** Stop from a card; the button stays disabled until the card moves on, or comes back on an error. */
+async function stop(card: Card, target: Element): Promise<void> {
+  const button = target.closest<HTMLButtonElement>("button[data-action=stop]");
+  if (!button) return;
+  try {
+    const outcome = await stopGuard.stop(card, button);
+    if (outcome === "sent") showToast(`Sent Stop to ${card.name}`);
+  } catch (e) {
+    showToast(`Stop: ${String(e)}`);
+    paint();
+  }
 }
 
 async function answer(card: Card, questionIndex: number, optionIndex: number, button: Element): Promise<void> {

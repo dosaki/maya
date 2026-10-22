@@ -1,15 +1,17 @@
+import { canStop } from "./harness";
 import type { Card } from "./types";
 
 /** Mirrors `answer::OPEN_DELAY_MS` in src-tauri/src/answer.rs: the picker must be on screen first. */
 export const OPEN_DELAY_MS = 1000;
 
 /**
- * Buttons for the current question of an AskUserQuestion prompt, or null
- * when the card is not waiting on a question (or every question is answered).
+ * Buttons for the current question of a prompt (a question, or a
+ * permission or plan ask once its menu is known), or null when the card is
+ * not waiting on one (or every question is answered).
  */
 export function renderOptions(card: Card, next: number, opts: { descriptions: boolean; enabled: boolean }): HTMLElement | null {
   const aw = card.awaiting;
-  if (card.state !== "awaiting" || !aw || aw.kind !== "question") return null;
+  if (card.state !== "awaiting" || !aw) return null;
   const q = aw.questions[next];
   if (!q) return null;
 
@@ -65,13 +67,14 @@ export function renderOptions(card: Card, next: number, opts: { descriptions: bo
 }
 
 /**
- * Milliseconds until the earliest question that is still inside the open
- * delay becomes answerable, or null when nothing is waiting on that.
+ * Milliseconds until the earliest question or Stop button that is still
+ * inside the open delay becomes usable, or null when nothing is waiting on that.
  */
 export function nextEnableDelay(cards: Card[], nowMs: number): number | null {
   let best: number | null = null;
   for (const c of cards) {
-    if (c.state !== "awaiting" || c.awaiting?.kind !== "question" || c.awaiting.questions.length === 0) continue;
+    const asking = c.state === "awaiting" && !!c.awaiting && c.awaiting.questions.length > 0;
+    if (!asking && !canStop(c)) continue;
     const remaining = c.stateSince + OPEN_DELAY_MS - nowMs;
     if (remaining > 0 && (best === null || remaining < best)) best = remaining;
   }

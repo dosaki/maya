@@ -33,6 +33,12 @@ describe("cardActionFor", () => {
     expect(cardActionFor(el.querySelector("button[data-action=close]")!)).toEqual({ kind: "close", sessionId: "s1" });
   });
 
+  it("routes the Stop button to a stop action", () => {
+    const el = renderCard({ ...card, state: "working" }, 5000);
+    document.body.replaceChildren(el);
+    expect(cardActionFor(el.querySelector("button[data-action=stop]")!)).toEqual({ kind: "stop", sessionId: "s1" });
+  });
+
   it("routes option buttons to an answer action with indices", () => {
     const el = document.createElement("article");
     el.className = "card";

@@ -20,6 +20,9 @@ export interface Question {
   chatRow?: number;
 }
 
+/** One answer to a question, as `answer::Pick` takes it: an option, several (multi-select), the user's own words, or Chat about this. */
+export type Pick = { kind: "option"; index: number } | { kind: "options"; indexes: number[] } | { kind: "own"; text: string } | { kind: "chat" };
+
 /** The agent runner behind a session; "other" is one this build does not know. */
 export type Harness = "claude-code" | "codex" | "antigravity" | "grok" | "kiro" | "opencode" | "other";
 
@@ -216,7 +219,7 @@ const PLATFORM_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux",
  * another machine's terminal, so it says where the session runs and, when
  * the card has a tmux session name, how to attach to it.
  */
-export function remoteTerminalToast(card: Pick<Card, "machine" | "terminal">): string {
+export function remoteTerminalToast(card: { machine?: string | null; terminal?: string | null }): string {
   const base = `That session runs on ${card.machine ?? "another machine"}`;
   return card.terminal ? `${base}; attach: tmux attach -t ${card.terminal}` : base;
 }

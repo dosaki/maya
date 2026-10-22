@@ -15,4 +15,12 @@ describe("makeProgress", () => {
     p.reset("s");
     expect(p.next(c(1))).toBe(0);
   });
+
+  it("finishes an ask set aside, past every question, for that ask only", () => {
+    const p = makeProgress();
+    const two = { ...c(1), awaiting: { kind: "question" as const, detail: "q", questions: [{ question: "a", header: "A", multiSelect: false, options: [] }, { question: "b", header: "B", multiSelect: false, options: [] }] } };
+    p.finish(two);
+    expect(p.next(two)).toBe(2);
+    expect(p.next({ ...two, stateSince: 2 })).toBe(0);
+  });
 });
