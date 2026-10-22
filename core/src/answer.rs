@@ -202,6 +202,8 @@ mod tests {
             question: "Q?".into(),
             header: "H".into(),
             multi_select: multi,
+            own: None,
+            chat_row: None,
             options: (0..n).map(|i| Choice { label: format!("o{i}"), description: "".into() }).collect(),
         }
     }

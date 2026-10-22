@@ -1,3 +1,4 @@
+use crate::claude_menus;
 use crate::events::HookEvent;
 use crate::model::{parse_questions, AwaitKind, Awaiting, Card, Harness, State};
 use crate::registry::RegistrySession;
@@ -103,10 +104,20 @@ fn awaiting_for_tool(e: &HookEvent) -> Awaiting {
         Some("AskUserQuestion") => Awaiting {
             kind: AwaitKind::Question,
             detail: question_detail(e),
-            questions: e.tool_input.as_ref().map(parse_questions).unwrap_or_default(),
+            questions: e
+                .tool_input
+                .as_ref()
+                .map(parse_questions)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mut q| {
+                    claude_menus::ask_rows(&mut q);
+                    q
+                })
+                .collect(),
         },
-        Some("ExitPlanMode") => Awaiting { kind: AwaitKind::Plan, detail: "Plan approval".to_string(), questions: vec![] },
-        _ => Awaiting { kind: AwaitKind::Permission, detail: permission_detail(e), questions: vec![] },
+        Some("ExitPlanMode") => Awaiting { kind: AwaitKind::Plan, detail: "Plan approval".to_string(), questions: claude_menus::plan_question(e).into_iter().collect() },
+        _ => Awaiting { kind: AwaitKind::Permission, detail: permission_detail(e), questions: claude_menus::permission_question(e).into_iter().collect() },
     }
 }
 
@@ -210,7 +221,7 @@ pub fn derive(i: &DeriveInput) -> Card {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::HookEvent;
+use crate::events::HookEvent;
     use crate::model::{AwaitKind, State};
     use crate::registry::RegistrySession;
     use crate::transcript::{OpenQuestion, TranscriptTail};
@@ -378,6 +389,8 @@ mod tests {
         assert_eq!(aw.kind, AwaitKind::Question);
         assert_eq!(aw.detail, "Which stack?");
         assert_eq!(aw.questions[0].options[0].label, "Tauri");
+        assert_eq!(aw.questions[0].own.as_ref().map(|o| o.row), Some(1));
+        assert_eq!(aw.questions[0].chat_row, Some(2));
     }
 
     #[test]

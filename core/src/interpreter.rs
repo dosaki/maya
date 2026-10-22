@@ -733,7 +733,7 @@ mod tests {
         use crate::model::{Choice, Question};
         let mut c = card("a", "hexgrid-d3", State::Awaiting, Some("Which?"));
         c.awaiting.as_mut().unwrap().kind = AwaitKind::Question;
-        c.awaiting.as_mut().unwrap().questions = vec![Question { question: "Which?".into(), header: "H".into(), multi_select: false, options: vec![Choice { label: "A".into(), description: "".into() }, Choice { label: "B".into(), description: "".into() }] }];
+        c.awaiting.as_mut().unwrap().questions = vec![Question { question: "Which?".into(), header: "H".into(), multi_select: false, own: None, chat_row: None, options: vec![Choice { label: "A".into(), description: "".into() }, Choice { label: "B".into(), description: "".into() }] }];
         c.state_since = 1234;
         let cards = vec![c];
         assert_eq!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &[], &[], &[]).unwrap()["option"], 2);
@@ -746,7 +746,7 @@ mod tests {
         let mut c = card(id, name, State::Awaiting, Some("Which stack?"));
         let aw = c.awaiting.as_mut().unwrap();
         aw.kind = AwaitKind::Question;
-        aw.questions = vec![Question { question: "Which stack?".into(), header: "H".into(), multi_select: false, options: labels.iter().map(|l| Choice { label: l.to_string(), description: "".into() }).collect() }];
+        aw.questions = vec![Question { question: "Which stack?".into(), header: "H".into(), multi_select: false, own: None, chat_row: None, options: labels.iter().map(|l| Choice { label: l.to_string(), description: "".into() }).collect() }];
         c
     }
 

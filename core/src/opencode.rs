@@ -524,7 +524,7 @@ pub fn card_for(s: &SessionInfo, live: &Live, snippet: Option<String>, context_w
     let ask_id = |request: &str| s.updated_ms + request.bytes().fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(b as u64)) % 1_000;
     let (state, since, awaiting) = if let Some(p) = &live.permission {
         let detail = format!("{}: {}", p.action, p.resource);
-        let q = Question { question: detail.clone(), header: "Permission".into(), options: PERMISSION_CHOICES.iter().map(|l| Choice { label: l.to_string(), description: String::new() }).collect(), multi_select: false };
+        let q = Question { question: detail.clone(), header: "Permission".into(), options: PERMISSION_CHOICES.iter().map(|l| Choice { label: l.to_string(), description: String::new() }).collect(), multi_select: false, own: None, chat_row: None };
         (State::Awaiting, ask_id(&p.id), Some(Awaiting { kind: AwaitKind::Question, detail: truncate(&detail, SNIPPET_CHARS), questions: vec![q] }))
     } else if let Some(f) = &live.form {
         if f.fields.iter().all(|fl| fl.options.is_empty()) {
@@ -532,7 +532,7 @@ pub fn card_for(s: &SessionInfo, live: &Live, snippet: Option<String>, context_w
             let prompt = f.fields.first().map(|fl| format!("{}: {}", f.title, fl.title)).unwrap_or_else(|| f.title.clone());
             (State::Awaiting, ask_id(&f.id), Some(Awaiting { kind: AwaitKind::Text, detail: truncate(&prompt, SNIPPET_CHARS), questions: vec![] }))
         } else {
-            let qs = f.fields.iter().map(|fl| Question { question: fl.title.clone(), header: fl.key.clone(), options: fl.options.iter().map(|(v, l)| Choice { label: l.clone(), description: v.clone() }).collect(), multi_select: false }).collect();
+            let qs = f.fields.iter().map(|fl| Question { question: fl.title.clone(), header: fl.key.clone(), options: fl.options.iter().map(|(v, l)| Choice { label: l.clone(), description: v.clone() }).collect(), multi_select: false, own: None, chat_row: None }).collect();
             (State::Awaiting, ask_id(&f.id), Some(Awaiting { kind: AwaitKind::Question, detail: truncate(&f.title, SNIPPET_CHARS), questions: qs }))
         }
     } else if live.running {

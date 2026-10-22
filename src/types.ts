@@ -14,6 +14,10 @@ export interface Question {
   header: string;
   options: Choice[];
   multiSelect: boolean;
+  /** The terminal's row for answering in your own words, when it has one. */
+  own?: { label: string; row: number };
+  /** The terminal's row for setting the question aside ("Chat about this"). */
+  chatRow?: number;
 }
 
 /** The agent runner behind a session; "other" is one this build does not know. */
