@@ -238,7 +238,8 @@ impl Parser {
     /// What time alone ends: a cancelled turn with no answer within
     /// `CANCEL_GRACE_MS` fails; a turn of her own ends after `QUIET_MS`
     /// with no line from her and no tool running, or after `STUCK_MS`
-    /// whatever tool calls are still open.
+    /// whatever tool calls are still open. A turn waiting for her session
+    /// to open is not hers: its prompt has not gone out yet.
     pub fn tick(&mut self, now_ms: u64, last_output_ms: u64) -> Vec<Event> {
         let mut out = vec![];
         if !self.in_turn {
@@ -248,7 +249,7 @@ impl Parser {
             self.settled.extend(self.in_flight.drain(..));
             self.end(false, &mut out);
             self.stray_end = true;
-        } else if self.in_flight.is_empty() {
+        } else if self.phase == Phase::Open && self.in_flight.is_empty() {
             let quiet = now_ms.saturating_sub(last_output_ms);
             if (self.tools.is_empty() && quiet >= QUIET_MS) || quiet >= STUCK_MS {
                 self.end(true, &mut out);
@@ -642,6 +643,16 @@ mod tests {
     }
 
     #[test]
+    fn quiet_does_not_end_a_turn_waiting_for_her_session() {
+        let mut p = Parser::new(&launch(Harness::Grok));
+        p.start();
+        assert_eq!(p.send("early").0, vec![Event::TurnStarted]);
+        assert_eq!(p.tick(STUCK_MS, 0), vec![], "no line from her yet: her session is still starting");
+        p.line(r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}"#);
+        assert_eq!(p.tick(2 * STUCK_MS, 0), vec![], "her session is still opening");
+    }
+
+    #[test]
     fn the_prompt_response_ends_the_turn_with_the_streamed_text() {
         let mut p = open(Harness::Grok);
         let id = sent(&mut p, "hi");
@@ -999,6 +1010,36 @@ cat >/dev/null
         assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "the dropped message is not sent once she opens");
         let got = std::fs::read_to_string(dir.join("in.log")).unwrap();
         assert!(!got.contains("session/prompt"), "{got}");
+        d.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_message_sent_while_her_session_opens_gets_its_reply_as_one_turn() {
+        let script = r#"got
+echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+got
+sleep 3
+echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"acp-1"}}'
+got
+echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I read the history"}}}}'
+echo '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+cat >/dev/null
+"#;
+        let (dir, l) = fake(Harness::Grok, script);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut d = super::super::driver::spawn(&l, tx).unwrap();
+        d.send("primer").unwrap();
+        let mut got = vec![];
+        while let Ok(e) = rx.recv_timeout(Duration::from_secs(10)) {
+            got.push(e);
+            if got.len() == 3 {
+                break;
+            }
+        }
+        assert_eq!(got, vec![Event::TurnStarted, Event::Ready { session_id: "acp-1".into() }, Event::TurnEnded { text: "I read the history".into(), context_tokens: None }], "no empty end while she opens");
+        assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "no second turn after her reply");
         d.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }
