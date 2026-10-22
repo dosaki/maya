@@ -21,13 +21,17 @@ use super::driver::{Driver, Event, Launch};
 pub const STDERR_TAIL_BYTES: usize = 2_048;
 /// How long the end of her stdout waits for the end of her stderr.
 const STDERR_WAIT: Duration = Duration::from_millis(500);
+/// How long an interrupted process has to end before it is killed and
+/// started again (see `Protocol::relaunch`).
+pub const RELAUNCH_GRACE: Duration = Duration::from_secs(3);
 
 /// A protocol with no process in it: lines in, events and lines to write
 /// out (one string may hold several lines, each newline-terminated).
 pub trait Protocol: Send + 'static {
     /// Her agent's name, for the log and the reason her process ended.
     fn label(&self) -> &'static str;
-    /// What to write as soon as the process runs.
+    /// What to write as soon as the process runs, and again as soon as a
+    /// relaunched one does (see `relaunch`).
     fn start(&mut self) -> Option<String> {
         None
     }
@@ -46,6 +50,15 @@ pub trait Protocol: Send + 'static {
     }
     fn background_subagents(&self) -> bool;
     fn assumed_session_id(&self) -> Option<String> {
+        None
+    }
+    /// Asked after each `cancel`: the arguments to start her process again
+    /// with, for an agent that cannot stop a turn in-band. Her process is
+    /// interrupted (SIGINT on unix, killed elsewhere) and, once it has
+    /// ended, started again with these, behind the same driver: its last
+    /// lines and its end are dropped, so no `Exited` comes of it, and
+    /// `start` runs again for the new one. None (the default) keeps it.
+    fn relaunch(&mut self) -> Option<Vec<String>> {
         None
     }
 }
@@ -82,6 +95,13 @@ struct Shared<P> {
     stderr: Tail,
     /// `Exited` went out: nothing follows it.
     done: bool,
+    /// Which of her processes is hers: the lines and the end of an earlier
+    /// one (stopped for a relaunch) are dropped.
+    generation: u64,
+    /// One is being started again.
+    relaunching: bool,
+    /// Shut down: no process is started again.
+    closed: bool,
 }
 
 impl<P: Protocol> Shared<P> {
@@ -140,30 +160,38 @@ impl<P: Protocol> Shared<P> {
 
 /// A brain process driven by `P`.
 pub struct LineDriver<P: Protocol> {
-    child: Child,
+    /// Her process now: another after a relaunch.
+    child: Arc<Mutex<Child>>,
     shared: Arc<Mutex<Shared<P>>>,
     background: bool,
     assumed: Option<String>,
     /// When she last wrote a line: see `Driver::output_clock`.
     last_output: Arc<AtomicU64>,
+    /// How her process is started, for a relaunch.
+    launch: Launch,
+    env: Vec<(String, String)>,
 }
 
 /// Starts `l.binary` with `args` (and `env` on top of the clean
-/// environment) in `l.cwd`, spoken to by `protocol`. Events arrive on
-/// `events`; `Exited` is the last one.
-pub fn spawn<P: Protocol>(l: &Launch, args: Vec<String>, env: &[(&str, &str)], mut protocol: P, events: Sender<Event>) -> Result<LineDriver<P>, String> {
-    let label = protocol.label();
+/// environment) in `l.cwd`, its stdio piped.
+fn start_process(l: &Launch, args: &[String], env: &[(String, String)]) -> Result<Child, String> {
     std::fs::create_dir_all(&l.cwd).map_err(|e| format!("cannot create {}: {e}", l.cwd.display()))?;
     let mut cmd = crate::command(&l.binary);
     cmd.args(args)
         .current_dir(&l.cwd)
         .env_clear()
         .envs(crate::launch::clean_env(std::env::vars()))
-        .envs(env.iter().copied())
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("cannot start {}: {e}", l.binary.display()))?;
+    cmd.spawn().map_err(|e| format!("cannot start {}: {e}", l.binary.display()))
+}
+
+/// Feeds `child`'s stdout to the protocol as process `generation`, stamping
+/// the output clock, and keeps its stderr's tail (returned, for `Shared`).
+/// Its end is `Exited` unless a later process has replaced it. Gives her stdin.
+fn attach<P: Protocol>(shared: &Arc<Mutex<Shared<P>>>, child: &mut Child, generation: u64, stamp: Arc<AtomicU64>, label: &'static str) -> Result<(Option<ChildStdin>, Tail), String> {
     let stdin = child.stdin.take();
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr = child.stderr.take();
@@ -182,12 +210,7 @@ pub fn spawn<P: Protocol>(l: &Launch, args: Vec<String>, env: &[(&str, &str)], m
             let _ = stderr_done.send(());
         });
     }
-    let first = protocol.start();
-    let (background, assumed) = (protocol.background_subagents(), protocol.assumed_session_id());
-    let shared = Arc::new(Mutex::new(Shared { protocol, stdin, events, stderr: tail, done: false }));
-    shared.lock().unwrap().write_logged(first);
-    let last_output = Arc::new(AtomicU64::new(0));
-    let (stamp, reader_shared) = (last_output.clone(), shared.clone());
+    let reader_shared = shared.clone();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut buf = Vec::new();
@@ -201,7 +224,7 @@ pub fn spawn<P: Protocol>(l: &Launch, args: Vec<String>, env: &[(&str, &str)], m
             stamp.store(crate::now_ms(), Ordering::SeqCst);
             let line = String::from_utf8_lossy(&buf).into_owned();
             let mut s = reader_shared.lock().unwrap();
-            if s.done {
+            if s.done || s.generation != generation {
                 return;
             }
             let Some((events, back)) = s.guarded("a line", |p| p.line(&line)) else { return };
@@ -210,8 +233,31 @@ pub fn spawn<P: Protocol>(l: &Launch, args: Vec<String>, env: &[(&str, &str)], m
         }
         // Her last words on stderr come with the reason.
         let _ = stderr_ended.recv_timeout(STDERR_WAIT);
-        reader_shared.lock().unwrap().emit(vec![Event::Exited(format!("the {label} process ended"))]);
+        let mut s = reader_shared.lock().unwrap();
+        if s.generation == generation {
+            s.emit(vec![Event::Exited(format!("the {label} process ended"))]);
+        }
     });
+    Ok((stdin, tail))
+}
+
+/// Starts `l.binary` with `args` (and `env` on top of the clean
+/// environment) in `l.cwd`, spoken to by `protocol`. Events arrive on
+/// `events`; `Exited` is the last one.
+pub fn spawn<P: Protocol>(l: &Launch, args: Vec<String>, env: &[(&str, &str)], mut protocol: P, events: Sender<Event>) -> Result<LineDriver<P>, String> {
+    let label = protocol.label();
+    let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let mut child = start_process(l, &args, &env)?;
+    let first = protocol.start();
+    let (background, assumed) = (protocol.background_subagents(), protocol.assumed_session_id());
+    let shared = Arc::new(Mutex::new(Shared { protocol, stdin: None, events, stderr: Tail::default(), done: false, generation: 0, relaunching: false, closed: false }));
+    let last_output = Arc::new(AtomicU64::new(0));
+    {
+        let mut s = shared.lock().unwrap();
+        let (stdin, tail) = attach(&shared, &mut child, 0, last_output.clone(), label)?;
+        (s.stdin, s.stderr) = (stdin, tail);
+        s.write_logged(first);
+    }
     let (clock, ticker_shared) = (last_output.clone(), shared.clone());
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(200));
@@ -222,12 +268,77 @@ pub fn spawn<P: Protocol>(l: &Launch, args: Vec<String>, env: &[(&str, &str)], m
         let Some(events) = s.guarded("the time", |p| p.tick(crate::now_ms(), clock.load(Ordering::SeqCst))) else { return };
         s.emit(events);
     });
-    Ok(LineDriver { child, shared, background, assumed, last_output })
+    Ok(LineDriver { child: Arc::new(Mutex::new(child)), shared, background, assumed, last_output, launch: l.clone(), env })
+}
+
+/// Asks her process to stop its turn and end: SIGINT on unix; elsewhere,
+/// where there is none to send, it is killed.
+#[cfg(unix)]
+fn interrupt_process(child: &mut Child) {
+    // SAFETY: kill(2) on the pid of a child not yet waited for.
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGINT);
+    }
+}
+
+#[cfg(not(unix))]
+fn interrupt_process(child: &mut Child) {
+    let _ = child.kill();
 }
 
 impl<P: Protocol> LineDriver<P> {
     pub fn pid(&self) -> u32 {
-        self.child.id()
+        self.child.lock().unwrap().id()
+    }
+
+    /// Interrupts her process and, once it has ended (or been killed after
+    /// `RELAUNCH_GRACE`), starts another with `args` in its place, as
+    /// process `generation`. A start that fails ends her session.
+    fn relaunch(&self, generation: u64, args: Vec<String>) {
+        interrupt_process(&mut self.child.lock().unwrap());
+        let (child, shared, clock, l, env) = (self.child.clone(), self.shared.clone(), self.last_output.clone(), self.launch.clone(), self.env.clone());
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + RELAUNCH_GRACE;
+            loop {
+                let mut c = child.lock().unwrap();
+                match c.try_wait() {
+                    Ok(None) if Instant::now() < deadline => {}
+                    Ok(None) => {
+                        let _ = c.kill();
+                        let _ = c.wait();
+                        break;
+                    }
+                    _ => break,
+                }
+                drop(c);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Under her lock, so a shutdown either comes first and nothing
+            // starts, or comes after and finds the new process.
+            let mut s = shared.lock().unwrap();
+            let label = s.protocol.label();
+            if s.done || s.generation != generation {
+                return;
+            }
+            if s.closed {
+                s.emit(vec![Event::Exited(format!("the {label} process ended"))]);
+                return;
+            }
+            let started = start_process(&l, &args, &env).and_then(|mut new| {
+                let attached = attach(&shared, &mut new, generation, clock, label);
+                *child.lock().unwrap() = new;
+                attached
+            });
+            match started {
+                Ok((stdin, tail)) => {
+                    (s.stdin, s.stderr, s.relaunching) = (stdin, tail, false);
+                    crate::log::line("brain", format!("{label}: started again after a stop"));
+                    let first = s.guarded("a start", |p| p.start()).flatten();
+                    s.write_logged(first);
+                }
+                Err(e) => s.emit(vec![Event::Exited(format!("cannot start {label} again: {e}"))]),
+            }
+        });
     }
 }
 
@@ -253,6 +364,18 @@ impl<P: Protocol> Driver for LineDriver<P> {
             None => Ok(()),
         };
         s.emit(events);
+        // An agent that cannot stop in-band is started again; its old
+        // process's lines and end are dropped from now.
+        if let Some(args) = s.guarded("a stop", |p| p.relaunch()).flatten() {
+            if !s.relaunching {
+                s.relaunching = true;
+                s.generation += 1;
+                s.stdin = None;
+                let generation = s.generation;
+                drop(s);
+                self.relaunch(generation, args);
+            }
+        }
         wrote
     }
 
@@ -277,16 +400,21 @@ impl<P: Protocol> Driver for LineDriver<P> {
     }
 
     fn shutdown(&mut self) {
-        self.shared.lock().unwrap().stdin = None;
+        {
+            let mut s = self.shared.lock().unwrap();
+            s.closed = true;
+            s.stdin = None;
+        }
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
+            if matches!(self.child.lock().unwrap().try_wait(), Ok(Some(_))) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let mut c = self.child.lock().unwrap();
+        let _ = c.kill();
+        let _ = c.wait();
     }
 }
 
