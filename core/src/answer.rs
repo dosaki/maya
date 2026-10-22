@@ -1,5 +1,5 @@
 use crate::launch::check_choice;
-use crate::model::{AwaitKind, Card, State};
+use crate::model::{AwaitKind, Card, Question, State};
 
 /// The slash command that compacts a running session's context.
 pub const COMPACT: &str = "/compact";
@@ -166,30 +166,101 @@ pub fn needs_submit(question_index: usize, question_count: usize) -> bool {
     question_count > 1 && question_index + 1 == question_count
 }
 
+/// How a question is answered from Maya: an option, several options, the
+/// user's own words (the "Type something" row) or setting the question aside
+/// (the "Chat about this" row).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Pick {
+    Option { index: usize },
+    Options { indexes: Vec<usize> },
+    Own { text: String },
+    Chat,
+}
+
+/// One thing to do in the terminal for a pick.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Step {
+    /// Type the text, then Enter.
+    Line(String),
+    /// Wait this many milliseconds.
+    Pause(u64),
+}
+
+/// `text` as the one line typed on the "Type something" row: control codes
+/// gone, newlines and runs of whitespace one space, no blanks at the ends.
+pub fn own_line(text: &str) -> Result<String, String> {
+    if text.chars().count() > TYPED_MAX_CHARS {
+        return Err(format!("Message is too long to type (over {} characters).", TYPED_MAX_CHARS));
+    }
+    let line = typeable(text).split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+        return Err("Type an answer first.".into());
+    }
+    Ok(line)
+}
+
+/// The steps that answer `question` of `count` with `pick`: the arrows to its
+/// row (and the text, on the own row), then the Enter that `Line` adds. The
+/// last of several questions also confirms the review screen.
+pub fn steps_for_pick(q: &Question, question: usize, count: usize, pick: &Pick) -> Vec<Step> {
+    let submit = |mut steps: Vec<Step>| {
+        if needs_submit(question, count) {
+            steps.push(Step::Pause(SUBMIT_DELAY_MS));
+            steps.push(Step::Line(String::new()));
+        }
+        steps
+    };
+    match pick {
+        Pick::Option { index } => submit(vec![Step::Line(keys_for_option(*index))]),
+        Pick::Own { text } => {
+            let row = q.own.as_ref().map_or(q.options.len(), |o| o.row);
+            submit(vec![Step::Line(keys_for_option(row) + &own_line(text).unwrap_or_default())])
+        }
+        Pick::Chat => vec![Step::Line(keys_for_option(q.chat_row.unwrap_or(q.options.len() + 1)))],
+        // Multi-select is answered in the terminal until its keys are known.
+        Pick::Options { .. } => Vec::new(),
+    }
+}
+
 /// Refuses unless the card is still waiting on the ask the buttons were
-/// rendered for (`ask_id` is that ask's awaiting timestamp), the option
-/// exists, the question is single-select and the picker has had time to appear.
-pub fn check(card: &Card, ask_id: u64, question_index: usize, option_index: usize, now_ms: u64) -> Result<(), String> {
+/// rendered for (`ask_id` is that ask's awaiting timestamp), the pick fits
+/// the question and the picker has had time to appear.
+pub fn check_pick(card: &Card, ask_id: u64, question: usize, pick: &Pick, now_ms: u64) -> Result<(), String> {
     let aw = match (&card.state, &card.awaiting) {
-        (State::Awaiting, Some(aw)) if aw.kind == AwaitKind::Question => aw,
+        (State::Awaiting, Some(aw)) if aw.kind != AwaitKind::Text && !aw.questions.is_empty() => aw,
         _ => return Err("This session is not waiting for a question.".into()),
     };
     if card.state_since != ask_id {
         return Err("The question has changed; look again.".into());
     }
-    let Some(q) = aw.questions.get(question_index) else {
+    let Some(q) = aw.questions.get(question) else {
         return Err("That question has no such option.".into());
     };
-    if option_index >= q.options.len() {
-        return Err("That question has no such option.".into());
+    match pick {
+        Pick::Option { index } if *index >= q.options.len() => return Err("That question has no such option.".into()),
+        Pick::Own { text } => {
+            if q.own.is_none() {
+                return Err("That question takes no answer of your own.".into());
+            }
+            own_line(text)?;
+        }
+        Pick::Chat if q.chat_row.is_none() => return Err("That question cannot be set aside.".into()),
+        _ => {}
     }
-    if q.multi_select {
+    if q.multi_select || matches!(pick, Pick::Options { .. }) {
         return Err("Multi-select questions must be answered in the terminal.".into());
     }
     if now_ms.saturating_sub(card.state_since) < OPEN_DELAY_MS {
         return Err("Give the terminal a second to show the question.".into());
     }
     Ok(())
+}
+
+/// Refuses unless `option_index` of the question can be picked: `check_pick`
+/// with a `Pick::Option`.
+pub fn check(card: &Card, ask_id: u64, question_index: usize, option_index: usize, now_ms: u64) -> Result<(), String> {
+    check_pick(card, ask_id, question_index, &Pick::Option { index: option_index }, now_ms)
 }
 
 #[cfg(test)]
@@ -379,5 +450,81 @@ mod tests {
         // A terminal hyperlink, ended by ESC \, and a window title, ended by BEL.
         assert_eq!(reply_lines("see \x1b]8;;https://x.dev\x1b\\docs\x1b]8;;\x1b\\ now"), vec!["see docs now"]);
         assert_eq!(reply_lines("\x1b]0;my title\x07hello"), vec!["hello"]);
+    }
+
+    fn q_own(n: usize) -> Question {
+        Question { own: Some(crate::model::OwnRow { label: "Type something".into(), row: n }), chat_row: Some(n + 1), ..q(n, false) }
+    }
+
+    #[test]
+    fn option_steps_are_unchanged() {
+        assert_eq!(steps_for_pick(&q(3, false), 0, 1, &Pick::Option { index: 2 }), vec![Step::Line("\x1b[B\x1b[B".into())]);
+    }
+
+    #[test]
+    fn own_words_go_on_the_own_row() {
+        assert_eq!(steps_for_pick(&q_own(2), 0, 1, &Pick::Own { text: "use redis".into() }), vec![Step::Line("\x1b[B\x1b[Buse redis".into())]);
+    }
+
+    #[test]
+    fn chat_goes_to_the_chat_row() {
+        assert_eq!(steps_for_pick(&q_own(2), 0, 1, &Pick::Chat), vec![Step::Line("\x1b[B\x1b[B\x1b[B".into())]);
+    }
+
+    #[test]
+    fn the_last_of_several_questions_still_submits() {
+        let steps = steps_for_pick(&q_own(2), 1, 2, &Pick::Option { index: 0 });
+        assert_eq!(steps, vec![Step::Line("".into()), Step::Pause(SUBMIT_DELAY_MS), Step::Line("".into())]);
+        assert_eq!(steps_for_pick(&q_own(2), 0, 2, &Pick::Option { index: 0 }), vec![Step::Line("".into())]);
+    }
+
+    #[test]
+    fn own_line_cleans_text() {
+        assert_eq!(own_line("a\nb\tc\x1b[31m"), Ok("a b c".to_string()));
+        assert_eq!(own_line("\x1b\x07"), Err("Type an answer first.".to_string()));
+        assert!(own_line(&"x".repeat(TYPED_MAX_CHARS + 1)).unwrap_err().contains("too long"));
+    }
+
+    fn picks() -> Vec<Pick> {
+        vec![Pick::Option { index: 0 }, Pick::Options { indexes: vec![0] }, Pick::Own { text: "hi".into() }, Pick::Chat]
+    }
+
+    #[test]
+    fn check_pick_refuses_a_changed_ask_for_every_kind() {
+        let c = card(vec![q_own(2)], 1000);
+        for p in picks() {
+            assert_eq!(check_pick(&c, 900, 0, &p, 2000).unwrap_err(), "The question has changed; look again.", "{p:?}");
+        }
+    }
+
+    #[test]
+    fn check_pick_respects_the_open_delay() {
+        let c = card(vec![q_own(2)], 1000);
+        for p in [Pick::Option { index: 0 }, Pick::Own { text: "hi".into() }, Pick::Chat] {
+            assert!(check_pick(&c, 1000, 0, &p, 1500).unwrap_err().contains("second"), "{p:?}");
+            assert_eq!(check_pick(&c, 1000, 0, &p, 2000), Ok(()), "{p:?}");
+        }
+    }
+
+    #[test]
+    fn check_pick_refuses_picks_the_question_does_not_take() {
+        let c = card(vec![q(2, false), q(2, true)], 1000);
+        assert_eq!(check_pick(&c, 1000, 0, &Pick::Own { text: "x".into() }, 2000).unwrap_err(), "That question takes no answer of your own.");
+        assert_eq!(check_pick(&c, 1000, 0, &Pick::Chat, 2000).unwrap_err(), "That question cannot be set aside.");
+        assert!(check_pick(&c, 1000, 0, &Pick::Options { indexes: vec![0] }, 2000).unwrap_err().contains("Multi-select"));
+        assert!(check_pick(&c, 1000, 1, &Pick::Option { index: 0 }, 2000).unwrap_err().contains("Multi-select"));
+        assert!(check_pick(&c, 1000, 0, &Pick::Option { index: 2 }, 2000).unwrap_err().contains("no such option"));
+        assert!(check_pick(&c, 1000, 5, &Pick::Chat, 2000).unwrap_err().contains("no such option"));
+        let c = card(vec![q_own(2)], 1000);
+        assert_eq!(check_pick(&c, 1000, 0, &Pick::Own { text: "\x07".into() }, 2000).unwrap_err(), "Type an answer first.");
+    }
+
+    #[test]
+    fn check_pick_takes_any_awaiting_kind_with_questions_but_text() {
+        let mut c = card(vec![q_own(2)], 1000);
+        c.awaiting.as_mut().unwrap().kind = AwaitKind::Permission;
+        assert_eq!(check_pick(&c, 1000, 0, &Pick::Chat, 2000), Ok(()));
+        c.awaiting.as_mut().unwrap().kind = AwaitKind::Text;
+        assert!(check_pick(&c, 1000, 0, &Pick::Chat, 2000).unwrap_err().contains("not waiting"));
     }
 }

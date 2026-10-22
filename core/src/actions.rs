@@ -219,30 +219,46 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<Route, Stri
 
 /// Picks `option` of `question` in the session's open ask `ask_id`.
 pub fn answer_question(l: &Local, session_id: &str, ask_id: u64, question: usize, option: usize) -> Result<(), String> {
+    answer_pick(l, session_id, ask_id, question, &answer::Pick::Option { index: option })
+}
+
+/// Answers `question` in the session's open ask `ask_id` with `pick`: an
+/// option, the user's own words or setting the question aside.
+pub fn answer_pick(l: &Local, session_id: &str, ask_id: u64, question: usize, pick: &answer::Pick) -> Result<(), String> {
     if let Some(sc) = server_card(l, session_id, true)? {
-        answer::check(&sc.card, ask_id, question, option, now_ms())?;
+        answer::check_pick(&sc.card, ask_id, question, pick, now_ms())?;
         if let Some(p) = &sc.live.permission {
-            return crate::opencode::reply_permission(&sc.client, &sc.session.id, &p.id, crate::opencode::decision(option));
+            return match pick {
+                answer::Pick::Option { index } => crate::opencode::reply_permission(&sc.client, &sc.session.id, &p.id, crate::opencode::decision(*index)),
+                _ => Err("OpenCode takes that answer in its own window.".into()),
+            };
         }
         if let Some(f) = &sc.live.form {
             let field = f.fields.get(question).ok_or("That question has no such option.")?;
-            let (value, _) = field.options.get(option).ok_or("That question has no such option.")?;
-            return crate::opencode::reply_form(&sc.client, &sc.session.id, &f.id, &field.key, value);
+            let value = match pick {
+                answer::Pick::Option { index } => field.options.get(*index).ok_or("That question has no such option.")?.0.clone(),
+                answer::Pick::Own { text } => answer::own_line(text)?,
+                _ => return Err("OpenCode takes that answer in its own window.".into()),
+            };
+            return crate::opencode::reply_form(&sc.client, &sc.session.id, &f.id, &field.key, &value);
         }
         return Err("This session is not waiting for a question.".into());
     }
-    let (card, tty) = {
+    let (steps, tty) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
-        answer::check(&card, ask_id, question, option, now_ms())?;
+        answer::check_pick(&card, ask_id, question, pick, now_ms())?;
         let tty = session_tty(&store, session_id, card.pid)?;
-        (card, tty)
+        let questions = &card.awaiting.as_ref().ok_or("This session is not waiting for a question.")?.questions;
+        (answer::steps_for_pick(&questions[question], question, questions.len(), pick), tty)
     };
-    let count = card.awaiting.as_ref().map(|a| a.questions.len()).unwrap_or(0);
-    l.terminal.type_line(&tty, &answer::keys_for_option(option))?;
-    if answer::needs_submit(question, count) {
-        std::thread::sleep(Duration::from_millis(answer::SUBMIT_DELAY_MS));
-        l.terminal.type_line(&tty, "")?;
+    // All the steps of one pick under one hold of `TYPING`; the store is not locked.
+    let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
+    for step in steps {
+        match step {
+            answer::Step::Line(text) => l.terminal.type_line(&tty, &text)?,
+            answer::Step::Pause(ms) => std::thread::sleep(Duration::from_millis(ms)),
+        }
     }
     Ok(())
 }
@@ -1904,6 +1920,26 @@ mod tests {
         let entry = serde_json::json!({"pid": 4242, "sessionId": "s1", "cwd": "/Users/x/dev/eye", "name": "s1", "status": status, "tty": "/dev/pts/3"});
         std::fs::write(store.lock().unwrap().claude_dir().join("sessions/4242.json"), entry.to_string()).unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn answer_pick_types_the_steps() {
+        let (_d, store) = store_with_status("busy");
+        let maya = store.lock().unwrap().claude_dir().join("maya");
+        let ask = r#"{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"A?","header":"a","options":[{"label":"x","description":""},{"label":"y","description":""}]},{"question":"B?","header":"b","options":[{"label":"x","description":""},{"label":"y","description":""}]}]}}"#;
+        crate::hook_install::append_record_named(&maya, "events.jsonl", ask, now_ms() - 5000).unwrap();
+        let card = store.lock().unwrap().card_for("s1", now_ms()).unwrap();
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let t = |text: &str| Call::Type { tty: "/dev/pts/3".into(), text: text.into() };
+        answer_pick(&l, "s1", card.state_since, 0, &answer::Pick::Own { text: "use redis".into() }).unwrap();
+        answer_pick(&l, "s1", card.state_since, 1, &answer::Pick::Chat).unwrap();
+        answer_pick(&l, "s1", card.state_since, 1, &answer::Pick::Option { index: 1 }).unwrap();
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            vec![t("\x1b[B\x1b[Buse redis"), t("\x1b[B\x1b[B\x1b[B"), t("\x1b[B"), t("")]
+        );
+        assert_eq!(answer_pick(&l, "s1", card.state_since + 1, 0, &answer::Pick::Chat).unwrap_err(), "The question has changed; look again.");
     }
 
     #[test]
