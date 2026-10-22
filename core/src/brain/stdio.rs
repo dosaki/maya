@@ -4,8 +4,10 @@
 //! stderr for the reason it ended.
 //!
 //! The protocol, her stdin and the events share one lock, so the lines
-//! written and the events sent keep their order. A protocol that panics
-//! ends her session with `Exited` rather than poisoning that lock.
+//! written and the events sent keep their order. In debug and test builds
+//! a protocol that panics ends her session with `Exited` rather than
+//! poisoning that lock; release builds abort on a panic (`panic = "abort"`
+//! in Cargo.toml), so there a panic ends the whole app.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -119,9 +121,10 @@ impl<P: Protocol> Shared<P> {
         }
     }
 
-    /// Runs `f` on the protocol. A panic in it ends her session with
-    /// `Exited` (the protocol's state is not trusted again) and gives None;
-    /// it is caught under the lock, so the lock is not poisoned.
+    /// Runs `f` on the protocol. In debug and test builds a panic in it ends
+    /// her session with `Exited` (the protocol's state is not trusted again)
+    /// and gives None; it is caught under the lock, so the lock is not
+    /// poisoned. Release builds abort on a panic, so nothing is caught there.
     fn guarded<T>(&mut self, what: &str, f: impl FnOnce(&mut P) -> T) -> Option<T> {
         if self.done {
             return None;

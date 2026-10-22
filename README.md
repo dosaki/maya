@@ -284,8 +284,9 @@ resume or start a session, open or review a pull request.
     background subagents where the agent has them. Her chat log, her
     saved session and her watches live in that folder too. Maya never
     approves a permission prompt for the agent: Kiro and OpenCode approve
-    everything, as you chose; Codex, Grok and Antigravity use their own
-    auto-mode checks, and anything they escalate is declined. Her OpenCode
+    everything, as you chose; Codex and Grok use their own auto-mode
+    checks, and anything they escalate is declined; Antigravity's own auto
+    mode refuses what it will not run. Her OpenCode
     session lives on your own OpenCode server, hidden from the board.
   - On a machine in the assistant role, and whenever her session is down,
     only the text of your command, the last few exchanges and a summary
@@ -315,6 +316,10 @@ What differs between brains:
   "I'm in the middle of ..., I'll do that next."
 - Grok has no way to list or stop background subagents, so "stop" does not
   reach them and they do not show as working.
+- Antigravity does not report its subagents, so they do not show as
+  working. "Stop" while she is idle does nothing; during a turn it
+  interrupts and restarts her, which also ends any background subagent
+  with no report.
 - Codex runs with workspace writes and no network, and Maya declines every
   escalation, so jobs that need the network (`gh`, `git fetch`) fail with
   the Codex brain.

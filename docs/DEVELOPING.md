@@ -53,8 +53,8 @@ own OpenCode server), `session` (queue, busy replies, stop, compaction; no
 process in it), `protocol` (her fenced `maya` action blocks), `prompt`,
 `notes` (board changes since her last turn), `chat`, `record`, `watch` and
 `handover` (the summary for a Maya made main). Claude, ACP, Codex and agy
-share `stdio` (spawn, line reader, restart and kill) and `jsonrpc`; they
-differ only in a small protocol parser. Actions run after a 5 second
+share `stdio` (spawn, line reader, restart and kill), and ACP and Codex
+also share `jsonrpc`; they differ only in a small protocol parser. Actions run after a 5 second
 window unless the user says stop or corrects.
 
 Every brain is resident on the main machine; the quick one-shot
@@ -73,12 +73,17 @@ Limits per brain:
 
 - Maya never approves a permission prompt on the agent's behalf. Kiro
   (`--trust-all-tools`) and OpenCode (allow-all ruleset) approve
-  everything, by the user's choice; Grok, Codex and Antigravity use their
-  own auto-mode checks, and what they escalate is declined.
+  everything, by the user's choice; Grok and Codex use their own auto-mode
+  checks, and what they escalate is declined. Antigravity's own auto mode
+  refuses what it will not run: in headless mode nothing reaches Maya.
 - Codex and Kiro have no background subagents, so a long job makes her
   say "I'm in the middle of ..., I'll do that next."
 - Grok: ACP cannot list or stop background subagents, so "stop" does not
   reach them and they do not show as working.
+- Antigravity sends no TaskStarted/TaskEnded, so its subagents never show
+  as working. A stop while she is idle does nothing; a stop during a turn
+  sends SIGINT and relaunches on the saved conversation, which also ends
+  any background subagent with no report.
 - Codex runs workspace-write with no network (its closest-to-auto mode)
   and every escalation is declined, so network jobs (`gh`, `git fetch`)
   fail with the Codex brain.
