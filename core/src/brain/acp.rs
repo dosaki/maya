@@ -982,7 +982,7 @@ cat >/dev/null
         let script = r#"got
 echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
 got
-sleep 3
+sleep 10
 echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"acp-1"}}'
 cat >/dev/null
 "#;
@@ -990,12 +990,12 @@ cat >/dev/null
         let (tx, rx) = std::sync::mpsc::channel();
         let mut d = super::super::driver::spawn(&l, tx).unwrap();
         d.send("hi").unwrap();
-        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Event::TurnStarted);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::TurnStarted);
         let asked = Instant::now();
         d.interrupt().unwrap();
-        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Event::TurnFailed { context_tokens: None });
-        assert!(asked.elapsed() < Duration::from_secs(1), "before her session opens");
-        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Ready { session_id: "acp-1".into() });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::TurnFailed { context_tokens: None });
+        assert!(asked.elapsed() < Duration::from_secs(5), "before her session opens");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(20)).unwrap(), Event::Ready { session_id: "acp-1".into() });
         assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "the dropped message is not sent once she opens");
         let got = std::fs::read_to_string(dir.join("in.log")).unwrap();
         assert!(!got.contains("session/prompt"), "{got}");

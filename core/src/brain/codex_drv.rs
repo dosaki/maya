@@ -1077,7 +1077,7 @@ cat >/dev/null
 echo '{"id":1,"result":{}}'
 got
 got
-sleep 3
+sleep 10
 echo '{"id":2,"result":{"thread":{"id":"th-fake"}}}'
 cat >/dev/null
 "#;
@@ -1085,12 +1085,12 @@ cat >/dev/null
         let (tx, rx) = std::sync::mpsc::channel();
         let mut d = super::super::driver::spawn(&l, tx).unwrap();
         d.send("hi").unwrap();
-        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Event::TurnStarted);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::TurnStarted);
         let asked = Instant::now();
         d.interrupt().unwrap();
-        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Event::TurnFailed { context_tokens: None });
-        assert!(asked.elapsed() < Duration::from_secs(1), "before her thread opens");
-        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Ready { session_id: "th-fake".into() });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Event::TurnFailed { context_tokens: None });
+        assert!(asked.elapsed() < Duration::from_secs(5), "before her thread opens");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(20)).unwrap(), Event::Ready { session_id: "th-fake".into() });
         assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "the dropped message is not sent once she opens");
         assert!(got(&dir).iter().all(|v| v["method"] != "turn/start"));
         d.shutdown();

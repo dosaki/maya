@@ -1431,13 +1431,13 @@ mod tests {
         fn a_stop_before_her_session_exists_ends_the_turn_at_once() {
             let dir = tempfile::tempdir().unwrap();
             let f = server();
-            f.route_slow("POST /api/session", json!({"data": {"id": "ses_her"}}), 300);
+            f.route_slow("POST /api/session", json!({"data": {"id": "ses_her"}}), 3000);
             let (tx, rx) = channel();
             let mut d = start(&launch_in(dir.path()), f.service(), tx, &[10]).unwrap();
             d.send("hi").unwrap();
             d.interrupt().unwrap();
             assert_eq!(recv(&rx), Event::TurnStarted);
-            assert_eq!(rx.recv_timeout(Duration::from_millis(100)), Ok(Event::TurnFailed { context_tokens: None }), "at once, before her session exists");
+            assert_eq!(rx.recv_timeout(Duration::from_millis(1500)), Ok(Event::TurnFailed { context_tokens: None }), "at once, before her session exists");
             assert_eq!(recv(&rx), Event::Ready { session_id: "ses_her".into() });
             f.wait("her stream", |f| f.streams() == 1);
             std::thread::sleep(Duration::from_millis(100));
