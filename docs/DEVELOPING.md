@@ -45,24 +45,47 @@ session (`core/src/brain/`). Her files are in
 - `watches.json`: sessions and pull requests she asked to hear about.
 
 The modules: `driver` (what every resident brain looks like), `claude`
-(the Claude Code driver, stream-json over stdin/stdout), `session` (queue,
-busy replies, stop, compaction; no process in it), `protocol` (her
-fenced `maya` action blocks), `prompt`, `notes` (board changes since her
-last turn), `chat`, `record`, `watch` and `handover` (the summary for a
-Maya made main). Actions run after a 5 second
+(the Claude Code driver, stream-json over stdin/stdout), `acp` (Grok and
+Kiro, over ACP), `codex_drv` (Codex, `codex app-server`), `agy`
+(Antigravity, stream-json; a stop sends SIGINT and relaunches on the
+saved conversation), `opencode_drv` (OpenCode, HTTP and SSE on the user's
+own OpenCode server), `session` (queue, busy replies, stop, compaction; no
+process in it), `protocol` (her fenced `maya` action blocks), `prompt`,
+`notes` (board changes since her last turn), `chat`, `record`, `watch` and
+`handover` (the summary for a Maya made main). Claude, ACP, Codex and agy
+share `stdio` (spawn, line reader, restart and kill) and `jsonrpc`; they
+differ only in a small protocol parser. Actions run after a 5 second
 window unless the user says stop or corrects.
 
-Other brains use the quick one-shot interpreter with the same window:
-they have no resident session yet, but the Chat tab works with them as
-it does with Claude Code. Every Maya keeps her own brain: on an assistant
-machine it is dormant (no process runs, nothing is reset), Chat is
-read-only there, and her card in Debug mode is greyed as "Dormant". An
-assistant's `hello` says when its brain went dormant. Make main asks the
-outgoing main's brain for a handover summary (60 s at most; otherwise a
-digest of her Chat since then, and none for a phone), sent with
-`promote`; the new main resumes her own session and reads the summary as
-her first turn. Settings → Debug (off by default) shows the Debug tab
+Every brain is resident on the main machine; the quick one-shot
+interpreter with the same window is only the fallback (her session is
+down, or the machine is an assistant). Every Maya keeps her own brain: on
+an assistant machine it is dormant (no process runs, nothing is reset),
+Chat is read-only there, and her card in Debug mode is greyed as
+"Dormant". An assistant's `hello` says when its brain went dormant. Make
+main asks the outgoing main's brain for a handover summary (60 s at most;
+otherwise a digest of her Chat since then, and none for a phone), sent
+with `promote`; the new main resumes her own session and reads the summary
+as her first turn. Settings → Debug (off by default) shows the Debug tab
 and her card.
+
+Limits per brain:
+
+- Maya never approves a permission prompt on the agent's behalf. Kiro
+  (`--trust-all-tools`) and OpenCode (allow-all ruleset) approve
+  everything, by the user's choice; Grok, Codex and Antigravity use their
+  own auto-mode checks, and what they escalate is declined.
+- Codex and Kiro have no background subagents, so a long job makes her
+  say "I'm in the middle of ..., I'll do that next."
+- Grok: ACP cannot list or stop background subagents, so "stop" does not
+  reach them and they do not show as working.
+- Codex runs workspace-write with no network (its closest-to-auto mode)
+  and every escalation is declined, so network jobs (`gh`, `git fetch`)
+  fail with the Codex brain.
+- OpenCode: her session lives on the user's own OpenCode server (hidden
+  from the board) and runs with an allow-everything ruleset.
+- Compaction: only the Claude brain is compacted by Maya; the others
+  compact themselves.
 
 When her session stops on its own, the quick interpreter takes what she
 held and Maya starts her again after 30 s, then 60 s, 120 s and 300 s
