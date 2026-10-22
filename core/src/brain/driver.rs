@@ -65,6 +65,7 @@ pub fn spawn(l: &Launch, events: Sender<Event>) -> Result<Box<dyn Driver>, Strin
         Harness::ClaudeCode => Ok(Box::new(super::claude::spawn(l, events)?)),
         Harness::Grok | Harness::Kiro => Ok(Box::new(super::acp::spawn(l, events)?)),
         Harness::Codex => Ok(Box::new(super::codex_drv::spawn(l, events)?)),
+        Harness::Antigravity => Ok(Box::new(super::agy::spawn(l, events)?)),
         other => Err(format!("no resident brain for {}", crate::launch::label(other))),
     }
 }
@@ -75,8 +76,8 @@ mod tests {
 
     #[test]
     fn other_agents_have_no_resident_brain_yet() {
-        let l = Launch { agent: Harness::Antigravity, binary: "agy".into(), model: None, cwd: std::env::temp_dir(), system_prompt: String::new(), resume: None, writable: vec![] };
+        let l = Launch { agent: Harness::OpenCode, binary: "opencode".into(), model: None, cwd: std::env::temp_dir(), system_prompt: String::new(), resume: None, writable: vec![] };
         let (tx, _rx) = std::sync::mpsc::channel();
-        assert_eq!(spawn(&l, tx).err().as_deref(), Some("no resident brain for Antigravity"));
+        assert_eq!(spawn(&l, tx).err().as_deref(), Some("no resident brain for OpenCode"));
     }
 }

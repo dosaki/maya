@@ -1,6 +1,7 @@
 //! Maya's resident brain: her chat log and what grows around it.
 
 pub mod acp;
+pub mod agy;
 pub mod chat;
 pub mod claude;
 pub mod codex_drv;
