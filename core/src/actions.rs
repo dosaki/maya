@@ -219,30 +219,98 @@ pub fn send_reply(l: &Local, session_id: &str, text: &str) -> Result<Route, Stri
 
 /// Picks `option` of `question` in the session's open ask `ask_id`.
 pub fn answer_question(l: &Local, session_id: &str, ask_id: u64, question: usize, option: usize) -> Result<(), String> {
+    answer_pick(l, session_id, ask_id, question, &answer::Pick::Option { index: option })
+}
+
+/// Answers `question` in the session's open ask `ask_id` with `pick`: an
+/// option, the user's own words or setting the question aside.
+pub fn answer_pick(l: &Local, session_id: &str, ask_id: u64, question: usize, pick: &answer::Pick) -> Result<(), String> {
     if let Some(sc) = server_card(l, session_id, true)? {
-        answer::check(&sc.card, ask_id, question, option, now_ms())?;
+        answer::check_pick(&sc.card, ask_id, question, pick, now_ms())?;
         if let Some(p) = &sc.live.permission {
-            return crate::opencode::reply_permission(&sc.client, &sc.session.id, &p.id, crate::opencode::decision(option));
+            return match pick {
+                answer::Pick::Option { index } => crate::opencode::reply_permission(&sc.client, &sc.session.id, &p.id, crate::opencode::decision(*index)),
+                _ => Err("OpenCode takes that answer in its own window.".into()),
+            };
         }
         if let Some(f) = &sc.live.form {
             let field = f.fields.get(question).ok_or("That question has no such option.")?;
-            let (value, _) = field.options.get(option).ok_or("That question has no such option.")?;
-            return crate::opencode::reply_form(&sc.client, &sc.session.id, &f.id, &field.key, value);
+            let value = match pick {
+                answer::Pick::Option { index } => field.options.get(*index).ok_or("That question has no such option.")?.0.clone(),
+                answer::Pick::Own { text } => answer::own_line(text)?,
+                _ => return Err("OpenCode takes that answer in its own window.".into()),
+            };
+            return crate::opencode::reply_form(&sc.client, &sc.session.id, &f.id, &field.key, &value);
         }
         return Err("This session is not waiting for a question.".into());
+    }
+    let (steps, tty, claude) = {
+        let mut store = l.store.lock().unwrap();
+        let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
+        answer::check_pick(&card, ask_id, question, pick, now_ms())?;
+        let tty = session_tty(&store, session_id, card.pid)?;
+        let questions = &card.awaiting.as_ref().ok_or("This session is not waiting for a question.")?.questions;
+        (answer::steps_for_pick(&questions[question], question, questions.len(), pick), tty, card.harness == model::Harness::ClaudeCode)
+    };
+    // All the steps of one pick under one hold of `TYPING`; the store is not locked.
+    let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
+    for step in steps {
+        match step {
+            answer::Step::Line(text) => l.terminal.type_line(&tty, &text)?,
+            answer::Step::Pause(ms) => std::thread::sleep(Duration::from_millis(ms)),
+        }
+    }
+    // "Chat about this" dismisses the question like Esc, and Claude's hooks
+    // say nothing of it: set the ask aside here, or the card keeps it.
+    if claude && matches!(pick, answer::Pick::Chat) {
+        l.store.lock().unwrap().mark_interrupted(session_id, now_ms());
+    }
+    Ok(())
+}
+
+/// Why Stop does nothing for `card`, if so: the agent has no stop key, or no
+/// turn is running to stop. Checked before anything reaches the session.
+fn check_stoppable(card: &model::Card) -> Result<(), String> {
+    if launch::capabilities(card.harness).stop.is_none() {
+        return Err(format!("{} has no Stop yet.", launch::label(card.harness)));
+    }
+    if !launch::can_stop(card) {
+        return Err("There is nothing to stop in this session.".into());
+    }
+    Ok(())
+}
+
+/// Presses Esc in the session's terminal, or asks OpenCode's server to
+/// interrupt, so the turn ends (or the prompt it waits on is dismissed).
+pub fn stop_session(l: &Local, session_id: &str) -> Result<(), String> {
+    if let Some(sc) = server_card(l, session_id, true)? {
+        check_stoppable(&sc.card)?;
+        return crate::opencode::interrupt(&sc.client, &sc.session.id);
     }
     let (card, tty) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
-        answer::check(&card, ask_id, question, option, now_ms())?;
+        check_stoppable(&card)?;
         let tty = session_tty(&store, session_id, card.pid)?;
         (card, tty)
     };
-    let count = card.awaiting.as_ref().map(|a| a.questions.len()).unwrap_or(0);
-    l.terminal.type_line(&tty, &answer::keys_for_option(option))?;
-    if answer::needs_submit(question, count) {
-        std::thread::sleep(Duration::from_millis(answer::SUBMIT_DELAY_MS));
-        l.terminal.type_line(&tty, "")?;
+    // Esc alone, never an Enter after it. One key press at a time, like typed lines: see `TYPING`.
+    let pressed = {
+        let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
+        l.terminal.press_keys(&tty, answer::ESC)
+    };
+    crate::log::line(
+        "stop",
+        match &pressed {
+            Ok(()) => format!("pressed Esc in {session_id}"),
+            Err(e) => format!("could not press Esc in {session_id}: {e}"),
+        },
+    );
+    pressed?;
+    // Claude's hooks say nothing about an interrupt, so the ask it left would
+    // linger on the card until the next prompt.
+    if card.harness == model::Harness::ClaudeCode {
+        l.store.lock().unwrap().mark_interrupted(session_id, now_ms());
     }
     Ok(())
 }
@@ -968,7 +1036,7 @@ mod tests {
 
     /// A working session's card, under the agent's own name.
     fn test_card(id: &str, harness: Harness, cwd: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state: State::Working, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false }
+        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state: State::Working, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false }
     }
 
     /// Codex rollout lines: a turn starting, and that turn finished with a reply.
@@ -1848,6 +1916,131 @@ mod tests {
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
         assert_eq!(send_reply(&l, "s1", "yes"), Err("This session is waiting for a decision; answer it first.".into()));
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    /// A Claude session on `/dev/pts/3` whose registry says `status`.
+    fn store_with_status(status: &str) -> (tempfile::TempDir, Mutex<Store>) {
+        let (dir, store) = store_with_session("s1", 4242);
+        let entry = serde_json::json!({"pid": 4242, "sessionId": "s1", "cwd": "/Users/x/dev/eye", "name": "s1", "status": status, "tty": "/dev/pts/3"});
+        std::fs::write(store.lock().unwrap().claude_dir().join("sessions/4242.json"), entry.to_string()).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn answer_pick_types_the_steps() {
+        let (_d, store) = store_with_status("busy");
+        let maya = store.lock().unwrap().claude_dir().join("maya");
+        let ask = r#"{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"A?","header":"a","options":[{"label":"x","description":""},{"label":"y","description":""}]},{"question":"B?","header":"b","options":[{"label":"x","description":""},{"label":"y","description":""}]}]}}"#;
+        crate::hook_install::append_record_named(&maya, "events.jsonl", ask, now_ms() - 5000).unwrap();
+        let card = store.lock().unwrap().card_for("s1", now_ms()).unwrap();
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let t = |text: &str| Call::Type { tty: "/dev/pts/3".into(), text: text.into() };
+        answer_pick(&l, "s1", card.state_since, 0, &answer::Pick::Own { text: "use redis".into() }).unwrap();
+        answer_pick(&l, "s1", card.state_since, 1, &answer::Pick::Option { index: 1 }).unwrap();
+        assert_eq!(answer_pick(&l, "s1", card.state_since + 1, 0, &answer::Pick::Chat).unwrap_err(), "The question has changed; look again.");
+        answer_pick(&l, "s1", card.state_since, 1, &answer::Pick::Chat).unwrap();
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            vec![t("\x1b[B\x1b[Buse redis"), t("\x1b[B"), t(""), t("\x1b[B\x1b[B\x1b[B")]
+        );
+    }
+
+    #[test]
+    fn a_chat_pick_sets_the_ask_aside_but_an_option_pick_does_not() {
+        let ask = r#"{"session_id":"s1","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"A?","header":"a","options":[{"label":"x","description":""},{"label":"y","description":""}]}]}}"#;
+        let fake = FakeTerminal::default();
+        let (_d, store) = store_with_status("busy");
+        let maya = store.lock().unwrap().claude_dir().join("maya");
+        crate::hook_install::append_record_named(&maya, "events.jsonl", ask, now_ms() - 5000).unwrap();
+        let card = store.lock().unwrap().card_for("s1", now_ms()).unwrap();
+        let l = Local { store: &store, terminal: &fake };
+        answer_pick(&l, "s1", card.state_since, 0, &answer::Pick::Option { index: 0 }).unwrap();
+        let after = store.lock().unwrap().card_for("s1", now_ms() + 1).unwrap();
+        assert!(after.awaiting.is_some());
+        answer_pick(&l, "s1", card.state_since, 0, &answer::Pick::Chat).unwrap();
+        let after = store.lock().unwrap().card_for("s1", now_ms() + 1).unwrap();
+        assert!(after.awaiting.is_none());
+        assert!(answer::check_free(&after).is_ok());
+    }
+
+    #[test]
+    fn stop_presses_esc_and_nothing_else() {
+        let (_d, store) = store_with_status("busy");
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        stop_session(&l, "s1").unwrap();
+        assert_eq!(*fake.calls.lock().unwrap(), vec![Call::Keys { tty: "/dev/pts/3".into(), keys: "\x1b".into() }]);
+    }
+
+    #[test]
+    fn stop_clears_the_pending_ask() {
+        let (_d, store) = store_with_status("busy");
+        let maya = store.lock().unwrap().claude_dir().join("maya");
+        crate::hook_install::append_record_named(&maya, "events.jsonl", r#"{"session_id":"s1","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git push"}}"#, now_ms()).unwrap();
+        assert_eq!(store.lock().unwrap().card_for("s1", now_ms()).unwrap().state, State::Awaiting);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        stop_session(&l, "s1").unwrap();
+        let card = store.lock().unwrap().card_for("s1", now_ms() + 1).unwrap();
+        assert!(card.awaiting.is_none());
+        assert!(answer::check_free(&card).is_ok());
+    }
+
+    #[test]
+    fn stop_refuses_when_there_is_nothing_to_stop() {
+        let nothing = Err("There is nothing to stop in this session.".to_string());
+        let fake = FakeTerminal::default();
+        // Idle.
+        let (_d, store) = store_with_status("idle");
+        assert_eq!(stop_session(&Local { store: &store, terminal: &fake }, "s1"), nothing);
+        // Completed: a turn ended a moment ago.
+        let (_d, store) = store_with_status("idle");
+        let maya = store.lock().unwrap().claude_dir().join("maya");
+        crate::hook_install::append_record_named(&maya, "events.jsonl", r#"{"session_id":"s1","hook_event_name":"Stop"}"#, now_ms()).unwrap();
+        assert_eq!(store.lock().unwrap().card_for("s1", now_ms()).unwrap().state, State::Completed);
+        assert_eq!(stop_session(&Local { store: &store, terminal: &fake }, "s1"), nothing);
+        // Only a background shell is running.
+        let (_d, store) = store_with_status("shell");
+        let card = store.lock().unwrap().card_for("s1", now_ms()).unwrap();
+        assert_eq!((card.state, card.shell), (State::Working, true));
+        assert_eq!(stop_session(&Local { store: &store, terminal: &fake }, "s1"), nothing);
+        // A turn that ended by asking in prose.
+        let (_d, store) = store_with_status("idle");
+        let maya = store.lock().unwrap().claude_dir().join("maya");
+        crate::hook_install::append_record_named(&maya, "events.jsonl", r#"{"session_id":"s1","hook_event_name":"Stop"}"#, now_ms()).unwrap();
+        {
+            let mut st = store.lock().unwrap();
+            let s = st.session("s1").unwrap();
+            let path = st.transcript_path_for(&s);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let line = serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Should I go ahead and delete them?"}]}});
+            std::fs::write(&path, format!("{line}\n")).unwrap();
+            let card = st.card_for("s1", now_ms()).unwrap();
+            assert_eq!(card.awaiting.as_ref().map(|a| a.kind), Some(model::AwaitKind::Text));
+        }
+        assert_eq!(stop_session(&Local { store: &store, terminal: &fake }, "s1"), nothing);
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stop_refuses_an_agent_without_a_stop_key() {
+        let (t, store, _path) = store_with_codex(&format!("{TURN_STARTED}\n"));
+        let grok_dir = t.path().join("agy").join("no-grok");
+        let dir = t.path().join("grok-session");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&grok_dir).unwrap();
+        std::fs::write(grok_dir.join("active_sessions.json"), r#"[{"session_id":"g1","pid":78,"cwd":"/x"}]"#).unwrap();
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/grok");
+        for f in ["events.jsonl", "chat_history.jsonl"] {
+            std::fs::copy(fixtures.join(f), dir.join(f)).unwrap();
+        }
+        let grok = ForeignSession { harness: Harness::Grok, pid: 78, tty: Some("ttys010".into()), session_id: "g1".into(), cwd: "/x".into(), name: "Grok".into(), transcript_path: dir.join("events.jsonl") };
+        let store = Mutex::new(store.into_inner().unwrap().with_processes(vec![grok]));
+        store.lock().unwrap().refresh(now_ms());
+        let fake = FakeTerminal::default();
+        assert_eq!(stop_session(&Local { store: &store, terminal: &fake }, "g1"), Err("Grok Build has no Stop yet.".into()));
         assert!(fake.calls.lock().unwrap().is_empty());
     }
 

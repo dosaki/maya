@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "./actions";
-import { answerGuard } from "./answer";
+import { answerGuard, stopGuard } from "./answer";
 import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
 import { openModal, refreshModal, setProgress } from "./modal";
@@ -144,10 +144,24 @@ function act(target: Element): void {
   } else if (action.kind === "pr") void openPr(card.sessionId);
   else if (action.kind === "compact") void compact(card.sessionId);
   else if (action.kind === "close") void closeSession(card);
+  else if (action.kind === "stop") void stop(card, target);
   else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex, target);
   else {
     closeNewSession();
     void openModal(card);
+  }
+}
+
+/** Stop from a card; the button stays disabled until the card moves on, or comes back on an error. */
+async function stop(card: Card, target: Element): Promise<void> {
+  const button = target.closest<HTMLButtonElement>("button[data-action=stop]");
+  if (!button) return;
+  try {
+    const outcome = await stopGuard.stop(card, button);
+    if (outcome === "sent") showToast(`Sent Stop to ${card.name}`);
+  } catch (e) {
+    showToast(String(e));
+    paint();
   }
 }
 

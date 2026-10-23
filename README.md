@@ -17,6 +17,8 @@ the right terminal first.
 - Shows Claude Code, Codex, Antigravity, Grok Build, Kiro CLI and OpenCode sessions on one board as cards in a Kanban-like board
   - Each session card lands in a column: Idle, Working, Awaiting Decision or Completed
 - Lets you reply, answer questions, and run slash commands and `!` shell lines from the card
+- Stops a session that is working with a Stop button, which sends it the same Esc you would press in its terminal
+- Answers a question from a menu like the agent's own: pick an option, write your own words with "Type something", or pick "Chat about this" to talk it over first
 - Starts new sessions and resumes old ones
 - After a restart, offers to resume every session that was running, on this machine and on the paired ones, each in its own folder and terminal: from the Sessions tab, or by voice ("Maya, resume my sessions")
 - Shows what a session's terminal shows: the conversation, each command's output, edit diffs, how long it has been working, and its model, folder and branch

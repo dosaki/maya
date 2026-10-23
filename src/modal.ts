@@ -1,20 +1,24 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { answerGuard } from "./answer";
+import { answerGuard, stopButton, stopGuard } from "./answer";
 import { composeMessage, makeAttachments, pastedFiles, renderChips, type Attachment } from "./attachments";
 import { renderMarkdown } from "./markdown";
 import { projectName } from "./format";
 import { iconElement } from "./icons";
+import { MENU_PICK, renderMenu, type MenuPick } from "./menu";
 import { CLAUDE_AGENT, renderChoice, type AgentInfo } from "./newsession";
-import { OPEN_DELAY_MS, nextEnableDelay, renderOptions } from "./options";
+import { OPEN_DELAY_MS, nextEnableDelay } from "./options";
 import type { Progress } from "./progress";
 import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
-import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, prRef, remoteTitle, type Card, type Turn, type ViewerTheme } from "./types";
+import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, prRef, remoteTitle, type Card, type Pick, type Turn, type ViewerTheme } from "./types";
 import { renderToolTurn, resetToolUi } from "./toolturn";
 import { sendShortcut } from "./platform";
 
-/** Composer features the page turns on: the phone has a picker instead of drag-and-drop. */
-const composer = { attachButton: false };
+/**
+ * Composer features the page turns on: the phone has a picker instead of
+ * drag-and-drop, and no keyboard to hint at in the menu.
+ */
+const composer = { attachButton: false, keyboardHints: true };
 
 export function setComposerOptions(o: Partial<typeof composer>): void {
   Object.assign(composer, o);
@@ -68,7 +72,10 @@ export interface ModalHandlers {
   onSend(text: string): void;
   onTerminal(): void;
   onClose(): void;
-  onAnswer(questionIndex: number, optionIndex: number, button: HTMLElement): void;
+  /** Answer the question on screen from the menu; `el` is the row or box it came from. */
+  onPick(questionIndex: number, pick: Pick, el: HTMLElement): void;
+  /** Stop the session's turn (Esc in its terminal). */
+  onStop(button: HTMLButtonElement): void;
   /** Change the running session's model or effort (typed as a slash command). */
   onSetOption(setting: "model" | "effort", value: string): void;
   /** Send Shift+Tab to the session to move it to its next permission mode. */
@@ -537,15 +544,17 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   head.append(titles, state, look, close);
   panel.append(head);
 
+  const menu = renderMenu(m.card, m.next ?? 0, { enabled: nowMs - m.card.stateSince >= OPEN_DELAY_MS, keyboardHints: composer.keyboardHints });
   if (m.card.state === "awaiting") {
     const banner = el("div", "modal__banner");
-    const options = renderOptions(m.card, m.next ?? 0, { descriptions: true, enabled: nowMs - m.card.stateSince >= OPEN_DELAY_MS });
     const prose = m.card.awaiting?.kind === "text";
     const remote = !!m.card.machine;
-    const text = options
+    // A multi-select menu is read-only: it is answered in the terminal.
+    const answerable = !!menu && !m.card.awaiting?.questions[m.next ?? 0]?.multiSelect;
+    const text = answerable
       ? remote
-        ? "This session is asking a question. Pick an answer here."
-        : "This session is asking a question. Pick an answer here or in its terminal."
+        ? "This session is asking. Answer below."
+        : "This session is asking. Answer below or in its terminal."
       : prose
         ? remote
           ? `This session asked you something. Reply below. "${m.card.awaiting?.detail ?? ""}"`
@@ -559,13 +568,6 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
       open.type = "button";
       open.addEventListener("click", () => h.onTerminal());
       banner.append(open);
-    }
-    if (options) {
-      options.addEventListener("click", (ev) => {
-        const btn = (ev.target as HTMLElement).closest<HTMLElement>("button[data-action=answer]");
-        if (btn && !(btn as HTMLButtonElement).disabled) h.onAnswer(Number(btn.dataset.q), Number(btn.dataset.opt), btn);
-      });
-      banner.append(options);
     }
     panel.append(banner);
   }
@@ -602,9 +604,21 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const tweaks = renderTweaks(h, caps, m.agent ?? (claude ? CLAUDE_AGENT : { harness: m.card.harness, models: [], efforts: [], modes: [] }), m.card.model);
   if (tweaks) panel.append(tweaks);
 
-  // Every card takes replies: they are typed into the session's terminal, with
-  // a Claude session's inbox as the fallback.
-  {
+  const stop = stopButton(m.card, nowMs, "card__btn modal__stop");
+  stop?.addEventListener("click", () => h.onStop(stop));
+  if (menu) {
+    // While the session asks, the menu stands in for the composer: typed
+    // words go through its own row, never as a bare line.
+    menu.addEventListener(MENU_PICK, (ev) => {
+      const { questionIndex, pick } = (ev as CustomEvent<MenuPick>).detail;
+      h.onPick(questionIndex, pick, ev.target as HTMLElement);
+    });
+    if (stop) menu.querySelector(".menu__foot")?.append(stop);
+    panel.append(menu);
+    panel.append(el("div", "modal__statusline modal__statusline--foot", statusLine(m.card)));
+  } else {
+    // Every card takes replies: they are typed into the session's terminal, with
+    // a Claude session's inbox as the fallback.
     const attachments = m.attachments ?? [];
     panel.append(renderChips(attachments, (path) => h.onRemoveAttachment?.(path)));
     const form = el("div", "modal__composer");
@@ -660,10 +674,12 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
       attach.type = "button";
       attach.dataset.action = "attach";
       attach.addEventListener("click", () => pick.click());
-      form.append(prompt, ta, pick, attach, send);
+      form.append(prompt, ta, pick, attach);
     } else {
-      form.append(prompt, ta, send);
+      form.append(prompt, ta);
     }
+    if (stop) form.append(stop);
+    form.append(send);
     panel.append(form);
     panel.append(el("div", "modal__statusline modal__statusline--foot", statusLine(m.card)));
   }
@@ -677,7 +693,8 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
  * Updates an already-rendered modal from a fresh render without touching the
  * composer, so focus, caret, selection and a half-typed draft survive
  * background refreshes. History, state badge, banner and status line are
- * transplanted from `fresh`.
+ * transplanted from `fresh`; so is the composer's Stop button, and the menu
+ * only when it is for another question or came out of the open delay.
  */
 export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
   const panel = root.querySelector(".modal__panel");
@@ -707,6 +724,10 @@ export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
   const pending = [...panel.querySelectorAll<HTMLSelectElement>(".modal__tweaks select")].some((s) => s.value !== "");
   if (!pending) swap(".modal__tweaks", ".modal__chips, .modal__composer");
   swap(".modal__chips", ".modal__composer");
+  swap(".modal__composer .modal__stop", ".modal__composer [data-action=send]");
+  const menu = panel.querySelector<HTMLElement>(".menu");
+  const freshMenu = freshPanel.querySelector<HTMLElement>(".menu");
+  if (menu && freshMenu && menu.dataset.key !== freshMenu.dataset.key) menu.replaceWith(freshMenu);
   swap(".modal__status");
 }
 
@@ -832,7 +853,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   const host = document.getElementById("modal-host");
   if (!host || !current) return;
   const m = current.model;
-  const ta = host.querySelector<HTMLTextAreaElement>("textarea");
+  const ta = host.querySelector<HTMLTextAreaElement>(".modal__input");
   if (ta) m.draft = ta.value;
   const oldHist = host.querySelector(".modal__history");
   const wasAtBottom = !oldHist || oldHist.scrollTop + oldHist.clientHeight >= oldHist.scrollHeight - 8;
@@ -846,7 +867,8 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     onSend: (text) => void guardedSend(text),
     onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
     onClose: dismiss,
-    onAnswer: (q, opt, btn) => void answer(q, opt, btn),
+    onPick: (q, pick, el) => void answerPick(q, pick, el),
+    onStop: (button) => void stop(button),
     onSetOption: (setting, value) => void setOption(setting, value),
     onCycleMode: () => void cycleMode(),
     onOpenPr: () => void invoke("open_pr", { sessionId: m.card.sessionId }).catch((e) => setStatus(false, String(e))),
@@ -860,32 +882,47 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     },
     onPasteFiles: (files) => void attachPasted(files),
   });
-  // Buttons rendered inside the open delay: repaint once it has elapsed.
+  // Rows and Stop rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay([m.card], Date.now());
   if (enableTimer) clearTimeout(enableTimer);
   enableTimer = delay === null ? undefined : setTimeout(() => { enableTimer = undefined; paint(); }, delay + 50);
+  // The panel is patched while it keeps its composer or its menu; switching
+  // between the two redraws it, the draft riding along in the model.
   const existing = host.querySelector<HTMLElement>(".modal");
-  const composerUnchanged = !!existing && !!existing.querySelector("textarea");
-  if (existing && composerUnchanged) patchModal(existing, fresh);
+  const sameBottom = !!existing && (existing.querySelector(".menu") ? !!fresh.querySelector(".menu") : !!existing.querySelector(".modal__input") && !!fresh.querySelector(".modal__input"));
+  if (existing && sameBottom) patchModal(existing, fresh);
   else {
     host.replaceChildren(fresh);
     watchPanelSize(host.querySelector<HTMLElement>(".modal__panel"));
   }
   const hist = host.querySelector(".modal__history");
   if (hist) hist.scrollTop = wasAtBottom ? hist.scrollHeight : oldScroll;
-  if (opts.focusInput) host.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+  if (opts.focusInput) host.querySelector<HTMLTextAreaElement>(".modal__input")?.focus();
 }
 
-async function answer(questionIndex: number, optionIndex: number, button: HTMLElement): Promise<void> {
+async function answerPick(questionIndex: number, pick: Pick, el: HTMLElement): Promise<void> {
   if (!current) return;
   const me = current;
   const { card } = me.model;
   try {
-    const outcome = await answerGuard.answer(card, questionIndex, optionIndex, button);
+    const outcome = await answerGuard.pick(card, questionIndex, pick, el);
     if (current !== me || outcome === "dropped") return;
-    progress?.advance(card);
-    me.model.status = { ok: true, text: "Answer sent to the terminal" };
+    // Chat about this sets the whole ask aside; any other pick answers this question.
+    if (pick.kind === "chat") progress?.finish(card);
+    else progress?.advance(card);
+    me.model.status = { ok: true, text: pick.kind === "chat" ? "Sent Chat about this to the terminal" : "Answer sent to the terminal" };
     paint();
+  } catch (e) {
+    if (current === me) setStatus(false, String(e));
+  }
+}
+
+async function stop(button: HTMLButtonElement): Promise<void> {
+  if (!current) return;
+  const me = current;
+  try {
+    const outcome = await stopGuard.stop(me.model.card, button);
+    if (current === me && outcome === "sent") setStatus(true, "Sent Stop to the session");
   } catch (e) {
     if (current === me) setStatus(false, String(e));
   }
@@ -958,7 +995,7 @@ const guardedSend = makeSendGuard(async (text: string) => {
   const { card } = current.model;
   try {
     const route = await invoke<"typed" | "inbox" | null>("send_reply", { sessionId: card.sessionId, text, attachments: current.model.attachments?.map((a) => a.path) ?? [] });
-    const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea");
+    const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>(".modal__input");
     if (ta) ta.value = "";
     current.model.draft = "";
     attachments.clear();
@@ -981,7 +1018,7 @@ const guardedCommand = makeSendGuard(async (text: string) => {
   try {
     await invoke("send_slash_command", { sessionId: card.sessionId, text });
     if (current !== me) return;
-    const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>("textarea");
+    const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>(".modal__input");
     if (ta) ta.value = "";
     me.model.draft = "";
     me.model.status = { ok: true, text: `Sent ${text} to the terminal` };

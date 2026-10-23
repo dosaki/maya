@@ -72,6 +72,11 @@ pub fn reply_line_args(target: &str, line: &str, enter: &str) -> Vec<Vec<String>
     out
 }
 
+/// The tmux command that sends `keys` as their exact bytes, with no Enter.
+pub fn press_keys_args(target: &str, keys: &str) -> Vec<String> {
+    ["send-keys", "-t", target, "-H"].iter().map(|s| s.to_string()).chain(keys.bytes().map(|b| format!("{b:02x}"))).collect()
+}
+
 /// `tmux list-panes -a -F '#{pane_tty}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_name}'`
 pub const LIST_PANES_FORMAT: &str = "#{pane_tty}\t#{session_name}:#{window_index}.#{pane_index}\t#{session_name}";
 
@@ -116,6 +121,10 @@ impl Terminal for Tmux {
         let (target, _) = self.pane(tty).ok_or(NOT_IN_TMUX)?;
         for args in send_keys_args(&target, text) { self.run(&args)?; }
         Ok(())
+    }
+    fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
+        let (target, _) = self.pane(tty).ok_or(NOT_IN_TMUX)?;
+        self.run(&press_keys_args(&target, keys)).map(|_| ())
     }
     /// The pane is looked up once. Past that, a failed `send-keys` may follow
     /// keys that went in (a line's text and its Enter are separate commands),
@@ -182,6 +191,11 @@ mod tests {
             vec![v(&["send-keys", "-t", "t", "-l", "--", "push it\\;"]), v(&["send-keys", "-t", "t", "-H", "1b", "0d"])]
         );
         assert_eq!(reply_line_args("t", "", crate::answer::SEND), vec![v(&["send-keys", "-t", "t", "-H", "1b", "5b", "31", "33", "75"])], "a blank line is only its Enter");
+    }
+
+    #[test]
+    fn raw_keys_are_sent_as_hex_without_enter() {
+        assert_eq!(press_keys_args("maya-1:0.0", "\x1b"), v(&["send-keys", "-t", "maya-1:0.0", "-H", "1b"]));
     }
 
     #[test]

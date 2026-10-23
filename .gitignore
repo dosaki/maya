@@ -40,3 +40,4 @@ mobile/gen/schemas
 dist-mobile
 mobile/gen/android/keystore.properties
 *.jks
+.superpowers/

@@ -6,6 +6,7 @@ use crate::hub::Hub;
 use crate::android;
 use maya_core::actions::{Route, StartResult};
 use maya_core::agents::AgentInfo;
+use maya_core::answer::Pick;
 use maya_core::config::{Config, NetworkRole};
 use maya_core::launch::LaunchOptions;
 use maya_core::model::{Card, Harness};
@@ -53,6 +54,16 @@ pub fn send_reply(hub: H, session_id: String, text: String, attachments: Vec<Str
 #[tauri::command(async)]
 pub fn answer_question(hub: H, session_id: String, ask_id: u64, question_index: usize, option_index: usize) -> Result<(), String> {
     hub.send(&session_id, |session| CommandKind::Answer { session, ask_id, question: question_index, option: option_index }).map(|_| ())
+}
+
+#[tauri::command(async)]
+pub fn answer_pick(hub: H, session_id: String, ask_id: u64, question_index: usize, pick: Pick) -> Result<(), String> {
+    hub.send(&session_id, |session| CommandKind::Pick { session, ask_id, question: question_index, pick }).map(|_| ())
+}
+
+#[tauri::command(async)]
+pub fn stop_session(hub: H, session_id: String) -> Result<(), String> {
+    hub.send(&session_id, |session| CommandKind::Stop { session }).map(|_| ())
 }
 
 #[tauri::command(async)]

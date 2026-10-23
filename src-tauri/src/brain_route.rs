@@ -37,6 +37,7 @@ pub(crate) fn brain_card(session_id: &str, agent: Harness, cwd: &str, working: b
         model: None,
         branch: None,
         brain: true,
+        shell: false,
     }
 }
 

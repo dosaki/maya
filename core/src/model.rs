@@ -37,6 +37,19 @@ pub struct Question {
     pub options: Vec<Choice>,
     #[serde(default)]
     pub multi_select: bool,
+    /// The terminal's row for answering in your own words, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own: Option<OwnRow>,
+    /// The terminal's row for setting the question aside ("Chat about this").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_row: Option<usize>,
+}
+
+/// A row of a question's menu that takes typed text instead of a choice.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct OwnRow {
+    pub label: String,
+    pub row: usize,
 }
 
 /// Reads `input["questions"]` from an AskUserQuestion tool input. Anything
@@ -144,11 +157,26 @@ pub struct Card {
     /// never counted, announced or mirrored.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub brain: bool,
+    /// True when the card is Working only because a background shell the
+    /// turn started still runs: there is no turn to stop.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shell: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_question_without_own_or_chat_rows_round_trips_unchanged() {
+        let q: Question = serde_json::from_str(r#"{"question":"Q","header":"H","options":[],"multiSelect":false}"#).unwrap();
+        assert_eq!((q.own.clone(), q.chat_row), (None, None));
+        let json = serde_json::to_value(&q).unwrap();
+        assert!(json.get("own").is_none() && json.get("chatRow").is_none());
+        let with = Question { own: Some(OwnRow { label: "Type something".into(), row: 2 }), chat_row: Some(3), ..q };
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!((json["own"]["row"].as_u64(), json["chatRow"].as_u64()), (Some(2), Some(3)));
+    }
 
     #[test]
     fn a_pull_request_from_an_older_maya_is_a_github_one() {
@@ -224,7 +252,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None, brain: false
+            stale: false, model: None, branch: None, brain: false, shell: false
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["context"]["percent"], 62);

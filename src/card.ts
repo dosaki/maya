@@ -1,3 +1,4 @@
+import { stopButton } from "./answer";
 import { formatAge, projectName } from "./format";
 import { OPEN_DELAY_MS, renderOptions } from "./options";
 import { capabilitiesOf, harnessBadge } from "./harness";
@@ -74,6 +75,8 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
   }
   if (card.pr) actions.append(prButton(card.pr));
   if (capabilitiesOf(card.harness).compact && card.context && card.context.percent >= COMPACT_AT) actions.append(compactButton());
+  const stop = stopButton(card, nowMs);
+  if (stop) actions.append(stop);
   actions.append(reply);
   root.append(actions);
   return root;

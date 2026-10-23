@@ -154,6 +154,11 @@ pub enum Request {
 pub enum CommandKind {
     Reply { session: String, text: String, #[serde(default)] attachments: Vec<Attachment> },
     Answer { session: String, ask_id: u64, question: usize, option: usize },
+    /// Stops the session's turn (Esc, nothing else).
+    Stop { session: String },
+    /// Answers a question with a pick: an option, several, the user's own words or "chat about this".
+    /// `Answer` stays for older peers that only know an option index.
+    Pick { session: String, ask_id: u64, question: usize, pick: crate::answer::Pick },
     Compact { session: String },
     Close { session: String },
     Rename { session: String, name: String },
@@ -286,6 +291,16 @@ mod tests {
     }
 
     #[test]
+    fn stop_and_pick_round_trip() {
+        let stop = CommandKind::Stop { session: "s1".into() };
+        assert_eq!(serde_json::from_str::<CommandKind>(&serde_json::to_string(&stop).unwrap()).unwrap(), stop);
+        let pick = CommandKind::Pick { session: "s1".into(), ask_id: 9, question: 1, pick: crate::answer::Pick::Own { text: "use the second, but rename it".into() } };
+        let text = serde_json::to_string(&pick).unwrap();
+        let CommandKind::Pick { pick: crate::answer::Pick::Own { text: own }, ask_id: 9, question: 1, .. } = serde_json::from_str(&text).unwrap() else { panic!("expected an own-words pick") };
+        assert_eq!(own, "use the second, but rename it");
+    }
+
+    #[test]
     fn welcome_carries_caps_only_when_there_are_some() {
         let voiced = Down::Welcome { name: "desk".into(), mirror: Some(true), caps: vec![CAP_VOICE.into()] };
         assert_eq!(decode_down(&encode(&voiced)).unwrap(), voiced);
@@ -337,7 +352,7 @@ mod tests {
     #[test]
     fn a_card_from_an_agent_this_maya_does_not_know_still_decodes() {
         use crate::model::{Card, Harness, State};
-        let card = Card { session_id: "s1".into(), pid: 1, name: "s1".into(), cwd: "/x".into(), state: State::Idle, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness: Harness::Kiro, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false };
+        let card = Card { session_id: "s1".into(), pid: 1, name: "s1".into(), cwd: "/x".into(), state: State::Idle, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness: Harness::Kiro, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false };
         let text = encode(&Up::Board { cards: vec![card], dirs: vec![], agents: None, remembered: None }).replace("\"harness\":\"kiro\"", "\"harness\":\"future-agent\"");
         let Up::Board { cards, .. } = decode_up(&text).unwrap() else { panic!() };
         assert_eq!(cards[0].harness, Harness::Other);

@@ -413,6 +413,15 @@ impl Store {
         Some(derive(&DeriveInput { registry: &s, events: self.events.events_for(&s.session_id), transcript: &tail, now_ms, completed_timeout_ms: self.config.completed_timeout_ms() }))
     }
 
+    /// Records that Maya pressed Esc in a Claude session: the ask the turn
+    /// left open is over, and no hook of Claude's says so.
+    pub fn mark_interrupted(&mut self, session_id: &str, now_ms: u64) {
+        let payload = serde_json::json!({ "session_id": session_id, "hook_event_name": "MayaInterrupt" }).to_string();
+        if let Err(e) = crate::hook_install::append_record_named(&self.claude_dir.join("maya"), "events.jsonl", &payload, now_ms) {
+            crate::log::line("stop", format!("could not record the interrupt of {session_id}: {e}"));
+        }
+    }
+
     /// Drops event-log lines for sessions no longer in the registry. A Codex
     /// thread is kept while its writer lock exists, which holds from its
     /// start, whether or not a refresh has matched it to a process yet (at

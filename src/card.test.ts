@@ -146,3 +146,38 @@ describe("renderCard: the Compact button", () => {
     expect(compact({ ...base, harness: "codex", hasInbox: false, context: { used: 140_000, window: 200_000, percent: 70 } })).toBeNull();
   });
 });
+
+describe("renderCard: options and Stop", () => {
+  const question = { question: "Which?", header: "H", multiSelect: false, options: [{ label: "SQLite", description: "one file" }, { label: "Postgres", description: "" }], own: { label: "Type something", row: 2 }, chatRow: 3 };
+  const asking: Card = { ...base, state: "awaiting", stateSince: 1000, awaiting: { kind: "question", detail: "Which?", questions: [question] } };
+
+  it("card shows compact options and Stop", () => {
+    const el = renderCard(asking, 5000);
+    expect([...el.querySelectorAll(".options button[data-action=answer]")].map((b) => b.textContent)).toEqual(["SQLite", "Postgres"]);
+    // Type something and Chat about this live in the session view.
+    expect(el.textContent).not.toContain("Type something");
+    expect(el.textContent).not.toContain("Chat about this");
+    const stop = el.querySelector<HTMLButtonElement>(".card__actions button[data-action=stop]")!;
+    expect(stop.textContent).toBe("Stop");
+    expect(stop.disabled).toBe(false);
+    expect(renderCard({ ...base, state: "working", stateSince: 1000 }, 5000).querySelector("button[data-action=stop]")).not.toBeNull();
+    expect(renderCard({ ...base, state: "working", stateSince: 1000, shell: true }, 5000).querySelector("button[data-action=stop]")).toBeNull();
+    expect(renderCard(base, 5000).querySelector("button[data-action=stop]")).toBeNull();
+  });
+
+  it("disables Stop and the options inside the open delay", () => {
+    const el = renderCard(asking, 1500);
+    expect(el.querySelector<HTMLButtonElement>("button[data-action=stop]")!.disabled).toBe(true);
+    expect([...el.querySelectorAll<HTMLButtonElement>("button[data-action=answer]")].every((b) => b.disabled)).toBe(true);
+  });
+
+  it("offers the options of a permission or plan ask that has them", () => {
+    const el = renderCard({ ...asking, awaiting: { kind: "permission", detail: "Bash: ls", questions: [question] } }, 5000);
+    expect(el.querySelectorAll("button[data-action=answer]")).toHaveLength(2);
+  });
+
+  it("keeps the multi-select note on a multi-select card", () => {
+    const el = renderCard({ ...asking, awaiting: { kind: "question", detail: "Which?", questions: [{ ...question, multiSelect: true, own: undefined, chatRow: undefined }] } }, 5000);
+    expect(el.querySelector(".options__note")?.textContent).toBe("Multi-select: answer in the terminal");
+  });
+});
