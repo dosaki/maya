@@ -1108,6 +1108,27 @@ describe("Settings → Git", () => {
   });
 });
 
+describe("colour theme", () => {
+  it("offers Dark and Light under General and reports the choice", () => {
+    const h = { ...handlers(), onColorTheme: vi.fn() };
+    const el = renderSettings({ ...voiceBase, colorTheme: "dark" }, h);
+    const general = el.querySelector(".settings__section--general")!;
+    expect(general.textContent).toContain("Theme");
+    const sel = general.querySelector<HTMLSelectElement>("select[name=colorTheme]")!;
+    expect([...sel.options].map((o) => o.textContent)).toEqual(["Dark", "Light"]);
+    expect(sel.value).toBe("dark");
+    sel.value = "light";
+    sel.dispatchEvent(new Event("change"));
+    expect(h.onColorTheme).toHaveBeenCalledWith("light");
+  });
+
+  it("shows the saved theme, and Dark when none was saved", () => {
+    const pick = (model: object) => renderSettings({ ...voiceBase, ...model }, handlers()).querySelector<HTMLSelectElement>("select[name=colorTheme]")!.value;
+    expect(pick({ colorTheme: "light" })).toBe("light");
+    expect(pick({})).toBe("dark");
+  });
+});
+
 describe("session viewer", () => {
   it("offers the viewer's look under Sessions and saves the choice", () => {
     const h = { ...handlers(), onViewerTheme: vi.fn() };

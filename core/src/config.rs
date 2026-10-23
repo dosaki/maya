@@ -156,6 +156,9 @@ pub struct Config {
     /// The session viewer's look; the phone keeps its own.
     #[serde(default)]
     pub viewer_theme: ViewerTheme,
+    /// The colours of the desktop windows; the phone keeps its own look.
+    #[serde(default)]
+    pub color_theme: ColorTheme,
     #[serde(default)]
     pub network: NetworkConfig,
 }
@@ -187,6 +190,15 @@ pub enum ViewerTheme {
     #[default]
     Chat,
     Terminal,
+}
+
+/// The colours of Maya's windows. Dark is the look Maya always had.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorTheme {
+    #[default]
+    Dark,
+    Light,
 }
 
 /// A code host Maya reads pull requests from.
@@ -396,6 +408,7 @@ impl Default for Config {
             whisper_model: DEFAULT_MODEL.into(),
             git: None,
             viewer_theme: ViewerTheme::Chat,
+            color_theme: ColorTheme::Dark,
             network: NetworkConfig::default(),
         }
     }
@@ -691,6 +704,17 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "muted": true}"#).unwrap();
         assert!(c.muted);
         assert!(serde_json::to_string(&c).unwrap().contains("\"muted\":true"));
+    }
+
+    #[test]
+    fn the_colour_theme_defaults_to_dark_and_round_trips() {
+        assert_eq!(Config::default().color_theme, ColorTheme::Dark);
+        let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
+        assert_eq!(older.color_theme, ColorTheme::Dark);
+        let set = Config { color_theme: ColorTheme::Light, ..Config::default() };
+        let text = serde_json::to_string(&set).unwrap();
+        assert!(text.contains(r#""colorTheme":"light""#), "{text}");
+        assert_eq!(serde_json::from_str::<Config>(&text).unwrap().color_theme, ColorTheme::Light);
     }
 
     #[test]

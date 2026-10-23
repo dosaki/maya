@@ -431,3 +431,36 @@ body { margin: 0; background: var(--bg); }
 .chat__cancel, .chat__stop { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--gold-deep); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
 .chat__cancel:hover, .chat__stop:hover { border-color: var(--gold); }
 .chat__dormant { margin: 0; padding: 8px 12px; color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; text-align: center; }
+
+/* The light theme. The dark look above is the default and is not touched: every
+   rule below applies only when the page is marked data-theme="light" (set by
+   src/theme.ts). It gives the same variables light values, then changes the few
+   rules that use a fixed colour chosen for a dark page. The state colours
+   (awaiting, working, completed, idle) read the same on both, so they are not
+   repeated here. */
+:root[data-theme="light"] {
+  --bg: #f6f1e6; --panel: #fffdf8; --text: #231f14; --muted: #6b6350; --border: #ddd3bd;
+  --gold: #a97c16; --gold-bright: #7a5710; --gold-deep: #d6bd7a;
+  --on-gold: #1a1408;
+  --shadow: 0 1px 2px rgba(70,50,10,.14);
+  color-scheme: light;
+}
+:root[data-theme="light"] .topbar { background: linear-gradient(180deg, #fffaf0, var(--bg)); }
+:root[data-theme="light"] .card:hover, :root[data-theme="light"] .card:focus-visible { box-shadow: 0 0 0 1px var(--gold-deep), 0 6px 18px rgba(169,124,22,.16); }
+:root[data-theme="light"] .popover { box-shadow: 0 8px 30px rgba(60,45,10,.16); }
+:root[data-theme="light"] .modal__panel { box-shadow: 0 20px 60px rgba(60,45,10,.28); }
+:root[data-theme="light"] .card__btn--stop { color: #b91c1c; }
+:root[data-theme="light"] .reviews__error, :root[data-theme="light"] .voice--error, :root[data-theme="light"] .voice__error { color: #c0262c; }
+:root[data-theme="light"] .debug__line--speech .debug__source { color: #7e22ce; }
+/* These sit inside the chat look of the viewer only: the terminal look keeps its dark colours. */
+:root[data-theme="light"] .modal:not(.modal--terminal) .modal__status--warn { color: #a85a05; }
+:root[data-theme="light"] .modal:not(.modal--terminal) .diff__line--add { color: #166534; }
+:root[data-theme="light"] .modal:not(.modal--terminal) .diff__line--del { color: #991b1b; }
+/* The terminal-look viewer imitates a terminal, so it stays dark in the light theme: it gets the dark variables back. */
+:root[data-theme="light"] .modal--terminal {
+  --bg: #0c0b09; --panel: #16140f; --text: #f1e9d8; --muted: #a39a86; --border: #2c2719;
+  --gold: #d9ab3c; --gold-bright: #f0c85a; --gold-deep: #8f6a1c;
+  --on-gold: #1a1408;
+  --shadow: 0 1px 2px rgba(0,0,0,.5);
+  color-scheme: dark;
+}

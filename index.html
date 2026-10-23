@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Maya</title>
+    <!-- Runs before the stylesheet paints, so a light theme does not flash dark first. Same key as src/theme.ts. -->
+    <script>try{if(localStorage.getItem("maya.colorTheme")==="light")document.documentElement.dataset.theme="light"}catch(e){}</script>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
