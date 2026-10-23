@@ -44,6 +44,28 @@ describe("settings flow", () => {
     expect(document.querySelector(".settings__version")).toBeNull();
   });
 
+  it("an old ElevenLabs config opens with ElevenLabs switched on", async () => {
+    const open = async (voiceProvider: string) => {
+      const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider, elevenlabsVoiceId: "abc", listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "" };
+      invoke.mockImplementation((cmd: string) => {
+        if (cmd === "codex_hook_status") return Promise.resolve(false);
+        if (cmd === "hook_status") return Promise.resolve(true);
+        if (cmd === "get_config") return Promise.resolve({ ...config });
+        if (cmd === "has_elevenlabs_key") return Promise.resolve(false);
+        if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+        if (cmd === "list_whisper_models") return Promise.resolve([]);
+        if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+        return Promise.reject(new Error("unexpected " + cmd));
+      });
+      document.body.innerHTML = '<div id="settings" class="settings pane" hidden></div>';
+      await initSettings();
+      await flush();
+      return document.querySelector<HTMLInputElement>("input[name=elevenEnabled]")!.checked;
+    };
+    expect(await open("elevenlabs")).toBe(true);
+    expect(await open("builtin")).toBe(false);
+  });
+
   it("opens on the group chosen last time, and keeps it through a repaint", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "" };
     invoke.mockImplementation((cmd: string) => {
