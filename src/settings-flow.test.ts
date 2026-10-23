@@ -44,6 +44,39 @@ describe("settings flow", () => {
     expect(document.querySelector(".settings__version")).toBeNull();
   });
 
+  it("themes the page from the saved choice, and applies and saves a new one", async () => {
+    localStorage.clear();
+    delete document.documentElement.dataset.theme;
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", colorTheme: "light" };
+    let saved: { colorTheme?: string } | undefined;
+    invoke.mockImplementation((cmd: string, args?: { config?: { colorTheme?: string } }) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "set_config") {
+        saved = args?.config;
+        return Promise.resolve({ ...config, ...args?.config });
+      }
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+
+    await initSettings();
+    await flush();
+    expect(document.documentElement.dataset.theme).toBe("light");
+    const select = document.querySelector<HTMLSelectElement>("select[name=colorTheme]")!;
+    expect(select.value).toBe("light");
+
+    select.value = "dark";
+    select.dispatchEvent(new Event("change"));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    await flush();
+    expect(saved?.colorTheme).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+
   it("opens on the group chosen last time, and keeps it through a repaint", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "" };
     invoke.mockImplementation((cmd: string) => {

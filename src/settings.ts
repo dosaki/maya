@@ -4,8 +4,9 @@ import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, isMac, recognizerOptions, secretStore, thisComputerLower } from "./platform";
-import type { GitProvider, Harness, NewSessionTerminal, ViewerTheme } from "./types";
+import type { ColorTheme, GitProvider, Harness, NewSessionTerminal, ViewerTheme } from "./types";
 import { setViewerTheme } from "./modal";
+import { COLOR_THEMES, applyColorTheme, asColorTheme } from "./theme";
 import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
@@ -85,6 +86,8 @@ const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assista
 export interface SettingsModel {
   /** The session viewer's look; chat when absent. */
   viewerTheme?: ViewerTheme;
+  /** The colours of the windows; dark when absent. */
+  colorTheme?: ColorTheme;
   /** The macOS app new sessions open in; Terminal when absent. */
   newSessionTerminal?: NewSessionTerminal;
   hookInstalled: boolean | null;
@@ -184,6 +187,7 @@ export type Recognizer = "system" | "builtin";
 
 export interface SettingsHandlers {
   onViewerTheme?(t: ViewerTheme): void;
+  onColorTheme?(t: ColorTheme): void;
   onNewSessionTerminal?(t: NewSessionTerminal): void;
   onGitEnabled?(p: GitProvider, on: boolean): void;
   onGitTokenKind?(p: GitProvider, kind: "stored" | "env"): void;
@@ -278,6 +282,7 @@ export function gitConnections(raw: GitConnectionJson[] | null | undefined): Git
 
 interface ConfigJson {
   viewerTheme?: ViewerTheme;
+  colorTheme?: ColorTheme;
   newSessionTerminal?: NewSessionTerminal;
   git?: GitConnectionJson[] | null;
   completedTimeoutMinutes: number;
@@ -571,6 +576,22 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   agentModelSel.addEventListener("change", () => h.onAgentModel(agentSel.value as Harness, agentModelSel.value));
   agentModelLabel.append(agentModelSel);
   general.append(agentModelLabel);
+
+  const themeLabel = document.createElement("label");
+  themeLabel.textContent = "Theme";
+  const themeSel = document.createElement("select");
+  themeSel.name = "colorTheme";
+  for (const [value, text] of COLOR_THEMES) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = text;
+    themeSel.append(o);
+  }
+  themeSel.value = model.colorTheme ?? "dark";
+  themeSel.addEventListener("change", () => h.onColorTheme?.(asColorTheme(themeSel.value)));
+  themeLabel.append(themeSel);
+  general.append(themeLabel);
+
   if (model.version) {
     const version = document.createElement("div");
     version.className = "settings__hint settings__version";
@@ -1563,6 +1584,8 @@ export async function initSettings(): Promise<void> {
     model.git = gitConnections(c.git);
     model.viewerTheme = c.viewerTheme ?? "chat";
     setViewerTheme(model.viewerTheme);
+    model.colorTheme = asColorTheme(c.colorTheme);
+    applyColorTheme(model.colorTheme);
     model.newSessionTerminal = c.newSessionTerminal ?? "terminal";
     applyNetworkConfig(c);
   };
@@ -1665,6 +1688,12 @@ export async function initSettings(): Promise<void> {
     onReviewPrompt: (text) => void run(() => saveConfig({ reviewPrompt: text })),
     onRecognizer: (r) => void run(() => saveConfig({ recognizer: r })),
     onViewerTheme: (t) => void run(() => saveConfig({ viewerTheme: t })),
+    onColorTheme: (t) => {
+      // At once, without waiting for the save: the window should change as the choice is made.
+      model.colorTheme = t;
+      applyColorTheme(t);
+      void run(() => saveConfig({ colorTheme: t }));
+    },
     onNewSessionTerminal: (t) => void run(() => saveConfig({ newSessionTerminal: t })),
     onWhisperModel: (id) => void run(() => saveConfig({ whisperModel: id })),
     onDownloadModel: (id) => {
