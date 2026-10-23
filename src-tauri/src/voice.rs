@@ -1,8 +1,9 @@
-//! ElevenLabs as an optional voice. The key lives in the macOS Keychain (the
-//! Windows Credential Manager on Windows, GNOME Keyring through `secret-tool`
-//! on Linux), synthesised lines are cached under `<maya_dir>/voice/`, and
-//! playback uses the built-in `afplay` (MCI on Windows, `paplay` or `ffplay`
-//! on Linux). Anything that fails falls back to the built-in voice.
+//! The remote voices: ElevenLabs and an OpenAI-compatible speech server. Their
+//! keys live in the macOS Keychain (the Windows Credential Manager on
+//! Windows, GNOME Keyring through `secret-tool` on Linux), synthesised lines
+//! are cached under `<maya_dir>/voice/`, and playback uses the built-in
+//! `afplay` (MCI on Windows, `paplay` or `ffplay` on Linux). Anything that
+//! fails falls back to the next voice, and last to the built-in one.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -20,6 +21,16 @@ pub struct Voice {
 
 pub const MODEL_ID: &str = "eleven_multilingual_v2";
 
+/// Stores the voice server's API key in the OS key store.
+pub fn store_server_key(key: &str) -> Result<(), String> {
+    crate::keystore::store(&crate::keystore::VOICE_SERVER, key)
+}
+
+/// The voice server's API key, if one is stored.
+pub fn load_server_key() -> Option<String> {
+    crate::keystore::load(&crate::keystore::VOICE_SERVER).ok().flatten()
+}
+
 /// Stores the API key in the OS key store (replacing any previous one).
 pub fn store_key(key: &str) -> Result<(), String> {
     crate::keystore::store(&crate::keystore::ELEVENLABS, key)
@@ -32,7 +43,8 @@ pub fn load_key() -> Option<String> {
 
 /// The first audio player on `path` and its arguments before the file:
 /// PulseAudio's (PipeWire answers it too), then ffmpeg's. Both decode the
-/// MP3 ElevenLabs sends; ALSA's `aplay` does not (it plays it as static).
+/// MP3 from ElevenLabs and the WAV from a voice server; ALSA's `aplay` does
+/// not decode MP3 (it plays it as static), so it is never used.
 #[cfg(any(test, target_os = "linux"))]
 pub fn player_command(path: &str) -> Option<(&'static str, Vec<String>)> {
     for (bin, args) in [("paplay", vec![]), ("ffplay", vec!["-nodisp".to_string(), "-autoexit".to_string()])] {
@@ -65,11 +77,6 @@ fn mci_volume_command(volume: u8) -> String {
     format!("setaudio maya_voice volume to {}", u32::from(volume.min(100)) * 10)
 }
 
-/// True when the provider is ElevenLabs, a key is stored and a voice chosen.
-pub fn use_elevenlabs(provider: VoiceProvider, has_key: bool, voice_id: Option<&str>) -> bool {
-    provider == VoiceProvider::Elevenlabs && has_key && voice_id.map_or(false, |v| !v.trim().is_empty())
-}
-
 pub fn parse_voices(json: &str) -> Result<Vec<Voice>, String> {
     let v: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("ElevenLabs answered with something that is not JSON: {e}"))?;
     if let Some(detail) = v["detail"]["message"].as_str().or_else(|| v["detail"].as_str()) {
@@ -84,7 +91,7 @@ pub fn parse_voices(json: &str) -> Result<Vec<Voice>, String> {
 /// The account's voices.
 pub fn list_voices(key: &str) -> Result<Vec<Voice>, String> {
     let out = maya_core::command("curl")
-        .args(["-fsS", "--max-time", "15", "-H", &format!("xi-api-key: {key}"), "https://api.elevenlabs.io/v1/voices"])
+        .args(["-fsS", "--connect-timeout", "3", "--max-time", "15", "-H", &format!("xi-api-key: {key}"), "https://api.elevenlabs.io/v1/voices"])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("could not run curl: {e}"))?;
@@ -108,10 +115,16 @@ fn hash(s: &str) -> u64 {
     h
 }
 
-/// Where the audio for `text` in `voice_id` is cached.
-pub fn cache_path(maya_dir: &Path, voice_id: &str, text: &str) -> PathBuf {
-    let safe_voice: String = voice_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect();
-    maya_dir.join("voice").join(format!("{safe_voice}-{:016x}.mp3", hash(text)))
+/// Where the audio for `text` in the voice `tag` is cached, as `ext`.
+pub fn cache_path(maya_dir: &Path, tag: &str, text: &str, ext: &str) -> PathBuf {
+    let safe_tag: String = tag.chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect();
+    maya_dir.join("voice").join(format!("{safe_tag}-{:016x}.{ext}", hash(text)))
+}
+
+/// Where the audio for `text` from a voice server is cached: keyed by the
+/// server's address, model and voice, so changing any of them speaks anew.
+pub fn server_cache_path(maya_dir: &Path, base: &str, model: &str, voice: &str, text: &str) -> PathBuf {
+    cache_path(maya_dir, &format!("s{:016x}", hash(&format!("{base}\n{model}\n{voice}"))), text, "wav")
 }
 
 /// Synthesises `text` to `path`, returning the bytes written.
@@ -122,7 +135,7 @@ pub fn synthesize(key: &str, voice_id: &str, text: &str, path: &Path) -> Result<
     let tmp = path.with_extension("part");
     let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128");
     let out = maya_core::command("curl")
-        .args(["-fsS", "--max-time", "20", "-X", "POST", "-H", &format!("xi-api-key: {key}"), "-H", "Content-Type: application/json", "-d", &request_body(text), "-o"])
+        .args(["-fsS", "--connect-timeout", "3", "--max-time", "20", "-X", "POST", "-H", &format!("xi-api-key: {key}"), "-H", "Content-Type: application/json", "-d", &request_body(text), "-o"])
         .arg(&tmp)
         .arg(&url)
         .stdin(Stdio::null())
@@ -184,7 +197,7 @@ pub fn play(path: &Path, volume: u8) -> Result<(), String> {
 pub fn speak_remote(v: &RemoteVoice, text: &str, volume: u8, reach: Reach) -> Result<(), String> {
     match v {
         RemoteVoice::Elevenlabs { maya_dir, key, voice_id } => {
-            let path = cache_path(maya_dir, voice_id, text);
+            let path = cache_path(maya_dir, voice_id, text, "mp3");
             if !path.is_file() {
                 if reach == Reach::CacheOnly {
                     return Err("not cached".into());
@@ -193,7 +206,16 @@ pub fn speak_remote(v: &RemoteVoice, text: &str, volume: u8, reach: Reach) -> Re
             }
             play(&path, volume)
         }
-        RemoteVoice::Server { .. } => Err("not supported yet".into()),
+        RemoteVoice::Server { maya_dir, base, voice, model, key } => {
+            let path = server_cache_path(maya_dir, base, model, voice, text);
+            if !path.is_file() {
+                if reach == Reach::CacheOnly {
+                    return Err("not cached".into());
+                }
+                maya_core::voice_server::synthesize(base, key.as_deref(), voice, model, text, &path)?;
+            }
+            play(&path, volume)
+        }
     }
 }
 
@@ -205,10 +227,10 @@ mod tests {
 
     #[test]
     fn cache_path_is_stable_per_voice_and_text_and_a_safe_file_name() {
-        let a = cache_path(Path::new("/m"), "v1", "hexgrid d3 needs a decision");
-        let b = cache_path(Path::new("/m"), "v1", "hexgrid d3 needs a decision");
-        let c = cache_path(Path::new("/m"), "v2", "hexgrid d3 needs a decision");
-        let d = cache_path(Path::new("/m"), "v1", "other line");
+        let a = cache_path(Path::new("/m"), "v1", "hexgrid d3 needs a decision", "mp3");
+        let b = cache_path(Path::new("/m"), "v1", "hexgrid d3 needs a decision", "mp3");
+        let c = cache_path(Path::new("/m"), "v2", "hexgrid d3 needs a decision", "mp3");
+        let d = cache_path(Path::new("/m"), "v1", "other line", "mp3");
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);
@@ -219,21 +241,26 @@ mod tests {
     }
 
     #[test]
+    fn server_cache_is_wav_and_keyed_by_address_model_and_voice() {
+        let m = Path::new("/m");
+        let a = server_cache_path(m, "http://h:1", "tts-1", "alloy", "hello");
+        assert_eq!(a, server_cache_path(m, "http://h:1", "tts-1", "alloy", "hello"));
+        assert_ne!(a, server_cache_path(m, "http://h:2", "tts-1", "alloy", "hello"));
+        assert_ne!(a, server_cache_path(m, "http://h:1", "tts-2", "alloy", "hello"));
+        assert_ne!(a, server_cache_path(m, "http://h:1", "tts-1", "echo", "hello"));
+        assert_ne!(a, server_cache_path(m, "http://h:1", "tts-1", "alloy", "bye"));
+        let name = a.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with('s') && name.ends_with(".wav"));
+        assert!(name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.'));
+    }
+
+    #[test]
     fn voices_parse_from_the_api_listing() {
         let json = r#"{"voices":[{"voice_id":"abc","name":"Rachel","category":"premade"},{"voice_id":"def","name":"Custom"}]}"#;
         let v = parse_voices(json).unwrap();
         assert_eq!(v, vec![Voice { voice_id: "abc".into(), name: "Rachel".into() }, Voice { voice_id: "def".into(), name: "Custom".into() }]);
         assert!(parse_voices("{}").unwrap().is_empty());
         assert!(parse_voices("nope").is_err());
-    }
-
-    #[test]
-    fn elevenlabs_is_used_only_when_fully_configured() {
-        assert!(!use_elevenlabs(VoiceProvider::Builtin, true, Some("v")));
-        assert!(!use_elevenlabs(VoiceProvider::Elevenlabs, false, Some("v")));
-        assert!(!use_elevenlabs(VoiceProvider::Elevenlabs, true, None));
-        assert!(!use_elevenlabs(VoiceProvider::Elevenlabs, true, Some("  ")));
-        assert!(use_elevenlabs(VoiceProvider::Elevenlabs, true, Some("v")));
     }
 
     #[test]
@@ -271,7 +298,7 @@ mod tests {
         exe("ffplay");
         assert_eq!(player_command(&path), Some(("ffplay", vec!["-nodisp".to_string(), "-autoexit".to_string()])));
         exe("aplay");
-        assert_eq!(player_command(&path).map(|c| c.0), Some("ffplay"), "aplay cannot decode MP3");
+        assert_eq!(player_command(&path).map(|c| c.0), Some("ffplay"), "aplay is never used");
         exe("paplay");
         assert_eq!(player_command(&path).map(|c| c.0), Some("paplay"));
     }

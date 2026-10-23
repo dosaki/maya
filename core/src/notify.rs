@@ -348,12 +348,14 @@ fn say_text(line: &str, volume: u8) -> String {
 #[cfg(target_os = "android")]
 fn say_builtin(_line: &str, _volume: u8) {}
 
+type RemoteFn<'a> = dyn Fn(&RemoteVoice, &str, u8, Reach) -> Result<(), String> + 'a;
+
 /// Speaks `u` with the first voice in its chain that can. A voice marked
 /// down only plays a cached line, silently moving on when it has none
 /// (unless this is a trial); any other voice goes to the network, and a
 /// failure marks it down and is reported. The built-in voice speaks when no
 /// remote voice did.
-fn speak_chain(u: &Utterance, marks: &mut DownMarks, now: Instant, remote: &dyn Fn(&RemoteVoice, &str, u8, Reach) -> Result<(), String>, builtin: &dyn Fn(&str, u8)) -> SpeechReport {
+fn speak_chain(u: &Utterance, marks: &mut DownMarks, now: Instant, remote: &RemoteFn, builtin: &dyn Fn(&str, u8)) -> SpeechReport {
     let mut failures = Vec::new();
     for v in &u.voices {
         let fp = v.fingerprint();
