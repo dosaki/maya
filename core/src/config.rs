@@ -104,9 +104,17 @@ pub struct Config {
     /// the badge and the Dock bounce still come.
     #[serde(default)]
     pub muted: bool,
-    /// Which voice speaks: the built-in one or ElevenLabs.
+    /// Which voice speaks: the built-in one or ElevenLabs. Only read to
+    /// migrate old configs: `elevenlabs_on()` is the switch now.
     #[serde(default)]
     pub voice_provider: VoiceProvider,
+    /// Whether ElevenLabs speaks, set by its own switch. None falls back to
+    /// `voice_provider`, so a config from before the switch keeps its voice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevenlabs_enabled: Option<bool>,
+    /// An OpenAI-compatible speech server that speaks Maya's lines.
+    #[serde(default)]
+    pub voice_server: VoiceServer,
     /// How loud Maya speaks, in percent; read through `voice_volume()`.
     #[serde(default = "default_voice_volume")]
     pub voice_volume: u8,
@@ -181,6 +189,20 @@ pub enum VoiceProvider {
     #[default]
     Builtin,
     Elevenlabs,
+}
+
+/// An OpenAI-compatible speech server: its address, the voice it speaks
+/// with and the model it asks for. Off until the user turns it on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VoiceServer {
+    pub enabled: bool,
+    /// The server's base address, such as `http://localhost:8004`.
+    pub url: String,
+    /// The voice the server speaks with; blank leaves the server's default.
+    pub voice: String,
+    /// The model the server runs; blank leaves the server's default.
+    pub model: String,
 }
 
 /// How the session viewer draws a conversation: as chat, or like the agent's own terminal.
@@ -395,6 +417,8 @@ impl Default for Config {
             debug_mode: false,
             muted: false,
             voice_provider: Default::default(),
+            elevenlabs_enabled: None,
+            voice_server: VoiceServer::default(),
             voice_volume: default_voice_volume(),
             elevenlabs_voice_id: None,
             clones_dir: None,
@@ -419,6 +443,12 @@ impl Config {
     /// The word Maya answers to: the typed one, or "Maya" when it is blank.
     pub fn listen_word(&self) -> String {
         crate::wake::wake_word(self.listen_word.as_deref())
+    }
+
+    /// Whether ElevenLabs speaks: its own switch when it is set, otherwise
+    /// only where it was the chosen voice before the switch existed.
+    pub fn elevenlabs_on(&self) -> bool {
+        self.elevenlabs_enabled.unwrap_or(self.voice_provider == VoiceProvider::Elevenlabs)
     }
 
     /// The voice volume in percent, kept within `MIN_VOICE_VOLUME`..=100.
@@ -727,6 +757,27 @@ mod tests {
         let text = serde_json::to_string(&set).unwrap();
         assert!(text.contains(r#""viewerTheme":"terminal""#), "{text}");
         assert_eq!(serde_json::from_str::<Config>(&text).unwrap().viewer_theme, ViewerTheme::Terminal);
+    }
+
+    #[test]
+    fn elevenlabs_is_on_only_where_it_was_the_chosen_voice() {
+        let old = |json: &str| serde_json::from_str::<Config>(json).unwrap();
+        assert!(old(r#"{"completedTimeoutMinutes": 5, "voiceProvider": "elevenlabs", "elevenlabsVoiceId": "abc"}"#).elevenlabs_on());
+        assert!(!old(r#"{"completedTimeoutMinutes": 5, "voiceProvider": "builtin", "elevenlabsVoiceId": "abc"}"#).elevenlabs_on(), "set up but not chosen stays off");
+        assert!(!Config::default().elevenlabs_on());
+        assert!(!old(r#"{"completedTimeoutMinutes": 5, "voiceProvider": "elevenlabs", "elevenlabsEnabled": false}"#).elevenlabs_on());
+        assert!(old(r#"{"completedTimeoutMinutes": 5, "elevenlabsEnabled": true}"#).elevenlabs_on());
+    }
+
+    #[test]
+    fn voice_server_defaults_off_and_round_trips() {
+        assert_eq!(Config::default().voice_server, VoiceServer::default());
+        assert!(!Config::default().voice_server.enabled);
+        let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "voiceServer": {"enabled": true, "url": "http://localhost:8004", "voice": "tiago.wav"}}"#).unwrap();
+        assert_eq!(c.voice_server, VoiceServer { enabled: true, url: "http://localhost:8004".into(), voice: "tiago.wav".into(), model: String::new() });
+        let text = serde_json::to_string(&c).unwrap();
+        assert!(text.contains("\"voiceServer\":{\"enabled\":true"));
+        assert!(!text.contains("elevenlabsEnabled"), "unset stays unwritten");
     }
 
     #[test]
