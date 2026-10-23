@@ -263,3 +263,6 @@ export interface ResumeOutcome {
 
 /** How the session viewer draws a conversation. */
 export type ViewerTheme = "chat" | "terminal";
+
+/** The macOS app that opens the windows of sessions Maya starts. */
+export type NewSessionTerminal = "terminal" | "iterm";

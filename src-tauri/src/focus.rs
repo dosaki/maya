@@ -10,28 +10,30 @@ pub fn install_app_handle(app: tauri::AppHandle) {
     let _ = APP.set(app);
 }
 
-/// Activates Terminal from inside Maya's own process, on the main thread:
-/// Maya is the active app when the user clicks, so it may yield activation
-/// to Terminal (macOS 14 cooperative activation). Requests from a helper
-/// process such as `osascript` can be silently deferred. Returns false when
-/// Terminal is not running or the request was not accepted.
-pub fn activate_terminal_in_process() -> bool {
+/// Activates the app with `bundle_id` (Terminal or iTerm2) from inside Maya's
+/// own process, on the main thread: Maya is the active app when the user
+/// clicks, so it may yield activation to that app (macOS 14 cooperative
+/// activation). Requests from a helper process such as `osascript` can be
+/// silently deferred. Returns false when the app is not running or the
+/// request was not accepted.
+pub fn activate_app_in_process(bundle_id: &str) -> bool {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSApplicationActivationOptions, NSRunningApplication};
-    use objc2_foundation::ns_string;
+    use objc2_foundation::NSString;
     let Some(mtm) = MainThreadMarker::new() else { return false };
-    let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(ns_string!("com.apple.Terminal"));
-    let Some(terminal) = apps.iter().next() else { return false };
-    NSApplication::sharedApplication(mtm).yieldActivationToApplication(&terminal);
-    terminal.activateWithOptions(NSApplicationActivationOptions::empty())
+    let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle_id));
+    let Some(target) = apps.iter().next() else { return false };
+    NSApplication::sharedApplication(mtm).yieldActivationToApplication(&target);
+    target.activateWithOptions(NSApplicationActivationOptions::empty())
 }
 
 /// Runs the in-process activation on the main thread and waits for its answer.
-fn activate_from_main_thread() -> Option<bool> {
+fn activate_from_main_thread(bundle_id: &str) -> Option<bool> {
     let app = APP.get()?;
     let (tx, rx) = std::sync::mpsc::channel();
+    let bundle_id = bundle_id.to_string();
     app.run_on_main_thread(move || {
-        let _ = tx.send(activate_terminal_in_process());
+        let _ = tx.send(activate_app_in_process(&bundle_id));
     })
     .ok()?;
     rx.recv_timeout(std::time::Duration::from_secs(2)).ok()
@@ -57,34 +59,42 @@ return "not found""#
     )
 }
 
-/// JavaScript for Automation that brings Terminal forward the way a click on
-/// one of its windows does: only the window at the top of its stack comes up,
-/// the rest stay where they are (no `NSApplicationActivateAllWindows`).
-pub fn activate_script() -> String {
-    "ObjC.import('AppKit');\n\
-     const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier('com.apple.Terminal');\n\
-     if (apps.count > 0) apps.objectAtIndex(0).activateWithOptions($.NSApplicationActivateIgnoringOtherApps);"
-        .to_string()
+/// JavaScript for Automation that brings the app with `bundle_id` forward the
+/// way a click on one of its windows does: only the window at the top of its
+/// stack comes up, the rest stay where they are (no
+/// `NSApplicationActivateAllWindows`).
+pub fn activate_script(bundle_id: &str) -> String {
+    format!(
+        "ObjC.import('AppKit');\n\
+         const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier('{bundle_id}');\n\
+         if (apps.count > 0) apps.objectAtIndex(0).activateWithOptions($.NSApplicationActivateIgnoringOtherApps);"
+    )
 }
 
-/// Brings Terminal forward with only its front window: from Maya's own
-/// process when possible, else through a JavaScript for Automation helper.
-pub fn activate_terminal() -> Result<(), String> {
-    if activate_from_main_thread() == Some(true) {
+/// Brings the app with `bundle_id` forward with only its front window: from
+/// Maya's own process when possible, else through a JavaScript for Automation
+/// helper.
+pub fn activate_app(bundle_id: &str) -> Result<(), String> {
+    if activate_from_main_thread(bundle_id) == Some(true) {
         return Ok(());
     }
-    activate_terminal_via_osascript()
+    activate_app_via_osascript(bundle_id)
 }
 
-pub fn activate_terminal_via_osascript() -> Result<(), String> {
+/// Brings Terminal forward.
+pub fn activate_terminal() -> Result<(), String> {
+    activate_app("com.apple.Terminal")
+}
+
+pub fn activate_app_via_osascript(bundle_id: &str) -> Result<(), String> {
     let out = Command::new("osascript")
-        .args(["-l", "JavaScript", "-e", &activate_script()])
+        .args(["-l", "JavaScript", "-e", &activate_script(bundle_id)])
         .output()
         .map_err(|e| format!("could not run osascript: {e}"))?;
     if out.status.success() {
         Ok(())
     } else {
-        Err(format!("could not activate Terminal: {}", String::from_utf8_lossy(&out.stderr).trim()))
+        Err(format!("could not activate {bundle_id}: {}", String::from_utf8_lossy(&out.stderr).trim()))
     }
 }
 
@@ -130,8 +140,17 @@ mod tests {
 
     #[test]
     fn activation_uses_appkit_without_the_all_windows_option() {
-        let s = activate_script();
+        let s = activate_script("com.apple.Terminal");
         assert!(s.contains("com.apple.Terminal"));
+        assert!(s.contains("NSApplicationActivateIgnoringOtherApps"));
+        assert!(!s.contains("NSApplicationActivateAllWindows"));
+    }
+
+    #[test]
+    fn activation_script_takes_the_bundle_id() {
+        let s = activate_script("com.googlecode.iterm2");
+        assert!(s.contains("com.googlecode.iterm2"));
+        assert!(!s.contains("com.apple.Terminal"));
         assert!(s.contains("NSApplicationActivateIgnoringOtherApps"));
         assert!(!s.contains("NSApplicationActivateAllWindows"));
     }
