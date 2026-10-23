@@ -2,6 +2,7 @@
 //! be tested as text, and a thin runner hands it to `osascript`. This is the
 //! iTerm2 counterpart of `terminal_app.rs`.
 
+use crate::focus::activate_app;
 use maya_core::answer::reply_keys;
 use maya_core::launch::applescript_string;
 use maya_core::terminal::Terminal;
@@ -62,6 +63,66 @@ return "not found""#,
     )
 }
 
+/// Opens a new iTerm2 window and types `cmd` into its shell, the way Terminal's
+/// `do script` does: a `command` parameter would skip the login shell, so
+/// `claude` would not be on the PATH, and the window would close when the
+/// command ends. If iTerm2 is not running it is started and its own first
+/// window is used, so a cold start leaves one window and not two.
+pub fn applescript_open(cmd: &str) -> String {
+    let cmd = applescript_keys(cmd);
+    format!(
+        r#"if application id "{BUNDLE_ID}" is running then
+  tell application id "{BUNDLE_ID}"
+    set newWindow to (create window with default profile)
+    tell current session of newWindow to write text {cmd}
+  end tell
+else
+  tell application id "{BUNDLE_ID}" to activate
+  tell application id "{BUNDLE_ID}"
+    set ready to false
+    repeat 30 times
+      if (count of windows) > 0 then
+        if (count of tabs of window 1) > 0 then
+          set ready to true
+          exit repeat
+        end if
+      end if
+      delay 0.1
+    end repeat
+    if not ready then create window with default profile
+    tell current session of current window to write text {cmd}
+  end tell
+end if"#
+    )
+}
+
+/// Selects the iTerm2 session on `tty`, its tab and its window, without
+/// activating iTerm2 (activation is done separately). Window last: selecting
+/// a window reorders `windows`, which would leave the references taken from it
+/// pointing at another window.
+pub fn applescript_focus(tty: &str) -> String {
+    format!(
+        r#"if application id "{BUNDLE_ID}" is running then
+  tell application id "{BUNDLE_ID}"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if tty of s is "{}" then
+            select s
+            select t
+            select w
+            return "ok"
+          end if
+        end repeat
+      end repeat
+    end repeat
+  end tell
+end if
+return "not found""#,
+        applescript_string(tty)
+    )
+}
+
 /// Runs `script` and returns what it printed.
 fn run(script: String) -> Result<String, String> {
     let out = Command::new("osascript").arg("-e").arg(script).output().map_err(|e| format!("could not run osascript: {e}"))?;
@@ -75,8 +136,10 @@ fn run(script: String) -> Result<String, String> {
 pub struct ItermApp;
 
 impl Terminal for ItermApp {
-    fn open(&self, _command: &str, _cwd: &Path, _label: &str) -> Result<Option<String>, String> {
-        Err("not yet".into())
+    fn open(&self, command: &str, _cwd: &Path, _label: &str) -> Result<Option<String>, String> {
+        run(applescript_open(command))?;
+        activate_app(BUNDLE_ID)?;
+        Ok(None)
     }
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
         match run(applescript_type(tty, text, true))?.as_str() {
@@ -94,8 +157,11 @@ impl Terminal for ItermApp {
             Err((0, format!("No iTerm2 session found for {tty}.")))
         }
     }
-    fn focus(&self, _tty: &str) -> Result<(), String> {
-        Err("not yet".into())
+    fn focus(&self, tty: &str) -> Result<(), String> {
+        match run(applescript_focus(tty))?.as_str() {
+            "ok" => activate_app(BUNDLE_ID),
+            _ => Err(format!("no iTerm2 session found for {tty}")),
+        }
     }
     fn name_for_tty(&self, _tty: &str) -> Option<String> {
         None
@@ -122,6 +188,53 @@ mod tests {
         assert!(s.contains("repeat with t in tabs of w"), "{s}");
         assert!(s.contains("repeat with s in sessions of t"), "{s}");
         assert!(s.contains("if tty of s is \"/dev/ttys021\""), "{s}");
+    }
+
+    #[test]
+    fn open_types_the_command_into_a_new_window_shell() {
+        let s = applescript_open("cd '/r' && claude");
+        assert!(s.contains("create window with default profile"), "{s}");
+        assert!(s.contains("write text \"cd '/r' && claude\""), "{s}");
+        // A `command` parameter would skip the login shell, so `claude` would not be on the PATH.
+        assert!(!s.contains("command \""), "{s}");
+    }
+
+    #[test]
+    fn open_reuses_the_first_window_of_a_cold_start() {
+        let s = applescript_open("claude");
+        let (running, cold) = s.split_once("\nelse\n").expect(&s);
+        assert!(!running.contains("activate"), "{s}");
+        assert!(cold.contains("activate"), "{s}");
+        assert!(cold.contains("repeat 30 times"), "{s}");
+        assert!(cold.contains("(count of tabs of window 1) > 0"), "{s}");
+        assert!(cold.contains("write text \"claude\""), "{s}");
+        // Only when no window ever appears does a cold start make its own.
+        assert!(cold.contains("if not ready then"), "{s}");
+    }
+
+    #[test]
+    fn open_escapes_the_command() {
+        let s = applescript_open("echo \"hi\" \\ there");
+        assert!(s.contains("write text \"echo \\\"hi\\\" \\\\ there\""), "{s}");
+    }
+
+    #[test]
+    fn focus_selects_session_then_tab_then_window_without_activating() {
+        let s = applescript_focus("/dev/ttys021");
+        assert!(s.contains("if tty of s is \"/dev/ttys021\""), "{s}");
+        let session = s.find("select s").expect(&s);
+        let tab = s.find("select t").expect(&s);
+        let window = s.find("select w").expect(&s);
+        // Selecting a window reorders `windows`, so it goes last.
+        assert!(session < tab && tab < window, "{s}");
+        assert!(!s.contains("activate"), "{s}");
+        assert!(s.ends_with("return \"not found\""), "{s}");
+    }
+
+    #[test]
+    fn focus_checks_iterm_is_running_first() {
+        let s = applescript_focus("/dev/ttys021");
+        assert!(s.find("is running").expect(&s) < s.find("tell application id").expect(&s), "{s}");
     }
 
     #[test]
