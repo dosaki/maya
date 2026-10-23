@@ -265,6 +265,12 @@ impl Store {
         self.opencode.iter().find(|f| f.session.id == session_id).map(|f| (f.session.clone(), f.live.clone()))
     }
 
+    /// Every process with its parent and tty, for walking from a session's
+    /// tty to its terminal tab's (`tty::outer_tty`).
+    pub fn process_tree(&self) -> Vec<foreign::Proc> {
+        (self.process_tree)()
+    }
+
     /// The newest OpenCode terminal open on `dir`.
     pub fn opencode_window(&self, dir: &str) -> Option<i32> {
         (self.opencode_windows)().into_iter().filter(|(_, d)| d == dir).map(|(pid, _)| pid).max()
@@ -274,6 +280,12 @@ impl Store {
     pub fn with_kiro(mut self, sessions_dir: PathBuf, run_dir: PathBuf, procs: Vec<foreign::Proc>) -> Self {
         self.kiro_dir = sessions_dir;
         self.kiro_run_dir = run_dir;
+        self.process_tree = Box::new(move || procs.clone());
+        self
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_process_tree(mut self, procs: Vec<foreign::Proc>) -> Self {
         self.process_tree = Box::new(move || procs.clone());
         self
     }
