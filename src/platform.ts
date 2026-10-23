@@ -10,6 +10,11 @@ export function isLinux(): boolean {
   return /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
 }
 
+/** True when the page runs in Maya on macOS (the webview's user agent says Macintosh; Android does not). */
+export function isMac(): boolean {
+  return /Macintosh/.test(navigator.userAgent);
+}
+
 /** This machine in a machine picker: "This Mac", "This PC" or "This computer". */
 export function thisComputer(): string {
   if (isLinux()) return "This computer";

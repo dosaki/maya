@@ -2,6 +2,7 @@
 //! activation afterwards needs AppKit, so these live in the app.
 
 use crate::terminal_iterm::ItermApp;
+use maya_core::config::{self, NewSessionTerminal};
 use maya_core::launch::applescript_run;
 use maya_core::terminal::Terminal;
 use std::path::Path;
@@ -94,12 +95,27 @@ pub struct TerminalApp;
 /// in iTerm2 or in Terminal.app, and its tty says which, so typing and focus
 /// ask each app in turn: iTerm2 first, because it answers only when it is
 /// already running, while a script for Terminal starts it. New windows open
-/// in Terminal.app.
+/// where Settings says.
 pub struct MacTerminal {
-    apps: &'static [&'static dyn Terminal],
+    iterm: &'static dyn Terminal,
+    terminal: &'static dyn Terminal,
+    /// Where new windows open, read on each use so a change in Settings counts at once.
+    choice: fn() -> NewSessionTerminal,
 }
 
-pub static TERMINAL: MacTerminal = MacTerminal { apps: &[&ItermApp, &TerminalApp] };
+pub static TERMINAL: MacTerminal = MacTerminal { iterm: &ItermApp, terminal: &TerminalApp, choice: configured_choice };
+
+/// The choice saved in Settings; Terminal when there is none or it cannot be read.
+fn configured_choice() -> NewSessionTerminal {
+    config::load(&maya_core::claude_dir().join("maya/config.json")).new_session_terminal
+}
+
+impl MacTerminal {
+    /// The apps to ask about a tty, in order.
+    fn apps(&self) -> [&dyn Terminal; 2] {
+        [self.iterm, self.terminal]
+    }
+}
 
 /// Asks each app in turn and returns the first success. An error that says
 /// keys already went in (a typed count above 0) ends the search, so a reply is
@@ -119,18 +135,22 @@ fn first_hit<T>(apps: &[&dyn Terminal], ask: impl Fn(&dyn Terminal) -> Result<T,
 
 impl Terminal for MacTerminal {
     fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String> {
-        TerminalApp.open(command, cwd, label)
+        let app = match (self.choice)() {
+            NewSessionTerminal::Iterm => self.iterm,
+            NewSessionTerminal::Terminal => self.terminal,
+        };
+        app.open(command, cwd, label)
     }
     /// A line is one command: it either went in or it did not, so any error
     /// means "not here" and the next app is tried.
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
-        first_hit(self.apps, |app| app.type_line(tty, text).map_err(|why| (0, why))).map_err(|(_, why)| why)
+        first_hit(&self.apps(),|app| app.type_line(tty, text).map_err(|why| (0, why))).map_err(|(_, why)| why)
     }
     fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
-        first_hit(self.apps, |app| app.type_reply(tty, lines))
+        first_hit(&self.apps(),|app| app.type_reply(tty, lines))
     }
     fn focus(&self, tty: &str) -> Result<(), String> {
-        first_hit(self.apps, |app| app.focus(tty).map_err(|why| (0, why))).map_err(|(_, why)| why)
+        first_hit(&self.apps(),|app| app.focus(tty).map_err(|why| (0, why))).map_err(|(_, why)| why)
     }
     fn name_for_tty(&self, _tty: &str) -> Option<String> {
         None
@@ -204,7 +224,7 @@ mod tests {
 
     impl Terminal for Stub {
         fn open(&self, _command: &str, _cwd: &Path, _label: &str) -> Result<Option<String>, String> {
-            Ok(None)
+            self.answer().map(|()| None).map_err(|(_, why)| why)
         }
         fn type_line(&self, _tty: &str, _text: &str) -> Result<(), String> {
             self.answer().map_err(|(_, why)| why)
@@ -224,9 +244,22 @@ mod tests {
         Stub::new(Err((0, "no such tab".into())))
     }
 
-    fn mac(apps: &[&'static Stub]) -> MacTerminal {
-        let apps: Vec<&'static dyn Terminal> = apps.iter().map(|app| *app as &'static dyn Terminal).collect();
-        MacTerminal { apps: Box::leak(apps.into_boxed_slice()) }
+    /// Two stand-in apps, iTerm2 first and Terminal second, as `TERMINAL` has them.
+    fn mac(apps: &[&'static Stub; 2]) -> MacTerminal {
+        mac_choosing(apps, || NewSessionTerminal::Terminal)
+    }
+
+    fn mac_choosing(apps: &[&'static Stub; 2], choice: fn() -> NewSessionTerminal) -> MacTerminal {
+        MacTerminal { iterm: apps[0], terminal: apps[1], choice }
+    }
+
+    #[test]
+    fn new_sessions_open_in_the_chosen_app() {
+        let (iterm, terminal) = (Stub::new(Ok(())), Stub::new(Ok(())));
+        mac_choosing(&[iterm, terminal], || NewSessionTerminal::Iterm).open("claude", Path::new("/p"), "x").unwrap();
+        assert_eq!((iterm.calls(), terminal.calls()), (1, 0));
+        mac_choosing(&[iterm, terminal], || NewSessionTerminal::Terminal).open("claude", Path::new("/p"), "x").unwrap();
+        assert_eq!((iterm.calls(), terminal.calls()), (1, 1));
     }
 
     #[test]

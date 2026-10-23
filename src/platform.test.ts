@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { builtinVoiceName, isLinux, isWindows, recognizerOptions, secretStore, sendShortcut, thisComputer } from "./platform";
+import { builtinVoiceName, isLinux, isMac, isWindows, recognizerOptions, secretStore, sendShortcut, thisComputer } from "./platform";
 
 const original = navigator.userAgent;
 
@@ -8,6 +8,19 @@ function pretend(ua: string) {
 }
 
 afterEach(() => pretend(original));
+
+describe("isMac", () => {
+  it("is true only in Maya's macOS webview, not on Windows, Linux or Android", () => {
+    pretend("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15");
+    expect(isMac()).toBe(true);
+    pretend("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0");
+    expect(isMac()).toBe(false);
+    pretend("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 (KHTML, like Gecko)");
+    expect(isMac()).toBe(false);
+    pretend("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/130.0 Mobile Safari/537.36");
+    expect(isMac()).toBe(false);
+  });
+});
 
 describe("platform wording", () => {
   it("names the Mac and its shortcuts on macOS", () => {

@@ -156,6 +156,9 @@ pub struct Config {
     /// The session viewer's look; the phone keeps its own.
     #[serde(default)]
     pub viewer_theme: ViewerTheme,
+    /// The app new sessions open in on macOS; the other systems have one terminal.
+    #[serde(default)]
+    pub new_session_terminal: NewSessionTerminal,
     #[serde(default)]
     pub network: NetworkConfig,
 }
@@ -187,6 +190,16 @@ pub enum ViewerTheme {
     #[default]
     Chat,
     Terminal,
+}
+
+/// The macOS app that opens the windows of sessions Maya starts. Typing and
+/// focus find a session in either app, whatever this says.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NewSessionTerminal {
+    #[default]
+    Terminal,
+    Iterm,
 }
 
 /// A code host Maya reads pull requests from.
@@ -396,6 +409,7 @@ impl Default for Config {
             whisper_model: DEFAULT_MODEL.into(),
             git: None,
             viewer_theme: ViewerTheme::Chat,
+            new_session_terminal: NewSessionTerminal::Terminal,
             network: NetworkConfig::default(),
         }
     }
@@ -691,6 +705,17 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "muted": true}"#).unwrap();
         assert!(c.muted);
         assert!(serde_json::to_string(&c).unwrap().contains("\"muted\":true"));
+    }
+
+    #[test]
+    fn new_sessions_open_in_terminal_by_default_and_the_choice_round_trips() {
+        assert_eq!(Config::default().new_session_terminal, NewSessionTerminal::Terminal);
+        let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
+        assert_eq!(older.new_session_terminal, NewSessionTerminal::Terminal);
+        let set = Config { new_session_terminal: NewSessionTerminal::Iterm, ..Config::default() };
+        let text = serde_json::to_string(&set).unwrap();
+        assert!(text.contains(r#""newSessionTerminal":"iterm""#), "{text}");
+        assert_eq!(serde_json::from_str::<Config>(&text).unwrap().new_session_terminal, NewSessionTerminal::Iterm);
     }
 
     #[test]
