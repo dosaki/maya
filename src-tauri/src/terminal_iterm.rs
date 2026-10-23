@@ -66,33 +66,17 @@ return "not found""#,
 /// Opens a new iTerm2 window and types `cmd` into its shell, the way Terminal's
 /// `do script` does: a `command` parameter would skip the login shell, so
 /// `claude` would not be on the PATH, and the window would close when the
-/// command ends. If iTerm2 is not running it is started and its own first
-/// window is used, so a cold start leaves one window and not two.
+/// command ends. If iTerm2 is not running this starts it. A window iTerm2
+/// restores at start is left alone, never reused: it can hold a live program,
+/// such as a running agent, and typing the command into it would send the line
+/// to that program. So a cold start can leave one window more than before.
 pub fn applescript_open(cmd: &str) -> String {
     let cmd = applescript_keys(cmd);
     format!(
-        r#"if application id "{BUNDLE_ID}" is running then
-  tell application id "{BUNDLE_ID}"
-    set newWindow to (create window with default profile)
-    tell current session of newWindow to write text {cmd}
-  end tell
-else
-  tell application id "{BUNDLE_ID}" to activate
-  tell application id "{BUNDLE_ID}"
-    set ready to false
-    repeat 30 times
-      if (count of windows) > 0 then
-        if (count of tabs of window 1) > 0 then
-          set ready to true
-          exit repeat
-        end if
-      end if
-      delay 0.1
-    end repeat
-    if not ready then create window with default profile
-    tell current session of current window to write text {cmd}
-  end tell
-end if"#
+        r#"tell application id "{BUNDLE_ID}"
+  set newWindow to (create window with default profile)
+  tell current session of newWindow to write text {cmd}
+end tell"#
     )
 }
 
@@ -132,6 +116,20 @@ fn run(script: String) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// What the run of a reply's script means. A script that failed may have typed
+/// some of the reply, so that counts every line. But macOS refusing Maya access
+/// to iTerm2 (-1743) and iTerm2 going away (-600) fail before anything is
+/// typed, and counting those would stop Terminal.app from being asked, so a
+/// reply to a Terminal.app session would fail too.
+fn reply_outcome(ran: Result<String, String>, lines: usize, tty: &str) -> Result<(), (usize, String)> {
+    match ran {
+        Ok(out) if out == "ok" => Ok(()),
+        Ok(_) => Err((0, format!("No iTerm2 session found for {tty}."))),
+        Err(why) if why.contains("(-1743)") || why.contains("(-600)") => Err((0, why)),
+        Err(why) => Err((lines, why)),
+    }
+}
+
 /// iTerm2: keys reach a session by its tty, through AppleScript's `write text`.
 pub struct ItermApp;
 
@@ -150,12 +148,7 @@ impl Terminal for ItermApp {
     /// One write for the whole reply. A script that ran but failed may have
     /// typed some of it, so only a missing session counts as nothing typed.
     fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
-        let out = run(applescript_type(tty, &reply_keys(lines), false)).map_err(|e| (lines.len(), e))?;
-        if out == "ok" {
-            Ok(())
-        } else {
-            Err((0, format!("No iTerm2 session found for {tty}.")))
-        }
+        reply_outcome(run(applescript_type(tty, &reply_keys(lines), false)), lines.len(), tty)
     }
     fn focus(&self, tty: &str) -> Result<(), String> {
         match run(applescript_focus(tty))?.as_str() {
@@ -200,16 +193,39 @@ mod tests {
     }
 
     #[test]
-    fn open_reuses_the_first_window_of_a_cold_start() {
+    fn open_always_makes_its_own_window_and_never_types_into_one_that_exists() {
         let s = applescript_open("claude");
-        let (running, cold) = s.split_once("\nelse\n").expect(&s);
-        assert!(!running.contains("activate"), "{s}");
-        assert!(cold.contains("activate"), "{s}");
-        assert!(cold.contains("repeat 30 times"), "{s}");
-        assert!(cold.contains("(count of tabs of window 1) > 0"), "{s}");
-        assert!(cold.contains("write text \"claude\""), "{s}");
-        // Only when no window ever appears does a cold start make its own.
-        assert!(cold.contains("if not ready then"), "{s}");
+        assert_eq!(s.matches("create window with default profile").count(), 1, "{s}");
+        assert!(s.contains("write text \"claude\""), "{s}");
+        // A window iTerm2 restores at start can hold a live program, such as a
+        // running agent; typing the command into it would send it as a message.
+        assert!(!s.contains("current window"), "{s}");
+        assert!(!s.contains("window 1"), "{s}");
+        assert!(!s.contains("activate"), "{s}");
+    }
+
+    #[test]
+    fn a_reply_that_was_sent_is_ok_and_a_missing_session_means_nothing_typed() {
+        assert_eq!(reply_outcome(Ok("ok".into()), 2, "/dev/ttys021"), Ok(()));
+        assert_eq!(reply_outcome(Ok("not found".into()), 2, "/dev/ttys021"), Err((0, "No iTerm2 session found for /dev/ttys021.".to_string())));
+    }
+
+    #[test]
+    fn a_refused_automation_permission_means_nothing_was_typed() {
+        let refused = Err("osascript failed: execution error: Not authorized to send Apple events to iTerm. (-1743)".to_string());
+        assert!(matches!(reply_outcome(refused, 3, "/dev/ttys021"), Err((0, _))));
+    }
+
+    #[test]
+    fn an_app_that_went_away_means_nothing_was_typed() {
+        let gone = Err("osascript failed: iTerm got an error: Application isn't running. (-600)".to_string());
+        assert!(matches!(reply_outcome(gone, 3, "/dev/ttys021"), Err((0, _))));
+    }
+
+    #[test]
+    fn any_other_script_failure_may_have_typed_some_of_the_reply() {
+        let failed = Err("osascript failed: something broke (-2741)".to_string());
+        assert!(matches!(reply_outcome(failed, 3, "/dev/ttys021"), Err((3, _))));
     }
 
     #[test]
