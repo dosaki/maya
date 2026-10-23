@@ -24,7 +24,11 @@ pub fn base_url(raw: &str) -> Option<String> {
     }
     let s = s.trim_end_matches('/');
     let s = s.strip_suffix("/v1").unwrap_or(s);
-    Some(s.trim_end_matches('/').to_string())
+    let s = s.trim_end_matches('/');
+    if s == "http:" || s == "https:" {
+        return None;
+    }
+    Some(s.to_string())
 }
 
 pub fn speech_url(base: &str) -> String {
@@ -96,6 +100,9 @@ pub fn list_voices(base: &str, key: Option<&str>) -> Result<Vec<String>, String>
 /// `<path>.part` first, so a half-written file is never taken for a line;
 /// on any failure no file is left at `path`.
 pub fn synthesize(base: &str, key: Option<&str>, voice: &str, model: &str, text: &str, path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("could not save the audio: {e}"))?;
+    }
     let mut req = agent().post(speech_url(base)).header("Content-Type", "application/json");
     if let Some(k) = key {
         req = req.header("Authorization", &format!("Bearer {k}"));
@@ -135,6 +142,8 @@ mod tests {
         assert_eq!(base_url("https://api.openai.com/v1").as_deref(), Some("https://api.openai.com"));
         assert_eq!(base_url("localhost:8004"), None);
         assert_eq!(base_url("   "), None);
+        assert_eq!(base_url("http://"), None);
+        assert_eq!(base_url("https:///"), None);
         assert_eq!(speech_url("http://h:1"), "http://h:1/v1/audio/speech");
         assert_eq!(voices_url("http://h:1"), "http://h:1/v1/audio/voices");
     }
@@ -196,11 +205,12 @@ mod tests {
     #[test]
     fn synthesize_writes_the_audio_and_sends_the_key_as_a_bearer_header() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("line.wav");
+        // The voice folder does not exist yet, as on a device that never used ElevenLabs.
+        let path = dir.path().join("voice/line.wav");
         let (base, server) = serve_once("200 OK", "audio/wav", b"RIFF....WAVE");
         synthesize(&base, Some("k1"), "tiago.wav", "", "hello", &path).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"RIFF....WAVE");
-        assert!(!dir.path().join("line.wav.part").exists());
+        assert!(!dir.path().join("voice/line.wav.part").exists());
         let req = server.join().unwrap();
         assert!(req.contains("POST /v1/audio/speech"));
         assert!(req.to_ascii_lowercase().contains("authorization: bearer k1"));

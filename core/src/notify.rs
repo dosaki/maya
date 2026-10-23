@@ -395,6 +395,7 @@ fn speak_line(u: &Utterance) -> SpeechReport {
         return SpeechReport { spoken_by: BUILTIN, failures: vec![] };
     };
     let now = Instant::now();
+    // Held across synthesis and playback: safe only because the speech thread is DOWN's sole user.
     let mut marks = DOWN.lock().unwrap_or_else(|e| e.into_inner());
     speak_chain(u, &mut marks, now, remote, &say_builtin)
 }

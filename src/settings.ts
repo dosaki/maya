@@ -1161,13 +1161,16 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       const voice = document.createElement("select");
       voice.name = "serverVoice";
       // A saved voice the server no longer lists stays selectable.
-      for (const v of model.serverVoices.includes(model.serverVoice) ? model.serverVoices : [model.serverVoice, ...model.serverVoices]) {
+      // A blank one is the server's own default: the list's `default` when it has one.
+      const blankIsListed = model.serverVoice === "" && model.serverVoices.includes("default");
+      const saved = blankIsListed ? "default" : model.serverVoice;
+      for (const v of model.serverVoices.includes(saved) ? model.serverVoices : [saved, ...model.serverVoices]) {
         const o = document.createElement("option");
         o.value = v;
-        o.textContent = v || "default";
+        o.textContent = v || "server default";
         voice.append(o);
       }
-      voice.value = model.serverVoice;
+      voice.value = saved;
       voice.addEventListener("change", () => h.onServerVoice(voice.value));
       voiceLabel.append(voice);
       speaking.append(voiceLabel);
@@ -1652,6 +1655,7 @@ export async function initSettings(): Promise<void> {
   };
 
   const applyConfig = (c: ConfigJson) => {
+    model.voiceReport = null;
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
     model.clonesDir = c.clonesDir ?? "";
