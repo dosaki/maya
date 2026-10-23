@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
-import { builtinVoiceName, recognizerOptions, secretStore, thisComputerLower } from "./platform";
-import type { ColorTheme, GitProvider, Harness, ViewerTheme } from "./types";
+import { builtinVoiceName, isMac, recognizerOptions, secretStore, thisComputerLower } from "./platform";
+import type { ColorTheme, GitProvider, Harness, NewSessionTerminal, ViewerTheme } from "./types";
 import { setViewerTheme } from "./modal";
 import { COLOR_THEMES, applyColorTheme, asColorTheme } from "./theme";
 import { OPEN_SETTINGS_GROUP } from "./reviews";
@@ -88,6 +88,8 @@ export interface SettingsModel {
   viewerTheme?: ViewerTheme;
   /** The colours of the windows; dark when absent. */
   colorTheme?: ColorTheme;
+  /** The macOS app new sessions open in; Terminal when absent. */
+  newSessionTerminal?: NewSessionTerminal;
   hookInstalled: boolean | null;
   codexHookInstalled?: boolean | null;
   completedTimeoutMinutes: number;
@@ -186,6 +188,7 @@ export type Recognizer = "system" | "builtin";
 export interface SettingsHandlers {
   onViewerTheme?(t: ViewerTheme): void;
   onColorTheme?(t: ColorTheme): void;
+  onNewSessionTerminal?(t: NewSessionTerminal): void;
   onGitEnabled?(p: GitProvider, on: boolean): void;
   onGitTokenKind?(p: GitProvider, kind: "stored" | "env"): void;
   onGitEnvName?(p: GitProvider, name: string): void;
@@ -280,6 +283,7 @@ export function gitConnections(raw: GitConnectionJson[] | null | undefined): Git
 interface ConfigJson {
   viewerTheme?: ViewerTheme;
   colorTheme?: ColorTheme;
+  newSessionTerminal?: NewSessionTerminal;
   git?: GitConnectionJson[] | null;
   completedTimeoutMinutes: number;
   projectsDir?: string | null;
@@ -694,6 +698,22 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   viewerSel.addEventListener("change", () => h.onViewerTheme?.(viewerSel.value as ViewerTheme));
   viewerLabel.append(viewerSel);
   sessions.append(viewerLabel);
+  if (isMac()) {
+    const terminalLabel = document.createElement("label");
+    terminalLabel.textContent = "New sessions open in";
+    const terminalSel = document.createElement("select");
+    terminalSel.name = "newSessionTerminal";
+    for (const [value, text] of [["terminal", "Terminal"], ["iterm", "iTerm2"]] as const) {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = text;
+      terminalSel.append(o);
+    }
+    terminalSel.value = model.newSessionTerminal ?? "terminal";
+    terminalSel.addEventListener("change", () => h.onNewSessionTerminal?.(terminalSel.value as NewSessionTerminal));
+    terminalLabel.append(terminalSel);
+    sessions.append(terminalLabel);
+  }
 
   const clonesLabel = document.createElement("label");
   clonesLabel.textContent = "Clones directory (for PR reviews)";
@@ -1566,6 +1586,7 @@ export async function initSettings(): Promise<void> {
     setViewerTheme(model.viewerTheme);
     model.colorTheme = asColorTheme(c.colorTheme);
     applyColorTheme(model.colorTheme);
+    model.newSessionTerminal = c.newSessionTerminal ?? "terminal";
     applyNetworkConfig(c);
   };
 
@@ -1673,6 +1694,7 @@ export async function initSettings(): Promise<void> {
       applyColorTheme(t);
       void run(() => saveConfig({ colorTheme: t }));
     },
+    onNewSessionTerminal: (t) => void run(() => saveConfig({ newSessionTerminal: t })),
     onWhisperModel: (id) => void run(() => saveConfig({ whisperModel: id })),
     onDownloadModel: (id) => {
       model.downloading = { id, received: 0, total: model.models.find((m) => m.id === id)?.bytes ?? 0 };

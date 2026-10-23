@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
@@ -1126,6 +1126,42 @@ describe("colour theme", () => {
     const pick = (model: object) => renderSettings({ ...voiceBase, ...model }, handlers()).querySelector<HTMLSelectElement>("select[name=colorTheme]")!.value;
     expect(pick({ colorTheme: "light" })).toBe("light");
     expect(pick({})).toBe("dark");
+  });
+});
+
+describe("where new sessions open", () => {
+  const original = navigator.userAgent;
+  const pretend = (ua: string) => Object.defineProperty(navigator, "userAgent", { value: ua, configurable: true });
+  const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15";
+
+  afterEach(() => pretend(original));
+
+  it("offers Terminal or iTerm2 under Sessions on a Mac and saves the choice", () => {
+    pretend(MAC);
+    const h = { ...handlers(), onNewSessionTerminal: vi.fn() };
+    const el = renderSettings({ ...voiceBase, newSessionTerminal: "terminal" }, h);
+    const sessions = el.querySelector(".settings__section--sessions")!;
+    const sel = sessions.querySelector<HTMLSelectElement>("select[name=newSessionTerminal]")!;
+    expect([...sel.options].map((o) => o.textContent)).toEqual(["Terminal", "iTerm2"]);
+    expect(sel.value).toBe("terminal");
+    sel.value = "iterm";
+    sel.dispatchEvent(new Event("change"));
+    expect(h.onNewSessionTerminal).toHaveBeenCalledWith("iterm");
+  });
+
+  it("shows the saved choice and defaults to Terminal", () => {
+    pretend(MAC);
+    const chosen = renderSettings({ ...voiceBase, newSessionTerminal: "iterm" }, handlers());
+    expect(chosen.querySelector<HTMLSelectElement>("select[name=newSessionTerminal]")!.value).toBe("iterm");
+    const fresh = renderSettings({ ...voiceBase }, handlers());
+    expect(fresh.querySelector<HTMLSelectElement>("select[name=newSessionTerminal]")!.value).toBe("terminal");
+  });
+
+  it("is not offered on Windows or Linux, where there is no iTerm2", () => {
+    pretend("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0");
+    expect(renderSettings({ ...voiceBase }, handlers()).querySelector("select[name=newSessionTerminal]")).toBeNull();
+    pretend("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 (KHTML, like Gecko)");
+    expect(renderSettings({ ...voiceBase }, handlers()).querySelector("select[name=newSessionTerminal]")).toBeNull();
   });
 });
 

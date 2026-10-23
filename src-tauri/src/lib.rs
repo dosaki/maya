@@ -14,6 +14,8 @@ mod brain_route;
 mod remembered_app;
 #[cfg(target_os = "macos")]
 pub mod terminal_app;
+#[cfg(target_os = "macos")]
+pub mod terminal_iterm;
 #[cfg(target_os = "linux")]
 pub mod terminal_linux;
 #[cfg(windows)]

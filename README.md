@@ -121,6 +121,12 @@ not notarised. Set `MAYA_INSTALL_DIR` to install somewhere else. From the
 `.dmg` instead, drag Maya to Applications, and the first time right-click
 it and choose Open.
 
+Sessions run in Terminal.app or in iTerm2. Settings › Sessions › New
+sessions open in picks where the windows of the sessions Maya starts open
+(Terminal by default). Maya types into, and brings forward, a session in
+either app by its terminal device, wherever you started it. macOS may ask
+once whether Maya can control iTerm2: allow it.
+
 macOS shows the Focus state only to apps with Full Disk Access. Without it
 Maya cannot tell that a Focus mode such as Do Not Disturb is on, and keeps
 speaking; Settings says so and opens System Settings › Privacy & Security ›
@@ -502,7 +508,7 @@ write and drives them through their own interfaces.
   Alt+Enter between the lines and Enter sent as an escape sequence, so
   Claude Code never mistakes a long line's Enter for text. When Maya
   cannot type into a Claude Code session (one
-  in iTerm, VS Code or Ghostty, or over SSH outside tmux) it posts the
+  in VS Code or Ghostty, or over SSH outside tmux) it posts the
   reply to the session's inbox instead (a Unix socket on macOS and Linux,
   a named pipe on Windows), where Claude takes it as a message from
   another session that cannot approve anything, and the reply box says
@@ -513,7 +519,7 @@ write and drives them through their own interfaces.
   each session's token in `~/.claude/maya/inbox/`, and a session that was
   already running when the hook went in takes replies after its next hook
   event (your next prompt in it, say). On macOS terminal actions use AppleScript and AppKit on
-  Terminal.app; on Windows Maya attaches to the session's console to type
+  Terminal.app and iTerm2; on Windows Maya attaches to the session's console to type
   into it and brings its Windows Terminal window forward (the window, not
   the tab, when several sessions share one); on Linux the sessions Maya
   starts run in tmux, which types into them, shown in GNOME Terminal.
