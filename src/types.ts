@@ -14,7 +14,14 @@ export interface Question {
   header: string;
   options: Choice[];
   multiSelect: boolean;
+  /** The terminal's row for answering in your own words, when it has one. */
+  own?: { label: string; row: number };
+  /** The terminal's row for setting the question aside ("Chat about this"). */
+  chatRow?: number;
 }
+
+/** One answer to a question, as `answer::Pick` takes it: an option, several (multi-select), the user's own words, or Chat about this. */
+export type Pick = { kind: "option"; index: number } | { kind: "options"; indexes: number[] } | { kind: "own"; text: string } | { kind: "chat" };
 
 /** The agent runner behind a session; "other" is one this build does not know. */
 export type Harness = "claude-code" | "codex" | "antigravity" | "grok" | "kiro" | "opencode" | "other";
@@ -145,6 +152,8 @@ export interface Card {
   stale?: boolean;
   /** Maya's own resident session: shown only in debug mode and never counted. */
   brain?: boolean;
+  /** Working only because a background shell outlived the turn: there is no turn to stop. */
+  shell?: boolean;
 }
 
 /** The PR button: "PR #12" ("MR !12" on GitLab), with the state and URL in its tooltip. */
@@ -210,7 +219,7 @@ const PLATFORM_NAMES: Record<string, string> = { macos: "macOS", linux: "Linux",
  * another machine's terminal, so it says where the session runs and, when
  * the card has a tmux session name, how to attach to it.
  */
-export function remoteTerminalToast(card: Pick<Card, "machine" | "terminal">): string {
+export function remoteTerminalToast(card: { machine?: string | null; terminal?: string | null }): string {
   const base = `That session runs on ${card.machine ?? "another machine"}`;
   return card.terminal ? `${base}; attach: tmux attach -t ${card.terminal}` : base;
 }

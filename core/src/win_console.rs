@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HWND, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows_sys::Win32::System::Console::{AttachConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow, WriteConsoleInputW, INPUT_RECORD, KEY_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, ENHANCED_KEY, SHIFT_PRESSED};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, MAPVK_VK_TO_VSC, VK_DOWN, VK_PACKET, VK_RETURN, VK_TAB};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, MAPVK_VK_TO_VSC, VK_DOWN, VK_ESCAPE, VK_PACKET, VK_RETURN, VK_TAB};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOTOWNER};
 
 static ATTACH: Mutex<()> = Mutex::new(());
@@ -34,11 +34,13 @@ pub enum Key {
     /// Shift+Tab.
     BackTab,
     Enter,
+    Escape,
 }
 
 /// `text` as key presses: the escape sequences Maya's answers use (Down
 /// `ESC [ B`, Shift+Tab `ESC [ Z`) and a carriage return become those
-/// keys, the rest is typed.
+/// keys, the rest is typed. An ESC that starts neither of those sequences
+/// nor Alt+Enter (`ESC` then a carriage return) is the Escape key.
 pub fn keys_for(text: &str) -> Vec<Key> {
     let mut out = Vec::new();
     let mut rest = text;
@@ -48,6 +50,9 @@ pub fn keys_for(text: &str) -> Vec<Key> {
             rest = r;
         } else if let Some(r) = rest.strip_prefix("\x1b[Z") {
             out.push(Key::BackTab);
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix('\x1b').filter(|r| !r.starts_with('[') && !r.starts_with('\r')) {
+            out.push(Key::Escape);
             rest = r;
         } else if let Some(r) = rest.strip_prefix('\r') {
             out.push(Key::Enter);
@@ -79,6 +84,7 @@ pub fn records(keys: &[Key]) -> Vec<INPUT_RECORD> {
                 Key::Down => (VK_DOWN, 0, ENHANCED_KEY),
                 Key::BackTab => (VK_TAB, '\t' as u16, SHIFT_PRESSED),
                 Key::Enter => (VK_RETURN, '\r' as u16, 0),
+                Key::Escape => (VK_ESCAPE, 0x1b, 0),
             };
             [record(vk, unit, true, state), record(vk, unit, false, state)]
         })
@@ -106,6 +112,11 @@ pub fn type_line(pid: u32, text: &str) -> Result<(), String> {
     let mut keys = keys_for(text);
     keys.push(Key::Enter);
     type_keys(pid, &keys).map_err(|(_, e)| e)
+}
+
+/// Presses `text`'s keys in `pid`'s console, with no Enter after them.
+pub fn press_keys(pid: u32, text: &str) -> Result<(), String> {
+    type_keys(pid, &keys_for(text)).map_err(|(_, e)| e)
 }
 
 /// Types `keys` into `pid`'s console in one write. On failure, whether
@@ -199,8 +210,14 @@ mod tests {
     fn answers_become_arrow_and_back_tab_presses() {
         assert_eq!(keys_for("\x1b[B\x1b[Bok"), [Key::Down, Key::Down, Key::Unit('o' as u16), Key::Unit('k' as u16)]);
         assert_eq!(keys_for("\x1b[Z"), [Key::BackTab]);
-        // Text outside the BMP is two units; a lone ESC is typed as is.
-        assert_eq!(keys_for("\u{1f600}\x1b"), [Key::Unit(0xd83d), Key::Unit(0xde00), Key::Unit(0x1b)]);
+        // Text outside the BMP is two units.
+        assert_eq!(keys_for("\u{1f600}"), [Key::Unit(0xd83d), Key::Unit(0xde00)]);
+    }
+
+    #[test]
+    fn a_lone_escape_is_the_escape_key() {
+        assert_eq!(keys_for("\x1b"), vec![Key::Escape]);
+        assert_eq!(keys_for("\x1b[B"), vec![Key::Down]);
     }
 
     #[test]
@@ -212,14 +229,15 @@ mod tests {
 
     #[test]
     fn every_key_is_pressed_then_released() {
-        let recs = records(&[Key::Unit('é' as u16), Key::Down, Key::BackTab, Key::Enter]);
-        assert_eq!(recs.len(), 8);
+        let recs = records(&[Key::Unit('é' as u16), Key::Down, Key::BackTab, Key::Enter, Key::Escape]);
+        assert_eq!(recs.len(), 10);
         let k: Vec<(i32, u16, u16, u32)> = recs.iter().map(|r| unsafe { (r.Event.KeyEvent.bKeyDown, r.Event.KeyEvent.wVirtualKeyCode, r.Event.KeyEvent.uChar.UnicodeChar, r.Event.KeyEvent.dwControlKeyState) }).collect();
         assert_eq!(k[0], (1, VK_PACKET, 'é' as u16, 0));
         assert_eq!(k[1], (0, VK_PACKET, 'é' as u16, 0));
         assert_eq!(k[2], (1, VK_DOWN, 0, ENHANCED_KEY));
         assert_eq!(k[4], (1, VK_TAB, '\t' as u16, SHIFT_PRESSED));
         assert_eq!(k[6], (1, VK_RETURN, '\r' as u16, 0));
+        assert_eq!(k[8], (1, VK_ESCAPE, 0x1b, 0));
     }
 
     /// A console program with no window that reads one line from its

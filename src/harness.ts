@@ -4,7 +4,7 @@ import codexIcon from "./assets/icons/codex.svg";
 import grokIcon from "./assets/icons/grok.png";
 import kiroIcon from "./assets/icons/kiro.png";
 import opencodeIcon from "./assets/icons/opencode.svg";
-import type { Harness } from "./types";
+import type { Card, Harness } from "./types";
 
 export const HARNESS_LABEL: Record<Harness, string> = {
   "claude-code": "Claude Code",
@@ -59,21 +59,29 @@ export interface Capabilities {
   shellLines: boolean;
   /** `/exit` ends the session, so Close can type it and then close the terminal. */
   close: boolean;
+  /** Stop presses the agent's stop key (or calls its server). */
+  stop: boolean;
 }
 
 export const CAPABILITIES: Record<Harness, Capabilities> = {
-  "claude-code": { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true, close: true },
-  codex: { compact: true, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: true, shellLines: false, close: true },
-  antigravity: { compact: true, modelSwitch: false, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false, close: true },
-  grok: { compact: true, modelSwitch: true, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false, close: true },
-  kiro: { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true, close: true },
-  opencode: { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true, close: true },
-  other: { compact: false, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: false, shellLines: false, close: false },
+  "claude-code": { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true, close: true, stop: true },
+  codex: { compact: true, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: true, shellLines: false, close: true, stop: true },
+  antigravity: { compact: true, modelSwitch: false, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false, close: true, stop: false },
+  grok: { compact: true, modelSwitch: true, effortSwitch: false, modeCycle: true, slashLines: true, shellLines: false, close: true, stop: false },
+  kiro: { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true, close: true, stop: false },
+  opencode: { compact: true, modelSwitch: true, effortSwitch: true, modeCycle: true, slashLines: true, shellLines: true, close: true, stop: true },
+  other: { compact: false, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: false, shellLines: false, close: false, stop: false },
 };
 
-const NO_CAPABILITIES: Capabilities = { compact: false, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: false, shellLines: false, close: false };
+const NO_CAPABILITIES: Capabilities = { compact: false, modelSwitch: false, effortSwitch: false, modeCycle: false, slashLines: false, shellLines: false, close: false, stop: false };
 
 /** An agent this build does not know offers no controls, rather than Claude Code's. */
 export function capabilitiesOf(h: Harness): Capabilities {
   return CAPABILITIES[h] ?? NO_CAPABILITIES;
+}
+
+/** Whether Stop applies to the card: the same rules as `launch::can_stop` in Rust. */
+export function canStop(card: Card): boolean {
+  const turn = card.state === "working" ? !card.shell : card.state === "awaiting" && !!card.awaiting && card.awaiting.kind !== "text";
+  return turn && !card.brain && capabilitiesOf(card.harness).stop;
 }

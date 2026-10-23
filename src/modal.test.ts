@@ -1,11 +1,17 @@
 import styles from "./styles.css?raw";
-import { describe, expect, it, vi } from "vitest";
-import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, parsePanelSize, patchModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const invoke = vi.fn();
+vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
+
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
+const asking: Card = { ...base, state: "awaiting", stateSince: 5000,
+  awaiting: { kind: "question", detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "desc a" }], own: { label: "Type something", row: 1 }, chatRow: 2 }] } };
 const turns: Turn[] = [{ kind: "user", text: "hi" }, { kind: "assistant", text: "hello" }, { kind: "tool", text: "Bash: ls" }, { kind: "peer", text: "from eye" }];
-const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onAnswer: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCommand: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn(), onPasteFiles: vi.fn() });
+const handlers = () => ({ onSend: vi.fn(), onTerminal: vi.fn(), onClose: vi.fn(), onPick: vi.fn(), onStop: vi.fn(), onSetOption: vi.fn(), onCycleMode: vi.fn(), onOpenPr: vi.fn(), onRename: vi.fn(), onCommand: vi.fn(), onCompact: vi.fn(), onOpenLink: vi.fn(), onPasteFiles: vi.fn() });
 
 describe("historyRefetchDue", () => {
   it("always refetches a local card, and a remote one only when its state, state time or snippet moved", () => {
@@ -440,19 +446,80 @@ describe("renderModal", () => {
     const h = handlers();
     const el = renderModal({ card: { ...base, state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm", questions: [] } }, turns: [], status: { ok: false, text: "boom" }, draft: "" }, h);
     expect(el.querySelector(".modal__banner")?.textContent).toContain("waiting for a decision");
-    const asking = { ...base, state: "awaiting" as const, stateSince: 5000, awaiting: { kind: "question" as const, detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "desc a" }] }] } };
-    const early = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 5500);
-    expect(early.querySelector<HTMLButtonElement>(".modal__banner button[data-action=answer]")!.disabled).toBe(true);
-    const q = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000);
-    expect(q.querySelector(".modal__banner .options__desc")?.textContent).toBe("desc a");
-    const btn = q.querySelector<HTMLButtonElement>(".modal__banner button[data-action=answer]")!;
-    expect(btn.disabled).toBe(false);
-    btn.click();
-    expect(h.onAnswer).toHaveBeenCalledWith(0, 0, btn);
     el.querySelector<HTMLButtonElement>(".modal__banner button")!.click();
     expect(h.onTerminal).toHaveBeenCalled();
     expect(el.querySelector(".modal__status")?.textContent).toBe("boom");
     expect(el.querySelector(".modal__status")?.className).toContain("modal__status--error");
+  });
+
+  it("keeps only its text and Open terminal in the banner while the menu asks", () => {
+    const h = handlers();
+    const q = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000);
+    const banner = q.querySelector(".modal__banner")!;
+    expect(banner.textContent).toBe("This session is asking. Answer below or in its terminal.Open terminal");
+    expect(banner.querySelector(".options, .menu")).toBeNull();
+    expect([...banner.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Open terminal"]);
+  });
+
+  it("the menu is disabled inside the open delay", () => {
+    const h = handlers();
+    const early = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 5500);
+    expect(early.querySelector(".menu__rows")?.getAttribute("aria-disabled")).toBe("true");
+    early.querySelector<HTMLElement>(".menu [data-row='0']")!.click();
+    expect(h.onPick).not.toHaveBeenCalled();
+    const q = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000);
+    expect(q.querySelector(".menu__rows")?.getAttribute("aria-disabled")).toBeNull();
+    expect(q.querySelector(".menu .menu__desc")?.textContent).toBe("desc a");
+    const row = q.querySelector<HTMLElement>(".menu [data-row='0']")!;
+    row.click();
+    expect(h.onPick).toHaveBeenCalledWith(0, { kind: "option", index: 0 }, row);
+  });
+
+  it("menu replaces the composer while asking", () => {
+    const h = handlers();
+    const q = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000);
+    expect(q.querySelector(".menu")).not.toBeNull();
+    expect(q.querySelector(".modal__input")).toBeNull();
+    expect(q.querySelector(".modal__composer")).toBeNull();
+    // Once every question has an answer the composer is back until the card moves on.
+    const answered = renderModal({ card: asking, turns: [], status: null, draft: "", next: 1 }, h, 6000);
+    expect(answered.querySelector(".menu")).toBeNull();
+    expect(answered.querySelector(".modal__input")).not.toBeNull();
+  });
+
+  it("hands the phone's menu no keyboard hints", () => {
+    const h = handlers();
+    expect(renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000).querySelector(".menu__hints")).not.toBeNull();
+    setComposerOptions({ keyboardHints: false });
+    expect(renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000).querySelector(".menu__hints")).toBeNull();
+    setComposerOptions({ keyboardHints: true });
+  });
+
+  it("shows a multi-select question read-only and sends the user to the terminal", () => {
+    const multi = { ...asking, awaiting: { kind: "question" as const, detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: true, options: [{ label: "A", description: "" }] }] } };
+    const el = renderModal({ card: multi, turns: [], status: null, draft: "", next: 0 }, handlers(), 6000);
+    expect(el.querySelector(".menu__note")?.textContent).toBe("Multi-select: answer in the terminal");
+    expect(el.querySelector(".menu [data-action=pick]")).toBeNull();
+    expect(el.querySelector(".modal__banner")?.textContent).toContain("Answer it there");
+  });
+
+  it("Stop shows only when canStop, and sits next to Send", () => {
+    const h = handlers();
+    const working = { ...base, state: "working" as const, stateSince: 5000 };
+    const el = renderModal({ card: working, turns: [], status: null, draft: "" }, h, 6000);
+    const stop = el.querySelector<HTMLButtonElement>(".modal__composer button[data-action=stop]")!;
+    expect(stop.textContent).toBe("Stop");
+    expect(stop.nextElementSibling?.getAttribute("data-action")).toBe("send");
+    expect(stop.disabled).toBe(false);
+    stop.click();
+    expect(h.onStop).toHaveBeenCalledWith(stop);
+    expect(renderModal({ card: working, turns: [], status: null, draft: "" }, h, 5500).querySelector<HTMLButtonElement>("button[data-action=stop]")!.disabled).toBe(true);
+    expect(renderModal({ card: base, turns: [], status: null, draft: "" }, h, 6000).querySelector("button[data-action=stop]")).toBeNull();
+    expect(renderModal({ card: { ...working, shell: true }, turns: [], status: null, draft: "" }, h, 6000).querySelector("button[data-action=stop]")).toBeNull();
+    expect(renderModal({ card: { ...working, harness: "kiro" }, turns: [], status: null, draft: "" }, h, 6000).querySelector("button[data-action=stop]")).toBeNull();
+    // While asking, Stop sits in the menu's foot.
+    const q = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000);
+    expect(q.querySelector(".menu__foot button[data-action=stop]")).not.toBeNull();
   });
 
   it("shows the machine in the header and drops the terminal button from the awaiting banner for a remote card", () => {
@@ -505,10 +572,9 @@ describe("renderModal", () => {
     expect(prose.querySelector(".modal__banner")?.textContent).not.toContain("terminal");
     expect(prose.querySelector(".modal__banner")?.textContent).toContain("Reply below.");
 
-    const asking = { ...base, machine: "laptop", state: "awaiting" as const, stateSince: 5000, awaiting: { kind: "question" as const, detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "" }] }] } };
-    const question = renderModal({ card: asking, turns: [], status: null, draft: "", next: 0 }, h, 6000);
+    const question = renderModal({ card: { ...asking, machine: "laptop" }, turns: [], status: null, draft: "", next: 0 }, h, 6000);
     expect(question.querySelector(".modal__banner")?.textContent).not.toContain("terminal");
-    expect(question.querySelector(".modal__banner")?.textContent).toContain("Pick an answer here.");
+    expect(question.querySelector(".modal__banner")?.textContent).toBe("This session is asking. Answer below.");
   });
 
   it("closes on backdrop click and on the close button", () => {
@@ -681,5 +747,116 @@ describe("working and status lines", () => {
     expect(root.querySelector(".modal__statusline--head")?.textContent).toBe("claude-opus-5 · feat/x");
     expect(root.querySelector(".modal__statusline--foot")?.textContent).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
     expect(root.querySelector(".modal__working")?.textContent).toBe("✻ Working… (1s)");
+  });
+});
+
+describe("the open session view while a session asks", () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const host = () => document.getElementById("modal-host")!;
+  const key = (target: EventTarget, k: string) => target.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+  const calls = (cmd: string) => invoke.mock.calls.filter(([c]) => c === cmd);
+
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="modal-host"></div>';
+    invoke.mockReset();
+    invoke.mockImplementation((cmd: string) => Promise.resolve(cmd === "session_history" ? [] : null));
+  });
+
+  it("menu replaces the composer while asking and the composer returns after, with the draft", async () => {
+    const working = { ...base, sessionId: "m1", state: "working" as const, stateSince: Date.now() - 5000 };
+    await openModal(working);
+    host().querySelector<HTMLTextAreaElement>(".modal__input")!.value = "half a thought";
+    refreshModal([{ ...asking, sessionId: "m1", stateSince: Date.now() - 5000 }]);
+    await flush();
+    expect(host().querySelector(".menu")).not.toBeNull();
+    expect(host().querySelector(".modal__input")).toBeNull();
+    refreshModal([{ ...working, stateSince: Date.now() - 2000 }]);
+    await flush();
+    expect(host().querySelector(".menu")).toBeNull();
+    expect(host().querySelector<HTMLTextAreaElement>(".modal__input")?.value).toBe("half a thought");
+    closeModal();
+  });
+
+  it("keeps the menu, its focus and its own box through a repaint of the same question", async () => {
+    const card = { ...asking, sessionId: "m2", stateSince: Date.now() - 5000 };
+    await openModal(card);
+    const box = host().querySelector<HTMLTextAreaElement>(".menu textarea")!;
+    box.value = "Redis";
+    box.focus();
+    refreshModal([{ ...card, hasInbox: false }]);
+    await flush();
+    expect(host().querySelector(".menu textarea")).toBe(box);
+    expect(document.activeElement).toBe(box);
+    closeModal();
+  });
+
+  it("Escape still closes the view while the menu is shown", async () => {
+    await openModal({ ...asking, sessionId: "m3", stateSince: Date.now() - 5000 });
+    const menu = host().querySelector<HTMLElement>(".menu")!;
+    menu.focus();
+    key(menu, "Escape");
+    expect(host().childElementCount).toBe(0);
+    await openModal({ ...asking, sessionId: "m3", stateSince: Date.now() - 5000 });
+    key(host().querySelector(".menu textarea")!, "Escape");
+    expect(host().childElementCount).toBe(0);
+  });
+
+  it("number keys act on the menu only once it has focus, and send the pick", async () => {
+    const card = { ...asking, sessionId: "m4", stateSince: Date.now() - 5000 };
+    await openModal(card);
+    key(document, "1");
+    expect(calls("answer_question")).toHaveLength(0);
+    const menu = host().querySelector<HTMLElement>(".menu")!;
+    menu.focus();
+    key(menu, "1");
+    expect(calls("answer_question")).toEqual([["answer_question", { sessionId: "m4", askId: card.stateSince, questionIndex: 0, optionIndex: 0 }]]);
+    await flush();
+    expect(host().querySelector(".modal__status")?.textContent).toBe("Answer sent to the terminal");
+    closeModal();
+  });
+
+  it("Enter in the own box sends the words as the answer", async () => {
+    const card = { ...asking, sessionId: "m5", stateSince: Date.now() - 5000 };
+    await openModal(card);
+    const box = host().querySelector<HTMLTextAreaElement>(".menu textarea")!;
+    box.value = "Use Redis";
+    key(box, "Enter");
+    expect(calls("answer_pick")).toEqual([["answer_pick", { sessionId: "m5", askId: card.stateSince, questionIndex: 0, pick: { kind: "own", text: "Use Redis" } }]]);
+    closeModal();
+  });
+
+  it("a second Stop is ignored until the card changes", async () => {
+    const working = { ...base, sessionId: "m6", state: "working" as const, stateSince: Date.now() - 5000 };
+    await openModal(working);
+    host().querySelector<HTMLButtonElement>("button[data-action=stop]")!.click();
+    expect(calls("stop_session")).toEqual([["stop_session", { sessionId: "m6" }]]);
+    await flush();
+    refreshModal([{ ...working }]);
+    await flush();
+    const again = host().querySelector<HTMLButtonElement>("button[data-action=stop]")!;
+    expect(again.disabled).toBe(true);
+    again.click();
+    expect(calls("stop_session")).toHaveLength(1);
+    refreshModal([{ ...working, stateSince: Date.now() - 2000 }]);
+    await flush();
+    expect(host().querySelector<HTMLButtonElement>("button[data-action=stop]")!.disabled).toBe(false);
+    closeModal();
+  });
+
+  it("shows the backend's error in the status line when a stop or a pick fails", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "session_history") return Promise.resolve([]);
+      return Promise.reject(cmd === "stop_session" ? "Maya needs Accessibility permission to press Esc in Terminal." : "The question has changed; pick again.");
+    });
+    const card = { ...asking, sessionId: "m7", stateSince: Date.now() - 5000 };
+    await openModal(card);
+    host().querySelector<HTMLButtonElement>("button[data-action=stop]")!.click();
+    await flush();
+    expect(host().querySelector(".modal__status")?.textContent).toBe("Maya needs Accessibility permission to press Esc in Terminal.");
+    expect(host().querySelector<HTMLButtonElement>("button[data-action=stop]")!.disabled).toBe(false);
+    host().querySelector<HTMLElement>(".menu [data-row='0']")!.click();
+    await flush();
+    expect(host().querySelector(".modal__status")?.textContent).toBe("The question has changed; pick again.");
+    closeModal();
   });
 });

@@ -794,7 +794,7 @@ impl Driver for OpenCodeDriver {
         };
         let mut failed = None;
         for id in ids {
-            if let Err(e) = self.ctx.client.post_empty(&format!("/api/session/{id}/interrupt")) {
+            if let Err(e) = crate::opencode::interrupt(&self.ctx.client, &id) {
                 crate::log::line("brain", format!("OpenCode: could not stop session {id}: {e}"));
                 failed.get_or_insert(e);
             }
@@ -833,7 +833,7 @@ impl Driver for OpenCodeDriver {
         if !ids.is_empty() {
             let quick = Client::with_timeout(&self.ctx.service, SHUTDOWN_TIMEOUT);
             for id in ids {
-                let _ = quick.post_empty(&format!("/api/session/{id}/interrupt"));
+                let _ = crate::opencode::interrupt(&quick, &id);
             }
         }
     }

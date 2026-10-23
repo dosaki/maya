@@ -17,6 +17,10 @@ export function makeProgress() {
       const e = entry(card);
       state.set(card.sessionId, { since: e.since, next: e.next + 1 });
     },
+    /** Past every question of this ask, as when it was set aside with Chat about this. */
+    finish: (card: Card) => {
+      state.set(card.sessionId, { since: card.stateSince, next: card.awaiting?.questions.length ?? 0 });
+    },
     reset: (sessionId: string) => {
       state.delete(sessionId);
     },

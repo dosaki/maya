@@ -199,7 +199,7 @@ mod tests {
             terminal: None,
             stale: false,
             model: None,
-            branch: None, brain: false,
+            branch: None, brain: false, shell: false,
         }
     }
 

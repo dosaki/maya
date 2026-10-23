@@ -22,7 +22,9 @@ pub struct Reply {
 /// Only the first question can be answered by voice, so only it is listed.
 fn options_of(a: &crate::model::Awaiting) -> String {
     let labels: Vec<String> = a.questions.first().map(|q| q.options.iter().enumerate().map(|(i, o)| format!("{} {}", i + 1, o.label)).collect()).unwrap_or_default();
-    if labels.is_empty() {
+    if labels.is_empty() && matches!(a.kind, crate::model::AwaitKind::Permission | crate::model::AwaitKind::Plan) {
+        " (answer it in the terminal)".into()
+    } else if labels.is_empty() {
         " (free text: use reply)".into()
     } else {
         format!(" [{}]", labels.join(", "))
@@ -102,6 +104,7 @@ pub const ACTIONS: &str = r#"{"kind":"reply","session":"<name>","text":"<text>"}
 {"kind":"answer","session":"<name>","option":<1-based number>} pick one of the numbered options of its open question; a question marked "free text" has none, so use reply with the words to send
 {"kind":"focus","session":"<name>"}                 bring its terminal forward
 {"kind":"compact","session":"<name>"}               compact its context
+{"kind":"stop","session":"<name>"}                  stop what that session is doing, as Esc does
 {"kind":"resume","dir":"<project folder>"}          resume the latest session of that folder
 {"kind":"resume_all","scope":"all"}                 resume every session that was running when Maya last stopped ("resume my sessions", "bring back my sessions", "restore everything"); "scope":"here" for this machine only ("resume my sessions here")
 {"kind":"start","dir":"<project folder>","prompt":"<text>"} start a new session
@@ -409,9 +412,12 @@ pub fn validate(action: &Value, cards: &[Card], dirs: &[String], machines: &[Str
             a["title"] = Value::String(p.title.clone());
             Ok(a)
         }
-        "reply" | "focus" | "compact" | "answer" => {
+        "reply" | "focus" | "compact" | "answer" | "stop" => {
             let wanted = a["session"].as_str().unwrap_or("").to_string();
             let c = find_session(cards, &wanted)?;
+            if kind == "stop" && !crate::launch::can_stop(c) {
+                return Err(format!("{} has nothing running to stop.", c.name));
+            }
             if kind == "answer" {
                 let n = a["option"].as_u64().unwrap_or(0) as usize;
                 let options = c.awaiting.as_ref().and_then(|w| w.questions.first()).map(|q| q.options.as_slice()).unwrap_or(&[]);
@@ -427,6 +433,17 @@ pub fn validate(action: &Value, cards: &[Card], dirs: &[String], machines: &[Str
             }
             if kind == "reply" && a["text"].as_str().map_or(true, |t| t.trim().is_empty()) {
                 return Err("There was nothing to send".into());
+            }
+            if kind == "reply" && c.state == crate::model::State::Awaiting {
+                let ask = c.awaiting.as_ref();
+                // A menu's typed words are not a pick: only the terminal's own-words row takes them.
+                if ask.is_some_and(|w| matches!(w.kind, crate::model::AwaitKind::Permission | crate::model::AwaitKind::Plan)) {
+                    return Err("Pick one of its numbered options, or answer it in the terminal.".into());
+                }
+                if ask.and_then(|w| w.questions.first()).is_some_and(|q| q.own.is_some()) {
+                    a["own"] = Value::Bool(true);
+                    a["askId"] = Value::from(c.state_since);
+                }
             }
             a["session"] = Value::String(c.session_id.clone());
             a["name"] = Value::String(c.name.clone());
@@ -551,7 +568,7 @@ mod tests {
         Card {
             session_id: id.into(), pid: 1, name: name.into(), cwd: format!("/Users/x/dev/proj-{id}"), state, state_since: 0, snippet: "".into(),
             awaiting: ask.map(|a| Awaiting { kind: AwaitKind::Text, detail: a.into(), questions: vec![] }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false
         }
     }
 
@@ -733,7 +750,7 @@ mod tests {
         use crate::model::{Choice, Question};
         let mut c = card("a", "hexgrid-d3", State::Awaiting, Some("Which?"));
         c.awaiting.as_mut().unwrap().kind = AwaitKind::Question;
-        c.awaiting.as_mut().unwrap().questions = vec![Question { question: "Which?".into(), header: "H".into(), multi_select: false, options: vec![Choice { label: "A".into(), description: "".into() }, Choice { label: "B".into(), description: "".into() }] }];
+        c.awaiting.as_mut().unwrap().questions = vec![Question { question: "Which?".into(), header: "H".into(), multi_select: false, own: None, chat_row: None, options: vec![Choice { label: "A".into(), description: "".into() }, Choice { label: "B".into(), description: "".into() }] }];
         c.state_since = 1234;
         let cards = vec![c];
         assert_eq!(validate(&serde_json::json!({"kind":"answer","session":"hexgrid","option":2}), &cards, &[], &[], &[]).unwrap()["option"], 2);
@@ -746,7 +763,7 @@ mod tests {
         let mut c = card(id, name, State::Awaiting, Some("Which stack?"));
         let aw = c.awaiting.as_mut().unwrap();
         aw.kind = AwaitKind::Question;
-        aw.questions = vec![Question { question: "Which stack?".into(), header: "H".into(), multi_select: false, options: labels.iter().map(|l| Choice { label: l.to_string(), description: "".into() }).collect() }];
+        aw.questions = vec![Question { question: "Which stack?".into(), header: "H".into(), multi_select: false, own: None, chat_row: None, options: labels.iter().map(|l| Choice { label: l.to_string(), description: "".into() }).collect() }];
         c
     }
 
@@ -756,6 +773,56 @@ mod tests {
         assert!(s.contains("| asks: Which stack? [1 Postgres, 2 SQLite]"), "{s}");
         let plain = board_summary(&[card("b", "coral", State::Awaiting, Some("Push now?"))], 0);
         assert!(plain.ends_with("| asks: Push now? (free text: use reply)"), "no options, so marked free text: {plain}");
+    }
+
+    #[test]
+    fn stop_needs_a_stoppable_session() {
+        let cards = vec![card("a", "hexgrid", State::Working, None), card("b", "coral", State::Idle, None)];
+        let ok = validate(&json!({"kind":"stop","session":"hexgrid"}), &cards, &[], &[], &[]).unwrap();
+        assert_eq!((ok["session"].as_str(), ok["name"].as_str()), (Some("a"), Some("hexgrid")));
+        assert_eq!(validate(&json!({"kind":"stop","session":"coral"}), &cards, &[], &[], &[]).unwrap_err(), "coral has nothing running to stop.");
+        assert!(!waits(&ok), "a stop runs at once");
+        assert!(system_prompt().contains("stop what that session is doing, as Esc does"));
+    }
+
+    #[test]
+    fn permission_options_are_numbered_on_the_board() {
+        use crate::model::{Choice, Question};
+        let mut c = card("a", "hexgrid", State::Awaiting, Some("Run rm?"));
+        let aw = c.awaiting.as_mut().unwrap();
+        aw.kind = AwaitKind::Permission;
+        aw.questions = vec![Question { question: "Run rm?".into(), header: "".into(), multi_select: false, own: None, chat_row: None, options: ["Yes", "No"].iter().map(|l| Choice { label: l.to_string(), description: "".into() }).collect() }];
+        assert!(board_summary(&[c], 0).ends_with("| asks: Run rm? [1 Yes, 2 No]"));
+        let bare = {
+            let mut b = card("b", "coral", State::Awaiting, Some("Run rm?"));
+            b.awaiting.as_mut().unwrap().kind = AwaitKind::Permission;
+            b
+        };
+        assert!(board_summary(&[bare], 0).ends_with("| asks: Run rm? (answer it in the terminal)"));
+    }
+
+    #[test]
+    fn a_reply_to_a_question_with_an_own_row_is_an_own_answer() {
+        use crate::model::{Choice, OwnRow};
+        let mut c = asking("a", "hexgrid", &["Postgres", "SQLite"]);
+        c.state_since = 77;
+        c.awaiting.as_mut().unwrap().questions[0].own = Some(OwnRow { label: "Type something.".into(), row: 3 });
+        let v = validate(&json!({"kind":"reply","session":"hexgrid","text":"MariaDB"}), &[c.clone()], &[], &[], &[]).unwrap();
+        assert_eq!((v["own"].as_bool(), v["askId"].as_u64()), (Some(true), Some(77)));
+        c.awaiting.as_mut().unwrap().questions[0].own = None;
+        let plain = validate(&json!({"kind":"reply","session":"hexgrid","text":"MariaDB"}), &[c], &[], &[], &[]).unwrap();
+        assert!(plain.get("own").is_none() && plain.get("askId").is_none(), "no own row, so the text is typed as before");
+        let _ = Choice { label: "".into(), description: "".into() };
+    }
+
+    #[test]
+    fn a_reply_to_a_permission_or_plan_is_refused() {
+        for kind in [AwaitKind::Permission, AwaitKind::Plan] {
+            let mut c = card("a", "hexgrid", State::Awaiting, Some("Go?"));
+            c.awaiting.as_mut().unwrap().kind = kind;
+            let err = validate(&json!({"kind":"reply","session":"hexgrid","text":"yes"}), &[c], &[], &[], &[]).unwrap_err();
+            assert_eq!(err, "Pick one of its numbered options, or answer it in the terminal.");
+        }
     }
 
     #[test]

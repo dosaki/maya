@@ -44,4 +44,9 @@ describe("renderOptions", () => {
     expect(renderOptions({ ...two, state: "working", awaiting: null }, 0, { descriptions: false, enabled: true })).toBeNull();
     expect(renderOptions({ ...two, awaiting: { kind: "permission", detail: "Bash", questions: [] } }, 0, { descriptions: false, enabled: true })).toBeNull();
   });
+
+  it("shows any ask with questions, not only AskUserQuestion", () => {
+    const plan: Card = { ...two, awaiting: { kind: "plan", detail: "Plan", questions: [two.awaiting!.questions[0]] } };
+    expect(renderOptions(plan, 0, { descriptions: false, enabled: true })!.querySelectorAll("button[data-action=answer]")).toHaveLength(2);
+  });
 });

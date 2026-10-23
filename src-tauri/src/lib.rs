@@ -910,6 +910,22 @@ fn answer_question(app: AppHandle, state: TauriState<AppState>, session_id: Stri
     actions::answer_question(&local(&state), &session_id, ask_id, question_index, option_index)
 }
 
+#[tauri::command(async)]
+fn answer_pick(app: AppHandle, state: TauriState<AppState>, session_id: String, ask_id: u64, question_index: usize, pick: answer::Pick) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Pick { session: session_id, ask_id, question: question_index, pick });
+    }
+    actions::answer_pick(&local(&state), &session_id, ask_id, question_index, &pick)
+}
+
+#[tauri::command(async)]
+fn stop_session(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<(), String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        return route_done(&app, &machine, CommandKind::Stop { session: session_id });
+    }
+    actions::stop_session(&local(&state), &session_id)
+}
+
 /// The pull request link to open for `card`: only a web address, since a
 /// remote card's link comes from its assistant and `open` also takes file
 /// paths and app schemes.
@@ -1346,6 +1362,8 @@ pub fn run() {
             session_history,
             send_reply,
             answer_question,
+            answer_pick,
+            stop_session,
             set_session_option,
             cycle_session_mode,
             send_slash_command,
@@ -1551,7 +1569,7 @@ mod route_tests {
             machine: Some("laptop".into()),
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None, brain: false
+            stale: false, model: None, branch: None, brain: false, shell: false
         };
         assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));
         assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");

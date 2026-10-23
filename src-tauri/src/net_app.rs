@@ -367,8 +367,8 @@ pub(crate) fn revalidate(action: &Value, ctx: &VoiceContext) -> Result<Value, St
         _ => {}
     }
     let fresh = maya_core::interpreter::validate(&asked, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs)?;
-    // An answer must still be for the ask the user heard read back.
-    if action["kind"] == "answer" && fresh["askId"] != action["askId"] {
+    // An answer, or words for an own-words row, must still be for the ask the user heard read back.
+    if matches!(action["kind"].as_str(), Some("answer" | "reply")) && fresh["askId"] != action["askId"] {
         return Err("The question has changed; ask me again.".into());
     }
     // A pull request that has gone must not resolve to another with its number.
@@ -487,6 +487,8 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
             reply_with_attachments(&maya_dir, exists, &text, attachments, now_ms(), |text| actions::send_reply(&l, &session, &text)).map(|route| Some(route.data()))
         }
         CommandKind::Answer { session, ask_id, question, option } => done(actions::answer_question(&l, &session, ask_id, question, option)),
+        CommandKind::Stop { session } => done(actions::stop_session(&l, &session)),
+        CommandKind::Pick { session, ask_id, question, pick } => done(actions::answer_pick(&l, &session, ask_id, question, &pick)),
         CommandKind::Compact { session } => done(actions::compact_session(&l, &session)),
         CommandKind::Close { session } => done(actions::close_session(&l, &session)),
         CommandKind::Rename { session, name } => done(actions::rename_session(&l, &session, &name)),
@@ -561,14 +563,32 @@ mod tests {
             awaiting: Some(Awaiting {
                 kind: AwaitKind::Question,
                 detail: "Ship it?".into(),
-                questions: vec![Question { question: "Ship it?".into(), header: "".into(), options: vec![Choice { label: "Yes".into(), description: "".into() }], multi_select: false }],
+                questions: vec![Question { question: "Ship it?".into(), header: "".into(), options: vec![Choice { label: "Yes".into(), description: "".into() }], multi_select: false, own: None, chat_row: None }],
             }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false,
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false,
         }
     }
 
     fn board(cards: Vec<Card>) -> VoiceContext {
         VoiceContext { cards, dirs: vec![], machines: vec![], prs: vec![], remembered: vec![] }
+    }
+
+    #[test]
+    fn own_words_for_an_ask_answered_at_the_desk_are_refused_and_a_stop_is_revalidated() {
+        let own = |since| {
+            let mut c = asking("s1", "hexgrid", since);
+            c.awaiting.as_mut().unwrap().questions[0].own = Some(maya_core::model::OwnRow { label: "Type something.".into(), row: 2 });
+            c
+        };
+        let action = serde_json::json!({"kind": "reply", "session": "s1", "name": "hexgrid", "text": "MariaDB", "own": true, "askId": 42});
+        assert_eq!(revalidate(&action, &board(vec![own(42)])).unwrap()["askId"], 42);
+        assert_eq!(revalidate(&action, &board(vec![own(99)])).unwrap_err(), "The question has changed; ask me again.");
+        let mut working = asking("s1", "hexgrid", 5);
+        working.state = State::Working;
+        working.awaiting = None;
+        let stop = serde_json::json!({"kind": "stop", "session": "s1", "name": "hexgrid"});
+        assert_eq!(revalidate(&stop, &board(vec![working])).unwrap()["session"], "s1");
+        assert!(revalidate(&stop, &board(vec![])).is_err());
     }
 
     #[test]

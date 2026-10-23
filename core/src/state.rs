@@ -1,3 +1,4 @@
+use crate::claude_menus;
 use crate::events::HookEvent;
 use crate::model::{parse_questions, AwaitKind, Awaiting, Card, Harness, State};
 use crate::registry::RegistrySession;
@@ -103,10 +104,20 @@ fn awaiting_for_tool(e: &HookEvent) -> Awaiting {
         Some("AskUserQuestion") => Awaiting {
             kind: AwaitKind::Question,
             detail: question_detail(e),
-            questions: e.tool_input.as_ref().map(parse_questions).unwrap_or_default(),
+            questions: e
+                .tool_input
+                .as_ref()
+                .map(parse_questions)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mut q| {
+                    claude_menus::ask_rows(&mut q);
+                    q
+                })
+                .collect(),
         },
-        Some("ExitPlanMode") => Awaiting { kind: AwaitKind::Plan, detail: "Plan approval".to_string(), questions: vec![] },
-        _ => Awaiting { kind: AwaitKind::Permission, detail: permission_detail(e), questions: vec![] },
+        Some("ExitPlanMode") => Awaiting { kind: AwaitKind::Plan, detail: "Plan approval".to_string(), questions: claude_menus::plan_question(e).into_iter().collect() },
+        _ => Awaiting { kind: AwaitKind::Permission, detail: permission_detail(e), questions: claude_menus::permission_question(e).into_iter().collect() },
     }
 }
 
@@ -141,6 +152,8 @@ pub fn derive(i: &DeriveInput) -> Card {
                 awaiting = None;
                 last_turn = Some((true, e.received_at));
             }
+            // Written by Maya when it presses Esc: Claude's hooks say nothing of an interrupt.
+            "MayaInterrupt" if e.agent_id.is_none() => awaiting = None,
             "UserPromptSubmit" if e.agent_id.is_none() => {
                 awaiting = None;
                 last_turn = Some((false, e.received_at));
@@ -183,6 +196,8 @@ pub fn derive(i: &DeriveInput) -> Card {
         (State::Idle, r.status_updated_at, None)
     };
 
+    // Working on the shell alone, with no turn behind it.
+    let shell = shell_running && state == State::Working;
     Card {
         session_id: r.session_id.clone(),
         pid: r.pid,
@@ -199,14 +214,14 @@ pub fn derive(i: &DeriveInput) -> Card {
         machine: None,
         machine_address: None, machine_platform: None,
         terminal: None,
-        stale: false, model: None, branch: None, brain: false
+        stale: false, model: None, branch: None, brain: false, shell
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::HookEvent;
+use crate::events::HookEvent;
     use crate::model::{AwaitKind, State};
     use crate::registry::RegistrySession;
     use crate::transcript::{OpenQuestion, TranscriptTail};
@@ -264,6 +279,13 @@ mod tests {
         let c = run(&reg("idle", 1), &[], &TranscriptTail::default(), 5);
         assert_eq!(c.harness, crate::model::Harness::ClaudeCode);
         assert_eq!(c.pr, None, "the PR comes from the cache, not from derive");
+    }
+
+    #[test]
+    fn a_shell_left_running_marks_the_card() {
+        let c = run(&reg("shell", 1), &[], &TranscriptTail::default(), 5);
+        assert!(c.state == State::Working && c.shell);
+        assert!(!run(&reg("busy", 1), &[], &TranscriptTail::default(), 5).shell);
     }
 
     #[test]
@@ -367,6 +389,8 @@ mod tests {
         assert_eq!(aw.kind, AwaitKind::Question);
         assert_eq!(aw.detail, "Which stack?");
         assert_eq!(aw.questions[0].options[0].label, "Tauri");
+        assert_eq!(aw.questions[0].own.as_ref().map(|o| o.row), Some(1));
+        assert_eq!(aw.questions[0].chat_row, Some(2));
     }
 
     #[test]
@@ -397,6 +421,14 @@ mod tests {
         let c = run(&reg("busy", 0), &[e], &TranscriptTail::default(), 20);
         assert_eq!(c.state, State::Awaiting);
         assert_eq!(c.awaiting.unwrap().kind, AwaitKind::Permission);
+    }
+
+    #[test]
+    fn a_maya_interrupt_clears_the_ask() {
+        let evs = [tool_ev("PermissionRequest", "Bash", serde_json::json!({"command": "git push"}), 10), ev("MayaInterrupt", 11)];
+        let c = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 20);
+        assert!(c.awaiting.is_none());
+        assert_eq!(c.state, State::Working);
     }
 
     #[test]

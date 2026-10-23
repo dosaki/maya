@@ -20,6 +20,10 @@
 .modal__panel, .modal__panel--compact { width: 100vw; height: 100vh; max-width: none; max-height: none; min-width: 0; min-height: 0; border: 0; border-radius: 0; }
 .modal__backdrop { display: none; }
 .modal__attach { margin-right: 6px; }
+/* The menu takes taps: taller rows, and a box the keyboard does not zoom into. */
+.menu { max-height: 60%; padding: 10px 12px; }
+.menu__row { min-height: 44px; padding: 10px 12px; }
+.menu__own { font-size: 16px; }
 
 .topbar { padding: 8px 12px; }
 .tabs .tab__count { display: none; }

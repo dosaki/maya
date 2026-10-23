@@ -72,6 +72,41 @@ return "not found""#,
     )
 }
 
+/// Brings the Terminal tab on `tty` and its window forward, then presses Esc
+/// (key code 53) through System Events once Terminal is frontmost (it answers
+/// "not front" and presses nothing if it never is): `do script` always ends with a
+/// carriage return, so it cannot send a bare Esc.
+pub fn applescript_press_escape(tty: &str) -> String {
+    format!(
+        r#"tell application "Terminal"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if tty of t is "{tty}" then
+        set selected of t to true
+        set index of w to 1
+        activate
+        tell application "System Events"
+          repeat 20 times
+            if frontmost of application process "Terminal" then exit repeat
+            delay 0.05
+          end repeat
+          if not (frontmost of application process "Terminal") then return "not front"
+          key code 53
+        end tell
+        return "ok"
+      end if
+    end repeat
+  end repeat
+end tell
+return "not found""#
+    )
+}
+
+/// What osascript says when Maya may not send keys (-1719, -25211, 1002).
+fn needs_accessibility(stderr: &str) -> bool {
+    ["-1719", "-25211", "not allowed assistive access", "not allowed to send keystrokes", "(1002)"].iter().any(|m| stderr.contains(m))
+}
+
 pub fn type_into_tty(tty: &str, text: &str) -> Result<(), String> {
     let out = Command::new("osascript")
         .arg("-e")
@@ -100,6 +135,25 @@ impl Terminal for TerminalApp {
     }
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
         type_into_tty(tty, text)
+    }
+    /// Only Esc: through System Events, which needs Accessibility permission.
+    fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
+        if keys != maya_core::answer::ESC {
+            return Err("Only Esc can be pressed in Terminal.app.".into());
+        }
+        let out = Command::new("osascript").arg("-e").arg(applescript_press_escape(tty)).output().map_err(|e| format!("could not run osascript: {e}"))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            if needs_accessibility(&stderr) {
+                return Err("Maya needs Accessibility permission to press Esc in Terminal (System Settings → Privacy & Security → Accessibility).".into());
+            }
+            return Err(format!("osascript failed: {}", stderr.trim()));
+        }
+        match String::from_utf8_lossy(&out.stdout).trim() {
+            "ok" => Ok(()),
+            "not front" => Err("Terminal did not come to the front, so Esc was not pressed.".into()),
+            _ => Err(format!("No Terminal tab found for {tty}.")),
+        }
     }
     /// One script for the whole reply. A script that ran but failed may have
     /// typed some lines, so only a missing tab or osascript counts as none.
@@ -133,6 +187,32 @@ mod tests {
         assert!(s.contains("do script \"a\\\"b\\\\c\" in t"), "{s}");
         assert!(!s.contains("activate"));
         assert!(s.contains("return \"not found\""));
+    }
+
+    #[test]
+    fn escape_script_targets_the_tab_and_presses_key_code_53() {
+        let s = applescript_press_escape("/dev/ttys004");
+        assert!(s.contains("tty of t is \"/dev/ttys004\""), "{s}");
+        assert!(s.contains("key code 53"), "{s}");
+        assert!(!s.contains("do script"), "{s}");
+        assert!(s.find("frontmost of application process").unwrap() < s.find("key code 53").unwrap(), "{s}");
+    }
+
+    #[test]
+    fn missing_permission_is_recognised_in_osascripts_messages() {
+        for e in [
+            "execution error: osascript is not allowed to send keystrokes. (1002)",
+            "System Events got an error: osascript is not allowed assistive access. (-25211)",
+            "execution error: Not authorized (-1719)",
+        ] {
+            assert!(needs_accessibility(e), "{e}");
+        }
+        assert!(!needs_accessibility("execution error: Can't get window 1. (-1728)"));
+    }
+
+    #[test]
+    fn only_escape_can_be_pressed_in_terminal_app() {
+        assert_eq!(TerminalApp.press_keys("/dev/ttys004", "x"), Err("Only Esc can be pressed in Terminal.app.".into()));
     }
 
     #[test]
