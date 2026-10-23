@@ -348,6 +348,7 @@ fn say_text(line: &str, volume: u8) -> String {
 #[cfg(target_os = "android")]
 fn say_builtin(_line: &str, _volume: u8) {}
 
+/// The function that speaks one line with a remote voice, as `speak_chain` takes it.
 type RemoteFn<'a> = dyn Fn(&RemoteVoice, &str, u8, Reach) -> Result<(), String> + 'a;
 
 /// Speaks `u` with the first voice in its chain that can. A voice marked

@@ -449,7 +449,8 @@ pub(crate) enum WantedVoice {
 }
 
 /// The remote voices the config asks for, in the order they are tried:
-/// ElevenLabs, then the voice server. Read under the store lock, so it looks
+/// ElevenLabs, then the voice server (whatever its voice: blank leaves the
+/// server's default). Read under the store lock, so it looks
 /// up no key; `voice_chain` does, after the lock is released.
 pub(crate) fn voices_wanted(cfg: &Config, claude_dir: &std::path::Path) -> Vec<WantedVoice> {
     let maya_dir = claude_dir.join("maya");
@@ -460,7 +461,7 @@ pub(crate) fn voices_wanted(cfg: &Config, claude_dir: &std::path::Path) -> Vec<W
         }
     }
     let s = &cfg.voice_server;
-    if s.enabled && !s.voice.trim().is_empty() {
+    if s.enabled {
         if let Some(base) = maya_core::voice_server::base_url(&s.url) {
             wanted.push(WantedVoice::Server { maya_dir, base, voice: s.voice.clone(), model: s.model.clone() });
         }
@@ -1588,7 +1589,10 @@ mod route_tests {
         assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Builtin, Some("v"), "", ""), dir), vec![]);
         assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Builtin, None, "http://localhost:8004/", "default"), dir), vec![server("http://localhost:8004")]);
         assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Builtin, None, "localhost:8004", "default"), dir), vec![]);
-        assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Builtin, None, "http://localhost:8004", " "), dir), vec![]);
+        let blank = WantedVoice::Server { maya_dir: maya.clone(), base: "http://localhost:8004".into(), voice: "".into(), model: "tts-1".into() };
+        assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Builtin, None, "http://localhost:8004", ""), dir), vec![blank], "a blank voice keeps the server in the chain");
+        let off = Config { voice_server: config::VoiceServer { enabled: false, url: "http://localhost:8004".into(), voice: "default".into(), model: "tts-1".into() }, ..Default::default() };
+        assert_eq!(voices_wanted(&off, dir), vec![], "a server that is switched off is not wanted");
         assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Elevenlabs, Some("v"), "http://localhost:8004", "default"), dir), vec![eleven("v"), server("http://localhost:8004")]);
         assert_eq!(voice_chain(vec![]), vec![], "no key lookup when no voice is wanted");
     }

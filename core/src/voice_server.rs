@@ -35,10 +35,13 @@ pub fn voices_url(base: &str) -> String {
     format!("{base}/v1/audio/voices")
 }
 
-/// The JSON for one line. `model` is left out when blank: servers that have
-/// one model ignore it, and some reject a name they do not know.
+/// The JSON for one line. `voice` and `model` are left out when blank: the
+/// server then uses its own default (some reject a name they do not know).
 pub fn request_body(text: &str, voice: &str, model: &str) -> String {
-    let mut v = json!({ "input": text, "voice": voice, "response_format": "wav" });
+    let mut v = json!({ "input": text, "response_format": "wav" });
+    if !voice.trim().is_empty() {
+        v["voice"] = json!(voice);
+    }
     if !model.trim().is_empty() {
         v["model"] = json!(model);
     }
@@ -145,6 +148,8 @@ mod tests {
         assert!(v.get("model").is_none());
         let v: serde_json::Value = serde_json::from_str(&request_body("hi", "alloy", "tts-1")).unwrap();
         assert_eq!(v["model"], "tts-1");
+        let v: serde_json::Value = serde_json::from_str(&request_body("hi", " ", "tts-1")).unwrap();
+        assert!(v.get("voice").is_none(), "a blank voice leaves the server's default");
     }
 
     #[test]
