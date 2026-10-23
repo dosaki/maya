@@ -469,7 +469,9 @@ Three workflows in `.github/workflows/`:
   an assistant: the list, its seal, the config rewrites).
 - `src-tauri/src/` — `lib.rs` (Tauri commands), `net_app.rs` (the network's
   Tauri side: starting server and client, command execution),
-  `terminal_app.rs` (opening Terminal windows), `terminal_win.rs` and
+  `terminal_app.rs` (Terminal windows, and the choice between Terminal and
+  iTerm2 for typing, focus and new windows), `terminal_iterm.rs` (the iTerm2
+  side: AppleScript builders and `ItermApp`), `terminal_win.rs` and
   `terminal_linux.rs` (their Windows and Linux counterparts), `focus.rs` and `dock.rs`
   (AppKit), `keystore.rs` (the OS key store), `voice.rs` (ElevenLabs),
   `ear.rs`, `wake.rs`,
