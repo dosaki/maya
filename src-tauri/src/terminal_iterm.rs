@@ -145,6 +145,14 @@ impl Terminal for ItermApp {
             _ => Err(format!("No iTerm2 session found for {tty}.")),
         }
     }
+    /// The keys as given and no Enter: one raw write. Unlike Terminal.app, whose
+    /// `do script` cannot send a bare Esc, this needs no Accessibility permission.
+    fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
+        match run(applescript_type(tty, keys, false))?.as_str() {
+            "ok" => Ok(()),
+            _ => Err(format!("No iTerm2 session found for {tty}.")),
+        }
+    }
     /// One write for the whole reply. A script that ran but failed may have
     /// typed some of it, so only a missing session counts as nothing typed.
     fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
@@ -251,6 +259,14 @@ mod tests {
     fn focus_checks_iterm_is_running_first() {
         let s = applescript_focus("/dev/ttys021");
         assert!(s.find("is running").expect(&s) < s.find("tell application id").expect(&s), "{s}");
+    }
+
+    #[test]
+    fn escape_is_written_raw_with_no_enter() {
+        // `press_keys` is `applescript_type` with `newline` off: the bare key and nothing after it.
+        let s = applescript_type("/dev/ttys021", maya_core::answer::ESC, false);
+        assert!(s.contains("write text (character id 27) newline false"), "{s}");
+        assert!(!s.contains("activate"), "{s}");
     }
 
     #[test]

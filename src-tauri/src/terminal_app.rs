@@ -181,6 +181,11 @@ impl Terminal for MacTerminal {
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
         first_hit(&self.apps(),|app| app.type_line(tty, text).map_err(|why| (0, why))).map_err(|(_, why)| why)
     }
+    /// Like a line: one key press either happened or did not, so any error
+    /// means "not here" and the next app is tried.
+    fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
+        first_hit(&self.apps(), |app| app.press_keys(tty, keys).map_err(|why| (0, why))).map_err(|(_, why)| why)
+    }
     fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
         first_hit(&self.apps(),|app| app.type_reply(tty, lines))
     }
@@ -283,6 +288,9 @@ mod tests {
         fn type_line(&self, _tty: &str, _text: &str) -> Result<(), String> {
             self.answer().map_err(|(_, why)| why)
         }
+        fn press_keys(&self, _tty: &str, _keys: &str) -> Result<(), String> {
+            self.answer().map_err(|(_, why)| why)
+        }
         fn type_reply(&self, _tty: &str, _lines: &[String]) -> Result<(), (usize, String)> {
             self.answer()
         }
@@ -361,6 +369,26 @@ mod tests {
     fn focus_reports_the_last_reason_when_no_app_has_the_tty() {
         let last = Stub::new(Err((0, "no Terminal tab".into())));
         assert_eq!(mac(&[missing(), last]).focus("/dev/ttys001"), Err("no Terminal tab".to_string()));
+    }
+
+    #[test]
+    fn escape_is_pressed_in_the_app_that_has_the_tty() {
+        let (first, second) = (missing(), Stub::new(Ok(())));
+        assert_eq!(mac(&[first, second]).press_keys("/dev/ttys001", maya_core::answer::ESC), Ok(()));
+        assert_eq!((first.calls(), second.calls()), (1, 1));
+    }
+
+    #[test]
+    fn escape_goes_only_to_the_first_app_that_has_the_tty() {
+        let (first, second) = (Stub::new(Ok(())), Stub::new(Ok(())));
+        assert_eq!(mac(&[first, second]).press_keys("/dev/ttys001", maya_core::answer::ESC), Ok(()));
+        assert_eq!((first.calls(), second.calls()), (1, 0));
+    }
+
+    #[test]
+    fn escape_reports_the_last_reason_when_no_app_has_the_tty() {
+        let last = Stub::new(Err((0, "No Terminal tab found".into())));
+        assert_eq!(mac(&[missing(), last]).press_keys("/dev/ttys001", maya_core::answer::ESC), Err("No Terminal tab found".to_string()));
     }
 
     #[test]
