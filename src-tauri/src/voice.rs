@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 pub use maya_core::config::VoiceProvider;
+use maya_core::notify::{Reach, RemoteVoice};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -178,13 +179,22 @@ pub fn play(path: &Path, volume: u8) -> Result<(), String> {
     }
 }
 
-/// Speaks `text` with ElevenLabs, from the cache when possible.
-pub fn speak(maya_dir: &Path, key: &str, voice_id: &str, text: &str, volume: u8) -> Result<(), String> {
-    let path = cache_path(maya_dir, voice_id, text);
-    if !path.is_file() {
-        synthesize(key, voice_id, text, &path)?;
+/// Speaks `text` with a remote voice, from the cache when possible; with
+/// `Reach::CacheOnly` a line that is not cached fails.
+pub fn speak_remote(v: &RemoteVoice, text: &str, volume: u8, reach: Reach) -> Result<(), String> {
+    match v {
+        RemoteVoice::Elevenlabs { maya_dir, key, voice_id } => {
+            let path = cache_path(maya_dir, voice_id, text);
+            if !path.is_file() {
+                if reach == Reach::CacheOnly {
+                    return Err("not cached".into());
+                }
+                synthesize(key, voice_id, text, &path)?;
+            }
+            play(&path, volume)
+        }
+        RemoteVoice::Server { .. } => Err("not supported yet".into()),
     }
-    play(&path, volume)
 }
 
 #[cfg(test)]

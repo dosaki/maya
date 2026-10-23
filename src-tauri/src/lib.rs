@@ -317,14 +317,14 @@ fn announce_pr_reviews(app: &AppHandle, decided: &[reviews::ReviewPr]) {
         log::line("app", "focus mode is on: pull request announcements stay silent");
     }
     let (speak, banner_sound) = announcement(speak, muted, focus);
-    let eleven = if speak { eleven_settings(eleven_voice) } else { None };
+    let voices = if speak { eleven_voices(eleven_voice) } else { vec![] };
     for pr in decided {
         let (title, subtitle, body) = reviews::pr_banner(pr);
         log::line("app", format!("pull request {title}: {subtitle}"));
         notify::banner(&title, &subtitle, &body, banner_sound);
         if speak {
             if let Some(line) = reviews::pr_spoken_line(pr) {
-                notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, eleven.clone()) });
+                notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, voices.clone()) });
             }
         }
     }
@@ -461,6 +461,13 @@ pub(crate) fn eleven_settings(wanted: Option<(std::path::PathBuf, String)>) -> O
     Some((maya_dir, voice::load_key()?, voice_id))
 }
 
+/// The remote voices for one utterance: ElevenLabs when `eleven_settings`
+/// gives its settings, else none for the built-in voice. The same rule
+/// about the store lock holds.
+pub(crate) fn eleven_voices(wanted: Option<(std::path::PathBuf, String)>) -> Vec<notify::RemoteVoice> {
+    eleven_settings(wanted).map(|(maya_dir, key, voice_id)| notify::RemoteVoice::Elevenlabs { maya_dir, key, voice_id }).into_iter().collect()
+}
+
 /// The local cards as the board shows them: on Linux each carries the name
 /// of the tmux session it runs in, so the page knows which ones a terminal
 /// window can attach to.
@@ -556,19 +563,19 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
     }
     if wants_notify && !assistant {
         // The key is looked up only when there is something to say.
-        let eleven = if speak && (!fresh.is_empty() || !finished.is_empty()) { eleven_settings(eleven_voice) } else { None };
+        let voices = if speak && (!fresh.is_empty() || !finished.is_empty()) { eleven_voices(eleven_voice) } else { vec![] };
         for c in &fresh {
             notify::notify(c, banner_sound);
             if speak {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, eleven.clone()) });
+                    notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, voices.clone()) });
                 }
             }
         }
         if speak {
             for c in &finished {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, eleven.clone()) });
+                    notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, voices.clone()) });
                 }
             }
         }
@@ -1179,11 +1186,12 @@ fn try_voice(state: TauriState<AppState>) -> Result<(), String> {
         let store = state.store.lock().unwrap();
         (eleven_wanted(&store.config, store.claude_dir()), store.config.voice_loudness())
     };
-    let eleven = eleven_settings(eleven);
+    let voices = eleven_voices(eleven);
     // Through the one speech queue, so listening pauses and she does not
     // wake herself on "Maya here".
     let line = "Maya here. Is my voice ok?".to_string();
-    notify::speak_and_wait(notify::Utterance { fallback: false, volume, ..notify::Utterance::new(line, eleven) })
+    notify::speak_and_wait(notify::Utterance { trial: true, volume, ..notify::Utterance::new(line, voices) })?;
+    Ok(())
 }
 
 /// Mutes or unmutes Maya: muted, she makes no sound but still notifies.
@@ -1443,7 +1451,7 @@ pub fn run() {
             log::line("app", format!("{} sessions were running when Maya last stopped", offered.len()));
             #[cfg(target_os = "macos")]
             focus::install_app_handle(app.handle().clone());
-            notify::set_eleven_speaker(voice::speak);
+            notify::set_remote_speaker(voice::speak_remote);
             listener::install_speech_hook(app.handle().clone());
             #[cfg(target_os = "macos")]
             dock::set_dock_icon();

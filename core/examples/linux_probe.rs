@@ -36,8 +36,8 @@ fn main() {
     println!("focus_active: {}", notify::focus_active());
 
     println!("speak_and_wait: speaking one line");
-    match notify::speak_and_wait(Utterance::new("collector needs a decision".into(), None)) {
-        Ok(()) => println!("speak_and_wait: ok"),
+    match notify::speak_and_wait(Utterance::new("collector needs a decision".into(), vec![])) {
+        Ok(report) => println!("speak_and_wait: {}", report.message()),
         Err(e) => println!("speak_and_wait: {e}"),
     }
 }
