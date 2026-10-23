@@ -458,7 +458,7 @@ Three workflows in `.github/workflows/`:
   (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
   `interpreter.rs`, `log.rs` (the Debug tab and `maya.log`),
   `transcript.rs` and `diff.rs` (a session's turns for the viewer: tool output, edit diffs),
-  `remembered.rs` (the sessions running when Maya stopped, offered back after a restart), and `net/`
+  `remembered.rs` (the sessions running when Maya stopped, offered back after a restart), `voice_server.rs` (the OpenAI-compatible speech client), and `net/`
   with `protocol.rs` (message types, encode/decode, the pairing window),
   `identity.rs` (this Maya's key pair), `secure.rs` (SPAKE2 pairing, the
   Noise handshakes and the encrypted `Channel`),
@@ -473,10 +473,11 @@ Three workflows in `.github/workflows/`:
   iTerm2 for typing, focus and new windows), `terminal_iterm.rs` (the iTerm2
   side: AppleScript builders and `ItermApp`), `terminal_win.rs` and
   `terminal_linux.rs` (their Windows and Linux counterparts), `focus.rs` and `dock.rs`
-  (AppKit), `keystore.rs` (the OS key store), `voice.rs` (ElevenLabs),
+  (AppKit), `keystore.rs` (the OS key store), `voice.rs` (ElevenLabs and the voice server: cache and playback),
   `ear.rs`, `wake.rs`,
   `listener.rs`, `models.rs` (the voice assistant), and
   `remembered_app.rs` (resuming and forgetting what was running, for the banner and the voice; the heartbeat).
+- `chatterbox/` — a small OpenAI-compatible speech server (`server.py`, a `Dockerfile`, `compose.yaml` and a `voices/` folder) for Maya's voice server; see [chatterbox.md](chatterbox.md).
 - `cli/src/` — `main.rs` and `args.rs` (subcommand parsing), `commands.rs`
   (`pair`, `status`, `hooks`, `config`, `start`), `run_cmd.rs` (`run`, the headless
   loop), `executor.rs` (running the main's commands), `notify.rs` (writes the CLI's own status

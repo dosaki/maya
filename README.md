@@ -252,9 +252,15 @@ resume or start a session, open or review a pull request.
   without a sound. Notifications, the badge and the Dock bounce stay.
   Click it again to unmute; Maya remembers it across restarts.
 - **Volume.** "Voice volume" in Settings sets how loud she speaks, from
-  10% to 100%, for the built-in voice and ElevenLabs alike; "Try the
-  voice" plays it at that volume. The notification sound keeps the
+  10% to 100%, for every voice alike; "Try the voice" plays it at that
+  volume. The notification sound keeps the
   system's volume.
+- **Her voice.** Maya speaks each line with the first voice that works:
+  ElevenLabs, then a speech server of your own (any OpenAI-compatible one),
+  then the built-in voice. Each is set up in Settings → Voice. If a voice
+  fails, she uses the next. The repository ships a small Chatterbox server
+  that clones a voice from a short clip: see
+  [docs/chatterbox.md](docs/chatterbox.md). A phone keeps Android's voice.
 - **Off by default.** Turn on "Listen for 'Maya'" in Settings. A microphone
   appears in the top bar; clicking it opens the voice panel with the
   conversation. The Chat tab on the main machine is the same conversation

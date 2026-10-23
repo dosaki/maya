@@ -8,10 +8,18 @@ const voiceBase = {
   clonesDir: "",
   notifyOnAwaiting: true,
   speakNotifications: true,
-  voiceProvider: "builtin" as const,
+  elevenEnabled: false,
   elevenKeySet: false,
   elevenVoices: [],
   elevenVoiceId: "",
+  serverEnabled: false,
+  serverUrl: "",
+  serverVoice: "",
+  serverModel: "",
+  serverKeySet: false,
+  serverVoices: [] as string[],
+  serverVoicesError: null as string | null,
+  voiceReport: null as string | null,
   error: null,
   listen: false,
   microphone: "",
@@ -41,9 +49,14 @@ const handlers = () => ({
   onNotify: vi.fn(),
   onClonesDir: vi.fn(),
   onSpeak: vi.fn(),
-  onVoiceProvider: vi.fn(),
+  onElevenEnabled: vi.fn(),
   onElevenKey: vi.fn(),
   onElevenVoice: vi.fn(),
+  onServerEnabled: vi.fn(),
+  onServerUrl: vi.fn(),
+  onServerVoice: vi.fn(),
+  onServerModel: vi.fn(),
+  onServerKey: vi.fn(),
   onTryVoice: vi.fn(),
   onVoiceVolume: vi.fn(),
   onListen: vi.fn(),
@@ -172,7 +185,7 @@ describe("renderSettings", () => {
   });
   it("offers install when the hook is missing", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: false, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
+    const el = renderSettings({ hookInstalled: false, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
     expect(el.querySelector(".settings__status")?.textContent).toContain("not installed");
     const btn = el.querySelector<HTMLButtonElement>("button[data-action=install]")!;
     btn.click();
@@ -182,7 +195,7 @@ describe("renderSettings", () => {
 
   it("offers remove when the hook is installed", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
     expect(el.querySelector(".settings__status")?.textContent).toContain("installed");
     el.querySelector<HTMLButtonElement>("button[data-action=remove]")!.click();
     expect(h.onRemove).toHaveBeenCalled();
@@ -190,7 +203,7 @@ describe("renderSettings", () => {
 
   it("reports timeout changes and shows errors", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: "boom", listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
+    const el = renderSettings({ hookInstalled: null, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: "boom", listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
     const input = el.querySelector<HTMLInputElement>("input[name=timeout]")!;
     expect(input.value).toBe("30");
     input.value = "45";
@@ -201,7 +214,7 @@ describe("renderSettings", () => {
 
   it("has a notification toggle that reports changes", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
     const box = el.querySelector<HTMLInputElement>("input[name=notify]")!;
     expect(box.type).toBe("checkbox");
     expect(box.checked).toBe(true);
@@ -209,7 +222,7 @@ describe("renderSettings", () => {
     box.checked = false;
     box.dispatchEvent(new Event("change"));
     expect(h.onNotify).toHaveBeenCalledWith(false);
-    expect(renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: false, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h).querySelector<HTMLInputElement>("input[name=notify]")!.checked).toBe(false);
+    expect(renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: false, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h).querySelector<HTMLInputElement>("input[name=notify]")!.checked).toBe(false);
   });
 
   it("has a Debug group with a debug mode switch that saves", () => {
@@ -224,7 +237,7 @@ describe("renderSettings", () => {
 
   it("has a PR review notification toggle, on unless the config says off", () => {
     const h = { ...handlers(), onNotifyPrReview: vi.fn() };
-    const model = { hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null };
+    const model = { hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null };
     const box = renderSettings(model, h).querySelector<HTMLInputElement>("input[name=notifyPrReview]")!;
     expect(box.checked).toBe(true);
     expect(box.closest("label")?.textContent).toContain("assigned to me is approved or needs changes");
@@ -234,16 +247,30 @@ describe("renderSettings", () => {
     expect(renderSettings({ ...model, notifyOnPrReview: false }, h).querySelector<HTMLInputElement>("input[name=notifyPrReview]")!.checked).toBe(false);
   });
 
-  it("offers ElevenLabs as a voice, revealing key, voice list and Try when chosen", () => {
+  it("shows the voice order and a switch per remote voice", () => {
     const h = handlers();
-    const builtin = renderSettings({ ...voiceBase, voiceProvider: "builtin" }, h);
-    const provider = builtin.querySelector<HTMLSelectElement>("select[name=voiceProvider]")!;
-    expect([...provider.options].map((o) => o.value)).toEqual(["builtin", "elevenlabs"]);
-    expect(builtin.querySelector("input[name=elevenKey]")).toBeNull();
-    provider.value = "elevenlabs";
-    provider.dispatchEvent(new Event("change"));
-    expect(h.onVoiceProvider).toHaveBeenCalledWith("elevenlabs");
-    const el = renderSettings({ ...voiceBase, voiceProvider: "elevenlabs", elevenKeySet: false, elevenVoices: [{ voiceId: "abc", name: "Rachel" }, { voiceId: "def", name: "Bella" }], elevenVoiceId: "def" }, h);
+    const el = renderSettings(voiceBase, h);
+    expect(el.querySelector("[data-for=voice-order]")!.textContent).toMatch(/^Maya speaks with the first voice that works: ElevenLabs, then the voice server, then .+ \(built in\)\.$/);
+    expect(el.querySelector("select[name=voiceProvider]")).toBeNull();
+    const eleven = el.querySelector<HTMLInputElement>("input[name=elevenEnabled]")!;
+    const server = el.querySelector<HTMLInputElement>("input[name=serverEnabled]")!;
+    expect(eleven.checked).toBe(false);
+    expect(server.checked).toBe(false);
+    expect(eleven.closest("label")?.textContent).toContain("Use ElevenLabs");
+    expect(server.closest("label")?.textContent).toContain("Use a voice server (OpenAI-compatible)");
+    expect(el.querySelector("input[name=elevenKey]")).toBeNull();
+    expect(el.querySelector("input[name=serverUrl]")).toBeNull();
+    eleven.checked = true;
+    eleven.dispatchEvent(new Event("change"));
+    expect(h.onElevenEnabled).toHaveBeenCalledWith(true);
+    server.checked = true;
+    server.dispatchEvent(new Event("change"));
+    expect(h.onServerEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it("the ElevenLabs section shows its key and voice when on", () => {
+    const h = handlers();
+    const el = renderSettings({ ...voiceBase, elevenEnabled: true, elevenKeySet: false, elevenVoices: [{ voiceId: "abc", name: "Rachel" }, { voiceId: "def", name: "Bella" }], elevenVoiceId: "abc" }, h);
     const key = el.querySelector<HTMLInputElement>("input[name=elevenKey]")!;
     expect(key.type).toBe("password");
     key.value = " sk-123 ";
@@ -251,19 +278,66 @@ describe("renderSettings", () => {
     expect(h.onElevenKey).toHaveBeenCalledWith("sk-123");
     const voice = el.querySelector<HTMLSelectElement>("select[name=elevenVoice]")!;
     expect([...voice.options].map((o) => o.textContent)).toEqual(["Rachel", "Bella"]);
-    expect(voice.value).toBe("def");
-    voice.value = "abc";
+    expect(voice.value).toBe("abc");
+    voice.value = "def";
     voice.dispatchEvent(new Event("change"));
-    expect(h.onElevenVoice).toHaveBeenCalledWith("abc");
+    expect(h.onElevenVoice).toHaveBeenCalledWith("def");
     el.querySelector<HTMLButtonElement>("button[data-action=try-voice]")!.click();
     expect(h.onTryVoice).toHaveBeenCalled();
-    const saved = renderSettings({ ...voiceBase, voiceProvider: "elevenlabs", elevenKeySet: true, elevenVoices: [], elevenVoiceId: "" }, h);
+    const saved = renderSettings({ ...voiceBase, elevenEnabled: true, elevenKeySet: true }, h);
     expect(saved.querySelector<HTMLInputElement>("input[name=elevenKey]")!.placeholder).toContain("saved");
+  });
+
+  it("the server section offers a list when the server has one and a text box when not", () => {
+    const h = handlers();
+    const listed = renderSettings({ ...voiceBase, serverEnabled: true, serverUrl: "http://mac.local:8004", serverVoices: ["default", "tiago.wav"], serverVoice: "tiago.wav" }, h);
+    const select = listed.querySelector<HTMLSelectElement>("select[name=serverVoice]")!;
+    expect(select.value).toBe("tiago.wav");
+    expect(listed.querySelector("input[name=serverVoice]")).toBeNull();
+    select.value = "default";
+    select.dispatchEvent(new Event("change"));
+    expect(h.onServerVoice).toHaveBeenCalledWith("default");
+
+    const el = renderSettings({ ...voiceBase, serverEnabled: true, serverUrl: "http://mac.local:8004", serverVoices: [], serverVoicesError: "404" }, h);
+    const text = el.querySelector<HTMLInputElement>("input[name=serverVoice]")!;
+    expect(text.placeholder).toBe("default");
+    expect(el.querySelector("select[name=serverVoice]")).toBeNull();
+    expect(el.querySelector("[data-for=server-voices]")!.textContent).toBe("Could not list the server's voices: 404");
+    text.value = "";
+    text.dispatchEvent(new Event("change"));
+    expect(h.onServerVoice).toHaveBeenCalledWith("");
+
+    const url = el.querySelector<HTMLInputElement>("input[name=serverUrl]")!;
+    expect(url.placeholder).toBe("http://localhost:8004");
+    url.value = "http://mac.local:8004";
+    url.dispatchEvent(new Event("change"));
+    expect(h.onServerUrl).toHaveBeenCalledWith("http://mac.local:8004");
+    const model = el.querySelector<HTMLInputElement>("input[name=serverModel]")!;
+    expect(model.placeholder).toBe("optional");
+    model.value = "tts-1";
+    model.dispatchEvent(new Event("change"));
+    expect(h.onServerModel).toHaveBeenCalledWith("tts-1");
+
+    const key = el.querySelector<HTMLInputElement>("input[name=serverKey]")!;
+    expect(key.type).toBe("password");
+    expect(key.placeholder).toBe("optional; paste a key");
+    key.value = " sk-abc ";
+    key.dispatchEvent(new Event("change"));
+    expect(h.onServerKey).toHaveBeenCalledWith("sk-abc");
+    expect(key.value).toBe("");
+    const saved = renderSettings({ ...voiceBase, serverEnabled: true, serverKeySet: true }, h);
+    expect(saved.querySelector<HTMLInputElement>("input[name=serverKey]")!.placeholder).toContain("saved in");
+  });
+
+  it("the voice test's report is shown", () => {
+    const el = renderSettings({ ...voiceBase, voiceReport: "ElevenLabs failed: 402. Spoke with the voice server." }, handlers());
+    expect(el.querySelector("[data-for=voice-report]")!.textContent).toBe("ElevenLabs failed: 402. Spoke with the voice server.");
+    expect(renderSettings(voiceBase, handlers()).querySelector("[data-for=voice-report]")).toBeNull();
   });
 
   it("has a speak toggle that reports changes", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
     const box = el.querySelector<HTMLInputElement>("input[name=speak]")!;
     expect(box.checked).toBe(true);
     expect(box.closest("label")?.textContent).toContain("Speak");
@@ -274,7 +348,7 @@ describe("renderSettings", () => {
 
   it("shows the clones directory with the default as placeholder and reports changes", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
     const input = el.querySelector<HTMLInputElement>("input[name=clonesDir]")!;
     expect(input.placeholder).toBe("~/dev/reviews");
     expect(input.value).toBe("");
@@ -302,7 +376,7 @@ describe("renderSettings", () => {
 
   it("shows the projects directory and reports changes", () => {
     const h = handlers();
-    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin" as const, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
+    const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "~/dev", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
     const input = el.querySelector<HTMLInputElement>("input[name=projectsDir]")!;
     expect(input.value).toBe("~/dev");
     input.value = "~/code";
@@ -331,7 +405,7 @@ describe("renderSettings", () => {
   });
 
   it("puts each setting in its group", () => {
-    const el = renderSettings({ ...voiceBase, voiceProvider: "elevenlabs", recognizer: "builtin", focusVisible: false, networkRole: "main", network: { ...voiceBase.network, role: "main" } }, handlers());
+    const el = renderSettings({ ...voiceBase, elevenEnabled: true, serverEnabled: true, serverUrl: "http://x", recognizer: "builtin", focusVisible: false, networkRole: "main", network: { ...voiceBase.network, role: "main" } }, handlers());
     const groupOf = (selector: string) => el.querySelector(selector)?.closest<HTMLElement>(".settings__section")?.dataset.group;
     const expected: Record<string, string> = {
       "select[name=agent]": "general",
@@ -346,7 +420,10 @@ describe("renderSettings", () => {
       "input[name=notify]": "notifications",
       "input[name=speak]": "notifications",
       "[data-for=focus]": "notifications",
-      "select[name=voiceProvider]": "voice",
+      "input[name=elevenEnabled]": "voice",
+      "input[name=serverEnabled]": "voice",
+      "input[name=serverUrl]": "voice",
+      "input[name=serverKey]": "voice",
       "input[name=elevenKey]": "voice",
       "select[name=elevenVoice]": "voice",
       "input[name=voiceVolume]": "voice",
@@ -367,7 +444,7 @@ describe("renderSettings", () => {
     expect([...voice.querySelectorAll(".settings__subheading")].map((x) => x.textContent)).toEqual(["Speaking", "Listening"]);
     const [speaking, listening] = [...voice.querySelectorAll(".settings__subheading")];
     const follows = (a: Element, b: Element) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(follows(speaking, voice.querySelector("select[name=voiceProvider]")!)).toBe(true);
+    expect(follows(speaking, voice.querySelector("input[name=elevenEnabled]")!)).toBe(true);
     expect(follows(voice.querySelector("button[data-action=try-voice]")!, listening)).toBe(true);
     expect(follows(listening, voice.querySelector("input[name=listen]")!)).toBe(true);
   });

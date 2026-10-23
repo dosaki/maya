@@ -100,10 +100,20 @@ export interface SettingsModel {
   speakNotifications: boolean;
   /** False when Maya cannot tell whether a Focus mode is on (macOS without Full Disk Access). */
   focusVisible?: boolean;
-  voiceProvider: VoiceProvider;
+  elevenEnabled: boolean;
   elevenKeySet: boolean;
   elevenVoices: ElevenVoice[];
   elevenVoiceId: string;
+  serverEnabled: boolean;
+  serverUrl: string;
+  serverVoice: string;
+  serverModel: string;
+  serverKeySet: boolean;
+  /** The voices the server lists; empty when it has no list or the listing failed. */
+  serverVoices: string[];
+  serverVoicesError: string | null;
+  /** What the last voice test says each voice did. */
+  voiceReport: string | null;
   /** How loud Maya speaks, in percent; absent reads as 100. */
   voiceVolume?: number;
   error: string | null;
@@ -168,7 +178,12 @@ export interface SettingsModel {
   networkNewKeyConfirm?: boolean;
 }
 
-export type VoiceProvider = "builtin" | "elevenlabs";
+export interface VoiceServerJson {
+  enabled: boolean;
+  url: string;
+  voice: string;
+  model: string;
+}
 export interface ElevenVoice {
   voiceId: string;
   name: string;
@@ -206,9 +221,14 @@ export interface SettingsHandlers {
   onSpeak(enabled: boolean): void;
   onFullDiskAccess?(): void;
   onCheckUpdates?(): void;
-  onVoiceProvider(provider: VoiceProvider): void;
+  onElevenEnabled(on: boolean): void;
   onElevenKey(key: string): void;
   onElevenVoice(voiceId: string): void;
+  onServerEnabled(on: boolean): void;
+  onServerUrl(url: string): void;
+  onServerVoice(voice: string): void;
+  onServerModel(model: string): void;
+  onServerKey(key: string): void;
   onTryVoice(): void;
   onVoiceVolume(percent: number): void;
   onListen(on: boolean): void;
@@ -287,8 +307,11 @@ interface ConfigJson {
   notifyOnPrReview?: boolean;
   debugMode?: boolean;
   speakNotifications: boolean;
-  voiceProvider: VoiceProvider;
+  /** Read only to migrate: an old config that chose ElevenLabs has no `elevenlabsEnabled`. */
+  voiceProvider?: string;
+  elevenlabsEnabled?: boolean | null;
   elevenlabsVoiceId?: string | null;
+  voiceServer?: VoiceServerJson;
   voiceVolume?: number;
   listen: boolean;
   listenWord?: string | null;
@@ -1062,36 +1085,54 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   micLabel.append(mic);
   listening.append(micLabel);
 
-  const providerLabel = document.createElement("label");
-  providerLabel.textContent = "Voice";
-  const provider = document.createElement("select");
-  provider.name = "voiceProvider";
-  for (const [v, text] of [["builtin", `${builtinVoiceName()} (built in)`], ["elevenlabs", "ElevenLabs"]] as const) {
-    const o = document.createElement("option");
-    o.value = v;
-    o.textContent = text;
-    provider.append(o);
-  }
-  provider.value = model.voiceProvider;
-  provider.addEventListener("change", () => h.onVoiceProvider(provider.value === "elevenlabs" ? "elevenlabs" : "builtin"));
-  providerLabel.append(provider);
-  speaking.append(providerLabel);
+  const order = document.createElement("p");
+  order.dataset.for = "voice-order";
+  order.textContent = `Maya speaks with the first voice that works: ElevenLabs, then the voice server, then ${builtinVoiceName()} (built in).`;
+  speaking.append(order);
 
-  if (model.voiceProvider === "elevenlabs") {
-    const keyLabel = document.createElement("label");
-    keyLabel.textContent = "ElevenLabs API key";
+  const checkbox = (name: string, text: string, checked: boolean, onChange: (on: boolean) => void) => {
+    const label = document.createElement("label");
+    label.className = "settings__check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.name = name;
+    box.checked = checked;
+    box.addEventListener("change", () => onChange(box.checked));
+    label.append(box, document.createTextNode(` ${text}`));
+    return label;
+  };
+  const textField = (name: string, text: string, value: string, placeholder: string, onChange: (v: string) => void) => {
+    const label = document.createElement("label");
+    label.textContent = text;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.name = name;
+    input.value = value;
+    input.placeholder = placeholder;
+    input.addEventListener("change", () => onChange(input.value.trim()));
+    label.append(input);
+    return label;
+  };
+  const keyField = (name: string, text: string, placeholder: string, onKey: (k: string) => void) => {
+    const label = document.createElement("label");
+    label.textContent = text;
     const key = document.createElement("input");
     key.type = "password";
-    key.name = "elevenKey";
-    key.placeholder = model.elevenKeySet ? `saved in ${secretStore()}; paste to replace` : "paste your key";
+    key.name = name;
+    key.placeholder = placeholder;
     key.autocomplete = "off";
     key.addEventListener("change", () => {
       const k = key.value.trim();
-      if (k) h.onElevenKey(k);
+      if (k) onKey(k);
       key.value = "";
     });
-    keyLabel.append(key);
-    speaking.append(keyLabel);
+    label.append(key);
+    return label;
+  };
+
+  speaking.append(checkbox("elevenEnabled", "Use ElevenLabs", model.elevenEnabled, (on) => h.onElevenEnabled(on)));
+  if (model.elevenEnabled) {
+    speaking.append(keyField("elevenKey", "ElevenLabs API key", model.elevenKeySet ? `saved in ${secretStore()}; paste to replace` : "paste your key", (k) => h.onElevenKey(k)));
 
     const voiceLabel = document.createElement("label");
     voiceLabel.textContent = "ElevenLabs voice";
@@ -1108,6 +1149,43 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     voice.addEventListener("change", () => h.onElevenVoice(voice.value));
     voiceLabel.append(voice);
     speaking.append(voiceLabel);
+  }
+
+  speaking.append(checkbox("serverEnabled", "Use a voice server (OpenAI-compatible)", model.serverEnabled, (on) => h.onServerEnabled(on)));
+  if (model.serverEnabled) {
+    speaking.append(textField("serverUrl", "Server address", model.serverUrl, "http://localhost:8004", (u) => h.onServerUrl(u)));
+
+    if (model.serverVoices.length > 0) {
+      const voiceLabel = document.createElement("label");
+      voiceLabel.textContent = "Voice";
+      const voice = document.createElement("select");
+      voice.name = "serverVoice";
+      // A saved voice the server no longer lists stays selectable.
+      // A blank one is the server's own default: the list's `default` when it has one.
+      const blankIsListed = model.serverVoice === "" && model.serverVoices.includes("default");
+      const saved = blankIsListed ? "default" : model.serverVoice;
+      for (const v of model.serverVoices.includes(saved) ? model.serverVoices : [saved, ...model.serverVoices]) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = v || "server default";
+        voice.append(o);
+      }
+      voice.value = saved;
+      voice.addEventListener("change", () => h.onServerVoice(voice.value));
+      voiceLabel.append(voice);
+      speaking.append(voiceLabel);
+    } else {
+      speaking.append(textField("serverVoice", "Voice", model.serverVoice, "default", (v) => h.onServerVoice(v)));
+    }
+    if (model.serverVoicesError) {
+      const listed = document.createElement("p");
+      listed.dataset.for = "server-voices";
+      listed.textContent = `Could not list the server's voices: ${model.serverVoicesError}`;
+      speaking.append(listed);
+    }
+
+    speaking.append(textField("serverModel", "Model", model.serverModel, "optional", (m) => h.onServerModel(m)));
+    speaking.append(keyField("serverKey", "API key", model.serverKeySet ? `saved in ${secretStore()}; paste to replace` : "optional; paste a key", (k) => h.onServerKey(k)));
   }
 
   // The number follows the drag; the volume is saved once the slider is let go.
@@ -1137,6 +1215,13 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   tryBtn.textContent = "Try the voice";
   tryBtn.addEventListener("click", () => h.onTryVoice());
   speaking.append(tryBtn);
+
+  if (model.voiceReport) {
+    const report = document.createElement("p");
+    report.dataset.for = "voice-report";
+    report.textContent = model.voiceReport;
+    speaking.append(report);
+  }
 
   const roleLabel = document.createElement("label");
   roleLabel.textContent = "Network";
@@ -1469,10 +1554,18 @@ export async function initSettings(): Promise<void> {
     clonesDir: "",
     notifyOnAwaiting: true,
     speakNotifications: true,
-    voiceProvider: "builtin",
+    elevenEnabled: false,
     elevenKeySet: false,
     elevenVoices: [],
     elevenVoiceId: "",
+    serverEnabled: false,
+    serverUrl: "",
+    serverVoice: "",
+    serverModel: "",
+    serverKeySet: false,
+    serverVoices: [],
+    serverVoicesError: null,
+    voiceReport: null,
     error: null,
     listen: false,
     microphone: "",
@@ -1504,10 +1597,30 @@ export async function initSettings(): Promise<void> {
   };
 
   const loadVoices = async () => {
-    if (model.voiceProvider !== "elevenlabs") return;
-    model.elevenKeySet = await invoke<boolean>("has_elevenlabs_key");
-    if (!model.elevenKeySet) return;
-    model.elevenVoices = await invoke<ElevenVoice[]>("list_elevenlabs_voices");
+    // Each voice loads on its own: one failing (a bad key) must not stop the
+    // other refreshing. The ElevenLabs failure still reaches the page error.
+    let failed: unknown = null;
+    if (model.elevenEnabled) {
+      try {
+        model.elevenKeySet = await invoke<boolean>("has_elevenlabs_key");
+        if (model.elevenKeySet) model.elevenVoices = await invoke<ElevenVoice[]>("list_elevenlabs_voices");
+      } catch (e) {
+        failed = e;
+      }
+    }
+    model.serverVoices = [];
+    model.serverVoicesError = null;
+    if (model.serverEnabled) {
+      model.serverKeySet = await invoke<boolean>("has_voice_server_key");
+      if (model.serverUrl) {
+        try {
+          model.serverVoices = await invoke<string[]>("list_server_voices");
+        } catch (e) {
+          model.serverVoicesError = String(e);
+        }
+      }
+    }
+    if (failed) throw failed;
   };
 
   const loadGitStatus = async () => {
@@ -1542,6 +1655,7 @@ export async function initSettings(): Promise<void> {
   };
 
   const applyConfig = (c: ConfigJson) => {
+    model.voiceReport = null;
     model.completedTimeoutMinutes = c.completedTimeoutMinutes;
     model.projectsDir = c.projectsDir ?? "";
     model.clonesDir = c.clonesDir ?? "";
@@ -1549,7 +1663,11 @@ export async function initSettings(): Promise<void> {
     model.notifyOnPrReview = c.notifyOnPrReview !== false;
     model.debugMode = c.debugMode === true;
     model.speakNotifications = c.speakNotifications;
-    model.voiceProvider = c.voiceProvider;
+    model.elevenEnabled = c.elevenlabsEnabled ?? c.voiceProvider === "elevenlabs";
+    model.serverEnabled = c.voiceServer?.enabled ?? false;
+    model.serverUrl = c.voiceServer?.url ?? "";
+    model.serverVoice = c.voiceServer?.voice ?? "";
+    model.serverModel = c.voiceServer?.model ?? "";
     model.elevenVoiceId = c.elevenlabsVoiceId ?? "";
     model.voiceVolume = c.voiceVolume ?? 100;
     model.listen = c.listen;
@@ -1575,6 +1693,13 @@ export async function initSettings(): Promise<void> {
     const c = await invoke<ConfigJson>("set_config", {
       config: { ...fresh, ...patch },
     });
+    applyConfig(c);
+  };
+
+  const saveServer = async (patch: Partial<VoiceServerJson>) => {
+    const fresh = await invoke<ConfigJson>("get_config");
+    const server: VoiceServerJson = { enabled: false, url: "", voice: "", model: "", ...fresh.voiceServer, ...patch };
+    const c = await invoke<ConfigJson>("set_config", { config: { ...fresh, voiceServer: server } });
     applyConfig(c);
   };
 
@@ -1652,10 +1777,15 @@ export async function initSettings(): Promise<void> {
     onClonesDir: (path) => void run(() => saveConfig({ clonesDir: path || null })),
     onSpeak: (enabled) => void run(() => saveConfig({ speakNotifications: enabled })),
     onFullDiskAccess: () => void run(() => invoke<void>("open_full_disk_access")),
-    onVoiceProvider: (provider) => void run(async () => { await saveConfig({ voiceProvider: provider }); await loadVoices(); }),
+    onElevenEnabled: (on) => void run(async () => { await saveConfig({ elevenlabsEnabled: on }); await loadVoices(); }),
     onElevenKey: (key) => void run(async () => { await invoke("set_elevenlabs_key", { key }); await loadVoices(); }),
     onElevenVoice: (voiceId) => void run(() => saveConfig({ elevenlabsVoiceId: voiceId || null })),
-    onTryVoice: () => void run(() => invoke("try_voice")),
+    onServerEnabled: (on) => void run(async () => { await saveServer({ enabled: on }); await loadVoices(); }),
+    onServerUrl: (url) => void run(async () => { await saveServer({ url }); await loadVoices(); }),
+    onServerVoice: (voice) => void run(() => saveServer({ voice })),
+    onServerModel: (model) => void run(() => saveServer({ model })),
+    onServerKey: (key) => void run(async () => { await invoke("set_voice_server_key", { key }); await loadVoices(); }),
+    onTryVoice: () => void run(async () => { model.voiceReport = null; model.voiceReport = await invoke<string>("try_voice"); }),
     onVoiceVolume: (percent) => void run(() => saveConfig({ voiceVolume: percent })),
     onListen: (on) => void run(async () => { await invoke("voice_listen", { on }); model.listen = on; }),
     onListenWord: (word) => void run(() => saveConfig({ listenWord: word || null })),

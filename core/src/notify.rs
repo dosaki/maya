@@ -1,13 +1,14 @@
 use crate::model::{AwaitKind, Card, State};
 use crate::state::truncate;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 #[cfg(any(test, target_os = "linux"))]
 use std::path::Path;
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
 #[cfg(all(unix, not(target_os = "android")))]
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::path::PathBuf;
+use std::sync::{mpsc, LazyLock, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Remembers which asks have been announced so each one notifies once.
 /// The first refresh only primes it: asks already open when Maya starts
@@ -102,23 +103,89 @@ fn voice() -> Option<String> {
         .clone()
 }
 
-/// A line to speak and the voice to use for it, decided when it is queued.
+/// A voice that speaks over the network, with the settings it speaks with.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum RemoteVoice {
+    Elevenlabs { maya_dir: PathBuf, key: String, voice_id: String },
+    /// An OpenAI-compatible speech server at `base`.
+    Server { maya_dir: PathBuf, base: String, voice: String, model: String, key: Option<String> },
+}
+
+impl RemoteVoice {
+    /// The voice's name in what Maya reports.
+    pub fn label(&self) -> &'static str {
+        match self {
+            RemoteVoice::Elevenlabs { .. } => "ElevenLabs",
+            RemoteVoice::Server { .. } => "the voice server",
+        }
+    }
+
+    /// Identifies the voice with these exact settings. The marks it keys
+    /// live in memory, so the per-process std hasher is enough.
+    fn fingerprint(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        self.hash(&mut h);
+        h.finish()
+    }
+}
+
+/// Written by hand so that no log ever shows a key.
+impl std::fmt::Debug for RemoteVoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoteVoice::Elevenlabs { maya_dir, voice_id, .. } => f.debug_struct("Elevenlabs").field("maya_dir", maya_dir).field("voice_id", voice_id).finish_non_exhaustive(),
+            RemoteVoice::Server { maya_dir, base, voice, model, .. } => {
+                f.debug_struct("Server").field("maya_dir", maya_dir).field("base", base).field("voice", voice).field("model", model).finish_non_exhaustive()
+            }
+        }
+    }
+}
+
+/// How far a remote voice may go for a line: only to its cache, or out to
+/// the network when the line is not cached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    CacheOnly,
+    Network,
+}
+
+/// What became of a line: the voice that spoke it, after the remote voices
+/// that failed (`"ElevenLabs failed: 402."`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechReport {
+    pub spoken_by: &'static str,
+    pub failures: Vec<String>,
+}
+
+impl SpeechReport {
+    /// The failures and the voice that spoke, as one line.
+    pub fn message(&self) -> String {
+        let spoke = format!("Spoke with {}.", self.spoken_by);
+        self.failures.iter().map(String::as_str).chain([spoke.as_str()]).collect::<Vec<_>>().join(" ")
+    }
+}
+
+/// The built-in voice in a report: always last in the chain, always there.
+const BUILTIN: &str = "the built-in voice";
+
+/// A line to speak and the voices to try for it, decided when it is queued.
 pub struct Utterance {
     pub text: String,
-    /// ElevenLabs (maya dir, key, voice id) when configured; None for the built-in voice.
-    pub eleven: Option<(std::path::PathBuf, String, String)>,
-    /// When ElevenLabs fails, speak the line with the built-in voice instead.
-    /// Off for "Try the voice", which reports the failure.
-    pub fallback: bool,
-    /// Told once the line has been spoken, with the ElevenLabs error if any.
-    pub done: Option<mpsc::Sender<Result<(), String>>>,
+    /// The remote voices to try in order; the built-in voice speaks when
+    /// none of them does.
+    pub voices: Vec<RemoteVoice>,
+    /// "Try the voice": every remote voice is tried over the network, even
+    /// one marked down.
+    pub trial: bool,
+    /// Told once the line has been spoken, with the voice that spoke it.
+    pub done: Option<mpsc::Sender<SpeechReport>>,
     /// How loud, in percent of the engine's own full volume (`Config::voice_loudness`).
     pub volume: u8,
 }
 
 impl Utterance {
-    pub fn new(text: String, eleven: Option<(std::path::PathBuf, String, String)>) -> Utterance {
-        Utterance { text, eleven, fallback: true, done: None, volume: 100 }
+    pub fn new(text: String, voices: Vec<RemoteVoice>) -> Utterance {
+        Utterance { text, voices, trial: false, done: None, volume: 100 }
     }
 }
 
@@ -215,16 +282,42 @@ pub fn focus_status() -> Option<bool> {
 
 static SPEECH: OnceLock<Mutex<mpsc::Sender<Utterance>>> = OnceLock::new();
 
-/// Speaks `text` with ElevenLabs: `(maya_dir, key, voice_id, text)`.
-pub type ElevenSpeaker = fn(&std::path::Path, &str, &str, &str, u8) -> Result<(), String>;
+/// Speaks `(voice, text, volume)` with a remote voice, going no further than
+/// `Reach`: with `CacheOnly` it plays a cached line and otherwise fails.
+pub type RemoteSpeaker = fn(&RemoteVoice, &str, u8, Reach) -> Result<(), String>;
 
-static ELEVEN_SPEAKER: OnceLock<ElevenSpeaker> = OnceLock::new();
+static REMOTE_SPEAKER: OnceLock<RemoteSpeaker> = OnceLock::new();
 
-/// Installs the ElevenLabs speaker. Once per process; a second call is
+/// Installs the remote speaker. Once per process; a second call is
 /// ignored. Without one, every line is spoken with the built-in voice.
-pub fn set_eleven_speaker(speak: ElevenSpeaker) {
-    let _ = ELEVEN_SPEAKER.set(speak);
+pub fn set_remote_speaker(speak: RemoteSpeaker) {
+    let _ = REMOTE_SPEAKER.set(speak);
 }
+
+/// How long a remote voice that failed is left out of the chain.
+pub const DOWN_FOR: Duration = Duration::from_secs(300);
+
+/// When each failed remote voice, by fingerprint, last failed. A voice
+/// whose settings change has another fingerprint, so it is not down.
+#[derive(Default)]
+pub(crate) struct DownMarks(HashMap<u64, Instant>);
+
+impl DownMarks {
+    /// True when the voice failed less than `DOWN_FOR` before `now`.
+    pub(crate) fn is_down(&self, fp: u64, now: Instant) -> bool {
+        self.0.get(&fp).is_some_and(|at| now.saturating_duration_since(*at) < DOWN_FOR)
+    }
+
+    pub(crate) fn mark(&mut self, fp: u64, now: Instant) {
+        self.0.insert(fp, now);
+    }
+
+    pub(crate) fn clear(&mut self, fp: u64) {
+        self.0.remove(&fp);
+    }
+}
+
+static DOWN: LazyLock<Mutex<DownMarks>> = LazyLock::new(Default::default);
 
 /// Speaks with the built-in female voice.
 #[cfg(windows)]
@@ -255,36 +348,74 @@ fn say_text(line: &str, volume: u8) -> String {
 #[cfg(target_os = "android")]
 fn say_builtin(_line: &str, _volume: u8) {}
 
-/// Speaks one line with its chosen voice. An ElevenLabs failure falls back to
-/// the built-in voice unless the utterance says not to.
-fn speak_line(u: &Utterance) -> Result<(), String> {
-    if let (Some((dir, key, voice_id)), Some(speak)) = (&u.eleven, ELEVEN_SPEAKER.get()) {
-        match speak(dir, key, voice_id, &u.text, u.volume) {
-            Ok(()) => return Ok(()),
-            Err(e) if !u.fallback => return Err(e),
-            Err(_) => {}
+/// The function that speaks one line with a remote voice, as `speak_chain` takes it.
+type RemoteFn<'a> = dyn Fn(&RemoteVoice, &str, u8, Reach) -> Result<(), String> + 'a;
+
+/// Speaks `u` with the first voice in its chain that can. A voice marked
+/// down only plays a cached line, silently moving on when it has none
+/// (unless this is a trial); any other voice goes to the network, and a
+/// failure marks it down and is reported. The built-in voice speaks when no
+/// remote voice did.
+fn speak_chain(u: &Utterance, marks: &mut DownMarks, now: Instant, remote: &RemoteFn, builtin: &dyn Fn(&str, u8)) -> SpeechReport {
+    let mut failures = Vec::new();
+    for v in &u.voices {
+        let fp = v.fingerprint();
+        if !u.trial && marks.is_down(fp, now) {
+            if remote(v, &u.text, u.volume, Reach::CacheOnly).is_ok() {
+                return SpeechReport { spoken_by: v.label(), failures };
+            }
+            continue;
+        }
+        match remote(v, &u.text, u.volume, Reach::Network) {
+            Ok(()) => {
+                marks.clear(fp);
+                return SpeechReport { spoken_by: v.label(), failures };
+            }
+            Err(e) => {
+                marks.mark(fp, now);
+                failures.push(format!("{} failed: {}.", capitalised(v.label()), e.trim_end_matches('.')));
+            }
         }
     }
-    say_builtin(&u.text, u.volume);
-    Ok(())
+    builtin(&u.text, u.volume);
+    SpeechReport { spoken_by: BUILTIN, failures }
+}
+
+/// `s` with its first letter upper-cased, to start a sentence.
+fn capitalised(s: &str) -> String {
+    let mut chars = s.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+/// Speaks one line through its chain of voices, with the installed remote
+/// speaker; without one, the built-in voice speaks.
+fn speak_line(u: &Utterance) -> SpeechReport {
+    let Some(remote) = REMOTE_SPEAKER.get() else {
+        say_builtin(&u.text, u.volume);
+        return SpeechReport { spoken_by: BUILTIN, failures: vec![] };
+    };
+    let now = Instant::now();
+    // Held across synthesis and playback: safe only because the speech thread is DOWN's sole user.
+    let mut marks = DOWN.lock().unwrap_or_else(|e| e.into_inner());
+    speak_chain(u, &mut marks, now, remote, &say_builtin)
 }
 
 /// Speaks `u` with `speak`, calling `hook` before and after, then tells
 /// whoever waits for it.
-fn deliver(u: Utterance, hook: Option<&dyn Fn(SpeechPhase)>, speak: &dyn Fn(&Utterance) -> Result<(), String>) {
+fn deliver(u: Utterance, hook: Option<&dyn Fn(SpeechPhase)>, speak: &dyn Fn(&Utterance) -> SpeechReport) {
     if let Some(h) = hook {
         h(SpeechPhase::Starting(u.text.clone()));
     }
     crate::log::line("speech", format!("saying: {}", u.text));
-    let result = speak(&u);
-    if let Err(e) = &result {
-        crate::log::line("speech", format!("failed: {e}"));
+    let report = speak(&u);
+    for f in &report.failures {
+        crate::log::line("speech", f.clone());
     }
     if let Some(h) = hook {
         h(SpeechPhase::Finished);
     }
     if let Some(done) = u.done {
-        let _ = done.send(result);
+        let _ = done.send(report);
     }
 }
 
@@ -309,14 +440,14 @@ pub fn speak(u: Utterance) {
     }
 }
 
-/// Queues an utterance and waits until it has been spoken; the result is the
-/// ElevenLabs error when the line had no fallback. Never call it holding a
-/// lock the speech hook takes.
-pub fn speak_and_wait(mut u: Utterance) -> Result<(), String> {
+/// Queues an utterance and waits until it has been spoken, for the report
+/// of which voice spoke it; an error only when the queue stopped. Never
+/// call it holding a lock the speech hook takes.
+pub fn speak_and_wait(mut u: Utterance) -> Result<SpeechReport, String> {
     let (tx, rx) = mpsc::channel();
     u.done = Some(tx);
     speak(u);
-    rx.recv().map_err(|_| "the speech queue stopped".to_string())?
+    rx.recv().map_err(|_| "the speech queue stopped".to_string())
 }
 
 fn applescript_string(text: &str) -> String {
@@ -551,7 +682,157 @@ mod tests {
 
     #[test]
     fn an_utterance_speaks_at_full_volume_unless_told() {
-        assert_eq!(Utterance::new("x".into(), None).volume, 100);
+        assert_eq!(Utterance::new("x".into(), vec![]).volume, 100);
+    }
+
+    fn eleven() -> RemoteVoice {
+        RemoteVoice::Elevenlabs { maya_dir: "/m".into(), key: "k".into(), voice_id: "v".into() }
+    }
+
+    fn server() -> RemoteVoice {
+        RemoteVoice::Server { maya_dir: "/m".into(), base: "http://h:1".into(), voice: "default".into(), model: String::new(), key: None }
+    }
+
+    /// Remote voices that answer from a script per label and record each
+    /// call, and a built-in voice that records what it said.
+    #[derive(Default)]
+    struct Voices {
+        answers: std::cell::RefCell<std::collections::HashMap<&'static str, Result<(), String>>>,
+        calls: std::cell::RefCell<Vec<(&'static str, Reach)>>,
+        builtin: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl Voices {
+        fn answer(&self, label: &'static str, result: Result<(), &str>) {
+            self.answers.borrow_mut().insert(label, result.map_err(String::from));
+        }
+
+        fn speak(&self, u: &Utterance, marks: &mut DownMarks, now: Instant) -> SpeechReport {
+            let remote = |v: &RemoteVoice, _: &str, _: u8, reach: Reach| {
+                self.calls.borrow_mut().push((v.label(), reach));
+                self.answers.borrow().get(v.label()).cloned().unwrap_or(Ok(()))
+            };
+            let builtin = |text: &str, _: u8| self.builtin.borrow_mut().push(text.to_string());
+            speak_chain(u, marks, now, &remote, &builtin)
+        }
+
+        fn take_calls(&self) -> Vec<(&'static str, Reach)> {
+            std::mem::take(&mut *self.calls.borrow_mut())
+        }
+    }
+
+    const ELEVEN: &str = "ElevenLabs";
+    const SERVER: &str = "the voice server";
+
+    fn line() -> Utterance {
+        Utterance::new("hexgrid needs a decision".into(), vec![eleven(), server()])
+    }
+
+    #[test]
+    fn the_chain_goes_elevenlabs_then_server_then_builtin() {
+        let v = Voices::default();
+        v.answer(ELEVEN, Err("402"));
+        v.answer(SERVER, Ok(()));
+        let report = v.speak(&line(), &mut DownMarks::default(), Instant::now());
+        assert_eq!(report, SpeechReport { spoken_by: SERVER, failures: vec!["ElevenLabs failed: 402.".into()] });
+        assert!(v.builtin.borrow().is_empty(), "the built-in voice is not used");
+        assert_eq!(v.take_calls(), [(ELEVEN, Reach::Network), (SERVER, Reach::Network)]);
+    }
+
+    #[test]
+    fn with_every_remote_voice_failing_the_builtin_speaks() {
+        let v = Voices::default();
+        v.answer(ELEVEN, Err("a"));
+        v.answer(SERVER, Err("b"));
+        let report = v.speak(&line(), &mut DownMarks::default(), Instant::now());
+        assert_eq!(report.spoken_by, "the built-in voice");
+        assert_eq!(report.failures.len(), 2);
+        assert_eq!(*v.builtin.borrow(), ["hexgrid needs a decision"]);
+        assert_eq!(report.message(), "ElevenLabs failed: a. The voice server failed: b. Spoke with the built-in voice.");
+    }
+
+    #[test]
+    fn with_no_remote_voice_the_builtin_speaks() {
+        let v = Voices::default();
+        let report = v.speak(&Utterance::new("x".into(), vec![]), &mut DownMarks::default(), Instant::now());
+        assert_eq!(report, SpeechReport { spoken_by: "the built-in voice", failures: vec![] });
+        assert_eq!(report.message(), "Spoke with the built-in voice.");
+        assert_eq!(*v.builtin.borrow(), ["x"]);
+    }
+
+    #[test]
+    fn a_failed_voice_is_skipped_for_five_minutes_but_its_cache_still_plays() {
+        let v = Voices::default();
+        let mut marks = DownMarks::default();
+        let t0 = Instant::now();
+        v.answer(ELEVEN, Err("402"));
+        v.speak(&line(), &mut marks, t0);
+        v.take_calls();
+        let report = v.speak(&line(), &mut marks, t0 + Duration::from_secs(60));
+        assert_eq!(v.take_calls(), [(ELEVEN, Reach::CacheOnly), (SERVER, Reach::Network)], "only the cache is tried while down");
+        assert_eq!(report, SpeechReport { spoken_by: SERVER, failures: vec![] }, "a cache miss while down is not a failure");
+        assert!(marks.is_down(eleven().fingerprint(), t0 + Duration::from_secs(299)));
+        v.speak(&line(), &mut marks, t0 + DOWN_FOR);
+        assert_eq!(v.take_calls()[0], (ELEVEN, Reach::Network), "five minutes on, it is tried again");
+        // A cached line plays while down.
+        let mut marks = DownMarks::default();
+        v.speak(&line(), &mut marks, t0);
+        v.answer(ELEVEN, Ok(()));
+        v.take_calls();
+        let report = v.speak(&line(), &mut marks, t0 + Duration::from_secs(1));
+        assert_eq!(report.spoken_by, ELEVEN);
+        assert_eq!(v.take_calls(), [(ELEVEN, Reach::CacheOnly)]);
+    }
+
+    #[test]
+    fn a_cache_miss_while_down_does_not_renew_the_mark() {
+        let v = Voices::default();
+        let mut marks = DownMarks::default();
+        let t0 = Instant::now();
+        v.answer(ELEVEN, Err("402"));
+        v.speak(&line(), &mut marks, t0);
+        v.speak(&line(), &mut marks, t0 + Duration::from_secs(200));
+        v.take_calls();
+        v.speak(&line(), &mut marks, t0 + Duration::from_secs(300));
+        assert_eq!(v.take_calls()[0], (ELEVEN, Reach::Network));
+    }
+
+    #[test]
+    fn changed_settings_are_not_down() {
+        let v = Voices::default();
+        let mut marks = DownMarks::default();
+        let t0 = Instant::now();
+        v.answer(ELEVEN, Err("402"));
+        v.speak(&line(), &mut marks, t0);
+        v.take_calls();
+        let other = RemoteVoice::Elevenlabs { maya_dir: "/m".into(), key: "k".into(), voice_id: "w".into() };
+        v.speak(&Utterance::new("x".into(), vec![other]), &mut marks, t0 + Duration::from_secs(1));
+        assert_eq!(v.take_calls(), [(ELEVEN, Reach::Network)]);
+    }
+
+    #[test]
+    fn a_trial_ignores_marks_and_a_success_clears_them() {
+        let v = Voices::default();
+        let mut marks = DownMarks::default();
+        let t0 = Instant::now();
+        v.answer(ELEVEN, Err("402"));
+        v.speak(&line(), &mut marks, t0);
+        v.take_calls();
+        v.answer(ELEVEN, Ok(()));
+        let report = v.speak(&Utterance { trial: true, ..line() }, &mut marks, t0 + Duration::from_secs(1));
+        assert_eq!(report.spoken_by, ELEVEN);
+        assert_eq!(v.take_calls(), [(ELEVEN, Reach::Network)], "a trial ignores the mark");
+        v.speak(&line(), &mut marks, t0 + Duration::from_secs(2));
+        assert_eq!(v.take_calls(), [(ELEVEN, Reach::Network)], "the success cleared the mark");
+    }
+
+    #[test]
+    fn a_remote_voice_never_shows_its_key() {
+        let shown = format!("{:?}", eleven());
+        assert!(!shown.contains("k\"") && !shown.contains("key: \"k\""), "{shown}");
+        let keyed = RemoteVoice::Server { maya_dir: "/m".into(), base: "http://h:1".into(), voice: "default".into(), model: String::new(), key: Some("sk-secret".into()) };
+        let shown = format!("{keyed:?}");
+        assert!(!shown.contains("sk-secret"), "{shown}");
     }
 
     #[test]
@@ -728,18 +1009,19 @@ mod tests {
         let log = std::sync::Mutex::new(Vec::<String>::new());
         let hook = |p: SpeechPhase| log.lock().unwrap().push(format!("{p:?}"));
         let (tx, rx) = mpsc::channel();
-        let u = Utterance { done: Some(tx), ..Utterance::new("hexgrid needs a decision".into(), None) };
+        let u = Utterance { done: Some(tx), ..Utterance::new("hexgrid needs a decision".into(), vec![]) };
+        let failed = SpeechReport { spoken_by: "the built-in voice", failures: vec!["ElevenLabs failed: no voice.".into()] };
         deliver(u, Some(&hook), &|u: &Utterance| {
             log.lock().unwrap().push(format!("speak {}", u.text));
-            Err("no voice".into())
+            failed.clone()
         });
         assert_eq!(*log.lock().unwrap(), vec!["Starting(\"hexgrid needs a decision\")", "speak hexgrid needs a decision", "Finished"]);
-        assert_eq!(rx.recv().unwrap(), Err("no voice".to_string()), "the speaker's result reaches the waiter");
+        assert_eq!(rx.recv().unwrap(), failed, "the speaker's report reaches the waiter");
         // Without a hook (nothing listening) the line is still spoken.
         let spoken = std::sync::Mutex::new(0);
-        deliver(Utterance::new("x".into(), None), None, &|_| {
+        deliver(Utterance::new("x".into(), vec![]), None, &|_| {
             *spoken.lock().unwrap() += 1;
-            Ok(())
+            SpeechReport { spoken_by: "the built-in voice", failures: vec![] }
         });
         assert_eq!(*spoken.lock().unwrap(), 1);
     }

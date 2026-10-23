@@ -18,6 +18,7 @@ pub struct Item {
 }
 
 pub const ELEVENLABS: Item = Item { service: "maya-elevenlabs", account: "api-key", label: "Maya ElevenLabs", linux_account: "elevenlabs" };
+pub const VOICE_SERVER: Item = Item { service: "maya-voice-server", account: "api-key", label: "Maya voice server", linux_account: "voice-server" };
 pub const NETWORK_KEY: Item = Item { service: "maya-network-key", account: "private-key", label: "Maya network key", linux_account: "network-key" };
 
 pub const GITHUB_TOKEN: Item = Item { service: "maya-github", account: "token", label: "Maya GitHub token", linux_account: "github-token" };

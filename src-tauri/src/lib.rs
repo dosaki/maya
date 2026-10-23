@@ -302,12 +302,12 @@ fn announce_pr_reviews(app: &AppHandle, decided: &[reviews::ReviewPr]) {
     if decided.is_empty() {
         return;
     }
-    let (wanted, speak, muted, eleven_voice, assistant, volume) = {
+    let (wanted, speak, muted, wanted_voices, assistant, volume) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
         let c = &store.config;
-        let eleven = if c.speak_notifications && !c.muted { eleven_wanted(c, store.claude_dir()) } else { None };
-        (c.notify_on_pr_review, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant, c.voice_loudness())
+        let chain = if c.speak_notifications && !c.muted { voices_wanted(c, store.claude_dir()) } else { vec![] };
+        (c.notify_on_pr_review, c.speak_notifications, c.muted, chain, c.network.role == config::NetworkRole::Assistant, c.voice_loudness())
     };
     if !wanted || assistant {
         return;
@@ -317,14 +317,14 @@ fn announce_pr_reviews(app: &AppHandle, decided: &[reviews::ReviewPr]) {
         log::line("app", "focus mode is on: pull request announcements stay silent");
     }
     let (speak, banner_sound) = announcement(speak, muted, focus);
-    let eleven = if speak { eleven_settings(eleven_voice) } else { None };
+    let voices = if speak { voice_chain(wanted_voices) } else { vec![] };
     for pr in decided {
         let (title, subtitle, body) = reviews::pr_banner(pr);
         log::line("app", format!("pull request {title}: {subtitle}"));
         notify::banner(&title, &subtitle, &body, banner_sound);
         if speak {
             if let Some(line) = reviews::pr_spoken_line(pr) {
-                notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, eleven.clone()) });
+                notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, voices.clone()) });
             }
         }
     }
@@ -441,24 +441,46 @@ fn claude_dir() -> std::path::PathBuf {
     dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")).join(".claude")
 }
 
-/// Maya's folder and the ElevenLabs voice id when the config asks for that
-/// voice; None for the built-in one. Read under the store lock; the key is
-/// looked up only when this says yes, and after the lock is released.
-pub(crate) fn eleven_wanted(cfg: &Config, claude_dir: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
-    // A key is assumed here: looking it up is what this check spares.
-    if !voice::use_elevenlabs(cfg.voice_provider, true, cfg.elevenlabs_voice_id.as_deref()) {
-        return None;
-    }
-    Some((claude_dir.join("maya"), cfg.elevenlabs_voice_id.clone()?))
+/// A remote voice the config asks for, before any key is looked up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WantedVoice {
+    Elevenlabs { maya_dir: std::path::PathBuf, voice_id: String },
+    Server { maya_dir: std::path::PathBuf, base: String, voice: String, model: String },
 }
 
-/// The ElevenLabs settings for one utterance, when `eleven_wanted` said yes
-/// and a key is stored; else None for the built-in voice. Never call it
-/// holding the store lock: the key lookup can block (on Linux a locked
-/// GNOME keyring asks to be unlocked).
-pub(crate) fn eleven_settings(wanted: Option<(std::path::PathBuf, String)>) -> Option<(std::path::PathBuf, String, String)> {
-    let (maya_dir, voice_id) = wanted?;
-    Some((maya_dir, voice::load_key()?, voice_id))
+/// The remote voices the config asks for, in the order they are tried:
+/// ElevenLabs, then the voice server (whatever its voice: blank leaves the
+/// server's default). Read under the store lock, so it looks
+/// up no key; `voice_chain` does, after the lock is released.
+pub(crate) fn voices_wanted(cfg: &Config, claude_dir: &std::path::Path) -> Vec<WantedVoice> {
+    let maya_dir = claude_dir.join("maya");
+    let mut wanted = Vec::new();
+    if cfg.elevenlabs_on() {
+        if let Some(voice_id) = cfg.elevenlabs_voice_id.as_deref().filter(|v| !v.trim().is_empty()) {
+            wanted.push(WantedVoice::Elevenlabs { maya_dir: maya_dir.clone(), voice_id: voice_id.to_string() });
+        }
+    }
+    let s = &cfg.voice_server;
+    if s.enabled {
+        if let Some(base) = maya_core::voice_server::base_url(&s.url) {
+            wanted.push(WantedVoice::Server { maya_dir, base, voice: s.voice.clone(), model: s.model.clone() });
+        }
+    }
+    wanted
+}
+
+/// The remote voices for one utterance, from what `voices_wanted` said: each
+/// with its key. ElevenLabs is dropped when no key is stored; the server's
+/// key is optional. Never call it holding the store lock: a key lookup can
+/// block (on Linux a locked GNOME keyring asks to be unlocked).
+pub(crate) fn voice_chain(wanted: Vec<WantedVoice>) -> Vec<notify::RemoteVoice> {
+    wanted
+        .into_iter()
+        .filter_map(|w| match w {
+            WantedVoice::Elevenlabs { maya_dir, voice_id } => Some(notify::RemoteVoice::Elevenlabs { maya_dir, key: voice::load_key()?, voice_id }),
+            WantedVoice::Server { maya_dir, base, voice, model } => Some(notify::RemoteVoice::Server { maya_dir, base, voice, model, key: voice::load_server_key() }),
+        })
+        .collect()
 }
 
 /// The local cards as the board shows them: on Linux each carries the name
@@ -516,13 +538,13 @@ fn announcement(speak_notifications: bool, muted: bool, focus: bool) -> (bool, b
 }
 
 pub(crate) fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify, speak, muted, eleven_voice, assistant, volume, wake_word) = {
+    let (cards, wants_notify, speak, muted, wanted_voices, assistant, volume, wake_word) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
         let cards = local_cards(&mut store);
         let c = &store.config;
-        let eleven = if c.speak_notifications && !c.muted { eleven_wanted(c, store.claude_dir()) } else { None };
-        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, eleven, c.network.role == config::NetworkRole::Assistant, c.voice_loudness(), c.listen_word())
+        let chain = if c.speak_notifications && !c.muted { voices_wanted(c, store.claude_dir()) } else { vec![] };
+        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, chain, c.network.role == config::NetworkRole::Assistant, c.voice_loudness(), c.listen_word())
     };
     // Due names are typed into the terminals with no lock held.
     actions::run_due_renames(&local(&app.state::<AppState>()));
@@ -556,19 +578,19 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
     }
     if wants_notify && !assistant {
         // The key is looked up only when there is something to say.
-        let eleven = if speak && (!fresh.is_empty() || !finished.is_empty()) { eleven_settings(eleven_voice) } else { None };
+        let voices = if speak && (!fresh.is_empty() || !finished.is_empty()) { voice_chain(wanted_voices) } else { vec![] };
         for c in &fresh {
             notify::notify(c, banner_sound);
             if speak {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, eleven.clone()) });
+                    notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, voices.clone()) });
                 }
             }
         }
         if speak {
             for c in &finished {
                 if let Some(line) = notify::spoken_line(c) {
-                    notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, eleven.clone()) });
+                    notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, voices.clone()) });
                 }
             }
         }
@@ -1172,18 +1194,40 @@ fn list_elevenlabs_voices() -> Result<Vec<voice::Voice>, String> {
     voice::list_voices(&key)
 }
 
-/// Speaks a sample line with the current voice settings.
+/// Stores the voice server's API key in the key store.
 #[tauri::command(async)]
-fn try_voice(state: TauriState<AppState>) -> Result<(), String> {
-    let (eleven, volume) = {
+fn set_voice_server_key(key: String) -> Result<(), String> {
+    voice::store_server_key(&key)
+}
+
+#[tauri::command(async)]
+fn has_voice_server_key() -> bool {
+    voice::load_server_key().is_some()
+}
+
+/// The voices the configured server offers; an empty list when it has no
+/// listing.
+#[tauri::command(async)]
+fn list_server_voices(state: TauriState<AppState>) -> Result<Vec<String>, String> {
+    let url = state.store.lock().unwrap().config.voice_server.url.clone();
+    let base = maya_core::voice_server::base_url(&url).ok_or("Not a server address: start it with http:// or https://.")?;
+    maya_core::voice_server::list_voices(&base, voice::load_server_key().as_deref())
+}
+
+/// Speaks a sample line with the current voice settings, and says which voice
+/// spoke and which failed.
+#[tauri::command(async)]
+fn try_voice(state: TauriState<AppState>) -> Result<String, String> {
+    let (wanted, volume) = {
         let store = state.store.lock().unwrap();
-        (eleven_wanted(&store.config, store.claude_dir()), store.config.voice_loudness())
+        (voices_wanted(&store.config, store.claude_dir()), store.config.voice_loudness())
     };
-    let eleven = eleven_settings(eleven);
+    let voices = voice_chain(wanted);
     // Through the one speech queue, so listening pauses and she does not
     // wake herself on "Maya here".
     let line = "Maya here. Is my voice ok?".to_string();
-    notify::speak_and_wait(notify::Utterance { fallback: false, volume, ..notify::Utterance::new(line, eleven) })
+    let report = notify::speak_and_wait(notify::Utterance { trial: true, volume, ..notify::Utterance::new(line, voices) })?;
+    Ok(report.message())
 }
 
 /// Mutes or unmutes Maya: muted, she makes no sound but still notifies.
@@ -1398,6 +1442,9 @@ pub fn run() {
             set_elevenlabs_key,
             has_elevenlabs_key,
             list_elevenlabs_voices,
+            set_voice_server_key,
+            has_voice_server_key,
+            list_server_voices,
             try_voice,
             listener::voice_listen,
             listener::window_cancel,
@@ -1443,7 +1490,7 @@ pub fn run() {
             log::line("app", format!("{} sessions were running when Maya last stopped", offered.len()));
             #[cfg(target_os = "macos")]
             focus::install_app_handle(app.handle().clone());
-            notify::set_eleven_speaker(voice::speak);
+            notify::set_remote_speaker(voice::speak_remote);
             listener::install_speech_hook(app.handle().clone());
             #[cfg(target_os = "macos")]
             dock::set_dock_icon();
@@ -1525,14 +1572,29 @@ mod route_tests {
     }
 
     #[test]
-    fn the_elevenlabs_key_is_wanted_only_for_the_elevenlabs_provider_with_a_voice() {
+    fn the_wanted_voices_follow_the_switches_in_chain_order() {
         let dir = std::path::Path::new("/home/u/.claude");
-        let cfg = |provider, voice: Option<&str>| Config { voice_provider: provider, elevenlabs_voice_id: voice.map(String::from), ..Default::default() };
-        assert_eq!(eleven_wanted(&cfg(voice::VoiceProvider::Builtin, Some("v")), dir), None);
-        assert_eq!(eleven_wanted(&cfg(voice::VoiceProvider::Elevenlabs, None), dir), None);
-        assert_eq!(eleven_wanted(&cfg(voice::VoiceProvider::Elevenlabs, Some("  ")), dir), None);
-        assert_eq!(eleven_wanted(&cfg(voice::VoiceProvider::Elevenlabs, Some("v")), dir), Some((dir.join("maya"), "v".to_string())));
-        assert_eq!(eleven_settings(None), None, "no key lookup when the voice is not wanted");
+        let maya = dir.join("maya");
+        let eleven = |voice: &str| WantedVoice::Elevenlabs { maya_dir: maya.clone(), voice_id: voice.into() };
+        let server = |base: &str| WantedVoice::Server { maya_dir: maya.clone(), base: base.into(), voice: "default".into(), model: "tts-1".into() };
+        let cfg = |provider, voice: Option<&str>, url: &str, server_voice: &str| Config {
+            voice_provider: provider,
+            elevenlabs_voice_id: voice.map(String::from),
+            voice_server: config::VoiceServer { enabled: !url.is_empty(), url: url.into(), voice: server_voice.into(), model: "tts-1".into() },
+            ..Default::default()
+        };
+        assert_eq!(voices_wanted(&Config::default(), dir), vec![]);
+        assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Elevenlabs, Some("v"), "", ""), dir), vec![eleven("v")]);
+        assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Elevenlabs, Some("  "), "", ""), dir), vec![]);
+        assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Builtin, Some("v"), "", ""), dir), vec![]);
+        assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Builtin, None, "http://localhost:8004/", "default"), dir), vec![server("http://localhost:8004")]);
+        assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Builtin, None, "localhost:8004", "default"), dir), vec![]);
+        let blank = WantedVoice::Server { maya_dir: maya.clone(), base: "http://localhost:8004".into(), voice: "".into(), model: "tts-1".into() };
+        assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Builtin, None, "http://localhost:8004", ""), dir), vec![blank], "a blank voice keeps the server in the chain");
+        let off = Config { voice_server: config::VoiceServer { enabled: false, url: "http://localhost:8004".into(), voice: "default".into(), model: "tts-1".into() }, ..Default::default() };
+        assert_eq!(voices_wanted(&off, dir), vec![], "a server that is switched off is not wanted");
+        assert_eq!(voices_wanted(&cfg(voice::VoiceProvider::Elevenlabs, Some("v"), "http://localhost:8004", "default"), dir), vec![eleven("v"), server("http://localhost:8004")]);
+        assert_eq!(voice_chain(vec![]), vec![], "no key lookup when no voice is wanted");
     }
 
     #[test]
