@@ -180,17 +180,19 @@ mod tests {
     use super::*;
 
     fn exe(d: &Path, name: &str) {
-        let p = d.join(name);
-        std::fs::write(&p, "#!/bin/sh\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script(d, name, "");
     }
 
+    /// Writes an executable script at `d/name`. A child shell writes it, so
+    /// this process never holds a write handle to it: a process another test
+    /// starts meanwhile would inherit that handle until it execs, and running
+    /// the script then fails with "Text file busy".
     fn script(d: &Path, name: &str, body: &str) {
+        use std::io::Write;
         let p = d.join(name);
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut sh = Command::new("sh").arg("-c").arg("cat > \"$1\" && chmod 755 \"$1\"").arg("sh").arg(&p).stdin(Stdio::piped()).spawn().unwrap();
+        sh.stdin.take().unwrap().write_all(format!("#!/bin/sh\n{body}\n").as_bytes()).unwrap();
+        assert!(sh.wait().unwrap().success());
     }
 
     #[test]
