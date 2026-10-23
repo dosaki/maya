@@ -66,6 +66,38 @@ describe("settings flow", () => {
     expect(await open("builtin")).toBe(false);
   });
 
+  describe("voice chain loading", () => {
+    const open = async (voices: Record<string, () => Promise<unknown>>) => {
+      const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, elevenlabsEnabled: true, elevenlabsVoiceId: "abc", voiceServer: { enabled: true, url: "http://mac.local:8004", voice: "", model: "" }, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "" };
+      invoke.mockImplementation((cmd: string) => {
+        if (cmd === "codex_hook_status") return Promise.resolve(false);
+        if (cmd === "hook_status") return Promise.resolve(true);
+        if (cmd === "get_config") return Promise.resolve({ ...config });
+        if (cmd === "has_elevenlabs_key" || cmd === "has_voice_server_key") return Promise.resolve(true);
+        if (cmd in voices) return voices[cmd]();
+        if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+        if (cmd === "list_whisper_models") return Promise.resolve([]);
+        if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+        return Promise.reject(new Error("unexpected " + cmd));
+      });
+      document.body.innerHTML = '<div id="settings" class="settings pane" hidden></div>';
+      await initSettings();
+      await flush();
+    };
+
+    it("shows a server address problem next to the voice, not as a page error", async () => {
+      const text = "Not a server address: start it with http:// or https://.";
+      await open({ list_elevenlabs_voices: () => Promise.resolve([]), list_server_voices: () => Promise.reject(text) });
+      expect(document.querySelector("[data-for=server-voices]")?.textContent).toBe(`Could not list the server's voices: ${text}`);
+      expect(document.querySelector(".settings__error")?.textContent ?? "").toBe("");
+    });
+
+    it("loads the server's voices even when ElevenLabs fails", async () => {
+      await open({ list_elevenlabs_voices: () => Promise.reject("401"), list_server_voices: () => Promise.resolve(["default", "tiago.wav"]) });
+      expect([...document.querySelectorAll<HTMLOptionElement>("select[name=serverVoice] option")].map((o) => o.value)).toEqual(["", "default", "tiago.wav"]);
+    });
+  });
+
   it("opens on the group chosen last time, and keeps it through a repaint", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "" };
     invoke.mockImplementation((cmd: string) => {

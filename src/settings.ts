@@ -1594,20 +1594,30 @@ export async function initSettings(): Promise<void> {
   };
 
   const loadVoices = async () => {
+    // Each voice loads on its own: one failing (a bad key) must not stop the
+    // other refreshing. The ElevenLabs failure still reaches the page error.
+    let failed: unknown = null;
     if (model.elevenEnabled) {
-      model.elevenKeySet = await invoke<boolean>("has_elevenlabs_key");
-      if (model.elevenKeySet) model.elevenVoices = await invoke<ElevenVoice[]>("list_elevenlabs_voices");
-    }
-    if (model.serverEnabled && model.serverUrl) {
-      model.serverKeySet = await invoke<boolean>("has_voice_server_key");
       try {
-        model.serverVoices = await invoke<string[]>("list_server_voices");
-        model.serverVoicesError = null;
+        model.elevenKeySet = await invoke<boolean>("has_elevenlabs_key");
+        if (model.elevenKeySet) model.elevenVoices = await invoke<ElevenVoice[]>("list_elevenlabs_voices");
       } catch (e) {
-        model.serverVoices = [];
-        model.serverVoicesError = String(e);
+        failed = e;
       }
     }
+    model.serverVoices = [];
+    model.serverVoicesError = null;
+    if (model.serverEnabled) {
+      model.serverKeySet = await invoke<boolean>("has_voice_server_key");
+      if (model.serverUrl) {
+        try {
+          model.serverVoices = await invoke<string[]>("list_server_voices");
+        } catch (e) {
+          model.serverVoicesError = String(e);
+        }
+      }
+    }
+    if (failed) throw failed;
   };
 
   const loadGitStatus = async () => {
@@ -1771,7 +1781,7 @@ export async function initSettings(): Promise<void> {
     onServerVoice: (voice) => void run(() => saveServer({ voice })),
     onServerModel: (model) => void run(() => saveServer({ model })),
     onServerKey: (key) => void run(async () => { await invoke("set_voice_server_key", { key }); await loadVoices(); }),
-    onTryVoice: () => void run(async () => { model.voiceReport = await invoke<string>("try_voice"); }),
+    onTryVoice: () => void run(async () => { model.voiceReport = null; model.voiceReport = await invoke<string>("try_voice"); }),
     onVoiceVolume: (percent) => void run(() => saveConfig({ voiceVolume: percent })),
     onListen: (on) => void run(async () => { await invoke("voice_listen", { on }); model.listen = on; }),
     onListenWord: (word) => void run(() => saveConfig({ listenWord: word || null })),
