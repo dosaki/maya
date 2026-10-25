@@ -1,0 +1,24 @@
+services:
+  chatterbox:
+    build: .
+    ports:
+      # Use "8004:8004" to let other machines in, and set CHATTERBOX_API_KEY.
+      - "127.0.0.1:8004:8004"
+    volumes:
+      - ./voices:/app/voices
+      - hf-cache:/root/.cache/huggingface
+    environment:
+      CHATTERBOX_API_KEY: ${CHATTERBOX_API_KEY:-}
+    restart: unless-stopped
+    # For an NVIDIA GPU, uncomment this and the command below.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    # command: ["python", "/app/server.py", "--host", "0.0.0.0", "--device", "cuda"]
+
+volumes:
+  hf-cache:
