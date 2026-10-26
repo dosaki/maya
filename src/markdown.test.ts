@@ -28,4 +28,40 @@ describe("renderMarkdown", () => {
     expect(el.textContent).toContain("line one");
     expect(el.querySelector("br")).not.toBeNull();
   });
+
+  it("colours a code block whose fence names its language", () => {
+    const el = renderMarkdown("```sql\nSELECT name FROM users WHERE id = 'x';\n```");
+    const code = el.querySelector("pre code")!;
+    expect(code.querySelector(".hljs-keyword")?.textContent).toBe("SELECT");
+    expect(code.querySelector(".hljs-string")?.textContent).toBe("'x'");
+    expect(code.textContent).toBe("SELECT name FROM users WHERE id = 'x';\n");
+  });
+
+  it("knows a language by its usual short names", () => {
+    for (const lang of ["sh", "ts", "py", "rs", "yml"]) {
+      const el = renderMarkdown("```" + lang + "\nx\n```");
+      expect(el.querySelector("pre code")?.classList.contains("hljs"), lang).toBe(true);
+    }
+  });
+
+  it("leaves a code block with no language plain", () => {
+    const el = renderMarkdown("```\nSELECT 1;\n```");
+    expect(el.querySelector("pre code span")).toBeNull();
+    expect(el.querySelector("pre code")?.textContent).toBe("SELECT 1;\n");
+  });
+
+  it("leaves a code block in a language it does not know plain and escaped", () => {
+    const el = renderMarkdown("```nosuchlang\n<b>x</b>\n```");
+    expect(el.querySelector("pre code span")).toBeNull();
+    expect(el.querySelector("pre code b")).toBeNull();
+    expect(el.querySelector("pre code")?.textContent).toBe("<b>x</b>\n");
+  });
+
+  it("keeps markup in a coloured code block as text", () => {
+    const el = renderMarkdown('```html\n<script>alert(1)</script><img src=x onerror="alert(1)">\n```');
+    expect(el.querySelector("script")).toBeNull();
+    expect(el.querySelector("img")).toBeNull();
+    expect(el.querySelector("pre code")?.textContent).toBe('<script>alert(1)</script><img src=x onerror="alert(1)">\n');
+    expect(el.querySelector("pre code .hljs-tag")).not.toBeNull();
+  });
 });

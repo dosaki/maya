@@ -6,7 +6,6 @@ const css = "\n" + styles;
 
 const DARK = ":root";
 const LIGHT = ':root[data-theme="light"]';
-const TERMINAL_UNDER_LIGHT = ':root[data-theme="light"] .modal--terminal';
 
 /** The text between the braces of the rule whose selector is exactly `selector`. */
 function block(selector: string): string {
@@ -76,12 +75,14 @@ describe("the light theme", () => {
     for (const name of SHARED) expect(vars(LIGHT)).not.toHaveProperty(name);
   });
 
-  it("keeps the terminal-look viewer dark, like the terminal it imitates", () => {
-    const terminal = vars(TERMINAL_UNDER_LIGHT);
-    for (const [name, value] of Object.entries(ORIGINAL_DARK)) {
-      if (!SHARED.includes(name)) expect(terminal[name], name).toBe(value);
-    }
-    expect(block(TERMINAL_UNDER_LIGHT)).toContain("color-scheme: dark");
+  it("does not give the terminal-look viewer the dark colours back", () => {
+    expect(css).not.toContain(`\n${LIGHT} .modal--terminal {`);
+  });
+
+  it("gives every fixed colour of the terminal-look viewer a light counterpart", () => {
+    const fixed = [...css.matchAll(/\n(\.modal--terminal [^{]+?) \{([^}]*)\}/g)].filter(([, , body]) => /#[0-9a-f]{3,6}\b/i.test(body)).map(([, selector]) => selector);
+    expect(fixed.length).toBeGreaterThan(0);
+    for (const selector of fixed) expect(css, selector).toContain(`\n${LIGHT} ${selector} {`);
   });
 });
 
@@ -107,5 +108,29 @@ describe.each([
     expect(ratio("--gold", "--bg")).toBeGreaterThanOrEqual(3);
     expect(ratio("--gold", "--panel")).toBeGreaterThanOrEqual(3);
     expect(ratio("--on-gold", "--gold")).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+/** The colours of highlighted code, as each theme defines them. */
+function codeColors(selector: string): Record<string, string> {
+  return Object.fromEntries(Object.entries(vars(selector)).filter(([name]) => name.startsWith("--code-")));
+}
+
+describe("code colours", () => {
+  it("colour every kind of token, and each one is used", () => {
+    const names = Object.keys(codeColors(DARK));
+    expect(names.length).toBeGreaterThanOrEqual(8);
+    for (const name of names) expect(css, name).toContain(`var(${name})`);
+  });
+
+  it.each([
+    ["dark", { ...vars(DARK) }],
+    ["light", { ...vars(DARK), ...vars(LIGHT) }],
+  ])("are readable as small text in the %s theme", (_name, colors) => {
+    for (const name of Object.keys(codeColors(DARK))) {
+      for (const background of ["--bg", "--panel"]) {
+        expect(contrast(colors[name], colors[background]), `${name} on ${background}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
   });
 });
