@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { composerKey } from "./keys";
 
 export type Dot = "idle" | "working" | "waiting" | "unread";
 
@@ -94,14 +95,14 @@ export function renderChat(m: ChatModel, h: ChatHandlers): HTMLElement {
   input.rows = 2;
   input.placeholder = "Tell Maya what to do";
   input.value = m.draft;
-  input.addEventListener("keydown", (ev) => {
-    if (ev.key !== "Enter" || ev.shiftKey || ev.isComposing) return;
-    ev.preventDefault();
-    const text = input.value.trim();
-    if (!text) return;
-    input.value = "";
-    h.onSend(text);
-  });
+  input.addEventListener("keydown", (ev) =>
+    composerKey(ev, input, () => {
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      h.onSend(text);
+    }),
+  );
   bar.append(input);
   if (m.status.dot === "working") {
     const stop = el("button", "chat__stop", m.status.job ? `Stop (${m.status.job})` : "Stop");

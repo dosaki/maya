@@ -12,7 +12,7 @@ import type { Progress } from "./progress";
 import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
 import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, prRef, remoteTitle, type Card, type Pick, type Turn, type ViewerTheme } from "./types";
 import { renderToolTurn, resetToolUi } from "./toolturn";
-import { sendShortcut } from "./platform";
+import { composerKey, sendShortcut } from "./keys";
 
 /**
  * Composer features the page turns on: the phone has a picker instead of
@@ -650,12 +650,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
       ev.preventDefault();
       h.onPasteFiles?.(files);
     });
-    ta.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
-        ev.preventDefault();
-        trySend();
-      }
-    });
+    ta.addEventListener("keydown", (ev) => composerKey(ev, ta, trySend));
     const send = el("button", "card__btn card__btn--primary", "Send");
     send.type = "button";
     send.dataset.action = "send";

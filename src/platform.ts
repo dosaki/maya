@@ -1,4 +1,4 @@
-// What differs in the page between macOS, Windows and Linux: names and shortcuts.
+// What differs in the page between macOS, Windows and Linux: names.
 
 /** True when the page runs in Maya on Windows (WebView2's user agent says so). */
 export function isWindows(): boolean {
@@ -25,11 +25,6 @@ export function thisComputer(): string {
 export function thisComputerLower(): string {
   if (isLinux()) return "this computer";
   return isWindows() ? "this PC" : "this Mac";
-}
-
-/** The send shortcut as the keyboard shows it (both are accepted). */
-export function sendShortcut(): string {
-  return isWindows() || isLinux() ? "Ctrl+Enter" : "⌘↵";
 }
 
 /** The built-in voice's name. */

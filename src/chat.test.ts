@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderChat, type ChatTurn } from "./chat";
+import { defaultKeys, setKeyBindings } from "./keys";
 
 const turn = (who: string, text: string, via: ChatTurn["via"]): ChatTurn => ({ who, text, at: 1, via });
 
@@ -25,6 +26,27 @@ describe("renderChat", () => {
     expect(h.onSend).toHaveBeenCalledWith("what's waiting?");
     expect(el.querySelector("button[data-action=brain-stop]")).toBeNull();
     expect(el.querySelector("button[data-action=window-cancel]")).toBeNull();
+  });
+
+  it("sends and adds lines with the keys chosen in Settings", () => {
+    setKeyBindings({ send: ["Alt+Enter", "Meta+Enter"], newLine: ["Enter"] });
+    try {
+      const h = { onSend: vi.fn(), onCancel: vi.fn(), onStop: vi.fn() };
+      const el = renderChat({ turns: [], status: { dot: "idle", pending: null, job: null, ready: true }, draft: "" }, h);
+      const box = el.querySelector<HTMLTextAreaElement>("textarea[name=chat]")!;
+      box.value = "one";
+      box.setSelectionRange(3, 3);
+      box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", cancelable: true }));
+      expect(h.onSend).not.toHaveBeenCalled();
+      expect(box.value).toBe("one\n");
+      box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, cancelable: true }));
+      expect(h.onSend).toHaveBeenCalledWith("one");
+      box.value = "two";
+      box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", altKey: true, cancelable: true }));
+      expect(h.onSend).toHaveBeenLastCalledWith("two");
+    } finally {
+      setKeyBindings(defaultKeys());
+    }
   });
 
   it("keeps Shift+Enter for a new line, ignores blank input and never reads her text as markup", () => {

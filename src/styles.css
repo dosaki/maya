@@ -99,6 +99,8 @@ body { margin: 0; background: var(--bg); }
 .settings__status { color: var(--muted); font-size: 12.5px; }
 .settings__error { color: #dc2626; font-size: 12.5px; }
 .settings__row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.settings__keys-name { min-width: 80px; }
+.settings__keys .settings__error:empty { display: none; }
 .settings__hint, .settings__progress { color: var(--muted); font-size: 12.5px; }
 .settings__code { font: 600 22px ui-monospace, monospace; letter-spacing: .15em; color: var(--gold-bright); }
 .settings button.settings__link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--muted); font-size: 12.5px; text-decoration: underline; cursor: pointer; }
