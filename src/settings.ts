@@ -7,6 +7,7 @@ import { builtinVoiceName, isMac, recognizerOptions, secretStore, thisComputerLo
 import type { ColorTheme, GitProvider, Harness, NewSessionTerminal, ViewerTheme } from "./types";
 import { setViewerTheme } from "./modal";
 import { COLOR_THEMES, applyColorTheme, asColorTheme } from "./theme";
+import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys, removeCombo, setKeyBindings, type KeyBindings } from "./keys";
 import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
@@ -88,6 +89,8 @@ export interface SettingsModel {
   viewerTheme?: ViewerTheme;
   /** The colours of the windows; dark when absent. */
   colorTheme?: ColorTheme;
+  /** The keys that send and make a new line; the defaults when absent. */
+  keys?: KeyBindings;
   /** The macOS app new sessions open in; Terminal when absent. */
   newSessionTerminal?: NewSessionTerminal;
   hookInstalled: boolean | null;
@@ -203,6 +206,7 @@ export type Recognizer = "system" | "builtin";
 export interface SettingsHandlers {
   onViewerTheme?(t: ViewerTheme): void;
   onColorTheme?(t: ColorTheme): void;
+  onKeys?(k: KeyBindings): void;
   onNewSessionTerminal?(t: NewSessionTerminal): void;
   onGitEnabled?(p: GitProvider, on: boolean): void;
   onGitTokenKind?(p: GitProvider, kind: "stored" | "env"): void;
@@ -303,6 +307,7 @@ export function gitConnections(raw: GitConnectionJson[] | null | undefined): Git
 interface ConfigJson {
   viewerTheme?: ViewerTheme;
   colorTheme?: ColorTheme;
+  keys?: KeyBindings | null;
   newSessionTerminal?: NewSessionTerminal;
   git?: GitConnectionJson[] | null;
   completedTimeoutMinutes: number;
@@ -332,6 +337,7 @@ interface ConfigJson {
 /** The sidebar's groups, in its order. */
 export const SETTINGS_GROUPS = [
   ["general", "General"],
+  ["keyboard", "Keyboard"],
   ["sessions", "Sessions"],
   ["git", "Git"],
   ["reviews", "Pull requests"],
@@ -378,6 +384,81 @@ function subsection(title: string): HTMLElement {
   heading.textContent = title;
   s.append(heading);
   return s;
+}
+
+/**
+ * Settings › Keyboard: each action's combinations as chips, an Add button
+ * that records the next Enter press, and Reset to defaults.
+ */
+function renderKeyboard(section: HTMLElement, keys: KeyBindings, h: SettingsHandlers): void {
+  const hint = document.createElement("div");
+  hint.className = "settings__hint";
+  hint.textContent = "The keys for the Chat tab, a session's reply box and the new-session prompt. An Enter press in neither list does what the box does by itself.";
+  section.append(hint);
+  for (const [action, name] of KEY_ACTIONS) {
+    const row = document.createElement("div");
+    row.className = "settings__row settings__keys";
+    row.dataset.keys = action;
+    const label = document.createElement("span");
+    label.className = "settings__keys-name";
+    label.textContent = name;
+    row.append(label);
+    for (const combo of keys[action]) {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.append(comboLabel(combo));
+      if (action !== "send" || keys.send.length > 1) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "chip__remove";
+        remove.setAttribute("aria-label", `Remove ${comboLabel(combo)}`);
+        remove.textContent = "×";
+        remove.addEventListener("click", () => h.onKeys?.(removeCombo(keys, action, combo)));
+        chip.append(remove);
+      }
+      row.append(chip);
+    }
+    const add = document.createElement("button");
+    add.type = "button";
+    add.dataset.action = "keys-add";
+    add.textContent = "Add";
+    const error = document.createElement("span");
+    error.className = "settings__error";
+    let recording = false;
+    const stop = () => {
+      recording = false;
+      add.textContent = "Add";
+    };
+    add.addEventListener("click", () => {
+      recording = true;
+      error.textContent = "";
+      add.textContent = "Press keys… (Esc to cancel)";
+    });
+    add.addEventListener("blur", stop);
+    add.addEventListener("keydown", (ev) => {
+      if (!recording) return;
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        stop();
+        return;
+      }
+      const combo = comboOf(ev);
+      if (!combo) return;
+      ev.preventDefault();
+      stop();
+      const next = addCombo(keys, action, combo);
+      if (typeof next === "string") error.textContent = next;
+      else h.onKeys?.(next);
+    });
+    row.append(add, error);
+    section.append(row);
+  }
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.dataset.action = "keys-reset";
+  reset.textContent = "Reset to defaults";
+  reset.addEventListener("click", () => h.onKeys?.(defaultKeys()));
+  section.append(reset);
 }
 
 /** "483 921" from "483921": a space after the first three digits. */
@@ -540,7 +621,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   nav.append(...navButtons);
   content.append(...Object.values(sections));
   show(model.settingsGroup ?? "general");
-  const { general, sessions, git, reviews, notifications, voice, network, debug } = sections;
+  const { general, keyboard, sessions, git, reviews, notifications, voice, network, debug } = sections;
   const speaking = subsection("Speaking");
   const listening = subsection("Listening");
   voice.append(speaking, listening);
@@ -614,6 +695,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   themeSel.addEventListener("change", () => h.onColorTheme?.(asColorTheme(themeSel.value)));
   themeLabel.append(themeSel);
   general.append(themeLabel);
+
+  renderKeyboard(keyboard, model.keys ?? defaultKeys(), h);
 
   if (model.version) {
     const version = document.createElement("div");
@@ -1704,6 +1787,8 @@ export async function initSettings(): Promise<void> {
     setViewerTheme(model.viewerTheme);
     model.colorTheme = asColorTheme(c.colorTheme);
     applyColorTheme(model.colorTheme);
+    model.keys = asKeyBindings(c.keys);
+    setKeyBindings(model.keys);
     model.newSessionTerminal = c.newSessionTerminal ?? "terminal";
     applyNetworkConfig(c);
   };
@@ -1823,6 +1908,13 @@ export async function initSettings(): Promise<void> {
       model.colorTheme = t;
       applyColorTheme(t);
       void run(() => saveConfig({ colorTheme: t }));
+    },
+    onKeys: (k) => {
+      // At once, like the theme: the boxes follow the new keys before the save lands.
+      model.keys = k;
+      setKeyBindings(k);
+      paint();
+      void run(() => saveConfig({ keys: k }));
     },
     onNewSessionTerminal: (t) => void run(() => saveConfig({ newSessionTerminal: t })),
     onWhisperModel: (id) => void run(() => saveConfig({ whisperModel: id })),

@@ -21,6 +21,7 @@ import { initVoice } from "./voice";
 import { initChat } from "./chat";
 import { initDebug } from "./debug";
 import { maybeShowFirstRun } from "./firstrun";
+import { maybeShowKeysNotice } from "./notice";
 import { updates } from "./update";
 
 let cards: Card[] = [];
@@ -206,6 +207,10 @@ async function start(): Promise<void> {
   initChat();
   void initDebug();
   void maybeShowFirstRun();
+  void maybeShowKeysNotice(() => {
+    document.dispatchEvent(new CustomEvent(OPEN_SETTINGS_GROUP, { detail: "keyboard" }));
+    tabs?.show("settings");
+  });
   const searchHost = document.getElementById("session-search");
   if (searchHost) search = makeSessionSearch(searchHost, () => paint());
   const rememberedHost = document.getElementById("remembered");

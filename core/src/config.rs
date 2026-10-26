@@ -170,8 +170,23 @@ pub struct Config {
     /// The app new sessions open in on macOS; the other systems have one terminal.
     #[serde(default)]
     pub new_session_terminal: NewSessionTerminal,
+    /// The Enter combinations that send a message and make a new line; None
+    /// until Settings saves them, and the page then uses its defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<KeyBindings>,
     #[serde(default)]
     pub network: NetworkConfig,
+}
+
+/// The key combinations of each message-box action, as the page records
+/// them ("Alt+Meta+Enter"); the page checks them when it reads them.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyBindings {
+    #[serde(default)]
+    pub send: Vec<String>,
+    #[serde(default)]
+    pub new_line: Vec<String>,
 }
 
 /// Which speech recogniser the listener uses.
@@ -447,6 +462,7 @@ impl Default for Config {
             viewer_theme: ViewerTheme::Chat,
             color_theme: ColorTheme::Dark,
             new_session_terminal: NewSessionTerminal::Terminal,
+            keys: None,
             network: NetworkConfig::default(),
         }
     }
@@ -759,6 +775,19 @@ mod tests {
         let text = serde_json::to_string(&set).unwrap();
         assert!(text.contains(r#""colorTheme":"light""#), "{text}");
         assert_eq!(serde_json::from_str::<Config>(&text).unwrap().color_theme, ColorTheme::Light);
+    }
+
+    #[test]
+    fn the_message_keys_are_absent_until_chosen_and_round_trip() {
+        assert_eq!(Config::default().keys, None);
+        let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
+        assert_eq!(older.keys, None);
+        assert!(!serde_json::to_string(&older).unwrap().contains("keys"));
+        let keys = KeyBindings { send: vec!["Meta+Enter".into(), "Ctrl+Enter".into()], new_line: vec![] };
+        let set = Config { keys: Some(keys.clone()), ..Config::default() };
+        let text = serde_json::to_string(&set).unwrap();
+        assert!(text.contains(r#""keys":{"send":["Meta+Enter","Ctrl+Enter"],"newLine":[]}"#), "{text}");
+        assert_eq!(serde_json::from_str::<Config>(&text).unwrap().keys, Some(keys));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { setLocalMachine } from "./machines";
+import { comboLabel, defaultKeys, setKeyBindings } from "./keys";
 import { CLAUDE_AGENT, optionFields, renderNewSession, type AgentInfo, type NewSessionModel } from "./newsession";
 
 const handlers = () => ({ onStart: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn(), onMachine: vi.fn(), onAgent: vi.fn(), onModel: vi.fn() });
@@ -53,8 +54,26 @@ describe("renderNewSession", () => {
     start.click();
     expect(h.onStart).toHaveBeenCalledWith("", null, "fix ci", defaults);
     el.querySelector<HTMLSelectElement>("select[name=dir]")!.value = "sonarqube";
-    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(h.onStart).toHaveBeenLastCalledWith("", "sonarqube", "fix ci", defaults);
+  });
+
+  it("starts and adds lines with the keys chosen in Settings, and names the start key in the hint", () => {
+    setKeyBindings({ send: ["Ctrl+Enter"], newLine: ["Enter"] });
+    try {
+      const h = handlers();
+      const el = renderNewSession({ ...base, prompt: "fix" }, h);
+      const ta = el.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")!;
+      expect(ta.placeholder).toContain(`(${comboLabel("Ctrl+Enter")} to start)`);
+      ta.setSelectionRange(3, 3);
+      ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      expect(h.onStart).not.toHaveBeenCalled();
+      expect(ta.value).toBe("fix\n");
+      ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
+      expect(h.onStart).toHaveBeenCalledWith("", null, "fix", defaults);
+    } finally {
+      setKeyBindings(defaultKeys());
+    }
   });
 
   it("offers model, effort and mode with Default first and passes the choices to start", () => {
@@ -235,7 +254,7 @@ describe("agents", () => {
     const el = renderNewSession({ ...base, dir: "a", prompt: "go" }, h);
     const name = el.querySelector<HTMLInputElement>("input[name=name]")!;
     name.value = "Fix CI";
-    name.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    name.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(h.onStart).toHaveBeenCalledWith("", "a", "go", { ...defaults, name: "Fix CI" });
   });
 

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { showToast } from "./toast";
-import { sendShortcut } from "./platform";
+import { composerKey, sendShortcut } from "./keys";
 import { hasLocalMachine, initialChoices, machineChoices, type MachineChoice, type MachineInfo } from "./machines";
 import { harnessLabel } from "./harness";
 import { brainAgent, defaultAgent } from "./brain";
@@ -310,14 +310,9 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
   };
   ta.addEventListener("input", sync);
   select.addEventListener("change", sync);
-  const startOnShortcut = (ev: KeyboardEvent) => {
-    if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
-      ev.preventDefault();
-      tryStart();
-    }
-  };
-  ta.addEventListener("keydown", startOnShortcut);
-  nameInput?.addEventListener("keydown", startOnShortcut);
+  ta.addEventListener("keydown", (ev) => composerKey(ev, ta, tryStart));
+  const name = nameInput;
+  name?.addEventListener("keydown", (ev) => composerKey(ev, name, tryStart));
   start.addEventListener("click", tryStart);
   sync();
 

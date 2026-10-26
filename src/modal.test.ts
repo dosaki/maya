@@ -5,6 +5,7 @@ const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
 import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
+import { comboLabel, defaultKeys, setKeyBindings } from "./keys";
 import type { Card, Turn } from "./types";
 
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
@@ -393,7 +394,7 @@ describe("renderModal", () => {
     expect(h.onSend).toHaveBeenLastCalledWith("Attached file: /a.png");
   });
 
-  it("sends trimmed text on button click and on Cmd+Enter, never blank", () => {
+  it("sends trimmed text on button click and on Enter, never blank", () => {
     const h = handlers();
     const el = renderModal({ card: base, turns: [], status: null, draft: "" }, h);
     const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
@@ -401,8 +402,27 @@ describe("renderModal", () => {
     el.querySelector<HTMLButtonElement>("button[data-action=send]")!.click();
     expect(h.onSend).not.toHaveBeenCalled();
     ta.value = "  reply please  ";
-    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(h.onSend).toHaveBeenCalledWith("reply please");
+  });
+
+  it("sends and adds lines with the keys chosen in Settings, and names the send key in the hint", () => {
+    setKeyBindings({ send: ["Meta+Enter"], newLine: ["Enter"] });
+    try {
+      const h = handlers();
+      const el = renderModal({ card: base, turns: [], status: null, draft: "" }, h);
+      const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
+      expect(ta.placeholder).toContain(`(${comboLabel("Meta+Enter")} to send`);
+      ta.value = "two";
+      ta.setSelectionRange(0, 0);
+      ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      expect(h.onSend).not.toHaveBeenCalled();
+      expect(ta.value).toBe("\ntwo");
+      ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true, cancelable: true }));
+      expect(h.onSend).toHaveBeenCalledWith("two");
+    } finally {
+      setKeyBindings(defaultKeys());
+    }
   });
 
   it("types a /command into the terminal instead of sending it as a reply, for agents that take them", () => {
@@ -414,7 +434,7 @@ describe("renderModal", () => {
     expect(el.querySelector<HTMLTextAreaElement>("textarea")!.placeholder).toContain("/command");
     const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
     ta.value = " /review the diff ";
-    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(h.onCommand).toHaveBeenCalledWith("/review the diff");
     expect(h.onSend).not.toHaveBeenCalled();
     // Codex takes / commands too, but has no ! shell lines: one is just a reply there.
@@ -437,7 +457,7 @@ describe("renderModal", () => {
     expect(el.querySelector<HTMLTextAreaElement>("textarea")!.placeholder).toContain("!shell");
     const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
     ta.value = " ! git status ";
-    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(h.onCommand).toHaveBeenCalledWith("! git status");
     expect(h.onSend).not.toHaveBeenCalled();
   });

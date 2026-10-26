@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { comboLabel, defaultKeys } from "./keys";
 import { gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
@@ -396,12 +397,12 @@ describe("renderSettings", () => {
   it("lists the groups in a sidebar, one titled section each, and shows only General at first", () => {
     const el = renderSettings(voiceBase, handlers());
     const nav = [...el.querySelectorAll<HTMLButtonElement>(".settings__nav button")];
-    expect(nav.map((b) => b.textContent)).toEqual(["General", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug"]);
-    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug"]);
+    expect(nav.map((b) => b.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug"]);
+    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug"]);
     const sections = [...el.querySelectorAll<HTMLElement>(".settings__section")];
-    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "sessions", "git", "reviews", "notifications", "voice", "network", "debug"]);
+    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "keyboard", "sessions", "git", "reviews", "notifications", "voice", "network", "debug"]);
     expect(sections.filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["general"]);
-    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null, null]);
+    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null, null, null]);
   });
 
   it("puts each setting in its group", () => {
@@ -1203,6 +1204,93 @@ describe("colour theme", () => {
     const pick = (model: object) => renderSettings({ ...voiceBase, ...model }, handlers()).querySelector<HTMLSelectElement>("select[name=colorTheme]")!.value;
     expect(pick({ colorTheme: "light" })).toBe("light");
     expect(pick({})).toBe("dark");
+  });
+});
+
+describe("keyboard", () => {
+  const keys = { send: ["Enter"], newLine: ["Alt+Enter", "Ctrl+Enter"] };
+  const open = (model: object = { keys }) => {
+    const h = { ...handlers(), onKeys: vi.fn() };
+    const el = renderSettings({ ...voiceBase, ...model }, h);
+    const row = (action: string) => el.querySelector<HTMLElement>(`.settings__keys[data-keys=${action}]`)!;
+    const chips = (action: string) => [...row(action).querySelectorAll(".chip")].map((c) => c.firstChild?.textContent);
+    return { h, el, row, chips };
+  };
+  const press = (target: HTMLElement, init: KeyboardEventInit) => {
+    const ev = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    target.dispatchEvent(ev);
+    return ev;
+  };
+
+  it("lists the combinations of Send and New line under Keyboard", () => {
+    const { el, chips } = open();
+    const section = el.querySelector(".settings__section--keyboard")!;
+    expect(section.textContent).toContain("Send");
+    expect(section.textContent).toContain("New line");
+    expect(chips("send")).toEqual([comboLabel("Enter")]);
+    expect(chips("newLine")).toEqual([comboLabel("Alt+Enter"), comboLabel("Ctrl+Enter")]);
+  });
+
+  it("shows the defaults when no keys were saved", () => {
+    const { chips } = open({});
+    expect(chips("send")).toEqual(defaultKeys().send.map(comboLabel));
+    expect(chips("newLine")).toEqual(defaultKeys().newLine.map(comboLabel));
+  });
+
+  it("removes a combination, and offers no remove on Send's last one", () => {
+    const { h, row } = open();
+    expect(row("send").querySelector(".chip__remove")).toBeNull();
+    row("newLine").querySelectorAll<HTMLButtonElement>(".chip__remove")[0].click();
+    expect(h.onKeys).toHaveBeenCalledWith({ send: ["Enter"], newLine: ["Ctrl+Enter"] });
+  });
+
+  it("records the next Enter press for an action, and ignores other keys while it waits", () => {
+    const { h, row } = open();
+    const add = row("send").querySelector<HTMLButtonElement>("button[data-action=keys-add]")!;
+    add.click();
+    expect(add.textContent).toBe("Press keys… (Esc to cancel)");
+    press(add, { key: "Meta", metaKey: true });
+    press(add, { key: "k", metaKey: true });
+    expect(h.onKeys).not.toHaveBeenCalled();
+    const ev = press(add, { key: "Enter", metaKey: true });
+    expect(ev.defaultPrevented).toBe(true);
+    expect(h.onKeys).toHaveBeenCalledWith({ send: ["Enter", "Meta+Enter"], newLine: ["Alt+Enter", "Ctrl+Enter"] });
+  });
+
+  it("does nothing with an Enter press on Add before it was clicked", () => {
+    const { h, row } = open();
+    const add = row("send").querySelector<HTMLButtonElement>("button[data-action=keys-add]")!;
+    press(add, { key: "Enter", metaKey: true });
+    expect(h.onKeys).not.toHaveBeenCalled();
+  });
+
+  it("stops recording on Esc, and when Add loses focus", () => {
+    const { h, row } = open();
+    const add = row("newLine").querySelector<HTMLButtonElement>("button[data-action=keys-add]")!;
+    add.click();
+    press(add, { key: "Escape" });
+    expect(add.textContent).toBe("Add");
+    press(add, { key: "Enter", shiftKey: true });
+    add.click();
+    add.dispatchEvent(new FocusEvent("blur"));
+    expect(add.textContent).toBe("Add");
+    press(add, { key: "Enter", shiftKey: true });
+    expect(h.onKeys).not.toHaveBeenCalled();
+  });
+
+  it("refuses a combination the other action has, and says which", () => {
+    const { h, row } = open();
+    const add = row("send").querySelector<HTMLButtonElement>("button[data-action=keys-add]")!;
+    add.click();
+    press(add, { key: "Enter", altKey: true });
+    expect(h.onKeys).not.toHaveBeenCalled();
+    expect(row("send").querySelector(".settings__error")?.textContent).toBe(`New line already uses ${comboLabel("Alt+Enter")}.`);
+  });
+
+  it("resets to the defaults", () => {
+    const { h, el } = open({ keys: { send: ["Meta+Enter"], newLine: [] } });
+    el.querySelector<HTMLButtonElement>("button[data-action=keys-reset]")!.click();
+    expect(h.onKeys).toHaveBeenCalledWith(defaultKeys());
   });
 });
 

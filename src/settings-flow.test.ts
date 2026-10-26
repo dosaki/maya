@@ -9,6 +9,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: (...args: unknown[]) => eventL
 const getVersion = vi.fn(() => Promise.resolve("0.13.0"));
 vi.mock("@tauri-apps/api/app", () => ({ getVersion: () => getVersion() }));
 
+import { defaultKeys, keyBindings, setKeyBindings } from "./keys";
 import { initSettings } from "./settings";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -75,6 +76,36 @@ describe("settings flow", () => {
     await flush();
     expect(saved?.colorTheme).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+
+  it("follows the saved message keys, and applies and saves new ones", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", keys: { send: ["Meta+Enter"], newLine: ["Enter"] } };
+    let saved: { keys?: unknown } | undefined;
+    invoke.mockImplementation((cmd: string, args?: { config?: { keys?: unknown } }) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "set_config") {
+        saved = args?.config;
+        return Promise.resolve({ ...config, ...args?.config });
+      }
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    try {
+      await initSettings();
+      await flush();
+      expect(keyBindings()).toEqual({ send: ["Meta+Enter"], newLine: ["Enter"] });
+
+      document.querySelector<HTMLButtonElement>("button[data-action=keys-reset]")!.click();
+      expect(keyBindings()).toEqual(defaultKeys());
+      await flush();
+      expect(saved?.keys).toEqual(defaultKeys());
+    } finally {
+      setKeyBindings(defaultKeys());
+    }
   });
 
   it("an old ElevenLabs config opens with ElevenLabs switched on", async () => {

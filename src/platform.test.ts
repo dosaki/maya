@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { builtinVoiceName, isLinux, isMac, isWindows, recognizerOptions, secretStore, sendShortcut, thisComputer } from "./platform";
+import { builtinVoiceName, isLinux, isMac, isWindows, recognizerOptions, secretStore, thisComputer } from "./platform";
 
 const original = navigator.userAgent;
 
@@ -23,11 +23,10 @@ describe("isMac", () => {
 });
 
 describe("platform wording", () => {
-  it("names the Mac and its shortcuts on macOS", () => {
+  it("names the Mac on macOS", () => {
     pretend("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15");
     expect(isWindows()).toBe(false);
     expect(thisComputer()).toBe("This Mac");
-    expect(sendShortcut()).toBe("⌘↵");
     expect(builtinVoiceName()).toBe("Samantha");
     expect(secretStore()).toBe("Keychain");
     expect(recognizerOptions().map(([v]) => v)).toEqual(["system", "builtin"]);
@@ -37,7 +36,6 @@ describe("platform wording", () => {
     pretend("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0");
     expect(isWindows()).toBe(true);
     expect(thisComputer()).toBe("This PC");
-    expect(sendShortcut()).toBe("Ctrl+Enter");
     expect(builtinVoiceName()).toBe("Zira");
     expect(secretStore()).toBe("Credential Manager");
     expect(recognizerOptions()).toEqual([["builtin", "Built-in (Whisper, runs on this PC)"]]);
@@ -47,7 +45,6 @@ describe("platform wording", () => {
     pretend("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15");
     expect(isLinux()).toBe(true);
     expect(thisComputer()).toBe("This computer");
-    expect(sendShortcut()).toBe("Ctrl+Enter");
     expect(builtinVoiceName()).toBe("speech-dispatcher");
     expect(secretStore()).toBe("GNOME Keyring");
     expect(recognizerOptions().map(([v]) => v)).toEqual(["builtin"]);
