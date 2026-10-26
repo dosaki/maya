@@ -118,14 +118,16 @@ fn run(script: String) -> Result<String, String> {
 
 /// What the run of a reply's script means. A script that failed may have typed
 /// some of the reply, so that counts every line. But macOS refusing Maya access
-/// to iTerm2 (-1743) and iTerm2 going away (-600) fail before anything is
-/// typed, and counting those would stop Terminal.app from being asked, so a
-/// reply to a Terminal.app session would fail too.
+/// to iTerm2 (-1743), iTerm2 going away (-600) and a script that did not compile
+/// fail before anything is typed, and counting those would stop Terminal.app
+/// from being asked, so a reply to a Terminal.app session would fail too. On a
+/// Mac without iTerm2 the script never compiles: its terms need iTerm2's
+/// dictionary, so the "is running" check inside it never gets to run.
 fn reply_outcome(ran: Result<String, String>, lines: usize, tty: &str) -> Result<(), (usize, String)> {
     match ran {
         Ok(out) if out == "ok" => Ok(()),
         Ok(_) => Err((0, format!("No iTerm2 session found for {tty}."))),
-        Err(why) if why.contains("(-1743)") || why.contains("(-600)") => Err((0, why)),
+        Err(why) if why.contains("(-1743)") || why.contains("(-600)") || why.contains(": syntax error:") => Err((0, why)),
         Err(why) => Err((lines, why)),
     }
 }
@@ -228,6 +230,13 @@ mod tests {
     fn an_app_that_went_away_means_nothing_was_typed() {
         let gone = Err("osascript failed: iTerm got an error: Application isn't running. (-600)".to_string());
         assert!(matches!(reply_outcome(gone, 3, "/dev/ttys021"), Err((0, _))));
+    }
+
+    #[test]
+    fn a_script_that_did_not_compile_typed_nothing() {
+        // What osascript says on a Mac without iTerm2: the script never ran.
+        let missing = Err("osascript failed: 65:103: syntax error: Can’t get application id \"com.googlecode.iterm2\". (-1728)".to_string());
+        assert!(matches!(reply_outcome(missing, 3, "/dev/ttys021"), Err((0, _))));
     }
 
     #[test]
