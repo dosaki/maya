@@ -473,18 +473,19 @@ body { margin: 0; background: var(--bg); }
 :root[data-theme="light"] .card__btn--stop { color: #b91c1c; }
 :root[data-theme="light"] .reviews__error, :root[data-theme="light"] .voice--error, :root[data-theme="light"] .voice__error { color: #c0262c; }
 :root[data-theme="light"] .debug__line--speech .debug__source { color: #7e22ce; }
-/* These sit inside the chat look of the viewer only: the terminal look keeps its dark colours. */
-:root[data-theme="light"] .modal:not(.modal--terminal) .modal__status--warn { color: #a85a05; }
-:root[data-theme="light"] .modal:not(.modal--terminal) .diff__line--add { color: #166534; }
-:root[data-theme="light"] .modal:not(.modal--terminal) .diff__line--del { color: #991b1b; }
-/* The terminal-look viewer imitates a terminal, so it stays dark in the light theme: it gets the dark variables back. */
-:root[data-theme="light"] .modal--terminal {
-  --bg: #0c0b09; --panel: #16140f; --text: #f1e9d8; --muted: #a39a86; --border: #2c2719;
-  --gold: #d9ab3c; --gold-bright: #f0c85a; --gold-deep: #8f6a1c;
-  --on-gold: #1a1408;
-  --shadow: 0 1px 2px rgba(0,0,0,.5);
-  --code-keyword: #e78a4e; --code-string: #a9b665; --code-number: #d3869b; --code-comment: #928374;
-  --code-function: #e5b45a; --code-type: #7daea3; --code-variable: #89b482; --code-meta: #a39a86;
-  --code-addition: #8fdca8; --code-deletion: #f4a3a3;
-  color-scheme: dark;
-}
+/* Both looks of the viewer. */
+:root[data-theme="light"] .modal__status--warn { color: #a85a05; }
+:root[data-theme="light"] .diff__line--add { color: #166534; }
+:root[data-theme="light"] .diff__line--del { color: #991b1b; }
+/* The terminal look's fixed dark colours, each made from the light variables:
+   it reads as a light terminal, like the rest of the page. */
+:root[data-theme="light"] .modal--terminal .modal__panel { background: var(--panel); color: var(--text); }
+:root[data-theme="light"] .modal--terminal .turn { color: var(--text); }
+:root[data-theme="light"] .modal--terminal .turn--tool { color: var(--muted); }
+:root[data-theme="light"] .modal--terminal .turn__text .md pre { background: color-mix(in srgb, var(--bg) 70%, transparent); }
+:root[data-theme="light"] .modal--terminal .modal__composer { background: var(--panel); border-top-color: var(--border); }
+:root[data-theme="light"] .modal--terminal .modal__input { color: var(--text); }
+:root[data-theme="light"] .modal--terminal .menu { background: var(--panel); border-top-color: var(--border); }
+:root[data-theme="light"] .modal--terminal .menu__own { color: var(--text); }
+:root[data-theme="light"] .modal--terminal .turn--failed .turn__mark { color: #c0262c; }
+:root[data-theme="light"] .modal--terminal .modal__statusline--foot { background: var(--panel); color: var(--muted); }
