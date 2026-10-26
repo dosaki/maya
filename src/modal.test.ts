@@ -394,6 +394,18 @@ describe("renderModal", () => {
     expect(h.onSend).toHaveBeenLastCalledWith("Attached file: /a.png");
   });
 
+  it("sends a file attached after the composer was drawn, since a repaint keeps the composer", () => {
+    const h = handlers();
+    const m: Parameters<typeof renderModal>[0] = { card: base, turns: [], status: null, draft: "" };
+    const root = renderModal(m, h);
+    m.attachments = [{ name: "shot.png", path: "/a/shot.png" }];
+    patchModal(root, renderModal(m, h));
+    expect(root.querySelector(".modal__chips .chip__name")?.textContent).toBe("shot.png");
+    root.querySelector<HTMLTextAreaElement>("textarea")!.value = "see this";
+    root.querySelector<HTMLButtonElement>("button[data-action=send]")!.click();
+    expect(h.onSend).toHaveBeenCalledWith("see this\n\nAttached file: /a/shot.png");
+  });
+
   it("sends trimmed text on button click and on Enter, never blank", () => {
     const h = handlers();
     const el = renderModal({ card: base, turns: [], status: null, draft: "" }, h);

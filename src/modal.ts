@@ -639,7 +639,8 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
         h.onCommand(line);
         return;
       }
-      const text = composeMessage(ta.value, attachments);
+      // Read at send time: a repaint keeps this composer but brings new chips.
+      const text = composeMessage(ta.value, m.attachments ?? []);
       if (text) h.onSend(text);
     };
     ta.addEventListener("paste", (ev) => {
