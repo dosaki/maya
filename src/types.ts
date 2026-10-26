@@ -264,5 +264,8 @@ export interface ResumeOutcome {
 /** How the session viewer draws a conversation. */
 export type ViewerTheme = "chat" | "terminal";
 
+/** The colours of Maya's windows; dark is the look Maya always had. */
+export type ColorTheme = "dark" | "light";
+
 /** The macOS app that opens the windows of sessions Maya starts. */
 export type NewSessionTerminal = "terminal" | "iterm";

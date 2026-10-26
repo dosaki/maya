@@ -30,6 +30,7 @@ the right terminal first.
 - Does what you tell her by voice, through the agent you choose: "Maya, tell <session> to do <thing>"
 - Resumes old sessions of any of them, and reviews pull requests with the agent you chose, on a prompt you can edit in Settings
 - Shows the sessions of all your machines on one board.
+- Comes in a dark theme (the default) and a light one: Settings › General › Theme
 - Runs headless over SSH with the `maya` command.
 - Comes as an Android app too: a main Maya in your pocket, or a phone that joins your computer's Maya, shows every session, notifies you when one needs you and, joined to a computer, takes voice commands.
 
