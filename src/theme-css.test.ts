@@ -109,3 +109,31 @@ describe.each([
     expect(ratio("--on-gold", "--gold")).toBeGreaterThanOrEqual(4.5);
   });
 });
+
+/** The colours of highlighted code, as each theme defines them. */
+function codeColors(selector: string): Record<string, string> {
+  return Object.fromEntries(Object.entries(vars(selector)).filter(([name]) => name.startsWith("--code-")));
+}
+
+describe("code colours", () => {
+  it("colour every kind of token, and each one is used", () => {
+    const names = Object.keys(codeColors(DARK));
+    expect(names.length).toBeGreaterThanOrEqual(8);
+    for (const name of names) expect(css, name).toContain(`var(${name})`);
+  });
+
+  it("stay as in the dark theme in the terminal-look viewer", () => {
+    expect(codeColors(TERMINAL_UNDER_LIGHT)).toEqual(codeColors(DARK));
+  });
+
+  it.each([
+    ["dark", { ...vars(DARK) }],
+    ["light", { ...vars(DARK), ...vars(LIGHT) }],
+  ])("are readable as small text in the %s theme", (_name, colors) => {
+    for (const name of Object.keys(codeColors(DARK))) {
+      for (const background of ["--bg", "--panel"]) {
+        expect(contrast(colors[name], colors[background]), `${name} on ${background}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+});
