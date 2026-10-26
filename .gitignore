@@ -41,3 +41,5 @@ dist-mobile
 mobile/gen/android/keystore.properties
 *.jks
 .superpowers/
+chatterbox/voices/*
+!chatterbox/voices/.gitkeep

@@ -8,7 +8,7 @@
 //! `brain_app` extends the rule to the chat and brain locks.
 
 use crate::store::now_ms;
-use crate::{config, ear, eleven_settings, eleven_wanted, interpreter, launch, log, notify, wake};
+use crate::{config, ear, interpreter, launch, log, notify, voice_chain, voices_wanted, wake};
 use crate::{answer_pick, answer_question, compact_session, list_resumable_sessions, open_review_pr, resume_session, review_pr, send_reply, start_session, stop_session, AppState};
 use maya_core::brain::chat::{ChatLog, ChatTurn};
 use maya_core::window::{Batch, Via};
@@ -168,18 +168,18 @@ pub(crate) fn reply_aloud_as(app: &AppHandle, generation: u64, text: &str, via: 
     // History first, so a page that refetches it on this event sees the line.
     remember(app, "maya", text, via);
     emit_voice(app);
-    let (muted, eleven, volume) = {
+    let (muted, wanted, volume) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
-        (store.config.muted, eleven_wanted(&store.config, store.claude_dir()), store.config.voice_loudness())
+        (store.config.muted, voices_wanted(&store.config, store.claude_dir()), store.config.voice_loudness())
     };
     // Muted, the reply is only shown in the voice panel.
     if muted {
         return is_current(app, generation);
     }
-    let eleven = eleven_settings(eleven);
+    let voices = voice_chain(wanted);
     // No lock is held here: the speech hook takes the voice lock.
-    let _ = notify::speak_and_wait(notify::Utterance { volume, ..notify::Utterance::new(text.to_string(), eleven) });
+    let _ = notify::speak_and_wait(notify::Utterance { volume, ..notify::Utterance::new(text.to_string(), voices) });
     is_current(app, generation)
 }
 

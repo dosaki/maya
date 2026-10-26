@@ -37,6 +37,7 @@ pub mod terminal_tmux;
 pub mod transcript;
 pub mod tty;
 pub mod update;
+pub mod voice_server;
 pub mod wake;
 pub mod watcher;
 pub mod window;

@@ -29,13 +29,14 @@ pub struct StartResult {
 }
 
 /// The terminal device of a live session: the one the harness or the registry
-/// recorded, else the one `ps` reports for `pid`.
+/// recorded, else the one `ps` reports for `pid`; either way its terminal
+/// tab's when a shell wrapper sits between them (`tty::outer_tty`).
 fn session_tty(store: &Store, session_id: &str, pid: i32) -> Result<String, String> {
     let known = match store.foreign(session_id) {
         Some(f) => f.tty,
         None => store.session(session_id).and_then(|s| s.tty),
     };
-    known.map_or_else(|| tty::tty_for_pid(pid), Ok)
+    known.map(|t| tty::outer_tty(&store.process_tree(), &t)).map_or_else(|| tty::tty_for_pid(pid), Ok)
 }
 
 /// How long Codex must see no keys before an Enter submits instead of adding a line.
@@ -1832,6 +1833,18 @@ mod tests {
         let t = FakeTerminal::default();
         focus_session(&Local { store: &store, terminal: &t }, "s1").unwrap();
         assert!(matches!(&t.calls.lock().unwrap()[0], Call::Focus { tty } if !tty.is_empty()));
+        drop(dir);
+    }
+
+    #[test]
+    fn a_session_under_a_shell_wrapper_is_reached_through_its_tabs_tty() {
+        // Kiro CLI's wrapper runs the shell on /dev/pts/3 inside the tab's /dev/pts/1.
+        let (dir, store) = store_with_session("s1", 4242);
+        let procs = crate::foreign::parse_ps_tree("100 1 pts/1 login\n101 100 pts/1 zsh (kiro-cli-term)\n102 101 pts/3 /bin/zsh\n4242 102 pts/3 claude\n");
+        let store = Mutex::new(store.into_inner().unwrap().with_process_tree(procs));
+        let t = FakeTerminal::default();
+        focus_session(&Local { store: &store, terminal: &t }, "s1").unwrap();
+        assert_eq!(*t.calls.lock().unwrap(), vec![Call::Focus { tty: "/dev/pts/1".into() }]);
         drop(dir);
     }
 
