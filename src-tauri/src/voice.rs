@@ -197,7 +197,8 @@ pub fn play(path: &Path) -> Result<(), String> {
             code => Err(format!("could not play the voice (MCI error {code})")),
         }
     };
-    send(format!("open \"{}\" type mpegvideo alias maya_voice", path.display()))?;
+    // No `type`: MCI picks the driver from the file, so the server's WAV and the MP3 fallback both open.
+    send(format!("open \"{}\" alias maya_voice", path.display()))?;
     let played = send("play maya_voice wait".into());
     let _ = send("close maya_voice".into());
     played
