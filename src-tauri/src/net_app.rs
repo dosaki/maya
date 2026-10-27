@@ -429,9 +429,6 @@ fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, Strin
 /// come from the same places the page reads.
 pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
     let state = app.state::<AppState>();
-    if let Some(kind) = chat_request_kind(&request) {
-        log::line("network", format!("{} asked for {kind}", machine.unwrap_or("a phone")));
-    }
     match request {
         voice @ (Request::Interpret { .. } | Request::Execute { .. }) => serve_voice(app, voice),
         Request::ChatHistory => to_data(serde_json::json!({ "turns": listener::chat_history(app.state()), "status": crate::brain_app::status(app) })),
@@ -481,18 +478,6 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
                 None => execute(app, kind),
             },
         },
-    }
-}
-
-/// The command a Chat request from a phone is answered as; none for the rest.
-pub(crate) fn chat_request_kind(r: &Request) -> Option<&'static str> {
-    match r {
-        Request::ChatHistory => Some("chat_history"),
-        Request::ChatSend { .. } => Some("chat_send"),
-        Request::ChatSeen => Some("chat_seen"),
-        Request::WindowCancel => Some("window_cancel"),
-        Request::BrainStop => Some("brain_stop"),
-        _ => None,
     }
 }
 
@@ -554,16 +539,6 @@ mod tests {
     use std::cell::RefCell;
 
     use crate::model::{AwaitKind, Awaiting, Choice, Harness, Question, State};
-
-    #[test]
-    fn chat_requests_are_answered_as_their_commands() {
-        assert_eq!(chat_request_kind(&Request::ChatHistory), Some("chat_history"));
-        assert_eq!(chat_request_kind(&Request::ChatSend { text: "hi".into() }), Some("chat_send"));
-        assert_eq!(chat_request_kind(&Request::ChatSeen), Some("chat_seen"));
-        assert_eq!(chat_request_kind(&Request::WindowCancel), Some("window_cancel"));
-        assert_eq!(chat_request_kind(&Request::BrainStop), Some("brain_stop"));
-        assert_eq!(chat_request_kind(&Request::ListDirs), None);
-    }
 
     #[test]
     fn interpret_answers_say_and_a_pending_action() {
