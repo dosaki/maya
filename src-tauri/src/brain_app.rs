@@ -211,7 +211,11 @@ pub(crate) fn status(app: &AppHandle) -> BrainStatus {
 /// Tells the page what she has waiting. Takes the window, brain and chat
 /// locks in turn: the caller must hold none.
 pub(crate) fn emit_status(app: &AppHandle) {
-    let _ = app.emit("brain", status(app));
+    let status = status(app);
+    let _ = app.emit("brain", &status);
+    if let Ok(status) = serde_json::to_value(&status) {
+        crate::net_app::to_mirrors(app, crate::net::protocol::Down::Brain { status });
+    }
 }
 
 #[tauri::command]

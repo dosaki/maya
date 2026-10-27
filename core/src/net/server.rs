@@ -23,7 +23,7 @@
 
 use super::merge::{display_names, RemoteBoard};
 use super::identity::{encode_key, Keypair};
-use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
+use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_CHAT, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
 use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use super::{AssistantStatus, NetworkStatus, PairingCode};
@@ -480,6 +480,18 @@ impl ServerHandle {
         s.mirror_serial += 1;
         let remembered = s.mirror.as_ref().map(|b| b.remembered.clone()).unwrap_or_default();
         s.mirror = Some(MirrorBoard { serial: s.mirror_serial, cards, remembered });
+    }
+
+    /// Sends a Chat frame to every connected Maya that mirrors, asked for
+    /// Chat and is allowed; the rest hear nothing.
+    pub fn to_mirrors(&self, frame: Down) {
+        let s = lock(&self.shared);
+        for (id, conn) in &s.conns {
+            let asked = s.peers.get(id).is_some_and(|p| p.caps.iter().any(|c| c == CAP_MIRROR) && p.caps.iter().any(|c| c == CAP_CHAT));
+            if asked && s.may_mirror(id) {
+                let _ = conn.tx.send(frame.clone());
+            }
+        }
     }
 
     /// The word this main listens for, which mirroring Mayas answer to as
@@ -1695,6 +1707,45 @@ mod tests {
         assert!(machines[0].connected);
         assert!(machines.iter().any(|m| m.name == "laptop"));
         assert!(!machines.iter().any(|m| m.name == "Pixel"), "the receiver is not a machine to pick");
+        handle.stop();
+    }
+
+    #[test]
+    fn chat_frames_reach_only_allowed_mirrors_that_asked_for_chat() {
+        let (handle, port) = test_server();
+        let (mut phone, phone_id, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror", "chat"]);
+        let (mut old, _, _, _) = pair_client_caps(&handle, port, "Old", &["mirror"]);
+        let (mut laptop, _, _, _) = pair_client_caps(&handle, port, "laptop", &["lead"]);
+        wait_until(|| handle.status().assistants.iter().filter(|a| a.connected).count() == 3);
+        handle.to_mirrors(Down::Chat { turn: serde_json::json!({"text": "a"}) });
+        let turn = loop {
+            match recv(&mut phone) {
+                Down::Mirror { .. } => continue,
+                other => break other,
+            }
+        };
+        assert_eq!(turn, Down::Chat { turn: serde_json::json!({"text": "a"}) });
+        for quiet in [&mut old, &mut laptop] {
+            let end = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < end {
+                match quiet.read() {
+                    Ok(Got::Text(t)) => assert!(!matches!(decode_down(&t).unwrap(), Down::Chat { .. }), "no chat for this Maya"),
+                    Ok(Got::Closed) => panic!("closed"),
+                    _ => {}
+                }
+            }
+        }
+        handle.set_mirror(&phone_id, false).unwrap();
+        handle.to_mirrors(Down::Chat { turn: serde_json::json!({"text": "b"}) });
+        let end = Instant::now() + Duration::from_millis(300);
+        let mut seen = vec![];
+        while Instant::now() < end {
+            if let Ok(Got::Text(t)) = phone.read() {
+                seen.push(decode_down(&t).unwrap());
+            }
+        }
+        assert!(seen.iter().any(|d| matches!(d, Down::Mirror { allowed: false, .. })), "{seen:?}");
+        assert!(!seen.iter().any(|d| matches!(d, Down::Chat { .. })), "{seen:?}");
         handle.stop();
     }
 

@@ -10,7 +10,7 @@ use crate::listener::{self, Interpreted, VoiceContext};
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
-use crate::net::protocol::{CommandKind, Request, CAP_FOLLOW, CAP_LEAD};
+use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD};
 use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, target_of, Target, ROUTE_TIMEOUT};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
 use crate::net::AssistantLink;
@@ -429,10 +429,25 @@ fn serve_voice(app: &AppHandle, request: Request) -> Result<Option<Value>, Strin
 /// come from the same places the page reads.
 pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
     let state = app.state::<AppState>();
+    if let Some(kind) = chat_request_kind(&request) {
+        log::line("network", format!("{} asked for {kind}", machine.unwrap_or("a phone")));
+    }
     match request {
         voice @ (Request::Interpret { .. } | Request::Execute { .. }) => serve_voice(app, voice),
-        // Answered in a later change.
-        Request::ChatHistory | Request::ChatSend { .. } | Request::ChatSeen | Request::WindowCancel | Request::BrainStop => Err("Not yet.".into()),
+        Request::ChatHistory => to_data(serde_json::json!({ "turns": listener::chat_history(app.state()), "status": crate::brain_app::status(app) })),
+        Request::ChatSend { text } => listener::chat_send(app.clone(), text).map(|()| None),
+        Request::ChatSeen => {
+            listener::chat_seen(app.clone());
+            Ok(None)
+        }
+        Request::WindowCancel => {
+            listener::window_cancel(app.clone());
+            Ok(None)
+        }
+        Request::BrainStop => {
+            crate::brain_app::brain_stop(app.clone());
+            Ok(None)
+        }
         Request::ListDirs => match machine {
             Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),
@@ -466,6 +481,27 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
                 None => execute(app, kind),
             },
         },
+    }
+}
+
+/// The command a Chat request from a phone is answered as; none for the rest.
+pub(crate) fn chat_request_kind(r: &Request) -> Option<&'static str> {
+    match r {
+        Request::ChatHistory => Some("chat_history"),
+        Request::ChatSend { .. } => Some("chat_send"),
+        Request::ChatSeen => Some("chat_seen"),
+        Request::WindowCancel => Some("window_cancel"),
+        Request::BrainStop => Some("brain_stop"),
+        _ => None,
+    }
+}
+
+/// Sends `frame` to the phones that mirror and asked for Chat. The caller
+/// holds no lock: the server handle is cloned out of `network` first.
+pub(crate) fn to_mirrors(app: &AppHandle, frame: Down) {
+    let server = app.state::<AppState>().network.lock().unwrap().server.clone();
+    if let Some(s) = server {
+        s.to_mirrors(frame);
     }
 }
 
@@ -518,6 +554,16 @@ mod tests {
     use std::cell::RefCell;
 
     use crate::model::{AwaitKind, Awaiting, Choice, Harness, Question, State};
+
+    #[test]
+    fn chat_requests_are_answered_as_their_commands() {
+        assert_eq!(chat_request_kind(&Request::ChatHistory), Some("chat_history"));
+        assert_eq!(chat_request_kind(&Request::ChatSend { text: "hi".into() }), Some("chat_send"));
+        assert_eq!(chat_request_kind(&Request::ChatSeen), Some("chat_seen"));
+        assert_eq!(chat_request_kind(&Request::WindowCancel), Some("window_cancel"));
+        assert_eq!(chat_request_kind(&Request::BrainStop), Some("brain_stop"));
+        assert_eq!(chat_request_kind(&Request::ListDirs), None);
+    }
 
     #[test]
     fn interpret_answers_say_and_a_pending_action() {
