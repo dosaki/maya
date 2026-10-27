@@ -28,6 +28,8 @@ pub const CAP_MIRROR: &str = "mirror";
 /// A main with this cap interprets voice commands for a mirroring Maya
 /// (`Request::Interpret`, `Request::Execute`).
 pub const CAP_VOICE: &str = "voice";
+/// A Maya with this cap wants the main's Chat (`chat`, `brain`) and sends the chat requests.
+pub const CAP_CHAT: &str = "chat";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +121,11 @@ pub enum Down {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wake_word: Option<String>,
     },
+    /// One new turn of the main's Chat (`{who, text, at, via}`), for a Maya that
+    /// asked with `CAP_MIRROR` and `CAP_CHAT`.
+    Chat { turn: Value },
+    /// The main's brain status (`{dot, pending, job, ready}`), sent to the same Mayas as `chat`.
+    Brain { status: Value },
     /// The answer to the `request` with this id.
     Response { id: u64, ok: bool, #[serde(default)] error: Option<String>, #[serde(default)] data: Option<Value> },
     Pong,
@@ -147,6 +154,16 @@ pub enum Request {
     /// A validated action the user confirmed by voice; the main validates it
     /// again against its board before running it. Answered with `{say}`.
     Execute { action: Value },
+    /// The main's Chat turns so far, oldest first.
+    ChatHistory,
+    /// A message typed in the main's Chat; the main runs it as a chat turn.
+    ChatSend { text: String },
+    /// The Chat has been read up to now.
+    ChatSeen,
+    /// Cancels the main's pending window.
+    WindowCancel,
+    /// Stops the main's brain working.
+    BrainStop,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -288,6 +305,21 @@ mod tests {
         assert_eq!(decode_up(&encode(&ask)).unwrap(), ask);
         let run = Up::Request { id: 8, machine: None, request: Request::Execute { action: serde_json::json!({"kind": "answer", "session": "s1", "option": 1}) } };
         assert_eq!(decode_up(&encode(&run)).unwrap(), run);
+    }
+
+    #[test]
+    fn chat_frames_and_requests_round_trip() {
+        let turn = serde_json::json!({"who": "maya", "text": "Done.", "at": 5, "via": "chat"});
+        let chat = Down::Chat { turn: turn.clone() };
+        assert_eq!(decode_down(&encode(&chat)).unwrap(), chat);
+        assert!(encode(&chat).contains(r#""type":"chat""#));
+        let brain = Down::Brain { status: serde_json::json!({"dot": "working", "pending": null, "job": "x", "ready": true}) };
+        assert_eq!(decode_down(&encode(&brain)).unwrap(), brain);
+        for r in [Request::ChatHistory, Request::ChatSend { text: "hi".into() }, Request::ChatSeen, Request::WindowCancel, Request::BrainStop] {
+            let up = Up::Request { id: 1, machine: None, request: r };
+            assert_eq!(decode_up(&encode(&up)).unwrap(), up);
+        }
+        assert_eq!(CAP_CHAT, "chat");
     }
 
     #[test]

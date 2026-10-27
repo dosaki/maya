@@ -431,6 +431,8 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
     let state = app.state::<AppState>();
     match request {
         voice @ (Request::Interpret { .. } | Request::Execute { .. }) => serve_voice(app, voice),
+        // Answered in a later change.
+        Request::ChatHistory | Request::ChatSend { .. } | Request::ChatSeen | Request::WindowCancel | Request::BrainStop => Err("Not yet.".into()),
         Request::ListDirs => match machine {
             Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),

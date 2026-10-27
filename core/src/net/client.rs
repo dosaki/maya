@@ -676,6 +676,9 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
             None => log::line("network", format!("main: response {id} with no request lane")),
         },
         Down::Welcome { .. } => log::line("network", "main: ignored a welcome after welcome"),
+        // Handled in a later change; until then only logged.
+        Down::Chat { .. } => log::line("network", "main: a chat turn arrived; not handled yet"),
+        Down::Brain { .. } => log::line("network", "main: a brain status arrived; not handled yet"),
     }
     Ok(())
 }

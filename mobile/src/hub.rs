@@ -654,6 +654,7 @@ impl Hub {
             Request::ListDirs => to_data(serde_json::to_value(machine.map(|m| merge::dirs_of(&self.boards(), m)).unwrap_or_default())),
             Request::ListAgents => to_data(serde_json::to_value(agents_reply(false, machine.and_then(|m| merge::agents_of(&self.boards(), m)), Vec::new))),
             Request::Interpret { .. } | Request::Execute { .. } => Err("This phone cannot interpret voice commands.".into()),
+            Request::ChatHistory | Request::ChatSend { .. } | Request::ChatSeen | Request::WindowCancel | Request::BrainStop => Err("A phone cannot be the main.".into()),
             Request::Command(kind) => match target_of(&kind) {
                 Target::Session(session) => self.send(&session, |_| kind),
                 Target::Machine => {
