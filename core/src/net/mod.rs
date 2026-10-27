@@ -99,6 +99,8 @@ pub struct AssistantLink {
     pub mirror: Option<MirrorAccess>,
     /// The main interprets voice commands for this Maya (`CAP_VOICE` at the last welcome).
     pub voice: bool,
+    /// The main shows its Chat to this Maya (`CAP_CHAT` at the last welcome).
+    pub chat: bool,
     /// The word the main listens for, from its last board; `None` before
     /// one, or from an older main.
     pub wake_word: Option<String>,

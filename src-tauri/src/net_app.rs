@@ -150,7 +150,7 @@ impl ClientNotify for TauriClientNotify {
     fn paired(&self, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
-        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false, wake_word: None });
+        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false, chat: false, wake_word: None });
         // The read-only Chat names the main that is awake.
         crate::brain_app::emit_status(&self.app);
     }

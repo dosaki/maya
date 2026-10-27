@@ -135,6 +135,12 @@ pub trait ClientNotify: Send + Sync {
     /// What the main said it can do at `welcome` (`CAP_VOICE`); empty for
     /// an older main. Called right after `mirror_offer`.
     fn main_caps(&self, _caps: &[String]) {}
+    /// A turn of the main's Chat (`Down::Chat`), for a phone that asked to
+    /// mirror it. Runs on the client thread: do not wait on the main here.
+    fn chat_turn(&self, _turn: Value) {}
+    /// The main's brain status (`Down::Brain`), sent with its chat turns.
+    /// Runs on the client thread, like `chat_turn`.
+    fn brain_status(&self, _status: Value) {}
     /// The word the main listens for (`None` from an older main), with
     /// each board it shares, before `mirrored_remembered`.
     fn main_wake_word(&self, _word: Option<&str>) {}
@@ -676,9 +682,8 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
             None => log::line("network", format!("main: response {id} with no request lane")),
         },
         Down::Welcome { .. } => log::line("network", "main: ignored a welcome after welcome"),
-        // Handled in a later change; until then only logged.
-        Down::Chat { .. } => log::line("network", "main: a chat turn arrived; not handled yet"),
-        Down::Brain { .. } => log::line("network", "main: a brain status arrived; not handled yet"),
+        Down::Chat { turn } => notify.chat_turn(turn),
+        Down::Brain { status } => notify.brain_status(status),
     }
     Ok(())
 }
@@ -945,6 +950,43 @@ mod tests {
         assert!(began.elapsed() < Duration::from_millis(400), "it does not wait for the lookup");
         let failed = resolve_with("nowhere", Duration::from_secs(1), || Err(std::io::Error::other("no such host")));
         assert_eq!(failed, Err("Could not find nowhere: no such host".to_string()));
+    }
+
+    #[test]
+    fn chat_and_brain_frames_reach_the_app() {
+        struct Quiet;
+        impl Executor for Quiet {
+            fn execute(&self, _: CommandKind) -> Result<Option<Value>, String> {
+                Ok(None)
+            }
+            fn board(&self) -> (Vec<Card>, Vec<String>) {
+                (vec![], vec![])
+            }
+        }
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<(&'static str, Value)>>);
+        impl ClientNotify for Recorder {
+            fn paired(&self, _: &str) {}
+            fn connected(&self, _: &str) {}
+            fn disconnected(&self, _: &str) {}
+            fn removed(&self) {}
+            fn chat_turn(&self, turn: Value) {
+                self.0.lock().unwrap().push(("chat", turn));
+            }
+            fn brain_status(&self, status: Value) {
+                self.0.lock().unwrap().push(("brain", status));
+            }
+        }
+        let recorder = Arc::new(Recorder::default());
+        let (exec, notify): (Arc<dyn Executor>, Arc<dyn ClientNotify>) = (Arc::new(Quiet), recorder.clone());
+        let (tx, _rx) = channel();
+        let leaving = Arc::new(AtomicBool::new(false));
+        let turn = serde_json::json!({"id": 3, "role": "assistant", "text": "Done."});
+        let status = serde_json::json!({"dot": "working", "pending": null, "job": "x", "ready": true});
+        for down in [Down::Chat { turn: turn.clone() }, Down::Brain { status: status.clone() }] {
+            handle(down, &exec, &notify, &None, &tx, &leaving).unwrap();
+        }
+        assert_eq!(*recorder.0.lock().unwrap(), [("chat", turn), ("brain", status)]);
     }
 
     #[test]
