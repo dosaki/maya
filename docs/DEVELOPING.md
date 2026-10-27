@@ -363,7 +363,8 @@ What is where:
   traits: the config, the client handle that joins the main, the notifier
   diff and the alert state. `mobile/tests/round_trip.rs` drives it with a real core client.
 - **`mobile/src/commands.rs`** is the page's commands, by the desktop's
-  names, every session command routed with `merge::route(&[], …)`.
+  names, every session command sent to the joined main through
+  `Hub::request`.
 - **`mobile/src/alerts.rs`** decides which notifications a board change
   posts and clears; **`mobile/src/android.rs`** is the `keepalive` plugin
   bridge and the Android notifications, with host no-ops.

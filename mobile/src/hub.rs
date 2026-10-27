@@ -307,6 +307,12 @@ impl Hub {
 
     /// Empties the Chat, here and on the page; a history on its way is
     /// dropped. The ticket moves under `chat`, as `chat_fetched` reads it.
+    /// Drops what the main mirrored to this phone: its board and its Chat.
+    fn forget_mirror(&self) {
+        *self.mirror.lock().unwrap() = MirrorView::default();
+        self.forget_chat();
+    }
+
     fn forget_chat(&self) {
         let mut c = self.chat.lock().unwrap();
         self.chat_fetch.fetch_add(1, Ordering::SeqCst);
@@ -716,10 +722,15 @@ impl ClientNotify for HubClientNotify {
         self.brain();
     }
     fn removed(&self) {
+        // A removed phone mirrors nothing: its board and Chat go, and the tab hides.
+        if let Some(h) = self.hub.upgrade() {
+            h.forget_mirror();
+        }
         self.set(|l| {
             l.connected = false;
             l.error = Some(REMOVED.into());
             l.retrying = false;
+            l.mirror = None;
         });
         self.refresh();
     }
@@ -734,8 +745,7 @@ impl ClientNotify for HubClientNotify {
             None => MirrorAccess::Unsupported,
         };
         if access != MirrorAccess::Allowed {
-            *h.mirror.lock().unwrap() = MirrorView::default();
-            h.forget_chat();
+            h.forget_mirror();
         }
         self.set(|l| l.mirror = Some(access));
         h.refresh();
@@ -749,6 +759,12 @@ impl ClientNotify for HubClientNotify {
             l.voice = voice;
             l.chat = chat;
         });
+        if !chat {
+            // The last main's turns are not this one's.
+            if let Some(h) = self.hub.upgrade() {
+                h.forget_chat();
+            }
+        }
         // So the voice's offer follows the link.
         self.refresh();
         if self.stop.load(Ordering::SeqCst) {
@@ -1168,6 +1184,31 @@ mod tests {
         hub.chat_fetched(ticket, Ok(Some(serde_json::json!({"turns": [{"text": "old"}], "status": {"dot": "idle"}}))));
         assert!(hub.chat.lock().unwrap().turns.is_empty());
         assert_eq!(page.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_main_without_chat_empties_the_page_chat() {
+        let page = Arc::new(Resets::default());
+        let hub = test_hub_with(page.clone());
+        hub.set_link_for_test(AssistantLink { connected: true, chat: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() }, true);
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        notify.chat_turn(serde_json::json!({"text": "old"}));
+        notify.main_caps(&[]);
+        assert!(hub.chat.lock().unwrap().turns.is_empty());
+        assert_eq!(page.0.lock().unwrap().last(), Some(&vec![]), "the page forgets it too");
+    }
+
+    #[test]
+    fn a_removed_phone_forgets_the_mains_chat_and_hides_the_tab() {
+        let page = Arc::new(Resets::default());
+        let hub = test_hub_with(page.clone());
+        hub.set_link_for_test(AssistantLink { connected: true, chat: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() }, true);
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        notify.chat_turn(serde_json::json!({"text": "old"}));
+        notify.removed();
+        assert!(hub.chat.lock().unwrap().turns.is_empty());
+        assert_eq!(page.0.lock().unwrap().last(), Some(&vec![]), "the page forgets it too");
+        assert_eq!(hub.link.lock().unwrap().mirror, None, "so the Chat tab hides");
     }
 
     #[test]
