@@ -5,6 +5,8 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.View
+import android.webkit.WebView
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
@@ -33,6 +35,14 @@ class MainActivity : TauriActivity() {
       view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
       WindowInsetsCompat.CONSUMED
     }
+  }
+
+  // The page has nothing to autofill, but the web view offers its text boxes
+  // to the autofill service anyway: a password manager then puts up its
+  // popup on the reply box, which takes the focus and closes the keyboard
+  // mid-word. Keep the web view and everything in it out of autofill.
+  override fun onWebViewCreate(webView: WebView) {
+    webView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
   }
 
   // Android 16 gates the local network behind a runtime permission. Without
