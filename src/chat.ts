@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { composerKey } from "./keys";
+import { showToast } from "./toast";
 
 export type Dot = "idle" | "working" | "waiting" | "unread";
 
@@ -149,7 +150,7 @@ export function initChat(opts: { sendButton?: boolean } = {}): void {
     const scroll = log?.scrollTop ?? 0;
     pane.replaceChildren(
       renderChat({ turns, status, draft, sendButton: opts.sendButton }, {
-        onSend: (text) => void invoke("chat_send", { text }).catch(() => undefined),
+        onSend: (text) => void invoke("chat_send", { text }).catch((e) => notSent(text, e)),
         onCancel: () => void invoke("window_cancel").catch(() => undefined),
         onStop: () => void invoke("brain_stop").catch(() => undefined),
       }),
@@ -178,6 +179,18 @@ export function initChat(opts: { sendButton?: boolean } = {}): void {
     }
   };
 
+  // A message the main did not take (the link is down, it refused, it did
+  // not answer) says why and goes back in the box, unless a newer one is there.
+  const notSent = (text: string, e: unknown) => {
+    showToast(String(e));
+    const box = pane?.querySelector<HTMLTextAreaElement>("textarea[name=chat]");
+    if (box) {
+      if (!box.value) box.value = text;
+    } else if (!draft) {
+      draft = text;
+    }
+  };
+
   const seen = () => void invoke("chat_seen").catch(() => undefined);
 
   void listen<ChatTurn>("chat", (e) => {
@@ -185,10 +198,11 @@ export function initChat(opts: { sendButton?: boolean } = {}): void {
     paint();
     if (open) seen();
   });
-  // The phone fetched the history again (it reconnected): what it holds replaces the list.
+  // The phone fetched the history again (it reconnected) or emptied it (it left the main): what it holds replaces the list.
   void listen<ChatTurn[]>("chat-reset", (e) => {
     turns = e.payload;
     paint();
+    if (open) seen();
   });
   void listen<BrainStatus>("brain", (e) => {
     status = e.payload;
