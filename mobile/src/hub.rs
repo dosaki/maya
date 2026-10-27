@@ -84,8 +84,8 @@ pub struct Hub {
     pub maya_dir: PathBuf,
     /// Serializes `refresh`, so a stale snapshot never overtakes a newer one.
     /// Lock order: `refresh` first, alone (its callers hold no other lock);
-    /// `settings`, `notifier`, `posted`, `client`, `link` and `mirror` are
-    /// taken alone, never while holding another hub lock. `stop_client`
+    /// `settings`, `notifier`, `posted`, `client`, `client_error`, `link`
+    /// and `mirror` are taken alone, never while holding another hub lock. `stop_client`
     /// joins the client thread, which may be in a callback that calls
     /// `refresh`, so it holds no hub lock while it joins. `lane` has its own
     /// lock, never held here.
@@ -93,6 +93,9 @@ pub struct Hub {
     pub settings: Mutex<Settings>,
     /// The client that listens to the main.
     pub client: Mutex<Option<ClientHandle>>,
+    /// Why the client could not start (the key file cannot be read…);
+    /// `None` once it runs. The Off status carries it to the page.
+    client_error: Mutex<Option<String>>,
     /// How that client stands with the main.
     pub link: Mutex<AssistantLink>,
     /// The joined main's last board; empty otherwise.
@@ -130,7 +133,7 @@ pub(crate) fn speaks_events(speak_on: bool, silenced: impl FnOnce() -> bool) -> 
 impl Hub {
     pub fn new(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>) -> Arc<Hub> {
         Arc::new(Hub {
-            maya_dir, settings: Mutex::new(settings), client: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, voice: OnceLock::new(), silenced: OnceLock::new(),
+            maya_dir, settings: Mutex::new(settings), client: Mutex::new(None), client_error: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, voice: OnceLock::new(), silenced: OnceLock::new(),
             #[cfg(test)]
             joined_override: Mutex::new(None),
         })
@@ -313,13 +316,14 @@ impl Hub {
     }
 
     /// The status as the Network screen shows it: the link while this phone
-    /// listens to a main, Off otherwise.
+    /// listens to a main, Off otherwise, with why the client could not start.
     pub fn status(&self) -> NetworkStatus {
         if self.client.lock().unwrap().is_some() {
             let assistant = self.link.lock().unwrap().clone();
             return self.with_pair_again(NetworkStatus { role: NetworkRole::Assistant, assistant, ..Default::default() });
         }
-        self.with_pair_again(NetworkStatus { role: NetworkRole::Off, ..Default::default() })
+        let main_error = self.client_error.lock().unwrap().clone();
+        self.with_pair_again(NetworkStatus { role: NetworkRole::Off, main_error, ..Default::default() })
     }
 
     /// The core never fills `pair_again`; it is the config's, so every
@@ -397,6 +401,7 @@ impl Hub {
             Ok(k) => k,
             Err(e) => {
                 log::line("network", format!("not listening to the main: {e}"));
+                *self.client_error.lock().unwrap() = Some(e);
                 self.sink.network(&self.status());
                 return;
             }
@@ -408,6 +413,7 @@ impl Hub {
             reconnect(&config_of, key, Arc::new(NoSessions), notify, &stop);
         });
         *self.client.lock().unwrap() = Some(handle);
+        *self.client_error.lock().unwrap() = None;
         // A mirror that landed before the handle was in shows now.
         self.refresh();
         self.sink.service_start(&alerts::service_line(SOME_MAIN, false));
@@ -866,6 +872,24 @@ mod tests {
     #[test]
     fn the_phone_asks_to_follow_mirror_and_chat_but_not_lead() {
         assert_eq!(phone_caps(), vec![CAP_FOLLOW.to_string(), CAP_MIRROR.into(), maya_core::net::protocol::CAP_CHAT.into()]);
+    }
+
+    #[test]
+    fn a_key_file_that_cannot_be_read_shows_until_the_client_starts() {
+        let hub = test_hub();
+        let key_file = hub.maya_dir.join(identity::FILE);
+        // A directory where the key file should be: it cannot be read.
+        std::fs::create_dir_all(&key_file).unwrap();
+        hub.start_client();
+        assert!(!hub.joined());
+        let status = hub.status();
+        assert_eq!(status.role, NetworkRole::Off);
+        assert!(status.main_error.is_some_and(|e| !e.is_empty()), "the page is told why");
+        std::fs::remove_dir_all(&key_file).unwrap();
+        hub.start_client();
+        assert!(hub.joined());
+        hub.stop_client();
+        assert_eq!(hub.status().main_error, None, "cleared once the client started");
     }
 
     #[test]
