@@ -70,7 +70,7 @@ pub struct Posted(HashMap<String, Kind>);
 pub trait Alerts: Send + Sync {
     fn post(&self, post: &Post);
     fn clear(&self, id: i32);
-    /// The foreground service's text ("Main for 2 assistants, 1 connected").
+    /// The foreground service's text ("Joined to desk").
     fn service_line(&self, line: &str);
 }
 
@@ -154,13 +154,12 @@ fn push(out: &mut Vec<Action>, posted: &mut Posted, c: &Card, kind: Kind, body: 
     out.push(Action::Post(Post { id: notification_id(&c.session_id), kind, title: title_for(c), body, session_id: c.session_id.clone(), spoken: maya_core::notify::spoken_line(c), quiet: false }));
 }
 
-/// The foreground service's line.
-pub fn service_line(paired: usize, connected: usize) -> String {
-    match (paired, connected) {
-        (0, _) => "No assistants paired yet".into(),
-        (1, 1) => "Main for 1 assistant, connected".into(),
-        (1, _) => "Main for 1 assistant, not connected".into(),
-        (n, c) => format!("Main for {n} assistants, {c} connected"),
+/// The foreground service's line: the main this phone has joined.
+pub fn service_line(main: &str, connected: bool) -> String {
+    if connected {
+        format!("Joined to {main}")
+    } else {
+        format!("Reconnecting to {main}…")
     }
 }
 
@@ -290,11 +289,9 @@ mod tests {
     }
 
     #[test]
-    fn service_lines_count_assistants() {
-        assert_eq!(service_line(0, 0), "No assistants paired yet");
-        assert_eq!(service_line(1, 1), "Main for 1 assistant, connected");
-        assert_eq!(service_line(1, 0), "Main for 1 assistant, not connected");
-        assert_eq!(service_line(3, 2), "Main for 3 assistants, 2 connected");
+    fn the_service_line_names_the_main() {
+        assert_eq!(service_line("desk", true), "Joined to desk");
+        assert_eq!(service_line("desk", false), "Reconnecting to desk…");
     }
 
     #[test]
