@@ -170,7 +170,7 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers): HTMLElement 
 
   const battery = section("Battery");
   battery.append(button("Keep Maya awake", "battery", h.onBattery));
-  battery.append(el("p", "settings__hint", "Android may otherwise stop the server with the screen off."));
+  battery.append(el("p", "settings__hint", "Android may otherwise stop Maya with the screen off."));
   root.append(battery);
 
   for (const b of root.querySelectorAll("button")) if (m.busy) b.disabled = true;

@@ -83,7 +83,7 @@ describe("renderNetwork", () => {
     expect(h.onSwitch).toHaveBeenCalledWith("completed", true);
     el.querySelector<HTMLButtonElement>("button[data-action=battery]")!.click();
     expect(h.onBattery).toHaveBeenCalled();
-    expect(el.textContent).toContain("Android may otherwise stop the server with the screen off.");
+    expect(el.textContent).toContain("Android may otherwise stop Maya with the screen off.");
   });
 
   it("says when Android has notifications off for Maya", () => {

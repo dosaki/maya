@@ -25,7 +25,7 @@
 
 .topbar { padding: 8px 12px; }
 .tabs .tab__count { display: none; }
-.card__btn, .settings button, .strip__tab, .modal__close { min-height: 40px; }
+.card__btn, .settings button, .strip__tab, .modal__close, .chat__send, .chat__cancel, .chat__stop { min-height: 40px; }
 .card { padding: 12px 14px; }
 
 /* The first run's overlay; a stopped server's card sits on the board instead, under live tabs. */
