@@ -37,8 +37,8 @@ class MainActivity : TauriActivity() {
 
   // Android 16 gates the local network behind a runtime permission. Without
   // it the OS drops the main's packets to the LAN while the internet still
-  // works: an assistant's pairing connection gets no reply and times out.
-  // The grant takes effect at once, so the server need not restart.
+  // works: the phone's connection to the main gets no reply and times out.
+  // The grant takes effect at once, so the connection need not restart.
   private fun requestLocalNetwork() {
     if (Build.VERSION.SDK_INT < 36) return
     if (ContextCompat.checkSelfPermission(this, LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED) return

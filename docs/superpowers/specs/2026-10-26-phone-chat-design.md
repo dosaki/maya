@@ -1,7 +1,7 @@
 # The phone is always a mirror, and gets Chat — design
 
 Date: 2026-10-26
-Status: draft
+Status: implemented
 Builds on: `2026-10-14-phone-joins-a-main-design.md`,
 `2026-10-16-phone-voice-design.md`,
 `2026-10-21-maya-brain-assistant-design.md`

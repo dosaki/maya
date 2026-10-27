@@ -16,7 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 
 /**
- * Keeps the process, and so the Rust server in it, alive with the screen
+ * Keeps the process, and so the Rust client in it that joins the main, alive with the screen
  * off: a foreground service with an ongoing notification, a partial wake
  * lock and a Wi‑Fi lock. It runs nothing itself.
  */
@@ -33,7 +33,7 @@ class KeepAliveService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        // A restart by Android after the process died: the Rust server died
+        // A restart by Android after the process died: the Rust client died
         // with it and nothing here can bring it back, so do not hold locks for it.
         if (intent == null) {
             stopSelf()
@@ -55,8 +55,8 @@ class KeepAliveService : Service() {
 
     private fun ensureChannel() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        val channel = NotificationChannel(CHANNEL, "Server", NotificationManager.IMPORTANCE_LOW)
-        channel.description = "Keeps the main Maya running with the screen off"
+        val channel = NotificationChannel(CHANNEL, "Joined main", NotificationManager.IMPORTANCE_LOW)
+        channel.description = "Keeps Maya joined to the main with the screen off"
         nm.createNotificationChannel(channel)
     }
 

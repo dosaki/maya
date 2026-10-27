@@ -190,57 +190,63 @@ me?" gets an answer, and that Terminal on a card brings up its session.
 
 Download `Maya_<version>.apk` from the release and open it on the phone;
 Android asks to allow installs from your browser once (the builds are not
-on the Play Store). The phone runs no agents. It is either the **main**,
-with your computers paired to it, or it **joins** a computer that is
-already the main and shows that main's whole board.
+on the Play Store). The phone runs no agents and no server. It always
+**joins** a computer that is the main, and shows that main's whole board.
 
 Every APK after 0.21.0 is signed with the same key, so a new one installs
-over the one before and keeps the pairings. 0.21.0 and earlier were each
-signed with a new key: moving from one of those means uninstalling first,
-once, which forgets the pairings.
+over the one before and keeps what the phone has joined. 0.21.0 and
+earlier were each signed with a new key: moving from one of those means
+uninstalling first, once.
 
-1. Open Maya and press **Start**. It asks to post notifications; allow it.
-   The Network tab shows a six-digit pairing code and the phone's Wi‑Fi
-   address.
-2. On each computer, open Maya's Settings › Network, choose "Assistant to
-   a main Maya", type the phone's address, port 4127 and the code, and
-   Pair. Its sessions appear on the phone's board.
-3. Upright, the board shows one column at a time: swipe, or tap the
+1. On the main computer, open Maya's Settings › Network and choose
+   "Act as main Maya". It shows a pairing code (**Show pairing code** makes
+   a new one).
+2. Open Maya on the phone. Its first screen is **Join**: type the
+   computer's address, port 4127 and the code, and press **Join**. The
+   phone asks to post notifications; allow it.
+3. The computer lists the phone with a **Sees and controls all sessions**
+   switch, on from the start; turn it off to stop the phone seeing and
+   acting on the sessions.
+4. Upright, the board shows one column at a time: swipe, or tap the
    strip at the top. Sideways it shows up to four.
 
-To join a computer that is already the main instead, choose **Join a main**
-on the first screen (or in the Network tab when the server is off), type
-the computer's address, port 4127 and the code from its Settings › Network
-› Show pairing code, and press **Join**. The computer lists the phone with a
-**Sees and controls all sessions** switch, on from the start; turn it off to
-stop the phone seeing and acting on the sessions.
+The **Chat** tab on the phone is the main computer's Chat: the same
+conversation, including the turns that were spoken. Type a message and
+Maya's reply comes up on both screens. Cancel and Stop work as they do on
+the computer. If you turn off the main's switch for the phone, the Chat
+tab goes away.
+
+If the phone was the main before 0.35, it now opens with networking off
+and the Join screen. The phone can no longer be the main. On one computer
+choose "Act as main Maya" in Settings › Network, then Join the phone to
+it and pair the other computers to that computer.
 
 With the screen off Maya keeps running behind a persistent notification
-("Main for 2 assistants, 1 connected"). Android may still stop it on some
-phones: press **Keep Maya awake** on the Network tab to exempt it from
-battery optimisation. If the notification disappears, open Maya again and
-the assistants reconnect on their own. A new Wi‑Fi address has to be
-retyped on the assistants.
+("Joined to desk", or "Reconnecting to desk…" while the link is down).
+Android may still stop it on some phones: press **Keep Maya awake** on the
+Network tab to exempt it from battery optimisation. If the notification
+disappears, open Maya again and the phone reconnects on its own. If the
+main's Wi‑Fi address changes, join again with the new one.
 
 Each ask and each finished turn is a notification you can turn off on the
 Network tab, or silence per channel in Android's settings; tapping one
 opens the card. There is no Pull Requests tab on the phone.
 
-A phone that has joined a computer's Maya also speaks and listens while
-the app is on screen. Tap the microphone and talk to Maya as you would on
-the computer: the computer's agent works out what you meant, says what it
-is about to do, and does it after five seconds unless you say "stop" or
-"no", or correct it; a Cancel button stops it too. With **Speak** on (the
-Network tab) the phone also says aloud when a session needs you; **Wake
-word "Maya"** (experimental) listens for her name without a tap. Android
-asks for the microphone the first time. Once the app leaves the screen
-the phone stops listening and speaking, and keeps to notifications. A
-phone that is the main has no voice.
+The phone also speaks and listens while the app is on screen. Tap the
+microphone and talk to Maya as you would on the computer: the computer's
+agent works out what you meant, says what it is about to do, and does it
+after five seconds unless you say "stop" or "no", or correct it; a Cancel
+button stops it too. With **Speak** on (the Network tab) the phone also
+says aloud when a session needs you; **Wake word "Maya"** (experimental)
+listens for her name without a tap. Android asks for the microphone the
+first time. Once the app leaves the screen the phone stops listening and
+speaking, and keeps to notifications.
 
-Hand checks for a new build, which CI cannot run: pair a computer, rotate
+Hand checks for a new build, which CI cannot run: join the main, rotate
 between one and four columns, answer a decision from the phone, lock the
-phone and receive a notification, start a session on the computer from
-the phone, and stop and start the server and watch the computer reconnect.
+phone and receive a notification, type in Chat and see the reply on both
+screens, start a session on the computer from the phone, and turn the
+main off and on and watch the phone reconnect.
 
 ## Voice
 
@@ -410,8 +416,7 @@ quiet.
   moment still knows only the old main's key, so pair it with the new main
   when it is back. The new main's Maya picks up her own session and gets a
   short summary of what the old main's Maya did while she was dormant; it
-  shows in her Chat. The old main's Maya goes dormant. A phone made main
-  gets no summary.
+  shows in her Chat. The old main's Maya goes dormant.
 - **Versions.** Run the same Maya on every machine. The main notes an
   assistant that runs another version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
