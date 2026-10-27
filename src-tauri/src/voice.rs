@@ -160,7 +160,8 @@ pub fn play(path: &Path, volume: u8) -> Result<(), String> {
             code => Err(format!("could not play the voice (MCI error {code})")),
         }
     };
-    send(format!("open \"{}\" type mpegvideo alias maya_voice", path.display()))?;
+    // No `type`: MCI picks the driver from the file, so the server's WAV and the MP3 fallback both open.
+    send(format!("open \"{}\" alias maya_voice", path.display()))?;
     if let Err(e) = send(mci_volume_command(volume)) {
         crate::log::line("voice", format!("could not set the volume: {e}"));
     }
