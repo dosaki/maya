@@ -1447,7 +1447,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       actions.className = "settings__assistant-actions";
       actions.append(rm);
       row.append(info, actions);
-      if (a.connected && a.canLead) {
+      if (a.connected && a.canLead && !(a.wantsMirror || a.mirror)) {
         const mk = document.createElement("button");
         mk.type = "button";
         mk.dataset.action = "make-main";

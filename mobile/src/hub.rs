@@ -474,8 +474,6 @@ impl Hub {
         }
         match started {
             Ok(handle) => {
-                // The user pressed Make main on this phone, so the entry it hands itself may mirror.
-                handle.set_own_mirror(true);
                 let status = self.with_pair_again(handle.status());
                 *self.server.lock().unwrap() = Some(handle);
                 *self.main_error.lock().unwrap() = None;

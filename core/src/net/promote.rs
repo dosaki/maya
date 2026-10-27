@@ -7,10 +7,9 @@ use crate::config::{Config, NetworkRole, PairedAssistant};
 
 /// The entry the old main makes for itself in the list it hands over: it
 /// connects to the new main with its own key. Its address is filled in by
-/// the new main at its first connection. `mirror` is true for a phone: the
-/// user pressed Make main on it.
-pub fn own_entry(main_name: &str, mirror: bool, key: &str) -> PairedAssistant {
-    PairedAssistant { id: new_id(), name: main_name.into(), hostname: super::local_hostname(), platform: std::env::consts::OS.into(), key: key.into(), address: String::new(), last_seen: None, mirror }
+/// the new main at its first connection.
+pub fn own_entry(main_name: &str, key: &str) -> PairedAssistant {
+    PairedAssistant { id: new_id(), name: main_name.into(), hostname: super::local_hostname(), platform: std::env::consts::OS.into(), key: key.into(), address: String::new(), last_seen: None, mirror: false }
 }
 
 /// Every paired assistant but the one promoted, then the old main's own entry.
@@ -50,14 +49,13 @@ mod tests {
     }
 
     #[test]
-    fn only_a_phone_s_own_entry_may_mirror() {
-        assert!(own_entry("Pixel", true, "a2V5").mirror);
-        assert!(!own_entry("desk", false, "a2V5").mirror);
+    fn the_old_main_s_own_entry_never_mirrors() {
+        assert!(!own_entry("desk", "a2V5").mirror);
     }
 
     #[test]
     fn the_list_leaves_the_new_main_out_and_adds_the_old_one() {
-        let me = own_entry("desk", false, "a2V5");
+        let me = own_entry("desk", "a2V5");
         let list = handover_list(&[entry("g", "laptop"), entry("b", "mini")], "g", &me);
         assert_eq!(list.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["b", me.id.as_str()]);
         assert_eq!(list[0], entry("b", "mini"), "the others go as they are, key included");
