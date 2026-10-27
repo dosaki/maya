@@ -64,7 +64,7 @@ an assistant machine it is dormant (no process runs, nothing is reset),
 Chat is read-only there, and her card in Debug mode is greyed as
 "Dormant". An assistant's `hello` says when its brain went dormant. Make
 main asks the outgoing main's brain for a handover summary (60 s at most;
-otherwise a digest of her Chat since then, and none for a phone), sent
+otherwise a digest of her Chat since then), sent
 with `promote`; the new main resumes her own session and reads the summary
 as her first turn. Settings → Debug (off by default) shows the Debug tab
 and her card.
@@ -320,13 +320,13 @@ built once (`pnpm tauri build --bundles appimage`):
 
 The phone app is a second Tauri crate, `mobile/`, that depends on
 `maya_core` and reuses the frontend's board, card, modal and dialogs from
-`mobile/web/index.html` through `src/mobile/main.ts`. It is a
-main, or it joins a main (with a pairing code, or by handing its own main
-role to an assistant) and mirrors that main's board: the main sends it
-`mirror` frames and answers its `request`s, as long as the main's "Sees
-and controls all sessions" switch for it is on. A main can make a joined
-phone the main again. It runs no
-sessions, so it needs no sidecar and no `jq`.
+`mobile/web/index.html` through `src/mobile/main.ts`. It always joins a
+main, with a pairing code, and never runs a server. It mirrors that
+main's board: the main sends it `mirror` frames and answers its
+`request`s, as long as the main's "Sees and controls all sessions" switch
+for it is on. Its Chat tab is the main's Chat, through the same `chat`
+frames. A phone saved as a main by 0.34 opens with networking off. It runs
+no sessions, so it needs no sidecar and no `jq`.
 
 Requirements: `rustup` (Homebrew's `rust` has no Android targets), Java 17
 or later (CI uses 21), and the Android SDK command-line tools (`brew
@@ -354,16 +354,17 @@ stdout and stderr, panics included; Maya's own log is `maya/maya.log` in
 the app's data directory, which `adb shell run-as com.dosaki.maya.mobile`
 reaches on a debug build. Its network key is `maya/identity.key` in the
 same directory. On the emulator the phone's address is not
-reachable from the Mac: `adb forward tcp:4127 tcp:4127` and pair the
-desktop with `127.0.0.1`.
+reachable from the Mac, but the phone only joins: make the Mac the main
+and join it from the emulator at `10.0.2.2`, port 4127.
 
 What is where:
 
 - **`mobile/src/hub.rs`** is the app with the page and Android behind
-  traits: the config, the server handle, the notifier diff and the alert
-  state. `mobile/tests/round_trip.rs` drives it with a real core client.
+  traits: the config, the client handle that joins the main, the notifier
+  diff and the alert state. `mobile/tests/round_trip.rs` drives it with a real core client.
 - **`mobile/src/commands.rs`** is the page's commands, by the desktop's
-  names, every session command routed with `merge::route(&[], …)`.
+  names, every session command sent to the joined main through
+  `Hub::request`.
 - **`mobile/src/alerts.rs`** decides which notifications a board change
   posts and clears; **`mobile/src/android.rs`** is the `keepalive` plugin
   bridge and the Android notifications, with host no-ops.

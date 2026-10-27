@@ -23,7 +23,7 @@
 
 use super::merge::{display_names, RemoteBoard};
 use super::identity::{encode_key, Keypair};
-use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
+use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_CHAT, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
 use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use super::{AssistantStatus, NetworkStatus, PairingCode};
@@ -348,8 +348,6 @@ struct Ctx {
     notify: Arc<dyn Notify>,
     stop: Arc<AtomicBool>,
     main_name: String,
-    /// The entry this main makes for itself at a handover may mirror.
-    own_mirror: AtomicBool,
     /// This main's key pair: assistants pin its public half.
     identity: Arc<Keypair>,
     live: AtomicUsize,
@@ -482,6 +480,18 @@ impl ServerHandle {
         s.mirror = Some(MirrorBoard { serial: s.mirror_serial, cards, remembered });
     }
 
+    /// Sends a Chat frame to every connected Maya that mirrors, asked for
+    /// Chat and is allowed; the rest hear nothing.
+    pub fn to_mirrors(&self, frame: Down) {
+        let s = lock(&self.shared);
+        for (id, conn) in &s.conns {
+            let asked = s.peers.get(id).is_some_and(|p| p.caps.iter().any(|c| c == CAP_MIRROR) && p.caps.iter().any(|c| c == CAP_CHAT));
+            if asked && s.may_mirror(id) {
+                let _ = conn.tx.send(frame.clone());
+            }
+        }
+    }
+
     /// The word this main listens for, which mirroring Mayas answer to as
     /// well; a change goes out with the board on the next tick.
     pub fn mirror_wake_word(&self, word: Option<String>) {
@@ -547,12 +557,6 @@ impl ServerHandle {
         Ok(())
     }
 
-    /// The entry this main makes for itself at a handover may mirror: a
-    /// phone, where the user pressed Make main.
-    pub fn set_own_mirror(&self, on: bool) {
-        self.ctx.own_mirror.store(on, Ordering::SeqCst);
-    }
-
     /// Stops accepting and closes every connection within a tick; does not wait.
     pub fn stop(&self) {
         if !self.stop.swap(true, Ordering::SeqCst) {
@@ -581,7 +585,7 @@ pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>
     };
     let shared = Arc::new(Mutex::new(Server::new(paired, main_name.clone())));
     let stop = Arc::new(AtomicBool::new(false));
-    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name, own_mirror: AtomicBool::new(false), identity, live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()) });
+    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name, identity, live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()) });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
     log::line("network", format!("listening on port {port}"));
@@ -1336,8 +1340,6 @@ impl Drop for HandoverTurn<'_> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HandoverTo {
     pub label: String,
-    /// A phone (a mirroring Maya): it has no brain and gets no summary.
-    pub phone: bool,
     /// When its brain went dormant; None when it never ran one.
     pub brain_dormant_since: Option<u64>,
 }
@@ -1377,6 +1379,10 @@ impl ServerHandle {
             if !s.conns.contains_key(id) {
                 return Err(format!("{label} is not connected."));
             }
+            // A phone only mirrors a main; an older one may still say it can lead.
+            if entry.mirror || s.peers.get(id).is_some_and(|p| p.caps.iter().any(|c| c == CAP_MIRROR)) {
+                return Err("A phone cannot be the main.".into());
+            }
             if !s.peers.get(id).is_some_and(|p| p.caps.iter().any(|c| c == CAP_LEAD)) {
                 return Err(format!("{label} cannot become a main."));
             }
@@ -1385,10 +1391,10 @@ impl ServerHandle {
             }
             s.handover = true;
             s.pairing = None;
-            let me = super::promote::own_entry(&self.ctx.main_name, self.ctx.own_mirror.load(Ordering::SeqCst), &self.ctx.identity.public_b64());
+            let me = super::promote::own_entry(&self.ctx.main_name, &self.ctx.identity.public_b64());
             let list = super::promote::handover_list(&s.paired, id, &me);
             let peer = s.peers.get(id);
-            let to = HandoverTo { label: label.clone(), phone: entry.mirror || peer.is_some_and(|p| p.caps.iter().any(|c| c == CAP_MIRROR)), brain_dormant_since: peer.and_then(|p| p.brain_dormant_since) };
+            let to = HandoverTo { label: label.clone(), brain_dormant_since: peer.and_then(|p| p.brain_dormant_since) };
             (label, entry.address, entry.key, list, to)
         };
         let _turn = HandoverTurn(&self.shared);
@@ -1699,6 +1705,45 @@ mod tests {
     }
 
     #[test]
+    fn chat_frames_reach_only_allowed_mirrors_that_asked_for_chat() {
+        let (handle, port) = test_server();
+        let (mut phone, phone_id, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror", "chat"]);
+        let (mut old, _, _, _) = pair_client_caps(&handle, port, "Old", &["mirror"]);
+        let (mut laptop, _, _, _) = pair_client_caps(&handle, port, "laptop", &["lead"]);
+        wait_until(|| handle.status().assistants.iter().filter(|a| a.connected).count() == 3);
+        handle.to_mirrors(Down::Chat { turn: serde_json::json!({"text": "a"}) });
+        let turn = loop {
+            match recv(&mut phone) {
+                Down::Mirror { .. } => continue,
+                other => break other,
+            }
+        };
+        assert_eq!(turn, Down::Chat { turn: serde_json::json!({"text": "a"}) });
+        for quiet in [&mut old, &mut laptop] {
+            let end = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < end {
+                match quiet.read() {
+                    Ok(Got::Text(t)) => assert!(!matches!(decode_down(&t).unwrap(), Down::Chat { .. }), "no chat for this Maya"),
+                    Ok(Got::Closed) => panic!("closed"),
+                    _ => {}
+                }
+            }
+        }
+        handle.set_mirror(&phone_id, false).unwrap();
+        handle.to_mirrors(Down::Chat { turn: serde_json::json!({"text": "b"}) });
+        let end = Instant::now() + Duration::from_millis(300);
+        let mut seen = vec![];
+        while Instant::now() < end {
+            if let Ok(Got::Text(t)) = phone.read() {
+                seen.push(decode_down(&t).unwrap());
+            }
+        }
+        assert!(seen.iter().any(|d| matches!(d, Down::Mirror { allowed: false, .. })), "{seen:?}");
+        assert!(!seen.iter().any(|d| matches!(d, Down::Chat { .. })), "{seen:?}");
+        handle.stop();
+    }
+
+    #[test]
     fn the_main_sends_its_wake_word_with_the_board_and_again_when_it_changes() {
         let (handle, port) = test_server();
         let (mut phone, id, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
@@ -1776,16 +1821,13 @@ mod tests {
     }
 
     #[test]
-    fn a_phone_main_hands_over_an_entry_for_itself_that_may_mirror() {
+    fn promote_refuses_a_maya_that_mirrors() {
         let (handle, port) = test_server();
-        handle.set_own_mirror(true);
-        let (mut g, g_id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
-        let h = handle.clone();
-        let t = std::thread::spawn(move || h.promote(&g_id));
-        let Down::Command { id: cmd, kind: CommandKind::Promote { list, .. } } = recv(&mut g) else { panic!("expected promote") };
-        assert!(list.last().unwrap().mirror);
-        send(&mut g, &Up::Result { id: cmd, ok: true, error: None, data: Some(serde_json::json!({ "port": 5001 })) });
-        assert!(t.join().unwrap().is_ok());
+        let (_phone, id, _, _) = pair_client_caps(&handle, port, "Pixel", &["follow", "lead", "mirror"]);
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        assert_eq!(handle.promote(&id).err().as_deref(), Some("A phone cannot be the main."));
+        let a = handle.status().assistants.into_iter().find(|a| a.id == id).expect("still paired");
+        assert!(a.connected, "nothing was handed over");
         handle.stop();
     }
 
@@ -1812,7 +1854,7 @@ mod tests {
         });
         let Down::Command { id: cmd, kind: CommandKind::Promote { summary, .. } } = recv(&mut g) else { panic!("expected promote") };
         assert_eq!(summary.as_deref(), Some("User asked for #52."));
-        assert_eq!(*asked.lock().unwrap(), Some(HandoverTo { label: "laptop".into(), phone: false, brain_dormant_since: Some(77) }));
+        assert_eq!(*asked.lock().unwrap(), Some(HandoverTo { label: "laptop".into(), brain_dormant_since: Some(77) }));
         send(&mut g, &Up::Result { id: cmd, ok: true, error: None, data: Some(serde_json::json!({ "port": 5001 })) });
         assert!(t.join().unwrap().is_ok());
         handle.stop();

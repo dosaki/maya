@@ -273,15 +273,13 @@ pub(crate) enum SummarySource {
     Ask,
     /// A plain digest of her Chat: her brain is not running.
     Digest,
-    /// None: a phone has no brain to read it.
-    None,
 }
 
-pub(crate) fn summary_source(phone: bool, brain_ready: bool) -> SummarySource {
-    match (phone, brain_ready) {
-        (true, _) => SummarySource::None,
-        (false, true) => SummarySource::Ask,
-        (false, false) => SummarySource::Digest,
+pub(crate) fn summary_source(brain_ready: bool) -> SummarySource {
+    if brain_ready {
+        SummarySource::Ask
+    } else {
+        SummarySource::Digest
     }
 }
 
@@ -677,11 +675,9 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_comes_from_her_brain_when_ready_else_a_digest_and_a_phone_gets_none() {
-        assert_eq!(summary_source(false, true), SummarySource::Ask);
-        assert_eq!(summary_source(false, false), SummarySource::Digest);
-        assert_eq!(summary_source(true, true), SummarySource::None);
-        assert_eq!(summary_source(true, false), SummarySource::None);
+    fn the_summary_comes_from_her_brain_when_ready_else_a_digest() {
+        assert_eq!(summary_source(true), SummarySource::Ask);
+        assert_eq!(summary_source(false), SummarySource::Digest);
     }
 
     #[test]

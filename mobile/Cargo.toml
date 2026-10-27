@@ -1,7 +1,7 @@
 [package]
 name = "maya-mobile"
 version.workspace = true
-description = "Maya for Android: a main Maya that coordinates the assistants paired with it"
+description = "Maya for Android: a phone that joins a main Maya and mirrors its board"
 authors.workspace = true
 edition.workspace = true
 

@@ -105,7 +105,11 @@ pub(crate) fn remember(app: &AppHandle, who: &str, text: &str, via: Via) {
     let at = now_ms();
     push_turn(&state.chat, &state.voice, who, text, at, via);
     // No lock is held here: the page hears the turn, then the dot it may change.
-    let _ = app.emit("chat", ChatTurn { who: who.into(), text: text.into(), at, via });
+    let turn = ChatTurn { who: who.into(), text: text.into(), at, via };
+    let _ = app.emit("chat", &turn);
+    if let Ok(turn) = serde_json::to_value(&turn) {
+        crate::net_app::to_mirrors(app, crate::net::protocol::Down::Chat { turn });
+    }
     crate::brain_app::emit_status(app);
 }
 

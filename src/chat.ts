@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { composerKey } from "./keys";
+import { showToast } from "./toast";
 
 export type Dot = "idle" | "working" | "waiting" | "unread";
 
@@ -25,6 +26,8 @@ export interface ChatModel {
   turns: ChatTurn[];
   status: BrainStatus;
   draft: string;
+  /** A Send button beside the input, for a screen with no Enter key to hand. */
+  sendButton?: boolean;
 }
 
 export interface ChatHandlers {
@@ -95,15 +98,21 @@ export function renderChat(m: ChatModel, h: ChatHandlers): HTMLElement {
   input.rows = 2;
   input.placeholder = "Tell Maya what to do";
   input.value = m.draft;
-  input.addEventListener("keydown", (ev) =>
-    composerKey(ev, input, () => {
-      const text = input.value.trim();
-      if (!text) return;
-      input.value = "";
-      h.onSend(text);
-    }),
-  );
+  const send = () => {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    h.onSend(text);
+  };
+  input.addEventListener("keydown", (ev) => composerKey(ev, input, send));
   bar.append(input);
+  if (m.sendButton) {
+    const b = el("button", "chat__send", "Send");
+    b.type = "button";
+    b.dataset.action = "chat-send";
+    b.addEventListener("click", send);
+    bar.append(b);
+  }
   if (m.status.dot === "working") {
     const stop = el("button", "chat__stop", m.status.job ? `Stop (${m.status.job})` : "Stop");
     stop.type = "button";
@@ -116,7 +125,7 @@ export function renderChat(m: ChatModel, h: ChatHandlers): HTMLElement {
 }
 
 /** Wires the Chat pane and the dot on the Chat tab: history, live turns and status, seen on open. */
-export function initChat(): void {
+export function initChat(opts: { sendButton?: boolean } = {}): void {
   const pane = document.getElementById("chat");
   let turns: ChatTurn[] = [];
   let status: BrainStatus = IDLE;
@@ -140,8 +149,8 @@ export function initChat(): void {
     const atEnd = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 40;
     const scroll = log?.scrollTop ?? 0;
     pane.replaceChildren(
-      renderChat({ turns, status, draft }, {
-        onSend: (text) => void invoke("chat_send", { text }).catch(() => undefined),
+      renderChat({ turns, status, draft, sendButton: opts.sendButton }, {
+        onSend: (text) => void invoke("chat_send", { text }).catch((e) => notSent(text, e)),
         onCancel: () => void invoke("window_cancel").catch(() => undefined),
         onStop: () => void invoke("brain_stop").catch(() => undefined),
       }),
@@ -170,10 +179,28 @@ export function initChat(): void {
     }
   };
 
+  // A message the main did not take (the link is down, it refused, it did
+  // not answer) says why and goes back in the box, unless a newer one is there.
+  const notSent = (text: string, e: unknown) => {
+    showToast(String(e));
+    const box = pane?.querySelector<HTMLTextAreaElement>("textarea[name=chat]");
+    if (box) {
+      if (!box.value) box.value = text;
+    } else if (!draft) {
+      draft = text;
+    }
+  };
+
   const seen = () => void invoke("chat_seen").catch(() => undefined);
 
   void listen<ChatTurn>("chat", (e) => {
     turns = [...turns, e.payload];
+    paint();
+    if (open) seen();
+  });
+  // The phone fetched the history again (it reconnected) or emptied it (it left the main): what it holds replaces the list.
+  void listen<ChatTurn[]>("chat-reset", (e) => {
+    turns = e.payload;
     paint();
     if (open) seen();
   });

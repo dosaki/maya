@@ -492,7 +492,14 @@ describe("renderSettings", () => {
     const row = el.querySelector(".settings__assistant")!;
     expect(row.firstElementChild?.textContent).toContain("Iris (Android, 192.168.55.99) — Connected");
     const actions = row.querySelector(".settings__assistant-actions")!;
-    expect([...actions.children].map((c) => (c as HTMLElement).dataset.action ?? c.querySelector<HTMLElement>("input")?.dataset.action)).toEqual(["remove-assistant", "make-main", "mirror"]);
+    expect([...actions.children].map((c) => (c as HTMLElement).dataset.action ?? c.querySelector<HTMLElement>("input")?.dataset.action)).toEqual(["remove-assistant", "mirror"]);
+  });
+
+  it("a row that mirrors gets the switch but never Make main", () => {
+    const assistants = [{ id: "a1", name: "Iris", hostname: "iris", platform: "android", address: "192.168.55.99", connected: true, lastSeen: null, canLead: true, wantsMirror: true, mirror: false }];
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network: { ...voiceBase.network, role: "main", assistants } }, handlers());
+    expect(el.querySelector("[data-action=make-main]")).toBeNull();
+    expect(el.querySelector("[data-action=mirror]")).not.toBeNull();
   });
 
   it("shows the app version at the end of the General section once it is known", () => {

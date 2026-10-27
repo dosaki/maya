@@ -10,7 +10,7 @@ use crate::listener::{self, Interpreted, VoiceContext};
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
-use crate::net::protocol::{CommandKind, Request, CAP_FOLLOW, CAP_LEAD};
+use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD};
 use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, target_of, Target, ROUTE_TIMEOUT};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
 use crate::net::AssistantLink;
@@ -150,7 +150,7 @@ impl ClientNotify for TauriClientNotify {
     fn paired(&self, _: &str) {}
     fn connected(&self, main_name: &str) {
         let name = main_name.to_string();
-        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false, wake_word: None });
+        self.set(|l| *l = AssistantLink { connected: true, main_name: Some(name), error: None, retrying: false, mirror: None, voice: false, chat: false, wake_word: None });
         // The read-only Chat names the main that is awake.
         crate::brain_app::emit_status(&self.app);
     }
@@ -431,6 +431,20 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
     let state = app.state::<AppState>();
     match request {
         voice @ (Request::Interpret { .. } | Request::Execute { .. }) => serve_voice(app, voice),
+        Request::ChatHistory => to_data(serde_json::json!({ "turns": listener::chat_history(app.state()), "status": crate::brain_app::status(app) })),
+        Request::ChatSend { text } => listener::chat_send(app.clone(), text).map(|()| None),
+        Request::ChatSeen => {
+            listener::chat_seen(app.clone());
+            Ok(None)
+        }
+        Request::WindowCancel => {
+            listener::window_cancel(app.clone());
+            Ok(None)
+        }
+        Request::BrainStop => {
+            crate::brain_app::brain_stop(app.clone());
+            Ok(None)
+        }
         Request::ListDirs => match machine {
             Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),
@@ -464,6 +478,15 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
                 None => execute(app, kind),
             },
         },
+    }
+}
+
+/// Sends `frame` to the phones that mirror and asked for Chat. The caller
+/// holds no lock: the server handle is cloned out of `network` first.
+pub(crate) fn to_mirrors(app: &AppHandle, frame: Down) {
+    let server = app.state::<AppState>().network.lock().unwrap().server.clone();
+    if let Some(s) = server {
+        s.to_mirrors(frame);
     }
 }
 

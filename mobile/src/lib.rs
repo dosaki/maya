@@ -1,7 +1,7 @@
-//! Maya for Android: a main Maya with no sessions of its own, or a phone
-//! that joins a main and mirrors its board. The server, pairing, merging
-//! and routing are `maya_core`'s; this crate is the Tauri commands the page
-//! calls, and the Android glue: the foreground service and the notifications.
+//! Maya for Android: a phone that joins a main Maya and mirrors its board.
+//! The client, pairing and routing are `maya_core`'s; this crate is the
+//! Tauri commands the page calls, and the Android glue: the foreground
+//! service and the notifications.
 
 pub mod alerts;
 pub mod android;
@@ -17,8 +17,7 @@ use maya_core::net::protocol::Request;
 use maya_core::net::NetworkStatus;
 use maya_core::store::now_ms;
 use serde_json::Value;
-use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 
 /// The hub's way out: events to the page, and the foreground service.
@@ -46,22 +45,18 @@ impl Sink for TauriSink {
     fn service_stop(&self) {
         android::service_stop(&self.app);
     }
-}
 
-/// How often the boards are re-merged with no new frame, so an assistant
-/// that went away greys and, after the core's five minutes, leaves the
-/// board and takes its notifications with it.
-const REFRESH_EVERY: Duration = Duration::from_secs(10);
+    fn chat(&self, turn: &Value) {
+        let _ = self.app.emit("chat", turn);
+    }
 
-/// Re-merges the boards every `REFRESH_EVERY` for as long as the hub lives.
-fn spawn_refresh(hub: Weak<Hub>) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(REFRESH_EVERY);
-        match hub.upgrade() {
-            Some(hub) => hub.refresh(),
-            None => break,
-        }
-    });
+    fn brain(&self, status: &Value) {
+        let _ = self.app.emit("brain", status);
+    }
+
+    fn chat_reset(&self, turns: &[Value]) {
+        let _ = self.app.emit("chat-reset", turns);
+    }
 }
 
 /// The phone's voice conversation: it asks the joined main, shows itself
@@ -130,18 +125,12 @@ pub fn run() {
             commands::network_status,
             commands::network_pair,
             commands::network_new_key,
-            commands::network_pairing_code,
-            commands::network_remove_assistant,
-            commands::network_promote,
-            commands::network_set_mirror,
             commands::listen_stop,
             commands::get_config,
             commands::set_config,
             commands::log_lines,
             commands::log_clear,
             commands::log_path,
-            commands::server_start,
-            commands::server_stop,
             commands::local_addresses,
             commands::request_battery_exemption,
             commands::notifications_allowed,
@@ -149,7 +138,13 @@ pub fn run() {
             commands::voice_view,
             commands::voice_tap,
             commands::voice_cancel,
-            commands::voice_open_settings
+            commands::voice_open_settings,
+            commands::chat_history,
+            commands::brain_status,
+            commands::chat_send,
+            commands::chat_seen,
+            commands::window_cancel,
+            commands::brain_stop
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -165,20 +160,11 @@ pub fn run() {
             let hub = Hub::new(maya_dir, settings, android::alerts(&handle), Arc::new(TauriSink { app: handle.clone() }));
             app.manage(hub.clone());
             make_voice(&handle, &hub);
-            spawn_refresh(Arc::downgrade(&hub));
             if let Err(e) = android::create_channels(&handle) {
                 log::line("android", format!("notification channels: {e}"));
             }
             android::clear_leftovers(&handle);
             log::line("app", format!("started Maya {} for Android", env!("CARGO_PKG_VERSION")));
-            // The server comes back on its own when it was running last time.
-            let was_main = hub.settings.lock().unwrap().config.network.role == NetworkRole::Main;
-            if was_main {
-                let hub = hub.clone();
-                std::thread::spawn(move || {
-                    let _ = hub.start_server();
-                });
-            }
             let was_assistant = hub.settings.lock().unwrap().config.network.role == NetworkRole::Assistant;
             if was_assistant {
                 hub.start_client();

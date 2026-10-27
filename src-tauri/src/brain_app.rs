@@ -211,7 +211,11 @@ pub(crate) fn status(app: &AppHandle) -> BrainStatus {
 /// Tells the page what she has waiting. Takes the window, brain and chat
 /// locks in turn: the caller must hold none.
 pub(crate) fn emit_status(app: &AppHandle) {
-    let _ = app.emit("brain", status(app));
+    let status = status(app);
+    let _ = app.emit("brain", &status);
+    if let Ok(status) = serde_json::to_value(&status) {
+        crate::net_app::to_mirrors(app, crate::net::protocol::Down::Brain { status });
+    }
 }
 
 #[tauri::command]
@@ -801,12 +805,11 @@ pub(crate) fn wake_as_main(app: &AppHandle, by: &str, summary: Option<String>) {
 /// The summary for the Maya taking the main role over (`to`): her brain
 /// writes it when it runs, bounded by `handover::ASK_MS`; otherwise, or when
 /// it takes too long, a digest of her Chat since `to`'s brain went dormant.
-/// A phone gets none. The caller holds no lock.
+/// The caller holds no lock.
 pub(crate) fn handover_summary(app: &AppHandle, to: &HandoverTo) -> Option<String> {
-    let source = brain_route::summary_source(to.phone, ready(app));
+    let source = brain_route::summary_source(ready(app));
     log::line("brain", format!("handover summary for {}: {source:?}", to.label));
     let asked = match source {
-        SummarySource::None => return None,
         SummarySource::Digest => None,
         SummarySource::Ask => ask_privately(app, &handover::request(&to.label, to.brain_dormant_since), Duration::from_millis(handover::ASK_MS)),
     };

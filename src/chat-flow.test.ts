@@ -16,7 +16,7 @@ const on = <T,>(name: string) => eventListen.mock.calls.find((c) => c[0] === nam
 
 describe("chat flow", () => {
   beforeEach(() => {
-    document.body.innerHTML = '<nav><button data-tab="sessions">S</button><button data-tab="chat">Chat <span class="tab__dot"></span></button></nav><div id="board"></div><div id="chat" hidden></div>';
+    document.body.innerHTML = '<nav><button data-tab="sessions">S</button><button data-tab="chat">Chat <span class="tab__dot"></span></button></nav><div id="board"></div><div id="chat" hidden></div><div id="toast" class="toast" hidden></div>';
     localStorage.clear();
     invoke.mockReset();
     eventListen.mockClear();
@@ -105,5 +105,74 @@ describe("chat flow", () => {
     expect(document.querySelector(".chat__dormant")!.textContent).toBe("Dormant: the main Maya is awake.");
     expect(document.querySelector("textarea[name=chat]")).toBeNull();
     expect(tab.hidden).toBe(false);
+  });
+
+  it("a chat-reset replaces the turns", async () => {
+    initChat();
+    await flush();
+    on<ChatTurn>("chat")({ payload: { who: "maya", text: "a", at: 1, via: "chat" } });
+    expect([...document.querySelectorAll(".chat__turn")].map((t) => t.textContent)).toEqual(["a"]);
+    on<ChatTurn[]>("chat-reset")({ payload: [{ who: "maya", text: "b", at: 2, via: "chat" }, { who: "user", text: "c", at: 3, via: "chat" }] });
+    expect([...document.querySelectorAll(".chat__turn")].map((t) => t.textContent)).toEqual(["b", "c"]);
+  });
+
+  it("a chat-reset while Chat is open marks it seen", async () => {
+    const tabs = makeTabs();
+    initChat();
+    await flush();
+    tabs.show("chat");
+    await flush();
+    invoke.mockClear();
+    on<ChatTurn[]>("chat-reset")({ payload: [{ who: "maya", text: "b", at: 2, via: "chat" }] });
+    expect(invoke).toHaveBeenCalledWith("chat_seen");
+  });
+
+  it("a message that could not be sent says why and goes back in the box", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "chat_history") return Promise.resolve([]);
+      if (cmd === "brain_status") return Promise.resolve(status());
+      if (cmd === "chat_send") return Promise.reject("The link to the main Maya was lost.");
+      return Promise.resolve(undefined);
+    });
+    initChat({ sendButton: true });
+    await flush();
+    const box = document.querySelector<HTMLTextAreaElement>("textarea[name=chat]")!;
+    box.value = "hello";
+    document.querySelector<HTMLButtonElement>("button[data-action=chat-send]")!.click();
+    expect(box.value).toBe("");
+    await flush();
+    const toast = document.getElementById("toast")!;
+    expect(toast.hidden).toBe(false);
+    expect(toast.textContent).toBe("The link to the main Maya was lost.");
+    expect(document.querySelector<HTMLTextAreaElement>("textarea[name=chat]")!.value).toBe("hello");
+  });
+
+  it("a message that could not be sent does not overwrite a newer one", async () => {
+    let reject: (e: string) => void = () => {};
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "chat_history") return Promise.resolve([]);
+      if (cmd === "brain_status") return Promise.resolve(status());
+      if (cmd === "chat_send") return new Promise((_, r) => (reject = r));
+      return Promise.resolve(undefined);
+    });
+    initChat({ sendButton: true });
+    await flush();
+    const box = document.querySelector<HTMLTextAreaElement>("textarea[name=chat]")!;
+    box.value = "hello";
+    document.querySelector<HTMLButtonElement>("button[data-action=chat-send]")!.click();
+    box.value = "and then";
+    reject("The main Maya did not answer in time.");
+    await flush();
+    expect(document.getElementById("toast")!.textContent).toBe("The main Maya did not answer in time.");
+    expect(box.value).toBe("and then");
+  });
+
+  it("shows a Send button that sends when the phone asks for one", async () => {
+    initChat({ sendButton: true });
+    await flush();
+    const box = document.querySelector<HTMLTextAreaElement>("textarea[name=chat]")!;
+    box.value = "hello";
+    document.querySelector<HTMLButtonElement>("button[data-action=chat-send]")!.click();
+    expect(invoke).toHaveBeenCalledWith("chat_send", { text: "hello" });
   });
 });

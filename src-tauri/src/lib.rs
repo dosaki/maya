@@ -235,11 +235,12 @@ impl Notify for TauriNetNotify {
     fn main_caps(&self) -> Vec<String> {
         // Voice needs Maya's agent on this machine to interpret.
         let brain = self.app.state::<AppState>().store.lock().unwrap().config.brain();
+        // A main always runs a brain, so it always has Chat to give.
+        let mut caps = vec![net::protocol::CAP_CHAT.to_string()];
         if launch::find_binary(brain).is_ok() {
-            vec![net::protocol::CAP_VOICE.to_string()]
-        } else {
-            vec![]
+            caps.push(net::protocol::CAP_VOICE.to_string());
         }
+        caps
     }
 }
 
