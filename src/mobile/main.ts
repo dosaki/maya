@@ -7,6 +7,7 @@ import { cardActionFor } from "../actions";
 import { answerGuard, stopGuard } from "../answer";
 import { renderBoard, swapBoard } from "../board";
 import { makeClickGuard } from "../clickguard";
+import { initChat } from "../chat";
 import { initDebug } from "../debug";
 import { setLocalMachine } from "../machines";
 import { closeModal, openModal, refreshModal, setComposerOptions, setOnDismiss, setProgress } from "../modal";
@@ -20,8 +21,9 @@ import { showToast } from "../toast";
 import type { Card, CardState } from "../types";
 import { updates } from "../update";
 import { makeCardHistory } from "./card-history";
+import { chatTabShown } from "./chat-tab";
 import { initVoice } from "./voice";
-import { initNetwork, type NetworkStatus } from "./network";
+import { initNetwork } from "./network";
 import { watchTaps } from "./notify-tap";
 import { initSetup } from "./setup";
 import { activeColumn, columnWidth, columnsFor, openingColumn, renderStrip, scrollLeftFor, visibleColumns } from "./strip";
@@ -30,7 +32,6 @@ setLocalMachine(false);
 setComposerOptions({ attachButton: true, keyboardHints: false });
 
 let cards: Card[] = [];
-let status: NetworkStatus | null = null;
 let opened = false;
 let pendingTap: string | null = null;
 let colWidth = 0;
@@ -42,7 +43,7 @@ let retry: ReturnType<typeof setTimeout> | undefined;
 let enableTimer: ReturnType<typeof setTimeout> | undefined;
 let known = new Set<string>();
 let tabs: ReturnType<typeof makeTabs> | null = null;
-/** "The server is stopped." with Start, shown in place of the columns while the server is down. */
+/** The Join card, shown in place of the columns while the phone is not joined to a main. */
 let stopped: HTMLElement | null = null;
 const cardHistory = makeCardHistory();
 setOnDismiss(() => cardHistory.dismissed());
@@ -78,21 +79,6 @@ function paintStrip(): void {
   host.replaceChildren(renderStrip(counts(), visibleColumns(active, columns), (i) => boardEl()?.scrollTo({ left: scrollLeftFor(i, colWidth), behavior: "smooth" })));
 }
 
-function paintHint(host: HTMLElement): void {
-  if (!status || status.role !== "main" || status.assistants.length > 0) return;
-  const hint = document.createElement("div");
-  hint.className = "board__hint";
-  const p = document.createElement("p");
-  p.textContent = "Pair an assistant to see its sessions.";
-  const open = document.createElement("button");
-  open.type = "button";
-  open.className = "card__btn card__btn--primary";
-  open.textContent = "Open Network";
-  open.addEventListener("click", () => tabs?.show("settings"));
-  hint.append(p, open);
-  host.prepend(hint);
-}
-
 function paint(): void {
   if (!guard.canPaint(Date.now())) {
     if (!retry) retry = setTimeout(() => { retry = undefined; paint(); }, 200);
@@ -106,7 +92,6 @@ function paint(): void {
     return;
   }
   swapBoard(host, renderBoard(cards, Date.now(), (c) => progress.next(c)));
-  paintHint(host);
   guard.markPaint(Date.now(), { movedUnderPointer: false });
   const delay = nextEnableDelay(cards, Date.now());
   if (enableTimer) clearTimeout(enableTimer);
@@ -198,8 +183,12 @@ async function start(): Promise<void> {
     if (rememberedHost) rememberedHost.hidden = tab !== "sessions";
   });
   void initVoice();
+  initChat({ sendButton: true });
   const recheckNotifications = initNetwork((s) => {
-    status = s;
+    // Chat is the main's: it hides when the phone is not joined or the main stops sharing.
+    const chat = document.querySelector<HTMLElement>("[data-tab=chat]");
+    if (chat) chat.hidden = !chatTabShown(s);
+    if (!chatTabShown(s) && tabs?.current() === "chat") tabs.show("sessions");
     paint();
   });
   initSetup({

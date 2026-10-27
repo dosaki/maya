@@ -72,4 +72,17 @@ describe("renderChat", () => {
     expect(el.querySelector("button[data-action=window-cancel]")).toBeNull();
     expect(el.querySelector(".chat__pending")).toBeNull();
   });
+
+  it("a Send button sends the trimmed text and clears the box", () => {
+    const h = { onSend: vi.fn(), onCancel: vi.fn(), onStop: vi.fn() };
+    const idle = { dot: "idle" as const, pending: null, job: null, ready: true };
+    const el = renderChat({ turns: [], status: idle, draft: " hi ", sendButton: true }, h);
+    const box = el.querySelector<HTMLTextAreaElement>("textarea[name=chat]")!;
+    el.querySelector<HTMLButtonElement>("[data-action=chat-send]")!.click();
+    expect(h.onSend).toHaveBeenCalledWith("hi");
+    expect(box.value).toBe("");
+    el.querySelector<HTMLButtonElement>("[data-action=chat-send]")!.click();
+    expect(h.onSend).toHaveBeenCalledTimes(1);
+    expect(renderChat({ turns: [], status: idle, draft: "" }, h).querySelector("[data-action=chat-send]")).toBeNull();
+  });
 });

@@ -5,8 +5,6 @@
 .board { display: flex; grid-template-columns: none; overflow-x: auto; overflow-y: hidden; scroll-snap-type: x mandatory; gap: 12px; padding: 8px 12px 12px; scrollbar-width: none; }
 .board::-webkit-scrollbar { display: none; }
 .column { flex: 0 0 var(--col-w); scroll-snap-align: start; min-width: 0; }
-.board__hint { flex: 0 0 auto; margin: 24px auto; padding: 0 24px; text-align: center; color: var(--muted); max-width: 360px; }
-.board__hint button { margin-top: 12px; }
 
 .strip { display: flex; gap: 4px; padding: 6px 12px 0; }
 .strip__tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 2px; background: none; border: 0; border-bottom: 3px solid var(--border); color: var(--muted); font: inherit; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -39,11 +37,6 @@
 .setup__error { color: #f87171; }
 .setup__card--stopped { width: calc(100% - 24px); margin: 24px auto; box-sizing: border-box; }
 
-.network__code { font-size: 32px; letter-spacing: .12em; font-variant-numeric: tabular-nums; color: var(--gold-bright); }
-.network__addresses { color: var(--muted); overflow-wrap: anywhere; }
-.network__assistant { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
-.network__assistant-name { flex: 1; min-width: 0; }
-.network__assistant-meta { color: var(--muted); font-size: 12px; }
 .network__confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .network__confirm p { flex-basis: 100%; margin: 0; font-size: 13px; }
 .network__listening { margin: 0; font-weight: 600; }
@@ -55,8 +48,6 @@
 .network .settings__section > label:not(.settings__switch) { flex-direction: column; align-items: stretch; gap: 4px; }
 .network .settings__section > label:not(.settings__switch) > input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 8px 10px; }
 
-.setup__modes { display: flex; gap: 8px; margin: 8px 0 12px; }
-.setup__modes button[aria-pressed=true] { border-color: var(--gold); color: var(--gold-bright); }
 
 /* The mic bar under the column strip: the mic, what was heard and said, Yes and No.
    Not `.voice`: styles.css, loaded first, uses that for the desktop's 28 px button. */

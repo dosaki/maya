@@ -13,6 +13,7 @@
         <h1 class="topbar__title" title="Manage All Your Agents"><img class="topbar__logo" src="../../src/assets/maya-logo.png" alt="" width="26" height="26" /> Maya</h1>
         <nav class="tabs" role="tablist">
           <button class="tab" type="button" role="tab" data-tab="sessions">Sessions</button>
+          <button class="tab" type="button" role="tab" data-tab="chat" hidden>Chat <span class="tab__dot tab__dot--idle"></span></button>
           <span class="tabs__spacer"></span>
           <button class="tab" type="button" role="tab" data-tab="debug">Debug</button>
           <button class="tab" type="button" role="tab" data-tab="settings">Network</button>
@@ -23,6 +24,7 @@
       <div id="voice-host"></div>
       <div id="remembered" class="remembered-host"></div>
       <div id="board"></div>
+      <section id="chat" class="pane" hidden></section>
       <div id="debug" class="pane" hidden></div>
       <div id="settings" class="settings pane" hidden></div>
       <div id="setup" hidden></div>

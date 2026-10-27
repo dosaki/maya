@@ -25,6 +25,8 @@ export interface ChatModel {
   turns: ChatTurn[];
   status: BrainStatus;
   draft: string;
+  /** A Send button beside the input, for a screen with no Enter key to hand. */
+  sendButton?: boolean;
 }
 
 export interface ChatHandlers {
@@ -95,15 +97,21 @@ export function renderChat(m: ChatModel, h: ChatHandlers): HTMLElement {
   input.rows = 2;
   input.placeholder = "Tell Maya what to do";
   input.value = m.draft;
-  input.addEventListener("keydown", (ev) =>
-    composerKey(ev, input, () => {
-      const text = input.value.trim();
-      if (!text) return;
-      input.value = "";
-      h.onSend(text);
-    }),
-  );
+  const send = () => {
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    h.onSend(text);
+  };
+  input.addEventListener("keydown", (ev) => composerKey(ev, input, send));
   bar.append(input);
+  if (m.sendButton) {
+    const b = el("button", "chat__send", "Send");
+    b.type = "button";
+    b.dataset.action = "chat-send";
+    b.addEventListener("click", send);
+    bar.append(b);
+  }
   if (m.status.dot === "working") {
     const stop = el("button", "chat__stop", m.status.job ? `Stop (${m.status.job})` : "Stop");
     stop.type = "button";
@@ -116,7 +124,7 @@ export function renderChat(m: ChatModel, h: ChatHandlers): HTMLElement {
 }
 
 /** Wires the Chat pane and the dot on the Chat tab: history, live turns and status, seen on open. */
-export function initChat(): void {
+export function initChat(opts: { sendButton?: boolean } = {}): void {
   const pane = document.getElementById("chat");
   let turns: ChatTurn[] = [];
   let status: BrainStatus = IDLE;
@@ -140,7 +148,7 @@ export function initChat(): void {
     const atEnd = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 40;
     const scroll = log?.scrollTop ?? 0;
     pane.replaceChildren(
-      renderChat({ turns, status, draft }, {
+      renderChat({ turns, status, draft, sendButton: opts.sendButton }, {
         onSend: (text) => void invoke("chat_send", { text }).catch(() => undefined),
         onCancel: () => void invoke("window_cancel").catch(() => undefined),
         onStop: () => void invoke("brain_stop").catch(() => undefined),
@@ -176,6 +184,11 @@ export function initChat(): void {
     turns = [...turns, e.payload];
     paint();
     if (open) seen();
+  });
+  // The phone fetched the history again (it reconnected): what it holds replaces the list.
+  void listen<ChatTurn[]>("chat-reset", (e) => {
+    turns = e.payload;
+    paint();
   });
   void listen<BrainStatus>("brain", (e) => {
     status = e.payload;

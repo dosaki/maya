@@ -452,8 +452,8 @@ body { margin: 0; background: var(--bg); }
 .chat__bar { display: flex; gap: 8px; align-items: flex-end; }
 .chat__input { flex: 1; resize: none; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .chat__input:focus { outline: none; border-color: var(--gold); }
-.chat__cancel, .chat__stop { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--gold-deep); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
-.chat__cancel:hover, .chat__stop:hover { border-color: var(--gold); }
+.chat__cancel, .chat__stop, .chat__send { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--gold-deep); border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+.chat__cancel:hover, .chat__stop:hover, .chat__send:hover { border-color: var(--gold); }
 .chat__dormant { margin: 0; padding: 8px 12px; color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; text-align: center; }
 
 /* The light theme. The dark look above is the default and is not touched: every

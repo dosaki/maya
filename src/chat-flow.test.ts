@@ -106,4 +106,22 @@ describe("chat flow", () => {
     expect(document.querySelector("textarea[name=chat]")).toBeNull();
     expect(tab.hidden).toBe(false);
   });
+
+  it("a chat-reset replaces the turns", async () => {
+    initChat();
+    await flush();
+    on<ChatTurn>("chat")({ payload: { who: "maya", text: "a", at: 1, via: "chat" } });
+    expect([...document.querySelectorAll(".chat__turn")].map((t) => t.textContent)).toEqual(["a"]);
+    on<ChatTurn[]>("chat-reset")({ payload: [{ who: "maya", text: "b", at: 2, via: "chat" }, { who: "user", text: "c", at: 3, via: "chat" }] });
+    expect([...document.querySelectorAll(".chat__turn")].map((t) => t.textContent)).toEqual(["b", "c"]);
+  });
+
+  it("shows a Send button that sends when the phone asks for one", async () => {
+    initChat({ sendButton: true });
+    await flush();
+    const box = document.querySelector<HTMLTextAreaElement>("textarea[name=chat]")!;
+    box.value = "hello";
+    document.querySelector<HTMLButtonElement>("button[data-action=chat-send]")!.click();
+    expect(invoke).toHaveBeenCalledWith("chat_send", { text: "hello" });
+  });
 });
