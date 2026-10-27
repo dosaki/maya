@@ -195,23 +195,23 @@ pub fn brain_status(hub: H) -> Value {
 
 #[tauri::command(async)]
 pub fn chat_send(hub: H, text: String) -> Result<(), String> {
-    hub.request(None, Request::ChatSend { text }).map(|_| ())
+    hub.chat_request(Request::ChatSend { text }).map(|_| ())
 }
 
 /// The next three are best effort, as on the desktop: the page waits for nothing.
 #[tauri::command(async)]
 pub fn chat_seen(hub: H) {
-    let _ = hub.request(None, Request::ChatSeen);
+    let _ = hub.chat_request(Request::ChatSeen);
 }
 
 #[tauri::command(async)]
 pub fn window_cancel(hub: H) {
-    let _ = hub.request(None, Request::WindowCancel);
+    let _ = hub.chat_request(Request::WindowCancel);
 }
 
 #[tauri::command(async)]
 pub fn brain_stop(hub: H) {
-    let _ = hub.request(None, Request::BrainStop);
+    let _ = hub.chat_request(Request::BrainStop);
 }
 
 #[tauri::command]

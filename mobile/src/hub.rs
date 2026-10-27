@@ -104,6 +104,18 @@ fn phone_caps() -> Vec<String> {
 /// The main's name while the link has not said it yet.
 const SOME_MAIN: &str = "the main Maya";
 
+/// Why this phone cannot chat over `link` now, or `None` when it can.
+fn chat_dormant(link: &AssistantLink) -> Option<String> {
+    let main = link.main_name.as_deref().unwrap_or(SOME_MAIN);
+    if !link.connected {
+        Some(format!("Reconnecting to {main}…"))
+    } else if !link.chat {
+        Some(format!("Update {main} to chat from the phone."))
+    } else {
+        None
+    }
+}
+
 pub struct Hub {
     /// `<app data dir>/maya`: the config, the log and saved attachments.
     pub maya_dir: PathBuf,
@@ -269,33 +281,44 @@ impl Hub {
     /// The Chat's status: the main's, or, in its shape, why this phone
     /// cannot chat now (the page shows `dormant` in place of the input).
     pub fn chat_status(&self) -> Value {
-        let (connected, chat, main) = {
-            let link = self.link.lock().unwrap();
-            (link.connected, link.chat, link.main_name.clone().unwrap_or_else(|| SOME_MAIN.into()))
-        };
-        let dormant = if !connected {
-            Some(format!("Reconnecting to {main}…"))
-        } else if !chat {
-            Some(format!("Update {main} to chat from the phone."))
-        } else if let Some(status) = self.chat.lock().unwrap().status.clone() {
-            return status;
-        } else {
-            None
-        };
+        // `link` is released at the end of this statement, before `chat`.
+        let dormant = chat_dormant(&self.link.lock().unwrap());
+        if dormant.is_none() {
+            if let Some(status) = self.chat.lock().unwrap().status.clone() {
+                return status;
+            }
+        }
         serde_json::json!({"dot": "idle", "pending": null, "job": null, "ready": false, "dormant": dormant})
     }
 
-    /// Empties the Chat; a history on its way is dropped.
+    /// Sends a Chat request (`ChatSend`, `ChatSeen`, `WindowCancel`,
+    /// `BrainStop`) to the joined main, only if it said it has Chat
+    /// (`CAP_CHAT`): an older main never gets one. Takes `link` alone.
+    pub fn chat_request(&self, request: Request) -> Result<Option<Value>, String> {
+        let refused = {
+            let link = self.link.lock().unwrap();
+            if link.chat { None } else { chat_dormant(&link) }
+        };
+        if let Some(why) = refused {
+            return Err(why);
+        }
+        self.request(None, request)
+    }
+
+    /// Empties the Chat, here and on the page; a history on its way is
+    /// dropped. The ticket moves under `chat`, as `chat_fetched` reads it.
     fn forget_chat(&self) {
+        let mut c = self.chat.lock().unwrap();
         self.chat_fetch.fetch_add(1, Ordering::SeqCst);
-        *self.chat.lock().unwrap() = ChatView::default();
+        *c = ChatView::default();
+        self.sink.chat_reset(&[]);
     }
 
     /// Starts a history fetch; the turns and the status that come from now
     /// on are kept for it. Returns its ticket.
     pub(crate) fn begin_chat_fetch(&self) -> u64 {
-        let ticket = self.chat_fetch.fetch_add(1, Ordering::SeqCst) + 1;
         let mut c = self.chat.lock().unwrap();
+        let ticket = self.chat_fetch.fetch_add(1, Ordering::SeqCst) + 1;
         c.live = Some(vec![]);
         c.status = None;
         ticket
@@ -712,6 +735,7 @@ impl ClientNotify for HubClientNotify {
         };
         if access != MirrorAccess::Allowed {
             *h.mirror.lock().unwrap() = MirrorView::default();
+            h.forget_chat();
         }
         self.set(|l| l.mirror = Some(access));
         h.refresh();
@@ -847,9 +871,26 @@ mod tests {
 
     /// A hub over an empty config in a fresh directory, with no-op alerts and sink.
     pub(crate) fn test_hub() -> Arc<Hub> {
+        test_hub_with(Arc::new(NoSink))
+    }
+
+    fn test_hub_with(sink: Arc<dyn Sink>) -> Arc<Hub> {
         let dir = std::env::temp_dir().join(format!("maya-hub-test-{}-{}", std::process::id(), now_ms()));
         let settings = Settings { path: settings_path(&dir), config: Config::default() };
-        Hub::new(dir, settings, Arc::new(NoAlerts), Arc::new(NoSink))
+        Hub::new(dir, settings, Arc::new(NoAlerts), sink)
+    }
+
+    /// The page's `chat-reset` events.
+    #[derive(Default)]
+    struct Resets(Mutex<Vec<Vec<Value>>>);
+    impl Sink for Resets {
+        fn sessions(&self, _: &[Card]) {}
+        fn network(&self, _: &NetworkStatus) {}
+        fn service_start(&self, _: &str) {}
+        fn service_stop(&self) {}
+        fn chat_reset(&self, turns: &[Value]) {
+            self.0.lock().unwrap().push(turns.to_vec());
+        }
     }
 
     #[test]
@@ -1110,6 +1151,51 @@ mod tests {
         hub.forget_chat();
         hub.chat_fetched(ticket, Ok(Some(history)));
         assert!(hub.chat.lock().unwrap().turns.is_empty());
+    }
+
+    #[test]
+    fn a_main_that_stops_offering_its_board_empties_the_page_chat() {
+        let page = Arc::new(Resets::default());
+        let hub = test_hub_with(page.clone());
+        hub.set_link_for_test(AssistantLink { connected: true, chat: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() }, true);
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        notify.chat_turn(serde_json::json!({"text": "old"}));
+        let ticket = hub.begin_chat_fetch();
+        notify.mirror_offer(Some(false));
+        assert!(hub.chat.lock().unwrap().turns.is_empty());
+        assert_eq!(page.0.lock().unwrap().last(), Some(&vec![]), "the page forgets it too");
+        // The history on its way is dropped.
+        hub.chat_fetched(ticket, Ok(Some(serde_json::json!({"turns": [{"text": "old"}], "status": {"dot": "idle"}}))));
+        assert!(hub.chat.lock().unwrap().turns.is_empty());
+        assert_eq!(page.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stopping_the_client_empties_the_page_chat() {
+        let page = Arc::new(Resets::default());
+        let hub = test_hub_with(page.clone());
+        HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) }.chat_turn(serde_json::json!({"text": "old"}));
+        hub.stop_client();
+        assert!(hub.chat.lock().unwrap().turns.is_empty());
+        assert_eq!(*page.0.lock().unwrap(), [Vec::<Value>::new()]);
+    }
+
+    #[test]
+    fn chat_requests_go_only_to_a_main_that_chats() {
+        let hub = test_hub();
+        let link = |connected, chat| AssistantLink { connected, chat, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() };
+        let requests = || [Request::ChatSend { text: "hi".into() }, Request::ChatSeen, Request::WindowCancel, Request::BrainStop];
+        hub.set_link_for_test(link(true, false), true);
+        for r in requests() {
+            assert_eq!(hub.chat_request(r), Err("Update Yhi to chat from the phone.".to_string()), "never sent to an older main");
+        }
+        hub.set_link_for_test(link(false, false), true);
+        assert_eq!(hub.chat_request(Request::ChatSeen), Err("Reconnecting to Yhi…".to_string()));
+        // A main that chats: on to the lane, which has no connection here.
+        hub.set_link_for_test(link(true, true), true);
+        for r in requests() {
+            assert_eq!(hub.chat_request(r), Err(NOT_CONNECTED.to_string()));
+        }
     }
 
     #[test]

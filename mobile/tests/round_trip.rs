@@ -319,7 +319,7 @@ fn a_joined_phone_gets_the_chat_live_and_again_after_a_reconnect() {
     hub.join("127.0.0.1", port, "Pixel", &code).unwrap();
     let old = vec![json!({"text": "old"})];
     // Fetched off the client thread, which carries the answer: on it, this would never come.
-    wait_until("the history", || page.chat_resets.lock().unwrap().first() == Some(&old));
+    wait_until("the history", || page.chat_resets.lock().unwrap().last() == Some(&old));
     wait_until("the main's status", || page.brains.lock().unwrap().last() == Some(&json!({"dot": "idle"})));
 
     // A turn comes live.
@@ -327,31 +327,37 @@ fn a_joined_phone_gets_the_chat_live_and_again_after_a_reconnect() {
     wait_until("the live turn", || page.chats.lock().unwrap().iter().any(|t| t["text"] == "new") && hub.chat.lock().unwrap().turns.len() == 2);
 
     // Typing goes to the main.
-    hub.request(None, Request::ChatSend { text: "hi".into() }).unwrap();
+    hub.chat_request(Request::ChatSend { text: "hi".into() }).unwrap();
     assert!(notify.requests.lock().unwrap().iter().any(|r| matches!(r, (None, Request::ChatSend { text }) if text == "hi")));
 
     // The switch off empties the Chat; on fetches it again.
     let phone_id = main.status().assistants[0].id.clone();
     main.set_mirror(&phone_id, false).unwrap();
-    wait_until("the Chat emptied", || hub.chat.lock().unwrap().turns.is_empty());
+    wait_until("the Chat emptied", || hub.chat.lock().unwrap().turns.is_empty() && page.chat_resets.lock().unwrap().last() == Some(&vec![]));
     main.set_mirror(&phone_id, true).unwrap();
     main.mirror(vec![]);
-    wait_until("the history again", || page.chat_resets.lock().unwrap().len() == 2);
+    wait_until("the history again", || page.chat_resets.lock().unwrap().last() == Some(&old));
 
     // The main goes away: the page says so, and the turns stay.
     let saved = notify.saved.lock().unwrap().clone();
     main.to_mirrors(Down::Chat { turn: json!({"text": "new"}) });
     wait_until("the live turn again", || hub.chat.lock().unwrap().turns.len() == 2);
+    let resets = page.chat_resets.lock().unwrap().len();
     main.stop();
     wait_until("the note", || page.brains.lock().unwrap().last().is_some_and(|b| b["dormant"] == "Reconnecting to desk…"));
     assert_eq!(hub.chat.lock().unwrap().turns.len(), 2);
+    assert_eq!(page.chat_resets.lock().unwrap().len(), resets, "the page keeps its turns too");
 
     // Back on the same port: the history replaces the turns.
     let (main, _) = desk_again(key, port, saved);
-    wait_until("the history after the reconnect", || page.chat_resets.lock().unwrap().len() == 3);
+    wait_until("the history after the reconnect", || page.chat_resets.lock().unwrap().len() == resets + 1);
     assert_eq!(hub.chat.lock().unwrap().turns, old, "replaced, not appended to");
     assert_eq!(page.chat_resets.lock().unwrap().last(), Some(&old));
+
+    // Leaving empties the page's Chat too, so the next main never shows it.
     hub.stop_listening().unwrap();
+    assert!(hub.chat.lock().unwrap().turns.is_empty());
+    assert_eq!(page.chat_resets.lock().unwrap().last(), Some(&vec![]));
     main.stop();
 }
 
