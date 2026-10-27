@@ -1,15 +1,16 @@
 //! The phone's hub against a real core main on localhost: joining, the
-//! mirrored board, a command round trip, and which boards post notifications.
+//! mirrored board, a command round trip, the main's Chat, and which boards
+//! post notifications.
 
 use maya_core::config::{Config, NetworkConfig, NetworkRole};
 use maya_core::model::{AwaitKind, Awaiting, Card, Harness, State};
 use maya_core::net::identity::Keypair;
-use maya_core::net::protocol::{CommandKind, Request};
+use maya_core::net::protocol::{CommandKind, Down, Request, CAP_CHAT};
 use maya_core::net::server::{start_with, ServerHandle};
 use maya_core::net::{MirrorAccess, NetworkStatus};
 use maya_mobile_lib::alerts::{Alerts, Post};
 use maya_mobile_lib::hub::{Hub, Settings, Sink};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -38,6 +39,9 @@ struct Page {
     boards: Mutex<Vec<Vec<Card>>>,
     statuses: Mutex<Vec<NetworkStatus>>,
     service: Mutex<Vec<String>>,
+    chats: Mutex<Vec<Value>>,
+    brains: Mutex<Vec<Value>>,
+    chat_resets: Mutex<Vec<Vec<Value>>>,
 }
 
 impl Sink for Page {
@@ -52,6 +56,15 @@ impl Sink for Page {
     }
     fn service_stop(&self) {
         self.service.lock().unwrap().push("stop".into());
+    }
+    fn chat(&self, turn: &Value) {
+        self.chats.lock().unwrap().push(turn.clone());
+    }
+    fn brain(&self, status: &Value) {
+        self.brains.lock().unwrap().push(status.clone());
+    }
+    fn chat_reset(&self, turns: &[Value]) {
+        self.chat_resets.lock().unwrap().push(turns.to_vec());
     }
 }
 
@@ -156,7 +169,7 @@ fn stop_listening_that_cannot_save_keeps_the_phone_listening() {
     hub.client.lock().unwrap().take().unwrap().stop();
 }
 
-/// A core main that records the requests it is asked.
+/// A core main with Chat that records the requests it is asked.
 #[derive(Default)]
 struct MainNotify {
     requests: Mutex<Vec<(Option<String>, Request)>>,
@@ -181,8 +194,15 @@ impl maya_core::net::server::Notify for MainNotify {
         Ok(())
     }
     fn request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
+        let answer = match request {
+            Request::ChatHistory => Some(json!({"turns": [{"text": "old"}], "status": {"dot": "idle"}})),
+            _ => None,
+        };
         self.requests.lock().unwrap().push((machine.map(str::to_string), request));
-        Ok(None)
+        Ok(answer)
+    }
+    fn main_caps(&self) -> Vec<String> {
+        vec![CAP_CHAT.into()]
     }
 }
 
@@ -196,6 +216,23 @@ fn desk_with(key: Arc<Keypair>) -> (ServerHandle, u16, Arc<MainNotify>) {
     let handle = start_with(notify.clone(), Arc::new(Mutex::new(config)), 0, key).unwrap();
     let port = handle.port();
     (handle, port, notify)
+}
+
+/// The main again on `port` with its key and the assistants it had saved,
+/// once the port is free.
+fn desk_again(key: Arc<Keypair>, port: u16, assistants: Vec<maya_core::config::PairedAssistant>) -> (ServerHandle, Arc<MainNotify>) {
+    let notify = Arc::new(MainNotify::default());
+    let config = Arc::new(Mutex::new(NetworkConfig { name: "desk".into(), assistants, ..Default::default() }));
+    let started = Instant::now();
+    loop {
+        match start_with(notify.clone(), config.clone(), port, key.clone()) {
+            Ok(m) => return (m, notify),
+            Err(e) => {
+                assert!(started.elapsed() < Duration::from_secs(10), "the port did not come back: {e}");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
 }
 
 #[test]
@@ -223,7 +260,7 @@ fn the_phone_joins_a_main_mirrors_it_quietly_acts_through_it_and_leaves() {
 
     // A command goes to the main.
     hub.send("s1", |session| CommandKind::Compact { session }).unwrap();
-    assert!(matches!(&notify.requests.lock().unwrap()[0], (None, Request::Command(CommandKind::Compact { session })) if session == "s1"));
+    assert!(notify.requests.lock().unwrap().iter().any(|r| matches!(r, (None, Request::Command(CommandKind::Compact { session })) if session == "s1")));
 
     // The switch off empties the board; on brings it back.
     main.set_mirror(&phone_id, false).unwrap();
@@ -259,18 +296,7 @@ fn a_reconnect_announces_the_asks_that_began_while_away() {
     let saved = notify.saved.lock().unwrap().clone();
     main.stop();
     wait_until("the link drops", || !hub.status().assistant.connected);
-    let config = NetworkConfig { name: "desk".into(), assistants: saved, ..Default::default() };
-    let config = Arc::new(Mutex::new(config));
-    let started = std::time::Instant::now();
-    let main = loop {
-        match start_with(Arc::new(MainNotify::default()), config.clone(), port, key.clone()) {
-            Ok(m) => break m,
-            Err(e) => {
-                assert!(started.elapsed() < Duration::from_secs(10), "the port did not come back: {e}");
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-    };
+    let (main, _) = desk_again(key, port, saved);
     wait_until("the phone is back", || hub.status().assistant.connected && hub.status().assistant.mirror == Some(MirrorAccess::Allowed));
     // s1 still waits (same since); s2 began while the phone was away.
     main.mirror(vec![card("s1", State::Awaiting, 1_000), card("s2", State::Awaiting, 2_000)]);
@@ -280,6 +306,51 @@ fn a_reconnect_announces_the_asks_that_began_while_away() {
     assert_eq!(posts.len(), 1, "only the ask that began while away is announced");
     assert_eq!(posts[0].title, "s2 on desk needs a decision");
     drop(posts);
+    hub.stop_listening().unwrap();
+    main.stop();
+}
+
+#[test]
+fn a_joined_phone_gets_the_chat_live_and_again_after_a_reconnect() {
+    let key = Arc::new(Keypair::generate());
+    let (main, port, notify) = desk_with(key.clone());
+    let (hub, page, _dir) = new_hub(free_port());
+    let code = main.open_pairing(maya_core::store::now_ms()).unwrap().0;
+    hub.join("127.0.0.1", port, "Pixel", &code).unwrap();
+    let old = vec![json!({"text": "old"})];
+    // Fetched off the client thread, which carries the answer: on it, this would never come.
+    wait_until("the history", || page.chat_resets.lock().unwrap().first() == Some(&old));
+    wait_until("the main's status", || page.brains.lock().unwrap().last() == Some(&json!({"dot": "idle"})));
+
+    // A turn comes live.
+    main.to_mirrors(Down::Chat { turn: json!({"text": "new"}) });
+    wait_until("the live turn", || page.chats.lock().unwrap().iter().any(|t| t["text"] == "new") && hub.chat.lock().unwrap().turns.len() == 2);
+
+    // Typing goes to the main.
+    hub.request(None, Request::ChatSend { text: "hi".into() }).unwrap();
+    assert!(notify.requests.lock().unwrap().iter().any(|r| matches!(r, (None, Request::ChatSend { text }) if text == "hi")));
+
+    // The switch off empties the Chat; on fetches it again.
+    let phone_id = main.status().assistants[0].id.clone();
+    main.set_mirror(&phone_id, false).unwrap();
+    wait_until("the Chat emptied", || hub.chat.lock().unwrap().turns.is_empty());
+    main.set_mirror(&phone_id, true).unwrap();
+    main.mirror(vec![]);
+    wait_until("the history again", || page.chat_resets.lock().unwrap().len() == 2);
+
+    // The main goes away: the page says so, and the turns stay.
+    let saved = notify.saved.lock().unwrap().clone();
+    main.to_mirrors(Down::Chat { turn: json!({"text": "new"}) });
+    wait_until("the live turn again", || hub.chat.lock().unwrap().turns.len() == 2);
+    main.stop();
+    wait_until("the note", || page.brains.lock().unwrap().last().is_some_and(|b| b["dormant"] == "Reconnecting to desk…"));
+    assert_eq!(hub.chat.lock().unwrap().turns.len(), 2);
+
+    // Back on the same port: the history replaces the turns.
+    let (main, _) = desk_again(key, port, saved);
+    wait_until("the history after the reconnect", || page.chat_resets.lock().unwrap().len() == 3);
+    assert_eq!(hub.chat.lock().unwrap().turns, old, "replaced, not appended to");
+    assert_eq!(page.chat_resets.lock().unwrap().last(), Some(&old));
     hub.stop_listening().unwrap();
     main.stop();
 }

@@ -182,6 +182,38 @@ pub fn start_session(hub: H, dir: Option<String>, prompt: String, options: Launc
     data(hub.send_to(&machine, CommandKind::Start { dir, prompt, options })?)
 }
 
+/// The main's Chat as the hub holds it: fetched on connect, then live.
+#[tauri::command]
+pub fn chat_history(hub: H) -> Vec<Value> {
+    hub.chat.lock().unwrap().turns.clone()
+}
+
+#[tauri::command]
+pub fn brain_status(hub: H) -> Value {
+    hub.chat_status()
+}
+
+#[tauri::command(async)]
+pub fn chat_send(hub: H, text: String) -> Result<(), String> {
+    hub.request(None, Request::ChatSend { text }).map(|_| ())
+}
+
+/// The next three are best effort, as on the desktop: the page waits for nothing.
+#[tauri::command(async)]
+pub fn chat_seen(hub: H) {
+    let _ = hub.request(None, Request::ChatSeen);
+}
+
+#[tauri::command(async)]
+pub fn window_cancel(hub: H) {
+    let _ = hub.request(None, Request::WindowCancel);
+}
+
+#[tauri::command(async)]
+pub fn brain_stop(hub: H) {
+    let _ = hub.request(None, Request::BrainStop);
+}
+
 #[tauri::command]
 pub fn network_status(hub: H) -> NetworkStatus {
     hub.status()

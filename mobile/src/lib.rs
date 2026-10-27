@@ -45,6 +45,18 @@ impl Sink for TauriSink {
     fn service_stop(&self) {
         android::service_stop(&self.app);
     }
+
+    fn chat(&self, turn: &Value) {
+        let _ = self.app.emit("chat", turn);
+    }
+
+    fn brain(&self, status: &Value) {
+        let _ = self.app.emit("brain", status);
+    }
+
+    fn chat_reset(&self, turns: &[Value]) {
+        let _ = self.app.emit("chat-reset", turns);
+    }
 }
 
 /// The phone's voice conversation: it asks the joined main, shows itself
@@ -126,7 +138,13 @@ pub fn run() {
             commands::voice_view,
             commands::voice_tap,
             commands::voice_cancel,
-            commands::voice_open_settings
+            commands::voice_open_settings,
+            commands::chat_history,
+            commands::brain_status,
+            commands::chat_send,
+            commands::chat_seen,
+            commands::window_cancel,
+            commands::brain_stop
         ])
         .setup(|app| {
             let handle = app.handle().clone();

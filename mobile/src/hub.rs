@@ -4,11 +4,12 @@
 //! this is what the integration test drives.
 
 use crate::alerts::{self, Action, Alerts, Posted, Switches};
+use maya_core::brain::chat::KEEP;
 use maya_core::config::{self, Config, NetworkRole};
 use maya_core::log;
 use maya_core::model::Card;
 use maya_core::net::identity::{self, Keypair};
-use maya_core::net::client::{check_pair_args, pair_with, reconnect, ClientHandle, ClientNotify, Executor, RequestLane, NOT_PAIRED, REMOVED, REQUEST_TIMEOUT};
+use maya_core::net::client::{check_pair_args, pair_with, reconnect, ClientHandle, ClientNotify, Executor, RequestLane, NOT_CONNECTED, NOT_PAIRED, REMOVED, REQUEST_TIMEOUT};
 use maya_core::net::protocol::{CommandKind, Request, CAP_CHAT, CAP_FOLLOW, CAP_MIRROR, DEFAULT_PORT};
 use maya_core::net::routing::MachineInfo;
 use maya_core::remembered::{self, RememberedRow, ResumeOutcome};
@@ -16,9 +17,9 @@ use maya_core::net::{AssistantLink, MirrorAccess, NetworkStatus};
 use maya_core::notify::Notifier;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// What the hub tells the outside: the page's events and the service.
 pub trait Sink: Send + Sync {
@@ -28,6 +29,12 @@ pub trait Sink: Send + Sync {
     fn network(&self, status: &NetworkStatus);
     fn service_start(&self, line: &str);
     fn service_stop(&self);
+    /// A turn of the main's Chat.
+    fn chat(&self, _turn: &Value) {}
+    /// The main's brain status, or why this phone cannot chat.
+    fn brain(&self, _status: &Value) {}
+    /// The main's whole Chat, in place of what the page shows.
+    fn chat_reset(&self, _turns: &[Value]) {}
 }
 
 /// The config and where it is saved.
@@ -70,6 +77,24 @@ pub struct MirrorView {
     pub remembered: Vec<RememberedRow>,
 }
 
+/// The joined main's Chat, as the page shows it.
+#[derive(Default)]
+pub struct ChatView {
+    pub turns: Vec<Value>,
+    /// The main's brain status; `None` until it says.
+    pub status: Option<Value>,
+    /// The turns that came while the history was on its way, which it may
+    /// not hold; `None` when no history is being fetched.
+    live: Option<Vec<Value>>,
+}
+
+/// Keeps as many turns as the main does.
+fn keep_last(turns: &mut Vec<Value>) {
+    if turns.len() > KEEP {
+        turns.drain(..turns.len() - KEEP);
+    }
+}
+
 /// What this phone says it can do: follow a moved main, mirror the main's
 /// board, and show its Chat.
 fn phone_caps() -> Vec<String> {
@@ -84,8 +109,8 @@ pub struct Hub {
     pub maya_dir: PathBuf,
     /// Serializes `refresh`, so a stale snapshot never overtakes a newer one.
     /// Lock order: `refresh` first, alone (its callers hold no other lock);
-    /// `settings`, `notifier`, `posted`, `client`, `client_error`, `link`
-    /// and `mirror` are taken alone, never while holding another hub lock. `stop_client`
+    /// `settings`, `notifier`, `posted`, `client`, `client_error`, `link`,
+    /// `mirror` and `chat` are taken alone, never while holding another hub lock. `stop_client`
     /// joins the client thread, which may be in a callback that calls
     /// `refresh`, so it holds no hub lock while it joins. `lane` has its own
     /// lock, never held here.
@@ -100,6 +125,11 @@ pub struct Hub {
     pub link: Mutex<AssistantLink>,
     /// The joined main's last board; empty otherwise.
     pub mirror: Mutex<MirrorView>,
+    /// The joined main's Chat. The page's `chat` and `chat-reset` events are
+    /// sent while it is held, so they reach the page in the order it changed.
+    pub chat: Mutex<ChatView>,
+    /// The latest history fetch; an answer to an older one is dropped.
+    chat_fetch: AtomicU64,
     /// Where the page's commands go while joined.
     pub lane: Arc<RequestLane>,
     /// This phone's key pair, read from `identity.key` once and kept.
@@ -133,7 +163,7 @@ pub(crate) fn speaks_events(speak_on: bool, silenced: impl FnOnce() -> bool) -> 
 impl Hub {
     pub fn new(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>) -> Arc<Hub> {
         Arc::new(Hub {
-            maya_dir, settings: Mutex::new(settings), client: Mutex::new(None), client_error: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, voice: OnceLock::new(), silenced: OnceLock::new(),
+            maya_dir, settings: Mutex::new(settings), client: Mutex::new(None), client_error: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), chat: Mutex::new(ChatView::default()), chat_fetch: AtomicU64::new(0), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, voice: OnceLock::new(), silenced: OnceLock::new(),
             #[cfg(test)]
             joined_override: Mutex::new(None),
         })
@@ -234,6 +264,94 @@ impl Hub {
             return Some(format!("Update {main} to talk to Maya."));
         }
         None
+    }
+
+    /// The Chat's status: the main's, or, in its shape, why this phone
+    /// cannot chat now (the page shows `dormant` in place of the input).
+    pub fn chat_status(&self) -> Value {
+        let (connected, chat, main) = {
+            let link = self.link.lock().unwrap();
+            (link.connected, link.chat, link.main_name.clone().unwrap_or_else(|| SOME_MAIN.into()))
+        };
+        let dormant = if !connected {
+            Some(format!("Reconnecting to {main}…"))
+        } else if !chat {
+            Some(format!("Update {main} to chat from the phone."))
+        } else if let Some(status) = self.chat.lock().unwrap().status.clone() {
+            return status;
+        } else {
+            None
+        };
+        serde_json::json!({"dot": "idle", "pending": null, "job": null, "ready": false, "dormant": dormant})
+    }
+
+    /// Empties the Chat; a history on its way is dropped.
+    fn forget_chat(&self) {
+        self.chat_fetch.fetch_add(1, Ordering::SeqCst);
+        *self.chat.lock().unwrap() = ChatView::default();
+    }
+
+    /// Starts a history fetch; the turns and the status that come from now
+    /// on are kept for it. Returns its ticket.
+    pub(crate) fn begin_chat_fetch(&self) -> u64 {
+        let ticket = self.chat_fetch.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut c = self.chat.lock().unwrap();
+        c.live = Some(vec![]);
+        c.status = None;
+        ticket
+    }
+
+    /// The main's answer to `ChatHistory` (`{turns, status}`) replaces the
+    /// turns and the page's list, keeping the turns and the status that came
+    /// after the main read its history. An answer to an older fetch is dropped.
+    pub(crate) fn chat_fetched(&self, ticket: u64, answer: Result<Option<Value>, String>) {
+        let history = answer.and_then(|v| v.ok_or_else(|| "no answer".to_string())).and_then(|mut v| {
+            let turns = serde_json::from_value::<Vec<Value>>(v["turns"].take()).map_err(|e| e.to_string())?;
+            Ok((turns, v["status"].take()))
+        });
+        {
+            let mut c = self.chat.lock().unwrap();
+            if self.chat_fetch.load(Ordering::SeqCst) != ticket {
+                return;
+            }
+            let live = c.live.take().unwrap_or_default();
+            let (mut turns, status) = match history {
+                Ok(h) => h,
+                Err(e) => {
+                    log::line("network", format!("could not fetch the main's Chat: {e}"));
+                    return;
+                }
+            };
+            for t in live {
+                if !turns.contains(&t) {
+                    turns.push(t);
+                }
+            }
+            keep_last(&mut turns);
+            c.turns = turns;
+            c.status = c.status.take().or(Some(status).filter(|s| !s.is_null()));
+            self.sink.chat_reset(&c.turns);
+        }
+        self.sink.brain(&self.chat_status());
+    }
+
+    /// Fetches the main's Chat on a thread of its own: the client thread,
+    /// which calls this, is the one that carries the answer. The lane opens
+    /// just after the callbacks that start this, so a fetch made before it
+    /// is tried again.
+    fn fetch_chat(self: &Arc<Self>) {
+        let ticket = self.begin_chat_fetch();
+        let hub = self.clone();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + REQUEST_TIMEOUT;
+            let answer = loop {
+                match hub.request(None, Request::ChatHistory) {
+                    Err(e) if e == NOT_CONNECTED && Instant::now() < deadline && hub.chat_fetch.load(Ordering::SeqCst) == ticket => std::thread::sleep(Duration::from_millis(25)),
+                    answer => break answer,
+                }
+            };
+            hub.chat_fetched(ticket, answer);
+        });
     }
 
     /// `speaks_events` now, for a board event that waited behind a
@@ -397,6 +515,7 @@ impl Hub {
         *self.link.lock().unwrap() = AssistantLink { retrying: true, ..Default::default() };
         self.mirror_seeded.store(false, Ordering::SeqCst);
         *self.mirror.lock().unwrap() = MirrorView::default();
+        self.forget_chat();
         let key = match self.identity() {
             Ok(k) => k,
             Err(e) => {
@@ -485,6 +604,7 @@ impl Hub {
         }
         *self.link.lock().unwrap() = AssistantLink::default();
         *self.mirror.lock().unwrap() = MirrorView::default();
+        self.forget_chat();
         self.refresh();
     }
 
@@ -530,6 +650,16 @@ impl HubClientNotify {
         }
     }
 
+    /// Tells the page the Chat's status, so its note follows the link.
+    fn brain(&self) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(h) = self.hub.upgrade() {
+            h.sink.brain(&h.chat_status());
+        }
+    }
+
     fn set(&self, f: impl FnOnce(&mut AssistantLink)) {
         if self.stop.load(Ordering::SeqCst) {
             return;
@@ -560,6 +690,7 @@ impl ClientNotify for HubClientNotify {
             l.retrying = retrying;
         });
         self.refresh();
+        self.brain();
     }
     fn removed(&self) {
         self.set(|l| {
@@ -585,11 +716,48 @@ impl ClientNotify for HubClientNotify {
         self.set(|l| l.mirror = Some(access));
         h.refresh();
     }
+    /// Called just after `connected` (which clears `chat`): a main with
+    /// Chat that lets this phone mirror it is asked for its history now.
     fn main_caps(&self, caps: &[String]) {
         let voice = caps.iter().any(|c| c == maya_core::net::protocol::CAP_VOICE);
-        self.set(|l| l.voice = voice);
+        let chat = caps.iter().any(|c| c == CAP_CHAT);
+        self.set(|l| {
+            l.voice = voice;
+            l.chat = chat;
+        });
         // So the voice's offer follows the link.
         self.refresh();
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(h) = self.hub.upgrade() else { return };
+        // The last link's status is stale; the history brings the main's.
+        h.chat.lock().unwrap().status = None;
+        self.brain();
+        if chat && h.link.lock().unwrap().mirror == Some(MirrorAccess::Allowed) {
+            h.fetch_chat();
+        }
+    }
+    fn chat_turn(&self, turn: Value) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(h) = self.hub.upgrade() else { return };
+        let mut c = h.chat.lock().unwrap();
+        if let Some(live) = c.live.as_mut() {
+            live.push(turn.clone());
+        }
+        c.turns.push(turn);
+        keep_last(&mut c.turns);
+        h.sink.chat(c.turns.last().unwrap());
+    }
+    fn brain_status(&self, status: Value) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(h) = self.hub.upgrade() else { return };
+        h.chat.lock().unwrap().status = Some(status);
+        self.brain();
     }
     fn main_wake_word(&self, word: Option<&str>) {
         let Some(h) = self.hub.upgrade() else { return };
@@ -616,9 +784,19 @@ impl ClientNotify for HubClientNotify {
         let Some(h) = self.hub.upgrade() else { return };
         if !allowed {
             *h.mirror.lock().unwrap() = MirrorView::default();
+            h.forget_chat();
             self.set(|l| l.mirror = Some(MirrorAccess::Refused));
             h.refresh();
+            self.brain();
             return;
+        }
+        // Allowed again: the Chat was emptied when the switch went off.
+        let (was_allowed, chat) = {
+            let l = h.link.lock().unwrap();
+            (l.mirror == Some(MirrorAccess::Allowed), l.chat)
+        };
+        if chat && !was_allowed {
+            h.fetch_chat();
         }
         // What already waits when the link comes up is not news.
         if !h.mirror_seeded.swap(true, Ordering::SeqCst) {
@@ -890,6 +1068,60 @@ mod tests {
         assert!(hub.joined());
         hub.stop_client();
         assert_eq!(hub.status().main_error, None, "cleared once the client started");
+    }
+
+    #[test]
+    fn the_chat_status_says_why_the_phone_cannot_chat() {
+        let hub = test_hub();
+        let link = |connected, chat| AssistantLink { connected, chat, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() };
+        let idle = |dormant: Value| serde_json::json!({"dot": "idle", "pending": null, "job": null, "ready": false, "dormant": dormant});
+        hub.set_link_for_test(link(false, true), true);
+        assert_eq!(hub.chat_status(), idle("Reconnecting to Yhi…".into()));
+        hub.set_link_for_test(link(true, false), true);
+        assert_eq!(hub.chat_status(), idle("Update Yhi to chat from the phone.".into()));
+        hub.set_link_for_test(link(true, true), true);
+        assert_eq!(hub.chat_status(), idle(Value::Null), "idle until the main says");
+        hub.chat.lock().unwrap().status = Some(serde_json::json!({"dot": "working"}));
+        assert_eq!(hub.chat_status(), serde_json::json!({"dot": "working"}));
+    }
+
+    #[test]
+    fn a_turn_that_comes_while_the_history_is_on_its_way_is_kept() {
+        let hub = test_hub();
+        hub.set_link_for_test(AssistantLink { connected: true, chat: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() }, true);
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        let turn = |t: &str| serde_json::json!({"text": t});
+        notify.chat_turn(turn("before"));
+        let ticket = hub.begin_chat_fetch();
+        notify.chat_turn(turn("in the history"));
+        notify.chat_turn(turn("after the history"));
+        notify.brain_status(serde_json::json!({"dot": "working"}));
+        let history = serde_json::json!({"turns": [turn("before"), turn("in the history")], "status": {"dot": "idle"}});
+        hub.chat_fetched(ticket, Ok(Some(history.clone())));
+        assert_eq!(hub.chat.lock().unwrap().turns, [turn("before"), turn("in the history"), turn("after the history")]);
+        assert_eq!(hub.chat_status(), serde_json::json!({"dot": "working"}), "the newer status");
+        // An answer to an older fetch is not shown over a newer one.
+        let older = hub.begin_chat_fetch();
+        let _newer = hub.begin_chat_fetch();
+        hub.chat_fetched(older, Ok(Some(serde_json::json!({"turns": [], "status": {"dot": "idle"}}))));
+        assert_eq!(hub.chat.lock().unwrap().turns.len(), 3);
+        // Nor once the Chat was emptied (the switch went off).
+        let ticket = hub.begin_chat_fetch();
+        hub.forget_chat();
+        hub.chat_fetched(ticket, Ok(Some(history)));
+        assert!(hub.chat.lock().unwrap().turns.is_empty());
+    }
+
+    #[test]
+    fn the_phone_keeps_the_last_500_turns() {
+        let hub = test_hub();
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        for i in 0..501 {
+            notify.chat_turn(serde_json::json!({"text": i}));
+        }
+        let turns = hub.chat.lock().unwrap().turns.clone();
+        assert_eq!(turns.len(), 500);
+        assert_eq!(turns[0]["text"], 1, "the oldest goes");
     }
 
     #[test]
