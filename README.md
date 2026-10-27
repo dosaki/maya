@@ -33,7 +33,7 @@ the right terminal first.
 - Comes in a dark theme (the default) and a light one: Settings › General › Theme
 - Lets you choose which Enter combinations send a message and which make a new line, several for each: Settings › Keyboard (Enter sends by default)
 - Runs headless over SSH with the `maya` command.
-- Comes as an Android app too: a main Maya in your pocket, or a phone that joins your computer's Maya, shows every session, notifies you when one needs you and, joined to a computer, takes voice commands.
+- Comes as an Android app too: a phone that joins your computer's Maya shows every session, has the same Chat, notifies you when one needs you and takes voice commands.
 
 ## Install
 

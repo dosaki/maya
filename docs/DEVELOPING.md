@@ -64,7 +64,7 @@ an assistant machine it is dormant (no process runs, nothing is reset),
 Chat is read-only there, and her card in Debug mode is greyed as
 "Dormant". An assistant's `hello` says when its brain went dormant. Make
 main asks the outgoing main's brain for a handover summary (60 s at most;
-otherwise a digest of her Chat since then, and none for a phone), sent
+otherwise a digest of her Chat since then), sent
 with `promote`; the new main resumes her own session and reads the summary
 as her first turn. Settings → Debug (off by default) shows the Debug tab
 and her card.
