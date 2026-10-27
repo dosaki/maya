@@ -171,8 +171,7 @@ see `CAP_CHAT` and never sends these requests.
   the phone." in place of the input, which is the existing dormant note.
 - While P is disconnected, Chat keeps what it has and shows
   "Reconnecting to {main}…" in place of the input.
-- The composer uses the phone's options: `keyboardHints: false`, and Enter
-  makes a new line with a Send button (see Builder's choices).
+- The composer has a Send button (see Builder's choices).
 
 ## Approaches
 
@@ -225,10 +224,10 @@ Anti-goals:
   dot on both.
 - **The countdown uses M's `until` as it comes.** Phones and computers on
   the same network keep their clocks within a second of each other.
-- **The phone's composer is Enter for a new line, with a Send button.**
-  This matches the phone's reply box (`attachButton: true`,
-  `keyboardHints: false`). If `renderChat` has no Send button, add one
-  that the phone turns on.
+- **The phone's composer has a Send button**, and its keys work as the
+  phone's reply box's do (`composerKey`, the user's chosen keys).
+  `renderChat` has no Send button today, so it gets one that the phone
+  turns on.
 - The `BrainStatus` shape can move into `maya_core` so that the protocol
   can name it, or the frames can carry it as `Value`. Choose whichever
   keeps the tests simpler.
