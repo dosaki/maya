@@ -255,7 +255,7 @@ pub(crate) enum Need {
 fn scopes(p: GitProvider, need: Need) -> &'static str {
     match (p, need) {
         (GitProvider::Github, Need::Reviews) => "repo scope (fine-grained: Pull requests read)",
-        (GitProvider::Github, Need::Deployments) => "repo scope (fine-grained: Actions read, Deployments read and write, Environments read, Metadata read)",
+        (GitProvider::Github, Need::Deployments) => "repo scope (fine-grained: Actions read, Deployments read and write, Metadata read)",
         (GitProvider::Gitlab, _) => "read_api scope",
     }
 }
@@ -265,7 +265,6 @@ pub fn is_refusal(e: &str) -> bool {
     e.starts_with("the token was refused")
 }
 
-/// The body of a 2xx reply, or what went wrong in words.
 /// The body of a 2xx reply, else why not. An error body is scrubbed of
 /// `token` before it is cut, so no part of the token survives the cut.
 fn check(p: GitProvider, status: u16, body: String, token: &str, need: Need) -> Result<String, String> {
@@ -521,7 +520,7 @@ mod tests {
         let reviews = get_json(&http, &f, "https://api.github.com/x").unwrap_err();
         let deploys = get_json_as(&http, &f, "https://api.github.com/x", Need::Deployments).unwrap_err();
         assert_eq!(reviews, "the token was refused (403). It needs the repo scope (fine-grained: Pull requests read).");
-        assert_eq!(deploys, "the token was refused (403). It needs the repo scope (fine-grained: Actions read, Deployments read and write, Environments read, Metadata read).");
+        assert_eq!(deploys, "the token was refused (403). It needs the repo scope (fine-grained: Actions read, Deployments read and write, Metadata read).");
         assert!(is_refusal(&deploys) && !is_refusal("404: Not Found"));
         let http = fake::FakeHttp::new(vec![("/y", 200, "ok")]);
         assert_eq!(post_json_as(&http, &f, "https://api.github.com/y", &serde_json::json!({"a": 1}), Need::Deployments).unwrap(), "ok");
