@@ -530,7 +530,7 @@ impl Store {
                 completed_timeout_ms: self.config.completed_timeout_ms(),
             });
             if let Some((key, prose)) = looked {
-                self.track_prose(&mut used, &s.session_id, text, key, &prose, card.state);
+                self.track_prose(&mut used, &s.session_id, text, key, &prose, &card);
             }
             card.pr = self.prs.get(&s.cwd);
             card.branch = self.prs.branch(&s.cwd);
@@ -554,7 +554,7 @@ impl Store {
             let looked = self.prose_for(&s.session_id, text);
             let mut card = foreign::derive(s, &tail, looked.as_ref().map_or(&Prose::Unjudged, |(_, p)| p), now_ms, timeout);
             if let Some((key, prose)) = looked {
-                self.track_prose(&mut used, &s.session_id, text, key, &prose, card.state);
+                self.track_prose(&mut used, &s.session_id, text, key, &prose, &card);
             }
             card.pr = self.prs.get(&s.cwd);
             card.branch = self.prs.branch(&s.cwd);
@@ -617,12 +617,13 @@ impl Store {
     }
 
     /// Books what `prose_for` found once the card is derived: a verdict in use
-    /// is kept; a finished card held on `Judging` is queued and counted as
-    /// judging. A card that works or waits on a prompt needs no verdict.
-    fn track_prose(&mut self, used: &mut HashSet<String>, id: &str, text: Option<&str>, key: String, prose: &Prose, state: State) {
+    /// is kept; a finished card held on `Judging` (or working only on a shell
+    /// its turn left) is queued and counted as judging. A card that works or
+    /// waits on a prompt needs no verdict.
+    fn track_prose(&mut self, used: &mut HashSet<String>, id: &str, text: Option<&str>, key: String, prose: &Prose, card: &Card) {
         if *prose != Prose::Judging {
             used.insert(key);
-        } else if matches!(state, State::Completed | State::Idle) {
+        } else if matches!(card.state, State::Completed | State::Idle) || (card.state == State::Working && card.shell) {
             if let Some(text) = text.filter(|_| self.queued.insert(key.clone())) {
                 self.due_asks.push((key, text.to_string()));
             }
@@ -1234,6 +1235,24 @@ mod tests {
         assert_eq!(store.refresh(now)[0].state, State::Awaiting);
         assert!(store.judging_sessions().is_empty());
         assert!(store.take_due_asks().is_empty());
+    }
+
+    #[test]
+    fn a_finished_turn_is_judged_while_its_background_shell_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        let now = finished_turn(&claude);
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"shell","startedAt":1,"statusUpdatedAt":100}"#).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        store.judge_asks = true;
+        let card = store.refresh(now).remove(0);
+        assert!(card.state == State::Working && card.shell);
+        assert_eq!(store.judging_sessions(), ["s7".to_string()].into_iter().collect());
+        let due = store.take_due_asks();
+        assert_eq!(due.len(), 1);
+        store.set_ask_verdict(due[0].0.clone(), Verdict { asks: true, line: Some(SAY_GO.into()) });
+        assert_eq!(store.refresh(now)[0].state, State::Awaiting);
+        assert!(store.judging_sessions().is_empty());
     }
 
     #[test]
