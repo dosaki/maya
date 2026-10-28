@@ -44,6 +44,7 @@ Requirements:
 
 - One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity, Grok Build, [Kiro CLI](https://kiro.dev/cli) or [OpenCode](https://opencode.ai), installed and, if applicable, signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
 - Pull requests: turn on GitHub or GitLab in Settings → Git and give it a token (or the name of a variable that holds one).
+- Deployments: turn on GitHub in Settings → Git. The token needs `repo` (classic), or Actions: read, Deployments: read and write and Metadata: read (fine-grained).
 - macOS on Apple Silicon or Intel (macOS 14 or later for voice).
 - Windows 10 or 11, 64-bit, with [Git for Windows](https://git-scm.com/download/win).
 - Ubuntu 24.04 or later with GNOME, x86_64 or arm64. Other distributions
@@ -230,7 +231,7 @@ main's Wi‑Fi address changes, join again with the new one.
 
 Each ask and each finished turn is a notification you can turn off on the
 Network tab, or silence per channel in Android's settings; tapping one
-opens the card. There is no Pull Requests tab on the phone.
+opens the card. There is no Pull Requests tab and no Deployments tab on the phone.
 
 The phone also speaks and listens while the app is on screen. Tap the
 microphone and talk to Maya as you would on the computer: the computer's
@@ -536,6 +537,7 @@ write and drives them through their own interfaces.
   the tab, when several sessions share one); on Linux the sessions Maya
   starts run in tmux, which types into them, shown in GNOME Terminal.
 - **Pull requests** come from GitHub's and GitLab's APIs, refreshed every two minutes.
+- **Deployments** come from GitHub's API, checked every two minutes on the main or a standalone Maya: runs waiting for your approval, in repos pushed to in the last 7 days that have an environment with required reviewers.
 - **Voice** is a small listener sidecar (Apple's recogniser or whisper.cpp)
   streaming text to Maya; a wake-word and confirmation state machine
   decides what to do; the command, board and pull requests go to Claude

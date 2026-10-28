@@ -109,6 +109,20 @@ token` once, when `gh` is logged in. Review clones run `git clone` over
 SSH (the default) or HTTPS, chosen per provider in Settings → Git, with the
 user's own git credentials.
 
+The Deployments tab lists GitHub Actions runs that wait for the user's
+approval, with Approve and Reject buttons, and deployment runs queued
+behind another run's deployment ("Waiting on <sha> <title>"). Only a main
+or a standalone Maya checks, every two minutes; an assistant's tab says
+"Deployments are checked on the main." The check covers the repos the
+token can see that were pushed to in the last 7 days. Of those, only repos
+with an environment that requires reviewers are asked for runs, and that
+answer is kept for 1 hour per repo. GitHub only; GitLab is not covered.
+Reject rejects the pending deployment, so the run fails at that step; it
+does not cancel the whole run. Approve approves every environment in that
+run that the user may approve. The token needs `repo` (classic), or, for a
+fine-grained token, **Actions: read**, **Deployments: read and write** and
+**Metadata: read**.
+
 ## Windows
 
 Requirements: Rust (rustup, the MSVC toolchain), the Visual Studio C++
