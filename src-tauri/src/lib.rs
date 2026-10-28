@@ -689,13 +689,13 @@ fn announcement(speak_notifications: bool, muted: bool, focus: bool) -> (bool, b
 }
 
 pub(crate) fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify, speak, muted, wanted_voices, assistant, volume, wake_word) = {
+    let (cards, judging, wants_notify, speak, muted, wanted_voices, assistant, volume, wake_word) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
         let cards = local_cards(&mut store);
         let c = &store.config;
         let chain = if c.speak_notifications && !c.muted { voices_wanted(c, store.claude_dir()) } else { vec![] };
-        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, chain, c.network.role == config::NetworkRole::Assistant, c.voice_loudness(), c.listen_word())
+        (cards, store.judging_sessions(), c.notify_on_awaiting, c.speak_notifications, c.muted, chain, c.network.role == config::NetworkRole::Assistant, c.voice_loudness(), c.listen_word())
     };
     // Due names are typed into the terminals with no lock held.
     actions::run_due_renames(&local(&app.state::<AppState>()));
@@ -711,7 +711,9 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
     let (fresh, finished) = {
         let state = app.state::<AppState>();
         let mut n = state.notifier.lock().unwrap();
-        (n.take_new(&cards), n.take_finished(&cards))
+        // A card whose last message is still being judged is announced once its verdict lands.
+        let settled: Vec<Card> = cards.iter().filter(|c| !judging.contains(&c.session_id)).cloned().collect();
+        (n.take_new(&cards), n.take_finished(&settled))
     };
     // A Focus mode (Do Not Disturb and friends) keeps Maya quiet; banners are
     // left to macOS, which filters them by the Focus's own rules.
@@ -1159,6 +1161,52 @@ pub(crate) fn poll_pull_requests(app: &AppHandle) {
     refresh_and_emit(app);
 }
 
+/// The model that judges finished messages: Maya's agent's own, or Claude Code's quick one.
+fn judge_model(cfg: &Config) -> Option<String> {
+    match cfg.brain_model() {
+        Some(m) => Some(m.to_string()),
+        None if cfg.brain() == Harness::ClaudeCode => Some("haiku".into()),
+        None => None,
+    }
+}
+
+/// Judges the finished messages the store queued, outside the store lock,
+/// and repaints once their verdicts are in.
+pub(crate) fn poll_asks(app: &AppHandle) {
+    let (due, brain, model, cwd) = {
+        let state = app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        (store.take_due_asks(), store.config.brain(), judge_model(&store.config), store.claude_dir().join("maya"))
+    };
+    if due.is_empty() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&cwd);
+    let binary = launch::find_binary(brain);
+    let answers: Vec<_> = due
+        .into_iter()
+        .map(|(key, text)| {
+            let verdict = match &binary {
+                Ok(bin) => maya_core::asks::judge(brain, bin, model.as_deref(), &text, &cwd)
+                    .map_err(|e| log::line("asks", format!("judging a finished message: {e:?}"))),
+                Err(_) => Err(()),
+            };
+            (key, verdict)
+        })
+        .collect();
+    {
+        let state = app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        for (key, verdict) in answers {
+            match verdict {
+                Ok(v) => store.set_ask_verdict(key, v),
+                Err(()) => store.set_ask_failed(key),
+            }
+        }
+    }
+    refresh_and_emit(app);
+}
+
 /// Saves a pasted file under the Maya directory and returns its path.
 #[tauri::command(async)]
 fn save_attachment(state: TauriState<AppState>, name: String, bytes: Vec<u8>) -> Result<String, String> {
@@ -1538,6 +1586,7 @@ const PR_POLL: Duration = Duration::from_secs(10);
 pub fn run() {
     let dir = claude_dir();
     let mut store = Store::new(dir.clone());
+    store.judge_asks = true;
     store.compact_events();
     let chat = maya_core::brain::chat::ChatLog::load(store.claude_dir().join("maya").join("brain").join("chat.json"));
     let brain = brain_app::BrainState::new(store.claude_dir());
@@ -1670,6 +1719,11 @@ pub fn run() {
                     std::thread::sleep(PR_POLL);
                 }
             });
+            let asks_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                poll_asks(&asks_handle);
+                std::thread::sleep(Duration::from_secs(2));
+            });
             let review_handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 poll_reviews(&review_handle);
@@ -1724,6 +1778,17 @@ pub fn run() {
 #[cfg(test)]
 mod route_tests {
     use super::*;
+
+    #[test]
+    fn the_judge_uses_the_agents_model_or_claudes_quick_one() {
+        let mut cfg = Config::default();
+        assert_eq!(judge_model(&cfg).as_deref(), Some("haiku"));
+        cfg.agent_model = " opus ".into();
+        assert_eq!(judge_model(&cfg).as_deref(), Some("opus"));
+        cfg.agent_model = String::new();
+        cfg.agent = Some(Harness::Codex);
+        assert_eq!(judge_model(&cfg), None);
+    }
 
     #[test]
     fn the_heartbeat_rides_every_third_pr_poll() {
