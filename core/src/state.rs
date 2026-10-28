@@ -25,23 +25,78 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// Phrases that mark the end of a turn as waiting on the user, even without
-/// a question mark. Matched on whole words in the last line.
-const DECISION_PHRASES: &[&str] = &["let me know", "say the word", "which do you", "do you want", "should i", "shall i", "want me to", "your call", "tell me which"];
+/// Phrases that mark a sentence as waiting on the user, even without a
+/// question mark. Matched on whole words.
+const DECISION_PHRASES: &[&str] = &[
+    "let me know",
+    "say the word",
+    "which do you",
+    "do you want",
+    "should i",
+    "shall i",
+    "want me to",
+    "your call",
+    "tell me which",
+    "if you'd like",
+    "if you would like",
+    "if you want",
+    "if you say",
+    "say go",
+    "say so",
+    "tell me",
+    "up to you",
+    "your decision",
+    "after you run",
+    "once you run",
+    "please run",
+    "when you're ready",
+];
 
-/// The last non-empty line of an assistant message, with a trailing code
-/// fence dropped so a pasted block does not hide the line before it.
-fn last_line(text: &str) -> Option<&str> {
-    let mut lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    if lines.last().map_or(false, |l| l.starts_with("```")) {
-        lines.pop();
-        while let Some(l) = lines.pop() {
-            if l.starts_with("```") {
-                break;
-            }
+/// The lines of `text` that carry prose: not inside a code fence, not a table
+/// row, quote or `! ` command. Also the first `! ` command line, fenced or not.
+fn prose_lines(text: &str) -> (Vec<&str>, Option<&str>) {
+    let mut prose = Vec::new();
+    let mut command = None;
+    let mut fenced = false;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if line.starts_with("```") {
+            fenced = !fenced;
+        } else if line.starts_with("! ") {
+            command.get_or_insert(line);
+        } else if !fenced && !line.starts_with('|') && !line.starts_with('>') {
+            prose.push(line);
         }
     }
-    lines.last().copied()
+    (prose, command)
+}
+
+/// The sentences of `line`, split at `.`, `?` or `!` followed by whitespace.
+/// A bracketed aside stays with the sentence before it.
+fn sentences(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut depth) = (0, 0i32);
+    let mut chars = line.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            '.' | '?' | '!' if depth == 0 => {
+                if let Some(&(_, next)) = chars.peek() {
+                    if next.is_whitespace() {
+                        let rest = line[i + 1..].trim_start();
+                        if !rest.starts_with('(') && !rest.starts_with('[') {
+                            out.push(line[start..=i].trim());
+                            start = i + 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.push(line[start..].trim());
+    out.retain(|s| !s.is_empty());
+    out
 }
 
 /// `line` without any bracketed asides at its end, such as `(e.g. "skip #2")`
@@ -60,22 +115,28 @@ fn strip_trailing_asides(line: &str) -> &str {
     }
 }
 
-/// The closing line of `text` when it asks the user for a decision: it ends
-/// with a question mark (ignoring trailing markdown, quotes or emoji) or
-/// contains one of `DECISION_PHRASES`. Questions earlier in the message do
-/// not count.
+/// The last sentence of `text`, anywhere in it, that asks the user for a
+/// decision: it ends with a question mark (ignoring trailing markdown, quotes
+/// or emoji) or contains one of `DECISION_PHRASES`. Code, tables and quotes
+/// are skipped. Failing that, the first `! ` command line, as the ask to run it.
 pub fn asking_line(text: &str) -> Option<String> {
-    let line = last_line(text)?;
-    let core = strip_trailing_asides(line).trim_end_matches(|c: char| !c.is_alphanumeric() && c != '?');
-    if core.ends_with('?') {
-        return Some(line.to_string());
-    }
-    let words: Vec<String> = line.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect();
-    let padded = format!(" {} ", words.join(" "));
-    if DECISION_PHRASES.iter().any(|p| padded.contains(&format!(" {p} "))) {
-        return Some(line.to_string());
-    }
-    None
+    let (prose, command) = prose_lines(text);
+    let asks = |s: &str| {
+        let core = strip_trailing_asides(s).trim_end_matches(|c: char| !c.is_alphanumeric() && c != '?');
+        if core.ends_with('?') {
+            return true;
+        }
+        let words: Vec<String> = s.to_lowercase().split(|c: char| !c.is_alphanumeric() && c != '\'' && c != '’').filter(|w| !w.is_empty()).map(str::to_string).collect();
+        let padded = format!(" {} ", words.join(" "));
+        DECISION_PHRASES.iter().any(|p| padded.contains(&format!(" {p} ")))
+    };
+    prose
+        .iter()
+        .rev()
+        .flat_map(|l| sentences(l).into_iter().rev())
+        .find(|s| asks(s))
+        .map(str::to_string)
+        .or_else(|| command.map(str::to_string))
 }
 
 fn permission_detail(e: &HookEvent) -> String {
@@ -441,25 +502,20 @@ use crate::events::HookEvent;
     }
 
     #[test]
-    fn asking_line_spots_questions_and_decision_phrases_at_the_tail_only() {
-        assert_eq!(asking_line("Done.\n\nCreate it as drafted?"), Some("Create it as drafted?".to_string()));
-        assert_eq!(asking_line("Which option do you prefer? "), Some("Which option do you prefer?".to_string()));
-        // Trailing markdown, quotes or emoji after the question mark are ignored.
-        assert_eq!(asking_line("Does this look right?** 🙂"), Some("Does this look right?** 🙂".to_string()));
-        // A code fence at the end does not hide the question before it, and one before the question is skipped.
-        assert_eq!(asking_line("Ready?\n```\ncode\n```"), Some("Ready?".to_string()));
-        assert_eq!(asking_line("```\nx?\n```\nSay the word and I will commit it."), Some("Say the word and I will commit it.".to_string()));
-        // Decision phrases without a question mark.
-        assert_eq!(asking_line("Two options.\n\nLet me know which you want."), Some("Let me know which you want.".to_string()));
-        assert_eq!(asking_line("I can do A or B. Your call."), Some("I can do A or B. Your call.".to_string()));
-        assert_eq!(asking_line("Should I go ahead"), Some("Should I go ahead".to_string()));
-        // A parenthetical example after the question mark does not hide it.
-        let aside = "Approve this plan, or amend any rows? (e.g. \"flip #1 to address\", \"skip #2\")";
-        assert_eq!(asking_line(aside), Some(aside.to_string()));
-        assert_eq!(asking_line("Go ahead? [y/n]"), Some("Go ahead? [y/n]".to_string()));
-        // A question earlier in the message does not count.
-        assert_eq!(asking_line("Why did it fail? Because of X.\n\nFixed and pushed."), None);
-        assert_eq!(asking_line("Is it done? Yes (mostly)."), None);
+    fn asking_line_finds_the_ask_anywhere_in_the_message() {
+        assert_eq!(asking_line("**Which way should I build it?**\n- A: one.\n- B: two.\n\nI recommend A. It is safer. It costs more."), Some("**Which way should I build it?**".into()));
+        assert_eq!(asking_line("Option 2 is a question about who opens PRs — your call, not mine.\n\nAnd it isn't collector-specific."), Some("Option 2 is a question about who opens PRs — your call, not mine.".into()));
+        assert_eq!(asking_line("I'll only do it if you say so and tell me which thread to use.\n\nOtherwise, try the checks yourself."), Some("I'll only do it if you say so and tell me which thread to use.".into()));
+        assert_eq!(asking_line("All green. If you'd like that fixed, I can do it in a separate PR."), Some("If you'd like that fixed, I can do it in a separate PR.".into()));
+        assert_eq!(asking_line("It's a single AWS call, and I can make it now if you say go."), Some("It's a single AWS call, and I can make it now if you say go.".into()));
+        assert_eq!(asking_line("Run these:\n```\n! cd ~/dev/x && sh a.sh\n```\nAfter you run them, I'll check the policies."), Some("After you run them, I'll check the policies.".into()));
+        // Kept from the old test: closing lines, code fences, trailing asides.
+        assert_eq!(asking_line("Ready?\n```\ncode\n```"), Some("Ready?".into()));
+        assert_eq!(asking_line("Go ahead? [y/n]"), Some("Go ahead? [y/n]".into()));
+        // A question inside code, a table or a quote is not an ask.
+        assert_eq!(asking_line("```\nwhy?\n```\nDone."), None);
+        assert_eq!(asking_line("| a? | b |\n|---|---|\n\nAll done."), None);
+        assert_eq!(asking_line("> Should we?\n\nFixed and pushed."), None);
         assert_eq!(asking_line("All done."), None);
         assert_eq!(asking_line(""), None);
     }
