@@ -518,8 +518,13 @@ write and drives them through their own interfaces.
   session is created on the server first, so its name, model and effort
   are set from the start, then shown in a window opened on it.
 - **States** come from the hook events in `~/.claude/maya/events.jsonl`
-  when the hook is installed, with a rule-based reading of the transcript
-  as the fallback (a turn that ends in a question is "Awaiting Decision").
+  when the hook is installed, and from a reading of the transcript as the
+  fallback. When a turn finishes, Maya asks her own agent whether its last
+  message asks you something; if it does, the card is "Awaiting Decision".
+  That is one call per finished message, which sends the agent the last
+  8,000 characters of the message, and the verdict is remembered, so a
+  message is judged once. When no agent can judge, the wording of the
+  message decides (a question, or a phrase such as "let me know").
 - **Replies** are typed into the session's terminal, so the agent takes
   them as yours: a Claude Code session can be approved from Maya or the
   phone. A multi-line reply to Claude Code is typed line by line, with
