@@ -728,11 +728,11 @@ pub(crate) fn announce_after(app: &AppHandle, generation: Option<u64>, lead: &st
         if matches!(old.origin, Via::Voice | Via::Maya) {
             close_window(&mut state.voice.lock().unwrap(), "idle");
         }
-        remember(app, "maya", &format!("Cancelled: {}", old.say), old.origin);
+        remember(app, "maya", &format!("Cancelled: {}", maya_core::speech::escape(&old.say)), old.origin);
     }
     log::line("action", format!("batch {id} announced: {say}"));
     let spoken = aloud(origin);
-    let line = crate::brain_route::one_line(&[lead, say.as_str()]);
+    let line = crate::brain_route::announced_line(lead, &say);
     // Only the listener run that heard the request opens its flow's window.
     let ours = |v: &VoiceState| generation.map_or(true, |g| v.generation == g);
     if spoken {

@@ -12,6 +12,8 @@ pub fn from_markdown(text: &str) -> String {
     // Inside a table, code block, image or HTML block: nothing is said.
     let mut skip = 0usize;
     let mut autolink = false;
+    // Where the last full stop `end_sentence` added ends, if it added one.
+    let mut added_stop = None;
     for event in Parser::new_ext(text, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS) {
         match event {
             Event::Start(Tag::Table(_) | Tag::CodeBlock(_) | Tag::Image { .. } | Tag::HtmlBlock) => skip += 1,
@@ -27,11 +29,35 @@ pub fn from_markdown(text: &str) -> String {
                 out.push_str(&words.join(" "));
             }
             Event::SoftBreak | Event::HardBreak => out.push(' '),
-            Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item) => end_sentence(&mut out),
+            Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item) => {
+                if end_sentence(&mut out) {
+                    added_stop = Some(out.trim_end().len());
+                }
+            }
             _ => {}
         }
     }
+    // A full stop added only to separate sentences is not needed after the last.
+    let trimmed = out.trim_end().len();
+    out.truncate(trimmed);
+    if added_stop == Some(out.len()) {
+        out.pop();
+    }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Plain text made safe to put into markdown: every character markdown
+/// could read as markup is escaped, so Chat shows it and the voice says it
+/// as written ("use the <Select> component", "__init__").
+pub fn escape(plain: &str) -> String {
+    let mut out = String::with_capacity(plain.len());
+    for c in plain.chars() {
+        if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '&' | '|' | '~' | '#' | '!') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn is_url(word: &str) -> bool {
@@ -40,17 +66,20 @@ fn is_url(word: &str) -> bool {
 }
 
 /// Closes what was said so far with a full stop unless it already ends a
-/// sentence or a clause, then a space for the next one.
-fn end_sentence(out: &mut String) {
+/// sentence or a clause, then a space for the next one. True when it added
+/// the full stop.
+fn end_sentence(out: &mut String) -> bool {
     let trimmed = out.trim_end().len();
     out.truncate(trimmed);
     if out.is_empty() {
-        return;
+        return false;
     }
-    if !out.ends_with(['.', '!', '?', ':', ';', '…']) {
+    let add = !out.ends_with(['.', '!', '?', ':', ';', '…']);
+    if add {
         out.push('.');
     }
     out.push(' ');
+    add
 }
 
 #[cfg(test)]
@@ -59,7 +88,7 @@ mod tests {
 
     #[test]
     fn plain_lines_pass_through_unchanged() {
-        for l in ["Sure. Focusing api-fix.", "Telling api_fix_v2: open the PR.", "Resuming 2 sessions, 1 here and 1 on Gnowee.", "Which one?"] {
+        for l in ["Dormant", "Working on: refactor", "Sure. Focusing api-fix.", "Telling api_fix_v2: open the PR.", "Resuming 2 sessions, 1 here and 1 on Gnowee.", "Which one?"] {
             assert_eq!(from_markdown(l), l);
         }
     }
@@ -67,7 +96,7 @@ mod tests {
     fn a_link_is_read_as_its_label_and_a_bare_url_as_a_link() {
         assert_eq!(from_markdown("See [the PR](https://github.com/o/r/pull/1)."), "See the PR.");
         assert_eq!(from_markdown("It is at https://example.com/x now."), "It is at a link now.");
-        assert_eq!(from_markdown("<https://example.com>"), "a link.");
+        assert_eq!(from_markdown("<https://example.com>"), "a link");
     }
     #[test]
     fn emphasis_headings_and_inline_code_are_plain_words() {
@@ -85,6 +114,12 @@ mod tests {
     #[test]
     fn only_a_table_says_nothing() {
         assert_eq!(from_markdown("| a |\n|---|\n| 1 |"), "");
+    }
+    #[test]
+    fn escaped_plain_text_is_read_and_shown_as_written() {
+        for x in ["use the <Select> component", "rename __init__ to *main*", "support <T> generics & [x] | y ~z~ `c`", "a\\b"] {
+            assert_eq!(from_markdown(&escape(x)), x);
+        }
     }
     #[test]
     fn paragraphs_join_into_one_line() {
