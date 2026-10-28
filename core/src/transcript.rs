@@ -61,14 +61,14 @@ pub fn read_tail(path: &Path, max_bytes: u64) -> TranscriptTail {
 }
 
 /// Like `read_tail` over `TAIL_BYTES`, but widens the window while it holds no
-/// assistant text, so a long run of records written after the last message
-/// (idle compaction) does not hide it.
+/// assistant record at all, so a long run of records written after the last
+/// message (idle compaction) does not hide it. A turn of tool calls stops it.
 pub fn read_last_turn(path: &Path) -> TranscriptTail {
     let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut window = TAIL_BYTES;
     loop {
-        let tail = read_tail(path, window);
-        if tail.last_assistant_text.is_some() || window >= len || window >= TURNS_SCAN_MAX_BYTES {
+        let (tail, assistant) = tail_text(path, window).map(|t| parse_window(&t)).unwrap_or_default();
+        if assistant || window >= len || window >= TURNS_SCAN_MAX_BYTES {
             return tail;
         }
         window = (window * 2).min(TURNS_SCAN_MAX_BYTES);
@@ -663,6 +663,12 @@ impl TailCache {
 }
 
 pub fn parse_tail(text: &str) -> TranscriptTail {
+    parse_window(text).0
+}
+
+/// `parse_tail`, and whether `text` holds any assistant record.
+fn parse_window(text: &str) -> (TranscriptTail, bool) {
+    let mut assistant = false;
     let mut last_text: Option<String> = None;
     let mut open: Vec<(String, OpenQuestion)> = Vec::new();
     let mut answered: HashSet<String> = HashSet::new();
@@ -673,6 +679,7 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let kind = v["type"].as_str().unwrap_or("");
+        assistant |= kind == "assistant";
         let main_chain = v["isSidechain"].as_bool() != Some(true);
         if kind == "user" && main_chain && is_prompt(&v) {
             turn_end = None;
@@ -732,7 +739,7 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
     }
 
     let open_question = open.into_iter().rev().find(|(id, _)| !answered.contains(id)).map(|(_, q)| q);
-    TranscriptTail { last_assistant_text: last_text, open_question, context_tokens, model, turn_end }
+    (TranscriptTail { last_assistant_text: last_text, open_question, context_tokens, model, turn_end }, assistant)
 }
 
 /// A user record the person typed: not a tool result, a meta record or the
@@ -1451,5 +1458,23 @@ mod tests {
         assert_eq!(t.turn_end, Some(the_ask()));
         assert_eq!(t.last_assistant_text.as_deref(), Some("Which way? A or B."));
         assert_eq!(TailCache::default().get(&p), t);
+    }
+
+    #[test]
+    fn read_last_turn_does_not_widen_past_a_working_turn_of_tool_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        let call = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t","name":"Read","input":{}}]}}"#;
+        let result = format!(r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t","content":"{}"}}]}}}}"#, "x".repeat(20_000));
+        let mut body = format!("{}\n", ask_line());
+        for _ in 0..20 {
+            body.push_str(&format!("{call}\n{result}\n"));
+        }
+        std::fs::write(&p, body).unwrap();
+
+        assert!(std::fs::metadata(&p).unwrap().len() > TAIL_BYTES + 100_000);
+        let t = read_last_turn(&p);
+        assert_eq!(t.last_assistant_text, None, "the window held assistant records: no wider read");
+        assert_eq!(t, read_tail(&p, TAIL_BYTES));
     }
 }
