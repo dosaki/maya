@@ -28,8 +28,8 @@ class LineArgs {
 /**
  * What the Rust side cannot do itself: the foreground service that keeps
  * the process alive, the battery exemption dialog, whether Android lets
- * Maya notify, the device's name and addresses, and which notification
- * was tapped.
+ * Maya notify, the sessions' notifications and their buttons, the
+ * device's name and addresses, and which notification was tapped.
  */
 @TauriPlugin
 class KeepAlivePlugin(private val activity: Activity) : Plugin(activity) {
@@ -71,6 +71,19 @@ class KeepAlivePlugin(private val activity: Activity) : Plugin(activity) {
         ret.put("value", pendingId ?: JSONObject.NULL)
         pendingId = null
         invoke.resolve(ret)
+    }
+
+    @Command
+    fun notifySession(invoke: Invoke) {
+        SessionNotifications.post(activity, invoke.parseArgs(NotifyArgs::class.java))
+        invoke.resolve()
+    }
+
+    /** Where the sessions' notification buttons send their presses. */
+    @Command
+    fun watchButtons(invoke: Invoke) {
+        SessionNotifications.events = invoke.parseArgs(WatchArgs::class.java).channel
+        invoke.resolve()
     }
 
     @Command
@@ -137,9 +150,9 @@ class KeepAlivePlugin(private val activity: Activity) : Plugin(activity) {
 }
 
 /** The extras tauri-plugin-notification puts on a tap's intent, and its tap action. */
-private const val NOTIFICATION_ID = "NotificationId"
-private const val NOTIFICATION_ACTION = "NotificationUserAction"
-private const val TAP = "tap"
+internal const val NOTIFICATION_ID = "NotificationId"
+internal const val NOTIFICATION_ACTION = "NotificationUserAction"
+internal const val TAP = "tap"
 
 /** Our mark on an intent whose tap was already remembered. */
 private const val TAP_TAKEN = "com.dosaki.maya.mobile.tapTaken"
