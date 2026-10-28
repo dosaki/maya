@@ -1485,7 +1485,7 @@ mod tests {
             let boards = shared.lock().unwrap().boards.clone();
             let cards = super::super::merge::merged(vec![], &boards, now_ms());
             let mut n = self.notifier.lock().unwrap();
-            let fresh: Vec<Card> = n.take_new(&cards).into_iter().chain(n.take_finished(&cards)).collect();
+            let fresh: Vec<Card> = n.take_new(&cards).into_iter().chain(n.take_finished(&cards, &HashSet::new())).collect();
             self.announced.lock().unwrap().extend(fresh.into_iter().map(|c| c.session_id));
         }
         fn board_seeded(&self, cards: &[Card]) {

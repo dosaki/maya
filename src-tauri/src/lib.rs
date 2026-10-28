@@ -711,9 +711,7 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
     let (fresh, finished) = {
         let state = app.state::<AppState>();
         let mut n = state.notifier.lock().unwrap();
-        // A card whose last message is still being judged is announced once its verdict lands.
-        let settled: Vec<Card> = cards.iter().filter(|c| !judging.contains(&c.session_id)).cloned().collect();
-        (n.take_new(&cards), n.take_finished(&settled))
+        (n.take_new(&cards), n.take_finished(&cards, &judging))
     };
     // A Focus mode (Do Not Disturb and friends) keeps Maya quiet; banners are
     // left to macOS, which filters them by the Focus's own rules.
