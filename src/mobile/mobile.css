@@ -31,7 +31,16 @@
 .menu__row { min-height: 44px; padding: 10px 12px; }
 .menu__own { font-size: 16px; }
 
-.topbar { padding: 8px 12px; }
+/* The bar never gets wider than the screen: a wider page makes Android's
+   web view widen the viewport that fixed elements fill, and every
+   full-screen card and dialog then sits off-centre with its right edge
+   cut off. The tabs stay on one line each, scroll sideways when they still
+   do not fit, and a narrow screen keeps the logo without the name. */
+.topbar { padding: 8px 12px; gap: 8px; }
+.tabs { min-width: 0; margin-left: 0; overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab { flex: none; padding: 5px 6px; white-space: nowrap; }
+@media (max-width: 360px) { .topbar__name { display: none; } }
 .tabs .tab__count { display: none; }
 .card__btn, .settings button, .strip__tab, .modal__close, .chat__send, .chat__cancel, .chat__stop { min-height: 40px; }
 .card { padding: 12px 14px; }
