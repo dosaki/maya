@@ -212,22 +212,41 @@ pub fn approval_count(runs: &[DeploymentRun]) -> usize {
     runs.iter().filter(|r| matches!(r.wait, RunWait::Approval { .. })).count()
 }
 
+/// What was last learned about a repo's environments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// An environment has required reviewers.
+    Needs,
+    /// No environment has required reviewers.
+    NoNeed,
+    /// The token was refused; the message is the refusal.
+    Refused(String),
+}
+
 /// Which repos have an environment with required reviewers, as last asked.
 #[derive(Default, Clone)]
 pub struct ApprovalRepos {
-    answers: HashMap<String, (bool, u64)>,
+    answers: HashMap<String, (Answer, u64)>,
 }
 
 impl ApprovalRepos {
     /// The answer for `repo`, if it is under `ANSWER_TTL_MS` old.
-    pub fn fresh(&self, repo: &str, now_ms: u64) -> Option<bool> {
-        let (needs, at) = *self.answers.get(repo)?;
-        (now_ms.saturating_sub(at) < ANSWER_TTL_MS).then_some(needs)
+    pub fn fresh(&self, repo: &str, now_ms: u64) -> Option<Answer> {
+        let (answer, at) = self.answers.get(repo)?;
+        (now_ms.saturating_sub(*at) < ANSWER_TTL_MS).then(|| answer.clone())
     }
 
-    pub fn set(&mut self, repo: &str, needs: bool, now_ms: u64) {
-        self.answers.insert(repo.to_string(), (needs, now_ms));
+    pub fn set(&mut self, repo: &str, answer: Answer, now_ms: u64) {
+        self.answers.insert(repo.to_string(), (answer, now_ms));
     }
+}
+
+/// Whether the ids a row showed are the ids it holds now, in any order.
+pub fn same_environments(shown: &[u64], listed: &[u64]) -> bool {
+    let (mut a, mut b) = (shown.to_vec(), listed.to_vec());
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
 }
 
 /// The rows for one repo: runs waiting for the user, and runs queued behind another.
@@ -235,7 +254,12 @@ pub fn check_repo(http: &dyn Http, forge: &Forge, repo: &str) -> Result<Vec<Depl
     let mut rows = Vec::new();
     let waiting = runs(http, forge, repo, "waiting", 50)?;
     for run in &waiting {
-        let environments = pending_deployments(http, forge, repo, run.id)?;
+        // A 404 says the run finished since the list: it no longer waits, which is no failure of the repo.
+        let environments = match pending_deployments(http, forge, repo, run.id) {
+            Ok(environments) => environments,
+            Err(e) if e.starts_with("404") => continue,
+            Err(e) => return Err(e),
+        };
         if !environments.is_empty() {
             rows.push(row(repo, run, RunWait::Approval { environments }));
         }
@@ -267,7 +291,9 @@ pub fn check_repo(http: &dyn Http, forge: &Forge, repo: &str) -> Result<Vec<Depl
 /// What one repo's work found.
 struct Outcome {
     /// An answer to cache, when `repo_needs_approval` was asked.
-    asked: Option<bool>,
+    asked: Option<Answer>,
+    /// The error is a cached refusal, already logged when it was new.
+    cached: bool,
     rows: Vec<DeploymentRun>,
     /// Whether the check made a call after the repo list.
     attempted: bool,
@@ -275,17 +301,28 @@ struct Outcome {
 }
 
 fn check_one(http: &dyn Http, forge: &Forge, cache: &ApprovalRepos, repo: &str, now_ms: u64) -> Outcome {
-    let mut out = Outcome { asked: None, rows: Vec::new(), attempted: false, error: None };
+    let mut out = Outcome { asked: None, cached: false, rows: Vec::new(), attempted: false, error: None };
     let needs = match cache.fresh(repo, now_ms) {
-        Some(needs) => needs,
+        Some(Answer::Needs) => true,
+        Some(Answer::NoNeed) => false,
+        Some(Answer::Refused(e)) => {
+            // Not asked again until the answer is old or the Git settings change.
+            out.attempted = true;
+            out.cached = true;
+            out.error = Some(e);
+            return out;
+        }
         None => {
             out.attempted = true;
             match repo_needs_approval(http, forge, repo) {
                 Ok(needs) => {
-                    out.asked = Some(needs);
+                    out.asked = Some(if needs { Answer::Needs } else { Answer::NoNeed });
                     needs
                 }
                 Err(e) => {
+                    if is_refusal(&e) {
+                        out.asked = Some(Answer::Refused(e.clone()));
+                    }
                     out.error = Some(e);
                     return out;
                 }
@@ -322,19 +359,23 @@ pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: 
                 })
             })
             .collect();
-        workers.into_iter().map(|w| w.join().map_err(|_| "the check stopped unexpectedly".to_string())).collect()
+        // Every handle is joined: an unjoined panicked one would panic the scope in the caller.
+        let results: Vec<_> = workers.into_iter().map(|w| w.join()).collect();
+        results.into_iter().map(|r| r.map_err(|_| "the check stopped unexpectedly".to_string())).collect()
     });
     let mut outcomes: Vec<(usize, Outcome)> = joined?.into_iter().flatten().collect();
     outcomes.sort_by_key(|(i, _)| *i);
     let (mut rows, mut attempted, mut refused, mut first_refusal) = (Vec::new(), 0, 0, None);
     for (i, out) in outcomes {
         let repo = &repos[i];
-        if let Some(needs) = out.asked {
-            cache.set(repo, needs, now_ms);
+        if let Some(answer) = out.asked {
+            cache.set(repo, answer, now_ms);
         }
         attempted += usize::from(out.attempted);
         if let Some(e) = out.error {
-            crate::log::line("app", format!("deployments: {repo}: {e}"));
+            if !out.cached {
+                crate::log::line("app", format!("deployments: {repo}: {e}"));
+            }
             if is_refusal(&e) {
                 refused += 1;
                 first_refusal.get_or_insert(e);
@@ -557,16 +598,84 @@ mod tests {
         let mut cache = ApprovalRepos::default();
         let e = fetch(&http, &forge(), &mut cache, now()).unwrap_err();
         assert!(is_refusal(&e) && e.contains("Actions read"), "{e}");
-        assert_eq!(cache.fresh("O/a", now()), None);
+        assert!(matches!(cache.fresh("O/a", now()), Some(Answer::Refused(_))));
+    }
+
+    #[test]
+    fn a_refusal_is_not_asked_again_until_it_is_old_and_still_counts_as_refused() {
+        let http = FakeHttp::new(vec![("/user/repos", 200, REPOS_AB), ("/environments", 403, "{}")]);
+        let mut cache = ApprovalRepos::default();
+        let t = now();
+        let first = fetch(&http, &forge(), &mut cache, t).unwrap_err();
+        let second = fetch(&http, &forge(), &mut cache, t + 120_000).unwrap_err();
+        assert!(is_refusal(&first) && is_refusal(&second), "{first} / {second}");
+        assert_eq!(asked(&http, "/environments"), 2);
+        fetch(&http, &forge(), &mut cache, t + 61 * 60_000).unwrap_err();
+        assert_eq!(asked(&http, "/environments"), 4);
+    }
+
+    #[test]
+    fn a_cached_need_skips_the_environments_call_but_still_checks_runs() {
+        let waiting = runs_json(&[(7, 10, 3, "waiting")]);
+        let http = FakeHttp::new(vec![
+            ("/user/repos", 200, REPOS_A),
+            ("/runs/7/pending_deployments", 200, CAN),
+            ("status=waiting", 200, &waiting),
+            ("status=pending", 200, r#"{"workflow_runs":[]}"#),
+        ]);
+        let mut cache = ApprovalRepos::default();
+        cache.set("O/a", Answer::Needs, now());
+        let rows = fetch(&http, &forge(), &mut cache, now()).unwrap();
+        assert_eq!(rows.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![7]);
+        assert_eq!((asked(&http, "/environments"), asked(&http, "status=waiting")), (0, 1));
+    }
+
+    #[test]
+    fn a_run_that_finished_mid_check_is_no_row_and_no_failure() {
+        let waiting = runs_json(&[(7, 10, 3, "waiting"), (8, 11, 4, "waiting")]);
+        let http = FakeHttp::new(vec![
+            ("/runs/7/pending_deployments", 404, r#"{"message":"Not Found"}"#),
+            ("/runs/8/pending_deployments", 200, CAN),
+            ("status=waiting", 200, &waiting),
+            ("status=pending", 200, r#"{"workflow_runs":[]}"#),
+        ]);
+        let rows = check_repo(&http, &forge(), "O/a").unwrap();
+        assert_eq!(rows.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![8]);
+    }
+
+    #[test]
+    fn environments_match_whatever_their_order() {
+        assert!(same_environments(&[2, 1], &[1, 2]));
+        assert!(same_environments(&[], &[]));
+        assert!(!same_environments(&[1], &[1, 2]));
+        assert!(!same_environments(&[1, 3], &[1, 2]));
+    }
+
+    #[test]
+    fn two_stopped_workers_fail_the_check_without_panicking_the_caller() {
+        let http = PanicOnAll(FakeHttp::new(vec![("/user/repos", 200, REPOS_AB)]));
+        assert_eq!(fetch(&http, &forge(), &mut ApprovalRepos::default(), now()), Err("the check stopped unexpectedly".to_string()));
     }
 
     #[test]
     fn the_cache_answers_only_while_fresh() {
         let mut cache = ApprovalRepos::default();
         assert_eq!(cache.fresh("O/a", 0), None);
-        cache.set("O/a", true, 1_000);
-        assert_eq!(cache.fresh("O/a", 1_000 + ANSWER_TTL_MS - 1), Some(true));
+        cache.set("O/a", Answer::Needs, 1_000);
+        assert_eq!(cache.fresh("O/a", 1_000 + ANSWER_TTL_MS - 1), Some(Answer::Needs));
         assert_eq!(cache.fresh("O/a", 1_000 + ANSWER_TTL_MS), None);
+    }
+
+    struct PanicOnAll(FakeHttp);
+
+    impl Http for PanicOnAll {
+        fn get(&self, url: &str, token: &str) -> Result<(u16, String), String> {
+            assert!(url.contains("/user/repos"), "boom");
+            self.0.get(url, token)
+        }
+        fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+            self.0.post_json(url, token, body)
+        }
     }
 
     struct PanicOnB(FakeHttp);

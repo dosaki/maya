@@ -341,17 +341,20 @@ pub(crate) fn poll_deployments(app: &AppHandle) {
         next.error = missing.first().map(|e| e.message.clone());
         next.off = false;
         next.assistant = false;
+        next.fetched_at = Some(now_ms());
         publish_deployments(app, next);
         return;
     };
     let mut cache = state.deployment_repos.lock().unwrap().clone();
     let result = deployments::fetch(git::http(), &forge, &mut cache, now_ms());
+    // The generation is checked under the lock that stores the result, so a settings change cannot slip in between.
+    let mut current = state.deployments.lock().unwrap();
     if state.git_generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
         log::line("app", "deployments: the Git settings changed during the check; its answers are dropped");
         return;
     }
     *state.deployment_repos.lock().unwrap() = cache;
-    let mut next = state.deployments.lock().unwrap().clone();
+    let mut next = current.clone();
     match result {
         Ok(runs) => {
             next.runs = runs;
@@ -365,7 +368,9 @@ pub(crate) fn poll_deployments(app: &AppHandle) {
     next.off = false;
     next.assistant = false;
     next.fetched_at = Some(now_ms());
-    publish_deployments(app, next);
+    *current = next.clone();
+    drop(current);
+    let _ = app.emit("deployments", &next);
 }
 
 /// Banners (and the spoken line) for assigned PRs that were just approved
@@ -516,12 +521,17 @@ fn deployment_url(runs: &[deployments::DeploymentRun], repo: &str, run_id: u64, 
 }
 
 const DEPLOYMENT_GONE: &str = "That deployment is no longer waiting.";
+const DEPLOYMENT_CHANGED: &str = "That deployment changed; check it again.";
 
 /// Answers a waiting run, then looks at its repository again whatever GitHub
 /// said, so the list shows what is true now. No lock is held across a call.
-fn review_deployment_cmd(app: &AppHandle, repo: &str, run_id: u64, approve: bool) -> Result<(), String> {
+/// Only the environments the row showed are answered.
+fn review_deployment_cmd(app: &AppHandle, repo: &str, run_id: u64, shown: &[u64], approve: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
     let ids = approval_environment_ids(&state.deployments.lock().unwrap().runs, repo, run_id).ok_or(DEPLOYMENT_GONE)?;
+    if !deployments::same_environments(shown, &ids) {
+        return Err(DEPLOYMENT_CHANGED.to_string());
+    }
     let conns: Vec<_> = state.store.lock().unwrap().config.git_connections().into_iter().filter(|c| c.provider == GitProvider::Github).collect();
     let (mut forges, missing) = git::forges(&conns);
     let forge = forges.pop().ok_or_else(|| missing.first().map(|e| e.message.clone()).unwrap_or_else(|| "GitHub is switched off.".to_string()))?;
@@ -541,13 +551,13 @@ fn review_deployment_cmd(app: &AppHandle, repo: &str, run_id: u64, approve: bool
 }
 
 #[tauri::command(async)]
-fn deployment_approve(app: AppHandle, repo: String, run_id: u64) -> Result<(), String> {
-    review_deployment_cmd(&app, &repo, run_id, true)
+fn deployment_approve(app: AppHandle, repo: String, run_id: u64, environment_ids: Vec<u64>) -> Result<(), String> {
+    review_deployment_cmd(&app, &repo, run_id, &environment_ids, true)
 }
 
 #[tauri::command(async)]
-fn deployment_reject(app: AppHandle, repo: String, run_id: u64) -> Result<(), String> {
-    review_deployment_cmd(&app, &repo, run_id, false)
+fn deployment_reject(app: AppHandle, repo: String, run_id: u64, environment_ids: Vec<u64>) -> Result<(), String> {
+    review_deployment_cmd(&app, &repo, run_id, &environment_ids, false)
 }
 
 /// Opens a listed run, or the run holding it back, in the browser.

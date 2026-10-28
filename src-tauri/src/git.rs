@@ -41,6 +41,8 @@ pub fn settings_changed(app: &AppHandle) {
     // Before the cache is cleared: a poll that began earlier then drops its answers.
     state.git_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     state.store.lock().unwrap().clear_prs();
+    // A cached refusal or answer may no longer hold under the new token.
+    *state.deployment_repos.lock().unwrap() = Default::default();
     let handle = app.clone();
     std::thread::spawn(move || {
         crate::poll_reviews(&handle);

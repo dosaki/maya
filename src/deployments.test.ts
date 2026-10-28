@@ -86,13 +86,21 @@ describe("deploymentActionFor", () => {
   it("reads a click into an action", () => {
     const root = renderDeployments(state([approval(7, ["production"]), blocked(9, { runId: 7, sha: "a1b2c3d4e5", title: "t", url: "u" })]), NOW, ui());
     const pick = (sel: string) => root.querySelector<HTMLElement>(sel)!;
-    expect(deploymentActionFor(pick("[data-run-id='7'] [data-action=approve]"))).toEqual({ kind: "approve", repo: "O/r", runId: 7 });
-    expect(deploymentActionFor(pick("[data-run-id='7'] [data-action=reject]"))).toEqual({ kind: "reject", repo: "O/r", runId: 7 });
+    expect(deploymentActionFor(pick("[data-run-id='7'] [data-action=approve]"))).toEqual({ kind: "approve", repo: "O/r", runId: 7, environmentIds: [0] });
+    expect(deploymentActionFor(pick("[data-run-id='7'] [data-action=reject]"))).toEqual({ kind: "reject", repo: "O/r", runId: 7, environmentIds: [0] });
     expect(deploymentActionFor(pick("[data-run-id='7'] [data-action=open-run]"))).toEqual({ kind: "open-run", repo: "O/r", runId: 7 });
     expect(deploymentActionFor(pick("[data-run-id='9'] [data-action=open-blocker]"))).toEqual({ kind: "open-blocker", repo: "O/r", runId: 9 });
     expect(deploymentActionFor(pick("[data-run-id='7'] .pr__title"))).toBeNull();
     const off = renderDeployments(state([], { off: true }), NOW, ui());
     expect(deploymentActionFor(off.querySelector("button")!)).toEqual({ kind: "git-settings" });
+  });
+});
+
+describe("deploymentActionFor environments", () => {
+  it("carries the ids of the environments the row displayed", () => {
+    const root = renderDeployments(state([approval(7, ["production", "eu", "us"])]), NOW, ui());
+    const approve = root.querySelector<HTMLElement>("[data-run-id='7'] [data-action=approve]")!;
+    expect(deploymentActionFor(approve)).toEqual({ kind: "approve", repo: "O/r", runId: 7, environmentIds: [0, 1, 2] });
   });
 });
 

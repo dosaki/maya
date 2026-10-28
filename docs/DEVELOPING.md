@@ -118,10 +118,12 @@ standalone Maya checks, every two minutes; on an assistant the Deployments
 tab says "Deployments are checked on the main." The check covers the repos the
 token can see that were pushed to in the last 7 days. Of those, only repos
 with an environment that requires reviewers are asked for runs, and that
-answer is kept for 1 hour per repo. GitHub only; GitLab is not covered.
+answer, a refusal of the token included, is kept for 1 hour per repo, or
+until the Git settings change. GitHub only; GitLab is not covered.
 Reject rejects the pending deployment, so the run fails at that step; it
 does not cancel the whole run. Approve approves every environment in that
-run that the user may approve. The token needs `repo` (classic), or, for a
+run that the user may approve, and only if they are the ones the row showed;
+if a check changed them, the click is refused. The token needs `repo` (classic), or, for a
 fine-grained token, **Actions: read**, **Deployments: read and write** and
 **Metadata: read**.
 

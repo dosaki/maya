@@ -69,16 +69,18 @@ async function deploymentAction(target: Element): Promise<void> {
       showToast(String(e));
     }
   } else {
-    const { repo, runId } = action;
+    const { repo, runId, environmentIds } = action;
     if (deployUi.busy.has(runId)) return;
     deployUi.busy.add(runId);
     deployUi.errors.delete(runId);
     paintDeployments();
     try {
-      await invoke(action.kind === "approve" ? "deployment_approve" : "deployment_reject", { repo, runId });
+      await invoke(action.kind === "approve" ? "deployment_approve" : "deployment_reject", { repo, runId, environmentIds });
       deployments = withoutRun(deployments, repo, runId);
     } catch (e) {
       deployUi.errors.set(runId, String(e));
+      // The backend may have dropped the row already; the toast says why.
+      if (!deployments.runs.some((r) => r.repo === repo && r.runId === runId)) showToast(String(e));
     }
     deployUi.busy.delete(runId);
     paintDeployments();

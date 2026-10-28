@@ -8,7 +8,11 @@ export interface RowUi {
 }
 
 export type DeploymentAction =
-  | { kind: "approve" | "reject" | "open-run" | "open-blocker"; repo: string; runId: number }
+  | { kind: "open-run"; repo: string; runId: number }
+  | { kind: "open-blocker"; repo: string; runId: number }
+  /** `environmentIds` are the environments the row showed; the backend refuses if they changed. */
+  | { kind: "approve"; repo: string; runId: number; environmentIds: number[] }
+  | { kind: "reject"; repo: string; runId: number; environmentIds: number[] }
   | { kind: "git-settings" };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -40,6 +44,7 @@ function renderRun(run: DeploymentRun, nowMs: number, ui: RowUi): HTMLElement {
   const root = el("article", wait.kind === "blocked" ? "pr deploy deploy--blocked" : "pr deploy");
   root.dataset.repo = run.repo;
   root.dataset.runId = String(run.runId);
+  if (wait.kind === "approval") root.dataset.environmentIds = wait.environments.map((e) => e.id).join(",");
   const head = el("header", "pr__head");
   const name = el("span", "pr__name");
   name.append(el("span", "pr__repo", run.repo.split("/").pop() ?? run.repo));
@@ -110,5 +115,10 @@ export function deploymentActionFor(target: Element): DeploymentAction | null {
   const kind = btn?.dataset.action;
   if (!row?.dataset.repo || !row.dataset.runId) return null;
   if (kind !== "approve" && kind !== "reject" && kind !== "open-run" && kind !== "open-blocker") return null;
-  return { kind, repo: row.dataset.repo, runId: Number(row.dataset.runId) };
+  const runId = Number(row.dataset.runId);
+  if (kind === "approve" || kind === "reject") {
+    const environmentIds = (row.dataset.environmentIds ?? "").split(",").filter(Boolean).map(Number);
+    return { kind, repo: row.dataset.repo, runId, environmentIds };
+  }
+  return { kind, repo: row.dataset.repo, runId };
 }
