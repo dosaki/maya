@@ -169,20 +169,28 @@ mod imp {
         Ok(())
     }
 
-    /// `res/drawable/ic_stat_maya.xml`: a white glyph, since Android draws
-    /// status-bar icons as alpha masks and the launcher icon shows as a blob.
-    const STATUS_ICON: &str = "ic_stat_maya";
-
     struct AndroidAlerts<R: Runtime> {
         app: AppHandle<R>,
     }
 
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct NotifyArgs<'a> {
+        id: i32,
+        channel_id: &'a str,
+        title: &'a str,
+        body: &'a str,
+        long_body: &'a str,
+        session_id: &'a str,
+        buttons: &'a [crate::alerts::Button],
+        update: bool,
+    }
+
     impl<R: Runtime> Alerts for AndroidAlerts<R> {
+        // Posted by `KeepAlivePlugin`, not the notification plugin: its
+        // buttons open the app, and these answer from the notification.
         fn post(&self, p: &Post) {
-            let shown = self.app.notification().builder().id(p.id).channel_id(p.channel_id()).icon(STATUS_ICON).title(&p.title).body(&p.body).extra("sessionId", &p.session_id).auto_cancel().show();
-            if let Err(e) = shown {
-                log::line("android", format!("notification: {e}"));
-            }
+            unit(&self.app, "notifySession", NotifyArgs { id: p.id, channel_id: p.channel_id(), title: &p.title, body: &p.body, long_body: &p.long_body, session_id: &p.session_id, buttons: &p.buttons, update: p.update })
         }
 
         fn clear(&self, id: i32) {
@@ -294,6 +302,25 @@ mod imp {
             Ok(())
         });
         voice_call(app, "watch", WatchArgs { channel });
+    }
+
+    /// Hands `KeepAlivePlugin` a channel for the buttons pressed on Maya's
+    /// notifications; each answer is sent on a thread of its own, since it
+    /// waits on the main.
+    pub fn watch_buttons<R: Runtime>(app: &AppHandle<R>, hub: std::sync::Weak<crate::hub::Hub>) {
+        let channel = tauri::ipc::Channel::<serde_json::Value>::new(move |body| {
+            let tauri::ipc::InvokeResponseBody::Json(json) = body else { return Ok(()) };
+            let pressed = serde_json::from_str::<serde_json::Value>(&json).ok().and_then(|e| crate::alerts::pressed(&e));
+            match (pressed, hub.upgrade()) {
+                (Some(p), Some(h)) => {
+                    std::thread::spawn(move || h.answer_pressed(&p));
+                }
+                (None, _) => log::line("notify", format!("unreadable button event: {json}")),
+                _ => {}
+            }
+            Ok(())
+        });
+        unit(app, "watchButtons", WatchArgs { channel });
     }
 
     #[derive(Deserialize)]
@@ -423,6 +450,8 @@ mod imp {
     }
 
     pub fn watch_voice<R: Runtime>(_: &AppHandle<R>, _: std::sync::Weak<crate::voice::Voice>) {}
+
+    pub fn watch_buttons<R: Runtime>(_: &AppHandle<R>, _: std::sync::Weak<crate::hub::Hub>) {}
 
     pub fn microphone_allowed<R: Runtime>(_: &AppHandle<R>) -> bool {
         true

@@ -1,9 +1,12 @@
-//! Which Android notifications a board change posts and clears, and the
-//! lines they and the foreground service show. Pure: the Android side is
-//! behind `Alerts`, so this is tested on the host.
+//! Which Android notifications a board change posts and clears, the lines
+//! they and the foreground service show, and what their buttons send. Pure:
+//! the Android side is behind `Alerts`, so this is tested on the host.
 
-use maya_core::model::{Card, State};
+use maya_core::answer::Pick;
+use maya_core::model::{AwaitKind, Card, State};
+use maya_core::net::protocol::CommandKind;
 use maya_core::notify::body_for;
+use serde::Serialize;
 use std::collections::HashMap;
 
 /// Which channel a notification goes on.
@@ -26,6 +29,34 @@ impl Kind {
 /// clashes with the speech (`silent()` is iOS-only in the plugin).
 pub const SPOKEN_CHANNEL: &str = "spoken";
 
+/// What a notification's button sends, through the main like the card's
+/// own controls. `ask` is the card's `state_since`, so a button left on an
+/// ask that has since moved on is refused rather than answering the next.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Answer {
+    /// Picks a row of the ask's menu.
+    Option { ask: u64, question: usize, index: usize },
+    /// Types into the menu's own-words row; the button opens a text box.
+    Own { ask: u64, question: usize },
+    /// Sends what is typed, as the card's reply box does; the button opens a text box.
+    Reply,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Button {
+    pub label: String,
+    #[serde(flatten)]
+    pub answer: Answer,
+}
+
+/// The most buttons Android shows on a notification.
+pub const MAX_BUTTONS: usize = 3;
+
+/// The longest text a pulled-down notification shows; Android drops the
+/// notification altogether when its extras grow too large.
+pub const LONG_BODY_CHARS: usize = 4000;
+
 /// One notification to show. `id` is stable per session, so a newer one
 /// replaces the older in place; `session_id` rides along so a tap opens
 /// the card.
@@ -35,11 +66,17 @@ pub struct Post {
     pub kind: Kind,
     pub title: String,
     pub body: String,
+    /// What the notification shows pulled down: the whole ask with its
+    /// choices, or the whole last message.
+    pub long_body: String,
+    pub buttons: Vec<Button>,
     pub session_id: String,
     /// What the phone says for it when it speaks events (`notify::spoken_line`).
     pub spoken: Option<String>,
     /// Posted on `SPOKEN_CHANNEL` because the phone is saying it aloud.
     pub quiet: bool,
+    /// Replaces the notification on screen without a sound of its own.
+    pub update: bool,
 }
 
 impl Post {
@@ -151,7 +188,123 @@ pub fn plan(cards: &[Card], fresh: &[Card], finished: &[Card], posted: &mut Post
 
 fn push(out: &mut Vec<Action>, posted: &mut Posted, c: &Card, kind: Kind, body: String) {
     posted.0.insert(c.session_id.clone(), kind);
-    out.push(Action::Post(Post { id: notification_id(&c.session_id), kind, title: title_for(c), body, session_id: c.session_id.clone(), spoken: maya_core::notify::spoken_line(c), quiet: false }));
+    out.push(Action::Post(post_for(c, kind, body)));
+}
+
+fn post_for(c: &Card, kind: Kind, body: String) -> Post {
+    let long_body = match kind {
+        Kind::Decision => ask_text(c),
+        Kind::Finished => body.clone(),
+    };
+    Post { id: notification_id(&c.session_id), kind, title: title_for(c), body, long_body, buttons: buttons_for(c, kind), session_id: c.session_id.clone(), spoken: maya_core::notify::spoken_line(c), quiet: false, update: false }
+}
+
+impl Posted {
+    /// Whether this session's notification of this kind is still up.
+    pub fn has(&self, session_id: &str, kind: Kind) -> bool {
+        self.0.get(session_id) == Some(&kind)
+    }
+}
+
+/// The ask in full, pulled down: what it asks, then each question with
+/// its choices numbered as the terminal numbers them.
+pub fn ask_text(card: &Card) -> String {
+    let Some(aw) = &card.awaiting else { return body_for(card) };
+    let detail = aw.detail.trim();
+    let mut lines: Vec<String> = vec![];
+    if !detail.is_empty() {
+        lines.push(detail.to_string());
+    }
+    for q in &aw.questions {
+        let question = q.question.trim();
+        if !question.is_empty() && question != detail {
+            lines.push(question.to_string());
+        }
+        lines.extend(q.options.iter().enumerate().map(|(i, o)| format!("{}. {}", i + 1, o.label)));
+    }
+    if lines.is_empty() {
+        return body_for(card);
+    }
+    maya_core::state::truncate(&lines.join("\n"), LONG_BODY_CHARS)
+}
+
+/// The pulled-down text of a finished turn: its last message in full.
+pub fn finished_text(text: &str) -> String {
+    maya_core::state::truncate(text.trim(), LONG_BODY_CHARS)
+}
+
+/// The buttons for a notification. A finished turn and an ask in prose
+/// take a reply. A single question takes its first choices, and its
+/// own-words row as a reply when it has one; anything else (several
+/// questions, a multi-select, an ask without a menu) is answered on the
+/// card, where the reply box also waits for the menu to be answered first.
+pub fn buttons_for(card: &Card, kind: Kind) -> Vec<Button> {
+    let reply = || Button { label: "Reply".into(), answer: Answer::Reply };
+    if kind == Kind::Finished {
+        return vec![reply()];
+    }
+    let Some(aw) = card.awaiting.as_ref().filter(|_| card.state == State::Awaiting) else { return vec![] };
+    let ask = card.state_since;
+    match aw.questions.as_slice() {
+        [] if aw.kind == AwaitKind::Text => vec![reply()],
+        [q] if !q.multi_select => {
+            let own = q.own.as_ref().map(|o| Button { label: o.label.clone(), answer: Answer::Own { ask, question: 0 } });
+            let room = MAX_BUTTONS - usize::from(own.is_some());
+            let mut out: Vec<Button> = q.options.iter().take(room).enumerate().map(|(index, o)| Button { label: o.label.clone(), answer: Answer::Option { ask, question: 0, index } }).collect();
+            out.extend(own);
+            out
+        }
+        _ => vec![],
+    }
+}
+
+/// A button pressed on a notification, as the Android side reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pressed {
+    pub session_id: String,
+    pub answer: Answer,
+    /// What was typed, for `Own` and `Reply`.
+    pub text: String,
+}
+
+/// Reads the Android side's `{sessionId, kind, ask, question, index, text}`.
+pub fn pressed(event: &serde_json::Value) -> Option<Pressed> {
+    let session_id = event.get("sessionId")?.as_str().filter(|s| !s.is_empty())?.to_string();
+    let num = |k: &str| event.get(k).and_then(serde_json::Value::as_u64);
+    let answer = match event.get("kind")?.as_str()? {
+        "option" => Answer::Option { ask: num("ask")?, question: num("question")? as usize, index: num("index")? as usize },
+        "own" => Answer::Own { ask: num("ask")?, question: num("question")? as usize },
+        "reply" => Answer::Reply,
+        _ => return None,
+    };
+    let text = event.get("text").and_then(serde_json::Value::as_str).unwrap_or("").trim().to_string();
+    // Android sends an empty reply when the box is submitted blank.
+    if text.is_empty() && !matches!(answer, Answer::Option { .. }) {
+        return None;
+    }
+    Some(Pressed { session_id, answer, text })
+}
+
+/// The command a pressed button sends to the main.
+pub fn command_for(p: &Pressed) -> CommandKind {
+    let session = p.session_id.clone();
+    match p.answer {
+        Answer::Option { ask, question, index } => CommandKind::Pick { session, ask_id: ask, question, pick: Pick::Option { index } },
+        Answer::Own { ask, question } => CommandKind::Pick { session, ask_id: ask, question, pick: Pick::Own { text: p.text.clone() } },
+        Answer::Reply => CommandKind::Reply { session, text: p.text.clone(), attachments: vec![] },
+    }
+}
+
+/// The notification again after a button's answer failed to send: the same
+/// buttons, to try again, under why it failed.
+pub fn failed_post(card: &Card, kind: Kind, error: &str) -> Post {
+    let mut p = post_for(card, kind, format!("Not sent: {error}"));
+    p.long_body = format!("Not sent: {error}\n\n{}", match kind {
+        Kind::Decision => ask_text(card),
+        Kind::Finished => finished_body(card),
+    });
+    p.update = true;
+    p
 }
 
 /// The foreground service's line: the main this phone has joined.
@@ -308,5 +461,109 @@ mod tests {
         assert_eq!(finished_body(&c), "Finished its turn");
         c.snippet = "x".repeat(300);
         assert_eq!(finished_body(&c).chars().count(), 200);
+    }
+
+    fn menu(labels: &[&str], own: bool) -> maya_core::model::Question {
+        maya_core::model::Question {
+            question: "Which one?".into(),
+            header: "Pick".into(),
+            options: labels.iter().map(|l| maya_core::model::Choice { label: l.to_string(), description: String::new() }).collect(),
+            multi_select: false,
+            own: own.then(|| maya_core::model::OwnRow { label: "Type something".into(), row: labels.len() }),
+            chat_row: None,
+        }
+    }
+
+    fn asking(questions: Vec<maya_core::model::Question>) -> Card {
+        let mut c = card("a", State::Awaiting, 7);
+        c.awaiting = Some(Awaiting { kind: AwaitKind::Question, detail: "Run `cargo test`?".into(), questions });
+        c
+    }
+
+    #[test]
+    fn pulled_down_an_ask_shows_its_question_and_every_choice() {
+        let c = asking(vec![menu(&["Yes", "Yes, and don't ask again", "No"], false)]);
+        assert_eq!(ask_text(&c), "Run `cargo test`?\nWhich one?\n1. Yes\n2. Yes, and don't ask again\n3. No");
+        let mut bare = c.clone();
+        bare.awaiting = None;
+        assert_eq!(ask_text(&bare), "Waiting for a decision");
+        let mut posted = Posted::default();
+        let Action::Post(p) = &plan(&[c.clone()], &[c], &[], &mut posted, ON)[0] else { panic!() };
+        assert!(p.long_body.ends_with("3. No"), "{}", p.long_body);
+        assert_eq!(p.body, "Run `cargo test`?");
+    }
+
+    #[test]
+    fn a_single_question_gets_its_first_choices_and_its_own_words_row() {
+        let three = buttons_for(&asking(vec![menu(&["A", "B", "C", "D"], false)]), Kind::Decision);
+        assert_eq!(three.iter().map(|b| b.label.as_str()).collect::<Vec<_>>(), ["A", "B", "C"]);
+        assert_eq!(three[2].answer, Answer::Option { ask: 7, question: 0, index: 2 });
+        let with_own = buttons_for(&asking(vec![menu(&["A", "B", "C"], true)]), Kind::Decision);
+        assert_eq!(with_own.iter().map(|b| b.label.as_str()).collect::<Vec<_>>(), ["A", "B", "Type something"]);
+        assert_eq!(with_own[2].answer, Answer::Own { ask: 7, question: 0 });
+    }
+
+    #[test]
+    fn asks_answered_only_on_the_card_get_no_buttons() {
+        assert!(buttons_for(&asking(vec![menu(&["A"], false), menu(&["B"], false)]), Kind::Decision).is_empty());
+        let mut multi = menu(&["A", "B"], true);
+        multi.multi_select = true;
+        assert!(buttons_for(&asking(vec![multi]), Kind::Decision).is_empty());
+        // A permission ask whose menu is not known: answered on the card.
+        assert!(buttons_for(&card("a", State::Awaiting, 1), Kind::Decision).is_empty());
+    }
+
+    #[test]
+    fn a_prose_ask_and_a_finished_turn_take_a_reply() {
+        let mut prose = card("a", State::Awaiting, 1);
+        prose.awaiting = Some(Awaiting { kind: AwaitKind::Text, detail: "Which branch?".into(), questions: vec![] });
+        assert_eq!(buttons_for(&prose, Kind::Decision), vec![Button { label: "Reply".into(), answer: Answer::Reply }]);
+        assert_eq!(buttons_for(&card("a", State::Completed, 1), Kind::Finished), vec![Button { label: "Reply".into(), answer: Answer::Reply }]);
+    }
+
+    #[test]
+    fn buttons_go_to_android_flat() {
+        let b = Button { label: "Yes".into(), answer: Answer::Option { ask: 7, question: 0, index: 1 } };
+        assert_eq!(serde_json::to_value(&b).unwrap(), serde_json::json!({"label": "Yes", "kind": "option", "ask": 7, "question": 0, "index": 1}));
+        let r = Button { label: "Reply".into(), answer: Answer::Reply };
+        assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({"label": "Reply", "kind": "reply"}));
+    }
+
+    #[test]
+    fn a_pressed_button_becomes_the_cards_own_command() {
+        let opt = pressed(&serde_json::json!({"sessionId": "s1", "kind": "option", "ask": 7, "question": 0, "index": 2})).unwrap();
+        let CommandKind::Pick { session, ask_id: 7, question: 0, pick: Pick::Option { index: 2 } } = command_for(&opt) else { panic!("{opt:?}") };
+        assert_eq!(session, "s1");
+        let own = pressed(&serde_json::json!({"sessionId": "s1", "kind": "own", "ask": 7, "question": 0, "text": " rename it "})).unwrap();
+        let CommandKind::Pick { pick: Pick::Own { text }, .. } = command_for(&own) else { panic!("{own:?}") };
+        assert_eq!(text, "rename it");
+        let reply = pressed(&serde_json::json!({"sessionId": "s1", "kind": "reply", "text": "now push it"})).unwrap();
+        let CommandKind::Reply { text, attachments, .. } = command_for(&reply) else { panic!("{reply:?}") };
+        assert_eq!((text.as_str(), attachments.len()), ("now push it", 0));
+    }
+
+    #[test]
+    fn a_blank_reply_or_a_garbled_event_sends_nothing() {
+        assert_eq!(pressed(&serde_json::json!({"sessionId": "s1", "kind": "reply", "text": "  "})), None);
+        assert_eq!(pressed(&serde_json::json!({"sessionId": "s1", "kind": "own", "ask": 7, "question": 0})), None);
+        assert_eq!(pressed(&serde_json::json!({"sessionId": "", "kind": "reply", "text": "x"})), None);
+        assert_eq!(pressed(&serde_json::json!({"sessionId": "s1", "kind": "option", "question": 0, "index": 1})), None);
+        assert_eq!(pressed(&serde_json::json!({"sessionId": "s1", "kind": "dance"})), None);
+    }
+
+    #[test]
+    fn a_failed_answer_reposts_with_why_and_the_same_buttons() {
+        let c = asking(vec![menu(&["Yes", "No"], false)]);
+        let p = failed_post(&c, Kind::Decision, "Not joined to a main.");
+        assert_eq!(p.body, "Not sent: Not joined to a main.");
+        assert!(p.long_body.starts_with("Not sent: Not joined to a main.\n\nRun `cargo test`?"), "{}", p.long_body);
+        assert_eq!(p.buttons, buttons_for(&c, Kind::Decision));
+        assert_eq!(p.id, notification_id("a"));
+    }
+
+    #[test]
+    fn the_full_text_is_capped() {
+        assert_eq!(finished_text(&"x".repeat(5000)).chars().count(), LONG_BODY_CHARS);
+        assert_eq!(finished_text("  done  "), "done");
     }
 }

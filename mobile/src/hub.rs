@@ -3,7 +3,7 @@
 //! state. The Tauri layer (`lib.rs`, `commands.rs`) is thin on purpose, so
 //! this is what the integration test drives.
 
-use crate::alerts::{self, Action, Alerts, Posted, Switches};
+use crate::alerts::{self, Action, Alerts, Kind, Post, Posted, Pressed, Switches};
 use maya_core::brain::chat::KEEP;
 use maya_core::config::{self, Config, NetworkRole};
 use maya_core::log;
@@ -15,6 +15,7 @@ use maya_core::net::routing::MachineInfo;
 use maya_core::remembered::{self, RememberedRow, ResumeOutcome};
 use maya_core::net::{AssistantLink, MirrorAccess, NetworkStatus};
 use maya_core::notify::Notifier;
+use maya_core::transcript::{Turn, TurnKind};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -160,6 +161,8 @@ pub struct Hub {
     pub voice: OnceLock<Arc<crate::voice::Voice>>,
     /// On silent, vibrate or Do Not Disturb (the voice plugin's `quiet`).
     pub silenced: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
+    /// This hub, for work it hands to a thread of its own.
+    me: Weak<Hub>,
     /// What `joined` answers in a test, so it needs no running client.
     #[cfg(test)]
     joined_override: Mutex<Option<bool>>,
@@ -174,7 +177,8 @@ pub(crate) fn speaks_events(speak_on: bool, silenced: impl FnOnce() -> bool) -> 
 
 impl Hub {
     pub fn new(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>) -> Arc<Hub> {
-        Arc::new(Hub {
+        Arc::new_cyclic(|me| Hub {
+            me: me.clone(),
             maya_dir, settings: Mutex::new(settings), client: Mutex::new(None), client_error: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), chat: Mutex::new(ChatView::default()), chat_fetch: AtomicU64::new(0), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, voice: OnceLock::new(), silenced: OnceLock::new(),
             #[cfg(test)]
             joined_override: Mutex::new(None),
@@ -383,6 +387,48 @@ impl Hub {
         });
     }
 
+    /// Puts a finished turn's whole last message in its notification: the
+    /// board carries only its first 200 characters. Asked on a thread of its
+    /// own after the post, and dropped if the notification is gone by then.
+    fn fill_finished(&self, post: Post) {
+        let Some(hub) = self.me.upgrade() else { return };
+        std::thread::spawn(move || {
+            let turns = hub.send(&post.session_id, |session| CommandKind::History { session }).and_then(|d| serde_json::from_value::<Vec<Turn>>(d.unwrap_or_default()).map_err(|e| e.to_string()));
+            let last = match turns {
+                Ok(turns) => turns.into_iter().rev().find(|t| t.kind == TurnKind::Assistant && !t.text.trim().is_empty()),
+                Err(e) => return log::line("notify", format!("last message of {}: {e}", post.session_id)),
+            };
+            let Some(last) = last else { return };
+            let long_body = alerts::finished_text(&last.text);
+            if long_body == post.long_body {
+                return;
+            }
+            // Held across the post, so a clear cannot slip in between.
+            let posted = hub.posted.lock().unwrap();
+            if posted.has(&post.session_id, Kind::Finished) {
+                hub.alerts.post(&Post { long_body, update: true, ..post });
+            }
+        });
+    }
+
+    /// Sends what a notification's button answered, as the card would. When
+    /// it fails, the notification comes back with why and its buttons, as
+    /// long as the card still waits on it.
+    pub fn answer_pressed(&self, pressed: &Pressed) {
+        let Err(e) = self.request(None, Request::Command(alerts::command_for(pressed))) else { return };
+        log::line("notify", format!("answer from a notification for {}: {e}", pressed.session_id));
+        let Some(card) = self.cards().into_iter().find(|c| c.session_id == pressed.session_id) else { return };
+        let kind = match card.state {
+            maya_core::model::State::Awaiting => Kind::Decision,
+            maya_core::model::State::Completed => Kind::Finished,
+            _ => return,
+        };
+        let posted = self.posted.lock().unwrap();
+        if posted.has(&card.session_id, kind) {
+            self.alerts.post(&alerts::failed_post(&card, kind, &e));
+        }
+    }
+
     /// `speaks_events` now, for a board event that waited behind a
     /// conversation: the voice asks this as it is about to speak it, with
     /// none of its locks held. Takes `settings` alone and briefly; the
@@ -454,7 +500,10 @@ impl Hub {
                         // Spoken (now or once the conversation is idle): post without a sound.
                         p.quiet = v.announce(line);
                     }
-                    self.alerts.post(&p)
+                    self.alerts.post(&p);
+                    if p.kind == Kind::Finished {
+                        self.fill_finished(p);
+                    }
                 }
                 Action::Clear(id) => self.alerts.clear(id),
             }
@@ -999,6 +1048,31 @@ mod tests {
         hub.refresh();
         assert_eq!(said.0.lock().unwrap().as_slice(), ["hexgrid needs a decision"]);
         assert!(posts.0.lock().unwrap()[0].quiet, "posted without a sound, since it is spoken");
+    }
+
+    #[test]
+    fn an_answer_from_a_notification_that_fails_puts_it_back_with_why() {
+        let (hub, posts, _) = hub_with_a_new_ask(false);
+        hub.refresh();
+        let pressed = Pressed { session_id: "s1".into(), answer: alerts::Answer::Option { ask: 5, question: 0, index: 0 }, text: String::new() };
+        // No client runs in the test: the request cannot reach a main.
+        hub.answer_pressed(&pressed);
+        let posts = posts.0.lock().unwrap();
+        assert_eq!(posts.len(), 2, "{posts:?}");
+        assert!(posts[1].body.starts_with("Not sent: "), "{}", posts[1].body);
+        assert!(posts[1].update, "put back without a sound");
+        assert_eq!(posts[1].id, posts[0].id);
+    }
+
+    #[test]
+    fn an_answer_for_a_notification_already_cleared_is_not_put_back() {
+        let (hub, posts, _) = hub_with_a_new_ask(false);
+        hub.refresh();
+        hub.mirror.lock().unwrap().cards[0].state = maya_core::model::State::Working;
+        hub.refresh();
+        let pressed = Pressed { session_id: "s1".into(), answer: alerts::Answer::Reply, text: "go".into() };
+        hub.answer_pressed(&pressed);
+        assert_eq!(posts.0.lock().unwrap().len(), 1);
     }
 
     #[test]

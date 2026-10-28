@@ -384,17 +384,26 @@ What is where:
   names, every session command sent to the joined main through
   `Hub::request`.
 - **`mobile/src/alerts.rs`** decides which notifications a board change
-  posts and clears; **`mobile/src/android.rs`** is the `keepalive` plugin
-  bridge and the Android notifications, with host no-ops.
+  posts and clears, the whole text each shows pulled down, and its
+  buttons: a single question's first choices (three at most, Android's
+  limit) and its own-words row, and a Reply box on a prose ask or a
+  finished turn. **`mobile/src/android.rs`** is the `keepalive` plugin
+  bridge and the Android notifications, with host no-ops. A press goes
+  from `SessionNotificationReceiver` through the channel `watch_buttons`
+  hands the plugin to `Hub::answer_pressed`, which sends it as the card
+  would and puts the notification back with why when that fails.
 - **`mobile/gen/android/`** is the generated project, committed, plus
   `KeepAliveService.kt` (the foreground service), `KeepAlivePlugin.kt`,
-  `VoicePlugin.kt` (the recogniser and the voice), `MainActivity.kt`'s `onNewIntent` (it keeps the tapped notification's
-  intent) and `res/drawable/ic_stat_maya.xml` (the status-bar icon).
-  Everything else in it is Tauri's; regenerate with `pnpm mobile android
-  init` only if you must, then restore those five files, the manifest's
-  permissions (`RECORD_AUDIO` included), its `<queries>` for the speech
-  recogniser and text-to-speech services (without them Android 11+ hides
-  both from the app) and its service, `build.gradle.kts`'s signing block, and the
+  `SessionNotifications.kt` (the sessions' notifications, their buttons
+  and the receiver for a press), `VoicePlugin.kt` (the recogniser and the
+  voice), `MainActivity.kt`'s `onNewIntent` (it keeps the tapped
+  notification's intent) and `res/drawable/ic_stat_maya.xml` (the
+  status-bar icon). Everything else in it is Tauri's; regenerate with
+  `pnpm mobile android init` only if you must, then restore those six
+  files, the manifest's permissions (`RECORD_AUDIO` included), its
+  `<queries>` for the speech recogniser and text-to-speech services
+  (without them Android 11+ hides both from the app), its service and its
+  receiver, `build.gradle.kts`'s signing block, and the
   launcher icon with `cp -R mobile/icons/android/. mobile/gen/android/app/src/main/res/`
   (`sh scripts/check-android-icons.sh`, run in CI, fails without it). (Run
   the Tauri CLI through `pnpm mobile …` from the repository root; `pnpm

@@ -160,6 +160,7 @@ pub fn run() {
             let hub = Hub::new(maya_dir, settings, android::alerts(&handle), Arc::new(TauriSink { app: handle.clone() }));
             app.manage(hub.clone());
             make_voice(&handle, &hub);
+            android::watch_buttons(&handle, Arc::downgrade(&hub));
             if let Err(e) = android::create_channels(&handle) {
                 log::line("android", format!("notification channels: {e}"));
             }
