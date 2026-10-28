@@ -44,6 +44,7 @@ pub fn settings_changed(app: &AppHandle) {
     let handle = app.clone();
     std::thread::spawn(move || {
         crate::poll_reviews(&handle);
+        crate::poll_deployments(&handle);
         crate::poll_pull_requests(&handle);
     });
 }

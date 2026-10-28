@@ -1,4 +1,4 @@
-pub use maya_core::{actions, answer, antigravity, attachments, codex, config, context, events, foreign, grok, hook_install, inbox, interpreter, kiro, launch, log, model, net, notify, opencode, pr, registry, resume, reviews, state, store, terminal, transcript, tty, wake, watcher};
+pub use maya_core::{actions, answer, antigravity, attachments, codex, config, context, deployments, events, foreign, grok, hook_install, inbox, interpreter, kiro, launch, log, model, net, notify, opencode, pr, registry, resume, reviews, state, store, terminal, transcript, tty, wake, watcher};
 
 pub mod badge;
 #[cfg(target_os = "macos")]
@@ -137,6 +137,9 @@ pub struct AppState {
     pub store: Mutex<Store>,
     pub notifier: Mutex<notify::Notifier>,
     pub reviews: Mutex<ReviewState>,
+    /// Lock rule: never held across a network call, and never with another lock.
+    pub deployments: Mutex<DeploymentState>,
+    pub deployment_repos: Mutex<deployments::ApprovalRepos>,
     pub pr_notifier: Mutex<reviews::PrNotifier>,
     pub voice: Mutex<VoiceState>,
     /// One conversation for voice and Chat. Lock rule: never held with the
@@ -250,6 +253,21 @@ pub(crate) fn remote_boards(state: &AppState) -> Vec<merge::RemoteBoard> {
     server.map(|s| s.boards()).unwrap_or_default()
 }
 
+/// The runs waiting for the user's approval or queued behind another run,
+/// and why the last check failed.
+#[derive(Default, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentState {
+    pub runs: Vec<deployments::DeploymentRun>,
+    /// The last check failed, or GitHub has no token; the runs are the last good ones.
+    pub error: Option<String>,
+    /// GitHub is switched off.
+    pub off: bool,
+    /// An assistant leaves this to its main.
+    pub assistant: bool,
+    pub fetched_at: Option<u64>,
+}
+
 /// The last PR list fetched, and why a forge could not be asked.
 #[derive(Default, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -293,6 +311,61 @@ pub(crate) fn poll_reviews(app: &AppHandle) {
     // Announced with no lock held: the banner and the voice take a moment.
     announce_pr_reviews(app, &decided);
     let _ = app.emit("reviews", &snapshot);
+}
+
+/// Stores `next` as the deployments state and tells the page.
+fn publish_deployments(app: &AppHandle, next: DeploymentState) {
+    *app.state::<AppState>().deployments.lock().unwrap() = next.clone();
+    let _ = app.emit("deployments", &next);
+}
+
+pub(crate) fn poll_deployments(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let generation = state.git_generation.load(std::sync::atomic::Ordering::SeqCst);
+    let (role, conns) = {
+        let store = state.store.lock().unwrap();
+        (store.config.network.role, store.config.git_connections())
+    };
+    if role == config::NetworkRole::Assistant {
+        publish_deployments(app, DeploymentState { assistant: true, fetched_at: Some(now_ms()), ..Default::default() });
+        return;
+    }
+    let conns: Vec<_> = conns.into_iter().filter(|c| c.provider == GitProvider::Github).collect();
+    if !conns.iter().any(|c| c.enabled) {
+        publish_deployments(app, DeploymentState { off: true, fetched_at: Some(now_ms()), ..Default::default() });
+        return;
+    }
+    let (mut forges, missing) = git::forges(&conns);
+    let Some(forge) = forges.pop() else {
+        let mut next = state.deployments.lock().unwrap().clone();
+        next.error = missing.first().map(|e| e.message.clone());
+        next.off = false;
+        next.assistant = false;
+        publish_deployments(app, next);
+        return;
+    };
+    let mut cache = state.deployment_repos.lock().unwrap().clone();
+    let result = deployments::fetch(git::http(), &forge, &mut cache, now_ms());
+    if state.git_generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
+        log::line("app", "deployments: the Git settings changed during the check; its answers are dropped");
+        return;
+    }
+    *state.deployment_repos.lock().unwrap() = cache;
+    let mut next = state.deployments.lock().unwrap().clone();
+    match result {
+        Ok(runs) => {
+            next.runs = runs;
+            next.error = None;
+        }
+        Err(e) => {
+            log::line("app", format!("deployments: GitHub check failed: {e}"));
+            next.error = Some(format!("GitHub check failed: {e}"));
+        }
+    }
+    next.off = false;
+    next.assistant = false;
+    next.fetched_at = Some(now_ms());
+    publish_deployments(app, next);
 }
 
 /// Banners (and the spoken line) for assigned PRs that were just approved
@@ -415,6 +488,73 @@ fn clones_dir(state: TauriState<AppState>) -> String {
 #[tauri::command(async)]
 fn list_review_prs(state: TauriState<AppState>) -> ReviewState {
     state.reviews.lock().unwrap().clone()
+}
+
+#[tauri::command(async)]
+fn list_deployments(state: TauriState<AppState>) -> DeploymentState {
+    state.deployments.lock().unwrap().clone()
+}
+
+/// The environment ids of a listed run that waits for approval.
+fn approval_environment_ids(runs: &[deployments::DeploymentRun], repo: &str, run_id: u64) -> Option<Vec<u64>> {
+    runs.iter().find(|r| r.repo == repo && r.run_id == run_id).and_then(|r| match &r.wait {
+        deployments::RunWait::Approval { environments } => Some(environments.iter().map(|e| e.id).collect()),
+        deployments::RunWait::Blocked { .. } => None,
+    })
+}
+
+/// The page to open for a listed run: its own, or the run blocking it.
+fn deployment_url(runs: &[deployments::DeploymentRun], repo: &str, run_id: u64, blocker: bool) -> Option<String> {
+    let run = runs.iter().find(|r| r.repo == repo && r.run_id == run_id)?;
+    if !blocker {
+        return Some(run.url.clone());
+    }
+    match &run.wait {
+        deployments::RunWait::Blocked { by: Some(b) } => Some(b.url.clone()),
+        _ => None,
+    }
+}
+
+const DEPLOYMENT_GONE: &str = "That deployment is no longer waiting.";
+
+/// Answers a waiting run, then looks at its repository again whatever GitHub
+/// said, so the list shows what is true now. No lock is held across a call.
+fn review_deployment_cmd(app: &AppHandle, repo: &str, run_id: u64, approve: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let ids = approval_environment_ids(&state.deployments.lock().unwrap().runs, repo, run_id).ok_or(DEPLOYMENT_GONE)?;
+    let conns: Vec<_> = state.store.lock().unwrap().config.git_connections().into_iter().filter(|c| c.provider == GitProvider::Github).collect();
+    let (mut forges, missing) = git::forges(&conns);
+    let forge = forges.pop().ok_or_else(|| missing.first().map(|e| e.message.clone()).unwrap_or_else(|| "GitHub is switched off.".to_string()))?;
+    let answered = maya_core::forge::github::review_deployment(git::http(), &forge, repo, run_id, &ids, approve);
+    match deployments::check_repo(git::http(), &forge, repo) {
+        Ok(fresh) => {
+            let next = {
+                let mut d = state.deployments.lock().unwrap();
+                d.runs = deployments::replace_repo(&d.runs, repo, fresh);
+                d.clone()
+            };
+            let _ = app.emit("deployments", &next);
+        }
+        Err(e) => log::line("app", format!("deployments: checking {repo} again failed: {e}")),
+    }
+    answered
+}
+
+#[tauri::command(async)]
+fn deployment_approve(app: AppHandle, repo: String, run_id: u64) -> Result<(), String> {
+    review_deployment_cmd(&app, &repo, run_id, true)
+}
+
+#[tauri::command(async)]
+fn deployment_reject(app: AppHandle, repo: String, run_id: u64) -> Result<(), String> {
+    review_deployment_cmd(&app, &repo, run_id, false)
+}
+
+/// Opens a listed run, or the run holding it back, in the browser.
+#[tauri::command(async)]
+fn open_deployment(state: TauriState<AppState>, repo: String, run_id: u64, blocker: bool) -> Result<(), String> {
+    let url = deployment_url(&state.deployments.lock().unwrap().runs, &repo, run_id, blocker).ok_or(DEPLOYMENT_GONE)?;
+    open_in_browser(&url)
 }
 
 fn review_pr_for(state: &TauriState<AppState>, forge: Option<GitProvider>, repo: &str, number: u64) -> Result<reviews::ReviewPr, String> {
@@ -1394,7 +1534,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
         .invoke_handler(tauri::generate_handler![
             git::get_git_status,
@@ -1421,6 +1561,10 @@ pub fn run() {
             open_url,
             open_pr,
             list_review_prs,
+            list_deployments,
+            deployment_approve,
+            deployment_reject,
+            open_deployment,
             clones_dir,
             open_review_pr,
             review_pr,
@@ -1519,6 +1663,11 @@ pub fn run() {
             let review_handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 poll_reviews(&review_handle);
+                std::thread::sleep(Duration::from_secs(120));
+            });
+            let deployments_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                poll_deployments(&deployments_handle);
                 std::thread::sleep(Duration::from_secs(120));
             });
             // Its own thread: a slow `gh` or Keychain prompt must not hold up the polls.
