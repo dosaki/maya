@@ -233,7 +233,8 @@ Each ask and each finished turn is a notification you can turn off on the
 Network tab, or silence per channel in Android's settings; tapping one
 opens the card. Pull one down to read the whole ask, with its choices, or
 the whole last message. Answer from there: a question's first choices
-are buttons (Android allows three; its own-words row takes a reply box),
+are buttons (Android allows three, numbered as the text numbers them
+when one is too long to fit; its own-words row takes a reply box),
 and a finished turn or a question asked in prose takes a reply. Asks with
 several questions or a multi-select are answered on the card. There is no Pull Requests tab and no Deployments tab on the phone.
 

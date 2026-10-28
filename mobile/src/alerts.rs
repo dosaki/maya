@@ -53,6 +53,10 @@ pub struct Button {
 /// The most buttons Android shows on a notification.
 pub const MAX_BUTTONS: usize = 3;
 
+/// The longest choice that still fits on a button with two others beside
+/// it; Android shortens a longer one rather than wrap it.
+pub const BUTTON_LABEL_CHARS: usize = 12;
+
 /// The longest text a pulled-down notification shows; Android drops the
 /// notification altogether when its extras grow too large.
 pub const LONG_BODY_CHARS: usize = 4000;
@@ -234,8 +238,9 @@ pub fn finished_text(text: &str) -> String {
 }
 
 /// The buttons for a notification. A finished turn and an ask in prose
-/// take a reply. A single question takes its first choices, and its
-/// own-words row as a reply when it has one; anything else (several
+/// take a reply. A single question takes its first choices (by number
+/// when one is too long for its button), and its own-words row as a reply
+/// when it has one; anything else (several
 /// questions, a multi-select, an ask without a menu) is answered on the
 /// card, where the reply box also waits for the menu to be answered first.
 pub fn buttons_for(card: &Card, kind: Kind) -> Vec<Button> {
@@ -250,7 +255,10 @@ pub fn buttons_for(card: &Card, kind: Kind) -> Vec<Button> {
         [q] if !q.multi_select => {
             let own = q.own.as_ref().map(|o| Button { label: o.label.clone(), answer: Answer::Own { ask, question: 0 } });
             let room = MAX_BUTTONS - usize::from(own.is_some());
-            let mut out: Vec<Button> = q.options.iter().take(room).enumerate().map(|(index, o)| Button { label: o.label.clone(), answer: Answer::Option { ask, question: 0, index } }).collect();
+            let shown = &q.options[..q.options.len().min(room)];
+            // One choice too long and they all go by number, as `ask_text` numbers them.
+            let numbered = shown.iter().any(|o| o.label.chars().count() > BUTTON_LABEL_CHARS);
+            let mut out: Vec<Button> = shown.iter().enumerate().map(|(index, o)| Button { label: if numbered { (index + 1).to_string() } else { o.label.clone() }, answer: Answer::Option { ask, question: 0, index } }).collect();
             out.extend(own);
             out
         }
@@ -501,6 +509,18 @@ mod tests {
         let with_own = buttons_for(&asking(vec![menu(&["A", "B", "C"], true)]), Kind::Decision);
         assert_eq!(with_own.iter().map(|b| b.label.as_str()).collect::<Vec<_>>(), ["A", "B", "Type something"]);
         assert_eq!(with_own[2].answer, Answer::Own { ask: 7, question: 0 });
+    }
+
+    #[test]
+    fn choices_too_long_for_a_button_are_numbered_as_the_text_numbers_them() {
+        let long = asking(vec![menu(&["Commit, bump, open PR", "No", "Keep testing first"], true)]);
+        let buttons = buttons_for(&long, Kind::Decision);
+        assert_eq!(buttons.iter().map(|b| b.label.as_str()).collect::<Vec<_>>(), ["1", "2", "Type something"]);
+        assert_eq!(buttons[1].answer, Answer::Option { ask: 7, question: 0, index: 1 });
+        assert!(ask_text(&long).contains("1. Commit, bump, open PR\n2. No"));
+        // Every label fits: they stay.
+        let short = buttons_for(&asking(vec![menu(&["Yes", "Always allow", "No"], false)]), Kind::Decision);
+        assert_eq!(short.iter().map(|b| b.label.as_str()).collect::<Vec<_>>(), ["Yes", "Always allow", "No"]);
     }
 
     #[test]
