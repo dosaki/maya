@@ -145,9 +145,10 @@ pub fn user_prompt(command: &str, summary: &str, prs: &str, history: &[(String, 
     p
 }
 
-fn json_in(text: &str) -> Option<Value> {
+/// The JSON object between the first `{` and the last `}` of `text`.
+pub(crate) fn json_in(text: &str) -> Option<Value> {
     let start = text.find('{')?;
-    let end = text.rfind('}')?;
+    let end = text.rfind('}').filter(|&end| start < end)?;
     serde_json::from_str(&text[start..=end]).ok()
 }
 
@@ -578,6 +579,14 @@ mod tests {
         c.state_since = 1_000;
         let s = board_summary(&[c], 1_000 + 125_000);
         assert!(s.contains("api-fix | claude-code | completed | for 2m |"), "{s}");
+    }
+
+    #[test]
+    fn a_json_object_is_found_inside_text_or_not_at_all() {
+        assert_eq!(json_in(r#"Sure: {"say":"hi"} done"#), Some(json!({"say":"hi"})));
+        assert_eq!(json_in("} {"), None);
+        assert_eq!(json_in("no json"), None);
+        assert_eq!(json_in("{"), None);
     }
 
     #[test]

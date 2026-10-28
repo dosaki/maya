@@ -1,7 +1,7 @@
 //! Judges whether a finished message asks the user for something, with a
 //! one-shot call to Maya's agent, and remembers each verdict on disk.
 
-use crate::interpreter::{output_within, RunError};
+use crate::interpreter::{json_in, output_within, RunError};
 use crate::model::Harness;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -81,8 +81,7 @@ fn straight(s: &str) -> String {
 /// from `text`; failing that it is the wording check's, else the last line.
 pub fn parse_verdict(agent: Harness, stdout: &str, text: &str) -> Result<Verdict, String> {
     let reply = crate::launch::final_text(agent, stdout)?;
-    let (start, end) = reply.find('{').zip(reply.rfind('}')).ok_or_else(|| format!("no JSON verdict in: {}", reply.chars().take(120).collect::<String>()))?;
-    let v: serde_json::Value = serde_json::from_str(&reply[start..=end]).map_err(|e| format!("unreadable verdict: {e}"))?;
+    let v = json_in(&reply).ok_or_else(|| format!("no JSON verdict in: {}", reply.chars().take(120).collect::<String>()))?;
     let asks = v["asks"].as_bool().ok_or("verdict has no boolean asks")?;
     if !asks {
         return Ok(Verdict { asks, line: None });
@@ -174,6 +173,7 @@ mod tests {
         let curly = envelope(r#"{"asks":true,"line":"What's next?"}"#);
         assert_eq!(parse_verdict(a, &curly, "Done. What’s next?").unwrap().line.as_deref(), Some("What's next?"), "curly and straight apostrophes match");
         assert!(parse_verdict(a, &envelope("no json here"), text).is_err());
+        assert!(parse_verdict(a, &envelope("} {"), text).is_err(), "braces the wrong way round are no verdict, not a panic");
         assert!(parse_verdict(a, &envelope(r#"{"line":"x"}"#), text).is_err());
         assert!(parse_verdict(a, &envelope(r#"{"asks":"yes"}"#), text).is_err());
     }

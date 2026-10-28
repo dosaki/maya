@@ -1168,6 +1168,22 @@ fn judge_model(cfg: &Config) -> Option<String> {
     }
 }
 
+/// What `judge` made of a message; a failure, a panic among them, is logged
+/// and answers its key like any other, so the thread lives on.
+fn judged(judge: impl FnOnce() -> Result<maya_core::asks::Verdict, maya_core::interpreter::RunError>) -> Result<maya_core::asks::Verdict, ()> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(judge)) {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => {
+            log::line("asks", format!("judging a finished message: {e:?}"));
+            Err(())
+        }
+        Err(_) => {
+            log::line("asks", "judging a finished message panicked");
+            Err(())
+        }
+    }
+}
+
 /// Judges the finished messages the store queued, outside the store lock,
 /// and repaints once their verdicts are in.
 pub(crate) fn poll_asks(app: &AppHandle) {
@@ -1185,8 +1201,7 @@ pub(crate) fn poll_asks(app: &AppHandle) {
         .into_iter()
         .map(|(key, text)| {
             let verdict = match &binary {
-                Ok(bin) => maya_core::asks::judge(brain, bin, model.as_deref(), &text, &cwd)
-                    .map_err(|e| log::line("asks", format!("judging a finished message: {e:?}"))),
+                Ok(bin) => judged(|| maya_core::asks::judge(brain, bin, model.as_deref(), &text, &cwd)),
                 Err(_) => Err(()),
             };
             (key, verdict)
@@ -1776,6 +1791,15 @@ pub fn run() {
 #[cfg(test)]
 mod route_tests {
     use super::*;
+
+    #[test]
+    fn a_judge_that_panics_is_a_failed_judgement() {
+        let yes = maya_core::asks::Verdict { asks: true, line: None };
+        assert_eq!(judged(|| Ok(yes.clone())), Ok(yes));
+        assert_eq!(judged(|| Err(maya_core::interpreter::RunError::Failed("no".into()))), Err(()));
+        assert_eq!(judged(|| panic!("boom")), Err(()));
+        assert!(log::lines().iter().any(|l| l.source == "asks" && l.text == "judging a finished message panicked"));
+    }
 
     #[test]
     fn the_judge_uses_the_agents_model_or_claudes_quick_one() {
