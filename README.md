@@ -325,6 +325,11 @@ Maya keeps her own brain: on a machine in the assistant role (the laptop,
 say) it is dormant, and Chat there is read-only. It shows her own history
 and says which Maya is awake; that machine keeps the quick interpreter.
 
+Her replies in Chat are markdown, and their links open in your browser.
+Aloud she says only her sentences and lists, kept short. Details such as
+paths or hashes go in a table or code block on screen, and she tells you
+when to look.
+
 With any brain, Maya is one long-running session that remembers the
 conversation. She decides where a request goes: to an existing session, to
 a new session (in a repository, or in a scratch folder under `/tmp` when it

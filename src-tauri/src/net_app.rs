@@ -304,7 +304,8 @@ pub(crate) fn phone_reply(said: &str, waiting: Vec<Value>) -> Value {
 fn brain_reply_data(app: &AppHandle, say: &str, actions: Vec<Value>) -> Value {
     let (waiting, now): (Vec<Value>, Vec<Value>) = actions.into_iter().partition(maya_core::interpreter::waits);
     let mut lines: Vec<String> = Vec::new();
-    lines.extend(Some(say.trim().to_string()).filter(|s| !s.is_empty()));
+    // The phone speaks it: the words, not her markdown.
+    lines.extend(Some(maya_core::speech::from_markdown(say)).filter(|s| !s.is_empty()));
     let mut results = Vec::new();
     for action in now {
         if let Some(why) = refuse_remote(&action) {

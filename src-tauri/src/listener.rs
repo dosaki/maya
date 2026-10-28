@@ -161,13 +161,15 @@ pub(crate) fn reply_aloud_as(app: &AppHandle, generation: u64, text: &str, via: 
     if text.trim().is_empty() {
         return is_current(app, generation);
     }
+    // Chat keeps her markdown; the voice and its panel get the words.
+    let words = maya_core::speech::from_markdown(text);
     {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
         if v.generation != generation {
             return false;
         }
-        v.status.said = text.to_string();
+        v.status.said = words.clone();
     }
     // History first, so a page that refetches it on this event sees the line.
     remember(app, "maya", text, via);
@@ -177,13 +179,14 @@ pub(crate) fn reply_aloud_as(app: &AppHandle, generation: u64, text: &str, via: 
         let store = state.store.lock().unwrap();
         (store.config.muted, voices_wanted(&store.config, store.claude_dir()), store.config.voice_loudness())
     };
-    // Muted, the reply is only shown in the voice panel.
-    if muted {
+    // Muted, the reply is only shown in the voice panel; with no words
+    // (only a table, say) it is only in Chat.
+    if muted || words.is_empty() {
         return is_current(app, generation);
     }
     let voices = voice_chain(wanted);
     // No lock is held here: the speech hook takes the voice lock.
-    let _ = notify::speak_and_wait(notify::Utterance { volume, ..notify::Utterance::new(text.to_string(), voices) });
+    let _ = notify::speak_and_wait(notify::Utterance { volume, ..notify::Utterance::new(words, voices) });
     is_current(app, generation)
 }
 
@@ -408,7 +411,7 @@ pub(crate) fn reply_then_idle(app: &AppHandle, generation: u64, text: &str, inbo
     if !reply_aloud(app, generation, text) {
         return;
     }
-    if !asks_question(text) {
+    if !asks_question(&maya_core::speech::from_markdown(text)) {
         set_voice(app, generation, |st| st.state = "idle".into());
         return;
     }
@@ -725,11 +728,11 @@ pub(crate) fn announce_after(app: &AppHandle, generation: Option<u64>, lead: &st
         if matches!(old.origin, Via::Voice | Via::Maya) {
             close_window(&mut state.voice.lock().unwrap(), "idle");
         }
-        remember(app, "maya", &format!("Cancelled: {}", old.say), old.origin);
+        remember(app, "maya", &format!("Cancelled: {}", maya_core::speech::escape(&old.say)), old.origin);
     }
     log::line("action", format!("batch {id} announced: {say}"));
     let spoken = aloud(origin);
-    let line = crate::brain_route::one_line(&[lead, say.as_str()]);
+    let line = crate::brain_route::announced_line(lead, &say);
     // Only the listener run that heard the request opens its flow's window.
     let ours = |v: &VoiceState| generation.map_or(true, |g| v.generation == g);
     if spoken {

@@ -23,6 +23,12 @@ describe("renderMarkdown", () => {
     expect(el.textContent).toContain("hi");
   });
 
+  it("drops remote media and form widgets", () => {
+    const el = renderMarkdown('<video poster="https://evil/p"></video><audio autoplay src="https://evil/a.mp3"></audio><picture><source srcset="https://evil/s"></picture><select><option>x</option></select><textarea>t</textarea><span srcset="https://evil/s" poster="https://evil/p">ok</span>');
+    expect(el.querySelector("video, audio, source, picture, track, select, textarea")).toBeNull();
+    expect(el.innerHTML).not.toContain("evil");
+  });
+
   it("keeps plain text plain, with line breaks", () => {
     const el = renderMarkdown("line one\nline two");
     expect(el.textContent).toContain("line one");

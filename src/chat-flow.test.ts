@@ -27,6 +27,18 @@ describe("chat flow", () => {
     });
   });
 
+  it("opens at the latest message", async () => {
+    const tabs = makeTabs();
+    initChat();
+    await flush();
+    on<ChatTurn[]>("chat-reset")({ payload: [{ who: "maya", text: "one", at: 1, via: "maya" }, { who: "maya", text: "two", at: 2, via: "maya" }] });
+    const log = document.querySelector<HTMLElement>(".chat__log")!;
+    Object.defineProperty(log, "scrollHeight", { configurable: true, value: 900 });
+    tabs.show("chat");
+    await flush();
+    expect(log.scrollTop).toBe(900);
+  });
+
   it("colours the tab dot by status and marks the chat seen when opened", async () => {
     const tabs = makeTabs();
     initChat();
@@ -45,7 +57,7 @@ describe("chat flow", () => {
     const turn: ChatTurn = { who: "maya", text: "Nothing waits.", at: 2, via: "chat" };
     on<ChatTurn>("chat")({ payload: turn });
     on<BrainStatus>("brain")({ payload: status({ dot: "working", job: "j", pending: { say: "Focusing x.", until: Date.now() + 5000 } }) });
-    expect(document.querySelector(".chat__turn")!.textContent).toBe("Nothing waits.");
+    expect(document.querySelector(".chat__turn")!.textContent!.trim()).toBe("Nothing waits.");
     document.querySelector<HTMLButtonElement>("button[data-action=window-cancel]")!.click();
     document.querySelector<HTMLButtonElement>("button[data-action=brain-stop]")!.click();
     expect(invoke).toHaveBeenCalledWith("window_cancel");
@@ -111,9 +123,9 @@ describe("chat flow", () => {
     initChat();
     await flush();
     on<ChatTurn>("chat")({ payload: { who: "maya", text: "a", at: 1, via: "chat" } });
-    expect([...document.querySelectorAll(".chat__turn")].map((t) => t.textContent)).toEqual(["a"]);
+    expect([...document.querySelectorAll(".chat__turn")].map((t) => t.textContent!.trim())).toEqual(["a"]);
     on<ChatTurn[]>("chat-reset")({ payload: [{ who: "maya", text: "b", at: 2, via: "chat" }, { who: "user", text: "c", at: 3, via: "chat" }] });
-    expect([...document.querySelectorAll(".chat__turn")].map((t) => t.textContent)).toEqual(["b", "c"]);
+    expect([...document.querySelectorAll(".chat__turn")].map((t) => t.textContent!.trim())).toEqual(["b", "c"]);
   });
 
   it("a chat-reset while Chat is open marks it seen", async () => {

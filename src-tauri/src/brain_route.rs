@@ -15,7 +15,7 @@ use serde_json::Value;
 /// Her card on the board: never awaiting or completed, so it never
 /// announces; Working while a turn or a subagent of hers runs.
 pub(crate) fn brain_card(session_id: &str, agent: Harness, cwd: &str, working: bool, job: Option<&str>, last_say: &str, since: u64) -> Card {
-    let snippet = if working { job.map_or_else(|| "Working".to_string(), |j| format!("Working on: {j}")) } else { last_say.to_string() };
+    let snippet = if working { job.map_or_else(|| "Working".to_string(), |j| format!("Working on: {j}")) } else { maya_core::speech::from_markdown(last_say) };
     Card {
         session_id: session_id.into(),
         pid: 0,
@@ -53,8 +53,17 @@ pub(crate) fn spoken(text: &str) -> Option<String> {
 
 /// The parts of her reply as one line to say or post, blank parts left
 /// out: said as one utterance, a short part ("Sure.") never plays alone.
+/// Each part is its own paragraph, so a part that ends in a table or a
+/// list stays whole in Chat; the voice still says them as one line.
 pub(crate) fn one_line<S: AsRef<str>>(parts: &[S]) -> String {
-    parts.iter().map(|p| p.as_ref().trim()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" ")
+    parts.iter().map(|p| p.as_ref().trim()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n")
+}
+
+/// Her words, then an announcement of what will run: the announcement is
+/// plain text that can carry the user's own words (a reply, a prompt, a
+/// pull request's title), so it is escaped to stay as written.
+pub(crate) fn announced_line(lead: &str, say: &str) -> String {
+    one_line(&[lead, maya_core::speech::escape(say).as_str()])
 }
 
 /// Whether her line goes through the voice path: a reply to a spoken request
@@ -513,9 +522,26 @@ mod tests {
 
     #[test]
     fn her_words_and_what_ran_make_one_line() {
-        assert_eq!(one_line(&["Sure.", "", " Focusing api-fix. "]), "Sure. Focusing api-fix.");
+        assert_eq!(one_line(&["Sure.", "", " Focusing api-fix. "]), "Sure.\n\nFocusing api-fix.");
         assert_eq!(one_line(&["  ", ""]), "");
         assert_eq!(one_line(&["", "Telling api-fix: open the PR."]), "Telling api-fix: open the PR.");
+        assert_eq!(maya_core::speech::from_markdown(&one_line(&["Sure.", "Focusing api-fix."])), "Sure. Focusing api-fix.");
+    }
+
+    #[test]
+    fn an_announcement_keeps_the_users_words_as_written() {
+        let line = announced_line("Sure.", "Telling api-fix: use the <Select> component and __init__.");
+        assert_eq!(maya_core::speech::from_markdown(&line), "Sure. Telling api-fix: use the <Select> component and __init__.");
+    }
+    #[test]
+    fn her_card_shows_her_words_not_her_markdown() {
+        let c = brain_card("u", Harness::ClaudeCode, "/x", false, None, "**Done.** See [the PR](https://x/1).\n\n| t |\n|---|\n| a |", 7);
+        assert_eq!(c.snippet, "Done. See the PR.");
+    }
+    #[test]
+    fn her_markdown_and_what_ran_stay_apart() {
+        let line = one_line(&["Failures below.\n\n| t |\n|---|\n| a |", "Focusing api-fix."]);
+        assert_eq!(maya_core::speech::from_markdown(&line), "Failures below. Focusing api-fix.");
     }
 
     #[test]

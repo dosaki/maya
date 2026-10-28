@@ -22,6 +22,7 @@ snow.workspace = true
 spake2.workspace = true
 ureq.workspace = true
 if-addrs.workspace = true
+pulldown-cmark.workspace = true
 tempfile = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
