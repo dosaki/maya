@@ -111,9 +111,11 @@ user's own git credentials.
 
 The Deployments tab lists GitHub Actions runs that wait for the user's
 approval, with Approve and Reject buttons, and deployment runs queued
-behind another run's deployment ("Waiting on <sha> <title>"). Only a main
-or a standalone Maya checks, every two minutes; an assistant's tab says
-"Deployments are checked on the main." The check covers the repos the
+behind another run's deployment ("Waiting on <sha> <title>"). When Maya
+cannot find the run it waits on (a concurrency group shared by several
+workflows), it says "Waiting on another deployment". Only a main or a
+standalone Maya checks, every two minutes; on an assistant the Deployments
+tab says "Deployments are checked on the main." The check covers the repos the
 token can see that were pushed to in the last 7 days. Of those, only repos
 with an environment that requires reviewers are asked for runs, and that
 answer is kept for 1 hour per repo. GitHub only; GitLab is not covered.
