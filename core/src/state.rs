@@ -252,10 +252,13 @@ pub fn derive(i: &DeriveInput) -> Card {
         }
     }
 
-    // A resumed session has no Stop event: its transcript shows when the turn ended.
-    if last_turn.is_none() && r.status != "busy" {
+    // A resumed session may have no Stop for its last turn, or only an older
+    // prompt: its transcript shows when the turn ended.
+    if r.status != "busy" {
         if let Some(t) = &i.transcript.turn_end {
-            last_turn = Some((true, t.at_ms));
+            if last_turn.map_or(true, |(_, ts)| t.at_ms > ts) {
+                last_turn = Some((true, t.at_ms));
+            }
         }
     }
 
@@ -415,6 +418,19 @@ use crate::events::HookEvent;
         let done = run_prose(&reg("idle", 5), &[], &t, &Prose::Done, 1_000 + TIMEOUT + 5);
         assert_eq!(done.state, State::Idle);
         assert_eq!(done.state_since, 1_000 + TIMEOUT);
+    }
+
+    #[test]
+    fn a_transcript_turn_end_after_the_last_prompt_event_is_the_turn_end() {
+        let t = TranscriptTail { turn_end: Some(crate::transcript::TurnEnd { at_ms: 200, text: "Which way?".into() }), ..Default::default() };
+        let asks = Prose::Asks("Which way?".into());
+        let c = run_prose(&reg("idle", 5), &[ev("UserPromptSubmit", 100)], &t, &asks, 5_000_000);
+        assert_eq!(c.state, State::Awaiting);
+        assert_eq!(c.state_since, 200);
+        let c = run_prose(&reg("idle", 5), &[ev("UserPromptSubmit", 300)], &t, &asks, 5_000_000);
+        assert_ne!(c.state, State::Awaiting);
+        let c = run_prose(&reg("idle", 5), &[ev("Stop", 250)], &t, &asks, 5_000_000);
+        assert_eq!(c.state_since, 250);
     }
 
     #[test]
