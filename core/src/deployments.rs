@@ -1,9 +1,9 @@
 use serde::Serialize;
 use serde_json::Value;
 
-/// Runs older than this count as stale, in milliseconds.
+/// A repo whose last push is older than this is not checked, in milliseconds.
 pub const ACTIVE_WINDOW_MS: u64 = 7 * 86_400_000;
-/// How long an answer about a run stays fresh, in milliseconds.
+/// How long a repo's "needs approval" answer is kept, in milliseconds.
 pub const ANSWER_TTL_MS: u64 = 3_600_000;
 /// How many pages of runs to read per repo.
 pub const REPO_PAGES: u32 = 5;
