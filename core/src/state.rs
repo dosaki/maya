@@ -6,10 +6,24 @@ use crate::transcript::TranscriptTail;
 
 pub const SNIPPET_CHARS: usize = 200;
 
+/// What is known about whether the agent's last message asks the user something.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prose {
+    /// No verdict: read the message with `asking_line`.
+    Unjudged,
+    /// A verdict is on its way: no ask meanwhile.
+    Judging,
+    /// The message asks; the line to show.
+    Asks(String),
+    /// The message asks nothing.
+    Done,
+}
+
 pub struct DeriveInput<'a> {
     pub registry: &'a RegistrySession,
     pub events: &'a [HookEvent],
     pub transcript: &'a TranscriptTail,
+    pub prose: &'a Prose,
     pub now_ms: u64,
     pub completed_timeout_ms: u64,
 }
@@ -223,6 +237,13 @@ pub fn derive(i: &DeriveInput) -> Card {
         }
     }
 
+    // A resumed session has no Stop event: its transcript shows when the turn ended.
+    if last_turn.is_none() && r.status != "busy" {
+        if let Some(t) = &i.transcript.turn_end {
+            last_turn = Some((true, t.at_ms));
+        }
+    }
+
     if i.events.is_empty() {
         if let Some(q) = &i.transcript.open_question {
             awaiting = Some((Awaiting { kind: q.kind, detail: q.detail.clone(), questions: q.questions.clone() }, r.status_updated_at, None));
@@ -235,7 +256,14 @@ pub fn derive(i: &DeriveInput) -> Card {
     // A turn that ended by asking in prose waits for a reply, however long ago
     // and whatever it left running in the background.
     let asked = match last_turn {
-        Some((true, ts)) if !is_busy => i.transcript.last_assistant_text.as_deref().and_then(asking_line).map(|line| (line, ts)),
+        Some((true, ts)) if !is_busy => match i.prose {
+            Prose::Asks(line) => Some((line.clone(), ts)),
+            Prose::Unjudged => {
+                let text = i.transcript.turn_end.as_ref().map(|t| t.text.as_str()).or(i.transcript.last_assistant_text.as_deref());
+                text.and_then(asking_line).map(|line| (line, ts))
+            }
+            Prose::Judging | Prose::Done => None,
+        },
         _ => None,
     };
 
@@ -323,7 +351,69 @@ use crate::events::HookEvent;
     }
 
     fn run(r: &RegistrySession, events: &[HookEvent], t: &TranscriptTail, now: u64) -> Card {
-        derive(&DeriveInput { registry: r, events, transcript: t, now_ms: now, completed_timeout_ms: TIMEOUT })
+        run_prose(r, events, t, &Prose::Unjudged, now)
+    }
+
+    fn run_prose(r: &RegistrySession, events: &[HookEvent], t: &TranscriptTail, prose: &Prose, now: u64) -> Card {
+        derive(&DeriveInput { registry: r, events, transcript: t, prose, now_ms: now, completed_timeout_ms: TIMEOUT })
+    }
+
+    fn said(text: &str) -> TranscriptTail {
+        TranscriptTail { last_assistant_text: Some(text.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn a_judged_ask_stays_awaiting_long_after_the_turn() {
+        let hours = 5 * 3_600_000;
+        let c = run_prose(&reg("idle", 0), &[ev("Stop", 0)], &said("Which way?"), &Prose::Asks("Which way?".into()), hours);
+        assert_eq!(c.state, State::Awaiting);
+        assert_eq!(c.state_since, 0);
+        let a = c.awaiting.unwrap();
+        assert_eq!(a.kind, AwaitKind::Text);
+        assert_eq!(a.detail, "Which way?");
+    }
+
+    #[test]
+    fn a_done_verdict_overrides_a_question_mark() {
+        let t = said("Why? Because X.");
+        let fresh = run_prose(&reg("idle", 0), &[ev("Stop", 0)], &t, &Prose::Done, 1000);
+        assert_eq!(fresh.state, State::Completed);
+        let old = run_prose(&reg("idle", 0), &[ev("Stop", 0)], &t, &Prose::Done, TIMEOUT + 1);
+        assert_eq!(old.state, State::Idle);
+    }
+
+    #[test]
+    fn judging_and_unjudged_fall_back_as_documented() {
+        let t = said("Shall I go on?");
+        let events = [ev("Stop", 0)];
+        assert_eq!(run_prose(&reg("idle", 0), &events, &t, &Prose::Judging, 1000).state, State::Completed);
+        assert_eq!(run_prose(&reg("idle", 0), &events, &t, &Prose::Judging, TIMEOUT + 1).state, State::Idle);
+        assert_eq!(run_prose(&reg("idle", 0), &events, &t, &Prose::Unjudged, TIMEOUT + 1).state, State::Awaiting);
+    }
+
+    #[test]
+    fn a_resumed_session_with_no_events_takes_its_turn_end_from_the_transcript() {
+        let t = TranscriptTail { turn_end: Some(crate::transcript::TurnEnd { at_ms: 1_000, text: "Run these".into() }), ..Default::default() };
+        let asks = run_prose(&reg("idle", 5), &[], &t, &Prose::Asks("Run these".into()), 5_000_000);
+        assert_eq!(asks.state, State::Awaiting);
+        assert_eq!(asks.state_since, 1_000);
+        let done = run_prose(&reg("idle", 5), &[], &t, &Prose::Done, 1_000 + TIMEOUT + 5);
+        assert_eq!(done.state, State::Idle);
+        assert_eq!(done.state_since, 1_000 + TIMEOUT);
+    }
+
+    #[test]
+    fn a_reply_event_clears_a_judged_ask() {
+        let events = [ev("Stop", 0), ev("UserPromptSubmit", 10)];
+        let c = run_prose(&reg("idle", 10), &events, &said("Which way?"), &Prose::Asks("Which way?".into()), 20);
+        assert_ne!(c.state, State::Awaiting);
+    }
+
+    #[test]
+    fn a_busy_session_is_working_whatever_the_verdict() {
+        let t = TranscriptTail { turn_end: Some(crate::transcript::TurnEnd { at_ms: 1_000, text: "Which way?".into() }), ..said("Which way?") };
+        let c = run_prose(&reg("busy", 2_000), &[], &t, &Prose::Asks("Which way?".into()), 3_000);
+        assert_eq!(c.state, State::Working);
     }
 
     #[test]

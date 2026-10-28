@@ -6,7 +6,7 @@ use crate::model::{Card, PullRequest};
 use crate::pr::PrCache;
 use crate::remembered::{Key, LiveSession, Memory, Remembered};
 use crate::registry::{self, RegistrySession};
-use crate::state::{derive, DeriveInput};
+use crate::state::{derive, DeriveInput, Prose};
 use crate::transcript::TailCache;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -422,7 +422,7 @@ impl Store {
         let s = self.session(session_id)?;
         let path = self.transcript_path_for(&s);
         let tail = self.tails.get(&path);
-        Some(derive(&DeriveInput { registry: &s, events: self.events.events_for(&s.session_id), transcript: &tail, now_ms, completed_timeout_ms: self.config.completed_timeout_ms() }))
+        Some(derive(&DeriveInput { registry: &s, events: self.events.events_for(&s.session_id), transcript: &tail, prose: &Prose::Unjudged, now_ms, completed_timeout_ms: self.config.completed_timeout_ms() }))
     }
 
     /// Records that Maya pressed Esc in a Claude session: the ask the turn
@@ -494,6 +494,7 @@ impl Store {
                 registry: s,
                 events: self.events.events_for(&s.session_id),
                 transcript: &tail,
+                prose: &Prose::Unjudged,
                 now_ms,
                 completed_timeout_ms: self.config.completed_timeout_ms(),
             });
@@ -514,7 +515,7 @@ impl Store {
             if s.harness == Harness::Codex {
                 crate::codex_hooks::apply(&mut tail, self.codex_events.events_for(&s.session_id));
             }
-            let mut card = foreign::derive(s, &tail, now_ms, timeout);
+            let mut card = foreign::derive(s, &tail, &Prose::Unjudged, now_ms, timeout);
             card.pr = self.prs.get(&s.cwd);
             card.branch = self.prs.branch(&s.cwd);
             cards.push(card);
