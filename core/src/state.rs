@@ -202,6 +202,8 @@ pub fn derive(i: &DeriveInput) -> Card {
     let mut awaiting: Option<(Awaiting, u64, Option<String>)> = None;
     // (is_stop, timestamp) of the most recent main-agent Stop or UserPromptSubmit.
     let mut last_turn: Option<(bool, u64)> = None;
+    // An Esc after the latest turn start or end: the ask that turn left is over.
+    let mut interrupted = false;
 
     for e in i.events {
         match e.hook_event_name.as_str() {
@@ -225,12 +227,17 @@ pub fn derive(i: &DeriveInput) -> Card {
             }
             "Stop" if e.agent_id.is_none() => {
                 awaiting = None;
+                interrupted = false;
                 last_turn = Some((true, e.received_at));
             }
             // Written by Maya when it presses Esc: Claude's hooks say nothing of an interrupt.
-            "MayaInterrupt" if e.agent_id.is_none() => awaiting = None,
+            "MayaInterrupt" if e.agent_id.is_none() => {
+                awaiting = None;
+                interrupted = true;
+            }
             "UserPromptSubmit" if e.agent_id.is_none() => {
                 awaiting = None;
+                interrupted = false;
                 last_turn = Some((false, e.received_at));
             }
             _ => {}
@@ -256,7 +263,7 @@ pub fn derive(i: &DeriveInput) -> Card {
     // A turn that ended by asking in prose waits for a reply, however long ago
     // and whatever it left running in the background.
     let asked = match last_turn {
-        Some((true, ts)) if !is_busy => match i.prose {
+        Some((true, ts)) if !is_busy && !interrupted => match i.prose {
             Prose::Asks(line) => Some((line.clone(), ts)),
             Prose::Unjudged => {
                 let text = i.transcript.turn_end.as_ref().map(|t| t.text.as_str()).or(i.transcript.last_assistant_text.as_deref());
@@ -407,6 +414,22 @@ use crate::events::HookEvent;
         let events = [ev("Stop", 0), ev("UserPromptSubmit", 10)];
         let c = run_prose(&reg("idle", 10), &events, &said("Which way?"), &Prose::Asks("Which way?".into()), 20);
         assert_ne!(c.state, State::Awaiting);
+    }
+
+    #[test]
+    fn an_interrupt_ends_the_ask_whatever_the_verdict() {
+        let asks = Prose::Asks("Which way?".into());
+        let t = said("Which way?");
+        for prose in [&asks, &Prose::Unjudged] {
+            let c = run_prose(&reg("idle", 0), &[ev("Stop", 0), ev("MayaInterrupt", 10)], &t, prose, 5_000_000);
+            assert_eq!(c.state, State::Idle);
+            assert_eq!(c.state_since, TIMEOUT);
+        }
+        let tail = TranscriptTail { turn_end: Some(crate::transcript::TurnEnd { at_ms: 1_000, text: "Which way?".into() }), ..said("Which way?") };
+        let c = run_prose(&reg("idle", 5), &[ev("MayaInterrupt", 10)], &tail, &asks, 5_000_000);
+        assert_ne!(c.state, State::Awaiting);
+        let again = run_prose(&reg("idle", 0), &[ev("Stop", 0), ev("MayaInterrupt", 10), ev("Stop", 20)], &t, &asks, 5_000_000);
+        assert_eq!(again.state, State::Awaiting);
     }
 
     #[test]
