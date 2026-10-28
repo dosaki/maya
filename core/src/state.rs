@@ -149,8 +149,16 @@ pub fn asking_line(text: &str) -> Option<String> {
         .rev()
         .flat_map(|l| sentences(l).into_iter().rev())
         .find(|s| asks(s))
-        .map(str::to_string)
+        .map(|s| balanced_bold(s).to_string())
         .or_else(|| command.map(str::to_string))
+}
+
+/// `s` without a `**` at its end or start that a sentence split left unmatched.
+fn balanced_bold(s: &str) -> &str {
+    if s.matches("**").count() % 2 == 0 {
+        return s;
+    }
+    s.strip_suffix("**").map(str::trim_end).or_else(|| s.strip_prefix("**").map(str::trim_start)).unwrap_or(s)
 }
 
 fn permission_detail(e: &HookEvent) -> String {
@@ -625,6 +633,8 @@ use crate::events::HookEvent;
         // Kept from the old test: closing lines, code fences, trailing asides.
         assert_eq!(asking_line("Ready?\n```\ncode\n```"), Some("Ready?".into()));
         assert_eq!(asking_line("Go ahead? [y/n]"), Some("Go ahead? [y/n]".into()));
+        assert_eq!(asking_line("**Please review the plan. Which way should I build it?**\n\nI recommend A."), Some("Which way should I build it?".into()));
+        assert_eq!(asking_line("**Shall I ship it? It is ready.**"), Some("Shall I ship it?".into()));
         assert_eq!(asking_line("If you’d like that fixed, I can do it."), Some("If you’d like that fixed, I can do it.".into()));
         assert_eq!(asking_line("Run:\n! sh a.sh\nDone."), Some("! sh a.sh".into()));
         let aside = "Approve this plan, or amend any rows? (e.g. \"skip #2\")";
