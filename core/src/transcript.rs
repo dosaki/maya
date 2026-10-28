@@ -14,6 +14,15 @@ pub struct OpenQuestion {
     pub questions: Vec<Question>,
 }
 
+/// The last finished turn: an assistant message that stopped with `end_turn`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnEnd {
+    /// When the message was written, in ms since the epoch.
+    pub at_ms: u64,
+    /// The last text the assistant had said by then.
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TranscriptTail {
     pub last_assistant_text: Option<String>,
@@ -23,6 +32,8 @@ pub struct TranscriptTail {
     pub context_tokens: Option<u64>,
     /// Model id of that message, e.g. `claude-opus-5[1m]`.
     pub model: Option<String>,
+    /// The last finished turn, unless a prompt has been typed since.
+    pub turn_end: Option<TurnEnd>,
 }
 
 /// The last `max_bytes` of `path` as text, with the first (possibly partial)
@@ -47,6 +58,21 @@ pub(crate) fn tail_text(path: &Path, max_bytes: u64) -> Option<String> {
 /// Reads at most `max_bytes` from the end of `path` and parses it.
 pub fn read_tail(path: &Path, max_bytes: u64) -> TranscriptTail {
     tail_text(path, max_bytes).map(|t| parse_tail(&t)).unwrap_or_default()
+}
+
+/// Like `read_tail` over `TAIL_BYTES`, but widens the window while it holds no
+/// assistant text, so a long run of records written after the last message
+/// (idle compaction) does not hide it.
+pub fn read_last_turn(path: &Path) -> TranscriptTail {
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let mut window = TAIL_BYTES;
+    loop {
+        let tail = read_tail(path, window);
+        if tail.last_assistant_text.is_some() || window >= len || window >= TURNS_SCAN_MAX_BYTES {
+            return tail;
+        }
+        window = (window * 2).min(TURNS_SCAN_MAX_BYTES);
+    }
 }
 
 pub const TURNS_TAIL_BYTES: u64 = 1_048_576;
@@ -617,7 +643,7 @@ impl TailCache {
             }
         }
         self.reads += 1;
-        let tail = read_tail(path, TAIL_BYTES);
+        let tail = read_last_turn(path);
         self.entries.insert(path.to_path_buf(), (key.0, key.1, tail.clone()));
         tail
     }
@@ -642,10 +668,15 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
     let mut answered: HashSet<String> = HashSet::new();
     let mut context_tokens: Option<u64> = None;
     let mut model: Option<String> = None;
+    let mut turn_end: Option<TurnEnd> = None;
 
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let kind = v["type"].as_str().unwrap_or("");
+        let main_chain = v["isSidechain"].as_bool() != Some(true);
+        if kind == "user" && main_chain && is_prompt(&v) {
+            turn_end = None;
+        }
         let Some(content) = v["message"]["content"].as_array() else { continue };
         match kind {
             "assistant" => {
@@ -682,6 +713,10 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
                         _ => {}
                     }
                 }
+                if main_chain && !m.starts_with('<') && v["message"]["stop_reason"].as_str() == Some("end_turn") {
+                    let at_ms = v["timestamp"].as_str().and_then(crate::codex::ms_of);
+                    turn_end = at_ms.zip(last_text.clone()).map(|(at_ms, text)| TurnEnd { at_ms, text });
+                }
             }
             "user" => {
                 for block in content {
@@ -697,7 +732,20 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
     }
 
     let open_question = open.into_iter().rev().find(|(id, _)| !answered.contains(id)).map(|(_, q)| q);
-    TranscriptTail { last_assistant_text: last_text, open_question, context_tokens, model }
+    TranscriptTail { last_assistant_text: last_text, open_question, context_tokens, model, turn_end }
+}
+
+/// A user record the person typed: not a tool result, a meta record or the
+/// compaction summary.
+fn is_prompt(v: &Value) -> bool {
+    if ["isCompactSummary", "isMeta", "isVisibleInTranscriptOnly"].iter().any(|k| v[k].as_bool() == Some(true)) {
+        return false;
+    }
+    match &v["message"]["content"] {
+        Value::String(_) => true,
+        Value::Array(blocks) => blocks.iter().any(|b| b["type"].as_str() == Some("text")),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -1321,5 +1369,87 @@ mod tests {
         assert_eq!(sent[1].diff.as_ref().unwrap().len(), REMOTE_OUTPUT_LINES);
         assert_eq!((sent[1].added, sent[1].removed), (100, 0));
         assert_eq!(sent[2], plain);
+    }
+
+    const ASK_TS: &str = "2026-10-28T13:01:14.734Z";
+
+    fn ask_line() -> String {
+        format!(r#"{{"type":"assistant","message":{{"model":"claude-opus-5","stop_reason":"end_turn","content":[{{"type":"text","text":"Which way? A or B."}}]}},"timestamp":"{ASK_TS}"}}"#)
+    }
+
+    fn the_ask() -> TurnEnd {
+        TurnEnd { at_ms: crate::codex::ms_of(ASK_TS).unwrap(), text: "Which way? A or B.".into() }
+    }
+
+    #[test]
+    fn the_turn_end_is_the_last_end_turn_message_with_its_text_and_time() {
+        let text = [
+            r#"{"type":"user","message":{"content":"go"},"timestamp":"2026-10-28T13:00:00.000Z"}"#.to_string(),
+            ask_line(),
+            r#"{"type":"system","subtype":"compact_boundary"}"#.to_string(),
+            r#"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"content":"This session is being continued"}}"#.to_string(),
+        ]
+        .join("\n");
+        assert_eq!(parse_tail(&text).turn_end, Some(the_ask()));
+    }
+
+    #[test]
+    fn an_end_turn_with_no_text_of_its_own_takes_the_last_text_before_it() {
+        let text = [
+            r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Shall I proceed?"},{"type":"tool_use","id":"t1","name":"Bash","input":{}}]},"timestamp":"2026-10-28T13:00:00.000Z"}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+            r#"{"type":"assistant","message":{"stop_reason":"end_turn","content":[]},"timestamp":"2026-10-28T13:00:05.000Z"}"#,
+        ]
+        .join("\n");
+        let end = parse_tail(&text).turn_end.unwrap();
+        assert_eq!(end.text, "Shall I proceed?");
+        assert_eq!(end.at_ms, crate::codex::ms_of("2026-10-28T13:00:05.000Z").unwrap());
+        let none = r#"{"type":"assistant","message":{"stop_reason":"end_turn","content":[]},"timestamp":"2026-10-28T13:00:05.000Z"}"#;
+        assert_eq!(parse_tail(none).turn_end, None);
+    }
+
+    #[test]
+    fn a_user_prompt_after_the_turn_clears_the_turn_end() {
+        let ask = ask_line();
+        let with = |rec: &str| parse_tail(&format!("{ask}\n{rec}\n")).turn_end;
+        assert_eq!(with(r#"{"type":"user","message":{"content":"B please"}}"#), None);
+        assert_eq!(with(r#"{"type":"user","message":{"content":[{"type":"text","text":"B please"}]}}"#), None);
+        assert_eq!(with(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"ok"}]}}"#), Some(the_ask()));
+        assert_eq!(with(r#"{"type":"user","isMeta":true,"message":{"content":"<system-reminder>"}}"#), Some(the_ask()));
+        assert_eq!(with(r#"{"type":"user","isSidechain":true,"message":{"content":"sub-agent prompt"}}"#), Some(the_ask()));
+        assert_eq!(with(r#"{"type":"user","isCompactSummary":true,"message":{"content":"summary"}}"#), Some(the_ask()));
+    }
+
+    #[test]
+    fn a_turn_that_did_not_end_on_text_has_no_turn_end() {
+        let tool_use = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Let me look."},{"type":"tool_use","id":"t","name":"Read","input":{}}]},"timestamp":"2026-10-28T13:01:14.734Z"}"#;
+        assert_eq!(parse_tail(tool_use).turn_end, None);
+        let synthetic = r#"{"type":"assistant","message":{"model":"<synthetic>","stop_reason":"end_turn","content":[{"type":"text","text":"[Request interrupted by user]"}]},"timestamp":"2026-10-28T13:01:14.734Z"}"#;
+        assert_eq!(parse_tail(synthetic).turn_end, None);
+        let sidechain = ask_line().replace(r#"{"type":"assistant""#, r#"{"type":"assistant","isSidechain":true"#);
+        assert_eq!(parse_tail(&sidechain).turn_end, None);
+    }
+
+    #[test]
+    fn read_last_turn_reads_back_past_megabytes_of_compaction_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        let filler = format!(r#"{{"type":"attachment","attachment":{{"content":"{}"}}}}"#, "x".repeat(100_000));
+        let summary = r#"{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"content":"This session is being continued"}}"#;
+        let mut body = format!("{}\n", ask_line());
+        for _ in 0..8 {
+            body.push_str(&filler);
+            body.push('\n');
+        }
+        body.push_str(summary);
+        body.push('\n');
+        std::fs::write(&p, body).unwrap();
+
+        assert!(std::fs::metadata(&p).unwrap().len() > 2 * TAIL_BYTES);
+        assert_eq!(read_tail(&p, TAIL_BYTES).turn_end, None);
+        let t = read_last_turn(&p);
+        assert_eq!(t.turn_end, Some(the_ask()));
+        assert_eq!(t.last_assistant_text.as_deref(), Some("Which way? A or B."));
+        assert_eq!(TailCache::default().get(&p), t);
     }
 }
