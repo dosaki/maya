@@ -11,6 +11,8 @@ pub const ACTIVE_WINDOW_MS: u64 = 7 * 86_400_000;
 pub const ANSWER_TTL_MS: u64 = 3_600_000;
 /// The most pages of the repo listing to read.
 pub const REPO_PAGES: u32 = 5;
+/// How many repos are checked at once.
+const THREADS: usize = 8;
 
 /// A deployment environment a run waits to enter.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -300,15 +302,13 @@ fn check_one(http: &dyn Http, forge: &Forge, cache: &ApprovalRepos, repo: &str, 
     out
 }
 
-const THREADS: usize = 8;
-
 /// Every row across the user's active repos, ordered. Fails when the repo
 /// list fails, or when every repo the check tried refused the token.
 pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: u64) -> Result<Vec<DeploymentRun>, String> {
     let repos = active_repos(http, forge, now_ms)?;
     let next = AtomicUsize::new(0);
     let shared: &ApprovalRepos = cache;
-    let mut outcomes: Vec<(usize, Outcome)> = std::thread::scope(|s| {
+    let joined: Result<Vec<Vec<(usize, Outcome)>>, String> = std::thread::scope(|s| {
         let workers: Vec<_> = (0..THREADS.min(repos.len()))
             .map(|_| {
                 s.spawn(|| {
@@ -322,8 +322,9 @@ pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: 
                 })
             })
             .collect();
-        workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
+        workers.into_iter().map(|w| w.join().map_err(|_| "the check stopped unexpectedly".to_string())).collect()
     });
+    let mut outcomes: Vec<(usize, Outcome)> = joined?.into_iter().flatten().collect();
     outcomes.sort_by_key(|(i, _)| *i);
     let (mut rows, mut attempted, mut refused, mut first_refusal) = (Vec::new(), 0, 0, None);
     for (i, out) in outcomes {
@@ -566,5 +567,40 @@ mod tests {
         cache.set("O/a", true, 1_000);
         assert_eq!(cache.fresh("O/a", 1_000 + ANSWER_TTL_MS - 1), Some(true));
         assert_eq!(cache.fresh("O/a", 1_000 + ANSWER_TTL_MS), None);
+    }
+
+    struct PanicOnB(FakeHttp);
+
+    impl Http for PanicOnB {
+        fn get(&self, url: &str, token: &str) -> Result<(u16, String), String> {
+            assert!(!url.contains("/repos/O/b/"), "boom");
+            self.0.get(url, token)
+        }
+        fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+            self.0.post_json(url, token, body)
+        }
+    }
+
+    #[test]
+    fn a_stopped_worker_fails_the_check_and_leaves_the_cache_alone() {
+        let http = PanicOnB(FakeHttp::new(vec![("/user/repos", 200, REPOS_AB), ("/repos/O/a/environments", 200, r#"{"environments":[]}"#)]));
+        let mut cache = ApprovalRepos::default();
+        assert_eq!(fetch(&http, &forge(), &mut cache, now()), Err("the check stopped unexpectedly".to_string()));
+        assert_eq!(cache.fresh("O/a", now()), None);
+    }
+
+    #[test]
+    fn one_repo_refusing_while_another_works_is_not_an_error() {
+        let waiting = runs_json(&[(7, 10, 3, "waiting")]);
+        let http = FakeHttp::new(vec![
+            ("/user/repos", 200, REPOS_AB),
+            ("/repos/O/a/environments", 403, "{}"),
+            ("/repos/O/b/environments", 200, REVIEWERS),
+            ("/repos/O/b/actions/runs/7/pending_deployments", 200, CAN),
+            ("/repos/O/b/actions/runs?status=waiting", 200, &waiting),
+            ("/repos/O/b/actions/runs?status=pending", 200, r#"{"workflow_runs":[]}"#),
+        ]);
+        let rows = fetch(&http, &forge(), &mut ApprovalRepos::default(), now()).unwrap();
+        assert_eq!(rows.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![7]);
     }
 }
