@@ -333,7 +333,12 @@ fn check_one(http: &dyn Http, forge: &Forge, cache: &ApprovalRepos, repo: &str, 
         out.attempted = true;
         match check_repo(http, forge, repo) {
             Ok(rows) => out.rows = rows,
-            Err(e) => out.error = Some(e),
+            Err(e) => {
+                if is_refusal(&e) {
+                    out.asked = Some(Answer::Refused(e.clone()));
+                }
+                out.error = Some(e);
+            }
         }
     }
     out
@@ -628,6 +633,17 @@ mod tests {
         let rows = fetch(&http, &forge(), &mut cache, now()).unwrap();
         assert_eq!(rows.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![7]);
         assert_eq!((asked(&http, "/environments"), asked(&http, "status=waiting")), (0, 1));
+    }
+
+    #[test]
+    fn a_refusal_from_the_runs_calls_is_remembered_too() {
+        let http = FakeHttp::new(vec![("/user/repos", 200, REPOS_A), ("status=waiting", 403, "{}")]);
+        let mut cache = ApprovalRepos::default();
+        cache.set("O/a", Answer::Needs, now());
+        let first = fetch(&http, &forge(), &mut cache, now()).unwrap_err();
+        let second = fetch(&http, &forge(), &mut cache, now() + 120_000).unwrap_err();
+        assert!(is_refusal(&first) && is_refusal(&second), "{first} / {second}");
+        assert_eq!(asked(&http, "status=waiting"), 1);
     }
 
     #[test]
