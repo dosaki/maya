@@ -666,7 +666,7 @@ pub fn parse_tail(text: &str) -> TranscriptTail {
     parse_window(text).0
 }
 
-/// `parse_tail`, and whether `text` holds any assistant record.
+/// `parse_tail`, and whether `text` holds any main-chain assistant record.
 fn parse_window(text: &str) -> (TranscriptTail, bool) {
     let mut assistant = false;
     let mut last_text: Option<String> = None;
@@ -679,8 +679,8 @@ fn parse_window(text: &str) -> (TranscriptTail, bool) {
     for line in text.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         let kind = v["type"].as_str().unwrap_or("");
-        assistant |= kind == "assistant";
         let main_chain = v["isSidechain"].as_bool() != Some(true);
+        assistant |= kind == "assistant" && main_chain;
         if kind == "user" && main_chain && is_prompt(&v) {
             turn_end = None;
         }
@@ -1458,6 +1458,24 @@ mod tests {
         assert_eq!(t.turn_end, Some(the_ask()));
         assert_eq!(t.last_assistant_text.as_deref(), Some("Which way? A or B."));
         assert_eq!(TailCache::default().get(&p), t);
+    }
+
+    #[test]
+    fn a_sidechain_record_does_not_stop_the_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.jsonl");
+        let filler = format!(r#"{{"type":"attachment","attachment":{{"content":"{}"}}}}"#, "x".repeat(100_000));
+        let side = r#"{"type":"assistant","isSidechain":true,"message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t","name":"Read","input":{}}]}}"#;
+        let mut body = format!("{}\n", ask_line());
+        for _ in 0..8 {
+            body.push_str(&filler);
+            body.push('\n');
+        }
+        body.push_str(side);
+        body.push('\n');
+        std::fs::write(&p, body).unwrap();
+
+        assert_eq!(read_last_turn(&p).turn_end, Some(the_ask()));
     }
 
     #[test]
