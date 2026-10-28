@@ -430,7 +430,7 @@ impl Hub {
         let cards = self.cards();
         let (fresh, finished) = {
             let mut n = self.notifier.lock().unwrap();
-            (n.take_new(&cards), n.take_finished(&cards))
+            (n.take_new(&cards), n.take_finished(&cards, &std::collections::HashSet::new()))
         };
         let (switches, speak_on) = {
             let s = self.settings.lock().unwrap();
