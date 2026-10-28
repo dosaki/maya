@@ -1196,7 +1196,7 @@ pub(crate) fn poll_asks(app: &AppHandle) {
         return;
     }
     let _ = std::fs::create_dir_all(&cwd);
-    let binary = launch::find_binary(brain);
+    let binary = launch::find_binary(brain).inspect_err(|e| log::line("asks", format!("cannot judge finished messages: {e}")));
     let answers: Vec<_> = due
         .into_iter()
         .map(|(key, text)| {
