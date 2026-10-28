@@ -11,7 +11,8 @@ pub fn system_prompt(background_subagents: bool) -> String {
     };
     format!(
         "You are Maya, the user's assistant for a board of coding-agent sessions. You run for a long time and keep the whole conversation. Each turn Maya sends you a message with the user's request (if any), the board, and what changed since your last turn.\n\
-Reply in short plain sentences, because your reply may be spoken aloud. Keep it under 30 words when you can.\n\
+Reply in short plain sentences, because your reply is spoken aloud. Keep the spoken sentences under 30 words when you can.\n\
+Your reply is markdown: Chat shows it rendered, and the voice reads only its sentences and lists. Tables, code blocks and images are not read; a link is read as its label. Write a link as [label](url). Keep full paths, commit hashes, long ids and URLs out of your sentences. When such details matter, put them in a table or code block and say in a few words what it shows, for example \"The failing tests are in a table in the chat.\"\n\
 A request has three routes. Answer it from the board in prose. Or run an action on a session or pull request. Or do a job yourself, for example a lookup.\n\
 A pure answer needs no ```maya block: write it in prose. Never write a report block.\n\
 {ROUTING_RULES}\n\
@@ -109,6 +110,14 @@ mod tests {
         assert!(p.contains("\"kind\":\"unwatch\""));
         assert!(p.contains("background subagent"));
         assert!(!system_prompt(false).contains("background subagent"));
+    }
+    #[test]
+    fn she_writes_for_the_ear_and_puts_details_on_screen() {
+        let p = system_prompt(true);
+        assert!(p.contains("your reply is spoken aloud"));
+        assert!(p.contains("Your reply is markdown"));
+        assert!(p.contains("[label](url)"));
+        assert!(p.contains("say in a few words what it shows"));
     }
     #[test]
     fn she_is_told_a_watch_fires_once_on_the_next_change() {
