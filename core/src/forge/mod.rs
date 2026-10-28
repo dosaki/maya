@@ -245,20 +245,33 @@ impl Http for Ureq {
     }
 }
 
-fn scopes(p: GitProvider) -> &'static str {
-    match p {
-        GitProvider::Github => "repo scope (fine-grained: Pull requests read)",
-        GitProvider::Gitlab => "read_api scope",
+/// What a call is for, so a refused token is told what it needs.
+#[derive(Clone, Copy)]
+pub(crate) enum Need {
+    Reviews,
+    Deployments,
+}
+
+fn scopes(p: GitProvider, need: Need) -> &'static str {
+    match (p, need) {
+        (GitProvider::Github, Need::Reviews) => "repo scope (fine-grained: Pull requests read)",
+        (GitProvider::Github, Need::Deployments) => "repo scope (fine-grained: Actions read, Deployments read and write, Environments read, Metadata read)",
+        (GitProvider::Gitlab, _) => "read_api scope",
     }
+}
+
+/// Whether `e` says the token was refused.
+pub fn is_refusal(e: &str) -> bool {
+    e.starts_with("the token was refused")
 }
 
 /// The body of a 2xx reply, or what went wrong in words.
 /// The body of a 2xx reply, else why not. An error body is scrubbed of
 /// `token` before it is cut, so no part of the token survives the cut.
-fn check(p: GitProvider, status: u16, body: String, token: &str) -> Result<String, String> {
+fn check(p: GitProvider, status: u16, body: String, token: &str, need: Need) -> Result<String, String> {
     match status {
         200..=299 => Ok(body),
-        401 | 403 => Err(format!("the token was refused ({status}). It needs the {}.", scopes(p))),
+        401 | 403 => Err(format!("the token was refused ({status}). It needs the {}.", scopes(p, need))),
         _ => {
             let body = scrub(&body, token);
             let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
@@ -268,9 +281,9 @@ fn check(p: GitProvider, status: u16, body: String, token: &str) -> Result<Strin
     }
 }
 
-fn answer(forge: &Forge, r: Result<(u16, String), String>) -> Result<String, String> {
+fn answer(forge: &Forge, r: Result<(u16, String), String>, need: Need) -> Result<String, String> {
     let out = match r {
-        Ok((status, body)) => check(forge.site.provider, status, body, &forge.token),
+        Ok((status, body)) => check(forge.site.provider, status, body, &forge.token, need),
         Err(e) => Err(format!("could not reach {}: {e}", forge.site.host())),
     };
     out.map_err(|e| scrub(&e, &forge.token))
@@ -278,14 +291,24 @@ fn answer(forge: &Forge, r: Result<(u16, String), String>) -> Result<String, Str
 
 /// A GET's JSON reply.
 pub(crate) fn get_json(http: &dyn Http, forge: &Forge, url: &str) -> Result<serde_json::Value, String> {
-    let body = answer(forge, http.get(url, &forge.token))?;
+    get_json_as(http, forge, url, Need::Reviews)
+}
+
+/// A GET's JSON reply, where a refusal names the permissions `need` calls for.
+pub(crate) fn get_json_as(http: &dyn Http, forge: &Forge, url: &str, need: Need) -> Result<serde_json::Value, String> {
+    let body = answer(forge, http.get(url, &forge.token), need)?;
     serde_json::from_str(&body).map_err(|e| format!("{}'s reply was not JSON: {e}", forge.site.provider.label()))
 }
 
 /// A GraphQL query's reply body, for the provider's parser.
 pub(crate) fn post_graphql(http: &dyn Http, forge: &Forge, query: &str) -> Result<String, String> {
     let body = serde_json::json!({ "query": query }).to_string();
-    answer(forge, http.post_json(&forge.site.graphql_url(), &forge.token, &body))
+    answer(forge, http.post_json(&forge.site.graphql_url(), &forge.token, &body), Need::Reviews)
+}
+
+/// A POST's JSON body sent, and the reply body, where a refusal names the permissions `need` calls for.
+pub(crate) fn post_json_as(http: &dyn Http, forge: &Forge, url: &str, body: &serde_json::Value, need: Need) -> Result<String, String> {
+    answer(forge, http.post_json(url, &forge.token, &body.to_string()), need)
 }
 
 /// The PR or MR of `branch` in `repo`.
@@ -489,6 +512,20 @@ mod tests {
         let gl = Forge { site: gitlab("https://gitlab.com"), token: "glpat".into() };
         let http = fake::FakeHttp::new(vec![("/user", 403, "{}")]);
         assert_eq!(get_json(&http, &gl, "https://gitlab.com/api/v4/user").unwrap_err(), "the token was refused (403). It needs the read_api scope.");
+    }
+
+    #[test]
+    fn a_refusal_names_the_permissions_of_its_use() {
+        let f = Forge { site: github(), token: "ghp_x".into() };
+        let http = fake::FakeHttp::new(vec![("/x", 403, "{}")]);
+        let reviews = get_json(&http, &f, "https://api.github.com/x").unwrap_err();
+        let deploys = get_json_as(&http, &f, "https://api.github.com/x", Need::Deployments).unwrap_err();
+        assert_eq!(reviews, "the token was refused (403). It needs the repo scope (fine-grained: Pull requests read).");
+        assert_eq!(deploys, "the token was refused (403). It needs the repo scope (fine-grained: Actions read, Deployments read and write, Environments read, Metadata read).");
+        assert!(is_refusal(&deploys) && !is_refusal("404: Not Found"));
+        let http = fake::FakeHttp::new(vec![("/y", 200, "ok")]);
+        assert_eq!(post_json_as(&http, &f, "https://api.github.com/y", &serde_json::json!({"a": 1}), Need::Deployments).unwrap(), "ok");
+        assert_eq!(http.seen.lock().unwrap()[0].2.as_deref(), Some(r#"{"a":1}"#));
     }
 
     #[test]
