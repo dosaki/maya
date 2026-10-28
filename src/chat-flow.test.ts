@@ -27,6 +27,18 @@ describe("chat flow", () => {
     });
   });
 
+  it("opens at the latest message", async () => {
+    const tabs = makeTabs();
+    initChat();
+    await flush();
+    on<ChatTurn[]>("chat-reset")({ payload: [{ who: "maya", text: "one", at: 1, via: "maya" }, { who: "maya", text: "two", at: 2, via: "maya" }] });
+    const log = document.querySelector<HTMLElement>(".chat__log")!;
+    Object.defineProperty(log, "scrollHeight", { configurable: true, value: 900 });
+    tabs.show("chat");
+    await flush();
+    expect(log.scrollTop).toBe(900);
+  });
+
   it("colours the tab dot by status and marks the chat seen when opened", async () => {
     const tabs = makeTabs();
     initChat();

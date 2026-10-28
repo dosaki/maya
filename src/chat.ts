@@ -224,7 +224,11 @@ export function initChat(opts: { sendButton?: boolean } = {}): void {
   // makeTabs announces every switch; opening Chat means the user has read it.
   window.addEventListener("maya:tab", (ev) => {
     open = (ev as CustomEvent<string>).detail === "chat";
-    if (open) seen();
+    if (!open) return;
+    seen();
+    // Painted while hidden, the log had no height to scroll: land on the latest turn now it shows.
+    const log = pane?.querySelector<HTMLElement>(".chat__log");
+    if (log) log.scrollTop = log.scrollHeight;
   });
   void invoke<ChatTurn[]>("chat_history").then((t) => {
     turns = t;
