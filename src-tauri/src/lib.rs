@@ -1204,16 +1204,16 @@ pub(crate) fn poll_asks(app: &AppHandle) {
                 Ok(bin) => judged(|| maya_core::asks::judge(brain, bin, model.as_deref(), &text, &cwd)),
                 Err(_) => Err(()),
             };
-            (key, verdict)
+            (key, text, verdict)
         })
         .collect();
     {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
-        for (key, verdict) in answers {
+        for (key, text, verdict) in answers {
             match verdict {
                 Ok(v) => store.set_ask_verdict(key, v),
-                Err(()) => store.set_ask_failed(key),
+                Err(()) => store.set_ask_failed(key, &text),
             }
         }
     }

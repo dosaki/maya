@@ -41,6 +41,10 @@ impl AskCache {
         AskCache { path, verdicts, dirty: false }
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn get(&self, key: &str) -> Option<&Verdict> {
         self.verdicts.get(key)
     }

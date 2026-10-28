@@ -74,8 +74,6 @@ pub struct Store {
     due_asks: Vec<(String, String)>,
     /// Keys handed out or waiting to be, until their verdict or failure arrives.
     queued: HashSet<String>,
-    /// Keys whose judging failed in this run: the wording check decides them.
-    failed: HashSet<String>,
     /// The sessions held on their judging by the last refresh.
     judging: HashSet<String>,
     asks_save_failing: bool,
@@ -191,7 +189,6 @@ impl Store {
             judge_asks: false,
             due_asks: Vec::new(),
             queued: HashSet::new(),
-            failed: HashSet::new(),
             judging: HashSet::new(),
             asks_save_failing: false,
         }
@@ -590,14 +587,7 @@ impl Store {
         }
         self.save_memory();
         self.asks.retain(&used);
-        if let Err(e) = self.asks.save() {
-            if !self.asks_save_failing {
-                crate::log::line("asks", format!("could not save the verdicts: {e}"));
-            }
-            self.asks_save_failing = true;
-        } else {
-            self.asks_save_failing = false;
-        }
+        self.save_asks();
         cards
     }
 
@@ -613,7 +603,7 @@ impl Store {
             let prose = if v.asks { Prose::Asks(line().unwrap_or_default()) } else { Prose::Done };
             return Some((key, prose));
         }
-        (self.judge_asks && !self.failed.contains(&key)).then_some((key, Prose::Judging))
+        self.judge_asks.then_some((key, Prose::Judging))
     }
 
     /// Books what `prose_for` found once the card is derived: a verdict in use
@@ -639,15 +629,28 @@ impl Store {
     pub fn set_ask_verdict(&mut self, key: String, v: Verdict) {
         self.queued.remove(&key);
         self.asks.insert(key, v);
-        if let Err(e) = self.asks.save() {
-            crate::log::line("asks", format!("could not save the verdicts: {e}"));
+        self.save_asks();
+    }
+
+    /// Writes the verdicts when they changed; a streak of failed saves is
+    /// logged once, like the memory's.
+    fn save_asks(&mut self) {
+        match self.asks.save() {
+            Ok(()) => self.asks_save_failing = false,
+            Err(e) => {
+                if !self.asks_save_failing {
+                    crate::log::line("asks", format!("could not save the verdicts to {}: {e}", self.asks.path().display()));
+                }
+                self.asks_save_failing = true;
+            }
         }
     }
 
-    /// The judge gave no usable verdict: the wording check decides this message.
-    pub fn set_ask_failed(&mut self, key: String) {
-        self.queued.remove(&key);
-        self.failed.insert(key);
+    /// The judge gave no usable verdict on `text`: the wording check's is
+    /// kept as its verdict, so it is not judged again after a restart.
+    pub fn set_ask_failed(&mut self, key: String, text: &str) {
+        let line = crate::state::asking_line(text);
+        self.set_ask_verdict(key, Verdict { asks: line.is_some(), line });
     }
 
     /// The sessions the last refresh held on a verdict still to come.
@@ -1227,14 +1230,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().to_path_buf();
         let now = finished_turn(&claude);
-        let mut store = Store::new(claude).with_alive(|_| true);
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
         store.judge_asks = true;
         store.refresh(now);
-        let key = store.take_due_asks().remove(0).0;
-        store.set_ask_failed(key);
-        assert_eq!(store.refresh(now)[0].state, State::Awaiting);
+        let (key, text) = store.take_due_asks().remove(0);
+        store.set_ask_failed(key, &text);
+        let card = store.refresh(now).remove(0);
+        assert_eq!((card.state, card.awaiting.unwrap().detail.as_str()), (State::Awaiting, SAY_GO));
         assert!(store.judging_sessions().is_empty());
         assert!(store.take_due_asks().is_empty());
+
+        let mut next = Store::new(claude).with_alive(|_| true);
+        next.judge_asks = true;
+        assert_eq!(next.refresh(now)[0].state, State::Awaiting);
+        assert!(next.take_due_asks().is_empty(), "a failed message is not judged again after a restart");
+    }
+
+    #[test]
+    fn a_verdict_that_cannot_be_saved_is_logged_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        let now = finished_turn(&claude);
+        // A folder where the verdicts file should be: every save fails.
+        std::fs::create_dir_all(claude.join("maya/asks.json")).unwrap();
+        let logged = || crate::log::lines().iter().filter(|l| l.source == "asks" && l.text.contains("could not save the verdicts") && l.text.contains(&*claude.to_string_lossy())).count();
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.judge_asks = true;
+        store.refresh(now);
+        let (key, text) = store.take_due_asks().remove(0);
+        store.set_ask_verdict(key.clone(), Verdict { asks: false, line: None });
+        store.set_ask_verdict(key.clone(), Verdict { asks: true, line: None });
+        store.set_ask_failed(key, &text);
+        store.refresh(now);
+        assert_eq!(logged(), 1);
     }
 
     #[test]
