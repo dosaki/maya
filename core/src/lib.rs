@@ -31,6 +31,7 @@ pub mod registry;
 pub mod remembered;
 pub mod resume;
 pub mod reviews;
+pub mod speech;
 pub mod state;
 pub mod store;
 pub mod terminal;
