@@ -126,7 +126,7 @@ pub fn asking_line(text: &str) -> Option<String> {
         if core.ends_with('?') {
             return true;
         }
-        let words: Vec<String> = s.to_lowercase().split(|c: char| !c.is_alphanumeric() && c != '\'' && c != '’').filter(|w| !w.is_empty()).map(str::to_string).collect();
+        let words: Vec<String> = s.replace('’', "'").to_lowercase().split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).map(str::to_string).collect();
         let padded = format!(" {} ", words.join(" "));
         DECISION_PHRASES.iter().any(|p| padded.contains(&format!(" {p} ")))
     };
@@ -512,10 +512,15 @@ use crate::events::HookEvent;
         // Kept from the old test: closing lines, code fences, trailing asides.
         assert_eq!(asking_line("Ready?\n```\ncode\n```"), Some("Ready?".into()));
         assert_eq!(asking_line("Go ahead? [y/n]"), Some("Go ahead? [y/n]".into()));
+        assert_eq!(asking_line("If you’d like that fixed, I can do it."), Some("If you’d like that fixed, I can do it.".into()));
+        assert_eq!(asking_line("Run:\n! sh a.sh\nDone."), Some("! sh a.sh".into()));
+        let aside = "Approve this plan, or amend any rows? (e.g. \"skip #2\")";
+        assert_eq!(asking_line(aside), Some(aside.into()));
         // A question inside code, a table or a quote is not an ask.
         assert_eq!(asking_line("```\nwhy?\n```\nDone."), None);
         assert_eq!(asking_line("| a? | b |\n|---|---|\n\nAll done."), None);
         assert_eq!(asking_line("> Should we?\n\nFixed and pushed."), None);
+        assert_eq!(asking_line("Done.\n```\nwhy?"), None);
         assert_eq!(asking_line("All done."), None);
         assert_eq!(asking_line(""), None);
     }
