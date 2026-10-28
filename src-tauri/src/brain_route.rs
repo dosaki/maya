@@ -53,8 +53,10 @@ pub(crate) fn spoken(text: &str) -> Option<String> {
 
 /// The parts of her reply as one line to say or post, blank parts left
 /// out: said as one utterance, a short part ("Sure.") never plays alone.
+/// Each part is its own paragraph, so a part that ends in a table or a
+/// list stays whole in Chat; the voice still says them as one line.
 pub(crate) fn one_line<S: AsRef<str>>(parts: &[S]) -> String {
-    parts.iter().map(|p| p.as_ref().trim()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" ")
+    parts.iter().map(|p| p.as_ref().trim()).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("\n\n")
 }
 
 /// Whether her line goes through the voice path: a reply to a spoken request
@@ -513,9 +515,16 @@ mod tests {
 
     #[test]
     fn her_words_and_what_ran_make_one_line() {
-        assert_eq!(one_line(&["Sure.", "", " Focusing api-fix. "]), "Sure. Focusing api-fix.");
+        assert_eq!(one_line(&["Sure.", "", " Focusing api-fix. "]), "Sure.\n\nFocusing api-fix.");
         assert_eq!(one_line(&["  ", ""]), "");
         assert_eq!(one_line(&["", "Telling api-fix: open the PR."]), "Telling api-fix: open the PR.");
+        assert_eq!(maya_core::speech::from_markdown(&one_line(&["Sure.", "Focusing api-fix."])), "Sure. Focusing api-fix.");
+    }
+
+    #[test]
+    fn her_markdown_and_what_ran_stay_apart() {
+        let line = one_line(&["Failures below.\n\n| t |\n|---|\n| a |", "Focusing api-fix."]);
+        assert_eq!(maya_core::speech::from_markdown(&line), "Failures below. Focusing api-fix.");
     }
 
     #[test]
