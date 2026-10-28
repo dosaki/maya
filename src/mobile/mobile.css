@@ -16,6 +16,9 @@
 
 /* Cards and dialogs fill the screen; the × in the header is the way back. */
 .modal__panel, .modal__panel--compact { width: 100vw; height: 100vh; max-width: none; max-height: none; min-width: 0; min-height: 0; border: 0; border-radius: 0; }
+/* With the keyboard up the panel is half the screen: the new-session form
+   scrolls under its header, so the prompt and Start stay reachable. */
+.modal__panel--compact .newsession { flex: 1; min-height: 0; overflow-y: auto; }
 .modal__backdrop { display: none; }
 /* The header's name, project, context, model and branch do not fit one
    row on a phone: they wrap onto more lines, each kept whole, and one
