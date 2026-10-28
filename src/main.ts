@@ -9,13 +9,14 @@ import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
+import { approvalCount, deploymentActionFor, renderDeployments, type RowUi } from "./deployments";
 import { makeReviewsView, OPEN_SETTINGS_GROUP, reviewActionFor, waitingCount } from "./reviews";
 import { filterCards, makeSessionSearch } from "./search";
 import { initRemembered } from "./remembered";
 import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
-import { prRef, remoteTerminalToast, type Card, type ReviewState } from "./types";
+import { prRef, remoteTerminalToast, type Card, type DeploymentState, type ReviewState } from "./types";
 import { initMute } from "./mute";
 import { initVoice } from "./voice";
 import { initChat } from "./chat";
@@ -33,6 +34,8 @@ let enableTimer: ReturnType<typeof setTimeout> | undefined;
 let known = new Set<string>();
 let pointer: { x: number; y: number } | null = null;
 let reviews: ReviewState = { prs: [], errors: [], off: false, fetchedAt: null };
+let deployments: DeploymentState = { runs: [], error: null, off: false, assistant: false, fetchedAt: null };
+const deployUi: RowUi = { busy: new Set(), errors: new Map() };
 let clonesDir: string | null = null;
 let tabs: ReturnType<typeof makeTabs> | null = null;
 let reviewsView: ReturnType<typeof makeReviewsView> | null = null;
@@ -44,6 +47,41 @@ function paintReviews(): void {
   reviewsView ??= makeReviewsView(host);
   reviewsView.update(reviews, Date.now(), { cards, clonesDir });
   tabs?.setCount(waitingCount(reviews.prs));
+}
+
+function paintDeployments(): void {
+  const host = document.getElementById("deployments");
+  if (!host) return;
+  host.replaceChildren(renderDeployments(deployments, Date.now(), deployUi));
+  tabs?.setDeploymentCount(approvalCount(deployments.runs));
+}
+
+async function deploymentAction(target: Element): Promise<void> {
+  const action = deploymentActionFor(target);
+  if (!action) return;
+  if (action.kind === "git-settings") {
+    document.dispatchEvent(new CustomEvent(OPEN_SETTINGS_GROUP, { detail: "git" }));
+    tabs?.show("settings");
+  } else if (action.kind === "open-run" || action.kind === "open-blocker") {
+    try {
+      await invoke("open_deployment", { repo: action.repo, runId: action.runId, blocker: action.kind === "open-blocker" });
+    } catch (e) {
+      showToast(String(e));
+    }
+  } else {
+    const { repo, runId } = action;
+    if (deployUi.busy.has(runId)) return;
+    deployUi.busy.add(runId);
+    deployUi.errors.delete(runId);
+    paintDeployments();
+    try {
+      await invoke(action.kind === "approve" ? "deployment_approve" : "deployment_reject", { repo, runId });
+    } catch (e) {
+      deployUi.errors.set(runId, String(e));
+    }
+    deployUi.busy.delete(runId);
+    paintDeployments();
+  }
 }
 
 async function reviewAction(target: Element): Promise<void> {
@@ -235,6 +273,16 @@ async function start(): Promise<void> {
     paintReviews();
   });
   paintReviews();
+  document.getElementById("deployments")?.addEventListener("click", (ev) => void deploymentAction(ev.target as Element));
+  await listen<DeploymentState>("deployments", (e) => {
+    deployments = e.payload;
+    paintDeployments();
+  });
+  paintDeployments();
+  void invoke<DeploymentState>("list_deployments").then((d) => {
+    deployments = d;
+    paintDeployments();
+  }).catch(() => undefined);
   void invoke<ReviewState>("list_review_prs").then((r) => {
     reviews = r;
     paintReviews();
@@ -288,7 +336,7 @@ async function start(): Promise<void> {
   });
   cards = await invoke<Card[]>("list_sessions");
   paint();
-  setInterval(() => { paint(); paintReviews(); }, 10_000); // refresh the age labels
+  setInterval(() => { paint(); paintReviews(); paintDeployments(); }, 10_000); // refresh the age labels
 }
 
 void start();

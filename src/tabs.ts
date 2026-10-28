@@ -1,12 +1,12 @@
 import { STATE_LABEL, type CardState } from "./types";
 
-export type Tab = "sessions" | "reviews" | "debug" | "settings" | "chat";
+export type Tab = "sessions" | "reviews" | "deployments" | "debug" | "settings" | "chat";
 
 const KEY = "maya.tab";
-const PANES: Record<Tab, string> = { sessions: "board", reviews: "reviews", debug: "debug", settings: "settings", chat: "chat" };
+const PANES: Record<Tab, string> = { sessions: "board", reviews: "reviews", deployments: "deployments", debug: "debug", settings: "settings", chat: "chat" };
 
 function asTab(v: string | null | undefined): Tab {
-  return v === "reviews" || v === "debug" || v === "settings" || v === "chat" ? v : "sessions";
+  return v === "reviews" || v === "deployments" || v === "debug" || v === "settings" || v === "chat" ? v : "sessions";
 }
 
 function stored(): Tab {
@@ -18,7 +18,7 @@ function stored(): Tab {
 }
 
 /**
- * Five panes, one visible: Sessions, Pull Requests and Chat on the left, Debug and
+ * Six panes, one visible: Sessions, Pull Requests, Deployments and Chat on the left, Debug and
  * Settings on the right. Sessions is the default; the choice is remembered
  * per browser. Switching only toggles `hidden`, so the board keeps its
  * scroll positions and the session watcher keeps running underneath.
@@ -56,6 +56,10 @@ export function makeTabs(onChange?: (tab: Tab) => void) {
     show,
     setCount: (n: number) => {
       const el = document.getElementById("reviews-count");
+      if (el) el.textContent = n > 0 ? String(n) : "";
+    },
+    setDeploymentCount: (n: number) => {
+      const el = document.getElementById("deployments-count");
       if (el) el.textContent = n > 0 ? String(n) : "";
     },
     /** One badge per column on the Sessions tab; zeros stay visible so the badges keep their places. */

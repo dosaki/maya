@@ -121,6 +121,30 @@ export interface ReviewState {
   fetchedAt: number | null;
 }
 
+export interface DeployEnvironment { id: number; name: string }
+export interface DeployBlocker { runId: number; sha: string; title: string; url: string }
+export type RunWait = { kind: "approval"; environments: DeployEnvironment[] } | { kind: "blocked"; by: DeployBlocker | null };
+export interface DeploymentRun {
+  repo: string;
+  runId: number;
+  runNumber: number;
+  workflow: string;
+  branch: string;
+  sha: string;
+  title: string;
+  actor: string;
+  url: string;
+  since: string;
+  wait: RunWait;
+}
+export interface DeploymentState {
+  runs: DeploymentRun[];
+  error: string | null;
+  off: boolean;
+  assistant: boolean;
+  fetchedAt: number | null;
+}
+
 export interface Card {
   sessionId: string;
   pid: number;
