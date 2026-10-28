@@ -25,7 +25,7 @@ pub fn from_markdown(text: &str) -> String {
             }
             Event::End(TagEnd::Link) => autolink = false,
             Event::Text(t) | Event::Code(t) if !autolink => {
-                let words: Vec<&str> = t.split(' ').map(|w| if is_url(w) { "a link" } else { w }).collect();
+                let words: Vec<String> = t.split(' ').map(link_word).collect();
                 out.push_str(&words.join(" "));
             }
             Event::SoftBreak | Event::HardBreak => out.push(' '),
@@ -60,9 +60,15 @@ pub fn escape(plain: &str) -> String {
     out
 }
 
-fn is_url(word: &str) -> bool {
-    let w = word.to_ascii_lowercase();
-    w.starts_with("http://") || w.starts_with("https://")
+/// A word holding a URL, as "a link" with the punctuation around the URL
+/// kept: "(https://x.com/a)." is "(a link).".
+fn link_word(word: &str) -> String {
+    let lower = word.to_ascii_lowercase();
+    let Some(start) = ["http://", "https://"].iter().filter_map(|p| lower.find(p)).min() else {
+        return word.to_string();
+    };
+    let tail = word[start..].trim_end_matches(|c: char| matches!(c, ')' | ']' | '>' | '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\'' | '…'));
+    format!("{}a link{}", &word[..start], &word[start + tail.len()..])
 }
 
 /// Closes what was said so far with a full stop unless it already ends a
@@ -97,6 +103,11 @@ mod tests {
         assert_eq!(from_markdown("See [the PR](https://github.com/o/r/pull/1)."), "See the PR.");
         assert_eq!(from_markdown("It is at https://example.com/x now."), "It is at a link now.");
         assert_eq!(from_markdown("<https://example.com>"), "a link");
+    }
+    #[test]
+    fn a_url_in_brackets_or_quotes_is_read_as_a_link() {
+        assert_eq!(from_markdown("The PR (https://github.com/o/r/pull/12) is open."), "The PR (a link) is open.");
+        assert_eq!(from_markdown("Open \"https://x.com/a\", then wait."), "Open \"a link\", then wait.");
     }
     #[test]
     fn emphasis_headings_and_inline_code_are_plain_words() {
