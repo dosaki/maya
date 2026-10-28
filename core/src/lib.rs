@@ -9,6 +9,7 @@ pub mod codex;
 pub mod codex_hooks;
 pub mod config;
 pub mod context;
+pub mod deployments;
 pub mod diff;
 pub mod events;
 pub mod foreign;
