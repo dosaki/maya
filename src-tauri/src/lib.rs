@@ -689,13 +689,13 @@ fn announcement(speak_notifications: bool, muted: bool, focus: bool) -> (bool, b
 }
 
 pub(crate) fn refresh_and_emit(app: &AppHandle) {
-    let (cards, wants_notify, speak, muted, wanted_voices, assistant, volume, wake_word) = {
+    let (cards, judging, wants_notify, speak, muted, wanted_voices, assistant, volume, wake_word) = {
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
         let cards = local_cards(&mut store);
         let c = &store.config;
         let chain = if c.speak_notifications && !c.muted { voices_wanted(c, store.claude_dir()) } else { vec![] };
-        (cards, c.notify_on_awaiting, c.speak_notifications, c.muted, chain, c.network.role == config::NetworkRole::Assistant, c.voice_loudness(), c.listen_word())
+        (cards, store.judging_sessions(), c.notify_on_awaiting, c.speak_notifications, c.muted, chain, c.network.role == config::NetworkRole::Assistant, c.voice_loudness(), c.listen_word())
     };
     // Due names are typed into the terminals with no lock held.
     actions::run_due_renames(&local(&app.state::<AppState>()));
@@ -711,7 +711,7 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
     let (fresh, finished) = {
         let state = app.state::<AppState>();
         let mut n = state.notifier.lock().unwrap();
-        (n.take_new(&cards), n.take_finished(&cards))
+        (n.take_new(&cards), n.take_finished(&cards, &judging))
     };
     // A Focus mode (Do Not Disturb and friends) keeps Maya quiet; banners are
     // left to macOS, which filters them by the Focus's own rules.
@@ -753,7 +753,7 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
     let server = app.state::<AppState>().network.lock().unwrap().server.clone();
     if let Some(s) = server {
         s.mirror_wake_word(Some(wake_word));
-        s.mirror(cards.clone());
+        s.mirror(notify::mask_judging(&cards, &judging));
     }
     remembered_app::publish(app);
     if assistant {
@@ -1159,6 +1159,67 @@ pub(crate) fn poll_pull_requests(app: &AppHandle) {
     refresh_and_emit(app);
 }
 
+/// The model that judges finished messages: Maya's agent's own, or Claude Code's quick one.
+fn judge_model(cfg: &Config) -> Option<String> {
+    match cfg.brain_model() {
+        Some(m) => Some(m.to_string()),
+        None if cfg.brain() == Harness::ClaudeCode => Some("haiku".into()),
+        None => None,
+    }
+}
+
+/// What `judge` made of a message; a failure, a panic among them, is logged
+/// and answers its key like any other, so the thread lives on.
+fn judged(judge: impl FnOnce() -> Result<maya_core::asks::Verdict, maya_core::interpreter::RunError>) -> Result<maya_core::asks::Verdict, ()> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(judge)) {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => {
+            log::line("asks", format!("judging a finished message: {e:?}"));
+            Err(())
+        }
+        Err(_) => {
+            log::line("asks", "judging a finished message panicked");
+            Err(())
+        }
+    }
+}
+
+/// Judges the finished messages the store queued, outside the store lock,
+/// and repaints once their verdicts are in.
+pub(crate) fn poll_asks(app: &AppHandle) {
+    let (due, brain, model, cwd) = {
+        let state = app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        (store.take_due_asks(), store.config.brain(), judge_model(&store.config), store.claude_dir().join("maya"))
+    };
+    if due.is_empty() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(&cwd);
+    let binary = launch::find_binary(brain).inspect_err(|e| log::line("asks", format!("cannot judge finished messages: {e}")));
+    let answers: Vec<_> = due
+        .into_iter()
+        .map(|(key, text)| {
+            let verdict = match &binary {
+                Ok(bin) => judged(|| maya_core::asks::judge(brain, bin, model.as_deref(), &text, &cwd)),
+                Err(_) => Err(()),
+            };
+            (key, text, verdict)
+        })
+        .collect();
+    {
+        let state = app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        for (key, text, verdict) in answers {
+            match verdict {
+                Ok(v) => store.set_ask_verdict(key, v),
+                Err(()) => store.set_ask_failed(key, &text),
+            }
+        }
+    }
+    refresh_and_emit(app);
+}
+
 /// Saves a pasted file under the Maya directory and returns its path.
 #[tauri::command(async)]
 fn save_attachment(state: TauriState<AppState>, name: String, bytes: Vec<u8>) -> Result<String, String> {
@@ -1538,6 +1599,7 @@ const PR_POLL: Duration = Duration::from_secs(10);
 pub fn run() {
     let dir = claude_dir();
     let mut store = Store::new(dir.clone());
+    store.judge_asks = true;
     store.compact_events();
     let chat = maya_core::brain::chat::ChatLog::load(store.claude_dir().join("maya").join("brain").join("chat.json"));
     let brain = brain_app::BrainState::new(store.claude_dir());
@@ -1670,6 +1732,11 @@ pub fn run() {
                     std::thread::sleep(PR_POLL);
                 }
             });
+            let asks_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                poll_asks(&asks_handle);
+                std::thread::sleep(Duration::from_secs(2));
+            });
             let review_handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 poll_reviews(&review_handle);
@@ -1724,6 +1791,26 @@ pub fn run() {
 #[cfg(test)]
 mod route_tests {
     use super::*;
+
+    #[test]
+    fn a_judge_that_panics_is_a_failed_judgement() {
+        let yes = maya_core::asks::Verdict { asks: true, line: None };
+        assert_eq!(judged(|| Ok(yes.clone())), Ok(yes));
+        assert_eq!(judged(|| Err(maya_core::interpreter::RunError::Failed("no".into()))), Err(()));
+        assert_eq!(judged(|| panic!("boom")), Err(()));
+        assert!(log::lines().iter().any(|l| l.source == "asks" && l.text == "judging a finished message panicked"));
+    }
+
+    #[test]
+    fn the_judge_uses_the_agents_model_or_claudes_quick_one() {
+        let mut cfg = Config::default();
+        assert_eq!(judge_model(&cfg).as_deref(), Some("haiku"));
+        cfg.agent_model = " opus ".into();
+        assert_eq!(judge_model(&cfg).as_deref(), Some("opus"));
+        cfg.agent_model = String::new();
+        cfg.agent = Some(Harness::Codex);
+        assert_eq!(judge_model(&cfg), None);
+    }
 
     #[test]
     fn the_heartbeat_rides_every_third_pr_poll() {

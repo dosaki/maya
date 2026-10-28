@@ -4,7 +4,7 @@
 
 use crate::context;
 use crate::model::{AwaitKind, Awaiting, Card, Harness, State};
-use crate::state::{asking_line, truncate, SNIPPET_CHARS};
+use crate::state::{asking_line, truncate, Prose, SNIPPET_CHARS};
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Stdio;
@@ -38,8 +38,13 @@ pub struct ForeignTail {
 /// The card for a foreign session, with the same state rules as Claude Code
 /// sessions: an open request wins, then a running turn, then a prose ask,
 /// then Completed decaying to Idle.
-pub fn derive(s: &ForeignSession, t: &ForeignTail, now_ms: u64, completed_timeout_ms: u64) -> Card {
-    let prose = if t.working { None } else { t.last_agent_text.as_deref().and_then(asking_line) };
+pub fn derive(s: &ForeignSession, t: &ForeignTail, prose: &Prose, now_ms: u64, completed_timeout_ms: u64) -> Card {
+    let prose = match prose {
+        _ if t.working => None,
+        Prose::Asks(line) => Some(line.clone()),
+        Prose::Unjudged => t.last_agent_text.as_deref().and_then(asking_line),
+        Prose::Judging | Prose::Done => None,
+    };
     let (state, state_since, awaiting) = if let Some(detail) = &t.awaiting {
         (State::Awaiting, t.last_event_ms, Some(Awaiting { kind: AwaitKind::Permission, detail: truncate(detail, SNIPPET_CHARS), questions: vec![] }))
     } else if t.working {
@@ -441,24 +446,34 @@ mod tests {
     #[test]
     fn derives_the_four_states_and_a_prose_ask() {
         let min = 60_000;
-        let c = derive(&session(), &tail(true, None, None, 1000), 5000, 30 * min);
+        let c = derive(&session(), &tail(true, None, None, 1000), &Prose::Unjudged, 5000, 30 * min);
         assert_eq!(c.state, State::Working);
         assert_eq!(c.harness, Harness::Codex);
         assert_eq!(c.pid, 9);
         assert!(!c.has_inbox, "no inbox socket: replies are typed into the tty instead");
-        let a = derive(&session(), &tail(true, Some("Approve: rm -rf x"), None, 1000), 5000, 30 * min);
+        let a = derive(&session(), &tail(true, Some("Approve: rm -rf x"), None, 1000), &Prose::Unjudged, 5000, 30 * min);
         assert_eq!(a.state, State::Awaiting);
         assert_eq!(a.awaiting.as_ref().unwrap().kind, AwaitKind::Permission);
         assert_eq!(a.awaiting.as_ref().unwrap().detail, "Approve: rm -rf x");
-        let q = derive(&session(), &tail(false, None, Some("Should I push?"), 1000), 5000, 30 * min);
+        let q = derive(&session(), &tail(false, None, Some("Should I push?"), 1000), &Prose::Unjudged, 5000, 30 * min);
         assert_eq!(q.state, State::Awaiting);
         assert_eq!(q.awaiting.as_ref().unwrap().kind, AwaitKind::Text);
-        let done = derive(&session(), &tail(false, None, Some("Done."), 1000), 5000, 30 * min);
+        let done = derive(&session(), &tail(false, None, Some("Done."), 1000), &Prose::Unjudged, 5000, 30 * min);
         assert_eq!(done.state, State::Completed);
         assert_eq!(done.snippet, "Done.");
         assert_eq!(done.context.as_ref().unwrap().percent, 10);
-        let idle = derive(&session(), &tail(false, None, Some("Done."), 1000), 1000 + 31 * min, 30 * min);
+        let idle = derive(&session(), &tail(false, None, Some("Done."), 1000), &Prose::Unjudged, 1000 + 31 * min, 30 * min);
         assert_eq!(idle.state, State::Idle);
+    }
+
+    #[test]
+    fn a_foreign_session_follows_its_verdict() {
+        let t = tail(false, None, Some("Why? Because X."), 1000);
+        let asks = derive(&session(), &t, &Prose::Asks("Which way?".into()), 5000, 30 * 60_000);
+        assert_eq!(asks.state, State::Awaiting);
+        assert_eq!(asks.awaiting.as_ref().unwrap().detail, "Which way?");
+        let done = derive(&session(), &t, &Prose::Done, 5000, 30 * 60_000);
+        assert_eq!(done.state, State::Completed);
     }
 
     #[test]

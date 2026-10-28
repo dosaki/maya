@@ -1,12 +1,13 @@
+use crate::asks::{self, AskCache, Verdict};
 use crate::config::{self, Config};
 use crate::events::EventLog;
 use crate::foreign::{self, ForeignSession};
 use crate::model::Harness;
-use crate::model::{Card, PullRequest};
+use crate::model::{Card, PullRequest, State};
 use crate::pr::PrCache;
 use crate::remembered::{Key, LiveSession, Memory, Remembered};
 use crate::registry::{self, RegistrySession};
-use crate::state::{derive, DeriveInput};
+use crate::state::{derive, DeriveInput, Prose};
 use crate::transcript::TailCache;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -65,6 +66,22 @@ pub struct Store {
     memory_save_failing: bool,
     /// The session id refresh drops from the cards and from memory (Maya's own brain).
     hidden_session: Option<String>,
+    /// Ask a model whether a finished message asks the user something (the app
+    /// does); off, the wording check decides.
+    pub judge_asks: bool,
+    asks: AskCache,
+    /// `(key, text)` of messages to judge, until `take_due_asks` collects them.
+    due_asks: Vec<(String, String)>,
+    /// Keys handed out or waiting to be, until their verdict or failure arrives.
+    queued: HashSet<String>,
+    /// The sessions held on their judging by the last refresh.
+    judging: HashSet<String>,
+    asks_save_failing: bool,
+}
+
+/// The finished message of a Claude Code session: its turn end, else its last text.
+fn claude_text(tail: &crate::transcript::TranscriptTail) -> Option<&str> {
+    tail.turn_end.as_ref().map(|t| t.text.as_str()).or(tail.last_assistant_text.as_deref())
 }
 
 /// Text of the files names come from, read again only when they change.
@@ -142,6 +159,7 @@ impl Store {
         Self {
             codex_events: EventLog::new(claude_dir.join("maya/codex-events.jsonl")),
             events: EventLog::new(claude_dir.join("maya/events.jsonl")),
+            asks: AskCache::load(claude_dir.join("maya/asks.json")),
             claude_dir,
             codex_dir: crate::codex_hooks::dir(),
             agy_dir: home.join(".gemini/antigravity-cli"),
@@ -168,6 +186,11 @@ impl Store {
             memory: None,
             memory_save_failing: false,
             hidden_session: None,
+            judge_asks: false,
+            due_asks: Vec::new(),
+            queued: HashSet::new(),
+            judging: HashSet::new(),
+            asks_save_failing: false,
         }
     }
 
@@ -422,7 +445,8 @@ impl Store {
         let s = self.session(session_id)?;
         let path = self.transcript_path_for(&s);
         let tail = self.tails.get(&path);
-        Some(derive(&DeriveInput { registry: &s, events: self.events.events_for(&s.session_id), transcript: &tail, now_ms, completed_timeout_ms: self.config.completed_timeout_ms() }))
+        let prose = self.prose_for(&s.session_id, claude_text(&tail)).map_or(Prose::Unjudged, |(_, p)| p);
+        Some(derive(&DeriveInput { registry: &s, events: self.events.events_for(&s.session_id), transcript: &tail, prose: &prose, now_ms, completed_timeout_ms: self.config.completed_timeout_ms() }))
     }
 
     /// Records that Maya pressed Esc in a Claude session: the ask the turn
@@ -486,17 +510,25 @@ impl Store {
         let sessions = self.registry();
         let mut cards = Vec::with_capacity(sessions.len() + self.foreign.len());
         let mut paths = Vec::with_capacity(sessions.len());
+        self.judging.clear();
+        let mut used = HashSet::new();
         for s in &sessions {
             let path = self.transcript_path_for(s);
             let tail = self.tails.get(&path);
             paths.push(path);
+            let text = claude_text(&tail);
+            let looked = self.prose_for(&s.session_id, text);
             let mut card = derive(&DeriveInput {
                 registry: s,
                 events: self.events.events_for(&s.session_id),
                 transcript: &tail,
+                prose: looked.as_ref().map_or(&Prose::Unjudged, |(_, p)| p),
                 now_ms,
                 completed_timeout_ms: self.config.completed_timeout_ms(),
             });
+            if let Some((key, prose)) = looked {
+                self.track_prose(&mut used, &s.session_id, text, key, &prose, &card);
+            }
             card.pr = self.prs.get(&s.cwd);
             card.branch = self.prs.branch(&s.cwd);
             // Claude Code names its model in the transcript; the viewer's status line shows it.
@@ -506,7 +538,8 @@ impl Store {
         }
         self.tails.retain(&paths);
         let timeout = self.config.completed_timeout_ms();
-        for s in self.foreign.values() {
+        let foreign: Vec<ForeignSession> = self.foreign.values().cloned().collect();
+        for s in &foreign {
             let mut tail = foreign::tail_for(s);
             if s.harness == Harness::Kiro {
                 crate::kiro::apply_live(&mut tail, &self.kiro_run_dir, s.pid, &s.transcript_path, now_ms);
@@ -514,7 +547,12 @@ impl Store {
             if s.harness == Harness::Codex {
                 crate::codex_hooks::apply(&mut tail, self.codex_events.events_for(&s.session_id));
             }
-            let mut card = foreign::derive(s, &tail, now_ms, timeout);
+            let text = tail.last_agent_text.as_deref().filter(|_| !tail.working);
+            let looked = self.prose_for(&s.session_id, text);
+            let mut card = foreign::derive(s, &tail, looked.as_ref().map_or(&Prose::Unjudged, |(_, p)| p), now_ms, timeout);
+            if let Some((key, prose)) = looked {
+                self.track_prose(&mut used, &s.session_id, text, key, &prose, &card);
+            }
             card.pr = self.prs.get(&s.cwd);
             card.branch = self.prs.branch(&s.cwd);
             cards.push(card);
@@ -548,7 +586,76 @@ impl Store {
             m.observe(&live, now_ms);
         }
         self.save_memory();
+        self.asks.retain(&used);
+        self.save_asks();
         cards
+    }
+
+    /// What the cache and the judge settings say about `text`, the finished
+    /// message of session `id`: its key and `Asks`/`Done` from a cached
+    /// verdict, or `Judging` when it should be judged. `None` leaves the
+    /// wording check to decide.
+    fn prose_for(&self, id: &str, text: Option<&str>) -> Option<(String, Prose)> {
+        let text = text.filter(|_| self.hidden_session.as_deref() != Some(id))?;
+        let key = asks::key(id, text);
+        if let Some(v) = self.asks.get(&key) {
+            let line = || v.line.clone().or_else(|| crate::state::asking_line(text)).or_else(|| text.lines().map(str::trim).rfind(|l| !l.is_empty()).map(str::to_string));
+            let prose = if v.asks { Prose::Asks(line().unwrap_or_default()) } else { Prose::Done };
+            return Some((key, prose));
+        }
+        self.judge_asks.then_some((key, Prose::Judging))
+    }
+
+    /// Books what `prose_for` found once the card is derived: a verdict in use
+    /// is kept; a finished card held on `Judging` (or working only on a shell
+    /// its turn left) is queued and counted as judging. A card that works or
+    /// waits on a prompt needs no verdict.
+    fn track_prose(&mut self, used: &mut HashSet<String>, id: &str, text: Option<&str>, key: String, prose: &Prose, card: &Card) {
+        if *prose != Prose::Judging {
+            used.insert(key);
+        } else if matches!(card.state, State::Completed | State::Idle) || (card.state == State::Working && card.shell) {
+            if let Some(text) = text.filter(|_| self.queued.insert(key.clone())) {
+                self.due_asks.push((key, text.to_string()));
+            }
+            self.judging.insert(id.to_string());
+        }
+    }
+
+    /// The messages to judge now as `(key, text)`; each key is handed out once.
+    pub fn take_due_asks(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.due_asks)
+    }
+
+    pub fn set_ask_verdict(&mut self, key: String, v: Verdict) {
+        self.queued.remove(&key);
+        self.asks.insert(key, v);
+        self.save_asks();
+    }
+
+    /// Writes the verdicts when they changed; a streak of failed saves is
+    /// logged once, like the memory's.
+    fn save_asks(&mut self) {
+        match self.asks.save() {
+            Ok(()) => self.asks_save_failing = false,
+            Err(e) => {
+                if !self.asks_save_failing {
+                    crate::log::line("asks", format!("could not save the verdicts to {}: {e}", self.asks.path().display()));
+                }
+                self.asks_save_failing = true;
+            }
+        }
+    }
+
+    /// The judge gave no usable verdict on `text`: the wording check's is
+    /// kept as its verdict, so it is not judged again after a restart.
+    pub fn set_ask_failed(&mut self, key: String, text: &str) {
+        let line = crate::state::asking_line(text);
+        self.set_ask_verdict(key, Verdict { asks: line.is_some(), line });
+    }
+
+    /// The sessions the last refresh held on a verdict still to come.
+    pub fn judging_sessions(&self) -> HashSet<String> {
+        self.judging.clone()
     }
 
     /// Writes what happened to the pending names to Maya's log, so a name
@@ -1052,5 +1159,174 @@ mod tests {
         assert_eq!(card.branch, None, "not looked up yet");
         store.set_branch("/Users/x/dev/eye", Some("feat/x".into()));
         assert_eq!(store.refresh(2)[0].branch.as_deref(), Some("feat/x"));
+    }
+
+    const SAY_GO: &str = "I can make it now if you say go.";
+
+    /// A Claude dir with session `s7`, idle after a Stop, whose turn ended on `SAY_GO`.
+    fn finished_turn(claude: &Path) -> u64 {
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("maya")).unwrap();
+        std::fs::create_dir_all(claude.join("projects/-Users-x-dev-eye")).unwrap();
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"idle","startedAt":1,"statusUpdatedAt":100}"#).unwrap();
+        let ts = "2026-10-28T13:01:14.734Z";
+        std::fs::write(
+            claude.join("projects/-Users-x-dev-eye/s7.jsonl"),
+            format!(r#"{{"type":"assistant","message":{{"stop_reason":"end_turn","content":[{{"type":"text","text":"{SAY_GO}"}}]}},"timestamp":"{ts}"}}"#),
+        ).unwrap();
+        let at = crate::codex::ms_of(ts).unwrap();
+        std::fs::write(claude.join("maya/events.jsonl"), format!("{{\"session_id\":\"s7\",\"hook_event_name\":\"Stop\",\"received_at\":{at}}}\n")).unwrap();
+        at + 1_000
+    }
+
+    #[test]
+    fn a_finished_turn_is_judged_once_and_its_verdict_is_kept_across_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        let now = finished_turn(&claude);
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.judge_asks = true;
+        assert_eq!(store.refresh(now)[0].state, State::Completed);
+        assert_eq!(store.judging_sessions(), ["s7".to_string()].into_iter().collect());
+        let due = store.take_due_asks();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].1, SAY_GO);
+        assert!(store.take_due_asks().is_empty());
+        assert_eq!(store.refresh(now)[0].state, State::Completed, "still judging");
+        assert!(store.take_due_asks().is_empty(), "a queued key is not handed out again");
+
+        store.set_ask_verdict(due[0].0.clone(), Verdict { asks: true, line: Some(SAY_GO.into()) });
+        let card = store.refresh(now).remove(0);
+        assert_eq!((card.state, card.awaiting.unwrap().detail.as_str()), (State::Awaiting, SAY_GO));
+        assert!(store.judging_sessions().is_empty());
+        assert!(store.take_due_asks().is_empty());
+
+        let mut next = Store::new(claude).with_alive(|_| true);
+        next.judge_asks = true;
+        assert_eq!(next.refresh(now)[0].state, State::Awaiting);
+        assert!(next.take_due_asks().is_empty());
+    }
+
+    #[test]
+    fn a_verdict_that_does_not_ask_lets_the_card_complete_and_a_changed_message_is_judged_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        let now = finished_turn(&claude);
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.judge_asks = true;
+        store.refresh(now);
+        let key = store.take_due_asks().remove(0).0;
+        store.set_ask_verdict(key, Verdict { asks: false, line: None });
+        assert_eq!(store.refresh(now)[0].state, State::Completed);
+        assert!(store.judging_sessions().is_empty());
+        let t = claude.join("projects/-Users-x-dev-eye/s7.jsonl");
+        std::fs::write(&t, std::fs::read_to_string(&t).unwrap().replace("say go", "say stop")).unwrap();
+        store.refresh(now);
+        assert_eq!(store.take_due_asks().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_judgement_falls_back_to_the_wording_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        let now = finished_turn(&claude);
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.judge_asks = true;
+        store.refresh(now);
+        let (key, text) = store.take_due_asks().remove(0);
+        store.set_ask_failed(key, &text);
+        let card = store.refresh(now).remove(0);
+        assert_eq!((card.state, card.awaiting.unwrap().detail.as_str()), (State::Awaiting, SAY_GO));
+        assert!(store.judging_sessions().is_empty());
+        assert!(store.take_due_asks().is_empty());
+
+        let mut next = Store::new(claude).with_alive(|_| true);
+        next.judge_asks = true;
+        assert_eq!(next.refresh(now)[0].state, State::Awaiting);
+        assert!(next.take_due_asks().is_empty(), "a failed message is not judged again after a restart");
+    }
+
+    #[test]
+    fn a_verdict_that_cannot_be_saved_is_logged_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        let now = finished_turn(&claude);
+        // A folder where the verdicts file should be: every save fails.
+        std::fs::create_dir_all(claude.join("maya/asks.json")).unwrap();
+        let logged = || crate::log::lines().iter().filter(|l| l.source == "asks" && l.text.contains("could not save the verdicts") && l.text.contains(&*claude.to_string_lossy())).count();
+        let mut store = Store::new(claude.clone()).with_alive(|_| true);
+        store.judge_asks = true;
+        store.refresh(now);
+        let (key, text) = store.take_due_asks().remove(0);
+        store.set_ask_verdict(key.clone(), Verdict { asks: false, line: None });
+        store.set_ask_verdict(key.clone(), Verdict { asks: true, line: None });
+        store.set_ask_failed(key, &text);
+        store.refresh(now);
+        assert_eq!(logged(), 1);
+    }
+
+    #[test]
+    fn a_finished_turn_is_judged_while_its_background_shell_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        let now = finished_turn(&claude);
+        std::fs::write(claude.join("sessions/7.json"), r#"{"pid":7,"sessionId":"s7","cwd":"/Users/x/dev/eye","name":"eye-7","status":"shell","startedAt":1,"statusUpdatedAt":100}"#).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        store.judge_asks = true;
+        let card = store.refresh(now).remove(0);
+        assert!(card.state == State::Working && card.shell);
+        assert_eq!(store.judging_sessions(), ["s7".to_string()].into_iter().collect());
+        let due = store.take_due_asks();
+        assert_eq!(due.len(), 1);
+        store.set_ask_verdict(due[0].0.clone(), Verdict { asks: true, line: Some(SAY_GO.into()) });
+        assert_eq!(store.refresh(now)[0].state, State::Awaiting);
+        assert!(store.judging_sessions().is_empty());
+    }
+
+    #[test]
+    fn without_a_judge_the_wording_check_decides() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        let now = finished_turn(&claude);
+        let mut store = Store::new(claude).with_alive(|_| true);
+        assert_eq!(store.refresh(now)[0].state, State::Awaiting);
+        assert!(store.take_due_asks().is_empty());
+        assert!(store.judging_sessions().is_empty());
+    }
+
+    #[test]
+    fn the_hidden_session_is_never_judged() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        let now = finished_turn(&claude);
+        let mut store = Store::new(claude).with_alive(|_| true);
+        store.judge_asks = true;
+        store.hide_session(Some("s7".into()));
+        store.refresh(now);
+        assert!(store.take_due_asks().is_empty());
+    }
+
+    #[test]
+    fn a_foreign_session_that_stopped_is_judged() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        let line = |ts: &str, payload: &str| format!("{{\"timestamp\":\"{ts}\",\"type\":\"event_msg\",\"payload\":{payload}}}\n");
+        let said = line("2026-09-29T08:47:58.953Z", r#"{"type":"task_started","turn_id":"t1"}"#)
+            + &line("2026-09-29T08:48:00.953Z", &format!(r#"{{"type":"task_complete","turn_id":"t1","last_agent_message":"{SAY_GO}"}}"#));
+        std::fs::write(&rollout, said).unwrap();
+        let s = ForeignSession { harness: Harness::Codex, pid: 77, tty: None, session_id: "aaa".into(), cwd: "/Users/x/dev/one".into(), name: "Fix CI".into(), transcript_path: rollout.clone() };
+        let mut store = Store::new(claude).with_alive(|_| true).with_foreign(dir.path().join("codex"), dir.path().join("agy"), vec![s]);
+        store.judge_asks = true;
+        let now = 1_790_671_681_000;
+        let cards = store.refresh(now);
+        assert_eq!(cards[0].state, State::Completed);
+        assert_eq!(store.judging_sessions(), ["aaa".to_string()].into_iter().collect());
+        let due = store.take_due_asks();
+        assert_eq!((due.len(), due[0].1.as_str()), (1, SAY_GO));
+        store.set_ask_verdict(due[0].0.clone(), Verdict { asks: true, line: None });
+        let card = store.refresh(now).remove(0);
+        assert_eq!((card.state, card.awaiting.unwrap().detail.as_str()), (State::Awaiting, SAY_GO));
     }
 }

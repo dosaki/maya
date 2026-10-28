@@ -6,10 +6,24 @@ use crate::transcript::TranscriptTail;
 
 pub const SNIPPET_CHARS: usize = 200;
 
+/// What is known about whether the agent's last message asks the user something.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prose {
+    /// No verdict: read the message with `asking_line`.
+    Unjudged,
+    /// A verdict is on its way: no ask meanwhile.
+    Judging,
+    /// The message asks; the line to show.
+    Asks(String),
+    /// The message asks nothing.
+    Done,
+}
+
 pub struct DeriveInput<'a> {
     pub registry: &'a RegistrySession,
     pub events: &'a [HookEvent],
     pub transcript: &'a TranscriptTail,
+    pub prose: &'a Prose,
     pub now_ms: u64,
     pub completed_timeout_ms: u64,
 }
@@ -25,23 +39,78 @@ pub fn truncate(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// Phrases that mark the end of a turn as waiting on the user, even without
-/// a question mark. Matched on whole words in the last line.
-const DECISION_PHRASES: &[&str] = &["let me know", "say the word", "which do you", "do you want", "should i", "shall i", "want me to", "your call", "tell me which"];
+/// Phrases that mark a sentence as waiting on the user, even without a
+/// question mark. Matched on whole words.
+const DECISION_PHRASES: &[&str] = &[
+    "let me know",
+    "say the word",
+    "which do you",
+    "do you want",
+    "should i",
+    "shall i",
+    "want me to",
+    "your call",
+    "tell me which",
+    "if you'd like",
+    "if you would like",
+    "if you want",
+    "if you say",
+    "say go",
+    "say so",
+    "tell me",
+    "up to you",
+    "your decision",
+    "after you run",
+    "once you run",
+    "please run",
+    "when you're ready",
+];
 
-/// The last non-empty line of an assistant message, with a trailing code
-/// fence dropped so a pasted block does not hide the line before it.
-fn last_line(text: &str) -> Option<&str> {
-    let mut lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    if lines.last().map_or(false, |l| l.starts_with("```")) {
-        lines.pop();
-        while let Some(l) = lines.pop() {
-            if l.starts_with("```") {
-                break;
-            }
+/// The lines of `text` that carry prose: not inside a code fence, not a table
+/// row, quote or `! ` command. Also the first `! ` command line, fenced or not.
+fn prose_lines(text: &str) -> (Vec<&str>, Option<&str>) {
+    let mut prose = Vec::new();
+    let mut command = None;
+    let mut fenced = false;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if line.starts_with("```") {
+            fenced = !fenced;
+        } else if line.starts_with("! ") {
+            command.get_or_insert(line);
+        } else if !fenced && !line.starts_with('|') && !line.starts_with('>') {
+            prose.push(line);
         }
     }
-    lines.last().copied()
+    (prose, command)
+}
+
+/// The sentences of `line`, split at `.`, `?` or `!` followed by whitespace.
+/// A bracketed aside stays with the sentence before it.
+fn sentences(line: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut depth) = (0, 0i32);
+    let mut chars = line.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            '.' | '?' | '!' if depth == 0 => {
+                if let Some(&(_, next)) = chars.peek() {
+                    if next.is_whitespace() {
+                        let rest = line[i + 1..].trim_start();
+                        if !rest.starts_with('(') && !rest.starts_with('[') {
+                            out.push(line[start..=i].trim());
+                            start = i + 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.push(line[start..].trim());
+    out.retain(|s| !s.is_empty());
+    out
 }
 
 /// `line` without any bracketed asides at its end, such as `(e.g. "skip #2")`
@@ -60,22 +129,36 @@ fn strip_trailing_asides(line: &str) -> &str {
     }
 }
 
-/// The closing line of `text` when it asks the user for a decision: it ends
-/// with a question mark (ignoring trailing markdown, quotes or emoji) or
-/// contains one of `DECISION_PHRASES`. Questions earlier in the message do
-/// not count.
+/// The last sentence of `text`, anywhere in it, that asks the user for a
+/// decision: it ends with a question mark (ignoring trailing markdown, quotes
+/// or emoji) or contains one of `DECISION_PHRASES`. Code, tables and quotes
+/// are skipped. Failing that, the first `! ` command line, as the ask to run it.
 pub fn asking_line(text: &str) -> Option<String> {
-    let line = last_line(text)?;
-    let core = strip_trailing_asides(line).trim_end_matches(|c: char| !c.is_alphanumeric() && c != '?');
-    if core.ends_with('?') {
-        return Some(line.to_string());
+    let (prose, command) = prose_lines(text);
+    let asks = |s: &str| {
+        let core = strip_trailing_asides(s).trim_end_matches(|c: char| !c.is_alphanumeric() && c != '?');
+        if core.ends_with('?') {
+            return true;
+        }
+        let words: Vec<String> = s.replace('’', "'").to_lowercase().split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).map(str::to_string).collect();
+        let padded = format!(" {} ", words.join(" "));
+        DECISION_PHRASES.iter().any(|p| padded.contains(&format!(" {p} ")))
+    };
+    prose
+        .iter()
+        .rev()
+        .flat_map(|l| sentences(l).into_iter().rev())
+        .find(|s| asks(s))
+        .map(|s| balanced_bold(s).to_string())
+        .or_else(|| command.map(str::to_string))
+}
+
+/// `s` without a `**` at its end or start that a sentence split left unmatched.
+fn balanced_bold(s: &str) -> &str {
+    if s.matches("**").count() % 2 == 0 {
+        return s;
     }
-    let words: Vec<String> = line.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_string).collect();
-    let padded = format!(" {} ", words.join(" "));
-    if DECISION_PHRASES.iter().any(|p| padded.contains(&format!(" {p} "))) {
-        return Some(line.to_string());
-    }
-    None
+    s.strip_suffix("**").map(str::trim_end).or_else(|| s.strip_prefix("**").map(str::trim_start)).unwrap_or(s)
 }
 
 fn permission_detail(e: &HookEvent) -> String {
@@ -127,6 +210,8 @@ pub fn derive(i: &DeriveInput) -> Card {
     let mut awaiting: Option<(Awaiting, u64, Option<String>)> = None;
     // (is_stop, timestamp) of the most recent main-agent Stop or UserPromptSubmit.
     let mut last_turn: Option<(bool, u64)> = None;
+    // An Esc after the latest turn start or end: the ask that turn left is over.
+    let mut interrupted = false;
 
     for e in i.events {
         match e.hook_event_name.as_str() {
@@ -150,15 +235,30 @@ pub fn derive(i: &DeriveInput) -> Card {
             }
             "Stop" if e.agent_id.is_none() => {
                 awaiting = None;
+                interrupted = false;
                 last_turn = Some((true, e.received_at));
             }
             // Written by Maya when it presses Esc: Claude's hooks say nothing of an interrupt.
-            "MayaInterrupt" if e.agent_id.is_none() => awaiting = None,
+            "MayaInterrupt" if e.agent_id.is_none() => {
+                awaiting = None;
+                interrupted = true;
+            }
             "UserPromptSubmit" if e.agent_id.is_none() => {
                 awaiting = None;
+                interrupted = false;
                 last_turn = Some((false, e.received_at));
             }
             _ => {}
+        }
+    }
+
+    // A resumed session may have no Stop for its last turn, or only an older
+    // prompt: its transcript shows when the turn ended.
+    if r.status != "busy" {
+        if let Some(t) = &i.transcript.turn_end {
+            if last_turn.map_or(true, |(_, ts)| t.at_ms > ts) {
+                last_turn = Some((true, t.at_ms));
+            }
         }
     }
 
@@ -174,7 +274,14 @@ pub fn derive(i: &DeriveInput) -> Card {
     // A turn that ended by asking in prose waits for a reply, however long ago
     // and whatever it left running in the background.
     let asked = match last_turn {
-        Some((true, ts)) if !is_busy => i.transcript.last_assistant_text.as_deref().and_then(asking_line).map(|line| (line, ts)),
+        Some((true, ts)) if !is_busy && !interrupted => match i.prose {
+            Prose::Asks(line) => Some((line.clone(), ts)),
+            Prose::Unjudged => {
+                let text = i.transcript.turn_end.as_ref().map(|t| t.text.as_str()).or(i.transcript.last_assistant_text.as_deref());
+                text.and_then(asking_line).map(|line| (line, ts))
+            }
+            Prose::Judging | Prose::Done => None,
+        },
         _ => None,
     };
 
@@ -262,7 +369,98 @@ use crate::events::HookEvent;
     }
 
     fn run(r: &RegistrySession, events: &[HookEvent], t: &TranscriptTail, now: u64) -> Card {
-        derive(&DeriveInput { registry: r, events, transcript: t, now_ms: now, completed_timeout_ms: TIMEOUT })
+        run_prose(r, events, t, &Prose::Unjudged, now)
+    }
+
+    fn run_prose(r: &RegistrySession, events: &[HookEvent], t: &TranscriptTail, prose: &Prose, now: u64) -> Card {
+        derive(&DeriveInput { registry: r, events, transcript: t, prose, now_ms: now, completed_timeout_ms: TIMEOUT })
+    }
+
+    fn said(text: &str) -> TranscriptTail {
+        TranscriptTail { last_assistant_text: Some(text.into()), ..Default::default() }
+    }
+
+    #[test]
+    fn a_judged_ask_stays_awaiting_long_after_the_turn() {
+        let hours = 5 * 3_600_000;
+        let c = run_prose(&reg("idle", 0), &[ev("Stop", 0)], &said("Which way?"), &Prose::Asks("Which way?".into()), hours);
+        assert_eq!(c.state, State::Awaiting);
+        assert_eq!(c.state_since, 0);
+        let a = c.awaiting.unwrap();
+        assert_eq!(a.kind, AwaitKind::Text);
+        assert_eq!(a.detail, "Which way?");
+    }
+
+    #[test]
+    fn a_done_verdict_overrides_a_question_mark() {
+        let t = said("Why? Because X.");
+        let fresh = run_prose(&reg("idle", 0), &[ev("Stop", 0)], &t, &Prose::Done, 1000);
+        assert_eq!(fresh.state, State::Completed);
+        let old = run_prose(&reg("idle", 0), &[ev("Stop", 0)], &t, &Prose::Done, TIMEOUT + 1);
+        assert_eq!(old.state, State::Idle);
+    }
+
+    #[test]
+    fn judging_and_unjudged_fall_back_as_documented() {
+        let t = said("Shall I go on?");
+        let events = [ev("Stop", 0)];
+        assert_eq!(run_prose(&reg("idle", 0), &events, &t, &Prose::Judging, 1000).state, State::Completed);
+        assert_eq!(run_prose(&reg("idle", 0), &events, &t, &Prose::Judging, TIMEOUT + 1).state, State::Idle);
+        assert_eq!(run_prose(&reg("idle", 0), &events, &t, &Prose::Unjudged, TIMEOUT + 1).state, State::Awaiting);
+    }
+
+    #[test]
+    fn a_resumed_session_with_no_events_takes_its_turn_end_from_the_transcript() {
+        let t = TranscriptTail { turn_end: Some(crate::transcript::TurnEnd { at_ms: 1_000, text: "Run these".into() }), ..Default::default() };
+        let asks = run_prose(&reg("idle", 5), &[], &t, &Prose::Asks("Run these".into()), 5_000_000);
+        assert_eq!(asks.state, State::Awaiting);
+        assert_eq!(asks.state_since, 1_000);
+        let done = run_prose(&reg("idle", 5), &[], &t, &Prose::Done, 1_000 + TIMEOUT + 5);
+        assert_eq!(done.state, State::Idle);
+        assert_eq!(done.state_since, 1_000 + TIMEOUT);
+    }
+
+    #[test]
+    fn a_transcript_turn_end_after_the_last_prompt_event_is_the_turn_end() {
+        let t = TranscriptTail { turn_end: Some(crate::transcript::TurnEnd { at_ms: 200, text: "Which way?".into() }), ..Default::default() };
+        let asks = Prose::Asks("Which way?".into());
+        let c = run_prose(&reg("idle", 5), &[ev("UserPromptSubmit", 100)], &t, &asks, 5_000_000);
+        assert_eq!(c.state, State::Awaiting);
+        assert_eq!(c.state_since, 200);
+        let c = run_prose(&reg("idle", 5), &[ev("UserPromptSubmit", 300)], &t, &asks, 5_000_000);
+        assert_ne!(c.state, State::Awaiting);
+        let c = run_prose(&reg("idle", 5), &[ev("Stop", 250)], &t, &asks, 5_000_000);
+        assert_eq!(c.state_since, 250);
+    }
+
+    #[test]
+    fn a_reply_event_clears_a_judged_ask() {
+        let events = [ev("Stop", 0), ev("UserPromptSubmit", 10)];
+        let c = run_prose(&reg("idle", 10), &events, &said("Which way?"), &Prose::Asks("Which way?".into()), 20);
+        assert_ne!(c.state, State::Awaiting);
+    }
+
+    #[test]
+    fn an_interrupt_ends_the_ask_whatever_the_verdict() {
+        let asks = Prose::Asks("Which way?".into());
+        let t = said("Which way?");
+        for prose in [&asks, &Prose::Unjudged] {
+            let c = run_prose(&reg("idle", 0), &[ev("Stop", 0), ev("MayaInterrupt", 10)], &t, prose, 5_000_000);
+            assert_eq!(c.state, State::Idle);
+            assert_eq!(c.state_since, TIMEOUT);
+        }
+        let tail = TranscriptTail { turn_end: Some(crate::transcript::TurnEnd { at_ms: 1_000, text: "Which way?".into() }), ..said("Which way?") };
+        let c = run_prose(&reg("idle", 5), &[ev("MayaInterrupt", 10)], &tail, &asks, 5_000_000);
+        assert_ne!(c.state, State::Awaiting);
+        let again = run_prose(&reg("idle", 0), &[ev("Stop", 0), ev("MayaInterrupt", 10), ev("Stop", 20)], &t, &asks, 5_000_000);
+        assert_eq!(again.state, State::Awaiting);
+    }
+
+    #[test]
+    fn a_busy_session_is_working_whatever_the_verdict() {
+        let t = TranscriptTail { turn_end: Some(crate::transcript::TurnEnd { at_ms: 1_000, text: "Which way?".into() }), ..said("Which way?") };
+        let c = run_prose(&reg("busy", 2_000), &[], &t, &Prose::Asks("Which way?".into()), 3_000);
+        assert_eq!(c.state, State::Working);
     }
 
     #[test]
@@ -441,25 +639,27 @@ use crate::events::HookEvent;
     }
 
     #[test]
-    fn asking_line_spots_questions_and_decision_phrases_at_the_tail_only() {
-        assert_eq!(asking_line("Done.\n\nCreate it as drafted?"), Some("Create it as drafted?".to_string()));
-        assert_eq!(asking_line("Which option do you prefer? "), Some("Which option do you prefer?".to_string()));
-        // Trailing markdown, quotes or emoji after the question mark are ignored.
-        assert_eq!(asking_line("Does this look right?** 🙂"), Some("Does this look right?** 🙂".to_string()));
-        // A code fence at the end does not hide the question before it, and one before the question is skipped.
-        assert_eq!(asking_line("Ready?\n```\ncode\n```"), Some("Ready?".to_string()));
-        assert_eq!(asking_line("```\nx?\n```\nSay the word and I will commit it."), Some("Say the word and I will commit it.".to_string()));
-        // Decision phrases without a question mark.
-        assert_eq!(asking_line("Two options.\n\nLet me know which you want."), Some("Let me know which you want.".to_string()));
-        assert_eq!(asking_line("I can do A or B. Your call."), Some("I can do A or B. Your call.".to_string()));
-        assert_eq!(asking_line("Should I go ahead"), Some("Should I go ahead".to_string()));
-        // A parenthetical example after the question mark does not hide it.
-        let aside = "Approve this plan, or amend any rows? (e.g. \"flip #1 to address\", \"skip #2\")";
-        assert_eq!(asking_line(aside), Some(aside.to_string()));
-        assert_eq!(asking_line("Go ahead? [y/n]"), Some("Go ahead? [y/n]".to_string()));
-        // A question earlier in the message does not count.
-        assert_eq!(asking_line("Why did it fail? Because of X.\n\nFixed and pushed."), None);
-        assert_eq!(asking_line("Is it done? Yes (mostly)."), None);
+    fn asking_line_finds_the_ask_anywhere_in_the_message() {
+        assert_eq!(asking_line("**Which way should I build it?**\n- A: one.\n- B: two.\n\nI recommend A. It is safer. It costs more."), Some("**Which way should I build it?**".into()));
+        assert_eq!(asking_line("Option 2 is a question about who opens PRs — your call, not mine.\n\nAnd it isn't collector-specific."), Some("Option 2 is a question about who opens PRs — your call, not mine.".into()));
+        assert_eq!(asking_line("I'll only do it if you say so and tell me which thread to use.\n\nOtherwise, try the checks yourself."), Some("I'll only do it if you say so and tell me which thread to use.".into()));
+        assert_eq!(asking_line("All green. If you'd like that fixed, I can do it in a separate PR."), Some("If you'd like that fixed, I can do it in a separate PR.".into()));
+        assert_eq!(asking_line("It's a single AWS call, and I can make it now if you say go."), Some("It's a single AWS call, and I can make it now if you say go.".into()));
+        assert_eq!(asking_line("Run these:\n```\n! cd ~/dev/x && sh a.sh\n```\nAfter you run them, I'll check the policies."), Some("After you run them, I'll check the policies.".into()));
+        // Kept from the old test: closing lines, code fences, trailing asides.
+        assert_eq!(asking_line("Ready?\n```\ncode\n```"), Some("Ready?".into()));
+        assert_eq!(asking_line("Go ahead? [y/n]"), Some("Go ahead? [y/n]".into()));
+        assert_eq!(asking_line("**Please review the plan. Which way should I build it?**\n\nI recommend A."), Some("Which way should I build it?".into()));
+        assert_eq!(asking_line("**Shall I ship it? It is ready.**"), Some("Shall I ship it?".into()));
+        assert_eq!(asking_line("If you’d like that fixed, I can do it."), Some("If you’d like that fixed, I can do it.".into()));
+        assert_eq!(asking_line("Run:\n! sh a.sh\nDone."), Some("! sh a.sh".into()));
+        let aside = "Approve this plan, or amend any rows? (e.g. \"skip #2\")";
+        assert_eq!(asking_line(aside), Some(aside.into()));
+        // A question inside code, a table or a quote is not an ask.
+        assert_eq!(asking_line("```\nwhy?\n```\nDone."), None);
+        assert_eq!(asking_line("| a? | b |\n|---|---|\n\nAll done."), None);
+        assert_eq!(asking_line("> Should we?\n\nFixed and pushed."), None);
+        assert_eq!(asking_line("Done.\n```\nwhy?"), None);
         assert_eq!(asking_line("All done."), None);
         assert_eq!(asking_line(""), None);
     }
