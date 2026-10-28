@@ -30,6 +30,11 @@ export function approvalCount(runs: DeploymentRun[]): number {
   return runs.filter((r) => r.wait.kind === "approval").length;
 }
 
+/** `state` without the run `repo`/`runId`, once it has been approved or rejected. */
+export function withoutRun(state: DeploymentState, repo: string, runId: number): DeploymentState {
+  return { ...state, runs: state.runs.filter((r) => !(r.repo === repo && r.runId === runId)) };
+}
+
 function renderRun(run: DeploymentRun, nowMs: number, ui: RowUi): HTMLElement {
   const wait = run.wait;
   const root = el("article", wait.kind === "blocked" ? "pr deploy deploy--blocked" : "pr deploy");

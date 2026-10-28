@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvalCount, deploymentActionFor, renderDeployments, type RowUi } from "./deployments";
+import { approvalCount, deploymentActionFor, renderDeployments, withoutRun, type RowUi } from "./deployments";
 import type { DeployBlocker, DeploymentRun, DeploymentState } from "./types";
 
 const NOW = Date.parse("2026-09-29T10:00:00Z");
@@ -99,5 +99,16 @@ describe("deploymentActionFor", () => {
 describe("approvalCount", () => {
   it("counts only approval rows", () => {
     expect(approvalCount([approval(7, ["p"]), blocked(9, null)])).toBe(1);
+  });
+});
+
+describe("withoutRun", () => {
+  it("drops only the run with that repo and id", () => {
+    const other = { ...approval(7, ["p"]), repo: "O/other" };
+    const s = state([approval(7, ["p"]), other, blocked(9, null)], { error: "e" });
+    const next = withoutRun(s, "O/r", 7);
+    expect(next.runs.map((r) => `${r.repo}#${r.runId}`)).toEqual(["O/other#7", "O/r#9"]);
+    expect(next.error).toBe("e");
+    expect(s.runs).toHaveLength(3);
   });
 });

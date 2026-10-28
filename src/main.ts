@@ -9,7 +9,7 @@ import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
 import { makeProgress } from "./progress";
-import { approvalCount, deploymentActionFor, renderDeployments, type RowUi } from "./deployments";
+import { approvalCount, deploymentActionFor, renderDeployments, withoutRun, type RowUi } from "./deployments";
 import { makeReviewsView, OPEN_SETTINGS_GROUP, reviewActionFor, waitingCount } from "./reviews";
 import { filterCards, makeSessionSearch } from "./search";
 import { initRemembered } from "./remembered";
@@ -76,6 +76,7 @@ async function deploymentAction(target: Element): Promise<void> {
     paintDeployments();
     try {
       await invoke(action.kind === "approve" ? "deployment_approve" : "deployment_reject", { repo, runId });
+      deployments = withoutRun(deployments, repo, runId);
     } catch (e) {
       deployUi.errors.set(runId, String(e));
     }
@@ -282,7 +283,7 @@ async function start(): Promise<void> {
   void invoke<DeploymentState>("list_deployments").then((d) => {
     deployments = d;
     paintDeployments();
-  }).catch(() => undefined);
+  }).catch((e) => showToast(String(e)));
   void invoke<ReviewState>("list_review_prs").then((r) => {
     reviews = r;
     paintReviews();
