@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { composerKey } from "./keys";
+import { renderMarkdown } from "./markdown";
 import { showToast } from "./toast";
 
 export type Dot = "idle" | "working" | "waiting" | "unread";
@@ -34,6 +35,8 @@ export interface ChatHandlers {
   onSend(text: string): void;
   onCancel(): void;
   onStop(): void;
+  /** Open an http(s) link from one of her turns in the browser. */
+  onOpenLink(url: string): void;
 }
 
 const IDLE: BrainStatus = { dot: "idle", pending: null, job: null, ready: false, dormant: null };
@@ -59,7 +62,8 @@ export function tickCountdown(root: HTMLElement, until: number | null, now = Dat
 }
 
 /**
- * The conversation, the pending box, the input and Stop. Her text is set as text, never as markup.
+ * The conversation, the pending box, the input and Stop. Her text is
+ * sanitised markdown (see `renderMarkdown`); the user's is set as text.
  * While her brain is dormant (an assistant) only the conversation and the dormant note show.
  */
 export function renderChat(m: ChatModel, h: ChatHandlers): HTMLElement {
@@ -67,10 +71,18 @@ export function renderChat(m: ChatModel, h: ChatHandlers): HTMLElement {
   const log = el("div", "chat__log");
   log.setAttribute("role", "log");
   for (const t of m.turns) {
-    const turn = el("div", `chat__turn chat__turn--${t.who === "user" ? "user" : "maya"}`, t.text);
+    const user = t.who === "user";
+    const turn = el("div", `chat__turn chat__turn--${user ? "user" : "maya"}`, user ? t.text : undefined);
+    if (!user) turn.append(renderMarkdown(t.text));
     turn.title = t.via;
     log.append(turn);
   }
+  log.addEventListener("click", (ev) => {
+    const a = (ev.target as Element).closest("a[href]");
+    if (!a) return;
+    ev.preventDefault();
+    h.onOpenLink(a.getAttribute("href") ?? "");
+  });
   root.append(log);
 
   if (m.status.dormant) {
@@ -153,6 +165,7 @@ export function initChat(opts: { sendButton?: boolean } = {}): void {
         onSend: (text) => void invoke("chat_send", { text }).catch((e) => notSent(text, e)),
         onCancel: () => void invoke("window_cancel").catch(() => undefined),
         onStop: () => void invoke("brain_stop").catch(() => undefined),
+        onOpenLink: (url) => void invoke("open_url", { url }).catch((e) => showToast(String(e))),
       }),
     );
     const next = pane.querySelector<HTMLElement>(".chat__log");

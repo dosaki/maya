@@ -306,14 +306,14 @@ body { margin: 0; background: var(--bg); }
 .pr__meta { font-size: 12px; color: var(--muted); }
 .pr__machine { align-self: center; font-size: 12px; color: var(--gold); }
 
-.turn__text .md > :first-child { margin-top: 0; }
-.turn__text .md > :last-child { margin-bottom: 0; }
-.turn__text .md p, .turn__text .md ul, .turn__text .md ol, .turn__text .md pre, .turn__text .md table, .turn__text .md h1, .turn__text .md h2, .turn__text .md h3 { margin: 6px 0; }
-.turn__text .md h1, .turn__text .md h2, .turn__text .md h3 { font-size: 13px; }
-.turn__text .md ul, .turn__text .md ol { padding-left: 20px; }
-.turn__text .md pre { padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 70%, transparent); overflow-x: auto; white-space: pre; }
-.turn__text .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-.turn__text .md :not(pre) > code { color: var(--gold-bright); }
+:is(.turn__text, .chat__turn) .md > :first-child { margin-top: 0; }
+:is(.turn__text, .chat__turn) .md > :last-child { margin-bottom: 0; }
+:is(.turn__text, .chat__turn) .md p, :is(.turn__text, .chat__turn) .md ul, :is(.turn__text, .chat__turn) .md ol, :is(.turn__text, .chat__turn) .md pre, :is(.turn__text, .chat__turn) .md table, :is(.turn__text, .chat__turn) .md h1, :is(.turn__text, .chat__turn) .md h2, :is(.turn__text, .chat__turn) .md h3 { margin: 6px 0; }
+:is(.turn__text, .chat__turn) .md h1, :is(.turn__text, .chat__turn) .md h2, :is(.turn__text, .chat__turn) .md h3 { font-size: 13px; }
+:is(.turn__text, .chat__turn) .md ul, :is(.turn__text, .chat__turn) .md ol { padding-left: 20px; }
+:is(.turn__text, .chat__turn) .md pre { padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 70%, transparent); overflow-x: auto; white-space: pre; }
+:is(.turn__text, .chat__turn) .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+:is(.turn__text, .chat__turn) .md :not(pre) > code { color: var(--gold-bright); }
 /* Code blocks whose fence names a language, coloured by highlight.js's token classes. */
 .md .hljs-keyword, .md .hljs-selector-tag, .md .hljs-name, .md .hljs-doctag { color: var(--code-keyword); }
 .md .hljs-string, .md .hljs-regexp, .md .hljs-symbol, .md .hljs-char, .md .hljs-link { color: var(--code-string); }
@@ -327,9 +327,9 @@ body { margin: 0; background: var(--bg); }
 .md .hljs-deletion { color: var(--code-deletion); }
 .md .hljs-emphasis { font-style: italic; }
 .md .hljs-strong { font-weight: 600; }
-.turn__text .md table { border-collapse: collapse; }
-.turn__text .md th, .turn__text .md td { border: 1px solid var(--border); padding: 2px 6px; }
-.turn__text .md a { color: var(--working); }
+:is(.turn__text, .chat__turn) .md table { border-collapse: collapse; }
+:is(.turn__text, .chat__turn) .md th, :is(.turn__text, .chat__turn) .md td { border: 1px solid var(--border); padding: 2px 6px; }
+:is(.turn__text, .chat__turn) .md a { color: var(--working); }
 .turn { white-space: normal; }
 .turn--tool .turn__text { white-space: pre-wrap; }
 .modal__chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px; }
@@ -450,7 +450,7 @@ body { margin: 0; background: var(--bg); }
 .chat__log { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
 .chat__turn { max-width: 80%; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--border); }
 .chat__turn--user { align-self: flex-end; border-color: var(--gold-deep); }
-.chat__turn--maya { align-self: flex-start; }
+.chat__turn--maya { align-self: flex-start; white-space: normal; }
 .chat__pending { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid var(--awaiting); border-radius: 8px; background: var(--panel); }
 .chat__pending-say { flex: 1; }
 .chat__pending-left { color: var(--muted); font-variant-numeric: tabular-nums; }
