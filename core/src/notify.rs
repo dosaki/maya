@@ -67,6 +67,22 @@ impl Notifier {
     }
 }
 
+/// A board for another Maya, which holds no judging of its own: a finished
+/// card whose session is in `judging` goes out as Working, so it is not
+/// announced as finished just before its verdict makes it ask.
+pub fn mask_judging(cards: &[Card], judging: &HashSet<String>) -> Vec<Card> {
+    cards
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            if c.state == State::Completed && judging.contains(&c.session_id) {
+                c.state = State::Working;
+            }
+            c
+        })
+        .collect()
+}
+
 /// The session name as speech: dashes and hashes become spaces.
 pub(crate) fn spoken_name(name: &str) -> String {
     let spaced: String = name.chars().map(|c| if c == '-' || c == '_' || c == '#' { ' ' } else { c }).collect();
@@ -919,6 +935,15 @@ mod tests {
         let done = card("a", State::Completed, 100, "");
         assert!(n.take_finished(&[done.clone()], &held).is_empty());
         assert!(n.take_finished(&[done], &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn a_judging_turn_goes_out_as_working_until_its_verdict() {
+        let judging: HashSet<String> = ["a".to_string(), "c".to_string()].into();
+        let cards = [card("a", State::Completed, 100, ""), card("b", State::Completed, 100, ""), card("c", State::Idle, 100, "")];
+        let out = mask_judging(&cards, &judging);
+        assert_eq!(out.iter().map(|c| (c.session_id.as_str(), c.state, c.state_since)).collect::<Vec<_>>(), [("a", State::Working, 100), ("b", State::Completed, 100), ("c", State::Idle, 100)]);
+        assert_eq!(mask_judging(&cards, &HashSet::new()), cards);
     }
 
     #[test]

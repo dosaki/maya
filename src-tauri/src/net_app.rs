@@ -257,7 +257,8 @@ impl Executor for TauriExecutor {
         let (cards, root) = {
             let state = self.app.state::<AppState>();
             let mut store = state.store.lock().unwrap();
-            (crate::local_cards(&mut store), store.config.projects_dir_path())
+            let cards = crate::local_cards(&mut store);
+            (maya_core::notify::mask_judging(&cards, &store.judging_sessions()), store.config.projects_dir_path())
         };
         let dirs = root.filter(|r| r.is_dir()).map(|r| crate::launch::list_project_dirs(&r)).unwrap_or_default();
         (cards, dirs)

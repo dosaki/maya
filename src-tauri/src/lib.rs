@@ -753,7 +753,7 @@ pub(crate) fn refresh_and_emit(app: &AppHandle) {
     let server = app.state::<AppState>().network.lock().unwrap().server.clone();
     if let Some(s) = server {
         s.mirror_wake_word(Some(wake_word));
-        s.mirror(cards.clone());
+        s.mirror(notify::mask_judging(&cards, &judging));
     }
     remembered_app::publish(app);
     if assistant {

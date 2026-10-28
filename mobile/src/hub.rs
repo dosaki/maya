@@ -430,6 +430,7 @@ impl Hub {
         let cards = self.cards();
         let (fresh, finished) = {
             let mut n = self.notifier.lock().unwrap();
+            // The main sends its judging cards as Working: nothing is held here.
             (n.take_new(&cards), n.take_finished(&cards, &std::collections::HashSet::new()))
         };
         let (switches, speak_on) = {
