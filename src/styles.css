@@ -168,6 +168,8 @@ body { margin: 0; background: var(--bg); }
 .usage__pct, .usage__amount { color: var(--text); font-variant-numeric: tabular-nums; }
 .usage__meter[data-band="high"] .usage__pct { color: var(--awaiting); }
 .usage__reset, .usage__tokens { font-variant-numeric: tabular-nums; }
+/* A window whose reset passed since it was read: its old percentage is gone, the text is muted. */
+.usage .usage__meter[data-reset="passed"] .usage__pct { color: inherit; font-style: italic; }
 .usage__note { font-style: italic; }
 .usage__chip { padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); font-variant-numeric: tabular-nums; }
 .usage__chip:empty { display: none; }

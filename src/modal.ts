@@ -13,7 +13,7 @@ import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
 import { COMPACT_AT, STATE_LABEL, compactButton, prButton, prRef, remoteTitle, type Card, type Pick, type Turn, type ViewerTheme } from "./types";
 import { renderToolTurn, resetToolUi } from "./toolturn";
 import { composerKey, sendShortcut } from "./keys";
-import { costText, stageFor, usageStrip, type Stage } from "./usage";
+import { costText, hasReset, stageFor, usageStrip, type Stage } from "./usage";
 import { renderAnsi } from "./ansi";
 
 /**
@@ -523,21 +523,21 @@ export function workingText(card: Card, nowMs: number): string | null {
   return card.state === "working" ? `✻ Working… (${workingFor(nowMs - card.stateSince)})` : null;
 }
 
-/** The terminal look's status line: the session's own recorded line when it has one; otherwise Maya's: model · folder · branch · PR · ctx %, then the account limits and the cost, each when known. */
-export function statusLine(card: Card): string {
+/** The terminal look's status line: the session's own recorded line when it has one; otherwise Maya's: model · folder · branch · PR · ctx %, then the account limits ("5h reset" once a window's reset passed) and the cost, each when known. */
+export function statusLine(card: Card, nowMs: number = Date.now()): string {
   if (typeof card.statusLine === "string" && card.statusLine !== "") return card.statusLine;
   const pr = card.pr ? `${card.pr.forge === "gitlab" ? "MR" : "PR"} ${prRef(card.pr)}` : null;
-  const windows = (card.limits?.windows ?? []).map((w) => `${w.label} ${w.percent}%`);
+  const windows = (card.limits?.windows ?? []).map((w) => (hasReset(w, nowMs) ? `${w.label} reset` : `${w.label} ${w.percent}%`));
   const cost = card.usage?.cost ? costText(card.usage.cost) : null;
   return [card.model, projectName(card.cwd), card.branch, pr, card.context ? `ctx ${card.context.percent}%` : null, ...windows, cost].filter(Boolean).join(" · ");
 }
 
 /** The foot under the prompt: the recorded line's colours kept, or Maya's own line as plain text. */
-function statusFoot(card: Card): HTMLElement {
+function statusFoot(card: Card, nowMs: number): HTMLElement {
   const recorded = typeof card.statusLine === "string" && card.statusLine !== "";
   const foot = el("div", recorded ? "modal__statusline modal__statusline--foot modal__statusline--recorded" : "modal__statusline modal__statusline--foot");
   if (recorded) foot.append(renderAnsi(statusLine(card)));
-  else foot.textContent = statusLine(card);
+  else foot.textContent = statusLine(card, nowMs);
   return foot;
 }
 
@@ -671,7 +671,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     });
     if (stop) menu.querySelector(".menu__foot")?.append(stop);
     panel.append(menu);
-    panel.append(statusFoot(m.card));
+    panel.append(statusFoot(m.card, nowMs));
   } else {
     // Every card takes replies: they are typed into the session's terminal, with
     // a Claude session's inbox as the fallback.
@@ -733,7 +733,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     if (stop) form.append(stop);
     form.append(send);
     panel.append(form);
-    panel.append(statusFoot(m.card));
+    panel.append(statusFoot(m.card, nowMs));
   }
   if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.warn ? "warn" : m.status.ok ? "ok" : "error"}`, m.status.text));
 

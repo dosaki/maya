@@ -342,6 +342,11 @@ describe("renderModal", () => {
     expect(styles).not.toMatch(/data-band="mid"\][^{]*\.usage__fill/);
   });
 
+  it("mutes a window whose reset passed, in both looks", () => {
+    // Four classes and attributes: above the terminal look's `.modal--terminal .usage__pct` colours.
+    expect(styles).toContain('.usage .usage__meter[data-reset="passed"] .usage__pct { color: inherit; font-style: italic; }');
+  });
+
   it("tells the user to reply when the session asked in prose", () => {
     const h = handlers();
     const asked = { ...base, state: "awaiting" as const, awaiting: { kind: "text" as const, detail: "Create it as drafted?", questions: [] } };
@@ -832,6 +837,8 @@ describe("working and status lines", () => {
     };
     const line = "claude-opus-5 · eye · feat/x · PR #12 · ctx 42% · 5h 78% · 7d 41% · $4.12 est.";
     expect(statusLine(card)).toBe(line);
+    const passed: Card = { ...card, limits: { ...card.limits!, windows: [{ label: "5h", percent: 78, resetsAt: 1 }, { label: "7d", percent: 41, resetsAt: null }] } };
+    expect(statusLine(passed, 2_000), "a window whose reset passed").toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42% · 5h reset · 7d 41% · $4.12 est.");
     const el = renderModal({ card, turns, status: null, draft: "", theme: "terminal" }, handlers(), 2_000);
     const foot = el.querySelector(".modal__composer + .modal__statusline--foot")!;
     expect(foot.textContent).toBe(line);

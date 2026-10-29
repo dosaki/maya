@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AccountLimits, Card, SessionUsage } from "./types";
-import { costText, costTitle, hottestBand, limitsNote, resetText, stageFor, usageStrip, windowTitle } from "./usage";
+import { costText, costTitle, hasReset, hottestBand, limitsNote, resetText, stageFor, usageStrip, windowTitle } from "./usage";
 
 const NOW = Date.UTC(2026, 9, 29, 9, 0, 0);
 const MIN = 60_000;
@@ -83,7 +83,7 @@ describe("the usage strip's helpers", () => {
   });
 
   it("colours the chip by the hottest of the context and the windows", () => {
-    expect(hottestBand(claude)).toBe("high");
+    expect(hottestBand(claude, NOW)).toBe("high");
     expect(hottestBand({ ...base, context: { used: 1, window: 2, percent: 55 } })).toBe("mid");
     expect(hottestBand(base)).toBe("low");
   });
@@ -161,5 +161,32 @@ describe("usageStrip", () => {
     expect(strip.querySelector(".usage__cost")?.textContent).toContain("$0.00");
     expect(strip.querySelector(".usage__note")?.textContent).toBe("no limits");
     expect(usageStrip(base, "wide", NOW).querySelector(".usage__note")?.textContent).toBe("limits not read yet");
+  });
+
+  it("shows a window whose reset has passed as reset, muted, not its old percentage", () => {
+    const later = NOW + 2 * 60 * MIN; // the 5h window reset 48 minutes ago
+    expect(hasReset(limits.windows[0], later)).toBe(true);
+    expect(hasReset(limits.windows[1], later)).toBe(false);
+    expect(hasReset({ label: "month", percent: 30, resetsAt: null }, later)).toBe(false);
+
+    const strip = usageStrip(claude, "wide", later);
+    const [five, week] = [...strip.querySelectorAll<HTMLElement>(".usage__meter[data-kind=limit]")];
+    expect(five.dataset.reset).toBe("passed");
+    expect(five.dataset.band).toBe("low");
+    expect(five.querySelector(".usage__pct")?.textContent).toBe("reset");
+    expect(five.querySelector<HTMLElement>(".usage__fill")?.style.width).toBe("0%");
+    expect(five.querySelector(".usage__reset"), "no countdown to a reset that passed").toBeNull();
+    const at = new Date(limits.windows[0].resetsAt! * 1000);
+    const hhmm = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+    expect(five.title).toBe(`5-hour limit reset at ${hhmm} · tco@example.com`);
+    expect(week.dataset.reset).toBeUndefined();
+    expect(week.querySelector(".usage__pct")?.textContent).toBe("41%");
+
+    const chip = usageStrip(claude, "chip", later).querySelector<HTMLElement>(".usage__chip")!;
+    expect(chip.textContent, "the hottest live window is the weekly one").toBe("62% · 41% · $4.12 est.");
+    expect(chip.title).toContain("5h reset");
+    const quiet: Card = { ...claude, context: null };
+    expect(hottestBand(quiet, NOW)).toBe("high");
+    expect(hottestBand(quiet, later), "the stale 78% no longer colours the chip").toBe("low");
   });
 });

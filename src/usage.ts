@@ -38,6 +38,18 @@ function resetWhen(resetsAt: number | null | undefined, nowMs: number): { text: 
   return { text: h > 0 ? `${h}h ${minutes % 60}m` : `${minutes}m`, far: false };
 }
 
+/** Whether a window's reset time has passed: its percentage is from before the reset. */
+export function hasReset(w: LimitWindow, nowMs: number): boolean {
+  return typeof w.resetsAt === "number" && w.resetsAt * 1000 <= nowMs;
+}
+
+/** "09:00" for a time within the last day, "Thu 09:00" for one further back. */
+function pastWhen(atMs: number, nowMs: number): string {
+  const d = new Date(atMs);
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return nowMs - atMs < DAY_MS ? time : `${WEEKDAYS[d.getDay()]} ${time}`;
+}
+
 /** "↻ 1h 12m" / "↻ 45m" / "↻ Thu 09:00" when more than a day away; "" when unknown. */
 export function resetText(resetsAt: number | null | undefined, nowMs: number): string {
   const when = resetWhen(resetsAt, nowMs);
@@ -76,8 +88,13 @@ function age(ms: number): string {
  * Tooltip of a window: "5-hour limit 78% · resets in 1h 12m · tco@example.com"
  * (label words: 5h → "5-hour limit", 7d → "Weekly limit", else "<label> limit"),
  * then " · read 12m ago" when `readAt` (epoch ms) is more than 5 minutes old.
+ * A window whose reset has passed: "5-hour limit reset at 09:00 · tco@example.com".
  */
 export function windowTitle(w: LimitWindow, account: string | null | undefined, nowMs: number, readAt?: number | null): string {
+  if (hasReset(w, nowMs)) {
+    // The percentage is from before the reset: not shown, nor how old the reading is.
+    return [`${windowWords(w.label)} reset at ${pastWhen((w.resetsAt as number) * 1000, nowMs)}`, account || null].filter(Boolean).join(" · ");
+  }
   const when = resetWhen(w.resetsAt, nowMs);
   const reset = when ? (when.far ? `resets ${when.text}` : `resets in ${when.text}`) : null;
   const stale = readAt !== null && readAt !== undefined && nowMs - readAt > STALE_READ_MS ? `read ${age(nowMs - readAt)} ago` : null;
@@ -111,14 +128,15 @@ export function costTitle(usage: SessionUsage, harness: Harness): string {
   return lines.join("\n");
 }
 
-function hottestWindow(limits: AccountLimits | null | undefined): number | null {
-  if (!limits || limits.windows.length === 0) return null;
-  return Math.max(...limits.windows.map((w) => w.percent));
+/** The highest percentage of the windows that have not reset since they were read. */
+function hottestWindow(limits: AccountLimits | null | undefined, nowMs: number): number | null {
+  const live = (limits?.windows ?? []).filter((w) => !hasReset(w, nowMs));
+  return live.length ? Math.max(...live.map((w) => w.percent)) : null;
 }
 
 /** The band of the hottest window and the context, for the chip's colour. */
-export function hottestBand(card: Card): "low" | "mid" | "high" {
-  const percents = [card.context?.percent, hottestWindow(card.limits)].filter((p): p is number => typeof p === "number");
+export function hottestBand(card: Card, nowMs: number = Date.now()): "low" | "mid" | "high" {
+  const percents = [card.context?.percent, hottestWindow(card.limits, nowMs)].filter((p): p is number => typeof p === "number");
   return percents.length ? contextBand(Math.max(...percents)) : "low";
 }
 
@@ -135,6 +153,8 @@ interface MeterPart {
   kind: "ctx" | "limit";
   label: string;
   percent: number;
+  /** The window reset after it was read: its percentage is stale. */
+  resetPassed: boolean;
   reset: string;
   title: string;
 }
@@ -145,15 +165,16 @@ function meters(card: Card, nowMs: number): MeterPart[] {
   if (ctx) {
     // A recording may carry no window size: the percent alone, no division.
     const title = ctx.window > 0 ? `Context ${ctx.percent}% · ${formatTokens(ctx.used)} of ${formatTokens(ctx.window)}` : `Context ${ctx.percent}%`;
-    parts.push({ kind: "ctx", label: "ctx", percent: ctx.percent, reset: "", title });
+    parts.push({ kind: "ctx", label: "ctx", percent: ctx.percent, resetPassed: false, reset: "", title });
   }
   for (const w of card.limits?.windows ?? []) {
-    parts.push({ kind: "limit", label: w.label, percent: w.percent, reset: resetText(w.resetsAt, nowMs), title: windowTitle(w, card.limits?.account, nowMs, card.limits?.readAt) });
+    const passed = hasReset(w, nowMs);
+    parts.push({ kind: "limit", label: w.label, percent: passed ? 0 : w.percent, resetPassed: passed, reset: resetText(w.resetsAt, nowMs), title: windowTitle(w, card.limits?.account, nowMs, card.limits?.readAt) });
   }
   return parts;
 }
 
-/** The strip element: class `usage usage--<stage>`, children `.usage__meter[data-kind=ctx|limit]` each with `.usage__label`, `.usage__bar > .usage__fill`, `.usage__pct`, `.usage__reset`; `.usage__cost` with `.usage__tokens`; `.usage__note` for the note; at the chip stage a single `.usage__chip` with `data-band`. */
+/** The strip element: class `usage usage--<stage>`, children `.usage__meter[data-kind=ctx|limit]` (a window whose reset passed: `data-reset="passed"`, band low, `reset` for its percent) each with `.usage__label`, `.usage__bar > .usage__fill`, `.usage__pct`, `.usage__reset`; `.usage__cost` with `.usage__tokens`; `.usage__note` for the note; at the chip stage a single `.usage__chip` with `data-band`. */
 export function usageStrip(card: Card, stage: Stage, nowMs: number = Date.now()): HTMLElement {
   const strip = span(`usage usage--${stage}`);
   strip.dataset.stage = stage;
@@ -165,11 +186,11 @@ export function usageStrip(card: Card, stage: Stage, nowMs: number = Date.now())
 
   if (stage === "chip") {
     const ctxPart = card.context ? `${card.context.percent}%` : null;
-    const hottest = hottestWindow(card.limits);
+    const hottest = hottestWindow(card.limits, nowMs);
     const chip = span("usage__chip", [ctxPart, hottest === null ? null : `${hottest}%`, cost].filter(Boolean).join(" · "));
-    chip.dataset.band = hottestBand(card);
+    chip.dataset.band = hottestBand(card, nowMs);
     chip.title = [
-      ...parts.map((p) => [`${p.label} ${p.percent}%`, p.reset].filter(Boolean).join(" ")),
+      ...parts.map((p) => (p.resetPassed ? `${p.label} reset` : [`${p.label} ${p.percent}%`, p.reset].filter(Boolean).join(" "))),
       [cost, count].filter(Boolean).join(" ") || null,
       note,
     ]
@@ -183,7 +204,8 @@ export function usageStrip(card: Card, stage: Stage, nowMs: number = Date.now())
   for (const p of parts) {
     const meter = span("usage__meter");
     meter.dataset.kind = p.kind;
-    meter.dataset.band = contextBand(p.percent);
+    meter.dataset.band = p.resetPassed ? "low" : contextBand(p.percent);
+    if (p.resetPassed) meter.dataset.reset = "passed";
     meter.title = p.title;
     meter.append(span("usage__label", p.label));
     if (stage !== "narrow") {
@@ -193,7 +215,7 @@ export function usageStrip(card: Card, stage: Stage, nowMs: number = Date.now())
       bar.append(fill);
       meter.append(bar);
     }
-    meter.append(span("usage__pct", `${p.percent}%`));
+    meter.append(span("usage__pct", p.resetPassed ? "reset" : `${p.percent}%`));
     if (detailed && p.reset) meter.append(span("usage__reset", p.reset));
     strip.append(meter);
   }
