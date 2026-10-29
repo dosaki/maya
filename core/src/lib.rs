@@ -44,6 +44,7 @@ pub mod voice_server;
 pub mod wake;
 pub mod watcher;
 pub mod window;
+pub mod worktree;
 #[cfg(windows)]
 pub mod notify_win;
 #[cfg(windows)]
