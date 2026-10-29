@@ -391,7 +391,7 @@ fn stamp_of(path: &Path) -> Option<Stamp> {
     Some((meta.modified().ok(), meta.len()))
 }
 
-/// Recorded files by session, re-read only when their mtime or size changes; `newest()` is the latest `at` among them.
+/// Recorded files by session, re-read only when their mtime or size changes.
 #[derive(Default)]
 pub struct RecordedCache(std::collections::HashMap<String, (Stamp, Recorded)>);
 
@@ -412,10 +412,6 @@ impl RecordedCache {
         };
         self.0.insert(session_id.to_string(), (stamp, r.clone()));
         Some(r)
-    }
-
-    pub fn newest(&self) -> Option<Recorded> {
-        self.0.values().map(|(_, r)| r).max_by_key(|r| r.at).cloned()
     }
 
     /// Forgets every session not in `ids`.
@@ -568,13 +564,12 @@ mod tests {
     }
 
     #[test]
-    fn the_recorded_cache_rereads_a_changed_file_and_keeps_the_newest_it_holds() {
+    fn the_recorded_cache_rereads_a_changed_file_and_forgets_what_it_does_not_retain() {
         let dir = tempfile::tempdir().unwrap();
         let maya = dir.path().join("maya");
         let other = "00000000-0000-0000-0000-000000000001";
         let mut cache = RecordedCache::default();
         assert_eq!(cache.get(&maya, SID), None);
-        assert_eq!(cache.newest(), None);
         let first = recorded_from(&fixture(), "one", 1).unwrap();
         write_recorded(&maya, &first).unwrap();
         assert_eq!(cache.get(&maya, SID), Some(first));
@@ -585,12 +580,12 @@ mod tests {
         older.session_id = other.into();
         write_recorded(&maya, &older).unwrap();
         assert_eq!(cache.get(&maya, other), Some(older.clone()));
-        assert_eq!(cache.newest(), Some(second));
+        assert_eq!(cache.0.len(), 2);
         cache.retain(&[other.to_string()]);
-        assert_eq!(cache.newest(), Some(older));
+        assert_eq!(cache.0.keys().collect::<Vec<_>>(), [other]);
         std::fs::remove_file(maya.join(format!("usage-{other}.json"))).unwrap();
         assert_eq!(cache.get(&maya, other), None);
-        assert_eq!(cache.newest(), None);
+        assert!(cache.0.is_empty(), "a removed file is forgotten");
     }
 
     #[test]

@@ -549,18 +549,22 @@ impl Store {
                 None => tail.context_tokens.map(|used| crate::context::usage(tail.model.as_deref().unwrap_or(""), used, default_1m)),
             };
             let mut usage = crate::usage::session_usage_of(&totals);
-            if let Some(usd) = rec.as_ref().and_then(|r| r.total_cost_usd) {
+            let counted = !totals.priced.is_empty() || !totals.unpriced.is_empty();
+            let recorded_cost = rec.as_ref().and_then(|r| r.total_cost_usd);
+            if let Some(usd) = recorded_cost {
                 usage.cost = Some(crate::usage::Cost { micros: (usd * 1e6).round() as u64, unit: crate::usage::CostUnit::Usd, estimated: false, models: vec![] });
             }
-            card.usage = Some(usage);
+            // Nothing counted yet is no usage, not zeros.
+            card.usage = (counted || recorded_cost.is_some()).then_some(usage);
             card.status_line = rec.map(|r| r.line).filter(|l| !l.is_empty());
             cards.push(card);
         }
         self.tails.retain(&paths);
         self.totals.retain(&paths);
         self.recorded.retain(&sessions.iter().map(|s| s.session_id.clone()).collect::<Vec<_>>());
-        // One machine is one account: the newest reading is every Claude Code card's limits.
-        let limits = self.recorded.newest().and_then(|r| crate::statusline::limits_of(&r, crate::statusline::account_email(&self.claude_dir)));
+        // One machine is one account: the newest reading on disk, a session that
+        // ended included, is every Claude Code card's limits.
+        let limits = crate::statusline::newest_recorded(&maya_dir).and_then(|r| crate::statusline::limits_of(&r, crate::statusline::account_email(&self.claude_dir)));
         for card in &mut cards {
             card.limits = limits.clone();
         }
@@ -1414,8 +1418,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().join(".claude");
         claude_session(&claude, 7, SID_A, &[assistant_line("claude-opus-5-5", 100, 20), assistant_line("claude-opus-5-5", 5, 1)]);
+        claude_session(&claude, 8, SID_B, &[]);
         let mut store = Store::new(claude).with_alive(|_| true);
-        let card = store.refresh(1).remove(0);
+        let cards = store.refresh(1);
+        let fresh = cards.iter().find(|c| c.session_id == SID_B).unwrap();
+        assert!(fresh.usage.is_none(), "nothing counted yet is no usage, not zeros");
+        let card = cards.into_iter().find(|c| c.session_id == SID_A).unwrap();
         let usage = card.usage.unwrap();
         assert_eq!((usage.tokens.input, usage.tokens.output), (105, 21));
         let cost = usage.cost.unwrap();
@@ -1448,6 +1456,17 @@ mod tests {
         for c in &cards {
             let limits = c.limits.clone().unwrap();
             assert_eq!((limits.read_at, limits.windows[0].percent), (3_000, 5), "{}", c.session_id);
+        }
+
+        // A session that has ended may hold the freshest reading.
+        let mut ended = recording("00000000-0000-0000-0000-0000000000ff", "gone", 5_000);
+        ended.rate_limits = Some(serde_json::json!({"five_hour": {"used_percentage": 9}}));
+        crate::statusline::write_recorded(&maya, &ended).unwrap();
+        let cards = store.refresh(6_000);
+        assert_eq!(cards.len(), 2);
+        for c in &cards {
+            let limits = c.limits.clone().unwrap();
+            assert_eq!((limits.read_at, limits.windows[0].percent), (5_000, 9), "{}", c.session_id);
         }
     }
 }
