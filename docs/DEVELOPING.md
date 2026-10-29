@@ -112,8 +112,10 @@ stale reading.
 Where each agent's numbers come from:
 
 - Claude Code: limits, context and cost come from the status line
-  wrapper below. Limits come from the newest recording on the machine
-  and every Claude card shares them. Cost is the recording's
+  wrapper below. Limits come from the recording on the machine that
+  learned its `rate_limits` last, and every Claude card shares them: a
+  status line that re-renders on its refresh interval with unchanged
+  numbers is not a new reading. Cost is the recording's
   `total_cost_usd`; with no recording it is estimated from the
   transcript (main conversation only, labelled "est."). The transcript
   totals (`TranscriptTotals` in `core/src/usage.rs`) are incremental,

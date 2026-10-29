@@ -391,12 +391,30 @@ fn stamp_of(path: &Path) -> Option<Stamp> {
     Some((meta.modified().ok(), meta.len()))
 }
 
+/// One usage file as `RecordedCache` keeps it.
+struct Entry {
+    stamp: Stamp,
+    recorded: Option<Recorded>,
+    /// The `at` of the recording that last changed this session's numbers:
+    /// a status line re-rendered on its refresh interval writes a fresh `at`
+    /// with what it learned at its last message, which is not a new reading.
+    learned_at: u64,
+}
+
+/// The numbers a recording learned from Claude Code's last message.
+fn same_numbers(a: &Recorded, b: &Recorded) -> bool {
+    a.rate_limits == b.rate_limits
+        && a.total_cost_usd == b.total_cost_usd
+        && a.context_used_percent == b.context_used_percent
+        && a.context_window_size == b.context_window_size
+}
+
 /// Every `usage-<id>.json` in the folder, each parsed again only when its
 /// mtime or size changes; a file that does not parse is kept as `None`
 /// until it changes.
 #[derive(Default)]
 pub struct RecordedCache {
-    files: std::collections::HashMap<String, (Stamp, Option<Recorded>)>,
+    files: std::collections::HashMap<String, Entry>,
     /// Number of files parsed (for tests and diagnostics).
     pub reads: usize,
 }
@@ -411,27 +429,50 @@ impl RecordedCache {
             let Some(id) = name.to_str().and_then(|n| n.strip_prefix("usage-")?.strip_suffix(".json")).filter(|id| is_session_id(id)) else { continue };
             let Ok(meta) = entry.metadata() else { continue };
             let stamp = (meta.modified().ok(), meta.len());
-            let known = self.files.remove(id).filter(|(s, _)| *s == stamp);
-            let recorded = match known {
-                Some((_, r)) => r,
-                None => {
+            let known = self.files.remove(id);
+            let kept = match known {
+                Some(e) if e.stamp == stamp => e,
+                known => {
                     self.reads += 1;
-                    read_recorded(maya_dir, id)
+                    let recorded = read_recorded(maya_dir, id);
+                    let learned_at = match (&recorded, known) {
+                        (Some(new), Some(Entry { recorded: Some(old), learned_at, .. })) if same_numbers(new, &old) => learned_at,
+                        (Some(new), _) => new.at,
+                        (None, _) => 0,
+                    };
+                    Entry { stamp, recorded, learned_at }
                 }
             };
-            seen.insert(id.to_string(), (stamp, recorded));
+            seen.insert(id.to_string(), kept);
         }
         self.files = seen;
     }
 
     /// The recording of `session_id` as of the last `scan`.
     pub fn get(&self, session_id: &str) -> Option<Recorded> {
-        self.files.get(session_id)?.1.clone()
+        self.files.get(session_id)?.recorded.clone()
     }
 
-    /// The recording with the latest `at` in the folder, whichever session wrote it.
-    pub fn newest(&self) -> Option<Recorded> {
-        self.files.values().filter_map(|(_, r)| r.as_ref()).max_by_key(|r| r.at).cloned()
+    /// When `session_id`'s numbers last changed, as of the last `scan`.
+    pub fn learned_at(&self, session_id: &str) -> Option<u64> {
+        let e = self.files.get(session_id)?;
+        e.recorded.as_ref().map(|_| e.learned_at)
+    }
+
+    /// The account's limits: those of the recording that learned its
+    /// `rate_limits` last, whichever session wrote it, read at that time.
+    /// `Some` with no windows when recordings exist and none carries
+    /// `rate_limits` (an API key or a gateway); `None` without recordings.
+    pub fn limits(&self, account: Option<String>) -> Option<AccountLimits> {
+        let recorded = || self.files.values().filter_map(|e| Some((e.recorded.as_ref()?, e.learned_at)));
+        let newest = recorded().filter_map(|(r, learned_at)| Some((limits_of(r, None)?, learned_at))).max_by_key(|(_, learned_at)| *learned_at);
+        match newest {
+            Some((limits, read_at)) => Some(AccountLimits { account, read_at, ..limits }),
+            None => {
+                let read_at = recorded().map(|(_, learned_at)| learned_at).max()?;
+                Some(AccountLimits { account, windows: vec![], read_at })
+            }
+        }
     }
 }
 
@@ -579,14 +620,15 @@ mod tests {
     }
 
     #[test]
-    fn the_recorded_cache_parses_only_changed_files_and_keeps_the_newest_on_disk() {
+    fn the_recorded_cache_parses_only_changed_files_and_keeps_the_newest_reading() {
         let dir = tempfile::tempdir().unwrap();
         let maya = dir.path().join("maya");
         let other = "00000000-0000-0000-0000-000000000001";
         let broken = "00000000-0000-0000-0000-000000000002";
         let mut cache = RecordedCache::default();
+        let read_at = |c: &RecordedCache| c.limits(None).map(|l| l.read_at);
         cache.scan(&maya);
-        assert_eq!((cache.get(SID), cache.newest(), cache.reads), (None, None, 0));
+        assert_eq!((cache.get(SID), read_at(&cache), cache.reads), (None, None, 0));
 
         let first = recorded_from(&fixture(), "one", 1).unwrap();
         let mut older = recorded_from(&fixture(), "older", 3).unwrap();
@@ -596,22 +638,77 @@ mod tests {
         std::fs::write(maya.join("events.jsonl"), "{}\n").unwrap();
         std::fs::write(maya.join(format!("usage-{other}.json.123")), "half").unwrap();
         cache.scan(&maya);
-        assert_eq!((cache.get(SID), cache.newest(), cache.reads), (Some(first), Some(older.clone()), 2));
+        assert_eq!((cache.get(SID), read_at(&cache), cache.reads), (Some(first), Some(3), 2));
         cache.scan(&maya);
         assert_eq!(cache.reads, 2, "unchanged files are not read again");
 
-        let second = recorded_from(&fixture(), "second", 5).unwrap();
+        let mut second = recorded_from(&fixture(), "second", 5).unwrap();
+        second.total_cost_usd = Some(9.0);
         write_recorded(&maya, &second).unwrap();
         std::fs::write(maya.join(format!("usage-{broken}.json")), "not json").unwrap();
         cache.scan(&maya);
-        assert_eq!((cache.get(SID), cache.newest(), cache.reads), (Some(second.clone()), Some(second), 4));
+        assert_eq!((cache.get(SID), read_at(&cache), cache.reads), (Some(second), Some(5), 4));
         assert_eq!(cache.get(broken), None);
         cache.scan(&maya);
         assert_eq!(cache.reads, 4, "a file that does not parse is not parsed again until it changes");
 
         std::fs::remove_file(maya.join(format!("usage-{SID}.json"))).unwrap();
         cache.scan(&maya);
-        assert_eq!((cache.get(SID), cache.newest(), cache.reads), (None, Some(older), 4));
+        assert_eq!((cache.get(SID), read_at(&cache), cache.reads), (None, Some(3), 4));
+    }
+
+    fn five_hour(sid: &str, line: &str, at: u64, used: u64) -> Recorded {
+        let mut r = with_limits(json!({"five_hour": {"used_percentage": used}}));
+        r.session_id = sid.into();
+        r.line = line.into();
+        r.at = at;
+        r
+    }
+
+    #[test]
+    fn an_idle_re_render_does_not_make_its_old_limits_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        let maya = dir.path().join("maya");
+        let idle = "00000000-0000-0000-0000-000000000001";
+        let mut cache = RecordedCache::default();
+        let shown = |c: &RecordedCache| c.limits(None).map(|l| (l.windows[0].percent, l.read_at));
+        write_recorded(&maya, &five_hour(idle, "i", 1_000, 10)).unwrap();
+        cache.scan(&maya);
+        write_recorded(&maya, &five_hour(SID, "t", 2_000, 20)).unwrap();
+        cache.scan(&maya);
+        assert_eq!(shown(&cache), Some((20, 2_000)));
+
+        // The idle session re-renders on its refresh interval: a later `at`, the same numbers.
+        write_recorded(&maya, &five_hour(idle, "idle", 3_000, 10)).unwrap();
+        cache.scan(&maya);
+        assert_eq!(cache.learned_at(idle), Some(1_000), "unchanged numbers keep when they were learned");
+        assert_eq!(shown(&cache), Some((20, 2_000)), "the talking session's reading still wins");
+
+        // Its next message brings new numbers.
+        write_recorded(&maya, &five_hour(idle, "idle again", 4_000, 30)).unwrap();
+        cache.scan(&maya);
+        assert_eq!(cache.learned_at(idle), Some(4_000));
+        assert_eq!(shown(&cache), Some((30, 4_000)));
+    }
+
+    #[test]
+    fn recordings_without_rate_limits_give_no_limits_and_never_hide_a_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let maya = dir.path().join("maya");
+        let mut cache = RecordedCache::default();
+        let mut api_key = recorded_from(&fixture(), "key", 5_000).unwrap();
+        api_key.rate_limits = None;
+        write_recorded(&maya, &api_key).unwrap();
+        cache.scan(&maya);
+        let limits = cache.limits(Some("me@example.com".into())).unwrap();
+        assert_eq!(limits, AccountLimits { account: Some("me@example.com".into()), windows: vec![], read_at: 5_000 });
+
+        // A newer session before its first reply has no rate_limits yet; an older reading still wins.
+        let other = "00000000-0000-0000-0000-000000000001";
+        write_recorded(&maya, &five_hour(other, "o", 1_000, 12)).unwrap();
+        cache.scan(&maya);
+        let limits = cache.limits(None).unwrap();
+        assert_eq!((limits.windows[0].percent, limits.read_at), (12, 1_000));
     }
 
     #[test]

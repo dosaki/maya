@@ -687,7 +687,7 @@ impl Store {
         self.totals.retain(&paths);
         // One machine is one account: the newest reading on disk, a session that
         // ended included, is every Claude Code card's limits.
-        let limits = self.recorded.newest().and_then(|r| crate::statusline::limits_of(&r, crate::statusline::account_email(&self.claude_dir)));
+        let limits = self.recorded.limits(crate::statusline::account_email(&self.claude_dir));
         for card in &mut cards {
             card.limits = limits.clone();
         }
@@ -1633,6 +1633,25 @@ mod tests {
         for c in &cards {
             let limits = c.limits.clone().unwrap();
             assert_eq!((limits.read_at, limits.windows[0].percent), (5_000, 9), "{}", c.session_id);
+        }
+    }
+
+    #[test]
+    fn recordings_without_rate_limits_give_every_claude_card_no_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        claude_session(&claude, 7, SID_A, &[assistant_line("claude-opus-5-5", 1, 1)]);
+        claude_session(&claude, 8, SID_B, &[assistant_line("claude-opus-5-5", 1, 1)]);
+        let mut api_key = recording(SID_A, "a", 1_000);
+        api_key.rate_limits = None;
+        crate::statusline::write_recorded(&claude.join("maya"), &api_key).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        let cards = store.refresh(2_000);
+        assert_eq!(cards.len(), 2);
+        for c in &cards {
+            let limits = c.limits.clone().expect("recorded, so read: no limits rather than not read yet");
+            assert!(limits.windows.is_empty(), "{}", c.session_id);
+            assert_eq!(limits.read_at, 1_000);
         }
     }
 
