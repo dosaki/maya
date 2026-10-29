@@ -879,7 +879,10 @@ pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, 
         return Err(format!("{} is not installed on this machine.", launch::label(agent)));
     }
     let target = crate::reviews::resolve_target(&clones, &site, &pr.repo, pr.number)?;
-    if crate::reviews::is_busy(&target.dir, &live) {
+    // Live sessions report their folder with symlinks resolved (a linked
+    // clones directory); the plain path is kept for a folder not made yet.
+    let physical = std::fs::canonicalize(&target.dir).unwrap_or_else(|_| target.dir.clone());
+    if crate::reviews::is_busy(&target.dir, &live) || crate::reviews::is_busy(&physical, &live) {
         return Err(format!("A review of {} {}{} is already running.", pr.repo_name(), pr.forge.sigil(), pr.number));
     }
     // The terminal opens in the clones root, so it must exist (a terminal
@@ -1637,6 +1640,24 @@ mod tests {
     fn a_review_already_running_is_refused() {
         let (dir, store, clones) = store_reviewing_in_clones();
         write_session(dir.path(), "r1", 4343, &clones.join("bedrock-451").to_string_lossy());
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(start_review(&l, &bedrock_pr()).unwrap_err(), "A review of bedrock #451 is already running.");
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_review_running_through_a_linked_clones_directory_is_refused() {
+        let (dir, store) = store_with_projects(&[]);
+        let real = dir.path().join("real-clones");
+        repo_with_origin(&real.join("bedrock-451"), "git@github.com:Org/bedrock.git");
+        let linked = dir.path().join("clones");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        store.lock().unwrap().config.clones_dir = Some(linked.to_string_lossy().into_owned());
+        // A live session reports its folder with the link resolved.
+        let physical = std::fs::canonicalize(real.join("bedrock-451")).unwrap();
+        write_session(dir.path(), "r1", 4343, &physical.to_string_lossy());
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
         assert_eq!(start_review(&l, &bedrock_pr()).unwrap_err(), "A review of bedrock #451 is already running.");
