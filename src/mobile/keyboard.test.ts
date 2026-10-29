@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import mobileCss from "./mobile.css?raw";
-import { isTextField, keepFocusedAboveKeyboard } from "./keyboard";
+import { isTextField, keepFocusedAboveKeyboard, trackVisibleArea } from "./keyboard";
 
 describe("isTextField", () => {
   it("takes text boxes and leaves buttons, checkboxes and the page", () => {
@@ -57,5 +57,36 @@ describe("the phone's cards and dialogs", () => {
     const rule = mobileCss.split("\n").find((l) => l.startsWith(".modal__panel, .modal__panel--compact {"));
     expect(rule).toContain("width: 100%; height: 100%;");
     expect(rule).not.toContain("100vh");
+  });
+});
+
+describe("trackVisibleArea", () => {
+  afterEach(() => {
+    document.documentElement.style.removeProperty("--visible-top");
+    document.documentElement.style.removeProperty("--visible-height");
+  });
+
+  it("names the part of the page left above the keyboard, as it changes", () => {
+    const viewport = Object.assign(new EventTarget(), { offsetTop: 0, height: 800 });
+    trackVisibleArea(document.documentElement, viewport);
+    const style = document.documentElement.style;
+    expect(style.getPropertyValue("--visible-top")).toBe("0px");
+    expect(style.getPropertyValue("--visible-height")).toBe("800px");
+    Object.assign(viewport, { offsetTop: 40, height: 420 });
+    viewport.dispatchEvent(new Event("resize"));
+    expect(style.getPropertyValue("--visible-top")).toBe("40px");
+    expect(style.getPropertyValue("--visible-height")).toBe("420px");
+    Object.assign(viewport, { offsetTop: 10 });
+    viewport.dispatchEvent(new Event("scroll"));
+    expect(style.getPropertyValue("--visible-top")).toBe("10px");
+  });
+});
+
+describe("the phone's card layer", () => {
+  it("covers the part of the page left above the keyboard, not the whole screen", () => {
+    const rule = mobileCss.split("\n").find((l) => l.startsWith(".modal {"));
+    expect(rule).toContain("top: var(--visible-top, 0px);");
+    expect(rule).toContain("height: var(--visible-height, 100%);");
+    expect(rule).toContain("bottom: auto;");
   });
 });
