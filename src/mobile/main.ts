@@ -23,7 +23,7 @@ import { updates } from "../update";
 import { makeCardHistory } from "./card-history";
 import { chatTabShown } from "./chat-tab";
 import { initVoice } from "./voice";
-import { keepFocusedAboveKeyboard } from "./keyboard";
+import { keepFocusedAboveKeyboard, trackVisibleArea } from "./keyboard";
 import { initNetwork } from "./network";
 import { watchTaps } from "./notify-tap";
 import { initSetup } from "./setup";
@@ -202,6 +202,7 @@ async function start(): Promise<void> {
   layout();
   window.addEventListener("resize", layout);
   keepFocusedAboveKeyboard();
+  trackVisibleArea();
   // Android's back button pops the history entry a card pushed: close the card.
   window.addEventListener("popstate", () => closeModal());
   const board = document.getElementById("board");
