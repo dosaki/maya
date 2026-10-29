@@ -138,6 +138,14 @@ describe("usageStrip", () => {
     expect(() => usageStrip({ ...base, harness: "other" }, "chip", NOW)).not.toThrow();
   });
 
+  it("a_card_with_nothing_to_count_shows_the_note_in_its_chip", () => {
+    const fresh: Card = { ...base, harness: "claude-code", context: null, limits: null, usage: null };
+    expect(usageStrip(fresh, "chip", NOW).querySelector(".usage__chip")?.textContent).toBe("limits not read yet");
+    const grok: Card = { ...base, harness: "grok", context: null };
+    expect(usageStrip(grok, "chip", NOW).querySelector(".usage__chip")?.textContent).toBe("limits not shared");
+    expect(usageStrip({ ...base, harness: "other", context: null }, "chip", NOW).querySelector(".usage__chip")?.textContent).toBe("");
+  });
+
   it("antigravity_and_kiro_windows_keep_their_labels", () => {
     const agy: Card = { ...base, harness: "antigravity", limits: { account: null, windows: [{ label: "Gemini 7d", percent: 12, resetsAt: null }, { label: "Claude+GPT 7d", percent: 40, resetsAt: null }], readAt: NOW } };
     expect([...usageStrip(agy, "wide", NOW).querySelectorAll(".usage__meter[data-kind=limit] .usage__label")].map((l) => l.textContent)).toEqual(["Gemini 7d", "Claude+GPT 7d"]);

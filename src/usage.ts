@@ -187,7 +187,9 @@ export function usageStrip(card: Card, stage: Stage, nowMs: number = Date.now())
   if (stage === "chip") {
     const ctxPart = card.context ? `${card.context.percent}%` : null;
     const hottest = hottestWindow(card.limits, nowMs);
-    const chip = span("usage__chip", [ctxPart, hottest === null ? null : `${hottest}%`, cost].filter(Boolean).join(" · "));
+    const numbers = [ctxPart, hottest === null ? null : `${hottest}%`, cost].filter(Boolean).join(" · ");
+    // With nothing to count yet, the chip says why, rather than hiding.
+    const chip = span("usage__chip", numbers || note || "");
     chip.dataset.band = hottestBand(card, nowMs);
     chip.title = [
       ...parts.map((p) => (p.resetPassed ? `${p.label} reset` : [`${p.label} ${p.percent}%`, p.reset].filter(Boolean).join(" "))),

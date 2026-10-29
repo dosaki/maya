@@ -619,8 +619,12 @@ impl Store {
     pub fn set_grok_usage(&mut self, session_id: &str, usage: Option<SessionUsage>, now_ms: u64) {
         let slot = self.grok_usage.entry(session_id.to_string()).or_default();
         slot.ran_ms = Some(now_ms);
-        if usage.is_some() {
-            slot.usage = usage;
+        match usage {
+            Some(u) => slot.usage = Some(u),
+            // A run that brought nothing (the binary missing, a timeout, an
+            // unparseable answer) keeps the last reading and forgets the mtime
+            // it was handed out for, so the usual one-minute retry happens.
+            None => slot.seen = None,
         }
     }
 
@@ -1676,6 +1680,12 @@ mod tests {
         grok_events(t.path(), 3_000);
         assert!(store.usage_due(now + 150_000).grok.is_empty(), "changed, but the last run is 20 s old");
         assert_eq!(store.usage_due(now + 190_000).grok, vec!["g1".to_string()]);
+        // A run that failed is retried after the gap without the file changing.
+        store.set_grok_usage("g1", None, now + 191_000);
+        assert!(store.usage_due(now + 200_000).grok.is_empty(), "the failed run is 9 s old");
+        assert_eq!(store.usage_due(now + 260_000).grok, vec!["g1".to_string()], "retried after the gap, same file");
+        store.set_grok_usage("g1", Some(SessionUsage { tokens: Default::default(), cost: None }), now + 261_000);
+        assert!(store.usage_due(now + 400_000).grok.is_empty(), "a good run waits for the file to change");
     }
 
     fn agy_session(dir: &Path, pid: i32, id: &str) -> ForeignSession {
