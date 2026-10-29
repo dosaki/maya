@@ -1159,6 +1159,28 @@ pub(crate) fn poll_pull_requests(app: &AppHandle) {
     refresh_and_emit(app);
 }
 
+/// Runs the usage collectors that are due (`grok usage` and the like),
+/// outside the store lock, and repaints when anything was learned.
+pub(crate) fn poll_usage(app: &AppHandle) {
+    if maya_core::usage::collect(&app.state::<AppState>().store) {
+        refresh_and_emit(app);
+    }
+}
+
+/// Marks the limits of the session's agent due at once when they are stale:
+/// its window just opened. A session on another machine is left alone.
+#[tauri::command(async)]
+fn nudge_limits(state: TauriState<AppState>, session_id: String) {
+    if remote_machine_of(&state, &session_id).is_some() {
+        return;
+    }
+    // Only the agents found as processes (Antigravity, Kiro) have limits read on demand.
+    let mut store = state.store.lock().unwrap();
+    if let Some(s) = store.foreign(&session_id) {
+        store.nudge_limits(s.harness, now_ms());
+    }
+}
+
 /// The model that judges finished messages: Maya's agent's own, or Claude Code's quick one.
 fn judge_model(cfg: &Config) -> Option<String> {
     match cfg.brain_model() {
@@ -1654,6 +1676,7 @@ pub fn run() {
             save_attachment,
             open_url,
             open_pr,
+            nudge_limits,
             list_review_prs,
             list_deployments,
             deployment_approve,
@@ -1756,6 +1779,11 @@ pub fn run() {
                     }
                     std::thread::sleep(PR_POLL);
                 }
+            });
+            let usage_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                poll_usage(&usage_handle);
+                std::thread::sleep(maya_core::usage::COLLECT_EVERY);
             });
             let asks_handle = app.handle().clone();
             std::thread::spawn(move || loop {

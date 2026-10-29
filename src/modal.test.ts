@@ -799,6 +799,14 @@ describe("the open session view while a session asks", () => {
     invoke.mockImplementation((cmd: string) => Promise.resolve(cmd === "session_history" ? [] : null));
   });
 
+  it("opening a window nudges its agent's account limits, and a failed nudge is ignored", async () => {
+    invoke.mockImplementation((cmd: string) => (cmd === "nudge_limits" ? Promise.reject(new Error("gone")) : Promise.resolve(cmd === "session_history" ? [] : null)));
+    await openModal({ ...base, sessionId: "m0", harness: "antigravity" });
+    expect(calls("nudge_limits")).toEqual([["nudge_limits", { sessionId: "m0" }]]);
+    expect(host().querySelector(".modal__status")?.textContent ?? "").toBe("");
+    closeModal();
+  });
+
   it("menu replaces the composer while asking and the composer returns after, with the draft", async () => {
     const working = { ...base, sessionId: "m1", state: "working" as const, stateSince: Date.now() - 5000 };
     await openModal(working);

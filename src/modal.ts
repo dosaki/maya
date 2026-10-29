@@ -1054,6 +1054,8 @@ export async function openModal(card: Card): Promise<void> {
   document.addEventListener("keydown", keyHandler);
   void watchDrops();
   paint({ focusInput: true });
+  // A window opening on stale account limits has them read again.
+  void invoke("nudge_limits", { sessionId: card.sessionId }).catch(() => undefined);
   if (card.harness !== "claude-code") {
     const me = current;
     void invoke<{ agents: AgentInfo[] }>("list_agents", { machine: card.machine ?? "" })
