@@ -868,6 +868,12 @@ describe("working and status lines", () => {
     expect(styles).toContain(".modal--terminal .modal__statusline--head { display: none; }");
   });
 
+  it("scrolls a recorded line wider than the panel inside the foot instead of overflowing it", () => {
+    expect(styles).toContain(".modal__statusline--recorded { white-space: pre; overflow-x: auto; overflow-y: hidden; }");
+    // No look sets the foot's overflow back.
+    expect(styles).not.toMatch(/modal__statusline--(foot|recorded)[^{]*\{[^}]*overflow(-x)?: visible/);
+  });
+
   it("a repaint carries the status lines and the working line along", () => {
     const root = renderModal({ card: base, turns, status: null, draft: "" }, handlers());
     patchModal(root, renderModal({ card: busy, turns, status: null, draft: "" }, handlers(), 2_000));
