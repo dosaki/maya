@@ -41,6 +41,7 @@ pub fn run_with_timeout(program: &str, args: &[&str], timeout: std::time::Durati
 pub const COLLECT_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 const GROK_USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AGY_USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const KIRO_USAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Takes what is due from `store`, runs each collector with the lock
 /// released, and files the answers. True when anything ran, so the board
@@ -58,6 +59,11 @@ pub fn collect(store: &Mutex<Store>) -> bool {
     }
     if due.antigravity {
         file_limits(store, Harness::Antigravity, antigravity_limits());
+        learned = true;
+    }
+    if due.kiro {
+        let read = crate::kiro::acp_usage_text(KIRO_USAGE_TIMEOUT).and_then(|card| crate::kiro::parse_usage_card(&card, crate::now_ms()).ok_or_else(|| "Kiro's usage card did not parse".to_string()));
+        file_limits(store, Harness::Kiro, read);
         learned = true;
     }
     learned

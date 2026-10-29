@@ -225,6 +225,129 @@ pub fn apply_live(tail: &mut ForeignTail, run_dir: &Path, tui_pid: i32, events_p
     }
 }
 
+/// How Kiro is asked for its usage card: `_kiro.dev/commands/execute` with
+/// the `usage` command and no arguments (Kiro's commands are an adjacently
+/// tagged `{"command", "args"}` pair). Unofficial: found by probing
+/// `kiro-cli acp` 2.34 (`examples/kiro_usage_probe.rs`).
+pub fn usage_request(id: u64, session_id: &str) -> String {
+    crate::brain::jsonrpc::Envelope::Versioned.request(id, "_kiro.dev/commands/execute", serde_json::json!({"sessionId": session_id, "command": {"command": "usage", "args": {}}}))
+}
+
+/// The card's text from the answer to `usage_request`, else why there is none.
+pub fn card_of(answer: &Value) -> Result<String, String> {
+    if let Some(e) = answer.get("error") {
+        return Err(e["message"].as_str().unwrap_or("error").to_string());
+    }
+    let result = &answer["result"];
+    let message = result["message"].as_str().unwrap_or_default();
+    match (result["success"].as_bool(), message.is_empty()) {
+        (Some(true), false) => Ok(message.to_string()),
+        (_, true) => Err("no usage card".to_string()),
+        _ => Err(message.to_string()),
+    }
+}
+
+/// How long `acp_usage_text` gives Kiro to end once its stdin is closed.
+const PROBE_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Spawns `kiro-cli acp`, sends `initialize` (as `brain::acp::initialize`),
+/// `session/new` in the home folder with no MCP servers, then
+/// `usage_request`, and returns the card's text from its answer. Gives up
+/// after `timeout`. Before this returns the process has ended (given
+/// `PROBE_EXIT_GRACE` to save and exit, then killed) and the session it
+/// opened is forgotten.
+pub fn acp_usage_text(timeout: std::time::Duration) -> Result<String, String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Instant;
+    let kiro = crate::launch::find_binary(crate::model::Harness::Kiro)?;
+    let home = dirs::home_dir().ok_or("no home folder")?;
+    let mut child = crate::command(&kiro).arg("acp").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("kiro-cli acp: {e}"))?;
+    let (mut stdin, stdout) = (child.stdin.take(), child.stdout.take());
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    if let Some(stdout) = stdout {
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    let deadline = Instant::now() + timeout;
+    let mut session: Option<String> = None;
+    let ask = |stdin: &mut Option<std::process::ChildStdin>, line: String| -> Result<(), String> {
+        let pipe = stdin.as_mut().ok_or("kiro-cli acp has no stdin")?;
+        pipe.write_all(line.as_bytes()).and_then(|_| pipe.flush()).map_err(|e| format!("kiro-cli acp: {e}"))
+    };
+    let new_session = crate::brain::jsonrpc::Envelope::Versioned.request(2, "session/new", serde_json::json!({"cwd": home.to_string_lossy(), "mcpServers": []}));
+    let answer = ask(&mut stdin, crate::brain::acp::initialize(1)).and_then(|_| ask(&mut stdin, new_session)).and_then(|_| loop {
+        let line = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) => line,
+            Err(RecvTimeoutError::Timeout) => break Err("kiro-cli acp timed out".to_string()),
+            Err(RecvTimeoutError::Disconnected) => break Err("kiro-cli acp exited".to_string()),
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        if v.get("method").is_some() {
+            continue;
+        }
+        match v["id"].as_u64() {
+            Some(2) => {
+                let Some(id) = v["result"]["sessionId"].as_str() else { break Err("session/new failed".to_string()) };
+                session = Some(id.to_string());
+                ask(&mut stdin, usage_request(3, id))?;
+            }
+            Some(3) => break card_of(&v),
+            _ => {}
+        }
+    });
+    // `kiro-cli` runs the agent as a child of its own, which saves the
+    // session as it ends on stdin's close: wait for that (stdout closes once
+    // both are gone) before killing what is left and forgetting the session.
+    drop(stdin);
+    let grace = Instant::now() + PROBE_EXIT_GRACE;
+    while rx.recv_timeout(grace.saturating_duration_since(Instant::now())).is_ok() {}
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Some(id) = session {
+        forget_probe_session(&home.join(".kiro/sessions/cli"), &id);
+    }
+    answer
+}
+
+/// Removes the files of a session `acp_usage_text` opened, so the probe's
+/// sessions do not pile up in Kiro's list and Maya's resume list. Only a
+/// session with no turns (an empty or missing event log) is removed.
+pub fn forget_probe_session(sessions_dir: &Path, id: &str) {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return;
+    }
+    let events = sessions_dir.join(format!("{id}.jsonl"));
+    if std::fs::metadata(&events).is_ok_and(|m| m.len() > 0) {
+        return;
+    }
+    let _ = std::fs::remove_file(sessions_dir.join(format!("{id}.json")));
+    let _ = std::fs::remove_file(events);
+}
+
+/// The usage card's text (`Estimated Usage | resets on 2026-11-01 | …` then
+/// `Credits (0.62 of 50 covered in plan), 1.2%`) as one window: "month", at
+/// the share of the plan's credits used, resetting at the start (UTC) of the
+/// date it names. `None` without a used-of-cap figure or with a zero cap.
+pub fn parse_usage_card(text: &str, now_ms: u64) -> Option<crate::usage::AccountLimits> {
+    use crate::usage::{AccountLimits, LimitWindow};
+    let (head, _) = text.split_once(" covered in plan)")?;
+    let (used, cap) = head.rsplit_once('(')?.1.split_once(" of ")?;
+    let (used, cap) = (used.trim().parse::<f64>().ok()?, cap.trim().parse::<f64>().ok()?);
+    if cap <= 0.0 || used < 0.0 {
+        return None;
+    }
+    let resets_at = text.split_once("resets on ").and_then(|(_, rest)| rest.get(..10)).and_then(|date| crate::codex::ms_of(&format!("{date}T00:00:00Z"))).map(|ms| ms / 1000);
+    let percent = (used / cap * 100.0).round().clamp(0.0, 100.0) as u8;
+    Some(AccountLimits { account: None, windows: vec![LimitWindow { label: "month".into(), percent, resets_at }], read_at: now_ms })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +473,55 @@ mod tests {
         let mut none = parse_events("");
         apply_live(&mut none, Path::new("/nonexistent"), 1, Path::new("/nonexistent/x.jsonl"), 5);
         assert!(!none.working && none.context_window.is_none());
+    }
+
+    #[test]
+    fn parse_usage_card_reads_used_cap_and_reset() {
+        use crate::usage::LimitWindow;
+        let limits = parse_usage_card(&fixture("usage-card.txt"), 9).unwrap();
+        // 0.62 of 50 credits; 2026-11-01T00:00:00Z is 1793491200.
+        assert_eq!(limits.windows, vec![LimitWindow { label: "month".into(), percent: 1, resets_at: Some(1_793_491_200) }]);
+        assert_eq!((limits.account, limits.read_at), (None, 9));
+        let half = "Estimated Usage | resets on 2026-12-01 | KIRO PRO\nCredits (500.4 of 1000 covered in plan), 50.0%";
+        let w = &parse_usage_card(half, 9).unwrap().windows[0];
+        assert_eq!((w.percent, w.resets_at), (50, Some(1_796_083_200)));
+        let over = "Credits (1200 of 1000 covered in plan), 120%";
+        let w = &parse_usage_card(over, 9).unwrap().windows[0];
+        assert_eq!((w.percent, w.resets_at), (100, None), "capped, and no date means no reset");
+    }
+
+    #[test]
+    fn an_unrelated_text_gives_none() {
+        assert_eq!(parse_usage_card("Manage your plan at https://app.kiro.dev/account/usage", 9), None);
+        assert_eq!(parse_usage_card("", 9), None);
+        assert_eq!(parse_usage_card("Credits (5 of 0 covered in plan)", 9), None, "no cap");
+    }
+
+    #[test]
+    fn the_usage_request_names_the_command_with_empty_args() {
+        let v: Value = serde_json::from_str(&usage_request(3, "s1")).unwrap();
+        assert_eq!(v["method"], "_kiro.dev/commands/execute");
+        assert_eq!(v["params"], serde_json::json!({"sessionId": "s1", "command": {"command": "usage", "args": {}}}));
+    }
+
+    #[test]
+    fn the_usage_answer_gives_the_card_or_why_not() {
+        use serde_json::json;
+        assert_eq!(card_of(&json!({"id": 3, "result": {"success": true, "message": "the card", "data": {}}})), Ok("the card".to_string()));
+        assert_eq!(card_of(&json!({"id": 3, "error": {"code": -32700, "message": "Parse error"}})), Err("Parse error".to_string()));
+        assert_eq!(card_of(&json!({"id": 3, "result": {"success": false, "message": "signed out"}})), Err("signed out".to_string()));
+    }
+
+    #[test]
+    fn a_probe_session_with_no_turns_is_forgotten() {
+        let t = tempfile::tempdir().unwrap();
+        for (id, events) in [("empty", ""), ("used", "{}\n")] {
+            std::fs::write(t.path().join(format!("{id}.json")), "{}").unwrap();
+            std::fs::write(t.path().join(format!("{id}.jsonl")), events).unwrap();
+            forget_probe_session(t.path(), id);
+        }
+        assert!(!t.path().join("empty.json").exists() && !t.path().join("empty.jsonl").exists());
+        assert!(t.path().join("used.json").exists() && t.path().join("used.jsonl").exists(), "a session with turns is kept");
+        forget_probe_session(t.path(), "../escape");
     }
 }
