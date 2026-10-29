@@ -27,6 +27,7 @@ pub mod net;
 pub mod notify;
 pub mod opencode;
 pub mod pending_names;
+pub mod pricing;
 pub mod pr;
 pub mod registry;
 pub mod remembered;
