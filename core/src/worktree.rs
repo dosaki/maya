@@ -34,6 +34,22 @@ fn git_out(dir: &Path, args: &[&str]) -> Option<String> {
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// git's message from its stderr: from the first `fatal:` or `error:` line
+/// on, so progress lines before it ("Preparing worktree", "Cloning into")
+/// are left out; the whole of it, trimmed, when there is no such line.
+pub(crate) fn git_error(stderr: &[u8]) -> String {
+    let err = String::from_utf8_lossy(stderr);
+    let err = err.trim();
+    let mut start = 0;
+    for line in err.split_inclusive('\n') {
+        if line.starts_with("fatal:") || line.starts_with("error:") {
+            return err[start..].to_string();
+        }
+        start += line.len();
+    }
+    err.to_string()
+}
+
 /// Adds a worktree for a new session on a new branch cut from the
 /// checkout's current commit, under `clones_root`, and returns its
 /// folder. Only the top folder of a repository qualifies.
@@ -51,7 +67,9 @@ pub fn add_for_session(checkout: &Path, clones_root: &Path, name: Option<&str>, 
         .map(|n| if n == 1 { slug.clone() } else { format!("{slug}-{n}") })
         .find(|c| {
             let taken = git_out(checkout, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{c}")]).is_some();
-            !taken && !clones_root.join(format!("{folder}-{c}")).exists()
+            // A branch `<c>/...` keeps git from making `<c>` ("cannot lock ref").
+            let under = git_out(checkout, &["for-each-ref", "--count=1", &format!("refs/heads/{c}/")]).is_some_and(|o| !o.is_empty());
+            !taken && !under && !clones_root.join(format!("{folder}-{c}")).exists()
         })
         .ok_or_else(|| format!("No free branch name starting with {slug} in {folder}."))?;
     let dir = clones_root.join(format!("{folder}-{candidate}"));
@@ -66,7 +84,7 @@ pub fn add_for_session(checkout: &Path, clones_root: &Path, name: Option<&str>, 
         .output()
         .map_err(|e| format!("Could not run git: {e}"))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(git_error(&out.stderr));
     }
     Ok(dir)
 }
@@ -88,6 +106,8 @@ mod tests {
         git(&d, &["init", "-q"]);
         git(&d, &["config", "user.email", "t@example.com"]);
         git(&d, &["config", "user.name", "T"]);
+        git(&d, &["config", "commit.gpgsign", "false"]);
+        git(&d, &["config", "core.hooksPath", "/dev/null"]);
         std::fs::write(d.join("a.txt"), "a").unwrap();
         git(&d, &["add", "."]);
         git(&d, &["commit", "-q", "-m", "first"]);
@@ -124,6 +144,25 @@ mod tests {
         add_for_session(&proj, &clones, Some("fix"), "x").unwrap();
         std::fs::create_dir_all(clones.join("proj-fix-2")).unwrap();
         assert_eq!(add_for_session(&proj, &clones, Some("fix"), "x").unwrap(), clones.join("proj-fix-3"));
+    }
+
+    #[test]
+    fn a_branch_under_the_name_takes_the_name_too() {
+        let t = tempfile::tempdir().unwrap();
+        let clones = t.path().join("clones");
+        let proj = repo(t.path(), "proj");
+        git(&proj, &["branch", "fix/ci"]);
+        assert_eq!(add_for_session(&proj, &clones, Some("fix"), "x").unwrap(), clones.join("proj-fix-2"));
+        assert_eq!(git(&clones.join("proj-fix-2"), &["rev-parse", "--abbrev-ref", "HEAD"]), "fix-2");
+    }
+
+    #[test]
+    fn gits_error_drops_the_progress_lines_before_it() {
+        let worktree = b"Preparing worktree (new branch 'fix')\nfatal: cannot lock ref 'refs/heads/fix'\n";
+        assert_eq!(git_error(worktree), "fatal: cannot lock ref 'refs/heads/fix'");
+        let clone = b"Cloning into 'c'...\nerror: one\nfatal: two\n";
+        assert_eq!(git_error(clone), "error: one\nfatal: two");
+        assert_eq!(git_error(b"  something else\n"), "something else", "no fatal or error line keeps it all");
     }
 
     #[test]
