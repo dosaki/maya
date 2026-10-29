@@ -33,6 +33,9 @@ pub struct ForeignTail {
     pub context_window: Option<u64>,
     pub cwd: Option<String>,
     pub session_id: Option<String>,
+    pub usage: Option<crate::usage::SessionUsage>,
+    pub limits: Option<crate::usage::AccountLimits>,
+    pub model: Option<String>,
 }
 
 /// The card for a foreign session, with the same state rules as Claude Code
@@ -76,7 +79,7 @@ pub fn derive(s: &ForeignSession, t: &ForeignTail, prose: &Prose, now_ms: u64, c
         machine: None,
         machine_address: None, machine_platform: None,
         terminal: None,
-        stale: false, model: None, branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None
+        stale: false, model: t.model.clone(), branch: None, brain: false, shell: false, usage: t.usage.clone(), limits: t.limits.clone(), status_line: None
     }
 }
 
@@ -436,7 +439,7 @@ mod tests {
     use crate::model::{AwaitKind, Harness, State};
 
     fn tail(working: bool, awaiting: Option<&str>, text: Option<&str>, at: u64) -> ForeignTail {
-        ForeignTail { working, awaiting: awaiting.map(str::to_string), last_agent_text: text.map(str::to_string), last_event_ms: at, context_used: Some(1_000), context_window: Some(10_000), cwd: None, session_id: None }
+        ForeignTail { working, awaiting: awaiting.map(str::to_string), last_agent_text: text.map(str::to_string), last_event_ms: at, context_used: Some(1_000), context_window: Some(10_000), cwd: None, session_id: None, ..Default::default() }
     }
 
     fn session() -> ForeignSession {

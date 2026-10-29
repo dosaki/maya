@@ -587,6 +587,11 @@ impl Store {
             card.branch = self.prs.branch(&s.cwd);
             cards.push(card);
         }
+        // One machine is one Codex account: the newest reading is every Codex card's limits.
+        let codex_limits = cards.iter().filter(|c| c.harness == Harness::Codex).filter_map(|c| c.limits.clone()).max_by_key(|l| l.read_at);
+        for card in cards.iter_mut().filter(|c| c.harness == Harness::Codex) {
+            card.limits = codex_limits.clone();
+        }
         // OpenCode's sessions live in its server: asked on every refresh while it runs.
         self.opencode = match self.opencode_service() {
             Some(svc) => {
@@ -873,6 +878,30 @@ mod tests {
         std::fs::write(claude.join("settings.json"), r#"{"model": "claude-opus-5[1m]"}"#).unwrap();
         let ctx = store.refresh(2)[0].context.clone().unwrap();
         assert_eq!((ctx.window, ctx.percent), (1_000_000, 15));
+    }
+
+    #[test]
+    fn codex_limits_are_shared_by_every_codex_card() {
+        use crate::foreign::ForeignSession;
+        use crate::model::Harness;
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        let fixture = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex/token_count.jsonl")).unwrap();
+        let with = dir.path().join("with.jsonl");
+        std::fs::write(&with, &fixture).unwrap();
+        let without = dir.path().join("without.jsonl");
+        std::fs::write(&without, "{\"timestamp\":\"2026-10-29T09:00:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n").unwrap();
+        let mk = |pid, id: &str, path| ForeignSession { harness: Harness::Codex, pid, tty: Some(format!("/dev/ttys0{pid}")), session_id: id.into(), cwd: "/Users/x/dev/one".into(), name: id.into(), transcript_path: path };
+        let mut store = Store::new(claude).with_alive(|_| true).with_foreign(dir.path().join("codex"), dir.path().join("agy"), vec![mk(77, "aaa", with), mk(78, "bbb", without)]);
+        let cards = store.refresh(1_790_671_680_000);
+        assert_eq!(cards.len(), 2);
+        let a = cards.iter().find(|c| c.session_id == "aaa").unwrap();
+        let b = cards.iter().find(|c| c.session_id == "bbb").unwrap();
+        assert!(a.limits.is_some());
+        assert_eq!(a.limits, b.limits);
+        assert!(b.usage.is_none());
+        assert_eq!(a.model.as_deref(), Some("gpt-6.1-sol"));
     }
 
     #[test]
