@@ -122,6 +122,8 @@ struct LimitsSlot {
     ran_ms: Option<u64>,
     /// A window opened on a stale reading: due at the next hand-out.
     nudged: bool,
+    /// When a failed read was last logged.
+    logged_ms: Option<u64>,
 }
 
 impl LimitsSlot {
@@ -547,6 +549,7 @@ impl Store {
     pub const AGY_LIMITS_GAP_MS: u64 = 300_000;
     pub const KIRO_LIMITS_GAP_MS: u64 = 600_000;
     pub const NUDGE_STALE_MS: u64 = 60_000;
+    pub const LIMITS_LOG_GAP_MS: u64 = 3_600_000;
 
     fn limits_slot(&mut self, h: Harness) -> Option<&mut LimitsSlot> {
         match h {
@@ -589,13 +592,26 @@ impl Store {
         due
     }
 
-    /// The harness's limits as its collector read them; `None` (the read
-    /// failed) clears them.
+    /// The harness's limits as its collector read them; `None` clears them.
     pub fn set_limits(&mut self, h: Harness, limits: Option<AccountLimits>, now_ms: u64) {
         if let Some(slot) = self.limits_slot(h) {
             slot.limits = limits;
             slot.ran_ms = Some(now_ms);
         }
+    }
+
+    /// The harness's limits could not be read. The last good reading stays,
+    /// so one timed-out read does not blank the card; with none ever read
+    /// the limits stay `None`. True when the failure is to be logged: at most
+    /// once an hour per harness.
+    pub fn limits_failed(&mut self, h: Harness, now_ms: u64) -> bool {
+        let Some(slot) = self.limits_slot(h) else { return false };
+        slot.ran_ms = Some(now_ms);
+        let log = slot.logged_ms.is_none_or(|t| now_ms.saturating_sub(t) >= Self::LIMITS_LOG_GAP_MS);
+        if log {
+            slot.logged_ms = Some(now_ms);
+        }
+        log
     }
 
     /// A Grok session's usage from `grok usage`; `None` (the run failed)
@@ -1677,7 +1693,24 @@ mod tests {
         let of = |id: &str| cards.iter().find(|c| c.session_id == id).unwrap().limits.clone();
         assert_eq!((of("a1"), of("a2"), of("c1")), (Some(limits.clone()), Some(limits), None));
         store.set_limits(Harness::Antigravity, None, 20);
-        assert!(store.refresh(30).iter().all(|c| c.limits.is_none()), "a failed read clears the limits");
+        assert!(store.refresh(30).iter().all(|c| c.limits.is_none()), "None clears the limits");
+    }
+
+    #[test]
+    fn a_failed_limits_read_keeps_the_last_reading_and_is_logged_once_an_hour() {
+        use crate::usage::LimitWindow;
+        let t = tempfile::tempdir().unwrap();
+        let mut store = Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), t.path().join("agy"), vec![agy_session(t.path(), 43, "a1")]);
+        let now = 10_000_000;
+        assert!(store.limits_failed(Harness::Antigravity, now), "the first failure is logged");
+        assert!(store.refresh(now).iter().all(|c| c.limits.is_none()), "never read: no limits");
+        let limits = AccountLimits { account: None, windows: vec![LimitWindow { label: "Gemini 7d".into(), percent: 40, resets_at: None }], read_at: now + 1 };
+        store.set_limits(Harness::Antigravity, Some(limits.clone()), now + 1);
+        assert!(!store.limits_failed(Harness::Antigravity, now + 300_000), "under an hour since the last log");
+        assert_eq!(store.refresh(now + 300_000)[0].limits, Some(limits), "the last good reading stays");
+        assert!(store.limits_failed(Harness::Antigravity, now + Store::LIMITS_LOG_GAP_MS), "an hour on, logged again");
+        assert!(store.limits_failed(Harness::Kiro, now + 1), "each harness logs on its own");
+        assert!(!store.limits_failed(Harness::Grok, now), "no limits slot, nothing to log");
     }
 
     #[test]
