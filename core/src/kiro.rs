@@ -233,30 +233,30 @@ pub fn usage_request(id: u64, session_id: &str) -> String {
     crate::brain::jsonrpc::Envelope::Versioned.request(id, "_kiro.dev/commands/execute", serde_json::json!({"sessionId": session_id, "command": {"command": "usage", "args": {}}}))
 }
 
-/// The card's text from the answer to `usage_request`, else why there is none.
-pub fn card_of(answer: &Value) -> Result<String, String> {
+/// The `result` of the answer to `usage_request` (the card's `message`
+/// text and its structured `data`), else why there is none.
+pub fn result_of(answer: &Value) -> Result<Value, String> {
     if let Some(e) = answer.get("error") {
         return Err(e["message"].as_str().unwrap_or("error").to_string());
     }
     let result = &answer["result"];
-    let message = result["message"].as_str().unwrap_or_default();
-    match (result["success"].as_bool(), message.is_empty()) {
-        (Some(true), false) => Ok(message.to_string()),
-        (_, true) => Err("no usage card".to_string()),
-        _ => Err(message.to_string()),
+    match (result["success"].as_bool(), result["message"].as_str().filter(|m| !m.is_empty())) {
+        (Some(true), _) => Ok(result.clone()),
+        (_, Some(message)) => Err(message.to_string()),
+        _ => Err("no usage card".to_string()),
     }
 }
 
-/// How long `acp_usage_text` gives Kiro to end once its stdin is closed.
+/// How long `acp_usage` gives Kiro to end once its stdin is closed.
 const PROBE_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Spawns `kiro-cli acp`, sends `initialize` (as `brain::acp::initialize`),
 /// `session/new` in the home folder with no MCP servers, then
-/// `usage_request`, and returns the card's text from its answer. Gives up
+/// `usage_request`, and returns its answer's `result` (see `result_of`). Gives up
 /// after `timeout`. Before this returns the process has ended (given
 /// `PROBE_EXIT_GRACE` to save and exit, then killed) and the session it
 /// opened is forgotten.
-pub fn acp_usage_text(timeout: std::time::Duration) -> Result<String, String> {
+pub fn acp_usage(timeout: std::time::Duration) -> Result<Value, String> {
     use std::io::{BufRead, BufReader, Write};
     use std::process::Stdio;
     use std::sync::mpsc::RecvTimeoutError;
@@ -298,7 +298,7 @@ pub fn acp_usage_text(timeout: std::time::Duration) -> Result<String, String> {
                 session = Some(id.to_string());
                 ask(&mut stdin, usage_request(3, id))?;
             }
-            Some(3) => break card_of(&v),
+            Some(3) => break result_of(&v),
             _ => {}
         }
     });
@@ -316,7 +316,7 @@ pub fn acp_usage_text(timeout: std::time::Duration) -> Result<String, String> {
     answer
 }
 
-/// Removes the files of a session `acp_usage_text` opened, so the probe's
+/// Removes the files of a session `acp_usage` opened, so the probe's
 /// sessions do not pile up in Kiro's list and Maya's resume list. Only a
 /// session with no turns (an empty or missing event log) is removed.
 pub fn forget_probe_session(sessions_dir: &Path, id: &str) {
@@ -331,19 +331,38 @@ pub fn forget_probe_session(sessions_dir: &Path, id: &str) {
     let _ = std::fs::remove_file(events);
 }
 
+/// The usage answer's `result` as the account's limits: from its
+/// structured `data` when that has a credit breakdown with a cap, else from
+/// the card's `message` text (`parse_usage_card`).
+pub fn parse_usage_result(result: &Value, now_ms: u64) -> Option<crate::usage::AccountLimits> {
+    let data = &result["data"];
+    let breakdowns = data["usageBreakdowns"].as_array().into_iter().flatten();
+    let credits = breakdowns.filter(|b| b["hasLimit"].as_bool() != Some(false)).find(|b| b["resourceType"].as_str() == Some("CREDIT")).and_then(|b| Some((b["used"].as_f64()?, b["limit"].as_f64()?)));
+    match credits {
+        Some((used, cap)) => month(used, cap, data["billingCycleReset"].as_str(), now_ms),
+        None => parse_usage_card(result["message"].as_str()?, now_ms),
+    }
+}
+
 /// The usage card's text (`Estimated Usage | resets on 2026-11-01 | …` then
-/// `Credits (0.62 of 50 covered in plan), 1.2%`) as one window: "month", at
-/// the share of the plan's credits used, resetting at the start (UTC) of the
-/// date it names. `None` without a used-of-cap figure or with a zero cap.
+/// `Credits (0.62 of 50 covered in plan), 1.2%`) as the account's limits.
+/// `None` without a used-of-cap figure.
 pub fn parse_usage_card(text: &str, now_ms: u64) -> Option<crate::usage::AccountLimits> {
-    use crate::usage::{AccountLimits, LimitWindow};
     let (head, _) = text.split_once(" covered in plan)")?;
     let (used, cap) = head.rsplit_once('(')?.1.split_once(" of ")?;
-    let (used, cap) = (used.trim().parse::<f64>().ok()?, cap.trim().parse::<f64>().ok()?);
+    let reset = text.split_once("resets on ").and_then(|(_, rest)| rest.get(..10));
+    month(used.trim().parse().ok()?, cap.trim().parse().ok()?, reset, now_ms)
+}
+
+/// One "month" window at the share of the plan's credits used. Kiro names
+/// only the reset's date (`2026-11-01`), with no time or zone: it is taken
+/// as midnight UTC. `None` with no cap.
+fn month(used: f64, cap: f64, reset_date: Option<&str>, now_ms: u64) -> Option<crate::usage::AccountLimits> {
+    use crate::usage::{AccountLimits, LimitWindow};
     if cap <= 0.0 || used < 0.0 {
         return None;
     }
-    let resets_at = text.split_once("resets on ").and_then(|(_, rest)| rest.get(..10)).and_then(|date| crate::codex::ms_of(&format!("{date}T00:00:00Z"))).map(|ms| ms / 1000);
+    let resets_at = reset_date.and_then(|d| d.get(..10)).and_then(|d| crate::codex::ms_of(&format!("{d}T00:00:00Z"))).map(|ms| ms / 1000);
     let percent = (used / cap * 100.0).round().clamp(0.0, 100.0) as u8;
     Some(AccountLimits { account: None, windows: vec![LimitWindow { label: "month".into(), percent, resets_at }], read_at: now_ms })
 }
@@ -505,11 +524,44 @@ mod tests {
     }
 
     #[test]
-    fn the_usage_answer_gives_the_card_or_why_not() {
+    fn the_usage_answer_gives_its_result_or_why_not() {
         use serde_json::json;
-        assert_eq!(card_of(&json!({"id": 3, "result": {"success": true, "message": "the card", "data": {}}})), Ok("the card".to_string()));
-        assert_eq!(card_of(&json!({"id": 3, "error": {"code": -32700, "message": "Parse error"}})), Err("Parse error".to_string()));
-        assert_eq!(card_of(&json!({"id": 3, "result": {"success": false, "message": "signed out"}})), Err("signed out".to_string()));
+        let result = json!({"success": true, "message": "the card", "data": {}});
+        assert_eq!(result_of(&json!({"id": 3, "result": result})), Ok(result));
+        assert_eq!(result_of(&json!({"id": 3, "error": {"code": -32700, "message": "Parse error"}})), Err("Parse error".to_string()));
+        assert_eq!(result_of(&json!({"id": 3, "result": {"success": false, "message": "signed out"}})), Err("signed out".to_string()));
+        assert_eq!(result_of(&json!({"id": 3, "result": {"success": false}})), Err("no usage card".to_string()));
+    }
+
+    fn live_result() -> Value {
+        let answer: Value = serde_json::from_str(&fixture("usage-result.json")).unwrap();
+        result_of(&answer).unwrap()
+    }
+
+    #[test]
+    fn the_structured_data_gives_the_same_limits_as_the_card_text() {
+        let result = live_result();
+        let from_text = parse_usage_card(result["message"].as_str().unwrap(), 9).unwrap();
+        assert_eq!(parse_usage_result(&result, 9), Some(from_text.clone()));
+        assert_eq!(from_text.windows[0].percent, 1);
+        assert_eq!(from_text.windows[0].resets_at, Some(1_793_491_200));
+        let mut moved = result.clone();
+        moved["data"]["usageBreakdowns"][0]["used"] = 25.0.into();
+        moved["data"]["billingCycleReset"] = "2026-12-01".into();
+        let w = &parse_usage_result(&moved, 9).unwrap().windows[0];
+        assert_eq!((w.percent, w.resets_at), (50, Some(1_796_083_200)), "the data wins over the text");
+    }
+
+    #[test]
+    fn without_data_the_card_text_still_answers() {
+        let mut result = live_result();
+        result.as_object_mut().unwrap().remove("data");
+        let w = &parse_usage_result(&result, 9).unwrap().windows[0];
+        assert_eq!((w.label.as_str(), w.percent, w.resets_at), ("month", 1, Some(1_793_491_200)));
+        let mut no_credits = live_result();
+        no_credits["data"]["usageBreakdowns"] = serde_json::json!([]);
+        assert_eq!(parse_usage_result(&no_credits, 9), parse_usage_result(&result, 9), "data with no credit breakdown falls back too");
+        assert_eq!(parse_usage_result(&serde_json::json!({"success": true}), 9), None);
     }
 
     #[test]

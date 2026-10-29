@@ -7,7 +7,7 @@
 //! `{"command":"usage","args":{}}`, the shape Kiro 2.34 answers (a bare
 //! `"usage"` is refused: its commands are an adjacently tagged enum).
 //! `-- --maya` instead runs what Maya's collector runs
-//! (`kiro::acp_usage_text`, then `kiro::parse_usage_card`) and prints both.
+//! (`kiro::acp_usage`, then `kiro::parse_usage_result`) and prints both.
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -19,9 +19,9 @@ use serde_json::{json, Value};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--maya") {
-        let card = maya_core::kiro::acp_usage_text(Duration::from_secs(15));
-        println!("{card:?}");
-        println!("{:?}", card.ok().and_then(|c| maya_core::kiro::parse_usage_card(&c, maya_core::now_ms())));
+        let result = maya_core::kiro::acp_usage(Duration::from_secs(15));
+        println!("{result:?}");
+        println!("{:?}", result.ok().and_then(|r| maya_core::kiro::parse_usage_result(&r, maya_core::now_ms())));
         return;
     }
     let method = args.first().cloned().unwrap_or_else(|| "_kiro.dev/commands/execute".into());

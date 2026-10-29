@@ -62,7 +62,7 @@ pub fn collect(store: &Mutex<Store>) -> bool {
         learned = true;
     }
     if due.kiro {
-        let read = crate::kiro::acp_usage_text(KIRO_USAGE_TIMEOUT).and_then(|card| crate::kiro::parse_usage_card(&card, crate::now_ms()).ok_or_else(|| "Kiro's usage card did not parse".to_string()));
+        let read = crate::kiro::acp_usage(KIRO_USAGE_TIMEOUT).and_then(|result| crate::kiro::parse_usage_result(&result, crate::now_ms()).ok_or_else(|| "Kiro's usage card did not parse".to_string()));
         file_limits(store, Harness::Kiro, read);
         learned = true;
     }
