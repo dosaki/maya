@@ -1392,6 +1392,24 @@ fn remove_hook(state: TauriState<AppState>) -> Result<bool, String> {
     hook_install::status(&dir)
 }
 
+#[tauri::command(async)]
+fn statusline_status(state: TauriState<AppState>) -> Result<maya_core::statusline::Status, String> {
+    let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
+    maya_core::statusline::status(&dir)
+}
+
+#[tauri::command(async)]
+fn install_statusline(state: TauriState<AppState>) -> Result<maya_core::statusline::Status, String> {
+    let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
+    maya_core::statusline::install_to(&dir)
+}
+
+#[tauri::command(async)]
+fn remove_statusline(state: TauriState<AppState>) -> Result<maya_core::statusline::Status, String> {
+    let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
+    maya_core::statusline::remove_from(&dir)
+}
+
 /// Stores the ElevenLabs key in the Keychain.
 #[tauri::command(async)]
 fn set_elevenlabs_key(key: String) -> Result<(), String> {
@@ -1658,6 +1676,9 @@ pub fn run() {
             hook_status,
             install_hook,
             remove_hook,
+            statusline_status,
+            install_statusline,
+            remove_statusline,
             get_config,
             set_config,
             set_elevenlabs_key,

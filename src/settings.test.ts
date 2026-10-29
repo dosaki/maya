@@ -172,6 +172,33 @@ describe("renderSettings", () => {
     expect(labels(true, true)).toEqual(["Remove Claude hook", "Remove Codex hook"]);
   });
 
+  it("the status line block offers install, remove or says what blocks it", () => {
+    const h = { ...handlers(), onStatuslineInstall: vi.fn(), onStatuslineRemove: vi.fn() };
+    const render = (statusline: SettingsModel["statusline"]) => renderSettings({ ...voiceBase, statusline }, h);
+    const texts = (el: HTMLElement) => [...el.querySelectorAll(".settings__status")].map((s) => s.textContent);
+
+    const checking = render(null);
+    expect(texts(checking)).toContain("Checking status line…");
+
+    const missing = render({ installed: false });
+    expect(texts(missing)).toContain("Usage and limits are not recorded. Install the status line wrapper to see them in session windows.");
+    const install = missing.querySelector<HTMLButtonElement>("button[data-action=install-statusline]")!;
+    expect(install.textContent).toBe("Install usage status line");
+    install.click();
+    expect(h.onStatuslineInstall).toHaveBeenCalledOnce();
+
+    const installed = render({ installed: true });
+    expect(texts(installed)).toContain("Usage and limits are recorded from Claude Code's status line.");
+    const remove = installed.querySelector<HTMLButtonElement>("button[data-action=remove-statusline]")!;
+    expect(remove.textContent).toBe("Remove usage status line");
+    remove.click();
+    expect(h.onStatuslineRemove).toHaveBeenCalledOnce();
+
+    const blocked = render({ installed: false, blockedBy: "/etc/claude/managed-settings.json" });
+    expect(texts(blocked)).toContain("Usage and limits cannot be recorded: the status line is set in /etc/claude/managed-settings.json.");
+    expect(blocked.querySelector<HTMLButtonElement>("button[data-action=install-statusline]")!.disabled).toBe(true);
+  });
+
   it("installs and removes Codex hooks independently of Claude", () => {
     const h = { ...handlers(), onCodexInstall: vi.fn(), onCodexRemove: vi.fn() };
     const missing = renderSettings({ ...voiceBase, codexHookInstalled: false }, h);
