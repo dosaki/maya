@@ -93,10 +93,11 @@ pub struct TranscriptTotals {
 }
 
 impl TranscriptTotals {
-    /// Reads what was appended to `path` since the last call, at most `budget`
-    /// bytes, and returns the totals so far. A file shorter than what was
-    /// consumed starts over from zero.
-    pub fn get(&mut self, path: &Path, budget: u64) -> Totals {
+    /// Reads what was appended to `path` since the last call, at most
+    /// `*budget` bytes, takes what it read off `*budget`, and returns the
+    /// totals so far. A file shorter than what was consumed starts over from
+    /// zero.
+    pub fn get(&mut self, path: &Path, budget: &mut u64) -> Totals {
         let state = self.files.entry(path.to_path_buf()).or_default();
         let Ok(mut file) = std::fs::File::open(path) else { return state.totals.clone() };
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -107,9 +108,10 @@ impl TranscriptTotals {
             return state.totals.clone();
         }
         let mut buf = Vec::new();
-        if file.take(budget).read_to_end(&mut buf).is_err() {
+        if file.take(*budget).read_to_end(&mut buf).is_err() {
             return state.totals.clone();
         }
+        *budget -= buf.len() as u64;
         state.consumed += buf.len() as u64;
         let mut data = std::mem::take(&mut state.carry);
         data.extend_from_slice(&buf);
@@ -209,6 +211,11 @@ mod tests {
         assert_eq!(back, usage);
     }
 
+    /// A budget that never runs out.
+    fn unlimited() -> u64 {
+        u64::MAX
+    }
+
     fn line(model: &str, input: u64, cached: u64, write: u64, output: u64) -> String {
         format!(
             r#"{{"type":"assistant","isSidechain":false,"message":{{"model":"{model}","usage":{{"input_tokens":{input},"cache_read_input_tokens":{cached},"cache_creation_input_tokens":{write},"output_tokens":{output}}},"content":[]}}}}"#
@@ -238,13 +245,13 @@ mod tests {
         let (a, b, c) = (line("claude-opus-5-5", 1, 2, 3, 4), line("claude-opus-5-5", 10, 20, 30, 40), line("claude-opus-5-5", 100, 200, 300, 400));
         std::fs::write(&path, format!("{a}\n{b}\n")).unwrap();
         let mut totals = TranscriptTotals::default();
-        let t = totals.get(&path, u64::MAX);
+        let t = totals.get(&path, &mut unlimited());
         assert_eq!(t.tokens, TokenCounts { input: 11, cached_input: 22, cache_write: 33, output: 44 });
         std::fs::write(&path, format!("{a}\n{b}\n{c}\n")).unwrap();
-        let t = totals.get(&path, u64::MAX);
+        let t = totals.get(&path, &mut unlimited());
         assert_eq!(t.tokens, TokenCounts { input: 111, cached_input: 222, cache_write: 333, output: 444 });
         std::fs::write(&path, format!("{a}\n")).unwrap();
-        let t = totals.get(&path, u64::MAX);
+        let t = totals.get(&path, &mut unlimited());
         assert_eq!(t.tokens, TokenCounts { input: 1, cached_input: 2, cache_write: 3, output: 4 });
     }
 
@@ -257,10 +264,10 @@ mod tests {
         let (head, tail) = b.split_at(b.len() / 2);
         std::fs::write(&path, format!("{a}\n{head}")).unwrap();
         let mut totals = TranscriptTotals::default();
-        assert_eq!(totals.get(&path, u64::MAX).tokens.input, 1);
+        assert_eq!(totals.get(&path, &mut unlimited()).tokens.input, 1);
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         write!(f, "{tail}\n").unwrap();
-        assert_eq!(totals.get(&path, u64::MAX).tokens.input, 11);
+        assert_eq!(totals.get(&path, &mut unlimited()).tokens.input, 11);
     }
 
     #[test]
@@ -271,8 +278,10 @@ mod tests {
         let body = format!("{a}\n{a}\n{a}\n");
         std::fs::write(&path, &body).unwrap();
         let mut totals = TranscriptTotals::default();
-        assert_eq!(totals.get(&path, a.len() as u64 + 2).tokens.input, 1);
-        assert_eq!(totals.get(&path, u64::MAX).tokens.input, 3);
+        let mut budget = a.len() as u64 + 2;
+        assert_eq!(totals.get(&path, &mut budget).tokens.input, 1);
+        assert_eq!(budget, 0, "what was read comes off the budget");
+        assert_eq!(totals.get(&path, &mut unlimited()).tokens.input, 3);
     }
 
     #[test]
@@ -286,7 +295,7 @@ mod tests {
         assert!(!pricing::is_long(model, &small));
         assert!(pricing::is_long(model, &big));
         let want = pricing::cost_micros(model, &small, false).unwrap() + pricing::cost_micros(model, &big, true).unwrap();
-        let t = TranscriptTotals::default().get(&path, u64::MAX);
+        let t = TranscriptTotals::default().get(&path, &mut unlimited());
         assert_eq!(t.cost_micros, want);
         assert_eq!(t.priced, vec![model.to_string()]);
         assert!(t.unpriced.is_empty());
@@ -297,7 +306,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.jsonl");
         std::fs::write(&path, format!("{}\n", line("made-up-model", 5, 0, 0, 5))).unwrap();
-        let t = TranscriptTotals::default().get(&path, u64::MAX);
+        let t = TranscriptTotals::default().get(&path, &mut unlimited());
         assert_eq!(t.unpriced, vec!["made-up-model".to_string()]);
         assert_eq!(t.cost_micros, 0);
         assert!(session_usage_of(&t).cost.is_none());

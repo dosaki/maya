@@ -47,6 +47,10 @@ pub struct Store {
     pub config: Config,
     alive: Box<dyn Fn(i32) -> bool + Send>,
     tails: TailCache,
+    /// Claude Code transcripts' running token totals.
+    totals: crate::usage::TranscriptTotals,
+    /// What each Claude Code session's status line last recorded.
+    recorded: crate::statusline::RecordedCache,
     prs: PrCache,
     /// Compact the event log during refresh once it exceeds this many bytes.
     pub compact_threshold_bytes: u64,
@@ -177,6 +181,8 @@ impl Store {
             config,
             alive: Box::new(registry::pid_alive),
             tails: TailCache::default(),
+            totals: Default::default(),
+            recorded: Default::default(),
             prs: PrCache::default(),
             compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
             names: NameFiles::default(),
@@ -512,9 +518,12 @@ impl Store {
         let mut paths = Vec::with_capacity(sessions.len());
         self.judging.clear();
         let mut used = HashSet::new();
+        let maya_dir = self.claude_dir.join("maya");
+        let mut budget = crate::usage::TOTALS_BUDGET_BYTES;
         for s in &sessions {
             let path = self.transcript_path_for(s);
             let tail = self.tails.get(&path);
+            let totals = self.totals.get(&path, &mut budget);
             paths.push(path);
             let text = claude_text(&tail);
             let looked = self.prose_for(&s.session_id, text);
@@ -533,10 +542,28 @@ impl Store {
             card.branch = self.prs.branch(&s.cwd);
             // Claude Code names its model in the transcript; the viewer's status line shows it.
             card.model = tail.model.clone();
-            card.context = tail.context_tokens.map(|used| crate::context::usage(tail.model.as_deref().unwrap_or(""), used, default_1m));
+            let rec = self.recorded.get(&maya_dir, &s.session_id);
+            // The recorded context is what Claude Code's own status line shows; Maya's guess fills in without one.
+            card.context = match rec.as_ref().and_then(|r| r.context_used_percent.zip(r.context_window_size)) {
+                Some((percent, window)) => Some(crate::context::ContextUsage { used: window.saturating_mul(percent.into()) / 100, window, percent }),
+                None => tail.context_tokens.map(|used| crate::context::usage(tail.model.as_deref().unwrap_or(""), used, default_1m)),
+            };
+            let mut usage = crate::usage::session_usage_of(&totals);
+            if let Some(usd) = rec.as_ref().and_then(|r| r.total_cost_usd) {
+                usage.cost = Some(crate::usage::Cost { micros: (usd * 1e6).round() as u64, unit: crate::usage::CostUnit::Usd, estimated: false, models: vec![] });
+            }
+            card.usage = Some(usage);
+            card.status_line = rec.map(|r| r.line).filter(|l| !l.is_empty());
             cards.push(card);
         }
         self.tails.retain(&paths);
+        self.totals.retain(&paths);
+        self.recorded.retain(&sessions.iter().map(|s| s.session_id.clone()).collect::<Vec<_>>());
+        // One machine is one account: the newest reading is every Claude Code card's limits.
+        let limits = self.recorded.newest().and_then(|r| crate::statusline::limits_of(&r, crate::statusline::account_email(&self.claude_dir)));
+        for card in &mut cards {
+            card.limits = limits.clone();
+        }
         let timeout = self.config.completed_timeout_ms();
         let foreign: Vec<ForeignSession> = self.foreign.values().cloned().collect();
         for s in &foreign {
@@ -1328,5 +1355,99 @@ mod tests {
         store.set_ask_verdict(due[0].0.clone(), Verdict { asks: true, line: None });
         let card = store.refresh(now).remove(0);
         assert_eq!((card.state, card.awaiting.unwrap().detail.as_str()), (State::Awaiting, SAY_GO));
+    }
+
+    const SID_A: &str = "4f1c2a7e-0b1d-4c3e-9a8f-1234567890ab";
+    const SID_B: &str = "00000000-0000-0000-0000-000000000002";
+
+    fn assistant_line(model: &str, input: u64, output: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"model":"{model}","usage":{{"input_tokens":{input},"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":{output}}},"content":[{{"type":"text","text":"hi"}}]}}}}"#
+        )
+    }
+
+    /// Live session `sid` (pid `pid`, in /Users/x/dev/eye) in the Claude dir `claude`, its transcript holding `lines`.
+    fn claude_session(claude: &Path, pid: i32, sid: &str, lines: &[String]) {
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("projects/-Users-x-dev-eye")).unwrap();
+        std::fs::write(
+            claude.join(format!("sessions/{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"{sid}","cwd":"/Users/x/dev/eye","name":"eye-{pid}","status":"idle"}}"#),
+        ).unwrap();
+        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(claude.join(format!("projects/-Users-x-dev-eye/{sid}.jsonl")), body).unwrap();
+    }
+
+    /// The status line fixture's payload recorded for `sid` at `at`, with `line` as the printed line.
+    fn recording(sid: &str, line: &str, at: u64) -> crate::statusline::Recorded {
+        let payload: serde_json::Value = serde_json::from_str(include_str!("../fixtures/statusline/payload.json")).unwrap();
+        let mut r = crate::statusline::recorded_from(&payload, line, at).unwrap();
+        r.session_id = sid.into();
+        r
+    }
+
+    #[test]
+    fn a_recorded_status_line_fills_limits_cost_context_and_the_line() {
+        use crate::context::ContextUsage;
+        use crate::usage::{Cost, CostUnit, TokenCounts};
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        claude_session(&claude, 7, SID_A, &[assistant_line("claude-opus-5-5", 100, 20), assistant_line("claude-opus-5-5", 5, 1)]);
+        std::fs::write(dir.path().join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"me@example.com"},"numStartups":3}"#).unwrap();
+        let line = "\u{1b}[1mOpus\u{1b}[0m 12%";
+        crate::statusline::write_recorded(&claude.join("maya"), &recording(SID_A, line, 1_000)).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        let card = store.refresh(2_000).remove(0);
+        assert_eq!(card.status_line.as_deref(), Some(line));
+        let limits = card.limits.unwrap();
+        assert_eq!(limits.windows[0].label, "5h");
+        assert_eq!(limits.account.as_deref(), Some("me@example.com"));
+        assert_eq!(limits.read_at, 1_000);
+        assert_eq!(card.context, Some(ContextUsage { used: 120_000, window: 1_000_000, percent: 12 }));
+        let usage = card.usage.unwrap();
+        assert_eq!(usage.cost, Some(Cost { micros: 4_123_400, unit: CostUnit::Usd, estimated: false, models: vec![] }));
+        assert_eq!(usage.tokens, TokenCounts { input: 105, output: 21, ..Default::default() });
+    }
+
+    #[test]
+    fn without_a_recording_cost_is_estimated_from_the_transcript_and_limits_are_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        claude_session(&claude, 7, SID_A, &[assistant_line("claude-opus-5-5", 100, 20), assistant_line("claude-opus-5-5", 5, 1)]);
+        let mut store = Store::new(claude).with_alive(|_| true);
+        let card = store.refresh(1).remove(0);
+        let usage = card.usage.unwrap();
+        assert_eq!((usage.tokens.input, usage.tokens.output), (105, 21));
+        let cost = usage.cost.unwrap();
+        assert!(cost.estimated);
+        assert!(cost.micros > 0);
+        assert_eq!(cost.models, vec!["claude-opus-5-5".to_string()]);
+        assert!(card.limits.is_none());
+        assert!(card.status_line.is_none());
+    }
+
+    #[test]
+    fn the_newest_recording_sets_every_claude_cards_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        let maya = claude.join("maya");
+        claude_session(&claude, 7, SID_A, &[assistant_line("claude-opus-5-5", 1, 1)]);
+        claude_session(&claude, 8, SID_B, &[assistant_line("claude-opus-5-5", 1, 1)]);
+        crate::statusline::write_recorded(&maya, &recording(SID_A, "a", 1_000)).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        let cards = store.refresh(2_000);
+        let card = |sid: &str| cards.iter().find(|c| c.session_id == sid).unwrap().clone();
+        assert!(card(SID_A).limits.is_some());
+        assert_eq!(card(SID_B).limits, card(SID_A).limits);
+        assert_eq!(card(SID_B).status_line, None, "the line stays the session's own");
+
+        let mut newer = recording(SID_B, "b", 3_000);
+        newer.rate_limits = Some(serde_json::json!({"five_hour": {"used_percentage": 5}}));
+        crate::statusline::write_recorded(&maya, &newer).unwrap();
+        let cards = store.refresh(4_000);
+        for c in &cards {
+            let limits = c.limits.clone().unwrap();
+            assert_eq!((limits.read_at, limits.windows[0].percent), (3_000, 5), "{}", c.session_id);
+        }
     }
 }

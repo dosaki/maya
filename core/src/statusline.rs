@@ -383,6 +383,80 @@ pub fn limits_of(r: &Recorded, account: Option<String>) -> Option<AccountLimits>
     Some(AccountLimits { account, windows, read_at: r.at })
 }
 
+/// A file's modification time and length: what says it changed.
+type Stamp = (Option<std::time::SystemTime>, u64);
+
+fn stamp_of(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok(), meta.len()))
+}
+
+/// Recorded files by session, re-read only when their mtime or size changes; `newest()` is the latest `at` among them.
+#[derive(Default)]
+pub struct RecordedCache(std::collections::HashMap<String, (Stamp, Recorded)>);
+
+impl RecordedCache {
+    pub fn get(&mut self, maya_dir: &Path, session_id: &str) -> Option<Recorded> {
+        let Some(stamp) = recorded_path(maya_dir, session_id).and_then(|p| stamp_of(&p)) else {
+            self.0.remove(session_id);
+            return None;
+        };
+        if let Some((seen, r)) = self.0.get(session_id) {
+            if *seen == stamp {
+                return Some(r.clone());
+            }
+        }
+        let Some(r) = read_recorded(maya_dir, session_id) else {
+            self.0.remove(session_id);
+            return None;
+        };
+        self.0.insert(session_id.to_string(), (stamp, r.clone()));
+        Some(r)
+    }
+
+    pub fn newest(&self) -> Option<Recorded> {
+        self.0.values().map(|(_, r)| r).max_by_key(|r| r.at).cloned()
+    }
+
+    /// Forgets every session not in `ids`.
+    pub fn retain(&mut self, ids: &[String]) {
+        self.0.retain(|id, _| ids.contains(id));
+    }
+}
+
+/// The one field of `.claude.json` Maya reads; serde skips the rest.
+#[derive(Deserialize)]
+struct ClaudeJson {
+    #[serde(rename = "oauthAccount")]
+    oauth_account: Option<OauthAccount>,
+}
+
+#[derive(Deserialize)]
+struct OauthAccount {
+    #[serde(rename = "emailAddress")]
+    email_address: Option<String>,
+}
+
+/// `oauthAccount.emailAddress` from `<claude_dir's parent>/.claude.json`, re-read on change.
+pub fn account_email(claude_dir: &Path) -> Option<String> {
+    static SEEN: std::sync::Mutex<Option<(PathBuf, Stamp, Option<String>)>> = std::sync::Mutex::new(None);
+    let path = claude_dir.parent()?.join(".claude.json");
+    let stamp = stamp_of(&path)?;
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((p, s, email)) = seen.as_ref() {
+        if *p == path && *s == stamp {
+            return email.clone();
+        }
+    }
+    let email = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<ClaudeJson>(&text).ok())
+        .and_then(|j| j.oauth_account?.email_address)
+        .filter(|e| !e.is_empty());
+    *seen = Some((path, stamp, email.clone()));
+    email
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +565,48 @@ mod tests {
         assert_eq!(read_recorded(&maya, "../settings"), None);
         assert_eq!(newest_recorded(&maya), Some(newer));
         assert_eq!(newest_recorded(&dir.path().join("missing")), None);
+    }
+
+    #[test]
+    fn the_recorded_cache_rereads_a_changed_file_and_keeps_the_newest_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let maya = dir.path().join("maya");
+        let other = "00000000-0000-0000-0000-000000000001";
+        let mut cache = RecordedCache::default();
+        assert_eq!(cache.get(&maya, SID), None);
+        assert_eq!(cache.newest(), None);
+        let first = recorded_from(&fixture(), "one", 1).unwrap();
+        write_recorded(&maya, &first).unwrap();
+        assert_eq!(cache.get(&maya, SID), Some(first));
+        let second = recorded_from(&fixture(), "second", 5).unwrap();
+        write_recorded(&maya, &second).unwrap();
+        assert_eq!(cache.get(&maya, SID), Some(second.clone()));
+        let mut older = recorded_from(&fixture(), "older", 3).unwrap();
+        older.session_id = other.into();
+        write_recorded(&maya, &older).unwrap();
+        assert_eq!(cache.get(&maya, other), Some(older.clone()));
+        assert_eq!(cache.newest(), Some(second));
+        cache.retain(&[other.to_string()]);
+        assert_eq!(cache.newest(), Some(older));
+        std::fs::remove_file(maya.join(format!("usage-{other}.json"))).unwrap();
+        assert_eq!(cache.get(&maya, other), None);
+        assert_eq!(cache.newest(), None);
+    }
+
+    #[test]
+    fn account_email_reads_the_signed_in_address_beside_the_claude_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        let file = dir.path().join(".claude.json");
+        assert_eq!(account_email(&claude), None);
+        std::fs::write(&file, r#"{"oauthAccount":{"emailAddress":"me@example.com","accountUuid":"x"},"projects":{}}"#).unwrap();
+        assert_eq!(account_email(&claude).as_deref(), Some("me@example.com"));
+        std::fs::write(&file, r#"{"oauthAccount":{"emailAddress":"you@example.com"}}"#).unwrap();
+        assert_eq!(account_email(&claude).as_deref(), Some("you@example.com"));
+        std::fs::write(&file, r#"{"oauthAccount":{}}"#).unwrap();
+        assert_eq!(account_email(&claude), None);
+        std::fs::write(&file, "not json").unwrap();
+        assert_eq!(account_email(&claude), None);
     }
 
     #[test]
