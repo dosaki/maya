@@ -386,6 +386,8 @@ body { margin: 0; background: var(--bg); }
 .modal--terminal .turn { display: grid; grid-template-columns: 2ch minmax(0, 1fr); column-gap: 4px; max-width: none; align-self: stretch; background: transparent; border: 0; border-radius: 0; padding: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: #e8e2d4; }
 .modal--terminal .turn > :not(.turn__mark) { grid-column: 2; }
 .modal--terminal .turn__mark { display: inline; grid-column: 1; }
+/* A user's line sits on a lighter row, as in the CLI, so the turns divide at a glance. */
+.modal--terminal .turn--user { background: #1a1915; padding: 4px 6px; margin: 0 -6px; border-radius: 4px; }
 .modal--terminal .turn--user .turn__mark { color: var(--gold); }
 .modal--terminal .turn--user .turn__who, .modal--terminal .turn--assistant .turn__who { display: none; }
 .modal--terminal .turn--tool { color: #8a8478; }
@@ -493,6 +495,7 @@ body { margin: 0; background: var(--bg); }
 :root[data-theme="light"] .modal--terminal .modal__panel { background: var(--panel); color: var(--text); }
 :root[data-theme="light"] .modal--terminal .turn { color: var(--text); }
 :root[data-theme="light"] .modal--terminal .turn--tool { color: var(--muted); }
+:root[data-theme="light"] .modal--terminal .turn--user { background: color-mix(in srgb, var(--bg) 70%, transparent); }
 :root[data-theme="light"] .modal--terminal .turn__text .md pre { background: color-mix(in srgb, var(--bg) 70%, transparent); }
 :root[data-theme="light"] .modal--terminal .modal__composer { background: var(--panel); border-top-color: var(--border); }
 :root[data-theme="light"] .modal--terminal .modal__input { color: var(--text); }

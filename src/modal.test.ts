@@ -694,6 +694,11 @@ describe("viewer theme", () => {
     expect(styles).toContain("ui-monospace, SFMono-Regular, Menlo, monospace");
   });
 
+  it("gives the terminal look's user lines a lighter row, as the CLI does, in both themes", () => {
+    expect(styles).toContain(".modal--terminal .turn--user { background: #1a1915; padding: 4px 6px; margin: 0 -6px; border-radius: 4px; }");
+    expect(styles).toContain(':root[data-theme="light"] .modal--terminal .turn--user { background: color-mix(in srgb, var(--bg) 70%, transparent); }');
+  });
+
   it("keeps a multi-line tool call whole in one .turn__text, in both looks", () => {
     const text = "Bash(cat <<EOF\nline two\nEOF)";
     for (const theme of ["terminal", undefined] as const) {
