@@ -365,7 +365,19 @@ mod tests {
         assert_eq!(t.model.as_deref(), Some("gpt-6.1-sol"));
         let u = t.usage.unwrap();
         assert_eq!(u.tokens.output, 90);
+        let cost = u.cost.unwrap();
+        assert!(cost.estimated && cost.micros > 0);
+        assert_eq!(cost.models, vec!["gpt-6.1-sol".to_string()]);
         assert_eq!(t.limits.unwrap().read_at, ms_of("2026-10-29T09:12:33.123Z").unwrap());
+    }
+
+    #[test]
+    fn an_unpriced_model_gives_tokens_without_a_cost() {
+        let t = parse_tail(&token_fixture().replace("gpt-6.1-sol", "made-up-model"));
+        assert_eq!(t.model.as_deref(), Some("made-up-model"));
+        let u = t.usage.unwrap();
+        assert_eq!(u.tokens.output, 90);
+        assert_eq!(u.cost, None);
     }
 
     #[test]
