@@ -154,6 +154,7 @@ previous command is saved in `~/.claude/maya/statusline-inner` and runs
 unchanged. Each render writes `~/.claude/maya/usage-<session_id>.json`
 with the limits, cost, context, model and the rendered line. Maya scans
 that folder once per refresh and parses only the files that changed.
+Once an hour the scan deletes the usage files not written for 8 days.
 The account label is `oauthAccount.emailAddress` from `~/.claude.json`.
 
 The terminal look's bottom line is the recorded status line, drawn with

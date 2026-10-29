@@ -642,7 +642,7 @@ impl Store {
         let mut paths = Vec::with_capacity(sessions.len());
         self.judging.clear();
         let mut used = HashSet::new();
-        self.recorded.scan(&self.claude_dir.join("maya"));
+        self.recorded.scan(&self.claude_dir.join("maya"), now_ms);
         let mut budget = crate::usage::TOTALS_BUDGET_BYTES;
         for s in &sessions {
             let path = self.transcript_path_for(s);

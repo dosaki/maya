@@ -415,14 +415,31 @@ fn same_numbers(a: &Recorded, b: &Recorded) -> bool {
 #[derive(Default)]
 pub struct RecordedCache {
     files: std::collections::HashMap<String, Entry>,
+    /// When `scan` last deleted old files, epoch millis.
+    pruned_at: Option<u64>,
     /// Number of files parsed (for tests and diagnostics).
     pub reads: usize,
 }
 
+/// A usage file not written for this long is deleted: its session is gone.
+pub const PRUNE_AFTER_MS: u64 = 8 * 24 * 60 * 60 * 1000;
+/// How often `scan` looks for old files.
+const PRUNE_EVERY_MS: u64 = 60 * 60 * 1000;
+
+fn epoch_ms(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
 impl RecordedCache {
     /// Lists `maya_dir` once and stats each usage file, parsing only the
-    /// ones whose stamp changed and forgetting the ones that are gone.
-    pub fn scan(&mut self, maya_dir: &Path) {
+    /// ones whose stamp changed and forgetting the ones that are gone. At
+    /// most once an hour it also deletes the files last written (by their
+    /// `at`, else their mtime) more than `PRUNE_AFTER_MS` before `now_ms`.
+    pub fn scan(&mut self, maya_dir: &Path, now_ms: u64) {
+        let prune = self.pruned_at.is_none_or(|t| now_ms.saturating_sub(t) >= PRUNE_EVERY_MS);
+        if prune {
+            self.pruned_at = Some(now_ms);
+        }
         let mut seen = std::collections::HashMap::with_capacity(self.files.len());
         for entry in std::fs::read_dir(maya_dir).into_iter().flatten().flatten() {
             let name = entry.file_name();
@@ -443,6 +460,12 @@ impl RecordedCache {
                     Entry { stamp, recorded, learned_at }
                 }
             };
+            if prune {
+                let written = kept.recorded.as_ref().map(|r| r.at).or_else(|| stamp.0.map(epoch_ms)).unwrap_or(now_ms);
+                if now_ms.saturating_sub(written) > PRUNE_AFTER_MS && std::fs::remove_file(entry.path()).is_ok() {
+                    continue;
+                }
+            }
             seen.insert(id.to_string(), kept);
         }
         self.files = seen;
@@ -515,6 +538,8 @@ mod tests {
     use serde_json::{json, Value};
 
     const SID: &str = "4f1c2a7e-0b1d-4c3e-9a8f-1234567890ab";
+    /// A clock for `RecordedCache::scan` under which no test recording is old.
+    const NOW: u64 = 10_000;
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!("../fixtures/statusline/payload.json")).unwrap()
@@ -627,7 +652,7 @@ mod tests {
         let broken = "00000000-0000-0000-0000-000000000002";
         let mut cache = RecordedCache::default();
         let read_at = |c: &RecordedCache| c.limits(None).map(|l| l.read_at);
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         assert_eq!((cache.get(SID), read_at(&cache), cache.reads), (None, None, 0));
 
         let first = recorded_from(&fixture(), "one", 1).unwrap();
@@ -637,23 +662,23 @@ mod tests {
         write_recorded(&maya, &older).unwrap();
         std::fs::write(maya.join("events.jsonl"), "{}\n").unwrap();
         std::fs::write(maya.join(format!("usage-{other}.json.123")), "half").unwrap();
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         assert_eq!((cache.get(SID), read_at(&cache), cache.reads), (Some(first), Some(3), 2));
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         assert_eq!(cache.reads, 2, "unchanged files are not read again");
 
         let mut second = recorded_from(&fixture(), "second", 5).unwrap();
         second.total_cost_usd = Some(9.0);
         write_recorded(&maya, &second).unwrap();
         std::fs::write(maya.join(format!("usage-{broken}.json")), "not json").unwrap();
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         assert_eq!((cache.get(SID), read_at(&cache), cache.reads), (Some(second), Some(5), 4));
         assert_eq!(cache.get(broken), None);
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         assert_eq!(cache.reads, 4, "a file that does not parse is not parsed again until it changes");
 
         std::fs::remove_file(maya.join(format!("usage-{SID}.json"))).unwrap();
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         assert_eq!((cache.get(SID), read_at(&cache), cache.reads), (None, Some(3), 4));
     }
 
@@ -673,20 +698,20 @@ mod tests {
         let mut cache = RecordedCache::default();
         let shown = |c: &RecordedCache| c.limits(None).map(|l| (l.windows[0].percent, l.read_at));
         write_recorded(&maya, &five_hour(idle, "i", 1_000, 10)).unwrap();
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         write_recorded(&maya, &five_hour(SID, "t", 2_000, 20)).unwrap();
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         assert_eq!(shown(&cache), Some((20, 2_000)));
 
         // The idle session re-renders on its refresh interval: a later `at`, the same numbers.
         write_recorded(&maya, &five_hour(idle, "idle", 3_000, 10)).unwrap();
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         assert_eq!(cache.learned_at(idle), Some(1_000), "unchanged numbers keep when they were learned");
         assert_eq!(shown(&cache), Some((20, 2_000)), "the talking session's reading still wins");
 
         // Its next message brings new numbers.
         write_recorded(&maya, &five_hour(idle, "idle again", 4_000, 30)).unwrap();
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         assert_eq!(cache.learned_at(idle), Some(4_000));
         assert_eq!(shown(&cache), Some((30, 4_000)));
     }
@@ -699,16 +724,47 @@ mod tests {
         let mut api_key = recorded_from(&fixture(), "key", 5_000).unwrap();
         api_key.rate_limits = None;
         write_recorded(&maya, &api_key).unwrap();
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         let limits = cache.limits(Some("me@example.com".into())).unwrap();
         assert_eq!(limits, AccountLimits { account: Some("me@example.com".into()), windows: vec![], read_at: 5_000 });
 
         // A newer session before its first reply has no rate_limits yet; an older reading still wins.
         let other = "00000000-0000-0000-0000-000000000001";
         write_recorded(&maya, &five_hour(other, "o", 1_000, 12)).unwrap();
-        cache.scan(&maya);
+        cache.scan(&maya, NOW);
         let limits = cache.limits(None).unwrap();
         assert_eq!((limits.windows[0].percent, limits.read_at), (12, 1_000));
+    }
+
+    #[test]
+    fn scan_deletes_usage_files_older_than_eight_days_at_most_once_an_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        let maya = dir.path().join("maya");
+        let day = 24 * 60 * 60 * 1000;
+        let now = 100 * day;
+        let (old, fresh, broken) = ("00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002", "00000000-0000-0000-0000-000000000003");
+        write_recorded(&maya, &five_hour(old, "old", now - 9 * day, 50)).unwrap();
+        write_recorded(&maya, &five_hour(fresh, "fresh", now - 7 * day, 10)).unwrap();
+        // Unparsed, so its mtime (just now, in real time) says how old it is.
+        std::fs::write(maya.join(format!("usage-{broken}.json")), "not json").unwrap();
+        let path = |id: &str| maya.join(format!("usage-{id}.json"));
+        let mut cache = RecordedCache::default();
+        cache.scan(&maya, now);
+        assert!(!path(old).exists(), "written nine days ago");
+        assert_eq!(cache.get(old), None);
+        assert!(path(fresh).exists() && path(broken).exists());
+        assert_eq!(cache.limits(None).unwrap().windows[0].percent, 10);
+
+        // Two days on, the fresh one is old too, but the last pass was under an hour ago.
+        let later = now + 2 * day;
+        cache.pruned_at = Some(later - 30 * 60 * 1000);
+        cache.scan(&maya, later);
+        assert!(path(fresh).exists(), "pruned at most once an hour");
+        cache.pruned_at = Some(later - 60 * 60 * 1000);
+        cache.scan(&maya, later);
+        assert!(!path(fresh).exists());
+        assert_eq!(cache.get(fresh), None);
+        assert!(path(broken).exists(), "its mtime is recent");
     }
 
     #[test]
