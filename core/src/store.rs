@@ -573,6 +573,8 @@ impl Store {
             let mut tail = foreign::tail_for(s);
             if s.harness == Harness::Kiro {
                 crate::kiro::apply_live(&mut tail, &self.kiro_run_dir, s.pid, &s.transcript_path, now_ms);
+                let meta = self.names.read(&s.transcript_path.with_extension("json"));
+                crate::kiro::apply_credits(&mut tail, &meta);
             }
             if s.harness == Harness::Codex {
                 crate::codex_hooks::apply(&mut tail, self.codex_events.events_for(&s.session_id));

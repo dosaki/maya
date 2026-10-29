@@ -5,6 +5,7 @@
 
 use crate::foreign::ForeignTail;
 use crate::transcript::{Turn, TurnKind};
+use crate::usage::{Cost, CostUnit, SessionUsage, TokenCounts};
 use serde_json::Value;
 use std::path::Path;
 
@@ -40,6 +41,8 @@ pub struct Meta {
     pub updated_ms: u64,
     pub context_percent: Option<f64>,
     pub context_window: Option<u64>,
+    /// Credits spent across every turn, in millionths.
+    pub credits_micros: u64,
 }
 
 pub fn session_meta(json: &str) -> Option<Meta> {
@@ -52,7 +55,31 @@ pub fn session_meta(json: &str) -> Option<Meta> {
         updated_ms: v["updated_at"].as_str().and_then(crate::codex::ms_of).unwrap_or(0),
         context_percent: state["context_usage_percentage"].as_f64(),
         context_window: state["model_info"]["context_window_tokens"].as_u64(),
+        credits_micros: (credits(&v) * 1e6).round() as u64,
     })
+}
+
+/// The credits of every `metering_usage` entry of every turn.
+fn credits(v: &Value) -> f64 {
+    v["session_state"]["conversation_metadata"]["user_turn_metadatas"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|t| t["metering_usage"].as_array().into_iter().flatten())
+        .filter(|m| m["unit"] == "credit")
+        .filter_map(|m| m["value"].as_f64())
+        .sum()
+}
+
+/// The credits the session has spent, as its cost; Kiro bills no tokens.
+pub fn apply_credits(tail: &mut ForeignTail, meta_json: &str) {
+    let micros = session_meta(meta_json).map_or(0, |m| m.credits_micros);
+    if micros > 0 {
+        tail.usage = Some(SessionUsage {
+            tokens: TokenCounts::default(),
+            cost: Some(Cost { micros, unit: CostUnit::Credits, estimated: false, models: vec![] }),
+        });
+    }
 }
 
 /// A turn in progress: Kiro writes one per turn, named `<tui pid>-<start ms>.json`,
@@ -232,6 +259,24 @@ mod tests {
         assert_eq!(fresh.title, None);
         assert_eq!(fresh.context_percent, None);
         assert!(session_meta("nope").is_none());
+    }
+
+    #[test]
+    fn session_meta_sums_the_credits_of_every_turn() {
+        // The fixture's credit values add up to 0.06524060066334993.
+        assert_eq!(session_meta(&fixture("session.json")).unwrap().credits_micros, 65_241);
+    }
+
+    #[test]
+    fn apply_credits_sets_a_credit_cost_without_tokens() {
+        let mut tail = parse_events(&fixture("events.jsonl"));
+        apply_credits(&mut tail, &fixture("session.json"));
+        assert_eq!(tail.usage, Some(SessionUsage { tokens: TokenCounts::default(), cost: Some(Cost { micros: 65_241, unit: CostUnit::Credits, estimated: false, models: vec![] }) }));
+        let mut none = parse_events(&fixture("events.jsonl"));
+        apply_credits(&mut none, r#"{"session_id":"x","cwd":"/p","session_state":{}}"#);
+        assert_eq!(none.usage, None, "no credits spent, no cost");
+        apply_credits(&mut none, "nope");
+        assert_eq!(none.usage, None);
     }
 
     #[test]
