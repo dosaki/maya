@@ -944,6 +944,25 @@ describe("the open session view while a session asks", () => {
     closeModal();
   });
 
+  it("moves the recorded status line on a board refresh that repaints nothing else, and leaves an unchanged one be", async () => {
+    const card: Card = { ...base, sessionId: "u2", machine: "laptop", statusLine: "Opus · 10%" };
+    await openModal(card);
+    const foot = () => host().querySelector(".modal__statusline--foot");
+    expect(foot()?.textContent).toBe("Opus · 10%");
+    refreshModal([{ ...card, statusLine: "\u001b[1mOpus\u001b[0m · 12%" }]);
+    const moved = foot();
+    expect(moved?.textContent).toBe("Opus · 12%");
+    expect(moved?.querySelector(".ansi-b")?.textContent).toBe("Opus");
+    refreshModal([{ ...card, statusLine: "\u001b[1mOpus\u001b[0m · 12%" }]);
+    expect(foot(), "the same foot when it reads the same").toBe(moved);
+    // Without a recording, Maya's own line follows the card's limits.
+    const limits = { account: null, windows: [{ label: "5h", percent: 33, resetsAt: null }], readAt: Date.now() };
+    refreshModal([{ ...card, statusLine: null, limits }]);
+    expect(foot()?.textContent).toBe("eye · 5h 33%");
+    expect(foot()?.classList.contains("modal__statusline--recorded")).toBe(false);
+    closeModal();
+  });
+
   it("Escape still closes the view while the menu is shown", async () => {
     await openModal({ ...asking, sessionId: "m3", stateSince: Date.now() - 5000 });
     const menu = host().querySelector<HTMLElement>(".menu")!;

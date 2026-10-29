@@ -483,6 +483,14 @@ function redrawStrip(root: HTMLElement, card?: Card): void {
   else stripCards.set(old, from);
 }
 
+/** Swaps the status line under the prompt for `card`'s, only when it reads differently. */
+function redrawFoot(root: HTMLElement, card: Card): void {
+  const old = root.querySelector<HTMLElement>(".modal__statusline--foot");
+  if (!old) return;
+  const next = statusFoot(card, Date.now());
+  if (next.outerHTML !== old.outerHTML) old.replaceWith(next);
+}
+
 /**
  * Sets the header's stage from its width (`data-stage` on `.modal__head`,
  * which the header's CSS reads) and redraws the strip when the stage moved.
@@ -1179,9 +1187,12 @@ export function refreshModal(cards: Card[]): void {
   const refetch = historyRefetchDue(current.model.card, fresh, current.lastRemoteFetchAt, Date.now());
   current.model.card = fresh;
   tickWorking(Date.now());
-  // Limits and cost move without a repaint: an idle session's window still shows them.
+  // Limits, cost and the recorded status line move without a repaint: an idle session's window still shows them.
   const root = document.querySelector<HTMLElement>("#modal-host .modal");
-  if (root) redrawStrip(root, fresh);
+  if (root) {
+    redrawStrip(root, fresh);
+    redrawFoot(root, fresh);
+  }
   if (refetch) void loadTurns({ force: stateChanged });
   else if (stateChanged) paint();
 }
