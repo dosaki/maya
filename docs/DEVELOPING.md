@@ -97,6 +97,72 @@ held and Maya starts her again after 30 s, then 60 s, 120 s and 300 s
 while it keeps failing. A turn still running 10 s after a stop, or
 silent for 10 minutes, restarts her the same way.
 
+## Usage and limits
+
+The session window's header shows three things for a session: its context
+(how full the model's window is), its account's usage limits (windows
+with a percentage used and a reset time) and its cost so far. The same
+fields sit on the session card (`usage`, `limits`, `status_line`), and
+`core/src/collect.rs` fills them. The collectors run off the store lock,
+from the list `Store::usage_due` returns, in the app's `poll_usage`
+thread and in the CLI's, every 5 s. A probe that fails keeps the last
+good reading and logs at most once an hour. Opening a window nudges a
+stale reading.
+
+Where each agent's numbers come from:
+
+- Claude Code: limits, context and cost come from the status line
+  wrapper below. Limits come from the newest recording on the machine
+  and every Claude card shares them. Cost is the recording's
+  `total_cost_usd`; with no recording it is estimated from the
+  transcript (main conversation only, labelled "est."). The transcript
+  totals (`TranscriptTotals` in `core/src/usage.rs`) are incremental,
+  at most 8 MB per refresh, so a long transcript catches up over a few
+  ticks. `rate_limits` only reaches Pro and Max accounts: with an API
+  key the window shows "no limits".
+- Codex: both windows and the tokens come from the `token_count` lines
+  of the rollout file (`turn_context` names the model). Limits are
+  shared across Codex cards. Cost is estimated.
+- Kiro: credits per session come from the metering in `<id>.json`.
+  Account limits (one `month` window) come from a probe over
+  `kiro-cli acp` every 10 min: `_kiro.dev/commands/execute` with
+  `{"command":"usage","args":{}}`, the structured `result.data` first
+  and the card text as a fallback. This route is unofficial; it was
+  checked on Kiro 2.34 and may change. The probe removes only the
+  empty session it made.
+- Antigravity: one window per model group (`Gemini 7d`,
+  `Claude+GPT 7d`) from `agy -p "/usage" --output-format json`, every
+  5 min. No per-session cost.
+- Grok: cost and tokens from `grok usage <session-id>`, at most once a
+  minute and only when the events file changed. No limits ("limits not
+  shared").
+- OpenCode: tokens and cost from its server's session record. No limits.
+
+The status line wrapper (`core/src/statusline.rs`) is installed from
+Settings → Sessions ("Install usage status line" / "Remove usage status
+line") or with `maya statusline install|remove|status`. Install writes
+`~/.claude/maya/maya-statusline` (POSIX sh and `jq`; on Windows
+`maya-hook.exe statusline`) as `statusLine.command` in the user-level
+settings file that holds the winning entry (`settings.local.json`, else
+`settings.json`). It refuses when the managed settings file holds a
+status line, and Settings names the blocked file. Project-level
+`.claude/settings.json` status lines are not checked: a session under
+such a project records nothing and shows "limits not read yet". The
+previous command is saved in `~/.claude/maya/statusline-inner` and runs
+unchanged. Each render writes `~/.claude/maya/usage-<session_id>.json`
+with the limits, cost, context, model and the rendered line. Maya scans
+that folder once per refresh and parses only the files that changed.
+The account label is `oauthAccount.emailAddress` from `~/.claude.json`.
+
+The terminal look's bottom line is the recorded status line, drawn with
+its ANSI colours; without one it is Maya's own line with the limits and
+cost appended.
+
+Prices are list prices per model for the Claude and Codex families in
+`core/src/pricing.rs`, fetched on 2026-10-29, each row with its own
+long-context threshold. Cost is kept in integer micro-units. Update the
+table and its date when the vendors change prices.
+
 ## Git integration
 
 The Pull requests tab and each card's PR badge talk to GitHub's and
