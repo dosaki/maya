@@ -408,17 +408,25 @@ fn connect(config: &NetworkConfig, stop: &AtomicBool, deadline: Instant) -> Resu
     let _ = stream.set_read_timeout(Some(TICK));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_nodelay(true);
+    // Non-blocking for the upgrade: tungstenite resumes it only after
+    // WouldBlock, and a read timeout is TimedOut on Windows, which would end
+    // an upgrade answered a read tick late. The timeouts apply once it is done.
+    stream.set_nonblocking(true).map_err(|e| format!("Could not reach {host}:{port}: {e}"))?;
     let url = if host.contains(':') && !host.starts_with('[') { format!("ws://[{host}]:{port}/") } else { format!("ws://{host}:{port}/") };
     // Small until `welcome`, so whatever answers cannot make this Maya buffer more.
     let ws_config = WebSocketConfig::default().max_message_size(Some(PRE_AUTH_FRAME)).max_frame_size(Some(PRE_AUTH_FRAME));
     let mut attempt = tungstenite::client::client_with_config(url, stream, Some(ws_config));
     loop {
         match attempt {
-            Ok((ws, _)) => return Ok(ws),
+            Ok((ws, _)) => {
+                ws.get_ref().set_nonblocking(false).map_err(|e| format!("Could not reach {host}:{port}: {e}"))?;
+                return Ok(ws);
+            }
             Err(HandshakeError::Interrupted(mid)) => {
                 if stopped(stop) || Instant::now() > deadline {
                     return Err(format!("{host}:{port} did not answer as a Maya."));
                 }
+                std::thread::sleep(secure::HANDSHAKE_POLL);
                 attempt = mid.handshake();
             }
             Err(HandshakeError::Failure(e)) => return Err(format!("{host}:{port} did not answer as a Maya: {e}")),

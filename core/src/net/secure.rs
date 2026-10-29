@@ -12,7 +12,7 @@ use super::protocol::MAX_FRAME;
 use snow::{Builder, HandshakeState, TransportState};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::io::{Read, Write};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tungstenite::{Message, WebSocket};
 
 const PAIR_PATTERN: &str = "Noise_XXpsk3_25519_ChaChaPoly_SHA256";
@@ -95,6 +95,9 @@ pub struct Accepted {
     /// It paired (with the code) rather than connected (with its key).
     pub paired: bool,
 }
+
+/// How often a WebSocket upgrade still waiting on its peer looks again.
+pub(crate) const HANDSHAKE_POLL: Duration = Duration::from_millis(10);
 
 pub(crate) fn is_timeout(e: &tungstenite::Error) -> bool {
     matches!(e, tungstenite::Error::Io(io) if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut))

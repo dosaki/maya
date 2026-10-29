@@ -684,8 +684,7 @@ fn pairing_failed(ctx: &Ctx, ip: &str) {
 fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
     let pre_auth = PreAuth(ctx, addr.ip());
     let deadline = Instant::now() + PRE_AUTH_DEADLINE;
-    // Accepted sockets inherit the listener's non-blocking flag on macOS.
-    let _ = stream.set_nonblocking(false);
+    // Read once `upgrade` makes the socket blocking again.
     let _ = stream.set_read_timeout(Some(TICK));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_nodelay(true);
@@ -737,16 +736,24 @@ fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
     finish_ws(&mut ch.ws);
 }
 
+/// The WebSocket upgrade, on a non-blocking socket: tungstenite resumes it
+/// only after WouldBlock, and a read timeout is TimedOut on Windows, which
+/// would end an upgrade whose request is a read tick late.
 fn upgrade(ctx: &Ctx, stream: TcpStream, deadline: Instant) -> Result<Ws, String> {
+    stream.set_nonblocking(true).map_err(|e| e.to_string())?;
     let config = WebSocketConfig::default().max_message_size(Some(PRE_AUTH_FRAME)).max_frame_size(Some(PRE_AUTH_FRAME));
     let mut attempt = tungstenite::accept_with_config(stream, Some(config));
     loop {
         match attempt {
-            Ok(ws) => return Ok(ws),
+            Ok(ws) => {
+                ws.get_ref().set_nonblocking(false).map_err(|e| e.to_string())?;
+                return Ok(ws);
+            }
             Err(HandshakeError::Interrupted(mid)) => {
                 if ctx.stopped() || Instant::now() > deadline {
                     return Err("timed out".into());
                 }
+                std::thread::sleep(secure::HANDSHAKE_POLL);
                 attempt = mid.handshake();
             }
             Err(HandshakeError::Failure(e)) => return Err(e.to_string()),
