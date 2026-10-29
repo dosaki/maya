@@ -1,11 +1,11 @@
 package com.dosaki.maya.mobile
 
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.autofill.AutofillManager
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
@@ -43,8 +43,9 @@ class MainActivity : TauriActivity() {
   // web view reports the box it entered regardless; the popup then sits in
   // the screen's corner. With no autofill manager the web view's autofill is
   // off, and the framework's own uses of it all allow for none.
+  // Its name is hidden from the SDK: ask for the one the class maps to.
   override fun getSystemService(name: String): Any? =
-    if (name == Context.AUTOFILL_MANAGER_SERVICE) null else super.getSystemService(name)
+    if (name == getSystemServiceName(AutofillManager::class.java)) null else super.getSystemService(name)
 
   // Android 16 gates the local network behind a runtime permission. Without
   // it the OS drops the main's packets to the LAN while the internet still
