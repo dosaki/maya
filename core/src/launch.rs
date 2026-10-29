@@ -154,6 +154,8 @@ pub struct LaunchOptions {
     pub mode: Option<String>,
     /// The session's name; only Claude Code takes it as a flag.
     pub name: Option<String>,
+    /// Start in a new worktree on a new branch, under the clones directory.
+    pub worktree: bool,
 }
 
 fn chosen(v: &Option<String>) -> Option<&str> {
@@ -741,6 +743,12 @@ pub fn resolve_target(root: &Path, dirs: &[String], dir: Option<&str>, picked: O
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_launch_without_worktree_decodes_as_off() {
+        assert!(!serde_json::from_str::<LaunchOptions>(r#"{"agent":"claude-code"}"#).unwrap().worktree);
+        assert!(serde_json::from_str::<LaunchOptions>(r#"{"agent":"claude-code","worktree":true}"#).unwrap().worktree);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_scratch_folder_is_a_maya_folder_under_tmp() {

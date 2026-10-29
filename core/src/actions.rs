@@ -660,9 +660,9 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
         return Err("Type a prompt first.".into());
     }
     options.validate_shape()?;
-    let (root, maya_dir, agents) = {
+    let (root, maya_dir, agents, clones_root) = {
         let store = l.store.lock().unwrap();
-        (projects_root(&store)?, store.claude_dir().join("maya"), store.agents_source())
+        (projects_root(&store)?, store.claude_dir().join("maya"), store.agents_source(), store.config.clones_dir_path())
     };
     // Claude Code's models are Maya's own fixed list. Listing the agents is
     // only for the others, and can take seconds, so a Claude start skips it.
@@ -686,7 +686,15 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
             launch::classify(brain, &binary, model.as_deref(), &root, &prompt, &dirs, &maya_dir, launch::CLASSIFIER_TIMEOUT)
         }
     };
-    let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
+    let (mut target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
+    if options.worktree {
+        // The projects root itself is a folder of projects, not a repository to branch.
+        if how == "fallback" {
+            let name = root.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            return Err(format!("{name} is not a git repository, so it cannot start in a worktree."));
+        }
+        target = crate::worktree::add_for_session(&target, &clones_root, options.chosen_name(), &prompt)?;
+    }
     open_session(l, &target, how, &prompt, &options, &info, &maya_dir)
 }
 
@@ -1299,7 +1307,7 @@ mod tests {
         let store = with_agents(store, vec![agents::claude(), opencode_info()]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let opts = LaunchOptions { agent: Harness::OpenCode, model: Some("opencode/fledge-alpha-free".into()), effort: Some("low".into()), mode: Some("auto".into()), name: Some("Fix CI".into()) };
+        let opts = LaunchOptions { agent: Harness::OpenCode, model: Some("opencode/fledge-alpha-free".into()), effort: Some("low".into()), mode: Some("auto".into()), name: Some("Fix CI".into()), ..Default::default() };
         start_session(&l, Some("proj".into()), "-v please say hi".into(), opts).unwrap();
         let h = hits.lock().unwrap();
         let create = h.iter().find(|r| r.starts_with("POST /api/session\n")).map(|r| body_json(r)).expect("created on the server");
@@ -1494,6 +1502,45 @@ mod tests {
         store.lock().unwrap().pending_apply_for_test(&mut cards);
         assert_eq!(cards[0].name, "Fix CI");
         drop(dir);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let o = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    }
+
+    #[test]
+    fn start_session_in_a_worktree_runs_the_agent_there() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let proj = dir.path().join("projects").join("proj");
+        git(&proj, &["init", "-q"]);
+        git(&proj, &["config", "user.email", "t@example.com"]);
+        git(&proj, &["config", "user.name", "T"]);
+        std::fs::write(proj.join("a.txt"), "a").unwrap();
+        git(&proj, &["add", "."]);
+        git(&proj, &["commit", "-q", "-m", "first"]);
+        let clones = dir.path().join("clones");
+        store.lock().unwrap().config.clones_dir = Some(clones.to_string_lossy().into_owned());
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = LaunchOptions { worktree: true, name: Some("Fix CI".into()), ..Default::default() };
+        let r = start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap();
+        let made = clones.join("proj-fix-ci");
+        assert!(r.dir.ends_with("clones/proj-fix-ci"), "{}", r.dir);
+        assert!(made.is_dir());
+        let Call::Open { command, .. } = fake.calls.lock().unwrap()[0].clone() else { panic!() };
+        assert!(command.starts_with(&format!("cd '{}'", made.display())), "{command}");
+    }
+
+    #[test]
+    fn start_session_in_a_worktree_refuses_a_folder_that_is_not_a_repository() {
+        let (_dir, store) = store_with_projects(&["proj"]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = LaunchOptions { worktree: true, ..Default::default() };
+        let err = start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap_err();
+        assert_eq!(err, "proj is not a git repository, so it cannot start in a worktree.");
+        assert!(fake.calls.lock().unwrap().is_empty());
     }
 
     #[test]
