@@ -391,32 +391,47 @@ fn stamp_of(path: &Path) -> Option<Stamp> {
     Some((meta.modified().ok(), meta.len()))
 }
 
-/// Recorded files by session, re-read only when their mtime or size changes.
+/// Every `usage-<id>.json` in the folder, each parsed again only when its
+/// mtime or size changes; a file that does not parse is kept as `None`
+/// until it changes.
 #[derive(Default)]
-pub struct RecordedCache(std::collections::HashMap<String, (Stamp, Recorded)>);
+pub struct RecordedCache {
+    files: std::collections::HashMap<String, (Stamp, Option<Recorded>)>,
+    /// Number of files parsed (for tests and diagnostics).
+    pub reads: usize,
+}
 
 impl RecordedCache {
-    pub fn get(&mut self, maya_dir: &Path, session_id: &str) -> Option<Recorded> {
-        let Some(stamp) = recorded_path(maya_dir, session_id).and_then(|p| stamp_of(&p)) else {
-            self.0.remove(session_id);
-            return None;
-        };
-        if let Some((seen, r)) = self.0.get(session_id) {
-            if *seen == stamp {
-                return Some(r.clone());
-            }
+    /// Lists `maya_dir` once and stats each usage file, parsing only the
+    /// ones whose stamp changed and forgetting the ones that are gone.
+    pub fn scan(&mut self, maya_dir: &Path) {
+        let mut seen = std::collections::HashMap::with_capacity(self.files.len());
+        for entry in std::fs::read_dir(maya_dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let Some(id) = name.to_str().and_then(|n| n.strip_prefix("usage-")?.strip_suffix(".json")).filter(|id| is_session_id(id)) else { continue };
+            let Ok(meta) = entry.metadata() else { continue };
+            let stamp = (meta.modified().ok(), meta.len());
+            let known = self.files.remove(id).filter(|(s, _)| *s == stamp);
+            let recorded = match known {
+                Some((_, r)) => r,
+                None => {
+                    self.reads += 1;
+                    read_recorded(maya_dir, id)
+                }
+            };
+            seen.insert(id.to_string(), (stamp, recorded));
         }
-        let Some(r) = read_recorded(maya_dir, session_id) else {
-            self.0.remove(session_id);
-            return None;
-        };
-        self.0.insert(session_id.to_string(), (stamp, r.clone()));
-        Some(r)
+        self.files = seen;
     }
 
-    /// Forgets every session not in `ids`.
-    pub fn retain(&mut self, ids: &[String]) {
-        self.0.retain(|id, _| ids.contains(id));
+    /// The recording of `session_id` as of the last `scan`.
+    pub fn get(&self, session_id: &str) -> Option<Recorded> {
+        self.files.get(session_id)?.1.clone()
+    }
+
+    /// The recording with the latest `at` in the folder, whichever session wrote it.
+    pub fn newest(&self) -> Option<Recorded> {
+        self.files.values().filter_map(|(_, r)| r.as_ref()).max_by_key(|r| r.at).cloned()
     }
 }
 
@@ -564,28 +579,39 @@ mod tests {
     }
 
     #[test]
-    fn the_recorded_cache_rereads_a_changed_file_and_forgets_what_it_does_not_retain() {
+    fn the_recorded_cache_parses_only_changed_files_and_keeps_the_newest_on_disk() {
         let dir = tempfile::tempdir().unwrap();
         let maya = dir.path().join("maya");
         let other = "00000000-0000-0000-0000-000000000001";
+        let broken = "00000000-0000-0000-0000-000000000002";
         let mut cache = RecordedCache::default();
-        assert_eq!(cache.get(&maya, SID), None);
+        cache.scan(&maya);
+        assert_eq!((cache.get(SID), cache.newest(), cache.reads), (None, None, 0));
+
         let first = recorded_from(&fixture(), "one", 1).unwrap();
-        write_recorded(&maya, &first).unwrap();
-        assert_eq!(cache.get(&maya, SID), Some(first));
-        let second = recorded_from(&fixture(), "second", 5).unwrap();
-        write_recorded(&maya, &second).unwrap();
-        assert_eq!(cache.get(&maya, SID), Some(second.clone()));
         let mut older = recorded_from(&fixture(), "older", 3).unwrap();
         older.session_id = other.into();
+        write_recorded(&maya, &first).unwrap();
         write_recorded(&maya, &older).unwrap();
-        assert_eq!(cache.get(&maya, other), Some(older.clone()));
-        assert_eq!(cache.0.len(), 2);
-        cache.retain(&[other.to_string()]);
-        assert_eq!(cache.0.keys().collect::<Vec<_>>(), [other]);
-        std::fs::remove_file(maya.join(format!("usage-{other}.json"))).unwrap();
-        assert_eq!(cache.get(&maya, other), None);
-        assert!(cache.0.is_empty(), "a removed file is forgotten");
+        std::fs::write(maya.join("events.jsonl"), "{}\n").unwrap();
+        std::fs::write(maya.join(format!("usage-{other}.json.123")), "half").unwrap();
+        cache.scan(&maya);
+        assert_eq!((cache.get(SID), cache.newest(), cache.reads), (Some(first), Some(older.clone()), 2));
+        cache.scan(&maya);
+        assert_eq!(cache.reads, 2, "unchanged files are not read again");
+
+        let second = recorded_from(&fixture(), "second", 5).unwrap();
+        write_recorded(&maya, &second).unwrap();
+        std::fs::write(maya.join(format!("usage-{broken}.json")), "not json").unwrap();
+        cache.scan(&maya);
+        assert_eq!((cache.get(SID), cache.newest(), cache.reads), (Some(second.clone()), Some(second), 4));
+        assert_eq!(cache.get(broken), None);
+        cache.scan(&maya);
+        assert_eq!(cache.reads, 4, "a file that does not parse is not parsed again until it changes");
+
+        std::fs::remove_file(maya.join(format!("usage-{SID}.json"))).unwrap();
+        cache.scan(&maya);
+        assert_eq!((cache.get(SID), cache.newest(), cache.reads), (None, Some(older), 4));
     }
 
     #[test]

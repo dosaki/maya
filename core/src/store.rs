@@ -49,7 +49,7 @@ pub struct Store {
     tails: TailCache,
     /// Claude Code transcripts' running token totals.
     totals: crate::usage::TranscriptTotals,
-    /// What each Claude Code session's status line last recorded.
+    /// What the Claude Code status lines last recorded, every file in `maya/`.
     recorded: crate::statusline::RecordedCache,
     prs: PrCache,
     /// Compact the event log during refresh once it exceeds this many bytes.
@@ -518,7 +518,7 @@ impl Store {
         let mut paths = Vec::with_capacity(sessions.len());
         self.judging.clear();
         let mut used = HashSet::new();
-        let maya_dir = self.claude_dir.join("maya");
+        self.recorded.scan(&self.claude_dir.join("maya"));
         let mut budget = crate::usage::TOTALS_BUDGET_BYTES;
         for s in &sessions {
             let path = self.transcript_path_for(s);
@@ -542,7 +542,7 @@ impl Store {
             card.branch = self.prs.branch(&s.cwd);
             // Claude Code names its model in the transcript; the viewer's status line shows it.
             card.model = tail.model.clone();
-            let rec = self.recorded.get(&maya_dir, &s.session_id);
+            let rec = self.recorded.get(&s.session_id);
             // The recorded context is what Claude Code's own status line shows; Maya's guess fills in without one.
             card.context = match rec.as_ref().and_then(|r| r.context_used_percent.zip(r.context_window_size)) {
                 Some((percent, window)) => Some(crate::context::ContextUsage { used: window.saturating_mul(percent.into()) / 100, window, percent }),
@@ -561,10 +561,9 @@ impl Store {
         }
         self.tails.retain(&paths);
         self.totals.retain(&paths);
-        self.recorded.retain(&sessions.iter().map(|s| s.session_id.clone()).collect::<Vec<_>>());
         // One machine is one account: the newest reading on disk, a session that
         // ended included, is every Claude Code card's limits.
-        let limits = crate::statusline::newest_recorded(&maya_dir).and_then(|r| crate::statusline::limits_of(&r, crate::statusline::account_email(&self.claude_dir)));
+        let limits = self.recorded.newest().and_then(|r| crate::statusline::limits_of(&r, crate::statusline::account_email(&self.claude_dir)));
         for card in &mut cards {
             card.limits = limits.clone();
         }
@@ -1402,6 +1401,9 @@ mod tests {
         crate::statusline::write_recorded(&claude.join("maya"), &recording(SID_A, line, 1_000)).unwrap();
         let mut store = Store::new(claude).with_alive(|_| true);
         let card = store.refresh(2_000).remove(0);
+        assert_eq!(store.recorded.reads, 1, "one file, read once for the card and the limits");
+        assert_eq!(store.refresh(2_500).remove(0), card);
+        assert_eq!(store.recorded.reads, 1, "a second refresh with unchanged files reads none of them");
         assert_eq!(card.status_line.as_deref(), Some(line));
         let limits = card.limits.unwrap();
         assert_eq!(limits.windows[0].label, "5h");
