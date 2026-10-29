@@ -3,14 +3,22 @@
 //! Fetched 2026-10-29 from
 //!   https://platform.claude.com/docs/en/about-claude/pricing (docs.anthropic.com redirects there)
 //!   https://developers.openai.com/api/docs/pricing (https://openai.com/api/pricing answered 403)
-//! Claude rows use the 5-minute cache-write rate. The over-200k `long` rates
-//! are the Claude Haiku 5.5 prompts-over-100k rates (the page puts its
-//! threshold at 100k, not 200k) and the OpenAI long-context rates (the page
-//! puts that threshold at 272k); every other Claude row has no long rates
-//! because the 1M window is billed at the standard rate. The tuple is
-//! (input, cached_input, cache_write, output).
+//! Claude rows use the 5-minute cache-write rate. `long` carries the
+//! threshold the page states: 100k for Claude Haiku 5.5, 272k for OpenAI
+//! models with long-context rates. Other Claude rows have none, because the
+//! 1M window is billed at the standard rate.
 
 use crate::usage::TokenCounts;
+
+/// The higher rates a model charges once a request's prompt passes `from` tokens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LongRates {
+    pub from: u64,
+    pub input: f64,
+    pub cached_input: f64,
+    pub cache_write: f64,
+    pub output: f64,
+}
 
 /// Dollars per million tokens.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -19,8 +27,8 @@ pub struct Price {
     pub cached_input: f64,
     pub cache_write: f64,
     pub output: f64,
-    /// The rates past 200k input tokens on the request, when the model has them.
-    pub long: Option<(f64, f64, f64, f64)>,
+    /// The rates past the row's own prompt-size threshold, when the model has them.
+    pub long: Option<LongRates>,
 }
 
 static TABLE: &[(&str, Price)] = &[
@@ -171,7 +179,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 0.01,
             cache_write: 0.125,
             output: 0.5,
-            long: Some((0.5, 0.05, 0.625, 2.5)),
+            long: Some(LongRates {
+                from: 100_000,
+                input: 0.5,
+                cached_input: 0.05,
+                cache_write: 0.625,
+                output: 2.5,
+            }),
         },
     ),
     (
@@ -193,7 +207,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 1.0,
             cache_write: 10.0,
             output: 50.0,
-            long: Some((20.0, 2.0, 20.0, 75.0)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 20.0,
+                cached_input: 2.0,
+                cache_write: 20.0,
+                output: 75.0,
+            }),
         },
     ),
     (
@@ -203,7 +223,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 0.1,
             cache_write: 2.0,
             output: 10.0,
-            long: Some((4.0, 0.2, 4.0, 15.0)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 4.0,
+                cached_input: 0.2,
+                cache_write: 4.0,
+                output: 15.0,
+            }),
         },
     ),
     (
@@ -213,7 +239,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 0.05,
             cache_write: 1.0,
             output: 5.0,
-            long: Some((2.0, 0.1, 2.0, 7.5)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 2.0,
+                cached_input: 0.1,
+                cache_write: 2.0,
+                output: 7.5,
+            }),
         },
     ),
     (
@@ -223,7 +255,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 0.01,
             cache_write: 0.1,
             output: 0.5,
-            long: Some((0.2, 0.02, 0.2, 0.75)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 0.2,
+                cached_input: 0.02,
+                cache_write: 0.2,
+                output: 0.75,
+            }),
         },
     ),
     (
@@ -233,7 +271,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 0.2,
             cache_write: 2.0,
             output: 10.0,
-            long: Some((4.0, 0.4, 4.0, 15.0)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 4.0,
+                cached_input: 0.4,
+                cache_write: 4.0,
+                output: 15.0,
+            }),
         },
     ),
     (
@@ -243,7 +287,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 0.4,
             cache_write: 4.0,
             output: 20.0,
-            long: Some((8.0, 0.8, 8.0, 30.0)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 8.0,
+                cached_input: 0.8,
+                cache_write: 8.0,
+                output: 30.0,
+            }),
         },
     ),
     (
@@ -253,7 +303,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 0.2,
             cache_write: 2.0,
             output: 12.0,
-            long: Some((4.0, 0.4, 4.0, 18.0)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 4.0,
+                cached_input: 0.4,
+                cache_write: 4.0,
+                output: 18.0,
+            }),
         },
     ),
     (
@@ -263,7 +319,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 0.02,
             cache_write: 0.2,
             output: 1.2,
-            long: Some((0.4, 0.04, 0.4, 1.8)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 0.4,
+                cached_input: 0.04,
+                cache_write: 0.4,
+                output: 1.8,
+            }),
         },
     ),
     (
@@ -273,7 +335,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 30.0,
             cache_write: 30.0,
             output: 180.0,
-            long: Some((60.0, 60.0, 60.0, 270.0)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 60.0,
+                cached_input: 60.0,
+                cache_write: 60.0,
+                output: 270.0,
+            }),
         },
     ),
     (
@@ -283,7 +351,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 0.5,
             cache_write: 5.0,
             output: 30.0,
-            long: Some((10.0, 1.0, 10.0, 45.0)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 10.0,
+                cached_input: 1.0,
+                cache_write: 10.0,
+                output: 45.0,
+            }),
         },
     ),
     (
@@ -293,7 +367,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 30.0,
             cache_write: 30.0,
             output: 180.0,
-            long: Some((60.0, 60.0, 60.0, 270.0)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 60.0,
+                cached_input: 60.0,
+                cache_write: 60.0,
+                output: 270.0,
+            }),
         },
     ),
     (
@@ -323,7 +403,13 @@ static TABLE: &[(&str, Price)] = &[
             cached_input: 0.25,
             cache_write: 2.5,
             output: 15.0,
-            long: Some((5.0, 0.5, 5.0, 22.5)),
+            long: Some(LongRates {
+                from: 272_000,
+                input: 5.0,
+                cached_input: 0.5,
+                cache_write: 5.0,
+                output: 22.5,
+            }),
         },
     ),
     (
@@ -424,7 +510,7 @@ pub fn price_for(model: &str) -> Option<&'static Price> {
 pub fn cost_micros(model: &str, t: &TokenCounts, long: bool) -> Option<u64> {
     let p = price_for(model)?;
     let (input, cached, write, output) = match (long, p.long) {
-        (true, Some(l)) => l,
+        (true, Some(l)) => (l.input, l.cached_input, l.cache_write, l.output),
         _ => (p.input, p.cached_input, p.cache_write, p.output),
     };
     // Dollars per million tokens times tokens is micro-dollars.
@@ -435,9 +521,12 @@ pub fn cost_micros(model: &str, t: &TokenCounts, long: bool) -> Option<u64> {
     Some(micros.round() as u64)
 }
 
-/// True when a request's input + cached + cache-write tokens exceed 200_000.
-pub fn is_long(t: &TokenCounts) -> bool {
-    t.input + t.cached_input + t.cache_write > 200_000
+/// True when the model's row has long-context rates and the request's
+/// input + cached + cache-write tokens exceed that row's threshold.
+pub fn is_long(model: &str, t: &TokenCounts) -> bool {
+    price_for(model)
+        .and_then(|p| p.long)
+        .is_some_and(|l| t.input + t.cached_input + t.cache_write > l.from)
 }
 
 #[cfg(test)]
@@ -501,15 +590,18 @@ mod tests {
     }
 
     #[test]
-    fn is_long_counts_input_cached_and_cache_write() {
+    fn is_long_uses_the_rows_own_threshold() {
         let t = |input, cached_input, cache_write| TokenCounts {
             input,
             cached_input,
             cache_write,
             output: 0,
         };
-        assert!(is_long(&t(150_000, 60_000, 0)));
-        assert!(is_long(&t(1, 0, 200_000)));
-        assert!(!is_long(&t(100_000, 100_000, 0)));
+        assert!(is_long("claude-haiku-5-5", &t(90_000, 60_000, 0)));
+        assert!(!is_long("claude-opus-5-5", &t(90_000, 60_000, 0)));
+        assert!(!is_long("claude-opus-5-5", &t(1_000_000, 0, 0)));
+        assert!(!is_long("nonsense-9", &t(1_000_000, 0, 0)));
+        assert!(!is_long("gpt-6.1-sol", &t(272_000, 0, 0)));
+        assert!(is_long("gpt-6.1-sol", &t(100_000, 100_000, 72_001)));
     }
 }
