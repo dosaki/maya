@@ -5,8 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
-import android.view.View
-import android.webkit.WebView
+import android.view.autofill.AutofillManager
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
@@ -39,11 +38,14 @@ class MainActivity : TauriActivity() {
 
   // The page has nothing to autofill, but the web view offers its text boxes
   // to the autofill service anyway: a password manager then puts up its
-  // popup on the reply box, which takes the focus and closes the keyboard
-  // mid-word. Keep the web view and everything in it out of autofill.
-  override fun onWebViewCreate(webView: WebView) {
-    webView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
-  }
+  // popup on the reply box, which takes the focus and flickers the keyboard.
+  // Marking the web view not important for autofill does not stop it, as the
+  // web view reports the box it entered regardless; the popup then sits in
+  // the screen's corner. With no autofill manager the web view's autofill is
+  // off, and the framework's own uses of it all allow for none.
+  // Its name is hidden from the SDK: ask for the one the class maps to.
+  override fun getSystemService(name: String): Any? =
+    if (name == getSystemServiceName(AutofillManager::class.java)) null else super.getSystemService(name)
 
   // Android 16 gates the local network behind a runtime permission. Without
   // it the OS drops the main's packets to the LAN while the internet still

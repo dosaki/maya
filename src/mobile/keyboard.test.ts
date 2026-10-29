@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import mobileCss from "./mobile.css?raw";
 import { isTextField, keepFocusedAboveKeyboard } from "./keyboard";
 
 describe("isTextField", () => {
@@ -48,5 +49,13 @@ describe("keepFocusedAboveKeyboard", () => {
     b.focus();
     window.dispatchEvent(new Event("resize"));
     expect(scroll).not.toHaveBeenCalled();
+  });
+});
+
+describe("the phone's cards and dialogs", () => {
+  it("fill the layer they sit in, which shrinks with the keyboard, not the screen", () => {
+    const rule = mobileCss.split("\n").find((l) => l.startsWith(".modal__panel, .modal__panel--compact {"));
+    expect(rule).toContain("width: 100%; height: 100%;");
+    expect(rule).not.toContain("100vh");
   });
 });
