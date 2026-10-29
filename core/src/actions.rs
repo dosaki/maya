@@ -896,10 +896,10 @@ pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, 
         };
         let options = launch::LaunchOptions { agent, model: brain_model, ..Default::default() };
         let name = crate::reviews::session_name(pr.forge, &pr.repo, pr.number);
-        start_opencode(l, &target.dir, &crate::reviews::render_prompt(&template, pr), Some(&name), &options, &info)?;
+        start_opencode(l, &target.dir, &crate::reviews::render_prompt(&template, pr, !target.legacy), Some(&name), &options, &info)?;
         return Ok(target.dir.to_string_lossy().into_owned());
     }
-    let file = launch::write_prompt_file(&maya_dir, &crate::reviews::render_prompt(&template, pr))?;
+    let file = launch::write_prompt_file(&maya_dir, &crate::reviews::render_prompt(&template, pr, !target.legacy))?;
     let grok_id = (agent == model::Harness::Grok).then(launch::new_session_uuid);
     let known = {
         let mut store = l.store.lock().unwrap();
@@ -1639,6 +1639,21 @@ mod tests {
         let l = Local { store: &store, terminal: &fake };
         assert_eq!(start_review(&l, &bedrock_pr()).unwrap_err(), "A review of bedrock #451 is already running.");
         assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_review_in_an_old_full_clone_does_not_say_the_pr_is_checked_out() {
+        let (_dir, store, clones) = store_reviewing_in_clones();
+        repo_with_origin(&clones.join("bedrock-451"), "git@github.com:Org/bedrock.git");
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        start_review(&l, &bedrock_pr()).unwrap();
+        let calls = fake.calls.lock().unwrap();
+        let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
+        assert!(!command.contains("git "), "an old full clone gets no git steps: {command}");
+        let file = command.split("cat '").nth(1).unwrap().split('\'').next().unwrap();
+        let prompt = std::fs::read_to_string(file).unwrap();
+        assert!(prompt.starts_with("Review pull request #451") && !prompt.contains("checked out in this folder"), "{prompt}");
     }
 
     #[test]

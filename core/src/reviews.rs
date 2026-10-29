@@ -381,12 +381,18 @@ pub fn session_name(forge: GitProvider, name_with_owner: &str, number: u64) -> S
 /// The prompt a review session starts with: the template with `{number}`,
 /// `{repo}` and `{url}` filled in. A blank template means the built-in one;
 /// a template that names none of the three gets ` PR #<number> (<url>)`
-/// appended, so a bare slash command still says which pull request.
+/// appended, so a bare slash command still says which pull request. The
+/// built-in one says the PR is checked out only when `checked_out`: an old
+/// full clone holds whatever was last checked out in it.
 pub const DEFAULT_REVIEW_PROMPT: &str = "Review pull request #{number} of {repo} ({url}). The pull request is checked out in this folder. Make use of code review skills, and at the end give at most 3 options: Approve; Ask <questions here>; Request changes <changes here>. Mark the recommended option \"(Recommended)\". Show Ask and Request changes only when they are needed.";
 
-pub fn render_prompt(template: &str, pr: &ReviewPr) -> String {
+/// The built-in prompt's sentence that holds only for a worktree Maya checked out.
+const CHECKED_OUT: &str = " The pull request is checked out in this folder.";
+
+pub fn render_prompt(template: &str, pr: &ReviewPr, checked_out: bool) -> String {
     let t = template.trim();
-    let t = if t.is_empty() { DEFAULT_REVIEW_PROMPT } else { t };
+    let built_in = if checked_out { DEFAULT_REVIEW_PROMPT.to_string() } else { DEFAULT_REVIEW_PROMPT.replace(CHECKED_OUT, "") };
+    let t = if t.is_empty() { built_in.as_str() } else { t };
     let number = pr.number.to_string();
     if ["{number}", "{repo}", "{url}"].iter().any(|p| t.contains(p)) {
         t.replace("{number}", &number).replace("{repo}", &pr.repo).replace("{url}", &pr.url)
@@ -848,13 +854,23 @@ mod tests {
 
     #[test]
     fn the_review_prompt_fills_placeholders_or_appends_the_pr() {
-        let d = render_prompt("", &pr());
+        let d = render_prompt("", &pr(), true);
         assert!(d.starts_with("Review pull request #451 of Org/bedrock (https://github.com/Org/bedrock/pull/451). The pull request is checked out in this folder. Make use"), "{d}");
         assert!(d.contains("(Recommended)") && d.contains("Request changes"), "{d}");
-        assert_eq!(render_prompt("  \n", &pr()), d, "blank means the default");
-        assert_eq!(render_prompt("/should-i-approve PR #{number}", &pr()), "/should-i-approve PR #451");
-        assert_eq!(render_prompt("Look at {url} ({repo})", &pr()), "Look at https://github.com/Org/bedrock/pull/451 (Org/bedrock)");
-        assert_eq!(render_prompt("/should-i-approve", &pr()), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
+        assert_eq!(render_prompt("  \n", &pr(), true), d, "blank means the default");
+        assert_eq!(render_prompt("/should-i-approve PR #{number}", &pr(), true), "/should-i-approve PR #451");
+        assert_eq!(render_prompt("Look at {url} ({repo})", &pr(), true), "Look at https://github.com/Org/bedrock/pull/451 (Org/bedrock)");
+        assert_eq!(render_prompt("/should-i-approve", &pr(), true), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
+    }
+
+    #[test]
+    fn the_built_in_prompt_says_the_pr_is_checked_out_only_when_maya_checked_it_out() {
+        let sentence = "The pull request is checked out in this folder.";
+        let worktree = render_prompt("", &pr(), !target(false, true, false).legacy);
+        assert!(worktree.contains(sentence), "{worktree}");
+        let old = render_prompt("", &pr(), !target(false, false, true).legacy);
+        assert!(!old.contains(sentence) && old.starts_with("Review pull request #451 of Org/bedrock (https://github.com/Org/bedrock/pull/451). Make use"), "an old full clone holds whatever was checked out: {old}");
+        assert_eq!(render_prompt("Look at {url}", &pr(), false), render_prompt("Look at {url}", &pr(), true), "a custom template is left as written");
     }
 
     #[test]
