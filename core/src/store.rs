@@ -1,4 +1,5 @@
 use crate::asks::{self, AskCache, Verdict};
+use crate::collect;
 use crate::config::{self, Config};
 use crate::events::EventLog;
 use crate::foreign::{self, ForeignSession};
@@ -9,7 +10,7 @@ use crate::remembered::{Key, LiveSession, Memory, Remembered};
 use crate::registry::{self, RegistrySession};
 use crate::state::{derive, DeriveInput, Prose};
 use crate::transcript::TailCache;
-use crate::usage::{self, AccountLimits, SessionUsage};
+use crate::usage::{AccountLimits, SessionUsage};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -568,10 +569,10 @@ impl Store {
     /// Limits are read while a card of that harness is on the board: every
     /// gap, or at once when nudged. A Grok session's usage is read when its
     /// events file changed since the last run, at most once a minute.
-    pub fn usage_due(&mut self, now_ms: u64) -> usage::Due {
+    pub fn usage_due(&mut self, now_ms: u64) -> collect::Due {
         let on_board = |h: Harness| self.foreign.values().any(|s| s.harness == h);
         let (agy, kiro) = (on_board(Harness::Antigravity), on_board(Harness::Kiro));
-        let mut due = usage::Due { antigravity: self.agy_limits.take_due(agy, Self::AGY_LIMITS_GAP_MS, now_ms), kiro: self.kiro_limits.take_due(kiro, Self::KIRO_LIMITS_GAP_MS, now_ms), grok: vec![] };
+        let mut due = collect::Due { antigravity: self.agy_limits.take_due(agy, Self::AGY_LIMITS_GAP_MS, now_ms), kiro: self.kiro_limits.take_due(kiro, Self::KIRO_LIMITS_GAP_MS, now_ms), grok: vec![] };
         let grok: Vec<(String, PathBuf)> = self.foreign.values().filter(|s| s.harness == Harness::Grok).map(|s| (s.session_id.clone(), s.transcript_path.clone())).collect();
         self.grok_usage.retain(|id, _| grok.iter().any(|(g, _)| g == id));
         for (id, events) in grok {
@@ -1633,7 +1634,7 @@ mod tests {
         let s = ForeignSession { harness: Harness::Grok, pid: 11, tty: None, session_id: "g1".into(), cwd: "/x".into(), name: "g".into(), transcript_path: events.clone() };
         let mut store = Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), t.path().join("agy"), vec![s]);
         let now = 10_000_000;
-        assert_eq!(store.usage_due(now), crate::usage::Due { antigravity: false, kiro: false, grok: vec!["g1".into()] }, "never run");
+        assert_eq!(store.usage_due(now), crate::collect::Due { antigravity: false, kiro: false, grok: vec!["g1".into()] }, "never run");
         assert!(store.usage_due(now + 120_000).grok.is_empty(), "the events file has not changed");
         grok_events(t.path(), 2_000);
         assert_eq!(store.usage_due(now + 130_000).grok, vec!["g1".to_string()], "changed, and the last run is over a minute old");

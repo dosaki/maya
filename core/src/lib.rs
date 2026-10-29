@@ -8,6 +8,7 @@ pub mod brain;
 pub mod claude_menus;
 pub mod codex;
 pub mod codex_hooks;
+pub mod collect;
 pub mod config;
 pub mod context;
 pub mod deployments;

@@ -1162,7 +1162,7 @@ pub(crate) fn poll_pull_requests(app: &AppHandle) {
 /// Runs the usage collectors that are due (`grok usage` and the like),
 /// outside the store lock, and repaints when anything was learned.
 pub(crate) fn poll_usage(app: &AppHandle) {
-    if maya_core::usage::collect(&app.state::<AppState>().store) {
+    if maya_core::collect::collect(&app.state::<AppState>().store) {
         refresh_and_emit(app);
     }
 }
@@ -1783,7 +1783,7 @@ pub fn run() {
             let usage_handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 poll_usage(&usage_handle);
-                std::thread::sleep(maya_core::usage::COLLECT_EVERY);
+                std::thread::sleep(maya_core::collect::COLLECT_EVERY);
             });
             let asks_handle = app.handle().clone();
             std::thread::spawn(move || loop {

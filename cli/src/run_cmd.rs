@@ -238,10 +238,10 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
         let (s, due, stop) = (store.clone(), exec.board_due.clone(), stop.clone());
         std::thread::spawn(move || {
             while !stop.load(Ordering::SeqCst) {
-                if maya_core::usage::collect(&s) {
+                if maya_core::collect::collect(&s) {
                     due.store(true, Ordering::SeqCst);
                 }
-                std::thread::sleep(maya_core::usage::COLLECT_EVERY);
+                std::thread::sleep(maya_core::collect::COLLECT_EVERY);
             }
         });
     }
