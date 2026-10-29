@@ -1577,7 +1577,7 @@ mod tests {
         assert!(dir.path().join("clones").is_dir());
         let calls = fake.calls.lock().unwrap();
         let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
-        assert!(command.contains("git clone 'git@github.com:Org/bedrock.git'") && command.ends_with("&& codex -- \"$p\""), "{command}");
+        assert!(command.contains("git clone -- 'git@github.com:Org/bedrock.git'") && command.ends_with("&& codex -- \"$p\""), "{command}");
         assert!(command.contains("fetch origin '+pull/451/head:refs/maya/review/451'") && command.contains("worktree add --detach"), "{command}");
         let file = command.split("cat '").nth(1).unwrap().split('\'').next().unwrap();
         assert_eq!(std::fs::read_to_string(file).unwrap(), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
@@ -1667,7 +1667,7 @@ mod tests {
         let l = Local { store: &store, terminal: &fake };
         let pr = crate::reviews::ReviewPr { ssh_url: Some(dir.path().join("no-such-origin").to_string_lossy().into_owned()), ..bedrock_pr() };
         let err = start_review(&l, &pr).unwrap_err();
-        assert!(err.contains("no-such-origin") && err.starts_with("fatal:"), "git's clone error: {err}");
+        assert!(!err.is_empty() && err.contains("no-such-origin"), "git's clone error: {err}");
         assert!(fake.calls.lock().unwrap().is_empty(), "no terminal opens");
     }
 
@@ -1687,7 +1687,7 @@ mod tests {
         start_review(&l, &pr).unwrap();
         let calls = fake.calls.lock().unwrap();
         let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
-        assert!(command.contains("git clone 'https://github.com/Org/bedrock.git'"), "{command}");
+        assert!(command.contains("git clone -- 'https://github.com/Org/bedrock.git'"), "{command}");
     }
 
     #[test]

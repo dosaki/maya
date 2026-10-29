@@ -371,7 +371,7 @@ pub fn git_steps(target: &ReviewTarget, clone_url: &str) -> Vec<Vec<String>> {
     let step = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
     let mut steps = vec![];
     if target.clone {
-        steps.push(step(&["clone", clone_url, &clone]));
+        steps.push(step(&["clone", "--", clone_url, &clone]));
     }
     steps.push(step(&["-C", &clone, "fetch", "origin"]));
     steps.push(step(&["-C", &clone, "fetch", "origin", &format!("+{}:{}", target.pr_ref, target.local_ref)]));
@@ -384,12 +384,20 @@ pub fn git_steps(target: &ReviewTarget, clone_url: &str) -> Vec<Vec<String>> {
     steps
 }
 
-/// Runs `git_steps` with no shell; the first failure returns git's stderr, trimmed.
+/// One of `git_steps` as the core runs it: with no terminal, a credential
+/// prompt fails instead of waiting. The user's ssh command is left as it is.
+fn git_step(args: &[String]) -> std::process::Command {
+    let mut cmd = crate::command("git");
+    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
+    cmd
+}
+
+/// Runs `git_steps` with no shell; the first failure returns git's message.
 pub fn run_git_steps(steps: &[Vec<String>]) -> Result<(), String> {
     for args in steps {
-        let out = crate::command("git").args(args).stdin(Stdio::null()).output().map_err(|e| format!("Could not run git: {e}"))?;
+        let out = git_step(args).output().map_err(|e| format!("Could not run git: {e}"))?;
         if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let err = crate::worktree::git_error(&out.stderr);
             return Err(if err.is_empty() { format!("git {} failed.", args.join(" ")) } else { err });
         }
     }
@@ -727,7 +735,7 @@ mod tests {
         let url = "git@github.com:Org/bedrock.git";
         let fetch = [v(&["-C", "/c/bedrock", "fetch", "origin"]), v(&["-C", "/c/bedrock", "fetch", "origin", "+pull/451/head:refs/maya/review/451"])];
         let add = [v(&["-C", "/c/bedrock", "worktree", "prune"]), v(&["-C", "/c/bedrock", "worktree", "add", "--detach", "/c/bedrock-451", "refs/maya/review/451"])];
-        let fresh: Vec<_> = [v(&["clone", url, "/c/bedrock"])].into_iter().chain(fetch.clone()).chain(add.clone()).collect();
+        let fresh: Vec<_> = [v(&["clone", "--", url, "/c/bedrock"])].into_iter().chain(fetch.clone()).chain(add.clone()).collect();
         assert_eq!(git_steps(&target(true, false, false), url), fresh);
         let cloned: Vec<_> = fetch.iter().cloned().chain(add.clone()).collect();
         assert_eq!(git_steps(&target(false, false, false), url), cloned, "the clone is made once");
@@ -744,7 +752,7 @@ mod tests {
         let file = Path::new("/Users/x/.claude/maya/prompts/1.txt");
         let s = shell_command(crate::model::Harness::ClaudeCode, &target, "git@github.com:Org/bedrock.git", "review bedrock #451", file, None);
         let q = |p: &Path| shell_single_quote(&p.to_string_lossy());
-        assert!(s.starts_with(&format!("mkdir -p {} && git clone 'git@github.com:Org/bedrock.git' {} && ", q(&clones), q(&clones.join("bedrock")))), "{s}");
+        assert!(s.starts_with(&format!("mkdir -p {} && git clone -- 'git@github.com:Org/bedrock.git' {} && ", q(&clones), q(&clones.join("bedrock")))), "{s}");
         assert!(s.contains(&format!("git -C {} fetch origin '+pull/451/head:refs/maya/review/451' && ", q(&clones.join("bedrock")))), "{s}");
         assert!(s.contains(&format!("worktree add --detach {} 'refs/maya/review/451' && ", q(&clones.join("bedrock-451")))), "{s}");
         assert!(s.ends_with("-- \"$p\""), "{s}");
@@ -779,6 +787,8 @@ mod tests {
         git(t.path(), &["init", "-q", "-b", "main", work.to_str().unwrap()]);
         git(&work, &["config", "user.email", "maya@example.com"]);
         git(&work, &["config", "user.name", "Maya"]);
+        git(&work, &["config", "commit.gpgsign", "false"]);
+        git(&work, &["config", "core.hooksPath", "/dev/null"]);
         git(&work, &["remote", "add", "origin", origin.to_str().unwrap()]);
         commit(&work, "a");
         git(&work, &["push", "-q", "origin", "main"]);
@@ -810,8 +820,26 @@ mod tests {
     fn a_failing_review_step_returns_gits_message() {
         let t = tempfile::tempdir().unwrap();
         let missing = t.path().join("missing").to_string_lossy().into_owned();
-        let err = run_git_steps(&[vec!["clone".into(), missing, t.path().join("c").to_string_lossy().into_owned()]]).unwrap_err();
-        assert!(err.starts_with("fatal:") && err == err.trim(), "{err}");
+        let err = run_git_steps(&[vec!["clone".into(), "--".into(), missing, t.path().join("c").to_string_lossy().into_owned()]]).unwrap_err();
+        assert!(!err.is_empty() && err.contains("missing") && err == err.trim(), "{err}");
+    }
+
+    #[test]
+    fn a_failing_clone_leaves_out_gits_progress_line() {
+        let t = tempfile::tempdir().unwrap();
+        // A file URL makes git say "Cloning into" before it fails.
+        let path = t.path().join("missing").to_string_lossy().replace('\\', "/");
+        let url = format!("file:///{}", path.trim_start_matches('/'));
+        let err = run_git_steps(&[vec!["clone".into(), "--".into(), url, t.path().join("c").to_string_lossy().into_owned()]]).unwrap_err();
+        assert!(err.contains("missing") && !err.contains("Cloning into"), "{err}");
+    }
+
+    #[test]
+    fn the_core_runs_review_git_with_no_terminal_prompt() {
+        let cmd = git_step(&["-C".to_string(), "/c/bedrock".to_string(), "fetch".to_string(), "origin".to_string()]);
+        let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
+        assert!(envs.contains(&("GIT_TERMINAL_PROMPT".into(), Some("0".into()))), "{envs:?}");
+        assert!(!envs.iter().any(|(k, _)| k == "GIT_SSH_COMMAND"), "the user's ssh command is left alone: {envs:?}");
     }
 
     #[test]
@@ -949,7 +977,7 @@ mod tests {
         assert_eq!(s, "cd '/Users/x/reviews/bedrock-451' && p=\"$(cat '/Users/x/.claude/maya/prompts/1.txt')\" && rm -f '/Users/x/.claude/maya/prompts/1.txt' && claude -n 'review bedrock #451' -- \"$p\"", "an old full clone runs the agent alone");
         let fresh = target(true, false, false);
         let s = shell_command(crate::model::Harness::Codex, &fresh, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
-        assert!(s.starts_with("mkdir -p '/c' && git clone 'https://github.com/Org/bedrock.git' '/c/bedrock' && git -C '/c/bedrock' fetch origin && "), "{s}");
+        assert!(s.starts_with("mkdir -p '/c' && git clone -- 'https://github.com/Org/bedrock.git' '/c/bedrock' && git -C '/c/bedrock' fetch origin && "), "{s}");
         assert!(s.contains(" && git -C '/c/bedrock' worktree prune && git -C '/c/bedrock' worktree add --detach '/c/bedrock-451' 'refs/maya/review/451' && cd '/c/bedrock-451' && "), "{s}");
         assert!(s.ends_with("&& codex -- \"$p\""), "no -n for Codex: the name waits as a pending name: {s}");
         let s = shell_command(crate::model::Harness::Grok, &old, "https://github.com/Org/bedrock.git", "review bedrock #451", file, Some("1111-2222"));
