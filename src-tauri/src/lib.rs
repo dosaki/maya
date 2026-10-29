@@ -580,8 +580,8 @@ fn open_review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo:
 }
 
 /// Opens a terminal that reviews a listed PR with Maya's agent and the
-/// review prompt from Settings, in the project checkout when it is free,
-/// else in a clone under the clones dir.
+/// review prompt from Settings, in a worktree of one clone per repository
+/// under the clones dir.
 #[tauri::command(async)]
 fn review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<String, String> {
     let pr = review_pr_for(&state, forge, &repo, number)?;

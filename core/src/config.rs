@@ -121,7 +121,7 @@ pub struct Config {
     /// The ElevenLabs voice to use; the key itself lives in the Keychain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elevenlabs_voice_id: Option<String>,
-    /// Where PR review clones go when the project checkout is missing or busy.
+    /// Where review clones and worktrees go: reviews' and new sessions'.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clones_dir: Option<String>,
     /// Listen for the wake word while the app runs.
