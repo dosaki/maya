@@ -164,7 +164,6 @@ body { margin: 0; background: var(--bg); }
 .usage--medium .usage__bar { width: 44px; }
 .usage__fill { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--gold), var(--gold-bright)); }
 .usage__meter[data-kind="limit"] .usage__fill { background: var(--working); }
-.usage__meter[data-kind="limit"][data-band="mid"] .usage__fill { background: var(--gold); }
 .usage__meter[data-band="high"] .usage__fill { background: var(--awaiting); }
 .usage__pct, .usage__amount { color: var(--text); font-variant-numeric: tabular-nums; }
 .usage__meter[data-band="high"] .usage__pct { color: var(--awaiting); }

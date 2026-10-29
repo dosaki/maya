@@ -335,6 +335,13 @@ describe("renderModal", () => {
     expect(styles).toContain(".usage { display: flex;");
   });
 
+  it("keeps limit bars blue until 75 percent turns them amber, and context bars gold", () => {
+    expect(styles).toContain('.usage__meter[data-kind="limit"] .usage__fill { background: var(--working); }');
+    expect(styles).toContain('.usage__meter[data-band="high"] .usage__fill { background: var(--awaiting); }');
+    // No mid-band fill colour: a limit at 50-74% must not look like the context bar.
+    expect(styles).not.toMatch(/data-band="mid"\][^{]*\.usage__fill/);
+  });
+
   it("tells the user to reply when the session asked in prose", () => {
     const h = handlers();
     const asked = { ...base, state: "awaiting" as const, awaiting: { kind: "text" as const, detail: "Create it as drafted?", questions: [] } };
