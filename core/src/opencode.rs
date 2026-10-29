@@ -149,6 +149,10 @@ pub struct SessionInfo {
     pub viewed_ms: Option<u64>,
     /// Input, output and cache-read tokens of the last turn.
     pub tokens_used: u64,
+    /// Everything the session has spent; reasoning counts as output.
+    pub tokens: crate::usage::TokenCounts,
+    /// What the server priced the session at, in millionths of a dollar.
+    pub cost_micros: u64,
 }
 
 fn str_of(v: &Value) -> Option<String> {
@@ -174,6 +178,13 @@ pub fn sessions(v: &Value) -> Vec<SessionInfo> {
                 idle_ms: s["time"]["idle"].as_u64(),
                 viewed_ms: s["time"]["viewed"].as_u64(),
                 tokens_used: t["input"].as_u64().unwrap_or(0) + t["output"].as_u64().unwrap_or(0) + t["cache"]["read"].as_u64().unwrap_or(0),
+                tokens: crate::usage::TokenCounts {
+                    input: t["input"].as_u64().unwrap_or(0),
+                    cached_input: t["cache"]["read"].as_u64().unwrap_or(0),
+                    cache_write: t["cache"]["write"].as_u64().unwrap_or(0),
+                    output: t["output"].as_u64().unwrap_or(0) + t["reasoning"].as_u64().unwrap_or(0),
+                },
+                cost_micros: (s["cost"].as_f64().unwrap_or(0.0).max(0.0) * 1e6).round() as u64,
             })
         })
         .collect()
@@ -565,7 +576,7 @@ pub fn card_for(s: &SessionInfo, live: &Live, snippet: Option<String>, context_w
         terminal: None,
         stale: false,
         model: s.model.as_ref().map(|(p, m, _)| format!("{p}/{m}")),
-        branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None
+        branch: None, brain: false, shell: false, usage: Some(crate::usage::SessionUsage { tokens: s.tokens, cost: Some(crate::usage::Cost { micros: s.cost_micros, unit: crate::usage::CostUnit::Usd, estimated: false, models: vec![] }) }), limits: None, status_line: None
     })
 }
 
@@ -658,6 +669,8 @@ mod tests {
         assert_eq!(hi.model.as_ref().map(|m| (m.0.as_str(), m.1.as_str())), Some(("opencode", "fledge-alpha-free")));
         assert_eq!(hi.idle_ms, Some(1_791_029_162_638));
         assert_eq!(hi.tokens_used, 10_083 + 207, "input plus output plus cache reads");
+        assert_eq!(hi.tokens, crate::usage::TokenCounts { input: 10_083, cached_input: 0, cache_write: 0, output: 207 });
+        assert_eq!(hi.cost_micros, 0);
         assert!(hi.parent_id.is_none());
         assert!(sessions(&Value::Null).is_empty());
     }
@@ -687,7 +700,20 @@ mod tests {
     }
 
     fn session(id: &str, dir: &str, updated: u64) -> SessionInfo {
-        SessionInfo { id: id.into(), parent_id: None, title: Some("t".into()), directory: dir.into(), agent: "build".into(), model: None, created_ms: updated, updated_ms: updated, idle_ms: None, viewed_ms: None, tokens_used: 500 }
+        SessionInfo { id: id.into(), parent_id: None, title: Some("t".into()), directory: dir.into(), agent: "build".into(), model: None, created_ms: updated, updated_ms: updated, idle_ms: None, viewed_ms: None, tokens_used: 500, tokens: Default::default(), cost_micros: 0 }
+    }
+
+    #[test]
+    fn the_card_carries_the_sessions_tokens_and_dollar_cost() {
+        use crate::usage::{Cost, CostUnit, SessionUsage, TokenCounts};
+        let quiet = Live { running: false, permission: None, form: None };
+        let list = sessions(&json("sessions.json"));
+        let hi = list.iter().find(|s| s.title.as_deref() == Some("Saying \"Hi\" request")).unwrap();
+        let c = card_for(hi, &Live { running: true, ..quiet.clone() }, None, None, None, 7, "/maya", hi.updated_ms, 30 * 60_000).unwrap();
+        assert!(c.usage.is_some());
+        let paid = SessionInfo { tokens: TokenCounts { input: 100, cached_input: 40, cache_write: 5, output: 20 }, cost_micros: 12_345, ..session("ses_1", "/p", 1_000) };
+        let c = card_for(&paid, &Live { running: true, ..quiet }, None, None, None, 7, "/maya", 5_000, 30 * 60_000).unwrap();
+        assert_eq!(c.usage, Some(SessionUsage { tokens: paid.tokens, cost: Some(Cost { micros: 12_345, unit: CostUnit::Usd, estimated: false, models: vec![] }) }));
     }
 
     #[test]
