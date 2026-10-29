@@ -23,7 +23,7 @@
 
 use super::merge::{display_names, RemoteBoard};
 use super::identity::{encode_key, Keypair};
-use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_CHAT, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
+use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_CHAT, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, CAP_WORKTREE, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
 use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use super::{AssistantStatus, NetworkStatus, PairingCode};
@@ -302,7 +302,7 @@ impl Server {
             .iter()
             .zip(labels)
             .filter_map(|(p, (id, label))| {
-                self.by_id.get(&id).map(|b| RemoteBoard { machine: label, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), ..b.clone() })
+                self.by_id.get(&id).map(|b| RemoteBoard { machine: label, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), worktrees: self.peers.get(&id).is_some_and(|p| p.caps.iter().any(|c| c == CAP_WORKTREE)), ..b.clone() })
             })
             .collect();
         boards.sort_by(|a, b| a.machine.cmp(&b.machine));
@@ -1099,7 +1099,7 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
                 if current {
                     s.touch(&link.id);
                     // `sync_boards` fills in the label, hostname, platform and address.
-                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, agents, remembered, received_at: now_ms(), connected: true });
+                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, agents, remembered, worktrees: false, received_at: now_ms(), connected: true });
                     s.sync_boards();
                 }
                 current
@@ -2034,6 +2034,20 @@ mod tests {
     }
 
     #[test]
+    fn a_board_says_whether_its_maya_takes_worktrees() {
+        let (handle, port) = test_server();
+        let (mut new, _, _, _) = pair_client_caps(&handle, port, "new", &[CAP_WORKTREE]);
+        let (mut old, _, _, _) = pair_client_caps(&handle, port, "old", &[]);
+        send(&mut new, &Up::Board { cards: vec![], dirs: vec![], agents: None, remembered: None });
+        send(&mut old, &Up::Board { cards: vec![], dirs: vec![], agents: None, remembered: None });
+        wait_until(|| handle.boards().len() == 2);
+        let boards = handle.boards();
+        assert!(boards.iter().find(|b| b.machine == "new").unwrap().worktrees);
+        assert!(!boards.iter().find(|b| b.machine == "old").unwrap().worktrees);
+        handle.stop();
+    }
+
+    #[test]
     fn an_unknown_key_is_told_it_was_removed_and_a_wrong_code_is_refused() {
         let (handle, port) = test_server();
         let mut ws = connect_as(&handle, port, &Keypair::generate(), "x", &[]);
@@ -2229,7 +2243,7 @@ mod tests {
         let mut s = Server::new(vec![], "desk".into());
         let (first, previous) = s.record_pairing("a2V5", "192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
         assert!(previous.is_none());
-        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None, received_at: 0, connected: false });
+        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None, worktrees: false, received_at: 0, connected: false });
         // The same key from another address: the same machine, at its new address.
         let (second, previous) = s.record_pairing("a2V5", "192.168.55.80", "Gnowee", "TKC-0176", "macos", false);
         assert_eq!(previous.as_ref(), Some(&first));

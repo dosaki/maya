@@ -154,7 +154,7 @@ pub fn list_agents(hub: H, machine: Option<String>) -> AgentsReply {
     let machine = machine.filter(|m| !m.is_empty());
     hub.request(machine.as_deref(), Request::ListAgents).and_then(data).unwrap_or_else(|e| {
         log::line("network", format!("could not list the agents: {e}"));
-        agents_reply(false, None, Vec::new)
+        agents_reply(false, None, false, Vec::new)
     })
 }
 

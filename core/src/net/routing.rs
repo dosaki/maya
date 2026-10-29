@@ -5,6 +5,7 @@
 use super::protocol::Attachment;
 use super::NetworkStatus;
 use crate::agents::{self, AgentInfo};
+use crate::launch::LaunchOptions;
 use crate::model::Harness;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -27,13 +28,15 @@ pub struct MachineInfo {
     pub connected: bool,
 }
 
-/// The agents a machine can start, and whether its Maya takes a session
-/// name (an older one ignores names).
+/// The agents a machine can start, whether its Maya takes a session name
+/// (an older one ignores names), and whether it starts a session in a
+/// worktree when asked.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentsReply {
     pub agents: Vec<AgentInfo>,
     pub names: bool,
+    pub worktrees: bool,
 }
 
 /// Reads and base64-encodes local files for a remote reply's attachments;
@@ -61,14 +64,15 @@ pub fn remote_attachments(paths: &[String]) -> Result<Vec<Attachment>, String> {
 }
 
 /// A remote that reports no agents runs an older Maya: it starts only
-/// Claude Code and ignores a name. Locally, `local_list` is asked.
-pub fn agents_reply(local: bool, remote: Option<Vec<AgentInfo>>, local_list: impl FnOnce() -> Vec<AgentInfo>) -> AgentsReply {
+/// Claude Code and ignores a name. Locally, `local_list` is asked and a
+/// worktree is always possible; a remote says so in `remote_worktrees`.
+pub fn agents_reply(local: bool, remote: Option<Vec<AgentInfo>>, remote_worktrees: bool, local_list: impl FnOnce() -> Vec<AgentInfo>) -> AgentsReply {
     if local {
-        return AgentsReply { agents: local_list(), names: true };
+        return AgentsReply { agents: local_list(), names: true, worktrees: true };
     }
     match remote {
-        Some(agents) => AgentsReply { agents, names: true },
-        None => AgentsReply { agents: vec![agents::claude()], names: false },
+        Some(agents) => AgentsReply { agents, names: true, worktrees: remote_worktrees },
+        None => AgentsReply { agents: vec![agents::claude()], names: false, worktrees: remote_worktrees },
     }
 }
 
@@ -79,6 +83,14 @@ pub fn check_remote_agent(agent: Harness, remote: &Option<Vec<AgentInfo>>, machi
         Some(list) if !list.iter().any(|a| a.harness == agent) => Err(format!("That agent is not installed on {machine}.")),
         _ => Ok(()),
     }
+}
+
+/// An older Maya drops the worktree option and starts on the shared branch: refuse instead.
+pub fn check_remote_worktree(options: &LaunchOptions, worktrees: bool, machine: &str) -> Result<(), String> {
+    if options.worktree && !worktrees {
+        return Err(format!("{machine} runs an older Maya that cannot start a session in a worktree."));
+    }
+    Ok(())
 }
 
 /// The pickers' machine list from the network status: the display names
@@ -196,16 +208,28 @@ mod tests {
 
     #[test]
     fn an_older_remote_starts_claude_code_only_and_ignores_names() {
-        let reply = agents_reply(false, None, Vec::new);
+        let reply = agents_reply(false, None, false, Vec::new);
         assert_eq!(reply.agents.len(), 1);
         assert_eq!(reply.agents[0].harness, Harness::ClaudeCode);
         assert!(!reply.names);
-        let reply = agents_reply(false, Some(vec![agent(Harness::Codex)]), Vec::new);
+        assert!(!reply.worktrees);
+        let reply = agents_reply(false, Some(vec![agent(Harness::Codex)]), false, Vec::new);
         assert_eq!(reply.agents[0].harness, Harness::Codex);
         assert!(reply.names);
-        let reply = agents_reply(true, None, || vec![agent(Harness::Kiro)]);
+        assert!(!reply.worktrees);
+        assert!(agents_reply(false, Some(vec![agent(Harness::Codex)]), true, Vec::new).worktrees);
+        let reply = agents_reply(true, None, false, || vec![agent(Harness::Kiro)]);
         assert_eq!(reply.agents[0].harness, Harness::Kiro);
         assert!(reply.names);
+        assert!(reply.worktrees);
+    }
+
+    #[test]
+    fn check_remote_worktree_refuses_an_older_maya() {
+        let ask = |worktree| crate::launch::LaunchOptions { worktree, ..Default::default() };
+        assert_eq!(check_remote_worktree(&ask(true), false, "mini").unwrap_err(), "mini runs an older Maya that cannot start a session in a worktree.");
+        assert!(check_remote_worktree(&ask(false), false, "mini").is_ok());
+        assert!(check_remote_worktree(&ask(true), true, "mini").is_ok());
     }
 
     #[test]
