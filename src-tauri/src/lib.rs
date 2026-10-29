@@ -91,7 +91,7 @@ use config::Config;
 use listener::VoiceState;
 use maya_core::agents;
 use maya_core::config::GitProvider;
-use maya_core::net::routing::{agents_reply, check_remote_agent, machines_of, remote_attachments, AgentsReply, MachineInfo, ROUTE_TIMEOUT};
+use maya_core::net::routing::{agents_reply, check_remote_agent, check_remote_worktree, machines_of, remote_attachments, AgentsReply, MachineInfo, ROUTE_TIMEOUT};
 use model::{Card, Harness};
 use net::merge;
 use net::protocol::CommandKind;
@@ -580,8 +580,8 @@ fn open_review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo:
 }
 
 /// Opens a terminal that reviews a listed PR with Maya's agent and the
-/// review prompt from Settings, in the project checkout when it is free,
-/// else in a clone under the clones dir.
+/// review prompt from Settings, in a worktree of one clone per repository
+/// under the clones dir.
 #[tauri::command(async)]
 fn review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<String, String> {
     let pr = review_pr_for(&state, forge, &repo, number)?;
@@ -1335,8 +1335,10 @@ fn list_project_dirs(state: TauriState<AppState>, machine: Option<String>) -> Re
 #[tauri::command(async)]
 fn list_agents(state: TauriState<AppState>, machine: Option<String>) -> AgentsReply {
     let local = is_local(&machine);
-    let remote = if local { None } else { merge::agents_of(&remote_boards(&state), machine.as_deref().unwrap_or_default()) };
-    agents_reply(local, remote, agents::current)
+    let boards = remote_boards(&state);
+    let name = machine.as_deref().unwrap_or_default();
+    let remote = if local { None } else { merge::agents_of(&boards, name) };
+    agents_reply(local, remote, !local && merge::worktrees_of(&boards, name), agents::current)
 }
 
 #[tauri::command(async)]
@@ -1347,7 +1349,9 @@ fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String
         }
         options.validate_shape()?;
         let machine = machine.unwrap();
-        check_remote_agent(options.agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
+        let boards = remote_boards(&state);
+        check_remote_agent(options.agent, &merge::agents_of(&boards, &machine), &machine)?;
+        check_remote_worktree(&options, merge::worktrees_of(&boards, &machine), &machine)?;
         return route_data(&app, &machine, start_kind_for(dir, prompt, options));
     }
     actions::start_session(&local(&state), dir, prompt, options)
@@ -1957,13 +1961,14 @@ mod route_tests {
 
     #[test]
     fn an_older_remote_offers_claude_and_no_name() {
-        let r = agents_reply(false, None, || panic!("not local"));
+        let r = agents_reply(false, None, false, || panic!("not local"));
         assert_eq!(r.agents, vec![maya_core::agents::claude()]);
         assert!(!r.names);
-        let r = agents_reply(false, Some(vec![maya_core::agents::claude(), maya_core::agents::info_for(Harness::Grok, None)]), || panic!("not local"));
+        let r = agents_reply(false, Some(vec![maya_core::agents::claude(), maya_core::agents::info_for(Harness::Grok, None)]), false, || panic!("not local"));
         assert_eq!(r.agents.len(), 2);
         assert!(r.names);
-        assert!(agents_reply(true, None, || vec![maya_core::agents::claude()]).names);
+        assert!(agents_reply(true, None, false, || vec![maya_core::agents::claude()]).names);
+        assert!(agents_reply(false, None, true, || panic!("not local")).worktrees);
     }
 
     #[test]

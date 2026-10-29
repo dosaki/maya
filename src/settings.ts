@@ -822,7 +822,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
 
   const clonesLabel = document.createElement("label");
-  clonesLabel.textContent = "Clones directory (for PR reviews)";
+  clonesLabel.textContent = "Clones directory (for reviews and worktrees)";
   const clonesInput = document.createElement("input");
   clonesInput.type = "text";
   clonesInput.name = "clonesDir";

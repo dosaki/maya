@@ -34,8 +34,8 @@ export interface AgentInfo {
   modes: string[];
 }
 
-/** What Start sends: the agent, the name ("" for none) and its options. */
-export type StartChoices = SessionOptions & { agent: Harness; name: string };
+/** What Start sends: the agent, the name ("" for none), whether to use a new worktree and its options. */
+export type StartChoices = SessionOptions & { agent: Harness; name: string; worktree: boolean };
 
 /** Claude Code as Maya always knows it, before or without a listing. */
 export const CLAUDE_AGENT: AgentInfo = {
@@ -103,6 +103,10 @@ export interface NewSessionModel {
   agent: Harness;
   /** The machine's Maya takes names (an older one does not). */
   names: boolean;
+  /** The machine can start a session in a new worktree (an older one cannot). */
+  worktrees: boolean;
+  /** New worktree is ticked. */
+  worktree: boolean;
   /** The machine's agent listing has landed: until then Start waits, so a prompt cannot run under a provisional agent. */
   agentsLoaded: boolean;
   name: string;
@@ -289,8 +293,33 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
     optionSelects.push([f.name, sel]);
     optionRow.append(field);
   }
+
+  // An older Maya over there would ignore the option, so it is not offered.
+  let worktreeBox: HTMLInputElement | null = null;
+  let worktreeLabel: HTMLLabelElement | null = null;
+  let worktreeWarning: HTMLParagraphElement | null = null;
+  if (m.worktrees) {
+    worktreeLabel = el("label", "newsession__check");
+    worktreeBox = el("input", "");
+    worktreeBox.name = "worktree";
+    worktreeBox.type = "checkbox";
+    worktreeBox.checked = m.worktree;
+    worktreeLabel.append(worktreeBox, "New worktree");
+    const box = worktreeBox;
+    const warn = () => {
+      if (box.checked && !worktreeWarning) {
+        worktreeWarning = el("p", "newsession__hint newsession__warning", "Once this session is closed, Maya cannot resume it from the Resume list. Resume it from its folder with the agent.");
+        worktreeLabel!.after(worktreeWarning);
+      } else if (!box.checked && worktreeWarning) {
+        worktreeWarning.remove();
+        worktreeWarning = null;
+      }
+    };
+    box.addEventListener("change", warn);
+    warn();
+  }
   const readChoices = (): StartChoices => {
-    const o: StartChoices = { agent: agent.harness, name: nameInput?.value.trim() ?? "", model: "", effort: "", mode: "" };
+    const o: StartChoices = { agent: agent.harness, name: nameInput?.value.trim() ?? "", model: "", effort: "", mode: "", worktree: worktreeBox?.checked ?? false };
     for (const [name, sel] of optionSelects) o[name] = sel.value;
     return o;
   };
@@ -318,7 +347,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
 
   const actions = el("div", "newsession__actions");
   actions.append(start);
-  const fields: (HTMLElement | null)[] = [agentLabel, dirLabel, optionRow, nameLabel, promptLabel, actions];
+  const fields: (HTMLElement | null)[] = [agentLabel, dirLabel, optionRow, worktreeLabel, worktreeWarning, nameLabel, promptLabel, actions];
   form.append(...fields.filter((n): n is HTMLElement => n !== null));
   panel.append(form);
   if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.ok ? "ok" : "error"}`, m.status.text));
@@ -370,6 +399,8 @@ function capture(): void {
   if (ta && !m.done) m.prompt = ta.value;
   const name = host.querySelector<HTMLInputElement>("input[name=name]");
   if (name && !m.done) m.name = name.value;
+  const worktree = host.querySelector<HTMLInputElement>("input[name=worktree]");
+  if (worktree) m.worktree = worktree.checked;
   const sel = host.querySelector<HTMLSelectElement>("select[name=dir]");
   if (sel) m.dir = sel.value || null;
   saveOptions(host, m.agent);
@@ -444,16 +475,17 @@ async function loadDirs(machine: string): Promise<void> {
 async function loadAgents(machine: string): Promise<void> {
   const me = current;
   if (!me) return;
-  let reply: { agents: AgentInfo[]; names: boolean };
+  let reply: { agents: AgentInfo[]; names: boolean; worktrees?: boolean };
   try {
-    reply = await invoke<{ agents: AgentInfo[]; names: boolean }>("list_agents", { machine });
+    reply = await invoke<{ agents: AgentInfo[]; names: boolean; worktrees?: boolean }>("list_agents", { machine });
   } catch {
-    reply = { agents: [CLAUDE_AGENT], names: machine === "" };
+    reply = { agents: [CLAUDE_AGENT], names: machine === "", worktrees: machine === "" };
   }
   if (current !== me || me.model.machine !== machine) return;
   capture();
   me.model.agents = reply.agents.length > 0 ? reply.agents : [CLAUDE_AGENT];
   me.model.names = reply.names;
+  me.model.worktrees = reply.worktrees ?? false;
   const wanted = defaultAgent(me.model.agents, await brainAgent());
   if (current !== me || me.model.machine !== machine) return;
   me.model.agent = wanted;
@@ -476,6 +508,7 @@ async function chooseMachine(machine: string): Promise<void> {
   m.agents = [CLAUDE_AGENT];
   m.agent = "claude-code";
   m.names = machine === "";
+  m.worktrees = machine === "";
   m.agentsLoaded = false;
   m.options = optionsFor("claude-code");
   repaint();
@@ -543,6 +576,8 @@ export async function openNewSession(): Promise<void> {
       agents: [CLAUDE_AGENT],
       agent: "claude-code",
       names: true,
+      worktrees: true,
+      worktree: false,
       agentsLoaded: false,
       name: draftName,
     },

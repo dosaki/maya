@@ -20,6 +20,7 @@ the right terminal first.
 - Stops a session that is working with a Stop button, which sends it the same Esc you would press in its terminal
 - Answers a question from a menu like the agent's own: pick an option, write your own words with "Type something", or pick "Chat about this" to talk it over first
 - Starts new sessions and resumes old ones
+- Starts a new session in its own git worktree when you tick New worktree, on a new branch off the branch your checkout is on, so sessions in one repository do not step on each other
 - After a restart, offers to resume every session that was running, on this machine and on the paired ones, each in its own folder and terminal: from the Sessions tab, or by voice ("Maya, resume my sessions")
 - Shows what a session's terminal shows: the conversation, each command's output, edit diffs, how long it has been working, and its model, folder and branch
   - As a chat or in a terminal look, like the agent's own terminal (Settings → Sessions, or the `>_` button on the session)
@@ -28,7 +29,7 @@ the right terminal first.
   - Keeps quiet under a Focus mode, or when you mute her from the top bar
 - Lists the pull requests that ask for your review and the ones assigned to you, filtered by state and repository, with a dot for the review (green approved, blue commented, red changes requested): yours on review requests, the reviewers' on PRs assigned to you; reviews them in one click, and tells you when a PR assigned to you is approved or needs changes
 - Does what you tell her by voice, through the agent you choose: "Maya, tell <session> to do <thing>"
-- Resumes old sessions of any of them, and reviews pull requests with the agent you chose, on a prompt you can edit in Settings
+- Resumes old sessions of any of them, and reviews pull requests with the agent you chose, in a worktree of one clone per repository, on a prompt you can edit in Settings
 - Shows the sessions of all your machines on one board.
 - Comes in a dark theme (the default) and a light one: Settings › General › Theme
 - Lets you choose which Enter combinations send a message and which make a new line, several for each: Settings › Keyboard (Enter sends by default)
@@ -105,7 +106,7 @@ install, where the bar offers a Download link instead.
    permission prompt shows as Working. It never blocks Claude Code and a
    backup of your `settings.json` is taken before every change.
 2. Set your **projects directory** (for example `~/dev`) so the "+" can list
-   your folders, and a **clones directory** for pull-request reviews.
+   your folders, and a **clones directory** for pull-request reviews and worktrees.
 3. Open **Settings → Git** and turn on GitHub and/or GitLab (with its URL,
    for a self-hosted GitLab). Give each a token, or the name of a variable
    that holds one (`GH_TOKEN`, `GITLAB_TOKEN`), and pick SSH (the default)

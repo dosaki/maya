@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { setLocalMachine } from "./machines";
 import { comboLabel, defaultKeys, setKeyBindings } from "./keys";
 import { CLAUDE_AGENT, optionFields, renderNewSession, type AgentInfo, type NewSessionModel } from "./newsession";
+import styles from "./styles.css?raw";
 
 const handlers = () => ({ onStart: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn(), onMachine: vi.fn(), onAgent: vi.fn(), onModel: vi.fn() });
 const base: NewSessionModel = {
@@ -17,11 +18,13 @@ const base: NewSessionModel = {
   agents: [CLAUDE_AGENT],
   agent: "claude-code",
   names: true,
+  worktrees: true,
+  worktree: false,
   agentsLoaded: true,
   name: "",
 };
 const twoMachines = [{ name: "This Mac", value: "" }, { name: "laptop", value: "laptop" }];
-const defaults = { agent: "claude-code", name: "", model: "", effort: "", mode: "" };
+const defaults = { agent: "claude-code", name: "", model: "", effort: "", mode: "", worktree: false };
 
 describe("renderNewSession", () => {
   it("keeps Start disabled until the machine's agents are listed", () => {
@@ -91,7 +94,7 @@ describe("renderNewSession", () => {
     ta.value = "go";
     ta.dispatchEvent(new Event("input"));
     el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(h.onStart).toHaveBeenCalledWith("", null, "go", { agent: "claude-code", name: "", model: "opus", effort: "high", mode: "plan" });
+    expect(h.onStart).toHaveBeenCalledWith("", null, "go", { agent: "claude-code", name: "", model: "opus", effort: "high", mode: "plan", worktree: false });
   });
 
   it("preselects the remembered options", () => {
@@ -246,7 +249,7 @@ describe("agents", () => {
     const el = renderNewSession({ ...base, agents: [CLAUDE_AGENT, CODEX], agent: "codex", dir: "a", prompt: "go" }, h);
     el.querySelector<HTMLInputElement>("input[name=name]")!.value = "  Fix CI ";
     el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(h.onStart).toHaveBeenCalledWith("", "a", "go", { agent: "codex", name: "Fix CI", model: "", effort: "", mode: "" });
+    expect(h.onStart).toHaveBeenCalledWith("", "a", "go", { agent: "codex", name: "Fix CI", model: "", effort: "", mode: "", worktree: false });
   });
 
   it("starts from the Name field with the send shortcut", () => {
@@ -262,5 +265,51 @@ describe("agents", () => {
     const el = renderNewSession({ ...base, machines: twoMachines, machine: "laptop", names: false }, handlers());
     expect(el.querySelector("input[name=name]")).toBeNull();
     expect(el.querySelector("select[name=agent]")).toBeNull();
+  });
+
+  it("offers New worktree, off by default, and passes it to start", () => {
+    const h = handlers();
+    const el = renderNewSession({ ...base, prompt: "go" }, h);
+    const box = el.querySelector<HTMLInputElement>("label.newsession__check input[type=checkbox][name=worktree]")!;
+    expect(box.checked).toBe(false);
+    expect(box.closest("label")!.textContent).toBe("New worktree");
+    el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    expect(h.onStart).toHaveBeenLastCalledWith("", null, "go", defaults);
+    box.checked = true;
+    el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    expect(h.onStart).toHaveBeenLastCalledWith("", null, "go", { ...defaults, worktree: true });
+  });
+
+  it("warns that a worktree session cannot be resumed from the list while it is ticked", () => {
+    const el = renderNewSession(base, handlers());
+    const box = el.querySelector<HTMLInputElement>("input[name=worktree]")!;
+    expect(el.querySelector(".newsession__warning")).toBeNull();
+    box.checked = true;
+    box.dispatchEvent(new Event("change"));
+    expect(el.querySelector(".newsession__warning")!.textContent).toBe(
+      "Once this session is closed, Maya cannot resume it from the Resume list. Resume it from its folder with the agent.",
+    );
+    box.checked = false;
+    box.dispatchEvent(new Event("change"));
+    expect(el.querySelector(".newsession__warning")).toBeNull();
+  });
+
+  it("lays the New worktree box and its text on one line, in the theme's colours", () => {
+    expect(styles).toContain(".newsession__check { display: flex; align-self: flex-start; align-items: center; gap: 8px; color: var(--text); cursor: pointer; }");
+    expect(styles).toContain(".newsession__check input { margin: 0; }");
+  });
+
+  it("shows the warning at once when the box comes back ticked", () => {
+    const el = renderNewSession({ ...base, worktree: true }, handlers());
+    expect(el.querySelector<HTMLInputElement>("input[name=worktree]")!.checked).toBe(true);
+    expect(el.querySelector(".newsession__warning")).not.toBeNull();
+  });
+
+  it("hides New worktree for a machine that cannot start one", () => {
+    const h = handlers();
+    const el = renderNewSession({ ...base, worktrees: false, worktree: true, prompt: "go" }, h);
+    expect(el.querySelector("input[name=worktree]")).toBeNull();
+    el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    expect(h.onStart).toHaveBeenCalledWith("", null, "go", defaults);
   });
 });

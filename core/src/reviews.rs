@@ -3,6 +3,7 @@ use crate::model::Harness;
 use crate::config::GitProvider;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use crate::forge::{Forge, ForgeError, ForgeSite, Http};
 
 /// Why a PR is on the list.
@@ -280,19 +281,6 @@ fn is_checkout_of(dir: &Path, site: &ForgeSite, repo: &str) -> bool {
     crate::forge::origin_of(dir).and_then(|o| crate::forge::route(&o, std::slice::from_ref(site)).map(|(_, p)| p)).is_some_and(|p| p.eq_ignore_ascii_case(repo))
 }
 
-/// A checkout of `repo` on `site` under `projects_root`: the folder named
-/// after the repo when it is one, else the first match by folder name.
-pub fn find_checkout(projects_root: &Path, site: &ForgeSite, repo: &str) -> Option<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(projects_root) else { return None };
-    let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_dir() && p.join(".git").exists()).collect();
-    dirs.sort();
-    let named = projects_root.join(repo.rsplit('/').next().unwrap_or(repo));
-    if dirs.contains(&named) && is_checkout_of(&named, site, repo) {
-        return Some(named);
-    }
-    dirs.into_iter().find(|d| is_checkout_of(d, site, repo))
-}
-
 /// True when any live session's working directory is `dir` or inside it.
 pub fn is_busy(dir: &Path, live_cwds: &[String]) -> bool {
     let d = dir.to_string_lossy();
@@ -300,27 +288,120 @@ pub fn is_busy(dir: &Path, live_cwds: &[String]) -> bool {
     live_cwds.iter().any(|c| c == d.as_ref() || c.starts_with(&prefix))
 }
 
-/// Where a review runs and whether it must be cloned first.
+/// Where a review runs: a worktree of the repository's one clone, and the
+/// refs it checks out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewTarget {
+    /// The one clone of the repository: `<clones>/<repo>`, or
+    /// `<clones>/<owner>-<repo>` when another repository has that name.
+    pub clone_dir: PathBuf,
+    /// Where the review runs: the clone's folder name with `-<number>` (`-mr<number>` on GitLab).
     pub dir: PathBuf,
+    /// The forge's ref: `pull/<n>/head` on GitHub, `merge-requests/<n>/head` on GitLab.
+    pub pr_ref: String,
+    /// Maya's ref it is fetched into: `refs/maya/review/<n>` (`refs/maya/review/mr<n>` on GitLab).
+    pub local_ref: String,
+    /// `clone_dir` does not exist yet.
     pub clone: bool,
+    /// `dir` is a worktree of `clone_dir` already.
+    pub worktree_exists: bool,
+    /// `dir` is a full clone of the repository an earlier Maya made (its `.git` is a folder): review in it with no git steps.
+    pub legacy: bool,
 }
 
-/// The free project checkout if there is one; else `<clones>/<repo>-<number>`
-/// (`<repo>-mr<number>` on GitLab, so `!12` never reuses GitHub's `#12`),
-/// cloned unless it already exists.
-pub fn resolve_target(projects_root: &Path, clones_root: &Path, site: &ForgeSite, repo: &str, number: u64, live_cwds: &[String]) -> ReviewTarget {
-    if let Some(dir) = find_checkout(projects_root, site, repo) {
-        if !is_busy(&dir, live_cwds) {
-            return ReviewTarget { dir, clone: false };
+/// True when `dir` is a worktree of the clone at `clone_dir`: its `.git`
+/// is a file and git's common folder for it is the clone's `.git`.
+fn is_worktree_of(dir: &Path, clone_dir: &Path) -> bool {
+    if !dir.join(".git").is_file() {
+        return false;
+    }
+    let Ok(out) = crate::command("git").arg("-C").arg(dir).args(["rev-parse", "--git-common-dir"]).stdin(Stdio::null()).stderr(Stdio::null()).output() else {
+        return false;
+    };
+    let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // git may print it relative to `dir`.
+    out.status.success() && !common.is_empty() && matches!((std::fs::canonicalize(dir.join(common)), std::fs::canonicalize(clone_dir.join(".git"))), (Ok(a), Ok(b)) if a == b)
+}
+
+/// The review of `repo`'s PR `number` under `clones_root`. The marker
+/// `mr` on GitLab keeps `!12` from reusing GitHub's `#12`. When `<repo>`
+/// is another repository's clone, the clone and its worktrees are named
+/// after the full path instead (`OrgB/api` → `OrgB-api`); a folder of
+/// that name that is another repository's too is refused, as is a review
+/// folder that is neither a worktree of the clone nor an old full clone
+/// of the repository.
+pub fn resolve_target(clones_root: &Path, site: &ForgeSite, repo: &str, number: u64) -> Result<ReviewTarget, String> {
+    let repo_name = repo.rsplit('/').next().unwrap_or(repo);
+    let ours = |d: &Path| !d.exists() || is_checkout_of(d, site, repo);
+    let base = if ours(&clones_root.join(repo_name)) { repo_name.to_string() } else { repo.replace('/', "-") };
+    let clone_dir = clones_root.join(&base);
+    if !ours(&clone_dir) {
+        return Err(format!("{} is not a clone of {repo}; move it or change the clones directory.", clone_dir.display()));
+    }
+    let (marker, pr_ref) = match site.provider {
+        GitProvider::Gitlab => ("mr", format!("merge-requests/{number}/head")),
+        GitProvider::Github => ("", format!("pull/{number}/head")),
+    };
+    let dir = clones_root.join(format!("{base}-{marker}{number}"));
+    let worktree_exists = is_worktree_of(&dir, &clone_dir);
+    let legacy = dir.join(".git").is_dir() && is_checkout_of(&dir, site, repo);
+    if dir.exists() && !worktree_exists && !legacy {
+        return Err(format!("{} is not a review of {repo}; move it or change the clones directory.", dir.display()));
+    }
+    Ok(ReviewTarget {
+        clone: !clone_dir.exists(),
+        clone_dir,
+        pr_ref,
+        local_ref: format!("refs/maya/review/{marker}{number}"),
+        worktree_exists,
+        legacy,
+        dir,
+    })
+}
+
+/// The `git` argument lists a review runs before its agent, in order.
+/// Every branch is fetched too, so `origin/<base>` is current for an agent
+/// that diffs against it. The prune clears a worktree deleted by hand.
+pub fn git_steps(target: &ReviewTarget, clone_url: &str) -> Vec<Vec<String>> {
+    if target.legacy {
+        return vec![];
+    }
+    let clone = target.clone_dir.to_string_lossy().into_owned();
+    let dir = target.dir.to_string_lossy().into_owned();
+    let step = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    let mut steps = vec![];
+    if target.clone {
+        steps.push(step(&["clone", "--", clone_url, &clone]));
+    }
+    steps.push(step(&["-C", &clone, "fetch", "origin"]));
+    steps.push(step(&["-C", &clone, "fetch", "origin", &format!("+{}:{}", target.pr_ref, target.local_ref)]));
+    if target.worktree_exists {
+        steps.push(step(&["-C", &dir, "checkout", "--detach", &target.local_ref]));
+    } else {
+        steps.push(step(&["-C", &clone, "worktree", "prune"]));
+        steps.push(step(&["-C", &clone, "worktree", "add", "--detach", &dir, &target.local_ref]));
+    }
+    steps
+}
+
+/// One of `git_steps` as the core runs it: with no terminal, a credential
+/// prompt fails instead of waiting. The user's ssh command is left as it is.
+fn git_step(args: &[String]) -> std::process::Command {
+    let mut cmd = crate::command("git");
+    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
+    cmd
+}
+
+/// Runs `git_steps` with no shell; the first failure returns git's message.
+pub fn run_git_steps(steps: &[Vec<String>]) -> Result<(), String> {
+    for args in steps {
+        let out = git_step(args).output().map_err(|e| format!("Could not run git: {e}"))?;
+        if !out.status.success() {
+            let err = crate::worktree::git_error(&out.stderr);
+            return Err(if err.is_empty() { format!("git {} failed.", args.join(" ")) } else { err });
         }
     }
-    let repo_name = repo.rsplit('/').next().unwrap_or(repo);
-    let marker = if site.provider == GitProvider::Gitlab { "mr" } else { "" };
-    let dir = clones_root.join(format!("{repo_name}-{marker}{number}"));
-    let clone = !dir.is_dir();
-    ReviewTarget { dir, clone }
+    Ok(())
 }
 
 /// The name a review session is started with, so the board can tie it back
@@ -333,12 +414,18 @@ pub fn session_name(forge: GitProvider, name_with_owner: &str, number: u64) -> S
 /// The prompt a review session starts with: the template with `{number}`,
 /// `{repo}` and `{url}` filled in. A blank template means the built-in one;
 /// a template that names none of the three gets ` PR #<number> (<url>)`
-/// appended, so a bare slash command still says which pull request.
-pub const DEFAULT_REVIEW_PROMPT: &str = "Review pull request #{number} of {repo} ({url}). Make use of code review skills, and at the end give at most 3 options: Approve; Ask <questions here>; Request changes <changes here>. Mark the recommended option \"(Recommended)\". Show Ask and Request changes only when they are needed.";
+/// appended, so a bare slash command still says which pull request. The
+/// built-in one says the PR is checked out only when `checked_out`: an old
+/// full clone holds whatever was last checked out in it.
+pub const DEFAULT_REVIEW_PROMPT: &str = "Review pull request #{number} of {repo} ({url}). The pull request is checked out in this folder. Make use of code review skills, and at the end give at most 3 options: Approve; Ask <questions here>; Request changes <changes here>. Mark the recommended option \"(Recommended)\". Show Ask and Request changes only when they are needed.";
 
-pub fn render_prompt(template: &str, pr: &ReviewPr) -> String {
+/// The built-in prompt's sentence that holds only for a worktree Maya checked out.
+const CHECKED_OUT: &str = " The pull request is checked out in this folder.";
+
+pub fn render_prompt(template: &str, pr: &ReviewPr, checked_out: bool) -> String {
     let t = template.trim();
-    let t = if t.is_empty() { DEFAULT_REVIEW_PROMPT } else { t };
+    let built_in = if checked_out { DEFAULT_REVIEW_PROMPT.to_string() } else { DEFAULT_REVIEW_PROMPT.replace(CHECKED_OUT, "") };
+    let t = if t.is_empty() { built_in.as_str() } else { t };
     let number = pr.number.to_string();
     if ["{number}", "{repo}", "{url}"].iter().any(|p| t.contains(p)) {
         t.replace("{number}", &number).replace("{repo}", &pr.repo).replace("{url}", &pr.url)
@@ -347,20 +434,24 @@ pub fn render_prompt(template: &str, pr: &ReviewPr) -> String {
     }
 }
 
-/// The shell line the review terminal runs: a `git clone` first when needed, with the user's own git credentials, then
-/// the agent in the folder on the prompt file, as a new session named
-/// `review <repo> #<number>` (`-n` for Claude Code; the others get the name
-/// typed later, as `actions::start_session` does).
+/// The shell line the review terminal runs: `git_steps` first, with the
+/// user's own git credentials, then the agent in the folder on the prompt
+/// file, as a new session named `review <repo> #<number>` (`-n` for Claude
+/// Code; the others get the name typed later, as `actions::start_session`
+/// does).
 pub fn shell_command(agent: Harness, target: &ReviewTarget, clone_url: &str, session: &str, prompt_file: &Path, grok_id: Option<&str>) -> String {
     let opts = LaunchOptions { agent, name: Some(session.to_string()), ..Default::default() };
     let start = crate::launch::session_command(&target.dir, prompt_file, &opts, grok_id);
-    if target.clone {
-        let dir = shell_single_quote(&target.dir.to_string_lossy());
-        let parent = shell_single_quote(&target.dir.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
-        format!("mkdir -p {parent} && git clone {} {dir} && {start}", shell_single_quote(clone_url))
-    } else {
-        start
+    if target.legacy {
+        return start;
     }
+    // A plain word reads better bare; anything else (paths, URLs, refs) is quoted.
+    let word = |a: &String| if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { a.clone() } else { shell_single_quote(a) };
+    let root = target.clone_dir.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut line = vec![format!("mkdir -p {}", shell_single_quote(&root))];
+    line.extend(git_steps(target, clone_url).iter().map(|args| format!("git {}", args.iter().map(word).collect::<Vec<_>>().join(" "))));
+    line.push(start);
+    line.join(" && ")
 }
 
 #[cfg(test)]
@@ -488,13 +579,16 @@ mod tests {
         ForgeSite::of(&crate::config::GitConnection::default_for(GitProvider::Github))
     }
 
+    fn gitlab_site() -> ForgeSite {
+        ForgeSite::of(&crate::config::GitConnection { base_url: Some("https://gitlab.acme.io".into()), enabled: true, ..crate::config::GitConnection::default_for(GitProvider::Gitlab) })
+    }
+
     #[test]
-    fn find_checkout_matches_a_gitlab_checkout_through_its_site() {
+    fn a_checkout_matches_a_gitlab_repository_through_its_site() {
         let t = tempfile::tempdir().unwrap();
-        let gl = ForgeSite::of(&crate::config::GitConnection { base_url: Some("https://gitlab.acme.io".into()), enabled: true, ..crate::config::GitConnection::default_for(GitProvider::Gitlab) });
         let r = repo_with_origin(t.path(), "r", "git@gitlab.acme.io:grp/sub/r.git");
-        assert_eq!(find_checkout(t.path(), &gl, "grp/sub/r"), Some(r));
-        assert_eq!(find_checkout(t.path(), &github_site(), "grp/sub/r"), None, "the same path on GitHub is another repo");
+        assert!(is_checkout_of(&r, &gitlab_site(), "grp/sub/r"));
+        assert!(!is_checkout_of(&r, &github_site(), "grp/sub/r"), "the same path on GitHub is another repo");
     }
 
     #[test]
@@ -538,19 +632,6 @@ mod tests {
     }
 
     #[test]
-    fn find_checkout_prefers_the_folder_named_after_the_repo() {
-        let t = tempfile::tempdir().unwrap();
-        let alt = repo_with_origin(t.path(), "bouncer-bnc-0011", "git@github.com:Org/bouncer.git");
-        let main = repo_with_origin(t.path(), "bouncer", "https://github.com/Org/bouncer");
-        repo_with_origin(t.path(), "other", "git@github.com:Org/other.git");
-        std::fs::create_dir_all(t.path().join("plain-folder")).unwrap();
-        assert_eq!(find_checkout(t.path(), &github_site(), "Org/bouncer"), Some(main));
-        std::fs::remove_dir_all(t.path().join("bouncer")).unwrap();
-        assert_eq!(find_checkout(t.path(), &github_site(), "Org/bouncer"), Some(alt));
-        assert_eq!(find_checkout(t.path(), &github_site(), "Org/missing"), None);
-    }
-
-    #[test]
     fn a_checkout_is_busy_when_a_live_session_works_inside_it() {
         let live = vec!["/Users/x/dev/bouncer/packages/api".to_string(), "/Users/x/dev/other".to_string()];
         assert!(is_busy(Path::new("/Users/x/dev/bouncer"), &live));
@@ -560,32 +641,205 @@ mod tests {
     }
 
     #[test]
-    fn resolve_uses_a_free_checkout_else_a_clone_dir_reused_when_present() {
+    fn a_review_targets_the_one_clone_and_a_worktree_per_pr() {
         let t = tempfile::tempdir().unwrap();
-        let projects = t.path().join("dev");
-        let clones = t.path().join("reviews");
-        let main = repo_with_origin(&projects, "bedrock", "git@github.com:Org/bedrock.git");
-        let free = resolve_target(&projects, &clones, &github_site(), "Org/bedrock", 451, &[]);
-        assert_eq!(free, ReviewTarget { dir: main.clone(), clone: false });
-        let busy = resolve_target(&projects, &clones, &github_site(), "Org/bedrock", 451, &[main.to_string_lossy().into_owned()]);
-        assert_eq!(busy, ReviewTarget { dir: clones.join("bedrock-451"), clone: true });
-        std::fs::create_dir_all(clones.join("bedrock-451")).unwrap();
-        let again = resolve_target(&projects, &clones, &github_site(), "Org/bedrock", 451, &[main.to_string_lossy().into_owned()]);
-        assert_eq!(again, ReviewTarget { dir: clones.join("bedrock-451"), clone: false }, "an existing clone is reused");
-        let none = resolve_target(&projects, &clones, &github_site(), "Org/nowhere", 7, &[]);
-        assert_eq!(none, ReviewTarget { dir: clones.join("nowhere-7"), clone: true });
+        let clones = t.path().join("clones");
+        let gh = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap();
+        assert!(gh.clone && !gh.worktree_exists && !gh.legacy, "{gh:?}");
+        assert_eq!((gh.clone_dir, gh.dir), (clones.join("bedrock"), clones.join("bedrock-451")));
+        assert_eq!((gh.pr_ref.as_str(), gh.local_ref.as_str()), ("pull/451/head", "refs/maya/review/451"));
+        let mr = resolve_target(&clones, &gitlab_site(), "grp/r", 12).unwrap();
+        assert_eq!(mr.dir, clones.join("r-mr12"), "GitHub's r-12 is another repo's");
+        assert_eq!((mr.pr_ref.as_str(), mr.local_ref.as_str()), ("merge-requests/12/head", "refs/maya/review/mr12"));
     }
 
     #[test]
-    fn a_gitlab_clone_folder_is_named_for_the_mr_and_never_reuses_githubs() {
+    fn a_review_reuses_the_clone_and_spots_old_full_clones() {
         let t = tempfile::tempdir().unwrap();
-        let (projects, clones) = (t.path().join("dev"), t.path().join("reviews"));
-        std::fs::create_dir_all(clones.join("r-12")).unwrap();
-        let gl = ForgeSite::of(&crate::config::GitConnection { base_url: Some("https://gitlab.acme.io".into()), enabled: true, ..crate::config::GitConnection::default_for(GitProvider::Gitlab) });
-        let mr = resolve_target(&projects, &clones, &gl, "grp/r", 12, &[]);
-        assert_eq!(mr, ReviewTarget { dir: clones.join("r-mr12"), clone: true }, "GitHub's r-12 is another repo's");
-        let gh = resolve_target(&projects, &clones, &github_site(), "Org/r", 12, &[]);
-        assert_eq!(gh, ReviewTarget { dir: clones.join("r-12"), clone: false });
+        let clones = t.path().join("clones");
+        repo_with_origin(&clones, "bedrock", "git@github.com:Org/bedrock.git");
+        let again = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap();
+        assert!(!again.clone && !again.legacy, "{again:?}");
+        repo_with_origin(&clones, "bedrock-451", "git@github.com:Org/bedrock.git");
+        let old = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap();
+        assert!(old.legacy && !old.worktree_exists, "a full clone an earlier Maya made: {old:?}");
+    }
+
+    #[test]
+    fn a_repository_whose_name_is_taken_by_another_clones_under_its_full_path() {
+        let t = tempfile::tempdir().unwrap();
+        let clones = t.path().join("clones");
+        repo_with_origin(&clones, "api", "git@github.com:OrgA/api.git");
+        let b = resolve_target(&clones, &github_site(), "OrgB/api", 5).unwrap();
+        assert!(b.clone, "{b:?}");
+        assert_eq!((b.clone_dir, b.dir), (clones.join("OrgB-api"), clones.join("OrgB-api-5")));
+        let a = resolve_target(&clones, &github_site(), "OrgA/api", 5).unwrap();
+        assert_eq!((a.clone_dir, a.dir), (clones.join("api"), clones.join("api-5")), "the repository that owns the name keeps it");
+        let mr = resolve_target(&clones, &gitlab_site(), "grp/x/api", 7).unwrap();
+        assert_eq!((mr.clone_dir, mr.dir), (clones.join("grp-x-api"), clones.join("grp-x-api-mr7")));
+        repo_with_origin(&clones, "OrgB-api", "git@github.com:OrgB/api.git");
+        let again = resolve_target(&clones, &github_site(), "OrgB/api", 5).unwrap();
+        assert!(!again.clone && again.clone_dir == clones.join("OrgB-api"), "the fallback clone is reused: {again:?}");
+    }
+
+    #[test]
+    fn a_repository_whose_both_names_are_taken_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let clones = t.path().join("clones");
+        repo_with_origin(&clones, "api", "git@github.com:OrgA/api.git");
+        let taken = repo_with_origin(&clones, "OrgB-api", "git@github.com:OrgC/api.git");
+        let err = resolve_target(&clones, &github_site(), "OrgB/api", 5).unwrap_err();
+        assert_eq!(err, format!("{} is not a clone of OrgB/api; move it or change the clones directory.", taken.display()));
+    }
+
+    #[test]
+    fn a_review_folder_of_another_repository_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let clones = t.path().join("clones");
+        let other = repo_with_origin(&clones, "bedrock-451", "git@github.com:Other/bedrock.git");
+        let err = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap_err();
+        assert_eq!(err, format!("{} is not a review of Org/bedrock; move it or change the clones directory.", other.display()));
+    }
+
+    #[test]
+    fn a_session_worktree_with_a_reviews_name_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let clones = t.path().join("clones");
+        repo_with_origin(&clones, "bedrock", "git@github.com:Org/bedrock.git");
+        // A project `bedrock` whose session is named 451: its worktree is `bedrock-451`.
+        let proj = repo_with_origin(t.path(), "bedrock", "git@github.com:Org/bedrock.git");
+        for args in [&["config", "user.email", "t@example.com"][..], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.hooksPath", "/dev/null"], &["commit", "-q", "--allow-empty", "-m", "a"]] {
+            git(&proj, args);
+        }
+        let wt = clones.join("bedrock-451");
+        git(&proj, &["worktree", "add", "-q", "-b", "451", wt.to_str().unwrap()]);
+        let err = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap_err();
+        assert_eq!(err, format!("{} is not a review of Org/bedrock; move it or change the clones directory.", wt.display()));
+    }
+
+    fn target(clone: bool, worktree_exists: bool, legacy: bool) -> ReviewTarget {
+        ReviewTarget {
+            clone_dir: PathBuf::from("/c/bedrock"),
+            dir: PathBuf::from("/c/bedrock-451"),
+            pr_ref: "pull/451/head".into(),
+            local_ref: "refs/maya/review/451".into(),
+            clone,
+            worktree_exists,
+            legacy,
+        }
+    }
+
+    #[test]
+    fn the_review_steps_clone_once_fetch_and_add_or_update_the_worktree() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let url = "git@github.com:Org/bedrock.git";
+        let fetch = [v(&["-C", "/c/bedrock", "fetch", "origin"]), v(&["-C", "/c/bedrock", "fetch", "origin", "+pull/451/head:refs/maya/review/451"])];
+        let add = [v(&["-C", "/c/bedrock", "worktree", "prune"]), v(&["-C", "/c/bedrock", "worktree", "add", "--detach", "/c/bedrock-451", "refs/maya/review/451"])];
+        let fresh: Vec<_> = [v(&["clone", "--", url, "/c/bedrock"])].into_iter().chain(fetch.clone()).chain(add.clone()).collect();
+        assert_eq!(git_steps(&target(true, false, false), url), fresh);
+        let cloned: Vec<_> = fetch.iter().cloned().chain(add.clone()).collect();
+        assert_eq!(git_steps(&target(false, false, false), url), cloned, "the clone is made once");
+        let update: Vec<_> = fetch.iter().cloned().chain([v(&["-C", "/c/bedrock-451", "checkout", "--detach", "refs/maya/review/451"])]).collect();
+        assert_eq!(git_steps(&target(false, true, false), url), update, "a second review sees the PR's latest commits");
+        assert!(git_steps(&target(false, false, true), url).is_empty(), "an old full clone is reviewed as it is");
+    }
+
+    #[test]
+    fn the_review_shell_line_quotes_paths_with_spaces_and_quotes() {
+        let t = tempfile::tempdir().unwrap();
+        let clones = t.path().join("my reviews").join("it's");
+        let target = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap();
+        let file = Path::new("/Users/x/.claude/maya/prompts/1.txt");
+        let s = shell_command(crate::model::Harness::ClaudeCode, &target, "git@github.com:Org/bedrock.git", "review bedrock #451", file, None);
+        let q = |p: &Path| shell_single_quote(&p.to_string_lossy());
+        assert!(s.starts_with(&format!("mkdir -p {} && git clone -- 'git@github.com:Org/bedrock.git' {} && ", q(&clones), q(&clones.join("bedrock")))), "{s}");
+        assert!(s.contains(&format!("git -C {} fetch origin '+pull/451/head:refs/maya/review/451' && ", q(&clones.join("bedrock")))), "{s}");
+        assert!(s.contains(&format!("worktree add --detach {} 'refs/maya/review/451' && ", q(&clones.join("bedrock-451")))), "{s}");
+        assert!(s.ends_with("-- \"$p\""), "{s}");
+        #[cfg(unix)]
+        {
+            let ok = std::process::Command::new("sh").args(["-n", "-c", &s]).status().unwrap().success();
+            assert!(ok, "not valid sh: {s}");
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let o = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// Commits a change to `f` in `work` and returns the commit.
+    fn commit(work: &Path, text: &str) -> String {
+        std::fs::write(work.join("f"), text).unwrap();
+        git(work, &["add", "f"]);
+        git(work, &["commit", "-q", "-m", text]);
+        git(work, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn the_review_steps_check_out_the_pull_request() {
+        let t = tempfile::tempdir().unwrap();
+        let origin = t.path().join("origin.git");
+        let work = t.path().join("work");
+        let clones = t.path().join("clones");
+        git(t.path(), &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()]);
+        git(t.path(), &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+        git(&work, &["config", "user.email", "maya@example.com"]);
+        git(&work, &["config", "user.name", "Maya"]);
+        git(&work, &["config", "commit.gpgsign", "false"]);
+        git(&work, &["config", "core.hooksPath", "/dev/null"]);
+        git(&work, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        commit(&work, "a");
+        git(&work, &["push", "-q", "origin", "main"]);
+        let b = commit(&work, "b");
+        git(&work, &["push", "-q", "origin", &format!("{b}:refs/pull/451/head")]);
+        let url = origin.to_string_lossy().into_owned();
+        let first = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap();
+        run_git_steps(&git_steps(&first, &url)).unwrap();
+        assert_eq!(git(&first.dir, &["rev-parse", "HEAD"]), b);
+        // The origin is a local path, which names no repository on GitHub:
+        // the clone's origin is set to GitHub's address, rewritten back to
+        // the path for fetches, so the next resolves accept it.
+        git(&first.clone_dir, &["config", &format!("url.{url}.insteadOf"), "git@github.com:Org/bedrock.git"]);
+        git(&first.clone_dir, &["remote", "set-url", "origin", "git@github.com:Org/bedrock.git"]);
+        std::fs::remove_dir_all(&first.dir).unwrap();
+        let removed = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap();
+        assert!(!removed.clone && !removed.worktree_exists, "{removed:?}");
+        run_git_steps(&git_steps(&removed, &url)).expect("the prune clears the worktree deleted by hand");
+        assert_eq!(git(&removed.dir, &["rev-parse", "HEAD"]), b);
+        let c = commit(&work, "c");
+        git(&work, &["push", "-q", "origin", &format!("{c}:refs/pull/451/head")]);
+        let again = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap();
+        assert!(again.worktree_exists, "{again:?}");
+        run_git_steps(&git_steps(&again, &url)).unwrap();
+        assert_eq!(git(&again.dir, &["rev-parse", "HEAD"]), c);
+    }
+
+    #[test]
+    fn a_failing_review_step_returns_gits_message() {
+        let t = tempfile::tempdir().unwrap();
+        let missing = t.path().join("missing").to_string_lossy().into_owned();
+        let err = run_git_steps(&[vec!["clone".into(), "--".into(), missing, t.path().join("c").to_string_lossy().into_owned()]]).unwrap_err();
+        assert!(!err.is_empty() && err.contains("missing") && err == err.trim(), "{err}");
+    }
+
+    #[test]
+    fn a_failing_clone_leaves_out_gits_progress_line() {
+        let t = tempfile::tempdir().unwrap();
+        // A file URL makes git say "Cloning into" before it fails.
+        let path = t.path().join("missing").to_string_lossy().replace('\\', "/");
+        let url = format!("file:///{}", path.trim_start_matches('/'));
+        let err = run_git_steps(&[vec!["clone".into(), "--".into(), url, t.path().join("c").to_string_lossy().into_owned()]]).unwrap_err();
+        assert!(err.contains("missing") && !err.contains("Cloning into"), "{err}");
+    }
+
+    #[test]
+    fn the_core_runs_review_git_with_no_terminal_prompt() {
+        let cmd = git_step(&["-C".to_string(), "/c/bedrock".to_string(), "fetch".to_string(), "origin".to_string()]);
+        let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
+        assert!(envs.contains(&("GIT_TERMINAL_PROMPT".into(), Some("0".into()))), "{envs:?}");
+        assert!(!envs.iter().any(|(k, _)| k == "GIT_SSH_COMMAND"), "the user's ssh command is left alone: {envs:?}");
     }
 
     #[test]
@@ -696,28 +950,39 @@ mod tests {
 
     #[test]
     fn the_review_prompt_fills_placeholders_or_appends_the_pr() {
-        let d = render_prompt("", &pr());
-        assert!(d.starts_with("Review pull request #451 of Org/bedrock (https://github.com/Org/bedrock/pull/451)."), "{d}");
+        let d = render_prompt("", &pr(), true);
+        assert!(d.starts_with("Review pull request #451 of Org/bedrock (https://github.com/Org/bedrock/pull/451). The pull request is checked out in this folder. Make use"), "{d}");
         assert!(d.contains("(Recommended)") && d.contains("Request changes"), "{d}");
-        assert_eq!(render_prompt("  \n", &pr()), d, "blank means the default");
-        assert_eq!(render_prompt("/should-i-approve PR #{number}", &pr()), "/should-i-approve PR #451");
-        assert_eq!(render_prompt("Look at {url} ({repo})", &pr()), "Look at https://github.com/Org/bedrock/pull/451 (Org/bedrock)");
-        assert_eq!(render_prompt("/should-i-approve", &pr()), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
+        assert_eq!(render_prompt("  \n", &pr(), true), d, "blank means the default");
+        assert_eq!(render_prompt("/should-i-approve PR #{number}", &pr(), true), "/should-i-approve PR #451");
+        assert_eq!(render_prompt("Look at {url} ({repo})", &pr(), true), "Look at https://github.com/Org/bedrock/pull/451 (Org/bedrock)");
+        assert_eq!(render_prompt("/should-i-approve", &pr(), true), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
+    }
+
+    #[test]
+    fn the_built_in_prompt_says_the_pr_is_checked_out_only_when_maya_checked_it_out() {
+        let sentence = "The pull request is checked out in this folder.";
+        let worktree = render_prompt("", &pr(), !target(false, true, false).legacy);
+        assert!(worktree.contains(sentence), "{worktree}");
+        let old = render_prompt("", &pr(), !target(false, false, true).legacy);
+        assert!(!old.contains(sentence) && old.starts_with("Review pull request #451 of Org/bedrock (https://github.com/Org/bedrock/pull/451). Make use"), "an old full clone holds whatever was checked out: {old}");
+        assert_eq!(render_prompt("Look at {url}", &pr(), false), render_prompt("Look at {url}", &pr(), true), "a custom template is left as written");
     }
 
     #[test]
     fn the_review_shell_line_runs_the_agent_on_the_prompt_file_with_the_review_name() {
         let file = Path::new("/Users/x/.claude/maya/prompts/1.txt");
-        let free = ReviewTarget { dir: PathBuf::from("/Users/x/dev/bedrock"), clone: false };
-        let s = shell_command(crate::model::Harness::ClaudeCode, &free, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
-        assert_eq!(s, "cd '/Users/x/dev/bedrock' && p=\"$(cat '/Users/x/.claude/maya/prompts/1.txt')\" && rm -f '/Users/x/.claude/maya/prompts/1.txt' && claude -n 'review bedrock #451' -- \"$p\"");
-        let clone = ReviewTarget { dir: PathBuf::from("/Users/x/dev/reviews/bedrock-451"), clone: true };
-        let s = shell_command(crate::model::Harness::Codex, &clone, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
-        assert!(s.starts_with("mkdir -p '/Users/x/dev/reviews' && git clone 'https://github.com/Org/bedrock.git' '/Users/x/dev/reviews/bedrock-451' && "), "{s}");
+        let old = ReviewTarget { dir: PathBuf::from("/Users/x/reviews/bedrock-451"), ..target(false, false, true) };
+        let s = shell_command(crate::model::Harness::ClaudeCode, &old, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
+        assert_eq!(s, "cd '/Users/x/reviews/bedrock-451' && p=\"$(cat '/Users/x/.claude/maya/prompts/1.txt')\" && rm -f '/Users/x/.claude/maya/prompts/1.txt' && claude -n 'review bedrock #451' -- \"$p\"", "an old full clone runs the agent alone");
+        let fresh = target(true, false, false);
+        let s = shell_command(crate::model::Harness::Codex, &fresh, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
+        assert!(s.starts_with("mkdir -p '/c' && git clone -- 'https://github.com/Org/bedrock.git' '/c/bedrock' && git -C '/c/bedrock' fetch origin && "), "{s}");
+        assert!(s.contains(" && git -C '/c/bedrock' worktree prune && git -C '/c/bedrock' worktree add --detach '/c/bedrock-451' 'refs/maya/review/451' && cd '/c/bedrock-451' && "), "{s}");
         assert!(s.ends_with("&& codex -- \"$p\""), "no -n for Codex: the name waits as a pending name: {s}");
-        let s = shell_command(crate::model::Harness::Grok, &free, "https://github.com/Org/bedrock.git", "review bedrock #451", file, Some("1111-2222"));
+        let s = shell_command(crate::model::Harness::Grok, &old, "https://github.com/Org/bedrock.git", "review bedrock #451", file, Some("1111-2222"));
         assert!(s.ends_with("&& grok --session-id '1111-2222' -- \"$p\""), "{s}");
-        let s = shell_command(crate::model::Harness::Antigravity, &free, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
+        let s = shell_command(crate::model::Harness::Antigravity, &old, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
         assert!(s.ends_with("&& agy --prompt-interactive=\"$p\""), "{s}");
     }
 }

@@ -660,9 +660,9 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
         return Err("Type a prompt first.".into());
     }
     options.validate_shape()?;
-    let (root, maya_dir, agents) = {
+    let (root, maya_dir, agents, clones_root) = {
         let store = l.store.lock().unwrap();
-        (projects_root(&store)?, store.claude_dir().join("maya"), store.agents_source())
+        (projects_root(&store)?, store.claude_dir().join("maya"), store.agents_source(), store.config.clones_dir_path())
     };
     // Claude Code's models are Maya's own fixed list. Listing the agents is
     // only for the others, and can take seconds, so a Claude start skips it.
@@ -686,7 +686,15 @@ pub fn start_session(l: &Local, dir: Option<String>, prompt: String, options: la
             launch::classify(brain, &binary, model.as_deref(), &root, &prompt, &dirs, &maya_dir, launch::CLASSIFIER_TIMEOUT)
         }
     };
-    let (target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
+    let (mut target, how) = launch::resolve_target(&root, &dirs, dir.as_deref(), picked.as_deref())?;
+    if options.worktree {
+        // The projects root itself is a folder of projects, not a repository to branch.
+        if how == "fallback" {
+            let name = root.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+            return Err(format!("{name} is not a git repository, so it cannot start in a worktree."));
+        }
+        target = crate::worktree::add_for_session(&target, &clones_root, options.chosen_name(), &prompt)?;
+    }
     open_session(l, &target, how, &prompt, &options, &info, &maya_dir)
 }
 
@@ -857,50 +865,51 @@ pub fn resume_relayed(l: &Local, agent: model::Harness, dir: &str, session_id: &
     }
 }
 
-/// Opens a terminal reviewing `pr` with Maya's agent: in the project
-/// checkout when it is free, else in a clone under the clones directory.
-/// Returns the folder. For an agent that takes no name on its command line
-/// the review name waits in the store, as `start_session`'s does.
+/// Opens a terminal reviewing `pr` with Maya's agent, in a worktree of
+/// the repository's one clone under the clones directory. Returns the
+/// folder. For an agent that takes no name on its command line the review
+/// name waits in the store, as `start_session`'s does.
 pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, String> {
-    let (agent, projects, clones, live, maya_dir, template, agents, sites) = {
+    let (agent, clones, live, maya_dir, template, agents, sites) = {
         let store = l.store.lock().unwrap();
-        (store.config.brain(), store.config.projects_dir_path(), store.config.clones_dir_path(), store.live_cwds(), store.claude_dir().join("maya"), store.config.review_prompt.clone(), store.agents_source(), crate::forge::sites(&store.config.git_connections()))
+        (store.config.brain(), store.config.clones_dir_path(), store.live_cwds(), store.claude_dir().join("maya"), store.config.review_prompt.clone(), store.agents_source(), crate::forge::sites(&store.config.git_connections()))
     };
     let site = sites.into_iter().find(|s| s.provider == pr.forge).ok_or_else(|| format!("Turn on {} in Settings → Git first.", pr.forge.label()))?;
-    let projects = projects.ok_or("Set a projects directory in Settings first.")?;
     if agent != model::Harness::ClaudeCode && !agents().iter().any(|a| a.harness == agent) {
         return Err(format!("{} is not installed on this machine.", launch::label(agent)));
     }
-    let target = crate::reviews::resolve_target(&projects, &clones, &site, &pr.repo, pr.number, &live);
+    let target = crate::reviews::resolve_target(&clones, &site, &pr.repo, pr.number)?;
+    // Live sessions report their folder with symlinks resolved (a linked
+    // clones directory); the plain path is kept for a folder not made yet.
+    let physical = std::fs::canonicalize(&target.dir).unwrap_or_else(|_| target.dir.clone());
+    if crate::reviews::is_busy(&target.dir, &live) || crate::reviews::is_busy(&physical, &live) {
+        return Err(format!("A review of {} {}{} is already running.", pr.repo_name(), pr.forge.sigil(), pr.number));
+    }
+    // The terminal opens in the clones root, so it must exist (a terminal
+    // cannot start in a missing folder).
+    std::fs::create_dir_all(&clones).map_err(|e| format!("Could not create the clones folder {}: {e}.", clones.display()))?;
+    let url = crate::forge::clone_url_for(&site, pr);
     if agent == model::Harness::OpenCode {
-        // The review shell line clones a missing checkout before the agent runs;
-        // OpenCode's session is created on the server first, so it needs the folder.
-        if target.clone {
-            return Err("OpenCode reviews need the repository checked out under the projects directory.".into());
-        }
+        // OpenCode's session is created on its server first, so it needs the
+        // worktree before it starts: the core runs the git steps itself.
+        crate::reviews::run_git_steps(&crate::reviews::git_steps(&target, &url))?;
         let (brain_model, info) = {
             let store = l.store.lock().unwrap();
             (store.config.brain_model().map(String::from), agents().into_iter().find(|a| a.harness == model::Harness::OpenCode).unwrap_or_else(|| crate::agents::info_for(model::Harness::OpenCode, None)))
         };
         let options = launch::LaunchOptions { agent, model: brain_model, ..Default::default() };
         let name = crate::reviews::session_name(pr.forge, &pr.repo, pr.number);
-        start_opencode(l, &target.dir, &crate::reviews::render_prompt(&template, pr), Some(&name), &options, &info)?;
+        start_opencode(l, &target.dir, &crate::reviews::render_prompt(&template, pr, !target.legacy), Some(&name), &options, &info)?;
         return Ok(target.dir.to_string_lossy().into_owned());
     }
-    let file = launch::write_prompt_file(&maya_dir, &crate::reviews::render_prompt(&template, pr))?;
+    let file = launch::write_prompt_file(&maya_dir, &crate::reviews::render_prompt(&template, pr, !target.legacy))?;
     let grok_id = (agent == model::Harness::Grok).then(launch::new_session_uuid);
     let known = {
         let mut store = l.store.lock().unwrap();
         store.refresh(now_ms());
         store.live_session_ids()
     };
-    // A clone's folder does not exist yet: the terminal opens in its parent,
-    // the clones root, made first (a terminal cannot start in a missing folder).
-    let cwd = if target.clone { target.dir.parent().map(Path::to_path_buf).unwrap_or_else(|| target.dir.clone()) } else { target.dir.clone() };
-    if target.clone {
-        std::fs::create_dir_all(&cwd).map_err(|e| format!("Could not create the clones folder {}: {e}.", cwd.display()))?;
-    }
-    l.terminal.open(&crate::reviews::shell_command(agent, &target, &crate::forge::clone_url_for(&site, pr), &crate::reviews::session_name(pr.forge, &pr.repo, pr.number), &file, grok_id.as_deref()), &cwd, &tmux_label())?;
+    l.terminal.open(&crate::reviews::shell_command(agent, &target, &url, &crate::reviews::session_name(pr.forge, &pr.repo, pr.number), &file, grok_id.as_deref()), &clones, &tmux_label())?;
     if agent != model::Harness::ClaudeCode {
         let name = crate::reviews::session_name(pr.forge, &pr.repo, pr.number);
         l.store.lock().unwrap().add_pending_name(crate::pending_names::PendingName::new(agent, &target.dir.to_string_lossy(), &name, now_ms(), known, grok_id));
@@ -1299,7 +1308,7 @@ mod tests {
         let store = with_agents(store, vec![agents::claude(), opencode_info()]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let opts = LaunchOptions { agent: Harness::OpenCode, model: Some("opencode/fledge-alpha-free".into()), effort: Some("low".into()), mode: Some("auto".into()), name: Some("Fix CI".into()) };
+        let opts = LaunchOptions { agent: Harness::OpenCode, model: Some("opencode/fledge-alpha-free".into()), effort: Some("low".into()), mode: Some("auto".into()), name: Some("Fix CI".into()), ..Default::default() };
         start_session(&l, Some("proj".into()), "-v please say hi".into(), opts).unwrap();
         let h = hits.lock().unwrap();
         let create = h.iter().find(|r| r.starts_with("POST /api/session\n")).map(|r| body_json(r)).expect("created on the server");
@@ -1496,6 +1505,47 @@ mod tests {
         drop(dir);
     }
 
+    fn git(dir: &Path, args: &[&str]) {
+        let o = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    }
+
+    #[test]
+    fn start_session_in_a_worktree_runs_the_agent_there() {
+        let (dir, store) = store_with_projects(&["proj"]);
+        let proj = dir.path().join("projects").join("proj");
+        git(&proj, &["init", "-q"]);
+        git(&proj, &["config", "user.email", "t@example.com"]);
+        git(&proj, &["config", "user.name", "T"]);
+        git(&proj, &["config", "commit.gpgsign", "false"]);
+        git(&proj, &["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(proj.join("a.txt"), "a").unwrap();
+        git(&proj, &["add", "."]);
+        git(&proj, &["commit", "-q", "-m", "first"]);
+        let clones = dir.path().join("clones");
+        store.lock().unwrap().config.clones_dir = Some(clones.to_string_lossy().into_owned());
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = LaunchOptions { worktree: true, name: Some("Fix CI".into()), ..Default::default() };
+        let r = start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap();
+        let made = clones.join("proj-fix-ci");
+        assert!(Path::new(&r.dir).ends_with(Path::new("clones").join("proj-fix-ci")), "{}", r.dir);
+        assert!(made.is_dir());
+        let Call::Open { command, .. } = fake.calls.lock().unwrap()[0].clone() else { panic!() };
+        assert!(command.starts_with(&format!("cd '{}'", made.display())), "{command}");
+    }
+
+    #[test]
+    fn start_session_in_a_worktree_refuses_a_folder_that_is_not_a_repository() {
+        let (_dir, store) = store_with_projects(&["proj"]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let opts = LaunchOptions { worktree: true, ..Default::default() };
+        let err = start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap_err();
+        assert_eq!(err, "proj is not a git repository, so it cannot start in a worktree.");
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn start_session_refuses_an_agent_that_is_not_installed_or_a_model_it_does_not_list() {
         let (dir, store) = store_with_projects(&["proj"]);
@@ -1530,7 +1580,8 @@ mod tests {
         assert!(dir.path().join("clones").is_dir());
         let calls = fake.calls.lock().unwrap();
         let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
-        assert!(command.contains("git clone 'git@github.com:Org/bedrock.git'") && command.ends_with("&& codex -- \"$p\""), "{command}");
+        assert!(command.contains("git clone -- 'git@github.com:Org/bedrock.git'") && command.ends_with("&& codex -- \"$p\""), "{command}");
+        assert!(command.contains("fetch origin '+pull/451/head:refs/maya/review/451'") && command.contains("worktree add --detach"), "{command}");
         let file = command.split("cat '").nth(1).unwrap().split('\'').next().unwrap();
         assert_eq!(std::fs::read_to_string(file).unwrap(), "/should-i-approve PR #451 (https://github.com/Org/bedrock/pull/451)");
         drop(calls);
@@ -1540,6 +1591,105 @@ mod tests {
         // ancestor sits behind (macOS's /tmp, a linked clones directory).
         let canonical_clone = std::fs::canonicalize(dir.path()).unwrap().join("clones").join("bedrock-451");
         assert_eq!(store.lock().unwrap().pending_cwds_for_test(), vec![canonical_clone.to_string_lossy().into_owned()]);
+    }
+
+    /// The PR `Org/bedrock#451`, as the review tests start it.
+    fn bedrock_pr() -> crate::reviews::ReviewPr {
+        crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None }
+    }
+
+    /// A git repository at `dir` whose origin is `origin`.
+    fn repo_with_origin(dir: &Path, origin: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", origin]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(dir).args(args).status().unwrap().success());
+        }
+    }
+
+    /// A store reviewing in `<temp>/clones`, and that folder.
+    fn store_reviewing_in_clones() -> (tempfile::TempDir, Mutex<Store>, PathBuf) {
+        let (dir, store) = store_with_projects(&[]);
+        let clones = dir.path().join("clones");
+        store.lock().unwrap().config.clones_dir = Some(clones.to_string_lossy().into_owned());
+        (dir, store, clones)
+    }
+
+    #[test]
+    fn a_second_review_of_a_repository_clones_nothing() {
+        let (_dir, store, clones) = store_reviewing_in_clones();
+        repo_with_origin(&clones.join("bedrock"), "git@github.com:Org/bedrock.git");
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        start_review(&l, &bedrock_pr()).unwrap();
+        let calls = fake.calls.lock().unwrap();
+        let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
+        assert!(!command.contains("git clone") && command.contains("fetch origin"), "{command}");
+    }
+
+    #[test]
+    fn a_review_never_runs_in_the_projects_directory() {
+        let (dir, store, clones) = store_reviewing_in_clones();
+        repo_with_origin(&dir.path().join("projects").join("bedrock"), "git@github.com:Org/bedrock.git");
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let folder = start_review(&l, &bedrock_pr()).unwrap();
+        assert_eq!(PathBuf::from(folder), clones.join("bedrock-451"), "a free project checkout is not used");
+    }
+
+    #[test]
+    fn a_review_already_running_is_refused() {
+        let (dir, store, clones) = store_reviewing_in_clones();
+        write_session(dir.path(), "r1", 4343, &clones.join("bedrock-451").to_string_lossy());
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(start_review(&l, &bedrock_pr()).unwrap_err(), "A review of bedrock #451 is already running.");
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_review_running_through_a_linked_clones_directory_is_refused() {
+        let (dir, store) = store_with_projects(&[]);
+        let real = dir.path().join("real-clones");
+        repo_with_origin(&real.join("bedrock-451"), "git@github.com:Org/bedrock.git");
+        let linked = dir.path().join("clones");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+        store.lock().unwrap().config.clones_dir = Some(linked.to_string_lossy().into_owned());
+        // A live session reports its folder with the link resolved.
+        let physical = std::fs::canonicalize(real.join("bedrock-451")).unwrap();
+        write_session(dir.path(), "r1", 4343, &physical.to_string_lossy());
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(start_review(&l, &bedrock_pr()).unwrap_err(), "A review of bedrock #451 is already running.");
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_review_in_an_old_full_clone_does_not_say_the_pr_is_checked_out() {
+        let (_dir, store, clones) = store_reviewing_in_clones();
+        repo_with_origin(&clones.join("bedrock-451"), "git@github.com:Org/bedrock.git");
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        start_review(&l, &bedrock_pr()).unwrap();
+        let calls = fake.calls.lock().unwrap();
+        let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
+        assert!(!command.contains("git "), "an old full clone gets no git steps: {command}");
+        let file = command.split("cat '").nth(1).unwrap().split('\'').next().unwrap();
+        let prompt = std::fs::read_to_string(file).unwrap();
+        assert!(prompt.starts_with("Review pull request #451") && !prompt.contains("checked out in this folder"), "{prompt}");
+    }
+
+    #[test]
+    fn an_opencode_review_runs_the_git_steps_itself() {
+        let (dir, store, _clones) = store_reviewing_in_clones();
+        store.lock().unwrap().config.agent = Some(Harness::OpenCode);
+        let store = with_agents(store, vec![agents::claude(), crate::agents::info_for(Harness::OpenCode, None)]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let pr = crate::reviews::ReviewPr { ssh_url: Some(dir.path().join("no-such-origin").to_string_lossy().into_owned()), ..bedrock_pr() };
+        let err = start_review(&l, &pr).unwrap_err();
+        assert!(!err.is_empty() && err.contains("no-such-origin"), "git's clone error: {err}");
+        assert!(fake.calls.lock().unwrap().is_empty(), "no terminal opens");
     }
 
     #[test]
@@ -1558,7 +1708,7 @@ mod tests {
         start_review(&l, &pr).unwrap();
         let calls = fake.calls.lock().unwrap();
         let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
-        assert!(command.contains("git clone 'https://github.com/Org/bedrock.git'"), "{command}");
+        assert!(command.contains("git clone -- 'https://github.com/Org/bedrock.git'"), "{command}");
     }
 
     #[test]

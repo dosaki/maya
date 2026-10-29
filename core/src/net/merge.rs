@@ -22,6 +22,9 @@ pub struct RemoteBoard {
     /// What was running on it when its Maya last stopped, as it last said;
     /// `None` for an older Maya. Kept in memory for this run only.
     pub remembered: Option<Vec<crate::remembered::Remembered>>,
+    /// Whether its Maya starts a session in a worktree when asked: it is
+    /// connected and announced `CAP_WORKTREE`.
+    pub worktrees: bool,
     pub received_at: u64,
     pub connected: bool,
 }
@@ -125,6 +128,12 @@ pub fn agents_of(remotes: &[RemoteBoard], machine: &str) -> Option<Vec<crate::ag
     remotes.iter().find(|b| b.machine == machine).and_then(|b| b.agents.clone())
 }
 
+/// Whether `machine`'s Maya starts a session in a worktree when asked; an
+/// older Maya, or one not connected, does not.
+pub fn worktrees_of(remotes: &[RemoteBoard], machine: &str) -> bool {
+    remotes.iter().find(|b| b.machine == machine).is_some_and(|b| b.worktrees)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,7 +144,7 @@ mod tests {
     }
 
     fn board(machine: &str, hostname: &str, ids: &[&str], received_at: u64, connected: bool) -> RemoteBoard {
-        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, remembered: None, received_at, connected }
+        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, remembered: None, worktrees: false, received_at, connected }
     }
 
     #[test]

@@ -48,7 +48,7 @@ impl ClientNotify for CliNotify {
     }
 
     fn caps(&self) -> Vec<String> {
-        vec![maya_core::net::protocol::CAP_FOLLOW.into()]
+        vec![maya_core::net::protocol::CAP_FOLLOW.into(), maya_core::net::protocol::CAP_WORKTREE.into()]
     }
 
     /// Rewrites the main's host and port in `config.json`; `run` reads it
@@ -78,7 +78,7 @@ mod tests {
         c.network.main_key = "old".into();
         config::save(&path, &c).unwrap();
         let n = CliNotify::new(dir.path().to_path_buf(), Arc::new(AtomicBool::new(false)));
-        assert_eq!(n.caps(), ["follow"]);
+        assert_eq!(n.caps(), ["follow", "worktree"]);
         n.moved("10.0.0.9", 5001, "new").unwrap();
         let after = config::load(&path);
         assert_eq!((after.network.main_host.as_str(), after.network.main_port), ("10.0.0.9", 5001));

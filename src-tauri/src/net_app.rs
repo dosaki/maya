@@ -10,8 +10,8 @@ use crate::listener::{self, Interpreted, VoiceContext};
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
-use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD};
-use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, target_of, Target, ROUTE_TIMEOUT};
+use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD, CAP_WORKTREE};
+use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, check_remote_worktree, target_of, Target, ROUTE_TIMEOUT};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
 use crate::net::AssistantLink;
 use crate::config::{self, NetworkRole};
@@ -175,7 +175,7 @@ impl ClientNotify for TauriClientNotify {
     }
 
     fn caps(&self) -> Vec<String> {
-        vec![CAP_FOLLOW.into(), CAP_LEAD.into()]
+        vec![CAP_FOLLOW.into(), CAP_LEAD.into(), CAP_WORKTREE.into()]
     }
 
     /// From her record: None when this Maya never ran a brain.
@@ -452,8 +452,11 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),
         },
         Request::ListAgents => match machine {
-            Some(m) => to_data(agents_reply(false, merge::agents_of(&crate::remote_boards(&state), m), Vec::new)),
-            None => to_data(agents_reply(true, None, maya_core::agents::current)),
+            Some(m) => {
+                let boards = crate::remote_boards(&state);
+                to_data(agents_reply(false, merge::agents_of(&boards, m), merge::worktrees_of(&boards, m), Vec::new))
+            }
+            None => to_data(agents_reply(true, None, false, maya_core::agents::current)),
         },
         Request::Command(kind) => match target_of(&kind) {
             Target::Session(session) => match crate::remote_machine_of(&state, &session) {
@@ -464,6 +467,9 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
                 Some(m) => {
                     if let Some(agent) = agent_of(&kind) {
                         check_remote_agent(agent, &merge::agents_of(&crate::remote_boards(&state), m), m)?;
+                    }
+                    if let CommandKind::Start { options, .. } = &kind {
+                        check_remote_worktree(options, merge::worktrees_of(&crate::remote_boards(&state), m), m)?;
                     }
                     if let CommandKind::Forget { sessions } = &kind {
                         // Dropped here first, so the next mirror leaves the

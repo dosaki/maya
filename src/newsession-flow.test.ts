@@ -37,7 +37,7 @@ describe("new-session options", () => {
     ta.value = "fix ci";
     ta.dispatchEvent(new Event("input"));
     document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(invoke).toHaveBeenCalledWith("start_session", { dir: "a", prompt: "fix ci", options: { agent: "claude-code", name: "", model: "opus", effort: "", mode: "plan" }, machine: "" });
+    expect(invoke).toHaveBeenCalledWith("start_session", { dir: "a", prompt: "fix ci", options: { agent: "claude-code", name: "", model: "opus", effort: "", mode: "plan", worktree: false }, machine: "" });
     await flush();
     await flush();
     closeNewSession();
@@ -194,7 +194,7 @@ describe("new-session flow", () => {
     ta.value = "fix ci";
     ta.dispatchEvent(new Event("input"));
     document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
-    expect(invoke).toHaveBeenCalledWith("start_session", { dir: null, prompt: "fix ci", options: { agent: "claude-code", name: "", model: "", effort: "", mode: "" }, machine: "" });
+    expect(invoke).toHaveBeenCalledWith("start_session", { dir: null, prompt: "fix ci", options: { agent: "claude-code", name: "", model: "", effort: "", mode: "", worktree: false }, machine: "" });
     resolveStart({ dir: "/x/dev/a", how: "classifier" });
     await flush();
     await flush();

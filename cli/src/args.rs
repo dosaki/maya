@@ -29,7 +29,7 @@ pub enum ConfigOp {
 
 pub const USAGE: &str = "usage: maya <pair|run|status|hooks|config|start|--version> …
        maya pair <host[:port]> --code <code> [--name <name>] [--new-key]
-       maya start [--dir <dir>] [--prompt <prompt>] [--agent <claude-code|codex|antigravity|grok|kiro|opencode>] [--model <model>] [--effort <effort>] [--mode <mode>] [--name <name>]";
+       maya start [--dir <dir>] [--prompt <prompt>] [--agent <claude-code|codex|antigravity|grok|kiro|opencode>] [--model <model>] [--effort <effort>] [--mode <mode>] [--name <name>] [--worktree]";
 
 /// The main Maya's default port when none is given after the host.
 const DEFAULT_PORT: u16 = 4127;
@@ -141,6 +141,10 @@ fn parse_start(rest: &[String]) -> Result<Cmd, String> {
                 options.agent = agent.ok_or_else(|| format!("{USAGE}\nunknown agent: {v} (claude-code, codex, antigravity, grok, kiro or opencode)"))?;
             }
             "--name" => options.name = Some(take_value(rest, &mut i, "--name")?),
+            "--worktree" => {
+                options.worktree = true;
+                i += 1;
+            }
             s => return Err(format!("{USAGE}\nunknown flag: {s}")),
         }
     }
@@ -213,6 +217,15 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn start_takes_a_worktree_flag_with_no_value() {
+        let Cmd::Start { options, .. } = parse(&a("start --dir proj --worktree")).unwrap() else { panic!() };
+        assert!(options.worktree);
+        let Cmd::Start { options, .. } = parse(&a("start --dir proj")).unwrap() else { panic!() };
+        assert!(!options.worktree);
+        assert!(USAGE.contains("[--worktree]"));
     }
 
     #[test]

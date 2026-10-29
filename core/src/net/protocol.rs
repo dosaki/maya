@@ -30,6 +30,8 @@ pub const CAP_MIRROR: &str = "mirror";
 pub const CAP_VOICE: &str = "voice";
 /// A Maya with this cap wants the main's Chat (`chat`, `brain`) and sends the chat requests.
 pub const CAP_CHAT: &str = "chat";
+/// A Maya with this cap starts a session in a new worktree when asked (`LaunchOptions::worktree`).
+pub const CAP_WORKTREE: &str = "worktree";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
