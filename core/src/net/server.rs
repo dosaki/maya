@@ -2957,6 +2957,16 @@ mod tests {
     }
 
     #[test]
+    fn a_websocket_handshake_slower_than_a_read_tick_still_completes() {
+        let (handle, port) = test_server();
+        let stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        // The request comes after the main's first read has timed out.
+        std::thread::sleep(TICK * 3);
+        assert!(tungstenite::client(format!("ws://127.0.0.1:{port}/"), stream).is_ok(), "the main answered the upgrade");
+        handle.stop();
+    }
+
+    #[test]
     fn a_client_removed_while_its_board_is_on_the_way_is_told_it_was_removed() {
         let (handle, port) = test_server();
         let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, name: "laptop".into(), ..Default::default() };

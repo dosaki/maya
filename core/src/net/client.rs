@@ -853,6 +853,21 @@ mod tests {
     }
 
     #[test]
+    fn a_main_slower_than_a_read_tick_to_answer_the_upgrade_is_still_reached() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let main = std::thread::spawn(move || {
+            let stream = listener.accept().unwrap().0;
+            // The answer comes after the client's first read has timed out.
+            std::thread::sleep(TICK * 3);
+            tungstenite::accept(stream).map(drop)
+        });
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, ..Default::default() };
+        assert!(connect(&config, &AtomicBool::new(false), Instant::now() + Duration::from_secs(5)).is_ok(), "the upgrade completed");
+        main.join().unwrap().unwrap();
+    }
+
+    #[test]
     fn a_move_retries_at_once() {
         assert_eq!(retry_wait_ms(MOVED, 4), 0);
         assert_eq!(retry_wait_ms(KEY_CHANGED, 0), 30_000);
