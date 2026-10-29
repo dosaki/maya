@@ -488,6 +488,7 @@ body { margin: 0; background: var(--bg); }
 :root[data-theme="light"] .debug__line--speech .debug__source { color: #7e22ce; }
 /* Both looks of the viewer. */
 :root[data-theme="light"] .modal__status--warn { color: #a85a05; }
+:root[data-theme="light"] .newsession__warning { color: #a85a05; }
 :root[data-theme="light"] .diff__line--add { color: #166534; }
 :root[data-theme="light"] .diff__line--del { color: #991b1b; }
 /* The terminal look's fixed dark colours, each made from the light variables:
