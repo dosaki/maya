@@ -811,12 +811,31 @@ describe("working and status lines", () => {
     expect(renderModal({ card: base, turns, status: null, draft: "" }, handlers()).querySelector(".modal__working")).toBeNull();
   });
 
-  it("puts model · folder · branch · PR · ctx under the prompt, and model · branch in the header", () => {
+  it("the_terminal_foot_shows_the_recorded_line_when_there_is_one", () => {
+    const card: Card = { ...busy, statusLine: "\u001b[1mOpus\u001b[0m │ 62%" };
+    expect(statusLine(card)).toBe(card.statusLine);
+    const el = renderModal({ card, turns, status: null, draft: "", theme: "terminal" }, handlers(), 2_000);
+    const foot = el.querySelector(".modal__composer + .modal__statusline--foot")!;
+    expect(foot.textContent).toBe("Opus │ 62%");
+    expect(foot.querySelector(".ansi-b")).not.toBeNull();
+    expect(foot.classList.contains("modal__statusline--recorded")).toBe(true);
+  });
+
+  it("mayas_own_line_appends_limits_and_cost_without_a_recording", () => {
     expect(statusLine(busy)).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
     expect(statusLine({ ...busy, pr: { number: 3, url: "u", state: "open", forge: "gitlab" } })).toBe("claude-opus-5 · eye · feat/x · MR !3 · ctx 42%");
     expect(statusLine(base)).toBe("eye");
-    const el = renderModal({ card: busy, turns, status: null, draft: "", theme: "terminal" }, handlers(), 2_000);
-    expect(el.querySelector(".modal__composer + .modal__statusline--foot")?.textContent).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
+    const card: Card = {
+      ...busy,
+      limits: { account: null, readAt: 1, windows: [{ label: "5h", percent: 78, resetsAt: null }, { label: "7d", percent: 41, resetsAt: null }] },
+      usage: { input: 0, cachedInput: 0, cacheWrite: 0, output: 0, cost: { micros: 4_120_000, unit: "usd", estimated: true, models: [] } },
+    };
+    const line = "claude-opus-5 · eye · feat/x · PR #12 · ctx 42% · 5h 78% · 7d 41% · $4.12 est.";
+    expect(statusLine(card)).toBe(line);
+    const el = renderModal({ card, turns, status: null, draft: "", theme: "terminal" }, handlers(), 2_000);
+    const foot = el.querySelector(".modal__composer + .modal__statusline--foot")!;
+    expect(foot.textContent).toBe(line);
+    expect(foot.classList.contains("modal__statusline--recorded")).toBe(false);
     expect(el.querySelector(".modal__titles .modal__statusline--head")?.textContent).toBe("claude-opus-5 · feat/x");
   });
 

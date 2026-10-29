@@ -461,6 +461,9 @@ body { margin: 0; background: var(--bg); }
 .modal__statusline--foot { display: none; }
 .modal--terminal .modal__statusline--foot { display: block; padding: 0 16px 8px 32px; background: #0a0a0a; color: #8a8478; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
 .modal--terminal .modal__statusline--head { display: none; }
+.ansi-b { font-weight: 600; }
+.ansi-d { opacity: .6; }
+.modal__statusline--recorded { white-space: pre; }
 .modal--terminal .usage { color: #8a8478; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
 .modal--terminal .usage__pct { color: #e8e2d4; }
 .modal--terminal .usage__amount { color: #e8e2d4; }
