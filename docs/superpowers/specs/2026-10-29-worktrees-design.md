@@ -116,10 +116,14 @@ card's project name and the board search still read the repository:
 |---|---|
 | `<clones>/<repo>` | the one clone of a repository, for reviews. No session runs in it. |
 | `<clones>/<repo>-<number>` (`<repo>-mr<number>` on GitLab) | a review's worktree. The same names as today's per-PR clones. |
+| `<clones>/<owner>-<repo>` | the one clone of a repository when `<clones>/<repo>` is another repository's clone |
+| `<clones>/<owner>-<repo>-<number>` (`-mr<number>` on GitLab) | a review's worktree of that clone |
 | `<clones>/<folder>-<branch-slug>` | a new session's worktree, where `<folder>` is the project folder it came from |
 
 `<repo>` is the last part of the repository's path (`bedrock` for
-`Org/bedrock`), as today.
+`Org/bedrock`), as today. `<owner>-<repo>` is the repository's full
+path with every `/` replaced by `-` (`OrgB-api` for `OrgB/api`,
+`grp-x-api` for `grp/x/api` on GitLab).
 
 ### New session in a worktree
 
@@ -178,7 +182,7 @@ single-quoted as today):
 
 1. `mkdir -p <clones>`
 2. Clone, when `<clones>/<repo>` does not exist:
-   `git clone <url> <clones>/<repo>`
+   `git clone -- <url> <clones>/<repo>`
 3. Fetch every branch, so `origin/<base>` is current for agents that
    diff against it, and the pull request into a ref of Maya's own:
    `git -C <clones>/<repo> fetch origin && git -C <clones>/<repo> fetch origin +<pr-ref>:refs/maya/review/<number>`
@@ -220,15 +224,29 @@ another worktree. A custom template is left as the user wrote it.
 *(My call.)*
 
 **A folder left by an earlier version.** When `<clones>/<repo>-<number>`
-exists and is a full clone (its `.git` is a folder, not a file), Maya
-reviews in it as today, with no clone, fetch or worktree. It is not
-converted.
+exists and is a full clone of this repository (its `.git` is a folder,
+not a file, and its `origin` names the repository), Maya reviews in it
+as today, with no clone, fetch or worktree. It is not converted.
+
+**A review folder that is something else.** When the worktree folder
+exists but is neither a worktree of the clone (git's common folder for
+it is not the clone's `.git`) nor an old full clone of this repository,
+for example a session's worktree or another repository's folder of the
+same name, the review fails with "<folder> is not a review of <repo>;
+move it or change the clones directory." before a terminal opens, so
+Maya does not check out over it.
 
 **A `<clones>/<repo>` that is not this repository's clone** (its
 `origin` names another repository, checked with
-`reviews::is_checkout_of`): the review fails with "<folder> is not a
-clone of <repo>; move it or change the clones directory." before a
-terminal opens.
+`reviews::is_checkout_of`), as when `OrgA/api` is cloned there and a
+pull request of `OrgB/api` is reviewed: the clone is made at
+`<clones>/<owner>-<repo>` instead, and its worktrees at
+`<clones>/<owner>-<repo>-<number>`. A repository whose `<clones>/<repo>`
+is its own clone, or is missing, keeps the short names. Only when
+`<clones>/<owner>-<repo>` exists too and is not this repository's clone
+does the review fail, with "<folder> is not a clone of <repo>; move it
+or change the clones directory." naming that folder, before a terminal
+opens.
 
 **OpenCode.** An OpenCode review starts through OpenCode's server, which
 needs the worktree to exist before the session is created, so the shell

@@ -107,7 +107,10 @@ a variable read from the login shell (`forge::env`). GitLab's URL defaults
 to `https://gitlab.com`. The first start after 0.24 imports `gh auth
 token` once, when `gh` is logged in. Review clones run `git clone` over
 SSH (the default) or HTTPS, chosen per provider in Settings → Git, with the
-user's own git credentials.
+user's own git credentials. For an OpenCode review the core runs the git
+steps itself, with no terminal, before the session starts
+(`reviews::run_git_steps`, with `GIT_TERMINAL_PROMPT=0`): a credential
+that needs a prompt fails there, and git's message shows in Maya.
 
 The Deployments tab lists GitHub Actions runs that wait for the user's
 approval, with Approve and Reject buttons, and deployment runs queued
@@ -483,7 +486,7 @@ Three workflows in `.github/workflows/`:
   `inbox.rs` (Claude Code's session socket), `foreign.rs` with `codex.rs`,
   `antigravity.rs`, `grok.rs`, `kiro.rs` (other agents), `opencode.rs` (OpenCode's
   server client, over `ureq`), `reviews.rs` and `pr.rs`
-  (GitHub), `notify.rs` (notifications and speech output), `tty.rs`,
+  (GitHub), `worktree.rs` (a new session's own worktree and branch), `notify.rs` (notifications and speech output), `tty.rs`,
   `interpreter.rs`, `log.rs` (the Debug tab and `maya.log`),
   `transcript.rs` and `diff.rs` (a session's turns for the viewer: tool output, edit diffs),
   `remembered.rs` (the sessions running when Maya stopped, offered back after a restart), `voice_server.rs` (the OpenAI-compatible speech client), and `net/`
