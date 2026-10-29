@@ -35,6 +35,7 @@ pub mod resume;
 pub mod reviews;
 pub mod speech;
 pub mod state;
+pub mod statusline;
 pub mod store;
 pub mod terminal;
 pub mod terminal_tmux;
