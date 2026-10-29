@@ -156,7 +156,26 @@ body { margin: 0; background: var(--bg); }
 .card__meter { position: absolute; left: 0; top: 8px; bottom: 8px; width: 4px; border-radius: 2px; background: color-mix(in srgb, var(--border) 60%, transparent); overflow: hidden; }
 /* The context meter is gold in every band; the Compact button appears at 75%. */
 .card__meter-fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; background: linear-gradient(180deg, var(--gold-bright), var(--gold)); }
-.modal__context { font-size: 12px; color: var(--muted); }
+/* The header's usage strip: context, the account's limit windows, the session's cost. It
+   sheds detail as the head narrows (data-stage on .modal__head, set by a ResizeObserver). */
+.usage { display: flex; align-items: center; gap: 14px; align-self: center; min-width: 0; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.usage__meter, .usage__cost { display: inline-flex; align-items: center; gap: 5px; }
+.usage__bar { display: inline-block; width: 70px; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--border) 60%, transparent); overflow: hidden; }
+.usage--medium .usage__bar { width: 44px; }
+.usage__fill { display: block; height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--gold), var(--gold-bright)); }
+.usage__meter[data-kind="limit"] .usage__fill { background: var(--working); }
+.usage__meter[data-kind="limit"][data-band="mid"] .usage__fill { background: var(--gold); }
+.usage__meter[data-band="high"] .usage__fill { background: var(--awaiting); }
+.usage__pct, .usage__amount { color: var(--text); font-variant-numeric: tabular-nums; }
+.usage__meter[data-band="high"] .usage__pct { color: var(--awaiting); }
+.usage__reset, .usage__tokens { font-variant-numeric: tabular-nums; }
+.usage__note { font-style: italic; }
+.usage__chip { padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); font-variant-numeric: tabular-nums; }
+.usage__chip:empty { display: none; }
+.usage__chip[data-band="mid"] { border-color: var(--gold); }
+.usage__chip[data-band="high"] { border-color: var(--awaiting); color: var(--awaiting); }
+.modal__head[data-stage="narrow"] .modal__statusline--head, .modal__head[data-stage="chip"] .modal__statusline--head { display: none; }
+.modal__head[data-stage="chip"] .modal__project { display: none; }
 .card__meta { display: flex; align-items: center; gap: 6px; }
 .card__harness, .modal__harness, .remembered__agent { width: 14px; height: 14px; border-radius: 3px; flex: none; }
 .modal__harness { align-self: center; }
@@ -443,6 +462,11 @@ body { margin: 0; background: var(--bg); }
 .modal__statusline--foot { display: none; }
 .modal--terminal .modal__statusline--foot { display: block; padding: 0 16px 8px 32px; background: #0a0a0a; color: #8a8478; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
 .modal--terminal .modal__statusline--head { display: none; }
+.modal--terminal .usage { color: #8a8478; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.modal--terminal .usage__pct { color: #e8e2d4; }
+.modal--terminal .usage__amount { color: #e8e2d4; }
+.modal--terminal .usage__bar { background: #2a2824; border-radius: 0; }
+.modal--terminal .usage__fill, .modal--terminal .usage__chip { border-radius: 0; }
 
 /* Chat: the conversation, what waits in the action window, and the input. */
 .tab__dot { display: inline-block; width: 8px; height: 8px; margin-left: 4px; border-radius: 50%; background: var(--idle); }
@@ -507,3 +531,7 @@ body { margin: 0; background: var(--bg); }
 :root[data-theme="light"] .modal--terminal .turn--failed .turn__mark { color: #c0262c; }
 :root[data-theme="light"] .modal--terminal .modal__statusline--foot { background: var(--panel); color: var(--muted); }
 .newsession__warning { margin: 0; color: var(--awaiting); }
+:root[data-theme="light"] .modal--terminal .usage { color: var(--muted); }
+:root[data-theme="light"] .modal--terminal .usage__pct { color: var(--text); }
+:root[data-theme="light"] .modal--terminal .usage__amount { color: var(--text); }
+:root[data-theme="light"] .modal--terminal .usage__bar { background: color-mix(in srgb, var(--border) 60%, transparent); }

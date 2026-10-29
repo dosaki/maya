@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, applyStage, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
 import { comboLabel, defaultKeys, setKeyBindings } from "./keys";
 import type { Card, Turn } from "./types";
 
@@ -219,7 +219,7 @@ describe("renderModal", () => {
     const el = renderModal({ card: codex, turns: [], status: null, draft: "" }, h);
     expect(el.querySelector(".modal__tweaks")).toBeNull();
     expect(el.querySelector("button[data-action=compact]")).not.toBeNull();
-    expect(el.querySelector(".modal__context")?.textContent).toBe("ctx 80%");
+    expect(el.querySelector(".usage__meter[data-kind=ctx] .usage__pct")?.textContent).toBe("80%");
     const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
     expect(ta.placeholder).toContain("typed into its terminal as one line, so /commands run there)");
     expect(ta.placeholder).not.toContain("!shell");
@@ -286,12 +286,53 @@ describe("renderModal", () => {
   it("shows context usage in the header and a Compact button from 75 percent", () => {
     const h = handlers();
     const low = renderModal({ card: { ...base, context: { used: 20_000, window: 200_000, percent: 10 } }, turns: [], status: null, draft: "" }, h);
-    expect(low.querySelector(".modal__context")?.textContent).toBe("ctx 10%");
+    expect(low.querySelector(".usage__meter[data-kind=ctx] .usage__pct")?.textContent).toBe("10%");
     expect(low.querySelector("button[data-action=compact]")).toBeNull();
     const high = renderModal({ card: { ...base, context: { used: 160_000, window: 200_000, percent: 80 } }, turns: [], status: null, draft: "" }, h);
     const btn = high.querySelector<HTMLButtonElement>(".modal__head button[data-action=compact]")!;
     btn.click();
     expect(h.onCompact).toHaveBeenCalledTimes(1);
+  });
+
+  it("the_header_carries_the_usage_strip_and_no_context_span", () => {
+    const h = handlers();
+    const card: Card = { ...base, pr: { number: 12, url: "u", state: "open" }, context: { used: 160_000, window: 200_000, percent: 80 }, limits: { account: null, windows: [{ label: "5h", percent: 20, resetsAt: null }], readAt: 0 } };
+    const el = renderModal({ card, turns: [], status: null, draft: "" }, h);
+    const strip = el.querySelector<HTMLElement>(".modal__titles .usage");
+    expect(strip).not.toBeNull();
+    expect(el.querySelector(".modal__context")).toBeNull();
+    expect(strip!.previousElementSibling?.matches("[data-action=pr]"), "after the PR button").toBe(true);
+    expect(strip!.querySelectorAll(".usage__meter")).toHaveLength(2);
+    expect(el.querySelector(".modal__head button[data-action=compact]")).not.toBeNull();
+    expect(renderModal({ card: { ...base, context: { used: 20_000, window: 200_000, percent: 10 } }, turns: [], status: null, draft: "" }, h).querySelector("button[data-action=compact]")).toBeNull();
+  });
+
+  it("the_strip_stage_follows_the_heads_width", () => {
+    const card: Card = { ...base, context: { used: 124_000, window: 200_000, percent: 62 }, limits: { account: null, windows: [{ label: "5h", percent: 78, resetsAt: null }], readAt: 0 } };
+    const root = renderModal({ card, turns: [], status: null, draft: "" }, handlers());
+    const head = root.querySelector<HTMLElement>(".modal__head")!;
+    applyStage(root, 1200);
+    expect(head.dataset.stage).toBe("wide");
+    expect(root.querySelector<HTMLElement>(".usage")!.dataset.stage).toBe("wide");
+    applyStage(root, 900);
+    expect(head.dataset.stage).toBe("medium");
+    expect(root.querySelector(".usage")!.className).toBe("usage usage--medium");
+    applyStage(root, 700);
+    expect(head.dataset.stage).toBe("narrow");
+    expect(root.querySelector(".usage__bar")).toBeNull();
+    applyStage(root, 500);
+    expect(head.dataset.stage).toBe("chip");
+    expect(root.querySelector(".usage__chip")?.textContent).toBe("62% · 78%");
+    // A repaint keeps the stage the head is at.
+    patchModal(root, renderModal({ card: { ...card, context: { used: 140_000, window: 200_000, percent: 70 } }, turns: [], status: null, draft: "" }, handlers()));
+    expect(root.querySelectorAll(".usage")).toHaveLength(1);
+    expect(root.querySelector(".usage__chip")?.textContent).toBe("70% · 78%");
+  });
+
+  it("hides the header's status line at narrow and chip, and the folder at chip", () => {
+    expect(styles).toContain('.modal__head[data-stage="narrow"] .modal__statusline--head, .modal__head[data-stage="chip"] .modal__statusline--head { display: none; }');
+    expect(styles).toContain('.modal__head[data-stage="chip"] .modal__project { display: none; }');
+    expect(styles).toContain(".usage { display: flex;");
   });
 
   it("tells the user to reply when the session asked in prose", () => {
@@ -832,6 +873,19 @@ describe("the open session view while a session asks", () => {
     await flush();
     expect(host().querySelector(".menu textarea")).toBe(box);
     expect(document.activeElement).toBe(box);
+    closeModal();
+  });
+
+  it("moves the usage strip on a board refresh that repaints nothing else, and leaves an unchanged one be", async () => {
+    const card: Card = { ...base, sessionId: "u1", machine: "laptop" };
+    await openModal(card);
+    expect(host().querySelector(".usage__note")?.textContent).toBe("limits not read yet");
+    const limits = { account: null, windows: [{ label: "5h", percent: 33, resetsAt: null }], readAt: Date.now() };
+    refreshModal([{ ...card, limits }]);
+    const strip = host().querySelector(".usage");
+    expect(strip?.querySelector(".usage__meter[data-kind=limit] .usage__pct")?.textContent).toBe("33%");
+    refreshModal([{ ...card, limits }]);
+    expect(host().querySelector(".usage"), "the same strip, so a tooltip being read stays").toBe(strip);
     closeModal();
   });
 
