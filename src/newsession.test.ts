@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { setLocalMachine } from "./machines";
 import { comboLabel, defaultKeys, setKeyBindings } from "./keys";
 import { CLAUDE_AGENT, optionFields, renderNewSession, type AgentInfo, type NewSessionModel } from "./newsession";
+import styles from "./styles.css?raw";
 
 const handlers = () => ({ onStart: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn(), onMachine: vi.fn(), onAgent: vi.fn(), onModel: vi.fn() });
 const base: NewSessionModel = {
@@ -291,6 +292,11 @@ describe("agents", () => {
     box.checked = false;
     box.dispatchEvent(new Event("change"));
     expect(el.querySelector(".newsession__warning")).toBeNull();
+  });
+
+  it("lays the New worktree box and its text on one line, in the theme's colours", () => {
+    expect(styles).toContain(".newsession__check { display: flex; align-self: flex-start; align-items: center; gap: 8px; color: var(--text); cursor: pointer; }");
+    expect(styles).toContain(".newsession__check input { margin: 0; }");
   });
 
   it("shows the warning at once when the box comes back ticked", () => {
