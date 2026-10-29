@@ -15,15 +15,21 @@ pub struct Verdict {
     pub line: Option<String>,
 }
 
-pub const SYSTEM_PROMPT: &str = "You read the last message an AI coding agent wrote to its user when it finished a turn. Decide whether the message asks the user for something before work can go on: a decision, an answer, an approval, or an action such as running a command or checking a result. The ask can be anywhere in the message and in any wording. An offer that waits on the user's go-ahead (\"I can fix that if you want\") counts. A message that only reports what was done, with nothing for the user to decide or do, does not.\nReply with JSON only: {\"asks\": true, \"line\": \"<the sentence that asks, copied exactly from the message>\"} or {\"asks\": false, \"line\": null}.";
+pub const SYSTEM_PROMPT: &str = "You read the last message an AI coding agent wrote to its user when it finished a turn. Decide whether the agent has stopped because it needs something from the user before it can go on: an answer, a decision, an approval, or an action only the user can take. The ask can be anywhere in the message and in any wording. An offer that waits on the user's go-ahead (\"I can fix that if you want\", \"say go and I'll start\") counts.\nIt is not an ask when:\n- the message only reports what was done, found or decided;\n- the agent says it is still working, or watching or waiting on something other than the user, such as a build, a review, a merge or a timer; this holds even when the message also lists things for the user to check or do;\n- the agent lists what the user owns or could do later, such as a test plan, open items or reminders, without stopping for it;\n- a decision is pending elsewhere and the message only mentions it;\n- the agent answers a question and says what comes next without asking for anything.\nWhen in doubt, it is not an ask.\nReply with JSON only, giving your reason first in one short sentence: {\"why\": \"<reason>\", \"asks\": true, \"line\": \"<the sentence that asks, copied exactly from the message>\"} or {\"why\": \"<reason>\", \"asks\": false, \"line\": null}.";
 
 /// How much of the end of a message the judge reads.
 const MAX_CHARS: usize = 8_000;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `<session id>:<FNV-1a 64 of the text, 16 hex digits>`.
+/// `<session id>:<FNV-1a 64 of the prompt and the text, 16 hex digits>`.
+/// The prompt is in the hash so a message is judged again when the prompt
+/// changes, instead of keeping a verdict the old prompt gave.
 pub fn key(session_id: &str, text: &str) -> String {
-    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3));
+    key_for(SYSTEM_PROMPT, session_id, text)
+}
+
+fn key_for(prompt: &str, session_id: &str, text: &str) -> String {
+    let hash = prompt.bytes().chain([0]).chain(text.bytes()).fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3));
     format!("{session_id}:{hash:016x}")
 }
 
@@ -128,11 +134,13 @@ mod tests {
     }
 
     #[test]
-    fn keys_are_stable_and_change_with_the_text() {
+    fn keys_are_stable_and_change_with_the_text_and_the_prompt() {
         assert_eq!(key("s", "abc"), key("s", "abc"));
         assert_ne!(key("s", "abc"), key("s", "abd"));
         assert_eq!(key("s", "").len(), "s:".len() + 16);
-        assert_eq!(key("s", ""), "s:cbf29ce484222325", "the empty text hashes to the FNV offset basis");
+        assert_eq!(key_for("", "s", ""), "s:af63bd4c8601b7df", "the empty prompt and text hash as one zero byte");
+        assert_ne!(key_for("p1", "s", "x"), key_for("p2", "s", "x"), "a new prompt judges every message again");
+        assert_eq!(key("s", "x"), key_for(SYSTEM_PROMPT, "s", "x"));
     }
 
     #[test]
@@ -168,6 +176,8 @@ mod tests {
         assert_eq!(parse_verdict(a, &asks, text).unwrap(), Verdict { asks: true, line: Some("Which way should I build it?".into()) });
         let no = envelope(r#"{"asks":false,"line":"Which way should I build it?"}"#);
         assert_eq!(parse_verdict(a, &no, text).unwrap(), Verdict { asks: false, line: None }, "no ask has no line");
+        let reasoned = envelope(r#"{"why":"it waits on a choice","asks":true,"line":"Which way should I build it?"}"#);
+        assert_eq!(parse_verdict(a, &reasoned, text).unwrap().line.as_deref(), Some("Which way should I build it?"), "the reason before the verdict is passed over");
         let bare = envelope(r#"{"asks":true}"#);
         assert_eq!(parse_verdict(a, &bare, text).unwrap().line.as_deref(), Some("Which way should I build it?"), "the wording check finds it");
         let plain = "All set.\nI wrote it down";
