@@ -1,4 +1,5 @@
 use crate::asks::{self, AskCache, Verdict};
+use crate::collect;
 use crate::config::{self, Config};
 use crate::events::EventLog;
 use crate::foreign::{self, ForeignSession};
@@ -9,6 +10,7 @@ use crate::remembered::{Key, LiveSession, Memory, Remembered};
 use crate::registry::{self, RegistrySession};
 use crate::state::{derive, DeriveInput, Prose};
 use crate::transcript::TailCache;
+use crate::usage::{AccountLimits, SessionUsage};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -47,7 +49,16 @@ pub struct Store {
     pub config: Config,
     alive: Box<dyn Fn(i32) -> bool + Send>,
     tails: TailCache,
+    /// Claude Code transcripts' running token totals.
+    totals: crate::usage::TranscriptTotals,
+    /// What the Claude Code status lines last recorded, every file in `maya/`.
+    recorded: crate::statusline::RecordedCache,
     prs: PrCache,
+    /// Antigravity's and Kiro's account limits, read by collectors off the lock.
+    agy_limits: LimitsSlot,
+    kiro_limits: LimitsSlot,
+    /// Grok's tokens and cost per session id, from `grok usage`.
+    grok_usage: std::collections::HashMap<String, GrokSlot>,
     /// Compact the event log during refresh once it exceeds this many bytes.
     pub compact_threshold_bytes: u64,
     /// Codex and Antigravity names, re-read only when their files change.
@@ -101,6 +112,41 @@ impl NameFiles {
         self.0.insert(path.to_path_buf(), (stamp.0, stamp.1, text.clone()));
         text
     }
+}
+
+/// One harness's account limits as its collector last read them.
+#[derive(Default)]
+struct LimitsSlot {
+    limits: Option<AccountLimits>,
+    /// When the collector was last handed out or last answered.
+    ran_ms: Option<u64>,
+    /// A window opened on a stale reading: due at the next hand-out.
+    nudged: bool,
+    /// When a failed read was last logged.
+    logged_ms: Option<u64>,
+}
+
+impl LimitsSlot {
+    /// Due while a card is on the board, when nudged or `gap_ms` after the
+    /// last run; marks it started.
+    fn take_due(&mut self, on_board: bool, gap_ms: u64, now_ms: u64) -> bool {
+        let due = on_board && (self.nudged || self.ran_ms.is_none_or(|t| now_ms.saturating_sub(t) >= gap_ms));
+        self.nudged = false;
+        if due {
+            self.ran_ms = Some(now_ms);
+        }
+        due
+    }
+}
+
+/// One Grok session's usage as `grok usage` last told it.
+#[derive(Default)]
+struct GrokSlot {
+    usage: Option<SessionUsage>,
+    /// When the run was last handed out or last answered.
+    ran_ms: Option<u64>,
+    /// The events file's mtime when the last run was handed out.
+    seen: Option<std::time::SystemTime>,
 }
 
 /// The sessions of `procs`, found the way this platform can: through `lsof`
@@ -177,7 +223,12 @@ impl Store {
             config,
             alive: Box::new(registry::pid_alive),
             tails: TailCache::default(),
+            totals: Default::default(),
+            recorded: Default::default(),
             prs: PrCache::default(),
+            agy_limits: LimitsSlot::default(),
+            kiro_limits: LimitsSlot::default(),
+            grok_usage: std::collections::HashMap::new(),
             compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
             names: NameFiles::default(),
             pending: Default::default(),
@@ -494,6 +545,89 @@ impl Store {
         self.prs.set(dir, pr, now_ms);
     }
 
+    pub const GROK_USAGE_MIN_GAP_MS: u64 = 60_000;
+    pub const AGY_LIMITS_GAP_MS: u64 = 300_000;
+    pub const KIRO_LIMITS_GAP_MS: u64 = 600_000;
+    pub const NUDGE_STALE_MS: u64 = 60_000;
+    pub const LIMITS_LOG_GAP_MS: u64 = 3_600_000;
+
+    fn limits_slot(&mut self, h: Harness) -> Option<&mut LimitsSlot> {
+        match h {
+            Harness::Antigravity => Some(&mut self.agy_limits),
+            Harness::Kiro => Some(&mut self.kiro_limits),
+            _ => None,
+        }
+    }
+
+    /// Marks the harness's limits due now when older than `NUDGE_STALE_MS` (a window opened).
+    pub fn nudge_limits(&mut self, h: Harness, now_ms: u64) {
+        if let Some(slot) = self.limits_slot(h) {
+            if slot.ran_ms.is_none_or(|t| now_ms.saturating_sub(t) >= Self::NUDGE_STALE_MS) {
+                slot.nudged = true;
+            }
+        }
+    }
+
+    /// What the collectors should run now; marks what it hands out as started.
+    /// Limits are read while a card of that harness is on the board: every
+    /// gap, or at once when nudged. A Grok session's usage is read when its
+    /// events file changed since the last run, at most once a minute.
+    pub fn usage_due(&mut self, now_ms: u64) -> collect::Due {
+        let on_board = |h: Harness| self.foreign.values().any(|s| s.harness == h);
+        let (agy, kiro) = (on_board(Harness::Antigravity), on_board(Harness::Kiro));
+        let mut due = collect::Due { antigravity: self.agy_limits.take_due(agy, Self::AGY_LIMITS_GAP_MS, now_ms), kiro: self.kiro_limits.take_due(kiro, Self::KIRO_LIMITS_GAP_MS, now_ms), grok: vec![] };
+        let grok: Vec<(String, PathBuf)> = self.foreign.values().filter(|s| s.harness == Harness::Grok).map(|s| (s.session_id.clone(), s.transcript_path.clone())).collect();
+        self.grok_usage.retain(|id, _| grok.iter().any(|(g, _)| g == id));
+        for (id, events) in grok {
+            let mtime = std::fs::metadata(&events).and_then(|m| m.modified()).ok();
+            let slot = self.grok_usage.entry(id.clone()).or_default();
+            let rested = slot.ran_ms.is_none_or(|t| now_ms.saturating_sub(t) >= Self::GROK_USAGE_MIN_GAP_MS);
+            if mtime.is_some() && mtime != slot.seen && rested {
+                slot.seen = mtime;
+                slot.ran_ms = Some(now_ms);
+                due.grok.push(id);
+            }
+        }
+        due.grok.sort();
+        due
+    }
+
+    /// The harness's limits as its collector read them; `None` clears them.
+    pub fn set_limits(&mut self, h: Harness, limits: Option<AccountLimits>, now_ms: u64) {
+        if let Some(slot) = self.limits_slot(h) {
+            slot.limits = limits;
+            slot.ran_ms = Some(now_ms);
+        }
+    }
+
+    /// The harness's limits could not be read. The last good reading stays,
+    /// so one timed-out read does not blank the card; with none ever read
+    /// the limits stay `None`. True when the failure is to be logged: at most
+    /// once an hour per harness.
+    pub fn limits_failed(&mut self, h: Harness, now_ms: u64) -> bool {
+        let Some(slot) = self.limits_slot(h) else { return false };
+        slot.ran_ms = Some(now_ms);
+        let log = slot.logged_ms.is_none_or(|t| now_ms.saturating_sub(t) >= Self::LIMITS_LOG_GAP_MS);
+        if log {
+            slot.logged_ms = Some(now_ms);
+        }
+        log
+    }
+
+    /// A Grok session's usage from `grok usage`; `None` (the run failed)
+    /// keeps the last reading, since a session's usage only grows.
+    pub fn set_grok_usage(&mut self, session_id: &str, usage: Option<SessionUsage>, now_ms: u64) {
+        let slot = self.grok_usage.entry(session_id.to_string()).or_default();
+        slot.ran_ms = Some(now_ms);
+        match usage {
+            Some(u) => slot.usage = Some(u),
+            // A run that brought nothing (the binary missing, a timeout, an
+            // unparseable answer) keeps the last reading and forgets the mtime
+            // it was handed out for, so the usual one-minute retry happens.
+            None => slot.seen = None,
+        }
+    }
+
     /// True when the user's settings pick a 1M-context model by default.
     fn default_window_is_1m(&self) -> bool {
         std::fs::read_to_string(self.claude_dir.join("settings.json")).map(|t| crate::context::default_is_1m(&t)).unwrap_or(false)
@@ -512,9 +646,12 @@ impl Store {
         let mut paths = Vec::with_capacity(sessions.len());
         self.judging.clear();
         let mut used = HashSet::new();
+        self.recorded.scan(&self.claude_dir.join("maya"), now_ms);
+        let mut budget = crate::usage::TOTALS_BUDGET_BYTES;
         for s in &sessions {
             let path = self.transcript_path_for(s);
             let tail = self.tails.get(&path);
+            let totals = self.totals.get(&path, &mut budget);
             paths.push(path);
             let text = claude_text(&tail);
             let looked = self.prose_for(&s.session_id, text);
@@ -533,16 +670,39 @@ impl Store {
             card.branch = self.prs.branch(&s.cwd);
             // Claude Code names its model in the transcript; the viewer's status line shows it.
             card.model = tail.model.clone();
-            card.context = tail.context_tokens.map(|used| crate::context::usage(tail.model.as_deref().unwrap_or(""), used, default_1m));
+            let rec = self.recorded.get(&s.session_id);
+            // The recorded context is what Claude Code's own status line shows; Maya's guess fills in without one.
+            card.context = match rec.as_ref().and_then(|r| r.context_used_percent.zip(r.context_window_size)) {
+                Some((percent, window)) => Some(crate::context::ContextUsage { used: window.saturating_mul(percent.into()) / 100, window, percent }),
+                None => tail.context_tokens.map(|used| crate::context::usage(tail.model.as_deref().unwrap_or(""), used, default_1m)),
+            };
+            let mut usage = crate::usage::session_usage_of(&totals);
+            let counted = !totals.priced.is_empty() || !totals.unpriced.is_empty();
+            let recorded_cost = rec.as_ref().and_then(|r| r.total_cost_usd);
+            if let Some(usd) = recorded_cost {
+                usage.cost = Some(crate::usage::Cost { micros: (usd * 1e6).round() as u64, unit: crate::usage::CostUnit::Usd, estimated: false, models: vec![] });
+            }
+            // Nothing counted yet is no usage, not zeros.
+            card.usage = (counted || recorded_cost.is_some()).then_some(usage);
+            card.status_line = rec.map(|r| r.line).filter(|l| !l.is_empty());
             cards.push(card);
         }
         self.tails.retain(&paths);
+        self.totals.retain(&paths);
+        // One machine is one account: the newest reading on disk, a session that
+        // ended included, is every Claude Code card's limits.
+        let limits = self.recorded.limits(crate::statusline::account_email(&self.claude_dir));
+        for card in &mut cards {
+            card.limits = limits.clone();
+        }
         let timeout = self.config.completed_timeout_ms();
         let foreign: Vec<ForeignSession> = self.foreign.values().cloned().collect();
         for s in &foreign {
             let mut tail = foreign::tail_for(s);
             if s.harness == Harness::Kiro {
                 crate::kiro::apply_live(&mut tail, &self.kiro_run_dir, s.pid, &s.transcript_path, now_ms);
+                let meta = self.names.read(&s.transcript_path.with_extension("json"));
+                crate::kiro::apply_credits(&mut tail, &meta);
             }
             if s.harness == Harness::Codex {
                 crate::codex_hooks::apply(&mut tail, self.codex_events.events_for(&s.session_id));
@@ -556,6 +716,20 @@ impl Store {
             card.pr = self.prs.get(&s.cwd);
             card.branch = self.prs.branch(&s.cwd);
             cards.push(card);
+        }
+        // One machine is one Codex account: the newest reading is every Codex card's limits.
+        let codex_limits = cards.iter().filter(|c| c.harness == Harness::Codex).filter_map(|c| c.limits.clone()).max_by_key(|l| l.read_at);
+        for card in cards.iter_mut().filter(|c| c.harness == Harness::Codex) {
+            card.limits = codex_limits.clone();
+        }
+        // What the collectors read off the lock: account limits per harness, Grok's usage per session.
+        for card in &mut cards {
+            match card.harness {
+                Harness::Antigravity => card.limits = self.agy_limits.limits.clone(),
+                Harness::Kiro => card.limits = self.kiro_limits.limits.clone(),
+                Harness::Grok => card.usage = self.grok_usage.get(&card.session_id).and_then(|g| g.usage.clone()),
+                _ => {}
+            }
         }
         // OpenCode's sessions live in its server: asked on every refresh while it runs.
         self.opencode = match self.opencode_service() {
@@ -843,6 +1017,30 @@ mod tests {
         std::fs::write(claude.join("settings.json"), r#"{"model": "claude-opus-5[1m]"}"#).unwrap();
         let ctx = store.refresh(2)[0].context.clone().unwrap();
         assert_eq!((ctx.window, ctx.percent), (1_000_000, 15));
+    }
+
+    #[test]
+    fn codex_limits_are_shared_by_every_codex_card() {
+        use crate::foreign::ForeignSession;
+        use crate::model::Harness;
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("claude");
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        let fixture = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex/token_count.jsonl")).unwrap();
+        let with = dir.path().join("with.jsonl");
+        std::fs::write(&with, &fixture).unwrap();
+        let without = dir.path().join("without.jsonl");
+        std::fs::write(&without, "{\"timestamp\":\"2026-10-29T09:00:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n").unwrap();
+        let mk = |pid, id: &str, path| ForeignSession { harness: Harness::Codex, pid, tty: Some(format!("/dev/ttys0{pid}")), session_id: id.into(), cwd: "/Users/x/dev/one".into(), name: id.into(), transcript_path: path };
+        let mut store = Store::new(claude).with_alive(|_| true).with_foreign(dir.path().join("codex"), dir.path().join("agy"), vec![mk(77, "aaa", with), mk(78, "bbb", without)]);
+        let cards = store.refresh(1_790_671_680_000);
+        assert_eq!(cards.len(), 2);
+        let a = cards.iter().find(|c| c.session_id == "aaa").unwrap();
+        let b = cards.iter().find(|c| c.session_id == "bbb").unwrap();
+        assert!(a.limits.is_some());
+        assert_eq!(a.limits, b.limits);
+        assert!(b.usage.is_none());
+        assert_eq!(a.model.as_deref(), Some("gpt-6.1-sol"));
     }
 
     #[test]
@@ -1328,5 +1526,236 @@ mod tests {
         store.set_ask_verdict(due[0].0.clone(), Verdict { asks: true, line: None });
         let card = store.refresh(now).remove(0);
         assert_eq!((card.state, card.awaiting.unwrap().detail.as_str()), (State::Awaiting, SAY_GO));
+    }
+
+    const SID_A: &str = "4f1c2a7e-0b1d-4c3e-9a8f-1234567890ab";
+    const SID_B: &str = "00000000-0000-0000-0000-000000000002";
+
+    fn assistant_line(model: &str, input: u64, output: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"model":"{model}","usage":{{"input_tokens":{input},"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":{output}}},"content":[{{"type":"text","text":"hi"}}]}}}}"#
+        )
+    }
+
+    /// Live session `sid` (pid `pid`, in /Users/x/dev/eye) in the Claude dir `claude`, its transcript holding `lines`.
+    fn claude_session(claude: &Path, pid: i32, sid: &str, lines: &[String]) {
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::create_dir_all(claude.join("projects/-Users-x-dev-eye")).unwrap();
+        std::fs::write(
+            claude.join(format!("sessions/{pid}.json")),
+            format!(r#"{{"pid":{pid},"sessionId":"{sid}","cwd":"/Users/x/dev/eye","name":"eye-{pid}","status":"idle"}}"#),
+        ).unwrap();
+        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(claude.join(format!("projects/-Users-x-dev-eye/{sid}.jsonl")), body).unwrap();
+    }
+
+    /// The status line fixture's payload recorded for `sid` at `at`, with `line` as the printed line.
+    fn recording(sid: &str, line: &str, at: u64) -> crate::statusline::Recorded {
+        let payload: serde_json::Value = serde_json::from_str(include_str!("../fixtures/statusline/payload.json")).unwrap();
+        let mut r = crate::statusline::recorded_from(&payload, line, at).unwrap();
+        r.session_id = sid.into();
+        r
+    }
+
+    #[test]
+    fn a_recorded_status_line_fills_limits_cost_context_and_the_line() {
+        use crate::context::ContextUsage;
+        use crate::usage::{Cost, CostUnit, TokenCounts};
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        claude_session(&claude, 7, SID_A, &[assistant_line("claude-opus-5-5", 100, 20), assistant_line("claude-opus-5-5", 5, 1)]);
+        std::fs::write(dir.path().join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"me@example.com"},"numStartups":3}"#).unwrap();
+        let line = "\u{1b}[1mOpus\u{1b}[0m 12%";
+        crate::statusline::write_recorded(&claude.join("maya"), &recording(SID_A, line, 1_000)).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        let card = store.refresh(2_000).remove(0);
+        assert_eq!(store.recorded.reads, 1, "one file, read once for the card and the limits");
+        assert_eq!(store.refresh(2_500).remove(0), card);
+        assert_eq!(store.recorded.reads, 1, "a second refresh with unchanged files reads none of them");
+        assert_eq!(card.status_line.as_deref(), Some(line));
+        let limits = card.limits.unwrap();
+        assert_eq!(limits.windows[0].label, "5h");
+        assert_eq!(limits.account.as_deref(), Some("me@example.com"));
+        assert_eq!(limits.read_at, 1_000);
+        assert_eq!(card.context, Some(ContextUsage { used: 120_000, window: 1_000_000, percent: 12 }));
+        let usage = card.usage.unwrap();
+        assert_eq!(usage.cost, Some(Cost { micros: 4_123_400, unit: CostUnit::Usd, estimated: false, models: vec![] }));
+        assert_eq!(usage.tokens, TokenCounts { input: 105, output: 21, ..Default::default() });
+    }
+
+    #[test]
+    fn without_a_recording_cost_is_estimated_from_the_transcript_and_limits_are_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        claude_session(&claude, 7, SID_A, &[assistant_line("claude-opus-5-5", 100, 20), assistant_line("claude-opus-5-5", 5, 1)]);
+        claude_session(&claude, 8, SID_B, &[]);
+        let mut store = Store::new(claude).with_alive(|_| true);
+        let cards = store.refresh(1);
+        let fresh = cards.iter().find(|c| c.session_id == SID_B).unwrap();
+        assert!(fresh.usage.is_none(), "nothing counted yet is no usage, not zeros");
+        let card = cards.into_iter().find(|c| c.session_id == SID_A).unwrap();
+        let usage = card.usage.unwrap();
+        assert_eq!((usage.tokens.input, usage.tokens.output), (105, 21));
+        let cost = usage.cost.unwrap();
+        assert!(cost.estimated);
+        assert!(cost.micros > 0);
+        assert_eq!(cost.models, vec!["claude-opus-5-5".to_string()]);
+        assert!(card.limits.is_none());
+        assert!(card.status_line.is_none());
+    }
+
+    #[test]
+    fn the_newest_recording_sets_every_claude_cards_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        let maya = claude.join("maya");
+        claude_session(&claude, 7, SID_A, &[assistant_line("claude-opus-5-5", 1, 1)]);
+        claude_session(&claude, 8, SID_B, &[assistant_line("claude-opus-5-5", 1, 1)]);
+        crate::statusline::write_recorded(&maya, &recording(SID_A, "a", 1_000)).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        let cards = store.refresh(2_000);
+        let card = |sid: &str| cards.iter().find(|c| c.session_id == sid).unwrap().clone();
+        assert!(card(SID_A).limits.is_some());
+        assert_eq!(card(SID_B).limits, card(SID_A).limits);
+        assert_eq!(card(SID_B).status_line, None, "the line stays the session's own");
+
+        let mut newer = recording(SID_B, "b", 3_000);
+        newer.rate_limits = Some(serde_json::json!({"five_hour": {"used_percentage": 5}}));
+        crate::statusline::write_recorded(&maya, &newer).unwrap();
+        let cards = store.refresh(4_000);
+        for c in &cards {
+            let limits = c.limits.clone().unwrap();
+            assert_eq!((limits.read_at, limits.windows[0].percent), (3_000, 5), "{}", c.session_id);
+        }
+
+        // A session that has ended may hold the freshest reading.
+        let mut ended = recording("00000000-0000-0000-0000-0000000000ff", "gone", 5_000);
+        ended.rate_limits = Some(serde_json::json!({"five_hour": {"used_percentage": 9}}));
+        crate::statusline::write_recorded(&maya, &ended).unwrap();
+        let cards = store.refresh(6_000);
+        assert_eq!(cards.len(), 2);
+        for c in &cards {
+            let limits = c.limits.clone().unwrap();
+            assert_eq!((limits.read_at, limits.windows[0].percent), (5_000, 9), "{}", c.session_id);
+        }
+    }
+
+    #[test]
+    fn recordings_without_rate_limits_give_every_claude_card_no_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join(".claude");
+        claude_session(&claude, 7, SID_A, &[assistant_line("claude-opus-5-5", 1, 1)]);
+        claude_session(&claude, 8, SID_B, &[assistant_line("claude-opus-5-5", 1, 1)]);
+        let mut api_key = recording(SID_A, "a", 1_000);
+        api_key.rate_limits = None;
+        crate::statusline::write_recorded(&claude.join("maya"), &api_key).unwrap();
+        let mut store = Store::new(claude).with_alive(|_| true);
+        let cards = store.refresh(2_000);
+        assert_eq!(cards.len(), 2);
+        for c in &cards {
+            let limits = c.limits.clone().expect("recorded, so read: no limits rather than not read yet");
+            assert!(limits.windows.is_empty(), "{}", c.session_id);
+            assert_eq!(limits.read_at, 1_000);
+        }
+    }
+
+    fn grok_events(dir: &Path, mtime_secs: u64) -> PathBuf {
+        let events = dir.join("events.jsonl");
+        std::fs::write(&events, "{}\n").unwrap();
+        std::fs::File::options().write(true).open(&events).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime_secs)).unwrap();
+        events
+    }
+
+    #[test]
+    fn grok_usage_is_due_once_per_minute_and_only_after_the_events_file_changed() {
+        let t = tempfile::tempdir().unwrap();
+        let events = grok_events(t.path(), 1_000);
+        let s = ForeignSession { harness: Harness::Grok, pid: 11, tty: None, session_id: "g1".into(), cwd: "/x".into(), name: "g".into(), transcript_path: events.clone() };
+        let mut store = Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), t.path().join("agy"), vec![s]);
+        let now = 10_000_000;
+        assert_eq!(store.usage_due(now), crate::collect::Due { antigravity: false, kiro: false, grok: vec!["g1".into()] }, "never run");
+        assert!(store.usage_due(now + 120_000).grok.is_empty(), "the events file has not changed");
+        grok_events(t.path(), 2_000);
+        assert_eq!(store.usage_due(now + 130_000).grok, vec!["g1".to_string()], "changed, and the last run is over a minute old");
+        grok_events(t.path(), 3_000);
+        assert!(store.usage_due(now + 150_000).grok.is_empty(), "changed, but the last run is 20 s old");
+        assert_eq!(store.usage_due(now + 190_000).grok, vec!["g1".to_string()]);
+        // A run that failed is retried after the gap without the file changing.
+        store.set_grok_usage("g1", None, now + 191_000);
+        assert!(store.usage_due(now + 200_000).grok.is_empty(), "the failed run is 9 s old");
+        assert_eq!(store.usage_due(now + 260_000).grok, vec!["g1".to_string()], "retried after the gap, same file");
+        store.set_grok_usage("g1", Some(SessionUsage { tokens: Default::default(), cost: None }), now + 261_000);
+        assert!(store.usage_due(now + 400_000).grok.is_empty(), "a good run waits for the file to change");
+    }
+
+    fn agy_session(dir: &Path, pid: i32, id: &str) -> ForeignSession {
+        ForeignSession { harness: Harness::Antigravity, pid, tty: Some(format!("ttys0{pid}")), session_id: id.into(), cwd: "/x".into(), name: id.into(), transcript_path: dir.join(format!("{id}.jsonl")) }
+    }
+
+    #[test]
+    fn nudged_limits_are_due_at_once_when_stale() {
+        let t = tempfile::tempdir().unwrap();
+        let mut store = Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), t.path().join("agy"), vec![agy_session(t.path(), 43, "a1")]);
+        let now = 10_000_000;
+        assert!(store.usage_due(now).antigravity, "never read, and an Antigravity card is on the board");
+        assert!(!store.usage_due(now + 1_000).antigravity);
+        store.nudge_limits(Harness::Antigravity, now + 30_000);
+        assert!(!store.usage_due(now + 30_000).antigravity, "a reading under a minute old is fresh enough");
+        store.nudge_limits(Harness::Antigravity, now + 61_000);
+        assert!(store.usage_due(now + 61_000).antigravity, "a window opened on a stale reading");
+        assert!(!store.usage_due(now + 62_000).antigravity, "the nudge is spent");
+        assert!(store.usage_due(now + 61_000 + Store::AGY_LIMITS_GAP_MS).antigravity, "every five minutes while the card is on the board");
+        store.nudge_limits(Harness::Kiro, now + 400_000);
+        assert!(!store.usage_due(now + 400_000).kiro, "no Kiro card, no Kiro run");
+    }
+
+    #[test]
+    fn set_limits_stamps_every_card_of_that_harness() {
+        use crate::usage::LimitWindow;
+        let t = tempfile::tempdir().unwrap();
+        let codex = ForeignSession { harness: Harness::Codex, pid: 42, tty: Some("ttys001".into()), session_id: "c1".into(), cwd: "/x".into(), name: "c1".into(), transcript_path: t.path().join("rollout.jsonl") };
+        let sessions = vec![agy_session(t.path(), 43, "a1"), agy_session(t.path(), 44, "a2"), codex];
+        let mut store = Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), t.path().join("agy"), sessions);
+        let limits = AccountLimits { account: None, windows: vec![LimitWindow { label: "Gemini 7d".into(), percent: 40, resets_at: Some(1_793_877_569) }], read_at: 5 };
+        store.set_limits(Harness::Antigravity, Some(limits.clone()), 5);
+        let cards = store.refresh(10);
+        let of = |id: &str| cards.iter().find(|c| c.session_id == id).unwrap().limits.clone();
+        assert_eq!((of("a1"), of("a2"), of("c1")), (Some(limits.clone()), Some(limits), None));
+        store.set_limits(Harness::Antigravity, None, 20);
+        assert!(store.refresh(30).iter().all(|c| c.limits.is_none()), "None clears the limits");
+    }
+
+    #[test]
+    fn a_failed_limits_read_keeps_the_last_reading_and_is_logged_once_an_hour() {
+        use crate::usage::LimitWindow;
+        let t = tempfile::tempdir().unwrap();
+        let mut store = Store::new(t.path().join("claude")).with_alive(|_| true).with_foreign(t.path().join("codex"), t.path().join("agy"), vec![agy_session(t.path(), 43, "a1")]);
+        let now = 10_000_000;
+        assert!(store.limits_failed(Harness::Antigravity, now), "the first failure is logged");
+        assert!(store.refresh(now).iter().all(|c| c.limits.is_none()), "never read: no limits");
+        let limits = AccountLimits { account: None, windows: vec![LimitWindow { label: "Gemini 7d".into(), percent: 40, resets_at: None }], read_at: now + 1 };
+        store.set_limits(Harness::Antigravity, Some(limits.clone()), now + 1);
+        assert!(!store.limits_failed(Harness::Antigravity, now + 300_000), "under an hour since the last log");
+        assert_eq!(store.refresh(now + 300_000)[0].limits, Some(limits), "the last good reading stays");
+        assert!(store.limits_failed(Harness::Antigravity, now + Store::LIMITS_LOG_GAP_MS), "an hour on, logged again");
+        assert!(store.limits_failed(Harness::Kiro, now + 1), "each harness logs on its own");
+        assert!(!store.limits_failed(Harness::Grok, now), "no limits slot, nothing to log");
+    }
+
+    #[test]
+    fn grok_usage_reaches_its_card_and_a_failed_run_keeps_the_last_reading() {
+        use crate::usage::{Cost, CostUnit, TokenCounts};
+        let t = tempfile::tempdir().unwrap();
+        let grok = t.path().join("grok");
+        let sdir = crate::grok::session_dir(&grok, "/Users/x", "g1");
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(grok.join("active_sessions.json"), r#"[{"session_id":"g1","pid":11,"cwd":"/Users/x"}]"#).unwrap();
+        let mut store = Store::new(t.path().join("claude")).with_alive(|pid| pid == 11).with_agent_dirs(t.path().join("codex"), t.path().join("agy"), grok);
+        let usage = SessionUsage { tokens: TokenCounts { input: 7, output: 3, ..Default::default() }, cost: Some(Cost { micros: 40_362, unit: CostUnit::Usd, estimated: false, models: vec![] }) };
+        assert!(store.refresh(1).iter().find(|c| c.session_id == "g1").unwrap().usage.is_none());
+        store.set_grok_usage("g1", Some(usage.clone()), 2);
+        assert_eq!(store.refresh(3).iter().find(|c| c.session_id == "g1").unwrap().usage, Some(usage.clone()));
+        store.set_grok_usage("g1", None, 4);
+        assert_eq!(store.refresh(5).iter().find(|c| c.session_id == "g1").unwrap().usage, Some(usage));
     }
 }

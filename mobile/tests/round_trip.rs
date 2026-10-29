@@ -88,7 +88,7 @@ fn card(id: &str, state: State, since: u64) -> Card {
         terminal: None,
         stale: false,
         model: None,
-        branch: None, brain: false, shell: false,
+        branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None,
     }
 }
 

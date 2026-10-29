@@ -8,6 +8,7 @@ pub enum Cmd {
     Run,
     Status,
     Hooks(HooksOp),
+    Statusline(StatuslineOp),
     Config(ConfigOp),
     Start { dir: Option<String>, prompt: Option<String>, options: LaunchOptions },
     Version,
@@ -22,12 +23,19 @@ pub enum HooksOp {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum StatuslineOp {
+    Install,
+    Remove,
+    Status,
+}
+
+#[derive(Debug, PartialEq)]
 pub enum ConfigOp {
     /// `maya config projects-dir <path>`: the folder start and resume pick projects from.
     ProjectsDir(String),
 }
 
-pub const USAGE: &str = "usage: maya <pair|run|status|hooks|config|start|--version> …
+pub const USAGE: &str = "usage: maya <pair|run|status|hooks|statusline|config|start|--version> …
        maya pair <host[:port]> --code <code> [--name <name>] [--new-key]
        maya start [--dir <dir>] [--prompt <prompt>] [--agent <claude-code|codex|antigravity|grok|kiro|opencode>] [--model <model>] [--effort <effort>] [--mode <mode>] [--name <name>] [--worktree]";
 
@@ -43,6 +51,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         "run" => no_more(&args[1..], Cmd::Run),
         "status" => no_more(&args[1..], Cmd::Status),
         "hooks" => parse_hooks(&args[1..]),
+        "statusline" => parse_statusline(&args[1..]),
         "config" => parse_config(&args[1..]),
         "start" => parse_start(&args[1..]),
         other => Err(format!("{USAGE}\nunknown command: {other}")),
@@ -114,6 +123,16 @@ fn parse_hooks(rest: &[String]) -> Result<Cmd, String> {
     no_more(&rest[1..], Cmd::Hooks(op))
 }
 
+fn parse_statusline(rest: &[String]) -> Result<Cmd, String> {
+    let op = match rest.first().map(String::as_str) {
+        Some("install") => StatuslineOp::Install,
+        Some("remove") => StatuslineOp::Remove,
+        Some("status") => StatuslineOp::Status,
+        _ => return Err(format!("{USAGE}\nstatusline needs one of: install|remove|status")),
+    };
+    no_more(&rest[1..], Cmd::Statusline(op))
+}
+
 fn parse_config(rest: &[String]) -> Result<Cmd, String> {
     match rest {
         [op, path] if op == "projects-dir" => Ok(Cmd::Config(ConfigOp::ProjectsDir(path.clone()))),
@@ -178,6 +197,16 @@ mod tests {
         assert_eq!(parse(&a("")).unwrap(), Cmd::Help);
         assert!(parse(&a("dance")).unwrap_err().starts_with("usage:"));
         assert!(parse(&a("hooks")).unwrap_err().contains("install|remove|status"));
+    }
+
+    #[test]
+    fn statusline_parses_its_three_ops_and_rejects_others() {
+        assert_eq!(parse(&a("statusline install")).unwrap(), Cmd::Statusline(StatuslineOp::Install));
+        assert_eq!(parse(&a("statusline remove")).unwrap(), Cmd::Statusline(StatuslineOp::Remove));
+        assert_eq!(parse(&a("statusline status")).unwrap(), Cmd::Statusline(StatuslineOp::Status));
+        assert!(parse(&a("statusline")).unwrap_err().contains("statusline needs one of"));
+        assert!(parse(&a("statusline dance")).unwrap_err().contains("statusline needs one of"));
+        assert!(parse(&a("statusline install typo")).unwrap_err().ends_with("\nunexpected argument: typo"));
     }
 
     #[test]

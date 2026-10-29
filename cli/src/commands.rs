@@ -1,6 +1,6 @@
-//! The `pair`, `status`, `hooks`, `config` and `start` subcommands.
+//! The `pair`, `status`, `hooks`, `statusline`, `config` and `start` subcommands.
 
-use crate::args::HooksOp;
+use crate::args::{HooksOp, StatuslineOp};
 use crate::executor::CliExecutor;
 use crate::run_cmd::pid_suffix;
 use crate::run_lock::{self, RunLock};
@@ -13,6 +13,7 @@ use maya_core::launch::LaunchOptions;
 use maya_core::net::client::{self, Executor, WRONG_CODE};
 use maya_core::net::identity::{self, Keypair};
 use maya_core::registry::pid_alive;
+use maya_core::statusline;
 use maya_core::store::Store;
 use maya_core::terminal::Terminal;
 use std::ffi::OsStr;
@@ -140,6 +141,20 @@ pub fn hooks(claude_dir: &Path, op: HooksOp) -> Result<String, String> {
         HooksOp::Install => hook_install::install_script_to(claude_dir).map(|_| "hooks installed".to_string()),
         HooksOp::Remove => hook_install::remove_from(claude_dir).map(|_| "hooks removed".to_string()),
         HooksOp::Status => hook_install::status(claude_dir).map(|installed| if installed { "hooks: installed".to_string() } else { "hooks: not installed".to_string() }),
+    }
+}
+
+/// Installs, removes or reports the status line wrapper that records
+/// Claude Code's usage and limits.
+pub fn statusline(claude_dir: &Path, op: StatuslineOp) -> Result<String, String> {
+    match op {
+        StatuslineOp::Install => statusline::install_to(claude_dir).map(|_| "status line installed".to_string()),
+        StatuslineOp::Remove => statusline::remove_from(claude_dir).map(|_| "status line removed".to_string()),
+        StatuslineOp::Status => statusline::status(claude_dir).map(|s| match s.blocked_by {
+            Some(file) => format!("status line: blocked by {file}"),
+            None if s.installed => "status line: installed".to_string(),
+            None => "status line: not installed".to_string(),
+        }),
     }
 }
 
@@ -323,6 +338,21 @@ mod tests {
         assert_eq!(hooks(dir.path(), HooksOp::Status).unwrap(), "hooks: not installed");
         hooks(dir.path(), HooksOp::Install).unwrap();
         assert_eq!(hooks(dir.path(), HooksOp::Status).unwrap(), "hooks: installed");
+    }
+
+    #[test]
+    fn statusline_status_reports_installed_state() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.json"), "{}").unwrap();
+        assert_eq!(statusline(dir.path(), StatuslineOp::Status).unwrap(), "status line: not installed");
+        // The script is written without jq, so install works either way; only
+        // the state it reports afterwards is checked where jq is found.
+        assert_eq!(statusline(dir.path(), StatuslineOp::Install).unwrap(), "status line installed");
+        if jq_found() {
+            assert_eq!(statusline(dir.path(), StatuslineOp::Status).unwrap(), "status line: installed");
+        }
+        assert_eq!(statusline(dir.path(), StatuslineOp::Remove).unwrap(), "status line removed");
+        assert_eq!(statusline(dir.path(), StatuslineOp::Status).unwrap(), "status line: not installed");
     }
 
     #[test]

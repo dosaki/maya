@@ -233,6 +233,19 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
         });
     }
     {
+        // The usage collectors (`grok usage` and the like), off the store lock;
+        // the board goes out again when they learned something.
+        let (s, due, stop) = (store.clone(), exec.board_due.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                if maya_core::collect::collect(&s) {
+                    due.store(true, Ordering::SeqCst);
+                }
+                std::thread::sleep(maya_core::collect::COLLECT_EVERY);
+            }
+        });
+    }
+    {
         // This run's sign of life, every `remembered::HEARTBEAT_MS`, until it stops.
         let (s, stop) = (store.clone(), stop.clone());
         std::thread::spawn(move || {

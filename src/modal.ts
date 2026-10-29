@@ -10,9 +10,11 @@ import { CLAUDE_AGENT, renderChoice, type AgentInfo } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay } from "./options";
 import type { Progress } from "./progress";
 import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
-import { COMPACT_AT, STATE_LABEL, compactButton, formatTokens, prButton, prRef, remoteTitle, type Card, type Pick, type Turn, type ViewerTheme } from "./types";
+import { COMPACT_AT, STATE_LABEL, compactButton, prButton, prRef, remoteTitle, type Card, type Pick, type Turn, type ViewerTheme } from "./types";
 import { renderToolTurn, resetToolUi } from "./toolturn";
 import { composerKey, sendShortcut } from "./keys";
+import { costText, hasReset, stageFor, usageStrip, type Stage } from "./usage";
+import { renderAnsi } from "./ansi";
 
 /**
  * Composer features the page turns on: the phone has a picker instead of
@@ -441,11 +443,65 @@ function watchPanelSize(panel: HTMLElement | null): void {
   panelFitter = () => fitAnchoredPanel(panel);
   window.addEventListener("resize", panelFitter);
   if (typeof ResizeObserver === "undefined") return;
-  panelObserver = new ResizeObserver(() => {
-    const size = draggedPanelSize(panel);
-    if (size) savePanelSize(size);
+  const head = panel.querySelector<HTMLElement>(".modal__head");
+  panelObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.target === head) {
+        // A head not laid out yet reports 0: keep the stage it has.
+        if (entry.contentRect.width > 0) applyStage(panel, entry.contentRect.width);
+        continue;
+      }
+      const size = draggedPanelSize(panel);
+      if (size) savePanelSize(size);
+    }
   });
   panelObserver.observe(panel);
+  if (head) panelObserver.observe(head);
+}
+
+/** The card each usage strip on screen was drawn from, so a stage change can redraw it. */
+const stripCards = new WeakMap<HTMLElement, Card>();
+
+function strip(card: Card, stage: Stage, nowMs: number): HTMLElement {
+  const s = usageStrip(card, stage, nowMs);
+  stripCards.set(s, card);
+  return s;
+}
+
+/**
+ * Draws the header's usage strip for `card` (by default the one already
+ * there) at the head's stage, replacing the old one only when it reads
+ * differently, so a tooltip being read is not torn down for nothing.
+ */
+function redrawStrip(root: HTMLElement, card?: Card): void {
+  const old = root.querySelector<HTMLElement>(".modal__titles .usage");
+  const from = card ?? (old ? stripCards.get(old) : undefined);
+  if (!old || !from) return;
+  const stage = (root.querySelector<HTMLElement>(".modal__head")?.dataset.stage as Stage | undefined) ?? "wide";
+  const next = strip(from, stage, Date.now());
+  if (next.outerHTML !== old.outerHTML) old.replaceWith(next);
+  else stripCards.set(old, from);
+}
+
+/** Swaps the status line under the prompt for `card`'s, only when it reads differently. */
+function redrawFoot(root: HTMLElement, card: Card): void {
+  const old = root.querySelector<HTMLElement>(".modal__statusline--foot");
+  if (!old) return;
+  const next = statusFoot(card, Date.now());
+  if (next.outerHTML !== old.outerHTML) old.replaceWith(next);
+}
+
+/**
+ * Sets the header's stage from its width (`data-stage` on `.modal__head`,
+ * which the header's CSS reads) and redraws the strip when the stage moved.
+ */
+export function applyStage(root: HTMLElement, widthPx: number): void {
+  const head = root.querySelector<HTMLElement>(".modal__head");
+  if (!head) return;
+  const stage = stageFor(widthPx);
+  if (head.dataset.stage === stage && root.querySelector<HTMLElement>(".modal__titles .usage")?.dataset.stage === stage) return;
+  head.dataset.stage = stage;
+  redrawStrip(root);
 }
 
 /** True when the composer holds a line for the terminal: a `/command` or a `!` shell line. */
@@ -475,10 +531,22 @@ export function workingText(card: Card, nowMs: number): string | null {
   return card.state === "working" ? `✻ Working… (${workingFor(nowMs - card.stateSince)})` : null;
 }
 
-/** The terminal look's status line: model · folder · branch · PR · ctx %, each when known. */
-export function statusLine(card: Card): string {
+/** The terminal look's status line: the session's own recorded line when it has one; otherwise Maya's: model · folder · branch · PR · ctx %, then the account limits ("5h reset" once a window's reset passed) and the cost, each when known. */
+export function statusLine(card: Card, nowMs: number = Date.now()): string {
+  if (typeof card.statusLine === "string" && card.statusLine !== "") return card.statusLine;
   const pr = card.pr ? `${card.pr.forge === "gitlab" ? "MR" : "PR"} ${prRef(card.pr)}` : null;
-  return [card.model, projectName(card.cwd), card.branch, pr, card.context ? `ctx ${card.context.percent}%` : null].filter(Boolean).join(" · ");
+  const windows = (card.limits?.windows ?? []).map((w) => (hasReset(w, nowMs) ? `${w.label} reset` : `${w.label} ${w.percent}%`));
+  const cost = card.usage?.cost ? costText(card.usage.cost) : null;
+  return [card.model, projectName(card.cwd), card.branch, pr, card.context ? `ctx ${card.context.percent}%` : null, ...windows, cost].filter(Boolean).join(" · ");
+}
+
+/** The foot under the prompt: the recorded line's colours kept, or Maya's own line as plain text. */
+function statusFoot(card: Card, nowMs: number): HTMLElement {
+  const recorded = typeof card.statusLine === "string" && card.statusLine !== "";
+  const foot = el("div", recorded ? "modal__statusline modal__statusline--foot modal__statusline--recorded" : "modal__statusline modal__statusline--foot");
+  if (recorded) foot.append(renderAnsi(statusLine(card)));
+  else foot.textContent = statusLine(card, nowMs);
+  return foot;
 }
 
 /** The chat look's part of it, beside the header's folder, PR and ctx %: model · branch. */
@@ -517,15 +585,11 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     pr.addEventListener("click", () => h.onOpenPr());
     titles.append(pr);
   }
-  if (m.card.context) {
-    const ctx = el("span", "modal__context", `ctx ${m.card.context.percent}%`);
-    ctx.title = `Context ${m.card.context.percent}% · ${formatTokens(m.card.context.used)} of ${formatTokens(m.card.context.window)}`;
-    titles.append(ctx);
-    if (caps.compact && m.card.context.percent >= COMPACT_AT) {
-      const compact = compactButton();
-      compact.addEventListener("click", () => h.onCompact());
-      titles.append(compact);
-    }
+  titles.append(strip(m.card, "wide", nowMs));
+  if (m.card.context && caps.compact && m.card.context.percent >= COMPACT_AT) {
+    const compact = compactButton();
+    compact.addEventListener("click", () => h.onCompact());
+    titles.append(compact);
   }
   titles.append(el("span", "modal__statusline modal__statusline--head", headStatus(m.card)));
   const state = el("span", `modal__state modal__state--${m.card.state}`, STATE_LABEL[m.card.state]);
@@ -615,7 +679,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     });
     if (stop) menu.querySelector(".menu__foot")?.append(stop);
     panel.append(menu);
-    panel.append(el("div", "modal__statusline modal__statusline--foot", statusLine(m.card)));
+    panel.append(statusFoot(m.card, nowMs));
   } else {
     // Every card takes replies: they are typed into the session's terminal, with
     // a Claude session's inbox as the fallback.
@@ -677,7 +741,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     if (stop) form.append(stop);
     form.append(send);
     panel.append(form);
-    panel.append(el("div", "modal__statusline modal__statusline--foot", statusLine(m.card)));
+    panel.append(statusFoot(m.card, nowMs));
   }
   if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.warn ? "warn" : m.status.ok ? "ok" : "error"}`, m.status.text));
 
@@ -711,6 +775,10 @@ export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
   // A rename in progress keeps its input; otherwise the name follows the registry.
   if (!panel.querySelector(".modal__title-input")) swap(".modal__title");
   swap(".modal__state");
+  // The strip follows the card at the stage the head is at.
+  const freshStrip = freshPanel.querySelector<HTMLElement>(".modal__titles .usage");
+  const freshCard = freshStrip ? stripCards.get(freshStrip) : undefined;
+  if (freshCard) redrawStrip(panel as HTMLElement, freshCard);
   swap(".modal__statusline--head");
   swap(".modal__statusline--foot");
   swap(".modal__banner", ".modal__history");
@@ -1054,6 +1122,8 @@ export async function openModal(card: Card): Promise<void> {
   document.addEventListener("keydown", keyHandler);
   void watchDrops();
   paint({ focusInput: true });
+  // A window opening on stale account limits has them read again.
+  void invoke("nudge_limits", { sessionId: card.sessionId }).catch(() => undefined);
   if (card.harness !== "claude-code") {
     const me = current;
     void invoke<{ agents: AgentInfo[] }>("list_agents", { machine: card.machine ?? "" })
@@ -1117,6 +1187,12 @@ export function refreshModal(cards: Card[]): void {
   const refetch = historyRefetchDue(current.model.card, fresh, current.lastRemoteFetchAt, Date.now());
   current.model.card = fresh;
   tickWorking(Date.now());
+  // Limits, cost and the recorded status line move without a repaint: an idle session's window still shows them.
+  const root = document.querySelector<HTMLElement>("#modal-host .modal");
+  if (root) {
+    redrawStrip(root, fresh);
+    redrawFoot(root, fresh);
+  }
   if (refetch) void loadTurns({ force: stateChanged });
   else if (stateChanged) paint();
 }

@@ -1159,6 +1159,28 @@ pub(crate) fn poll_pull_requests(app: &AppHandle) {
     refresh_and_emit(app);
 }
 
+/// Runs the usage collectors that are due (`grok usage` and the like),
+/// outside the store lock, and repaints when anything was learned.
+pub(crate) fn poll_usage(app: &AppHandle) {
+    if maya_core::collect::collect(&app.state::<AppState>().store) {
+        refresh_and_emit(app);
+    }
+}
+
+/// Marks the limits of the session's agent due at once when they are stale:
+/// its window just opened. A session on another machine is left alone.
+#[tauri::command(async)]
+fn nudge_limits(state: TauriState<AppState>, session_id: String) {
+    if remote_machine_of(&state, &session_id).is_some() {
+        return;
+    }
+    // Only the agents found as processes (Antigravity, Kiro) have limits read on demand.
+    let mut store = state.store.lock().unwrap();
+    if let Some(s) = store.foreign(&session_id) {
+        store.nudge_limits(s.harness, now_ms());
+    }
+}
+
 /// The model that judges finished messages: Maya's agent's own, or Claude Code's quick one.
 fn judge_model(cfg: &Config) -> Option<String> {
     match cfg.brain_model() {
@@ -1390,6 +1412,24 @@ fn remove_hook(state: TauriState<AppState>) -> Result<bool, String> {
     let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
     hook_install::remove_from(&dir)?;
     hook_install::status(&dir)
+}
+
+#[tauri::command(async)]
+fn statusline_status(state: TauriState<AppState>) -> Result<maya_core::statusline::Status, String> {
+    let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
+    maya_core::statusline::status(&dir)
+}
+
+#[tauri::command(async)]
+fn install_statusline(state: TauriState<AppState>) -> Result<maya_core::statusline::Status, String> {
+    let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
+    maya_core::statusline::install_to(&dir)
+}
+
+#[tauri::command(async)]
+fn remove_statusline(state: TauriState<AppState>) -> Result<maya_core::statusline::Status, String> {
+    let dir = state.store.lock().unwrap().claude_dir().to_path_buf();
+    maya_core::statusline::remove_from(&dir)
 }
 
 /// Stores the ElevenLabs key in the Keychain.
@@ -1636,6 +1676,7 @@ pub fn run() {
             save_attachment,
             open_url,
             open_pr,
+            nudge_limits,
             list_review_prs,
             list_deployments,
             deployment_approve,
@@ -1658,6 +1699,9 @@ pub fn run() {
             hook_status,
             install_hook,
             remove_hook,
+            statusline_status,
+            install_statusline,
+            remove_statusline,
             get_config,
             set_config,
             set_elevenlabs_key,
@@ -1735,6 +1779,11 @@ pub fn run() {
                     }
                     std::thread::sleep(PR_POLL);
                 }
+            });
+            let usage_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                poll_usage(&usage_handle);
+                std::thread::sleep(maya_core::collect::COLLECT_EVERY);
             });
             let asks_handle = app.handle().clone();
             std::thread::spawn(move || loop {
@@ -1884,8 +1933,7 @@ mod route_tests {
             machine: Some("laptop".into()),
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None, brain: false, shell: false
-        };
+            stale: false, model: None, branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None };
         assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));
         assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
         assert_eq!(pr_link(&card("/Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");

@@ -132,6 +132,19 @@ pub fn tail_for_dir(dir: &Path) -> ForeignTail {
     t
 }
 
+/// Tokens and cost from `grok usage <session-id>`: reasoning counts as
+/// output; 1 USD is 10^10 ticks.
+pub fn parse_usage(json: &str) -> Option<crate::usage::SessionUsage> {
+    use crate::usage::{Cost, CostUnit, SessionUsage, TokenCounts};
+    let v: Value = serde_json::from_str(json).ok()?;
+    let s = v.get("session").filter(|s| s.is_object())?;
+    let n = |k: &str| s[k].as_u64().unwrap_or(0);
+    Some(SessionUsage {
+        tokens: TokenCounts { input: n("inputTokens"), cached_input: n("cachedReadTokens"), cache_write: n("cacheCreationTokens"), output: n("outputTokens") + n("reasoningTokens") },
+        cost: s["costUsdTicks"].as_u64().map(|ticks| Cost { micros: ticks / 10_000, unit: CostUnit::Usd, estimated: false, models: vec![] }),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +200,17 @@ mod tests {
         assert_eq!(got, vec![("user".to_string(), "Say \"Hi".to_string()), ("assistant".to_string(), "Hi".to_string())]);
         assert_eq!(last_assistant(&text).as_deref(), Some("Hi"));
         assert_eq!(user_query("<user_query>\n  go \n</user_query>"), "go");
+    }
+
+    #[test]
+    fn parse_usage_reads_grok_tokens_and_ticks() {
+        use crate::usage::{CostUnit, TokenCounts};
+        let u = parse_usage(&fixture("usage.json")).unwrap();
+        assert_eq!(u.tokens, TokenCounts { input: 19581, cached_input: 1152, cache_write: 0, output: 488 + 474 });
+        let cost = u.cost.unwrap();
+        assert_eq!((cost.micros, cost.unit, cost.estimated), (40_362, CostUnit::Usd, false));
+        assert!(parse_usage(r#"{"session":{"inputTokens":3}}"#).unwrap().cost.is_none(), "no ticks, no cost");
+        assert_eq!(parse_usage("not json"), None);
+        assert_eq!(parse_usage(r#"{"sessionId":"x"}"#), None);
     }
 }

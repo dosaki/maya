@@ -161,6 +161,15 @@ pub struct Card {
     /// turn started still runs: there is no turn to stop.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shell: bool,
+    /// Tokens and cost the session has used so far, when its agent reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::usage::SessionUsage>,
+    /// The account's usage limits as last read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::usage::AccountLimits>,
+    /// The line the agent's own status line shows, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_line: Option<String>,
 }
 
 #[cfg(test)]
@@ -252,7 +261,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None, brain: false, shell: false
+            stale: false, model: None, branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["context"]["percent"], 62);
@@ -275,5 +284,18 @@ mod tests {
         let with = Card { branch: Some("feat/x".into()), ..card };
         assert_eq!(serde_json::to_value(&with).unwrap()["branch"], "feat/x");
         assert!(serde_json::to_value(Card { branch: None, ..with }).unwrap().get("branch").is_none(), "left out when unknown");
+    }
+
+    #[test]
+    fn a_card_without_usage_fields_deserializes_with_none_and_serializes_none_of_them() {
+        let older = serde_json::json!({"sessionId": "s1", "pid": 1, "name": "n", "cwd": "/x", "state": "idle", "stateSince": 0, "snippet": "", "awaiting": null, "hasInbox": false, "harness": "claude-code", "pr": null, "context": null});
+        let card: Card = serde_json::from_value(older).unwrap();
+        assert_eq!(card.usage, None);
+        assert_eq!(card.limits, None);
+        assert_eq!(card.status_line, None);
+        let json = serde_json::to_value(&card).unwrap();
+        assert!(json.get("usage").is_none());
+        assert!(json.get("limits").is_none());
+        assert!(json.get("statusLine").is_none());
     }
 }

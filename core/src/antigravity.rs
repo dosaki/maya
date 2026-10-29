@@ -181,6 +181,46 @@ pub fn transcript_path(state_dir: &Path, id: &str) -> PathBuf {
     state_dir.join("brain").join(id).join(".system_generated/logs/transcript.jsonl")
 }
 
+/// The account's limits from `agy -p /usage --output-format json`: one
+/// window per bucket of each model group, labelled by the group's short name
+/// and the window ("Gemini 7d"), at the share used. `None` when the answer is
+/// not a success or has no groups.
+pub fn parse_usage(json: &str, now_ms: u64) -> Option<crate::usage::AccountLimits> {
+    use crate::usage::{AccountLimits, LimitWindow};
+    let v: Value = serde_json::from_str(json).ok()?;
+    if v["status"].as_str() != Some("SUCCESS") {
+        return None;
+    }
+    let groups = v["command"]["data"]["groups"].as_array().filter(|g| !g.is_empty())?;
+    let mut windows = vec![];
+    for group in groups {
+        let name = group["name"].as_str().unwrap_or_default();
+        let short = if name.starts_with("Gemini") {
+            "Gemini"
+        } else if name.starts_with("Claude and GPT") {
+            "Claude+GPT"
+        } else {
+            name
+        };
+        for bucket in group["buckets"].as_array().into_iter().flatten() {
+            let window = bucket["window"].as_str().unwrap_or_default();
+            let label = match window {
+                "weekly" => "7d",
+                "daily" => "1d",
+                "five_hour" => "5h",
+                other => other,
+            };
+            let used = (1.0 - bucket["remaining_fraction"].as_f64().unwrap_or(1.0)) * 100.0;
+            windows.push(LimitWindow {
+                label: format!("{short} {label}"),
+                percent: used.round().clamp(0.0, 100.0) as u8,
+                resets_at: bucket["reset_time"].as_str().and_then(ms_of).map(|ms| ms / 1000),
+            });
+        }
+    }
+    Some(AccountLimits { account: None, windows, read_at: now_ms })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +333,28 @@ I1001 08:08:19.406162    2713 server.go:3175] GetConversationDetail: found conve
         assert_eq!(conversation_id(&paths, dir).as_deref(), Some("448e2da1-4835-4ef7-af63-8918dc91bff3"));
         assert_eq!(conversation_id(&["/Users/x/other".to_string()], dir), None);
         assert_eq!(transcript_path(Path::new("/Users/x/.gemini/antigravity-cli"), "abc"), Path::new("/Users/x/.gemini/antigravity-cli/brain/abc/.system_generated/logs/transcript.jsonl"));
+    }
+
+    #[test]
+    fn parse_usage_gives_one_window_per_bucket_named_by_group() {
+        let json = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/antigravity/usage.json")).unwrap();
+        let limits = parse_usage(&json, 7).unwrap();
+        let got: Vec<(&str, u8, Option<u64>)> = limits.windows.iter().map(|w| (w.label.as_str(), w.percent, w.resets_at)).collect();
+        // 2026-11-05T10:19:29Z: `date -u -j -f %Y-%m-%dT%H:%M:%SZ 2026-11-05T10:19:29Z +%s`.
+        assert_eq!(got, vec![("Gemini 7d", 0, Some(1793873969)), ("Claude+GPT 7d", 0, Some(1793873969))]);
+        assert_eq!((limits.account, limits.read_at), (None, 7));
+        let quarter = json.replacen(r#""remaining_fraction":1,"#, r#""remaining_fraction":0.25,"#, 1);
+        assert_eq!(parse_usage(&quarter, 7).unwrap().windows[0].percent, 75);
+        let error = json.replace(r#""status":"SUCCESS""#, r#""status":"ERROR""#);
+        assert_eq!(parse_usage(&error, 7), None);
+        assert_eq!(parse_usage(r#"{"status":"SUCCESS","command":{"data":{"groups":[]}}}"#, 7), None, "no groups");
+        assert_eq!(parse_usage("not json", 7), None);
+    }
+
+    #[test]
+    fn parse_usage_names_other_windows_and_groups_as_given() {
+        let json = r#"{"status":"SUCCESS","command":{"data":{"groups":[{"name":"Other","buckets":[{"window":"daily","remaining_fraction":0.5},{"window":"five_hour","remaining_fraction":-1},{"window":"monthly","remaining_fraction":2}]}]}}}"#;
+        let got: Vec<(String, u8, Option<u64>)> = parse_usage(json, 0).unwrap().windows.into_iter().map(|w| (w.label, w.percent, w.resets_at)).collect();
+        assert_eq!(got, vec![("Other 1d".into(), 50, None), ("Other 5h".into(), 100, None), ("Other monthly".into(), 0, None)]);
     }
 }

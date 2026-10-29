@@ -84,6 +84,8 @@ export function nextNetworkRole(prev: NetworkStatus | undefined, selected: Netwo
 
 const DEFAULT_NETWORK_STATUS: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } };
 
+type StatuslineStatus = { installed: boolean; blockedBy?: string | null };
+
 export interface SettingsModel {
   /** The session viewer's look; chat when absent. */
   viewerTheme?: ViewerTheme;
@@ -95,6 +97,8 @@ export interface SettingsModel {
   newSessionTerminal?: NewSessionTerminal;
   hookInstalled: boolean | null;
   codexHookInstalled?: boolean | null;
+  /** Whether Maya's usage status line wrapper is installed; null while loading. */
+  statusline?: { installed: boolean; blockedBy?: string | null } | null;
   completedTimeoutMinutes: number;
   projectsDir: string;
   clonesDir: string;
@@ -219,6 +223,8 @@ export interface SettingsHandlers {
   onInstall(): void;
   onCodexInstall?(): void;
   onCodexRemove?(): void;
+  onStatuslineInstall?(): void;
+  onStatuslineRemove?(): void;
   onRemove(): void;
   onTimeout(minutes: number): void;
   onProjectsDir(path: string): void;
@@ -750,6 +756,25 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     btn.addEventListener("click", () => h.onInstall());
   }
   sessions.append(btn);
+
+  const line = model.statusline ?? null;
+  const lineStatus = document.createElement("div");
+  lineStatus.className = "settings__status";
+  lineStatus.textContent =
+    line === null
+      ? "Checking status line…"
+      : line.blockedBy
+        ? `Usage and limits cannot be recorded: the status line is set in ${line.blockedBy}.`
+        : line.installed
+          ? "Usage and limits are recorded from Claude Code's status line."
+          : "Usage and limits are not recorded. Install the status line wrapper to see them in session windows.";
+  const lineButton = document.createElement("button");
+  lineButton.type = "button";
+  lineButton.dataset.action = line?.installed ? "remove-statusline" : "install-statusline";
+  lineButton.textContent = line?.installed ? "Remove usage status line" : "Install usage status line";
+  lineButton.disabled = line === null || !!line.blockedBy;
+  lineButton.addEventListener("click", () => line?.installed ? h.onStatuslineRemove?.() : h.onStatuslineInstall?.());
+  sessions.append(lineStatus, lineButton);
 
   const codexStatus = document.createElement("div");
   codexStatus.className = "settings__status";
@@ -1653,6 +1678,7 @@ export async function initSettings(): Promise<void> {
 
   const model: SettingsModel = {
     hookInstalled: null,
+    statusline: null,
     completedTimeoutMinutes: 30,
     projectsDir: "",
     clonesDir: "",
@@ -1871,6 +1897,8 @@ export async function initSettings(): Promise<void> {
     },
     onCodexInstall: () => void run(async () => { model.codexHookInstalled = await invoke<boolean>("install_codex_hook"); }),
     onCodexRemove: () => void run(async () => { model.codexHookInstalled = await invoke<boolean>("remove_codex_hook"); }),
+    onStatuslineInstall: () => void run(async () => { model.statusline = await invoke<StatuslineStatus>("install_statusline"); }),
+    onStatuslineRemove: () => void run(async () => { model.statusline = await invoke<StatuslineStatus>("remove_statusline"); }),
     onInstall: () => void run(async () => { model.hookInstalled = await invoke<boolean>("install_hook"); }),
     onRemove: () => void run(async () => { model.hookInstalled = await invoke<boolean>("remove_hook"); }),
     onTimeout: (minutes) => void run(() => saveConfig({ completedTimeoutMinutes: minutes })),
@@ -2126,6 +2154,7 @@ export async function initSettings(): Promise<void> {
     // from loading: the Codex hook then shows as not installed, and
     // installing it reports what is wrong with the file.
     const codexStatus = invoke<boolean>("codex_hook_status").catch(() => false);
+    const statusline = invoke<StatuslineStatus>("statusline_status").catch((): StatuslineStatus => ({ installed: false }));
     const focusVisible = invoke<boolean>("focus_visible").catch(() => true);
     // Purely informational, so a failure just leaves the line out.
     const version = getVersion().catch(() => "");
@@ -2136,6 +2165,7 @@ export async function initSettings(): Promise<void> {
     model.updatesOn = updates.kind() !== "off";
     model.hookInstalled = installed;
     model.codexHookInstalled = codexInstalled;
+    model.statusline = await statusline;
     applyConfig(config);
     await loadVoices();
     await loadGitStatus();

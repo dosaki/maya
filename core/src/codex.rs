@@ -38,6 +38,29 @@ fn approval_detail(p: &Value) -> String {
     "Waiting for your approval".to_string()
 }
 
+/// `info.total_token_usage` → counts: input = input_tokens − cached_input_tokens, cached_input = cached_input_tokens, cache_write = cache_write_input_tokens, output = output_tokens (reasoning is inside output).
+pub fn token_counts(p: &Value) -> Option<crate::usage::TokenCounts> {
+    let u = p["info"]["total_token_usage"].as_object()?;
+    let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let cached = n("cached_input_tokens");
+    Some(crate::usage::TokenCounts { input: n("input_tokens").saturating_sub(cached), cached_input: cached, cache_write: n("cache_write_input_tokens"), output: n("output_tokens") })
+}
+
+/// `rate_limits` → windows from `primary` and `secondary` (skipping a null one), labelled by `window_label(window_minutes)`, `used_percent` rounded, `resets_at` in seconds; `read_at` is the line's timestamp. None when `rate_limits` is null or has no windows.
+pub fn rate_limits(p: &Value, at_ms: u64) -> Option<crate::usage::AccountLimits> {
+    let r = &p["rate_limits"];
+    let windows: Vec<crate::usage::LimitWindow> = ["primary", "secondary"]
+        .iter()
+        .filter_map(|k| {
+            let w = &r[*k];
+            let minutes = w["window_minutes"].as_u64().filter(|m| *m > 0)?;
+            let used = w["used_percent"].as_f64()?;
+            Some(crate::usage::LimitWindow { label: crate::usage::window_label(minutes), percent: used.round().clamp(0.0, 100.0) as u8, resets_at: w["resets_at"].as_u64() })
+        })
+        .collect();
+    (!windows.is_empty()).then_some(crate::usage::AccountLimits { account: None, windows, read_at: at_ms })
+}
+
 /// The state of a rollout from its (tail) text.
 pub fn parse_tail(text: &str) -> ForeignTail {
     let mut t = ForeignTail::default();
@@ -48,6 +71,11 @@ pub fn parse_tail(text: &str) -> ForeignTail {
         }
         let p = &v["payload"];
         match v["type"].as_str() {
+            Some("turn_context") => {
+                if let Some(m) = p["model"].as_str() {
+                    t.model = Some(m.to_string());
+                }
+            }
             Some("session_meta") => {
                 t.cwd = p["cwd"].as_str().map(str::to_string);
                 t.session_id = p["id"].as_str().or_else(|| p["session_id"].as_str()).map(str::to_string);
@@ -58,6 +86,14 @@ pub fn parse_tail(text: &str) -> ForeignTail {
                     t.awaiting = None;
                     if let Some(w) = p["model_context_window"].as_u64() {
                         t.context_window = Some(w);
+                    }
+                }
+                "token_count" => {
+                    if let Some(tokens) = token_counts(p) {
+                        t.usage = Some(crate::usage::SessionUsage { tokens, cost: None });
+                    }
+                    if let Some(l) = rate_limits(p, v["timestamp"].as_str().and_then(ms_of).unwrap_or(0)) {
+                        t.limits = Some(l);
                     }
                 }
                 "task_complete" | "turn_aborted" | "error" => {
@@ -89,6 +125,12 @@ pub fn parse_tail(text: &str) -> ForeignTail {
                 }
             }
             _ => {}
+        }
+    }
+    // Priced once, with the newest model, after the whole tail is read.
+    if let (Some(u), Some(model)) = (t.usage.as_mut(), t.model.as_ref()) {
+        if let Some(micros) = crate::pricing::cost_micros(model, &u.tokens, false) {
+            u.cost = Some(crate::usage::Cost { micros, unit: crate::usage::CostUnit::Usd, estimated: true, models: vec![model.clone()] });
         }
     }
     t
@@ -290,6 +332,52 @@ mod tests {
 
     fn fixture() -> String {
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex/rollout.jsonl")).unwrap()
+    }
+
+    fn token_fixture() -> String {
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/codex/token_count.jsonl")).unwrap()
+    }
+
+    fn payload(line: usize) -> Value {
+        let text = token_fixture();
+        let v: Value = serde_json::from_str(text.lines().nth(line).unwrap()).unwrap();
+        v["payload"].clone()
+    }
+
+    #[test]
+    fn token_counts_split_cached_from_input() {
+        let c = token_counts(&payload(1)).unwrap();
+        assert_eq!(c, crate::usage::TokenCounts { input: 2918, cached_input: 12160, cache_write: 0, output: 5 });
+    }
+
+    #[test]
+    fn rate_limits_label_windows_by_minutes_and_skip_null() {
+        let l = rate_limits(&payload(1), 7).unwrap();
+        let got: Vec<_> = l.windows.iter().map(|w| (w.label.as_str(), w.percent, w.resets_at)).collect();
+        assert_eq!(got, vec![("5h", 0, Some(1_790_986_755)), ("7d", 1, Some(1_791_276_482))]);
+        assert_eq!(l.read_at, 7);
+        assert!(rate_limits(&payload(2), 7).is_none());
+    }
+
+    #[test]
+    fn parse_tail_keeps_the_newest_usage_model_and_limits() {
+        let t = parse_tail(&token_fixture());
+        assert_eq!(t.model.as_deref(), Some("gpt-6.1-sol"));
+        let u = t.usage.unwrap();
+        assert_eq!(u.tokens.output, 90);
+        let cost = u.cost.unwrap();
+        assert!(cost.estimated && cost.micros > 0);
+        assert_eq!(cost.models, vec!["gpt-6.1-sol".to_string()]);
+        assert_eq!(t.limits.unwrap().read_at, ms_of("2026-10-29T09:12:33.123Z").unwrap());
+    }
+
+    #[test]
+    fn an_unpriced_model_gives_tokens_without_a_cost() {
+        let t = parse_tail(&token_fixture().replace("gpt-6.1-sol", "made-up-model"));
+        assert_eq!(t.model.as_deref(), Some("made-up-model"));
+        let u = t.usage.unwrap();
+        assert_eq!(u.tokens.output, 90);
+        assert_eq!(u.cost, None);
     }
 
     #[test]

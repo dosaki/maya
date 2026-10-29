@@ -24,6 +24,7 @@ the right terminal first.
 - After a restart, offers to resume every session that was running, on this machine and on the paired ones, each in its own folder and terminal: from the Sessions tab, or by voice ("Maya, resume my sessions")
 - Shows what a session's terminal shows: the conversation, each command's output, edit diffs, how long it has been working, and its model, folder and branch
   - As a chat or in a terminal look, like the agent's own terminal (Settings → Sessions, or the `>_` button on the session)
+- Shows each session's context, its account's usage limits and its cost so far, in the session window
 - Tells you when a session needs you
   - Using built-in notifications, and/or a voice and/or a Dock badge
   - Keeps quiet under a Focus mode, or when you mute her from the top bar

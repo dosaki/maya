@@ -215,24 +215,28 @@ pub fn remove(settings: Value) -> Value {
     Value::Object(root)
 }
 
-fn read_settings(claude_dir: &Path) -> Result<Value, String> {
-    let path = claude_dir.join("settings.json");
+/// `claude_dir/<file>` parsed, `{}` when it does not exist; an error,
+/// never a guess, when it is not valid JSON.
+pub(crate) fn read_settings(claude_dir: &Path, file: &str) -> Result<Value, String> {
+    let path = claude_dir.join(file);
     if !path.exists() {
         return Ok(json!({}));
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read settings.json: {e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("settings.json is not valid JSON, refusing to modify it: {e}"))
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {file}: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("{file} is not valid JSON, refusing to modify it: {e}"))
 }
 
-fn write_settings_with_backup(claude_dir: &Path, settings: &Value) -> Result<(), String> {
-    let path = claude_dir.join("settings.json");
+/// Writes `settings` to `claude_dir/<file>`, first copying what was there
+/// to `<file>.maya-backup-<epoch seconds>`.
+pub(crate) fn write_settings_with_backup(claude_dir: &Path, file: &str, settings: &Value) -> Result<(), String> {
+    let path = claude_dir.join(file);
     if path.exists() {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let backup = claude_dir.join(format!("settings.json.maya-backup-{stamp}"));
-        std::fs::copy(&path, &backup).map_err(|e| format!("cannot back up settings.json: {e}"))?;
+        let backup = claude_dir.join(format!("{file}.maya-backup-{stamp}"));
+        std::fs::copy(&path, &backup).map_err(|e| format!("cannot back up {file}: {e}"))?;
     }
     let text = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text + "\n").map_err(|e| format!("cannot write settings.json: {e}"))
+    std::fs::write(&path, text + "\n").map_err(|e| format!("cannot write {file}: {e}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -244,7 +248,7 @@ pub fn install_to(claude_dir: &Path) -> Result<(), String> {
 /// hook at it: `install_to` on macOS, and the headless CLI everywhere.
 #[cfg(unix)]
 pub fn install_script_to(claude_dir: &Path) -> Result<(), String> {
-    let settings = read_settings(claude_dir)?;
+    let settings = read_settings(claude_dir, "settings.json")?;
     let maya_dir = claude_dir.join("maya");
     std::fs::create_dir_all(&maya_dir).map_err(|e| format!("cannot create {}: {e}", maya_dir.display()))?;
     let script = maya_dir.join("hook.sh");
@@ -254,7 +258,7 @@ pub fn install_script_to(claude_dir: &Path) -> Result<(), String> {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
     }
     let command = format!("\"$HOME/{SCRIPT_MARKER}\"");
-    write_settings_with_backup(claude_dir, &install(settings, &command))
+    write_settings_with_backup(claude_dir, "settings.json", &install(settings, &command))
 }
 
 /// The hook binary in `dir`, the folder of Maya's own executable: Tauri
@@ -298,7 +302,7 @@ pub fn install_to(claude_dir: &Path) -> Result<(), String> {
 /// new one is renamed into place for the same reason and made executable.
 #[cfg(any(windows, target_os = "linux"))]
 pub fn install_with(claude_dir: &Path, source: &Path) -> Result<(), String> {
-    let settings = read_settings(claude_dir)?;
+    let settings = read_settings(claude_dir, "settings.json")?;
     let maya_dir = claude_dir.join("maya");
     std::fs::create_dir_all(&maya_dir).map_err(|e| format!("cannot create {}: {e}", maya_dir.display()))?;
     let bytes = std::fs::read(source).map_err(|e| format!("cannot read {}: {e}", source.display()))?;
@@ -324,16 +328,16 @@ pub fn install_with(claude_dir: &Path, source: &Path) -> Result<(), String> {
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).map_err(|e| format!("cannot make {HOOK_EXE} executable: {e}"))?;
     }
     let command = format!("\"$HOME/{HOOK_MARKER}\"");
-    write_settings_with_backup(claude_dir, &install(settings, &command))
+    write_settings_with_backup(claude_dir, "settings.json", &install(settings, &command))
 }
 
 pub fn remove_from(claude_dir: &Path) -> Result<(), String> {
-    let settings = read_settings(claude_dir)?;
-    write_settings_with_backup(claude_dir, &remove(settings))
+    let settings = read_settings(claude_dir, "settings.json")?;
+    write_settings_with_backup(claude_dir, "settings.json", &remove(settings))
 }
 
 pub fn status(claude_dir: &Path) -> Result<bool, String> {
-    Ok(is_installed(&read_settings(claude_dir)?))
+    Ok(is_installed(&read_settings(claude_dir, "settings.json")?))
 }
 
 #[cfg(test)]

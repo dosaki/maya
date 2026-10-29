@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, applyStage, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
 import { comboLabel, defaultKeys, setKeyBindings } from "./keys";
 import type { Card, Turn } from "./types";
 
@@ -219,7 +219,7 @@ describe("renderModal", () => {
     const el = renderModal({ card: codex, turns: [], status: null, draft: "" }, h);
     expect(el.querySelector(".modal__tweaks")).toBeNull();
     expect(el.querySelector("button[data-action=compact]")).not.toBeNull();
-    expect(el.querySelector(".modal__context")?.textContent).toBe("ctx 80%");
+    expect(el.querySelector(".usage__meter[data-kind=ctx] .usage__pct")?.textContent).toBe("80%");
     const ta = el.querySelector<HTMLTextAreaElement>("textarea")!;
     expect(ta.placeholder).toContain("typed into its terminal as one line, so /commands run there)");
     expect(ta.placeholder).not.toContain("!shell");
@@ -286,12 +286,81 @@ describe("renderModal", () => {
   it("shows context usage in the header and a Compact button from 75 percent", () => {
     const h = handlers();
     const low = renderModal({ card: { ...base, context: { used: 20_000, window: 200_000, percent: 10 } }, turns: [], status: null, draft: "" }, h);
-    expect(low.querySelector(".modal__context")?.textContent).toBe("ctx 10%");
+    expect(low.querySelector(".usage__meter[data-kind=ctx] .usage__pct")?.textContent).toBe("10%");
     expect(low.querySelector("button[data-action=compact]")).toBeNull();
     const high = renderModal({ card: { ...base, context: { used: 160_000, window: 200_000, percent: 80 } }, turns: [], status: null, draft: "" }, h);
     const btn = high.querySelector<HTMLButtonElement>(".modal__head button[data-action=compact]")!;
     btn.click();
     expect(h.onCompact).toHaveBeenCalledTimes(1);
+  });
+
+  it("the_header_carries_the_usage_strip_and_no_context_span", () => {
+    const h = handlers();
+    const card: Card = { ...base, pr: { number: 12, url: "u", state: "open" }, context: { used: 160_000, window: 200_000, percent: 80 }, limits: { account: null, windows: [{ label: "5h", percent: 20, resetsAt: null }], readAt: 0 } };
+    const el = renderModal({ card, turns: [], status: null, draft: "" }, h);
+    const strip = el.querySelector<HTMLElement>(".modal__titles .usage");
+    expect(strip).not.toBeNull();
+    expect(el.querySelector(".modal__context")).toBeNull();
+    expect(strip!.previousElementSibling?.matches("[data-action=pr]"), "after the PR button").toBe(true);
+    expect(strip!.querySelectorAll(".usage__meter")).toHaveLength(2);
+    expect(el.querySelector(".modal__head button[data-action=compact]")).not.toBeNull();
+    expect(renderModal({ card: { ...base, context: { used: 20_000, window: 200_000, percent: 10 } }, turns: [], status: null, draft: "" }, h).querySelector("button[data-action=compact]")).toBeNull();
+  });
+
+  it("the_strip_stage_follows_the_heads_width", () => {
+    const card: Card = { ...base, context: { used: 124_000, window: 200_000, percent: 62 }, limits: { account: null, windows: [{ label: "5h", percent: 78, resetsAt: null }], readAt: 0 } };
+    const root = renderModal({ card, turns: [], status: null, draft: "" }, handlers());
+    const head = root.querySelector<HTMLElement>(".modal__head")!;
+    applyStage(root, 1200);
+    expect(head.dataset.stage).toBe("wide");
+    expect(root.querySelector<HTMLElement>(".usage")!.dataset.stage).toBe("wide");
+    applyStage(root, 900);
+    expect(head.dataset.stage).toBe("medium");
+    expect(root.querySelector(".usage")!.className).toBe("usage usage--medium");
+    applyStage(root, 700);
+    expect(head.dataset.stage).toBe("narrow");
+    expect(root.querySelector(".usage__bar")).toBeNull();
+    applyStage(root, 500);
+    expect(head.dataset.stage).toBe("chip");
+    expect(root.querySelector(".usage__chip")?.textContent).toBe("62% · 78%");
+    // A repaint keeps the stage the head is at.
+    patchModal(root, renderModal({ card: { ...card, context: { used: 140_000, window: 200_000, percent: 70 } }, turns: [], status: null, draft: "" }, handlers()));
+    expect(root.querySelectorAll(".usage")).toHaveLength(1);
+    expect(root.querySelector(".usage__chip")?.textContent).toBe("70% · 78%");
+  });
+
+  it("hides the header's status line at narrow and chip, and the folder at chip", () => {
+    expect(styles).toContain('.modal__head[data-stage="narrow"] .modal__statusline--head, .modal__head[data-stage="chip"] .modal__statusline--head { display: none; }');
+    expect(styles).toContain('.modal__head[data-stage="chip"] .modal__project { display: none; }');
+    expect(styles).toContain(".usage { flex: none; display: flex;");
+  });
+
+  it("keeps every item in the head on one line: the status line gives way first, then the title", () => {
+    // Every item of the titles row keeps its width and its line; the strip never shrinks below its meters.
+    expect(styles).toContain(".modal__titles > * { flex: none; white-space: nowrap; }");
+    expect(styles).toContain(".usage { flex: none; display: flex;");
+    expect(styles).toContain(".modal__project { color: var(--muted); font-size: 12px; white-space: nowrap; }");
+    expect(styles).toContain(".modal__state { flex: none; white-space: nowrap;");
+    // The two that may shrink, the status line far sooner than the title, each ending in an ellipsis.
+    expect(styles).toContain(".modal__titles > .modal__title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
+    expect(styles).toContain(".modal__titles > .modal__statusline--head { flex: 0 100000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
+    expect(styles).toContain(".modal__titles { flex: 1; display: flex; align-items: baseline; gap: 8px; min-width: 0; }");
+    // The rules land on what renderModal draws.
+    const el = renderModal({ card: { ...base, model: "claude-opus-5", branch: "feat/x" }, turns: [], status: null, draft: "" }, handlers());
+    const titles = el.querySelector(".modal__head > .modal__titles")!;
+    for (const sel of [".modal__title", ".modal__project", ".usage", ".modal__statusline--head"]) expect(titles.querySelector(`:scope > ${sel}`), sel).not.toBeNull();
+  });
+
+  it("keeps limit bars blue until 75 percent turns them amber, and context bars gold", () => {
+    expect(styles).toContain('.usage__meter[data-kind="limit"] .usage__fill { background: var(--working); }');
+    expect(styles).toContain('.usage__meter[data-band="high"] .usage__fill { background: var(--awaiting); }');
+    // No mid-band fill colour: a limit at 50-74% must not look like the context bar.
+    expect(styles).not.toMatch(/data-band="mid"\][^{]*\.usage__fill/);
+  });
+
+  it("mutes a window whose reset passed, in both looks", () => {
+    // Four classes and attributes: above the terminal look's `.modal--terminal .usage__pct` colours.
+    expect(styles).toContain('.usage .usage__meter[data-reset="passed"] .usage__pct { color: inherit; font-style: italic; }');
   });
 
   it("tells the user to reply when the session asked in prose", () => {
@@ -763,12 +832,33 @@ describe("working and status lines", () => {
     expect(renderModal({ card: base, turns, status: null, draft: "" }, handlers()).querySelector(".modal__working")).toBeNull();
   });
 
-  it("puts model · folder · branch · PR · ctx under the prompt, and model · branch in the header", () => {
+  it("the_terminal_foot_shows_the_recorded_line_when_there_is_one", () => {
+    const card: Card = { ...busy, statusLine: "\u001b[1mOpus\u001b[0m │ 62%" };
+    expect(statusLine(card)).toBe(card.statusLine);
+    const el = renderModal({ card, turns, status: null, draft: "", theme: "terminal" }, handlers(), 2_000);
+    const foot = el.querySelector(".modal__composer + .modal__statusline--foot")!;
+    expect(foot.textContent).toBe("Opus │ 62%");
+    expect(foot.querySelector(".ansi-b")).not.toBeNull();
+    expect(foot.classList.contains("modal__statusline--recorded")).toBe(true);
+  });
+
+  it("mayas_own_line_appends_limits_and_cost_without_a_recording", () => {
     expect(statusLine(busy)).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
     expect(statusLine({ ...busy, pr: { number: 3, url: "u", state: "open", forge: "gitlab" } })).toBe("claude-opus-5 · eye · feat/x · MR !3 · ctx 42%");
     expect(statusLine(base)).toBe("eye");
-    const el = renderModal({ card: busy, turns, status: null, draft: "", theme: "terminal" }, handlers(), 2_000);
-    expect(el.querySelector(".modal__composer + .modal__statusline--foot")?.textContent).toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42%");
+    const card: Card = {
+      ...busy,
+      limits: { account: null, readAt: 1, windows: [{ label: "5h", percent: 78, resetsAt: null }, { label: "7d", percent: 41, resetsAt: null }] },
+      usage: { input: 0, cachedInput: 0, cacheWrite: 0, output: 0, cost: { micros: 4_120_000, unit: "usd", estimated: true, models: [] } },
+    };
+    const line = "claude-opus-5 · eye · feat/x · PR #12 · ctx 42% · 5h 78% · 7d 41% · $4.12 est.";
+    expect(statusLine(card)).toBe(line);
+    const passed: Card = { ...card, limits: { ...card.limits!, windows: [{ label: "5h", percent: 78, resetsAt: 1 }, { label: "7d", percent: 41, resetsAt: null }] } };
+    expect(statusLine(passed, 2_000), "a window whose reset passed").toBe("claude-opus-5 · eye · feat/x · PR #12 · ctx 42% · 5h reset · 7d 41% · $4.12 est.");
+    const el = renderModal({ card, turns, status: null, draft: "", theme: "terminal" }, handlers(), 2_000);
+    const foot = el.querySelector(".modal__composer + .modal__statusline--foot")!;
+    expect(foot.textContent).toBe(line);
+    expect(foot.classList.contains("modal__statusline--recorded")).toBe(false);
     expect(el.querySelector(".modal__titles .modal__statusline--head")?.textContent).toBe("claude-opus-5 · feat/x");
   });
 
@@ -776,6 +866,12 @@ describe("working and status lines", () => {
     expect(styles).toContain(".modal__statusline--foot { display: none; }");
     expect(styles).toContain(".modal--terminal .modal__statusline--foot { display: block;");
     expect(styles).toContain(".modal--terminal .modal__statusline--head { display: none; }");
+  });
+
+  it("scrolls a recorded line wider than the panel inside the foot instead of overflowing it", () => {
+    expect(styles).toContain(".modal__statusline--recorded { white-space: pre; overflow-x: auto; overflow-y: hidden; }");
+    // No look sets the foot's overflow back.
+    expect(styles).not.toMatch(/modal__statusline--(foot|recorded)[^{]*\{[^}]*overflow(-x)?: visible/);
   });
 
   it("a repaint carries the status lines and the working line along", () => {
@@ -797,6 +893,14 @@ describe("the open session view while a session asks", () => {
     document.body.innerHTML = '<div id="modal-host"></div>';
     invoke.mockReset();
     invoke.mockImplementation((cmd: string) => Promise.resolve(cmd === "session_history" ? [] : null));
+  });
+
+  it("opening a window nudges its agent's account limits, and a failed nudge is ignored", async () => {
+    invoke.mockImplementation((cmd: string) => (cmd === "nudge_limits" ? Promise.reject(new Error("gone")) : Promise.resolve(cmd === "session_history" ? [] : null)));
+    await openModal({ ...base, sessionId: "m0", harness: "antigravity" });
+    expect(calls("nudge_limits")).toEqual([["nudge_limits", { sessionId: "m0" }]]);
+    expect(host().querySelector(".modal__status")?.textContent ?? "").toBe("");
+    closeModal();
   });
 
   it("menu replaces the composer while asking and the composer returns after, with the draft", async () => {
@@ -824,6 +928,38 @@ describe("the open session view while a session asks", () => {
     await flush();
     expect(host().querySelector(".menu textarea")).toBe(box);
     expect(document.activeElement).toBe(box);
+    closeModal();
+  });
+
+  it("moves the usage strip on a board refresh that repaints nothing else, and leaves an unchanged one be", async () => {
+    const card: Card = { ...base, sessionId: "u1", machine: "laptop" };
+    await openModal(card);
+    expect(host().querySelector(".usage__note")?.textContent).toBe("limits not read yet");
+    const limits = { account: null, windows: [{ label: "5h", percent: 33, resetsAt: null }], readAt: Date.now() };
+    refreshModal([{ ...card, limits }]);
+    const strip = host().querySelector(".usage");
+    expect(strip?.querySelector(".usage__meter[data-kind=limit] .usage__pct")?.textContent).toBe("33%");
+    refreshModal([{ ...card, limits }]);
+    expect(host().querySelector(".usage"), "the same strip, so a tooltip being read stays").toBe(strip);
+    closeModal();
+  });
+
+  it("moves the recorded status line on a board refresh that repaints nothing else, and leaves an unchanged one be", async () => {
+    const card: Card = { ...base, sessionId: "u2", machine: "laptop", statusLine: "Opus · 10%" };
+    await openModal(card);
+    const foot = () => host().querySelector(".modal__statusline--foot");
+    expect(foot()?.textContent).toBe("Opus · 10%");
+    refreshModal([{ ...card, statusLine: "\u001b[1mOpus\u001b[0m · 12%" }]);
+    const moved = foot();
+    expect(moved?.textContent).toBe("Opus · 12%");
+    expect(moved?.querySelector(".ansi-b")?.textContent).toBe("Opus");
+    refreshModal([{ ...card, statusLine: "\u001b[1mOpus\u001b[0m · 12%" }]);
+    expect(foot(), "the same foot when it reads the same").toBe(moved);
+    // Without a recording, Maya's own line follows the card's limits.
+    const limits = { account: null, windows: [{ label: "5h", percent: 33, resetsAt: null }], readAt: Date.now() };
+    refreshModal([{ ...card, statusLine: null, limits }]);
+    expect(foot()?.textContent).toBe("eye · 5h 33%");
+    expect(foot()?.classList.contains("modal__statusline--recorded")).toBe(false);
     closeModal();
   });
 
