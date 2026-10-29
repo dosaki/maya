@@ -3,7 +3,7 @@
 
 use crate::pricing;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -85,6 +85,9 @@ struct FileState {
     consumed: u64,
     carry: Vec<u8>,
     totals: Totals,
+    /// The API calls already counted, by `call_id`: Claude Code writes one
+    /// record per content block, each repeating the call's id and usage.
+    counted: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -119,9 +122,13 @@ impl TranscriptTotals {
         state.carry = data.split_off(end);
         for raw in data.split(|&b| b == b'\n') {
             let Ok(v) = serde_json::from_slice::<serde_json::Value>(raw) else { continue };
-            if let Some((model, counts)) = record_counts(&v) {
-                add_record(&mut state.totals, &model, &counts);
+            let Some((model, counts)) = record_counts(&v) else { continue };
+            if let Some(id) = call_id(&v) {
+                if !state.counted.insert(id) {
+                    continue;
+                }
             }
+            add_record(&mut state.totals, &model, &counts);
         }
         state.totals.clone()
     }
@@ -166,6 +173,16 @@ pub fn record_counts(v: &serde_json::Value) -> Option<(String, TokenCounts)> {
             output: n("output_tokens"),
         },
     ))
+}
+
+/// The API call a record belongs to: `message.id`, with `requestId` when
+/// present. `None` when the record has no `message.id`, so it counts alone.
+fn call_id(v: &serde_json::Value) -> Option<String> {
+    let id = v["message"]["id"].as_str().filter(|s| !s.is_empty())?;
+    Some(match v["requestId"].as_str() {
+        Some(req) => format!("{id}|{req}"),
+        None => id.to_string(),
+    })
 }
 
 /// `Totals` as the card's usage: estimated, with `priced` as `models`;
@@ -282,6 +299,47 @@ mod tests {
         assert_eq!(totals.get(&path, &mut budget).tokens.input, 1);
         assert_eq!(budget, 0, "what was read comes off the budget");
         assert_eq!(totals.get(&path, &mut unlimited()).tokens.input, 3);
+    }
+
+    fn call_line(id: &str, input: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","requestId":"req_{id}","message":{{"id":"{id}","model":"claude-opus-5-5","usage":{{"input_tokens":{input},"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}},"content":[]}}}}"#
+        )
+    }
+
+    #[test]
+    fn records_of_one_api_call_count_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let (a, b) = (call_line("msg_a", 100), call_line("msg_b", 7));
+        // thinking, text and tool_use blocks of one call, then another call.
+        std::fs::write(&path, format!("{a}\n{a}\n{a}\n{b}\n")).unwrap();
+        let t = TranscriptTotals::default().get(&path, &mut unlimited());
+        assert_eq!(t.tokens.input, 107);
+    }
+
+    #[test]
+    fn a_call_split_across_two_budgeted_reads_counts_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let a = call_line("msg_a", 100);
+        std::fs::write(&path, format!("{a}\n{a}\n{a}\n")).unwrap();
+        let mut totals = TranscriptTotals::default();
+        let mut budget = a.len() as u64 + 1;
+        assert_eq!(totals.get(&path, &mut budget).tokens.input, 100);
+        assert_eq!(totals.get(&path, &mut unlimited()).tokens.input, 100);
+    }
+
+    #[test]
+    fn a_truncated_file_counts_its_calls_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let (a, b) = (call_line("msg_a", 100), call_line("msg_b", 7));
+        std::fs::write(&path, format!("{a}\n{a}\n{b}\n")).unwrap();
+        let mut totals = TranscriptTotals::default();
+        assert_eq!(totals.get(&path, &mut unlimited()).tokens.input, 107);
+        std::fs::write(&path, format!("{a}\n")).unwrap();
+        assert_eq!(totals.get(&path, &mut unlimited()).tokens.input, 100);
     }
 
     #[test]
