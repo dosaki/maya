@@ -1514,6 +1514,8 @@ mod tests {
         git(&proj, &["init", "-q"]);
         git(&proj, &["config", "user.email", "t@example.com"]);
         git(&proj, &["config", "user.name", "T"]);
+        git(&proj, &["config", "commit.gpgsign", "false"]);
+        git(&proj, &["config", "core.hooksPath", "/dev/null"]);
         std::fs::write(proj.join("a.txt"), "a").unwrap();
         git(&proj, &["add", "."]);
         git(&proj, &["commit", "-q", "-m", "first"]);
@@ -1524,7 +1526,7 @@ mod tests {
         let opts = LaunchOptions { worktree: true, name: Some("Fix CI".into()), ..Default::default() };
         let r = start_session(&l, Some("proj".into()), "hello".into(), opts).unwrap();
         let made = clones.join("proj-fix-ci");
-        assert!(r.dir.ends_with("clones/proj-fix-ci"), "{}", r.dir);
+        assert!(Path::new(&r.dir).ends_with(Path::new("clones").join("proj-fix-ci")), "{}", r.dir);
         assert!(made.is_dir());
         let Call::Open { command, .. } = fake.calls.lock().unwrap()[0].clone() else { panic!() };
         assert!(command.starts_with(&format!("cd '{}'", made.display())), "{command}");
