@@ -36,6 +36,8 @@ pub struct MachineInfo {
 pub struct AgentsReply {
     pub agents: Vec<AgentInfo>,
     pub names: bool,
+    /// An older main sends none: it cannot start a worktree.
+    #[serde(default)]
     pub worktrees: bool,
 }
 
@@ -222,6 +224,13 @@ mod tests {
         assert_eq!(reply.agents[0].harness, Harness::Kiro);
         assert!(reply.names);
         assert!(reply.worktrees);
+    }
+
+    #[test]
+    fn an_agents_reply_from_an_older_main_decodes_without_worktrees() {
+        let reply: AgentsReply = serde_json::from_str(r#"{"agents":[],"names":true}"#).unwrap();
+        assert!(reply.names);
+        assert!(!reply.worktrees);
     }
 
     #[test]
