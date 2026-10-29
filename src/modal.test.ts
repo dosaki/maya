@@ -332,7 +332,23 @@ describe("renderModal", () => {
   it("hides the header's status line at narrow and chip, and the folder at chip", () => {
     expect(styles).toContain('.modal__head[data-stage="narrow"] .modal__statusline--head, .modal__head[data-stage="chip"] .modal__statusline--head { display: none; }');
     expect(styles).toContain('.modal__head[data-stage="chip"] .modal__project { display: none; }');
-    expect(styles).toContain(".usage { display: flex;");
+    expect(styles).toContain(".usage { flex: none; display: flex;");
+  });
+
+  it("keeps every item in the head on one line: the status line gives way first, then the title", () => {
+    // Every item of the titles row keeps its width and its line; the strip never shrinks below its meters.
+    expect(styles).toContain(".modal__titles > * { flex: none; white-space: nowrap; }");
+    expect(styles).toContain(".usage { flex: none; display: flex;");
+    expect(styles).toContain(".modal__project { color: var(--muted); font-size: 12px; white-space: nowrap; }");
+    expect(styles).toContain(".modal__state { flex: none; white-space: nowrap;");
+    // The two that may shrink, the status line far sooner than the title, each ending in an ellipsis.
+    expect(styles).toContain(".modal__titles > .modal__title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
+    expect(styles).toContain(".modal__titles > .modal__statusline--head { flex: 0 100000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
+    expect(styles).toContain(".modal__titles { flex: 1; display: flex; align-items: baseline; gap: 8px; min-width: 0; }");
+    // The rules land on what renderModal draws.
+    const el = renderModal({ card: { ...base, model: "claude-opus-5", branch: "feat/x" }, turns: [], status: null, draft: "" }, handlers());
+    const titles = el.querySelector(".modal__head > .modal__titles")!;
+    for (const sel of [".modal__title", ".modal__project", ".usage", ".modal__statusline--head"]) expect(titles.querySelector(`:scope > ${sel}`), sel).not.toBeNull();
   });
 
   it("keeps limit bars blue until 75 percent turns them amber, and context bars gold", () => {
