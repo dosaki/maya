@@ -292,9 +292,10 @@ pub fn is_busy(dir: &Path, live_cwds: &[String]) -> bool {
 /// refs it checks out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewTarget {
-    /// The one clone of the repository: `<clones>/<repo>`.
+    /// The one clone of the repository: `<clones>/<repo>`, or
+    /// `<clones>/<owner>-<repo>` when another repository has that name.
     pub clone_dir: PathBuf,
-    /// Where the review runs: `<clones>/<repo>-<number>` (`-mr<number>` on GitLab).
+    /// Where the review runs: the clone's folder name with `-<number>` (`-mr<number>` on GitLab).
     pub dir: PathBuf,
     /// The forge's ref: `pull/<n>/head` on GitHub, `merge-requests/<n>/head` on GitLab.
     pub pr_ref: String,
@@ -302,34 +303,58 @@ pub struct ReviewTarget {
     pub local_ref: String,
     /// `clone_dir` does not exist yet.
     pub clone: bool,
-    /// `dir` is a worktree already (its `.git` is a file).
+    /// `dir` is a worktree of `clone_dir` already.
     pub worktree_exists: bool,
-    /// `dir` is a full clone an earlier Maya made (its `.git` is a folder): review in it with no git steps.
+    /// `dir` is a full clone of the repository an earlier Maya made (its `.git` is a folder): review in it with no git steps.
     pub legacy: bool,
 }
 
+/// True when `dir` is a worktree of the clone at `clone_dir`: its `.git`
+/// is a file and git's common folder for it is the clone's `.git`.
+fn is_worktree_of(dir: &Path, clone_dir: &Path) -> bool {
+    if !dir.join(".git").is_file() {
+        return false;
+    }
+    let Ok(out) = crate::command("git").arg("-C").arg(dir).args(["rev-parse", "--git-common-dir"]).stdin(Stdio::null()).stderr(Stdio::null()).output() else {
+        return false;
+    };
+    let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // git may print it relative to `dir`.
+    out.status.success() && !common.is_empty() && matches!((std::fs::canonicalize(dir.join(common)), std::fs::canonicalize(clone_dir.join(".git"))), (Ok(a), Ok(b)) if a == b)
+}
+
 /// The review of `repo`'s PR `number` under `clones_root`. The marker
-/// `mr` on GitLab keeps `!12` from reusing GitHub's `#12`. A `<repo>`
-/// folder whose origin is another repository is refused.
+/// `mr` on GitLab keeps `!12` from reusing GitHub's `#12`. When `<repo>`
+/// is another repository's clone, the clone and its worktrees are named
+/// after the full path instead (`OrgB/api` → `OrgB-api`); a folder of
+/// that name that is another repository's too is refused, as is a review
+/// folder that is neither a worktree of the clone nor an old full clone
+/// of the repository.
 pub fn resolve_target(clones_root: &Path, site: &ForgeSite, repo: &str, number: u64) -> Result<ReviewTarget, String> {
     let repo_name = repo.rsplit('/').next().unwrap_or(repo);
-    let clone_dir = clones_root.join(repo_name);
-    if clone_dir.exists() && !is_checkout_of(&clone_dir, site, repo) {
+    let ours = |d: &Path| !d.exists() || is_checkout_of(d, site, repo);
+    let base = if ours(&clones_root.join(repo_name)) { repo_name.to_string() } else { repo.replace('/', "-") };
+    let clone_dir = clones_root.join(&base);
+    if !ours(&clone_dir) {
         return Err(format!("{} is not a clone of {repo}; move it or change the clones directory.", clone_dir.display()));
     }
     let (marker, pr_ref) = match site.provider {
         GitProvider::Gitlab => ("mr", format!("merge-requests/{number}/head")),
         GitProvider::Github => ("", format!("pull/{number}/head")),
     };
-    let dir = clones_root.join(format!("{repo_name}-{marker}{number}"));
-    let git = dir.join(".git");
+    let dir = clones_root.join(format!("{base}-{marker}{number}"));
+    let worktree_exists = is_worktree_of(&dir, &clone_dir);
+    let legacy = dir.join(".git").is_dir() && is_checkout_of(&dir, site, repo);
+    if dir.exists() && !worktree_exists && !legacy {
+        return Err(format!("{} is not a review of {repo}; move it or change the clones directory.", dir.display()));
+    }
     Ok(ReviewTarget {
         clone: !clone_dir.exists(),
         clone_dir,
         pr_ref,
         local_ref: format!("refs/maya/review/{marker}{number}"),
-        worktree_exists: git.is_file(),
-        legacy: git.is_dir(),
+        worktree_exists,
+        legacy,
         dir,
     })
 }
@@ -633,12 +658,55 @@ mod tests {
     }
 
     #[test]
-    fn a_clone_folder_of_another_repository_is_refused() {
+    fn a_repository_whose_name_is_taken_by_another_clones_under_its_full_path() {
         let t = tempfile::tempdir().unwrap();
         let clones = t.path().join("clones");
-        let other = repo_with_origin(&clones, "bedrock", "git@github.com:Other/bedrock.git");
+        repo_with_origin(&clones, "api", "git@github.com:OrgA/api.git");
+        let b = resolve_target(&clones, &github_site(), "OrgB/api", 5).unwrap();
+        assert!(b.clone, "{b:?}");
+        assert_eq!((b.clone_dir, b.dir), (clones.join("OrgB-api"), clones.join("OrgB-api-5")));
+        let a = resolve_target(&clones, &github_site(), "OrgA/api", 5).unwrap();
+        assert_eq!((a.clone_dir, a.dir), (clones.join("api"), clones.join("api-5")), "the repository that owns the name keeps it");
+        let mr = resolve_target(&clones, &gitlab_site(), "grp/x/api", 7).unwrap();
+        assert_eq!((mr.clone_dir, mr.dir), (clones.join("grp-x-api"), clones.join("grp-x-api-mr7")));
+        repo_with_origin(&clones, "OrgB-api", "git@github.com:OrgB/api.git");
+        let again = resolve_target(&clones, &github_site(), "OrgB/api", 5).unwrap();
+        assert!(!again.clone && again.clone_dir == clones.join("OrgB-api"), "the fallback clone is reused: {again:?}");
+    }
+
+    #[test]
+    fn a_repository_whose_both_names_are_taken_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let clones = t.path().join("clones");
+        repo_with_origin(&clones, "api", "git@github.com:OrgA/api.git");
+        let taken = repo_with_origin(&clones, "OrgB-api", "git@github.com:OrgC/api.git");
+        let err = resolve_target(&clones, &github_site(), "OrgB/api", 5).unwrap_err();
+        assert_eq!(err, format!("{} is not a clone of OrgB/api; move it or change the clones directory.", taken.display()));
+    }
+
+    #[test]
+    fn a_review_folder_of_another_repository_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let clones = t.path().join("clones");
+        let other = repo_with_origin(&clones, "bedrock-451", "git@github.com:Other/bedrock.git");
         let err = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap_err();
-        assert_eq!(err, format!("{} is not a clone of Org/bedrock; move it or change the clones directory.", other.display()));
+        assert_eq!(err, format!("{} is not a review of Org/bedrock; move it or change the clones directory.", other.display()));
+    }
+
+    #[test]
+    fn a_session_worktree_with_a_reviews_name_is_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let clones = t.path().join("clones");
+        repo_with_origin(&clones, "bedrock", "git@github.com:Org/bedrock.git");
+        // A project `bedrock` whose session is named 451: its worktree is `bedrock-451`.
+        let proj = repo_with_origin(t.path(), "bedrock", "git@github.com:Org/bedrock.git");
+        for args in [&["config", "user.email", "t@example.com"][..], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.hooksPath", "/dev/null"], &["commit", "-q", "--allow-empty", "-m", "a"]] {
+            git(&proj, args);
+        }
+        let wt = clones.join("bedrock-451");
+        git(&proj, &["worktree", "add", "-q", "-b", "451", wt.to_str().unwrap()]);
+        let err = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap_err();
+        assert_eq!(err, format!("{} is not a review of Org/bedrock; move it or change the clones directory.", wt.display()));
     }
 
     fn target(clone: bool, worktree_exists: bool, legacy: bool) -> ReviewTarget {
