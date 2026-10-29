@@ -38,6 +38,7 @@ pub mod store;
 pub mod terminal;
 pub mod terminal_tmux;
 pub mod transcript;
+pub mod usage;
 pub mod tty;
 pub mod update;
 pub mod voice_server;

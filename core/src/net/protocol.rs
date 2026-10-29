@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn a_card_from_an_agent_this_maya_does_not_know_still_decodes() {
         use crate::model::{Card, Harness, State};
-        let card = Card { session_id: "s1".into(), pid: 1, name: "s1".into(), cwd: "/x".into(), state: State::Idle, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness: Harness::Kiro, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false };
+        let card = Card { session_id: "s1".into(), pid: 1, name: "s1".into(), cwd: "/x".into(), state: State::Idle, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness: Harness::Kiro, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None };
         let text = encode(&Up::Board { cards: vec![card], dirs: vec![], agents: None, remembered: None }).replace("\"harness\":\"kiro\"", "\"harness\":\"future-agent\"");
         let Up::Board { cards, .. } = decode_up(&text).unwrap() else { panic!() };
         assert_eq!(cards[0].harness, Harness::Other);

@@ -178,6 +178,44 @@ export interface Card {
   brain?: boolean;
   /** Working only because a background shell outlived the turn: there is no turn to stop. */
   shell?: boolean;
+  /** Tokens and cost the session has used so far, when its agent reports them. */
+  usage?: SessionUsage | null;
+  /** The account's usage limits as last read. */
+  limits?: AccountLimits | null;
+  /** The line the agent's own status line shows. */
+  statusLine?: string | null;
+}
+
+export interface TokenCounts {
+  input: number;
+  cachedInput: number;
+  cacheWrite: number;
+  output: number;
+}
+
+export interface Cost {
+  /** Millionths of the unit. */
+  micros: number;
+  unit: "usd" | "credits";
+  estimated: boolean;
+  models: string[];
+}
+
+export interface SessionUsage extends TokenCounts {
+  cost: Cost | null;
+}
+
+export interface LimitWindow {
+  label: string;
+  percent: number;
+  /** Epoch seconds when the window resets, when known. */
+  resetsAt: number | null;
+}
+
+export interface AccountLimits {
+  account: string | null;
+  windows: LimitWindow[];
+  readAt: number;
 }
 
 /** The PR button: "PR #12" ("MR !12" on GitLab), with the state and URL in its tooltip. */

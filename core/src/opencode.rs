@@ -565,7 +565,7 @@ pub fn card_for(s: &SessionInfo, live: &Live, snippet: Option<String>, context_w
         terminal: None,
         stale: false,
         model: s.model.as_ref().map(|(p, m, _)| format!("{p}/{m}")),
-        branch: None, brain: false, shell: false,
+        branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None
     })
 }
 
