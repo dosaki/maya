@@ -336,7 +336,9 @@ body { margin: 0; background: var(--bg); }
 :is(.turn__text, .chat__turn) .md p, :is(.turn__text, .chat__turn) .md ul, :is(.turn__text, .chat__turn) .md ol, :is(.turn__text, .chat__turn) .md pre, :is(.turn__text, .chat__turn) .md table, :is(.turn__text, .chat__turn) .md h1, :is(.turn__text, .chat__turn) .md h2, :is(.turn__text, .chat__turn) .md h3 { margin: 6px 0; }
 :is(.turn__text, .chat__turn) .md h1, :is(.turn__text, .chat__turn) .md h2, :is(.turn__text, .chat__turn) .md h3 { font-size: 13px; }
 :is(.turn__text, .chat__turn) .md ul, :is(.turn__text, .chat__turn) .md ol { padding-left: 20px; }
-:is(.turn__text, .chat__turn) .md pre { padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 70%, transparent); overflow-x: auto; white-space: pre; }
+/* Long lines wrap, as a terminal's do: a sideways scrollbar that appears after
+   the first layout makes WebKit paint the block over the line below it. */
+:is(.turn__text, .chat__turn) .md pre { padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 70%, transparent); white-space: pre-wrap; overflow-wrap: anywhere; }
 :is(.turn__text, .chat__turn) .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 :is(.turn__text, .chat__turn) .md :not(pre) > code { color: var(--gold-bright); }
 /* Code blocks whose fence names a language, coloured by highlight.js's token classes. */

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderMarkdown } from "./markdown";
+import styles from "./styles.css?raw";
 
 describe("renderMarkdown", () => {
   it("renders common markdown into elements", () => {
@@ -69,5 +70,16 @@ describe("renderMarkdown", () => {
     expect(el.querySelector("img")).toBeNull();
     expect(el.querySelector("pre code")?.textContent).toBe('<script>alert(1)</script><img src=x onerror="alert(1)">\n');
     expect(el.querySelector("pre code .hljs-tag")).not.toBeNull();
+  });
+
+  // A code block that scrolls sideways is a WebKit trap: when its scrollbar
+  // appears after the first layout (the history's own scrollbar narrowing it,
+  // say) the block grows but the line below it does not move, and the block
+  // paints over that line. Long lines wrap instead, as a terminal's do.
+  it("wraps a code block's long lines rather than scrolling them sideways", () => {
+    const rule = styles.split("\n").find((line) => line.startsWith(":is(.turn__text, .chat__turn) .md pre {")) ?? "";
+    expect(rule).toContain("white-space: pre-wrap;");
+    expect(rule).toContain("overflow-wrap: anywhere;");
+    expect(rule).not.toContain("overflow-x");
   });
 });
