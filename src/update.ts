@@ -94,7 +94,15 @@ export function makeUpdates() {
     // A failed install took the update it found, so a retry finds it again.
     const retry = state.phase === "error";
     // The restart ends Native sessions: a working one is asked about first.
-    const working = await invoke<string[]>("native_working").catch(() => []);
+    // Not knowing is not "none": the update waits rather than stop one unasked.
+    let working: string[];
+    try {
+      working = await invoke<string[]>("native_working");
+    } catch (e) {
+      state = { phase: "error", info, message: `could not tell whether a Native session is working: ${e}` };
+      paint();
+      return;
+    }
     if (working.length > 0 && !(await askQuit(working, true))) {
       state = { phase: "available", info };
       paint();

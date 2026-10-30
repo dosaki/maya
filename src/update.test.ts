@@ -179,6 +179,18 @@ describe("makeUpdates", () => {
     expect(invoke).toHaveBeenCalledWith("update_install");
   });
 
+  it("does not install when it cannot tell whether a Native session is working", async () => {
+    backend("self", () => Promise.resolve(info));
+    const plain = invoke.getMockImplementation()!;
+    invoke.mockImplementation((cmd: string) => (cmd === "native_working" ? Promise.reject(new Error("gone")) : plain(cmd)));
+    await makeUpdates().init();
+    await flush();
+    press("Update");
+    await flush();
+    expect(invoke).not.toHaveBeenCalledWith("update_install");
+    expect(text()).toContain("could not tell whether a Native session is working");
+  });
+
   it("asks first when a Native session is working, and installs on Restart anyway", async () => {
     backend("self", () => Promise.resolve(info), undefined, ["fix-ci"]);
     await makeUpdates().init();
