@@ -167,7 +167,9 @@ pub struct Config {
     /// The colours of the desktop windows; the phone keeps its own look.
     #[serde(default)]
     pub color_theme: ColorTheme,
-    /// The app new sessions open in on macOS; the other systems have one terminal.
+    /// Where new sessions open: a terminal app (Terminal or iTerm2 on macOS,
+    /// the system's one elsewhere), or Native, a terminal Maya hosts herself
+    /// on every platform.
     #[serde(default)]
     pub new_session_terminal: NewSessionTerminal,
     /// The Enter combinations that send a message and make a new line; None
