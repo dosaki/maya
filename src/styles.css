@@ -338,7 +338,12 @@ body { margin: 0; background: var(--bg); }
 :is(.turn__text, .chat__turn) .md ul, :is(.turn__text, .chat__turn) .md ol { padding-left: 20px; }
 /* Long lines wrap, as a terminal's do: a sideways scrollbar that appears after
    the first layout makes WebKit paint the block over the line below it. */
-:is(.turn__text, .chat__turn) .md pre { padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 70%, transparent); white-space: pre-wrap; overflow-wrap: anywhere; }
+:is(.turn__text, .chat__turn) .md pre { position: relative; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--bg) 70%, transparent); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Copy sits in the block's top-right corner, shown while the pointer is over the block; always on a touch screen. */
+.md__copy { position: absolute; top: 4px; right: 4px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); color: var(--muted); font: 600 10.5px system-ui, sans-serif; cursor: pointer; opacity: 0; transition: opacity .12s; }
+.md pre:hover > .md__copy, .md__copy:focus-visible { opacity: 1; }
+.md__copy:hover { color: var(--text); border-color: var(--gold-deep); }
+@media (hover: none) { .md__copy { opacity: 1; } }
 :is(.turn__text, .chat__turn) .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 :is(.turn__text, .chat__turn) .md :not(pre) > code { color: var(--gold-bright); }
 /* Code blocks whose fence names a language, coloured by highlight.js's token classes. */
