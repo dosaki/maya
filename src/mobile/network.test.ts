@@ -186,6 +186,51 @@ describe("initNetwork's groups", () => {
     expect(pane.querySelector(".settings-page__title")!.textContent).toBe("Voice");
   });
 
+  it("leaves the entry to a card that took it over, so a tapped notification's card stays open", async () => {
+    const pane = await mount();
+    open(pane, "notifications");
+    // A notification tap opens its card first, over the group's entry, then shows Sessions.
+    history.replaceState({ card: "s1" }, "");
+    const back = vi.spyOn(history, "back");
+    window.dispatchEvent(new CustomEvent("maya:tab", { detail: "sessions" }));
+    expect(back).not.toHaveBeenCalled();
+    expect(history.state).toEqual({ card: "s1" });
+    expect(pane.querySelector(".settings-list")).not.toBeNull();
+    back.mockRestore();
+  });
+
+  it("keeps a failed save's error on its own page, not on the next one opened", async () => {
+    const pane = await mount();
+    Object.defineProperty(tauri.replies, "set_config", { get: () => Promise.reject(new Error("disk full")), configurable: true });
+    open(pane, "voice");
+    const speak = pane.querySelector<HTMLInputElement>("input[name=speak]")!;
+    speak.checked = false;
+    speak.dispatchEvent(new Event("change"));
+    await settle();
+    expect(pane.querySelector(".settings__error")!.textContent).toContain("disk full");
+    pane.querySelector<HTMLElement>("button[data-action=back]")!.click();
+    open(pane, "releaseNotes");
+    expect(pane.querySelector(".settings__error")).toBeNull();
+  });
+
+  it("says a save failed in a toast when its page was left before it finished", async () => {
+    const pane = await mount();
+    document.body.insertAdjacentHTML("beforeend", '<div id="toast" hidden></div>');
+    let fail: (e: Error) => void = () => undefined;
+    Object.defineProperty(tauri.replies, "set_config", { get: () => new Promise((_, reject) => { fail = reject; }), configurable: true });
+    open(pane, "voice");
+    const speak = pane.querySelector<HTMLInputElement>("input[name=speak]")!;
+    speak.checked = false;
+    speak.dispatchEvent(new Event("change"));
+    await settle();
+    pane.querySelector<HTMLElement>("button[data-action=back]")!.click();
+    fail(new Error("disk full"));
+    await settle();
+    expect(document.getElementById("toast")!.textContent).toContain("disk full");
+    open(pane, "voice");
+    expect(pane.querySelector(".settings__error")).toBeNull();
+  });
+
   it("lands on the list again after another tab was shown", async () => {
     const pane = await mount();
     open(pane, "notifications");

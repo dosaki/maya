@@ -27,4 +27,12 @@ describe("makeCardHistory", () => {
     expect(back).not.toHaveBeenCalled();
     back.mockRestore();
   });
+
+  it("takes over an open Settings group's entry instead of pushing another", () => {
+    history.pushState({ settings: "notifications" }, "");
+    const before = history.length;
+    makeCardHistory().opened("s1");
+    expect(history.length).toBe(before);
+    expect(history.state).toEqual({ card: "s1" });
+  });
 });

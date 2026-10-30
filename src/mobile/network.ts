@@ -371,13 +371,17 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     setViewerTheme(model.viewerTheme);
   };
   const busy = async (f: () => Promise<void>) => {
+    // The page the save started on: its error shows there, or in a toast
+    // when the user has left it.
+    const at = model.group;
     model.busy = true;
     model.error = null;
     paint();
     try {
       await f();
     } catch (e) {
-      model.error = String(e);
+      if (model.group === at) model.error = String(e);
+      else showToast(String(e));
     }
     model.busy = false;
     paint();
@@ -414,6 +418,7 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     onBattery: () => void invoke("request_battery_exemption").catch((e) => showToast(String(e))),
     onOpenGroup: (g) => {
       model.group = g;
+      model.error = null;
       groupHistory.opened(g);
       paint();
     },
@@ -423,6 +428,7 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
   const closeGroup = () => {
     if (!model.group) return;
     model.group = null;
+    model.error = null;
     groupHistory.closed();
     paint();
   };
@@ -430,6 +436,7 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
   window.addEventListener("popstate", () => {
     if (model.group && !groupHistory.holding()) {
       model.group = null;
+      model.error = null;
       paint();
     }
   });
