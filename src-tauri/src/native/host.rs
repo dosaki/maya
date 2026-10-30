@@ -72,6 +72,25 @@ fn login_argv(shell: Option<&str>, command: &str) -> Vec<String> {
     vec![shell.into(), "-l".into(), "-c".into(), command.into()]
 }
 
+/// How many times opening a pseudo-terminal is tried. On macOS it fails
+/// now and then while another thread forks.
+const OPEN_TRIES: u32 = 5;
+
+/// Runs `f` until it succeeds, up to `OPEN_TRIES` times, with `pause` given
+/// 10 ms more after each failure; the last error when every try failed.
+fn retrying<T, E>(mut pause: impl FnMut(Duration), mut f: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+    let mut tries = 1;
+    loop {
+        match f() {
+            Err(_) if tries < OPEN_TRIES => {
+                pause(Duration::from_millis(10 * u64::from(tries)));
+                tries += 1;
+            }
+            done => return done,
+        }
+    }
+}
+
 /// A lock that a panicking sink cannot poison for everyone else.
 fn lock<T: ?Sized>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -189,7 +208,7 @@ impl NativeHost {
 
     fn spawn_argv(&self, argv: &[String], cwd: &Path) -> Result<TermId, String> {
         let size = PtySize { rows: DEFAULT_ROWS, cols: DEFAULT_COLS, pixel_width: 0, pixel_height: 0 };
-        let pair = native_pty_system().openpty(size).map_err(|e| format!("Could not open a terminal: {e}"))?;
+        let pair = retrying(std::thread::sleep, || native_pty_system().openpty(size)).map_err(|e| format!("Could not open a terminal: {e}"))?;
         let mut cmd = CommandBuilder::from_argv(argv.iter().map(Into::into).collect());
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
@@ -514,6 +533,31 @@ mod tests {
         assert_eq!(login_argv(Some("sh"), "claude"), [fallback, "-l", "-c", "claude"], "a relative SHELL is not trusted");
         assert_eq!(login_argv(Some("/no/such/shell"), "claude"), [fallback, "-l", "-c", "claude"], "nor one that does not exist");
         assert_eq!(shell_argv("claude")[1..], ["-l", "-c", "claude"]);
+    }
+
+    #[test]
+    fn opening_a_terminal_is_tried_again_a_few_times() {
+        let mut calls = 0;
+        let mut pauses = Vec::new();
+        let got: Result<u32, &str> = retrying(
+            |d| pauses.push(d),
+            || {
+                calls += 1;
+                if calls < 3 { Err("busy") } else { Ok(calls) }
+            },
+        );
+        assert_eq!(got, Ok(3));
+        assert_eq!(pauses, [Duration::from_millis(10), Duration::from_millis(20)]);
+
+        let (mut calls, mut pauses) = (0, 0);
+        let got: Result<(), &str> = retrying(
+            |_| pauses += 1,
+            || {
+                calls += 1;
+                Err("busy")
+            },
+        );
+        assert_eq!((got, calls, pauses), (Err("busy"), OPEN_TRIES, OPEN_TRIES - 1));
     }
 
     #[test]
