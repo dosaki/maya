@@ -330,7 +330,7 @@ const EXIT_WAIT: Duration = Duration::from_secs(5);
 
 /// Ends an idle or completed session and closes its terminal: types `/exit`
 /// (every agent takes it), waits for the agent's process to end, then types
-/// `exit` into the shell left behind.
+/// `exit` into the shell left behind, unless the terminal closed with the agent.
 pub fn close_session(l: &Local, session_id: &str) -> Result<(), String> {
     close_session_with(l, session_id, |pid| {
         let deadline = std::time::Instant::now() + EXIT_WAIT;
@@ -363,7 +363,9 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
         }
         (card.harness, card.pid, session_tty(&store, session_id, card.pid)?)
     };
+    // Asked before `/exit` too: a terminal that closes with the agent is gone after it.
     let after = l.terminal.reach_after_exit(&tty);
+    let closes_itself = l.terminal.closes_with_agent(&tty);
     type_line_for(l, harness, &tty, answer::EXIT)?;
     // Typed while the agent still runs, `exit` would land in its prompt as a message.
     if !exited(pid) {
@@ -371,6 +373,9 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
     }
     // Closed by the user from its card: not one to offer after a restart.
     l.store.lock().unwrap().session_closed(harness, session_id);
+    if closes_itself {
+        return Ok(());
+    }
     let mut last = "nothing else is attached to its terminal".to_string();
     for key in &after {
         match l.terminal.type_line(key, "exit") {
@@ -808,7 +813,10 @@ fn resume_remembered_with(l: &Local, entries: &[Remembered], pause: &mut dyn FnM
                     pause(Duration::from_millis(crate::remembered::RESUME_GAP_MS));
                 }
                 opened = true;
-                l.terminal.open(&resume::resume_command(e.agent, &path, &e.session_id), &path, &tmux_label()).map(|_| ())
+                let command = resume::resume_command(e.agent, &path, &e.session_id);
+                // A session that ran in a terminal Maya hosts comes back in one.
+                let opened = if e.native { l.terminal.open_native(&command, &path, &tmux_label()) } else { l.terminal.open(&command, &path, &tmux_label()) };
+                opened.map(|_| ())
             }
             Err(why) => Err(why),
         };
@@ -1902,6 +1910,17 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_session_whose_terminal_closes_with_it_types_no_shell_exit() {
+        let (dir, store) = store_with_session("s1", 4242);
+        let t = FakeTerminal::default();
+        t.native.lock().unwrap().insert("/dev/pts/3".into());
+        assert_eq!(close_session_with(&Local { store: &store, terminal: &t }, "s1", |_| true), Ok(()));
+        assert_eq!(*t.calls.lock().unwrap(), [Call::Type { tty: "/dev/pts/3".into(), text: "/exit".into() }]);
+        assert!(store.lock().unwrap().remembered_entry(Harness::ClaudeCode, "s1").is_none());
+        drop(dir);
+    }
+
+    #[test]
     fn close_leaves_the_shell_alone_when_claude_does_not_exit() {
         let (dir, store) = store_with_session("s1", 4242);
         let t = FakeTerminal::default();
@@ -2332,6 +2351,24 @@ mod tests {
         assert!(opened.iter().all(|(_, cwd)| *cwd == dir), "each in its own folder");
         assert_eq!(waits, [Duration::from_millis(400)], "one pause, between the two");
         assert!(store.lock().unwrap().was_running().is_empty(), "resumed: no longer offered");
+    }
+
+    #[test]
+    fn a_native_remembered_session_resumes_through_open_native() {
+        let (_t, claude, dir) = away_from_projects("native");
+        knows(&claude, &dir, "nat1");
+        knows(&claude, &dir, "app1");
+        let native = Remembered { native: true, ..was(Harness::ClaudeCode, "nat1", &dir, 1) };
+        let store = after_restart(&claude, vec![native, was(Harness::ClaudeCode, "app1", &dir, 2)]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let entries = store.lock().unwrap().was_running();
+        let out = resume_remembered_with(&l, &entries, &mut |_| ());
+        assert!(out.iter().all(|(_, r)| r.is_ok()), "{out:?}");
+        let calls = fake.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(matches!(&calls[0], Call::OpenNative { command, cwd, .. } if command.ends_with("claude --resume 'nat1'") && *cwd == dir), "{calls:?}");
+        assert!(matches!(&calls[1], Call::Open { command, .. } if command.ends_with("claude --resume 'app1'")), "{calls:?}");
     }
 
     #[test]

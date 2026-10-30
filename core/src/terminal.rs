@@ -6,6 +6,12 @@ pub trait Terminal: Send + Sync {
     /// Runs `command` (a shell line) in a visible terminal in `cwd`, under
     /// `label` where the terminal has names (tmux); returns that name.
     fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String>;
+    /// `open` in a terminal Maya hosts herself, whatever Settings says: a
+    /// session that ran Native resumes Native. A terminal that cannot host
+    /// one opens it as `open` does.
+    fn open_native(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String> {
+        self.open(command, cwd, label)
+    }
     /// Types `text` then Enter into the terminal hosting `tty`.
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String>;
     /// Presses `keys` in the terminal hosting `tty` exactly as given, with
@@ -37,6 +43,11 @@ pub trait Terminal: Send + Sync {
     fn reach_after_exit(&self, tty: &str) -> Vec<String> {
         vec![tty.to_string()]
     }
+    /// Whether the terminal hosting `tty` closes by itself once the agent
+    /// in it exits, so there is no shell left to type `exit` into.
+    fn closes_with_agent(&self, _tty: &str) -> bool {
+        false
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -51,6 +62,7 @@ pub mod test_support {
     #[derive(Debug, Clone, PartialEq)]
     pub enum Call {
         Open { command: String, cwd: PathBuf, label: String },
+        OpenNative { command: String, cwd: PathBuf, label: String },
         Type { tty: String, text: String },
         Focus { tty: String },
         Keys { tty: String, keys: String },
@@ -68,12 +80,18 @@ pub mod test_support {
         /// Typing fails once this many lines have been typed, as a terminal
         /// closed in the middle of a reply does.
         pub fail_after: Option<usize>,
+        /// Ttys whose terminal closes with its agent, as a Native one does.
+        pub native: Mutex<std::collections::HashSet<String>>,
     }
 
     impl Terminal for FakeTerminal {
         fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String> {
             self.calls.lock().unwrap().push(Call::Open { command: command.into(), cwd: cwd.into(), label: label.into() });
             Ok(Some(label.into()))
+        }
+        fn open_native(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String> {
+            self.calls.lock().unwrap().push(Call::OpenNative { command: command.into(), cwd: cwd.into(), label: label.into() });
+            Ok(None)
         }
         fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
             if let Some(e) = &self.fail_type {
@@ -113,6 +131,9 @@ pub mod test_support {
         }
         fn reach_after_exit(&self, tty: &str) -> Vec<String> {
             self.peers.lock().unwrap().get(tty).cloned().unwrap_or_else(|| vec![tty.to_string()])
+        }
+        fn closes_with_agent(&self, tty: &str) -> bool {
+            self.native.lock().unwrap().contains(tty)
         }
     }
 }

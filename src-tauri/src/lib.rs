@@ -34,14 +34,9 @@ pub(crate) use terminal_win as term;
 #[cfg(target_os = "linux")]
 pub(crate) use terminal_linux as term;
 
-/// This platform's one terminal, as the core's seam.
-#[cfg(not(target_os = "linux"))]
+/// This platform's terminal with Maya's own in front of it, as the core's seam.
 fn terminal() -> &'static dyn terminal::Terminal {
-    &term::TERMINAL
-}
-#[cfg(target_os = "linux")]
-fn terminal() -> &'static dyn terminal::Terminal {
-    &*term::TERMINAL
+    &*native::route::TERMINAL
 }
 
 /// Opens an http(s) URL in the default browser.
@@ -1645,6 +1640,7 @@ pub fn run() {
     let dir = claude_dir();
     let mut store = Store::new(dir.clone());
     store.judge_asks = true;
+    store.set_native_roots(Box::new(|| native::HOST.root_pids()));
     store.compact_events();
     let chat = maya_core::brain::chat::ChatLog::load(store.claude_dir().join("maya").join("brain").join("chat.json"));
     let brain = brain_app::BrainState::new(store.claude_dir());
@@ -1837,6 +1833,7 @@ pub fn run() {
             // file to nowhere.
             if let tauri::RunEvent::Exit = event {
                 models::abort_all();
+                native::HOST.kill_all();
                 brain_app::quit(app);
             }
         });

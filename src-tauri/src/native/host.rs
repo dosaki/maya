@@ -367,7 +367,7 @@ impl NativeHost {
     }
 
     #[cfg(all(test, unix))]
-    fn tty(&self, term: TermId) -> Option<String> {
+    pub(crate) fn tty(&self, term: TermId) -> Option<String> {
         self.get(term).ok()?.tty.clone()
     }
 }
