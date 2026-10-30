@@ -585,10 +585,12 @@ Three workflows in `.github/workflows/`:
   or listens like the app), and `status_file.rs`
   (`~/.claude/maya/cli-status.json`, read by `maya status`).
 - `src/` — `main.ts`, `board.ts`, `card.ts`, `modal.ts` with `toolturn.ts` (a tool call's output and diff in the viewer), `reviews.ts`,
-  `settings.ts`, `voice.ts`, `debug.ts`, `tabs.ts`,
+  `settings.ts`, `release-notes.ts`, `voice.ts`, `debug.ts`, `tabs.ts`,
   `remembered.ts` (the Sessions banner offering back what ran before a restart, desktop and phone).
 - `src/mobile/` — the phone's page: `main.ts`, `strip.ts` (the column
-  strip and the one-to-four-column layout), `network.ts`, `setup.ts`,
+  strip and the one-to-four-column layout), `network.ts` (Settings: the
+  list of groups and each group's page, with `settings-history.ts` so
+  Back returns to the list), `setup.ts`,
   `notify-tap.ts`, `mobile.css`; `src/machines.ts` is the dialogs'
   machine switch both pages share.
 - `ear/` — `main.swift` (audio capture, the System and Whisper engines),
@@ -598,16 +600,24 @@ Three workflows in `.github/workflows/`:
 ## Releasing
 
 Releases follow semver. The version in `src-tauri/tauri.conf.json` is the
-release version; bump it everywhere, commit and push to `main`:
+release version; bump it everywhere, rewrite `RELEASE_NOTES.md` for it,
+commit and push to `main`:
 
     pnpm version:set 0.2.0      # or: sh scripts/set-version.sh 0.2.0
-    git commit -am "chore: release 0.2.0"
+    $EDITOR RELEASE_NOTES.md    # "# 0.2.0", then ## New and ## Fixed
+    git commit -am "chore(release): 0.2.0"
     git push
 
-The Release workflow publishes `v0.2.0` for every platform, with notes generated
-from the merged pull requests and commits. A push whose version already has
+The Release workflow publishes `v0.2.0` for every platform. Its notes lead
+with `RELEASE_NOTES.md` under "Release Notes", then the install text, then
+the list GitHub generates from the merged pull requests
+(`scripts/release-notes.sh` assembles them; `scripts/test-release-notes.sh`
+tests it in CI). The app shows the same file in Settings → Release Notes,
+built in at build time (`src/release-notes.ts`), so it is always the
+notes of the running version. A push whose version already has
 a release only builds; a mismatch between `src-tauri/tauri.conf.json`,
-`mobile/tauri.conf.json`, `package.json` and `Cargo.toml` fails the run,
+`mobile/tauri.conf.json`, `package.json` and `Cargo.toml`, or a
+`RELEASE_NOTES.md` for another version, fails the run,
 a pull request's too (see [CI](#ci)); `pnpm version:set` keeps all of
 them in step, the phone app's included. Pull requests bump the version themselves: see the rule in
 [CLAUDE.md](../CLAUDE.md).
