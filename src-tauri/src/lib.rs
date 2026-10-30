@@ -8,6 +8,7 @@ pub mod ear;
 pub mod focus;
 pub mod listener;
 pub mod models;
+pub mod native;
 pub mod net_app;
 mod brain_app;
 mod brain_route;
