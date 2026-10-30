@@ -1773,16 +1773,11 @@ pub fn run() {
             listener::install_speech_hook(app.handle().clone());
             #[cfg(target_os = "macos")]
             dock::set_dock_icon();
-            // Cmd+Q asks for an exit, which the quit guard can hold; the
-            // predefined Quit would end AppKit before it could.
+            // Cmd+Q, the Dock's Quit and AppleScript end AppKit directly;
+            // the quit guard answers AppKit's question before they do.
             #[cfg(target_os = "macos")]
             {
-                app.set_menu(quit_guard::menu(app.handle())?)?;
-                app.on_menu_event(|app, event| {
-                    if event.id() == quit_guard::QUIT_ID {
-                        app.exit(0);
-                    }
-                });
+                quit_guard::guard_terminate(app.handle());
                 quit_guard::watch_power_off();
             }
             // Starts the agents' first listing, so the start form finds it ready.

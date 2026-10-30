@@ -4,9 +4,10 @@
 //! `quit_confirmed`, whose exit then goes through. An update's restart is
 //! asked about by the page before `update_install`.
 //!
-//! On macOS the app menu's predefined Quit sends AppKit's `terminate:`,
-//! which tao turns straight into `RunEvent::Exit` with no `ExitRequested`
-//! to hold, so the menu's Quit is Maya's own item, which asks for an exit.
+//! On macOS, Cmd+Q, the Dock's Quit and an AppleScript `quit` send AppKit's
+//! `terminate:`, which tao turns straight into `RunEvent::Exit` with no
+//! `ExitRequested` to hold. tao's app delegate has no
+//! `applicationShouldTerminate:`, so Maya adds one that runs the same check.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -21,10 +22,6 @@ static CONFIRMED: AtomicBool = AtomicBool::new(false);
 /// Set when macOS logs out, restarts or shuts down: the system is ending
 /// Maya, and a question would only hold that up.
 static SYSTEM_ENDING: AtomicBool = AtomicBool::new(false);
-
-/// The id of the macOS app menu's Quit item.
-#[cfg(target_os = "macos")]
-pub const QUIT_ID: &str = "maya-quit";
 
 /// The names of the sessions a quit would stop while they work: this
 /// machine's Native sessions that are Working. Maya's own brain is not one.
@@ -93,26 +90,85 @@ pub fn quit_confirmed(app: AppHandle) {
     app.exit(0);
 }
 
-/// The default menu with its Quit swapped for Maya's own, which asks for an
-/// exit (and so passes the check) instead of terminating AppKit outright.
+/// Whether a `terminate:` goes ahead now: when the system is ending Maya
+/// (log out, restart, shut down), or when nothing needed asking. `ask`
+/// asks, and is not called when the system is ending: a held log-out is one
+/// Maya would block.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn terminate_now(system_ending: bool, ask: impl FnOnce() -> bool) -> bool {
+    system_ending || !ask()
+}
+
+/// Whether a quit Apple event comes from the system: log out, restart and
+/// shut down give it a reason (`keyAEQuitReason`); the Dock's Quit and an
+/// AppleScript `quit` give none.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn system_quit(reason: Option<u32>) -> bool {
+    reason.is_some()
+}
+
+/// The app, for AppKit's `applicationShouldTerminate:` to check with.
 #[cfg(target_os = "macos")]
-pub fn menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    use tauri::menu::{Menu, MenuItem, MenuItemKind};
-    let menu = Menu::default(app)?;
-    // The app's own submenu comes first, with the predefined Quit in it.
-    if let Some(MenuItemKind::Submenu(sub)) = menu.items()?.into_iter().next() {
-        for (at, item) in sub.items()?.into_iter().enumerate() {
-            if let MenuItemKind::Predefined(p) = &item {
-                if p.text()?.starts_with("Quit") {
-                    sub.remove(p)?;
-                    let name = &app.package_info().name;
-                    sub.insert(&MenuItem::with_id(app, QUIT_ID, format!("Quit {name}"), true, Some("CmdOrCtrl+Q"))?, at)?;
-                    break;
-                }
-            }
-        }
+static APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+
+/// `keyAEQuitReason`, `'why?'`: the attribute a system quit carries.
+#[cfg(target_os = "macos")]
+const KEY_AE_QUIT_REASON: u32 = u32::from_be_bytes(*b"why?");
+
+/// The current Apple event's quit reason, if it has one.
+#[cfg(target_os = "macos")]
+fn quit_reason() -> Option<u32> {
+    use objc2::msg_send;
+    use objc2::rc::Retained;
+    use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager};
+    let event = NSAppleEventManager::sharedAppleEventManager().currentAppleEvent()?;
+    // SAFETY: `attributeDescriptorForKeyword:` takes an AEKeyword (a
+    // FourCharCode, u32) and returns a descriptor or nil.
+    let reason: Option<Retained<NSAppleEventDescriptor>> = unsafe { msg_send![&event, attributeDescriptorForKeyword: KEY_AE_QUIT_REASON] };
+    reason.map(|r| r.enumCodeValue())
+}
+
+/// AppKit asks this before a `terminate:`. Cancel (0) holds the quit while
+/// the page asks; Now (1) lets it go on.
+#[cfg(target_os = "macos")]
+extern "C-unwind" fn application_should_terminate(_this: *mut objc2::runtime::AnyObject, _sel: objc2::runtime::Sel, _sender: *mut objc2::runtime::AnyObject) -> usize {
+    use objc2_app_kit::NSApplicationTerminateReply;
+    // A panic must not cross into AppKit; a quit then goes on.
+    let now = std::panic::catch_unwind(|| {
+        let ending = SYSTEM_ENDING.load(Ordering::SeqCst) || system_quit(quit_reason());
+        terminate_now(ending, || APP.get().is_some_and(|app| ask_if_needed(app, false)))
+    })
+    .unwrap_or(true);
+    if now { NSApplicationTerminateReply::TerminateNow.0 } else { NSApplicationTerminateReply::TerminateCancel.0 }
+}
+
+/// Gives tao's app delegate an `applicationShouldTerminate:`, so every
+/// `terminate:` (Cmd+Q, the Dock, AppleScript) passes the check. Must run on
+/// the main thread, once, after the event loop set the delegate.
+#[cfg(target_os = "macos")]
+pub fn guard_terminate(app: &AppHandle) {
+    use objc2::runtime::{AnyObject, Imp};
+    use objc2::{sel, MainThreadMarker};
+    use objc2_app_kit::NSApplication;
+    let _ = APP.set(app.clone());
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let Some(delegate) = NSApplication::sharedApplication(mtm).delegate() else {
+        log::line("app", "no app delegate: the Dock's Quit will not ask about Native sessions");
+        return;
+    };
+    let delegate: &AnyObject = delegate.as_ref();
+    let class = delegate.class();
+    type ShouldTerminate = extern "C-unwind" fn(*mut AnyObject, objc2::runtime::Sel, *mut AnyObject) -> usize;
+    let imp = application_should_terminate as ShouldTerminate;
+    // SAFETY: the IMP's arguments and return match the type string `Q@:@`
+    // (NSUInteger, self, _cmd, the sender), which is the method's real
+    // signature; the class is the live delegate's, which tao registered.
+    let added = unsafe {
+        objc2::ffi::class_addMethod(class as *const _ as *mut _, sel!(applicationShouldTerminate:), std::mem::transmute::<ShouldTerminate, Imp>(imp), c"Q@:@".as_ptr())
+    };
+    if !added.as_bool() {
+        log::line("app", "the app delegate already answers applicationShouldTerminate:; the Dock's Quit may not ask about Native sessions");
     }
-    Ok(menu)
 }
 
 /// Watches for macOS logging out, restarting or shutting down, and sets
@@ -168,6 +224,20 @@ mod tests {
         assert!(!should_ask(true, false, &["a".into()]));
         assert!(!should_ask(false, true, &["a".into()]));
         assert!(!should_ask(false, false, &[]));
+    }
+
+    #[test]
+    fn a_system_quit_goes_ahead_without_asking() {
+        assert!(terminate_now(true, || panic!("a log-out is never held")));
+        assert!(terminate_now(false, || false), "nothing to ask about");
+        assert!(!terminate_now(false, || true), "held while the page asks");
+    }
+
+    #[test]
+    fn only_log_out_restart_and_shut_down_carry_a_quit_reason() {
+        assert!(system_quit(Some(u32::from_be_bytes(*b"rlgo"))));
+        assert!(system_quit(Some(u32::from_be_bytes(*b"shut"))));
+        assert!(!system_quit(None), "the Dock's Quit and AppleScript give none");
     }
 
     #[test]
