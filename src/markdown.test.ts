@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderMarkdown } from "./markdown";
+import styles from "./styles.css?raw";
 
 describe("renderMarkdown", () => {
   it("renders common markdown into elements", () => {
@@ -69,5 +70,62 @@ describe("renderMarkdown", () => {
     expect(el.querySelector("img")).toBeNull();
     expect(el.querySelector("pre code")?.textContent).toBe('<script>alert(1)</script><img src=x onerror="alert(1)">\n');
     expect(el.querySelector("pre code .hljs-tag")).not.toBeNull();
+  });
+
+  // A code block that scrolls sideways is a WebKit trap: when its scrollbar
+  // appears after the first layout (the history's own scrollbar narrowing it,
+  // say) the block grows but the line below it does not move, and the block
+  // paints over that line. Long lines wrap instead, as a terminal's do.
+  it("wraps a code block's long lines rather than scrolling them sideways", () => {
+    const rule = styles.split("\n").find((line) => line.startsWith(":is(.turn__text, .chat__turn) .md pre {")) ?? "";
+    expect(rule).toContain("white-space: pre-wrap;");
+    expect(rule).toContain("overflow-wrap: anywhere;");
+    expect(rule).not.toContain("overflow-x");
+  });
+});
+
+describe("copying a code block", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  function withClipboard(): ReturnType<typeof vi.fn> {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    return writeText;
+  }
+
+  it("puts a Copy button on every fenced block, and none on inline code or a raw <pre>", () => {
+    const el = renderMarkdown("some `inline` code\n\n```sh\nls\n```\n\n```\npwd\n```\n\n<pre>raw</pre>");
+    expect(el.querySelectorAll("pre")).toHaveLength(3);
+    const buttons = el.querySelectorAll("pre > button.md__copy");
+    expect(buttons).toHaveLength(2);
+    expect(el.querySelectorAll("button")).toHaveLength(2);
+    for (const b of buttons) {
+      expect(b.getAttribute("type")).toBe("button");
+      // The visible label is the accessible name, so it says "Copied" when it does.
+      expect(b.hasAttribute("aria-label")).toBe(false);
+      expect(b.getAttribute("title")).toBe("Copy code");
+      expect(b.textContent).toBe("Copy");
+    }
+  });
+
+  it("copies the block's text, not the button's label, and says so for a moment", async () => {
+    vi.useFakeTimers();
+    const writeText = withClipboard();
+    const el = renderMarkdown("```sql\nSELECT name FROM users WHERE id = 'x';\n```");
+    const button = el.querySelector<HTMLButtonElement>("pre > button.md__copy")!;
+    button.click();
+    expect(writeText).toHaveBeenCalledWith("SELECT name FROM users WHERE id = 'x';\n");
+    await Promise.resolve();
+    expect(button.textContent).toBe("Copied");
+    vi.advanceTimersByTime(1500);
+    expect(button.textContent).toBe("Copy");
+  });
+
+  it("leaves the block's own text untouched by the button", () => {
+    const el = renderMarkdown("```\nx\n```");
+    expect(el.querySelector("pre code")?.textContent).toBe("x\n");
   });
 });

@@ -58,5 +58,33 @@ export function renderMarkdown(text: string): HTMLElement {
     const href = a.getAttribute("href") ?? "";
     if (!/^https?:\/\//i.test(href)) a.removeAttribute("href");
   }
+  // Added after sanitising, which drops every button the text might carry.
+  // Only a fenced block has a <code> inside; a raw <pre> in the text has none.
+  for (const code of root.querySelectorAll("pre > code")) code.parentElement!.append(copyButton(code));
   return root;
+}
+
+/** How long the button says "Copied" before it offers to copy again. */
+const COPIED_MS = 1500;
+
+/**
+ * A Copy button for a code block, in its corner: a click puts the block's text
+ * on the clipboard. Its label is its accessible name, so a screen reader hears
+ * "Copied" too.
+ */
+function copyButton(code: Element): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "md__copy";
+  button.title = "Copy code";
+  button.textContent = "Copy";
+  let restore = 0;
+  button.addEventListener("click", () => {
+    void navigator.clipboard?.writeText(code.textContent ?? "").then(() => {
+      button.textContent = "Copied";
+      window.clearTimeout(restore);
+      restore = window.setTimeout(() => { button.textContent = "Copy"; }, COPIED_MS);
+    });
+  });
+  return button;
 }
