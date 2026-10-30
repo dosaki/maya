@@ -467,6 +467,12 @@ impl NativeHost {
         let _ = self.ends.unseen.set(hook);
     }
 
+    /// The folder of every terminal no card has shown yet: its session is
+    /// still starting, so the board does not show it.
+    pub fn starting(&self) -> Vec<PathBuf> {
+        self.all().into_iter().filter(|(_, t)| !t.carded.load(Ordering::Relaxed)).map(|(_, t)| t.cwd.clone()).collect()
+    }
+
     pub fn term_for_root(&self, root_pid: i32) -> Option<TermId> {
         self.all().into_iter().find(|(_, t)| t.root == root_pid).map(|(id, _)| id)
     }
@@ -861,6 +867,16 @@ mod tests {
         assert_eq!(host.term_for_root(root), None);
         assert!(host.write(term, b"x").is_err());
         assert!(host.root_pids().is_empty());
+    }
+
+    #[test]
+    fn a_terminal_is_starting_until_a_card_shows_it() {
+        let host = NativeHost::new(BATCH);
+        sh(&host, "sleep 30");
+        assert_eq!(host.starting(), [PathBuf::from("/")]);
+        host.mark_carded(&host.root_pids());
+        assert!(host.starting().is_empty());
+        host.kill_all();
     }
 
     #[test]

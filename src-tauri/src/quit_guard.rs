@@ -10,6 +10,7 @@
 //! `applicationShouldTerminate:`, so Maya adds one that runs the same check.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -44,6 +45,14 @@ pub fn working_native(cards: &[Card]) -> Vec<String> {
     cards.iter().filter(|c| c.native && c.state == State::Working && c.machine.is_none() && !c.brain).map(|c| c.name.clone()).collect()
 }
 
+/// What a quit would stop: the working Native sessions, then each Native
+/// terminal still starting (no card shows it yet, so it may sit at a trust
+/// prompt or a login), named by its folder.
+pub fn stopping(cards: &[Card], starting: &[PathBuf]) -> Vec<String> {
+    let folders = starting.iter().map(|d| format!("starting in {}", d.file_name().map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned())));
+    working_native(cards).into_iter().chain(folders).collect()
+}
+
 /// Whether to ask before the quit goes on: something would stop, nobody
 /// has already said yes, and the system is not the one ending Maya.
 pub fn should_ask(confirmed: bool, system_ending: bool, working: &[String]) -> bool {
@@ -63,11 +72,12 @@ pub fn agreed(code: Option<i32>) -> bool {
     }
 }
 
-/// The working Native sessions, from a fresh read of the store. Only the
-/// read holds its lock: no terminal names, no announcements.
+/// What a quit would stop, from a fresh read of the store. Only the read
+/// holds its lock: no terminal names, no announcements. The read marks the
+/// terminals a card shows, so `starting` comes after it.
 fn working_now(app: &AppHandle) -> Vec<String> {
     let cards = app.state::<AppState>().store.lock().unwrap().refresh(crate::now_ms());
-    working_native(&cards)
+    stopping(&cards, &crate::native::HOST.starting())
 }
 
 /// Asks the page whether to quit when a quit would stop a working Native
@@ -95,7 +105,8 @@ pub fn ask_if_needed(app: &AppHandle, agreed: bool) -> bool {
 /// update's restart.
 #[tauri::command(async)]
 pub fn native_working(state: tauri::State<'_, AppState>) -> Vec<String> {
-    working_native(&state.store.lock().unwrap().refresh(crate::now_ms()))
+    let cards = state.store.lock().unwrap().refresh(crate::now_ms());
+    stopping(&cards, &crate::native::HOST.starting())
 }
 
 /// The user said "Quit anyway": the exit goes through without asking again.
@@ -237,6 +248,14 @@ mod tests {
         ];
         assert_eq!(working_native(&cards), ["fix-ci", "docs"]);
         assert!(working_native(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_quit_also_stops_the_terminals_still_starting() {
+        let cards = [card("fix-ci", State::Working, true)];
+        let starting = [PathBuf::from("/Users/x/dev/maya"), PathBuf::from("/")];
+        assert_eq!(stopping(&cards, &starting), ["fix-ci", "starting in maya", "starting in /"]);
+        assert!(stopping(&[], &[]).is_empty());
     }
 
     #[test]

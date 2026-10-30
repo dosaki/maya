@@ -568,7 +568,8 @@ write and drives them through their own interfaces.
   A Native session, on any of the three, is run by Maya in a hidden
   pseudo-terminal she owns, so she types into it directly: in the terminal
   look the session's viewer shows its live screen and takes every key. Quitting Maya (or
-  restarting to update) asks first when a Native session is Working, since
+  restarting to update) asks first when a Native session is Working, or is
+  still starting and not yet on the board, since
   Native sessions stop with Maya; those open at quit are offered back at the
   next start and come back as Native. For now, from another machine or the
   phone, a Native session shows the transcript views, not the live terminal.

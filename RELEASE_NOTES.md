@@ -8,7 +8,7 @@
 - A Native session you start with the + button, resume on its own, or start to review a pull request opens its live terminal at once, before it shows on the board. A question such as whether to trust the folder, a login, or an error shows there.
 - If a Native session ends before it shows on the board, Maya says which folder it was in and shows the last lines it printed.
 - On Linux, a Native session takes typed keys without tmux.
-- Native sessions stop when Maya quits. Quitting Maya, closing its window or restarting to update asks first when a Native session is working. Logging out or shutting down is never held up.
+- Native sessions stop when Maya quits. Quitting Maya, closing its window or restarting to update asks first when a Native session is working, or is still starting and not yet on the board. Logging out or shutting down is never held up.
 - Native sessions that were open when Maya quit are offered back the next time it starts, in the Sessions tab or by voice ("Maya, resume my sessions"), and come back as Native.
 - For now, another machine's Maya and the phone show a Native session as its chat and transcript, not as its live terminal.
 
