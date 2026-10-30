@@ -146,10 +146,10 @@ describe("Settings as a list of groups", () => {
 describe("initNetwork's groups", () => {
   const settle = () => new Promise((r) => setTimeout(r, 0));
   const popped = () => new Promise((r) => window.addEventListener("popstate", () => setTimeout(r, 0), { once: true }));
-  const mount = async () => {
+  const mount = async (status: NetworkStatus = joinedStatus) => {
     history.replaceState(null, "");
     document.body.innerHTML = '<div id="settings"></div>';
-    tauri.replies = { get_config: { network: { name: "Pixel 8" }, notifyOnAwaiting: true, notifyOnCompleted: true }, network_status: joinedStatus, notifications_allowed: true };
+    tauri.replies = { get_config: { network: { name: "Pixel 8" }, notifyOnAwaiting: true, notifyOnCompleted: true }, network_status: status, notifications_allowed: true };
     initNetwork(() => undefined);
     await settle();
     return document.getElementById("settings")!;
@@ -229,6 +229,34 @@ describe("initNetwork's groups", () => {
     expect(document.getElementById("toast")!.textContent).toContain("disk full");
     open(pane, "voice");
     expect(pane.querySelector(".settings__error")).toBeNull();
+  });
+
+  it("keeps what was typed but not saved when the page is left and opened again", async () => {
+    const pane = await mount(off);
+    open(pane, "network");
+    pane.querySelector<HTMLInputElement>("input[name=name]")!.value = "Fold";
+    pane.querySelector<HTMLInputElement>("input[name=host]")!.value = "desk.local";
+    pane.querySelector<HTMLElement>("button[data-action=back]")!.click();
+    open(pane, "voice");
+    window.dispatchEvent(new CustomEvent("maya:tab", { detail: "sessions" }));
+    open(pane, "network");
+    expect(pane.querySelector<HTMLInputElement>("input[name=name]")!.value).toBe("Fold");
+    expect(pane.querySelector<HTMLInputElement>("input[name=host]")!.value).toBe("desk.local");
+  });
+
+  it("forgets the join fields once the join succeeds", async () => {
+    const pane = await mount(off);
+    open(pane, "network");
+    pane.querySelector<HTMLInputElement>("input[name=host]")!.value = "desk.local";
+    pane.querySelector<HTMLInputElement>("input[name=code]")!.value = "483921";
+    tauri.replies.network_pair = joinedStatus;
+    pane.querySelector<HTMLElement>("button[data-action=join]")!.click();
+    await settle();
+    tauri.replies.listen_stop = off;
+    pane.querySelector<HTMLElement>("button[data-action=leave]")!.click();
+    await settle();
+    expect(pane.querySelector<HTMLInputElement>("input[name=host]")!.value).toBe("");
+    expect(pane.querySelector<HTMLInputElement>("input[name=code]")!.value).toBe("");
   });
 
   it("lands on the list again after another tab was shown", async () => {

@@ -32,11 +32,11 @@ printf '# 0.42.0  \n\n- A thing.\n' > "$dir/spaces.md"
 passes "$dir/spaces.md" "trailing spaces"
 
 printf '# 0.41.0\n\n- A thing.\n' > "$dir/old.md"
-fails "$dir/old.md" "another version" 0.41.0 0.42.0
+fails "$dir/old.md" "another version" "first line is .# 0.41.0., not .# 0.42.0."
 printf '# v0.42.0\n\n- A thing.\n' > "$dir/v.md"
 fails "$dir/v.md" "a v prefix" v0.42.0
 printf '## New\n\n- A thing.\n' > "$dir/nohead.md"
-fails "$dir/nohead.md" "no version heading" 0.42.0
+fails "$dir/nohead.md" "no version heading" "first line is .## New., not .# 0.42.0."
 fails "$dir/none.md" "a missing file" missing
 
 out="$(sh scripts/release-notes.sh body abc123 "$dir/ok.md")"

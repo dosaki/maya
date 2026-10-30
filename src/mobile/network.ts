@@ -321,10 +321,16 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     error: null,
     newKey: false,
   };
+  // What was typed but not saved, kept while its page is closed (another
+  // group, the list, another tab) and put back when it opens again.
+  let kept: Edits = {};
   const render = () => {
     const edits = carryEdits(pane, model);
+    // A field on screen says for itself whether it still differs.
+    for (const f of CARRIED) if (pane.querySelector(`input[name=${f}]`)) delete kept[f];
+    kept = { ...kept, ...edits, focus: undefined };
     pane.replaceChildren(renderNetwork(model, handlers));
-    restoreEdits(pane, edits);
+    restoreEdits(pane, { ...kept, focus: edits.focus });
   };
   // The permission changes behind the page (the first run's prompt, Android's
   // settings), so every repaint reads it again and repaints if it moved.
@@ -413,6 +419,8 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     onJoin: (host, port, code) => void busy(async () => {
       setStatus(await invoke<NetworkStatus>("network_pair", { host, port, name: model.name, code }));
       await loadConfig();
+      // Joined: the next Join starts empty.
+      kept = { name: kept.name };
     }),
     onViewerTheme: (t) => void busy(() => saveConfig((c) => { c.viewerTheme = t; })),
     onBattery: () => void invoke("request_battery_exemption").catch((e) => showToast(String(e))),

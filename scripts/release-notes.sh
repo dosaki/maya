@@ -16,7 +16,7 @@ case "$cmd" in
     [ -f "$file" ] || { echo "$file is missing: write the notes for $arg" >&2; exit 1; }
     # A Windows editor's \r, and trailing spaces, are not part of the version.
     first="$(head -n 1 "$file" | tr -d '\r' | sed 's/[[:space:]]*$//')"
-    [ "$first" = "# $arg" ] || { echo "$file is for '$first', not $arg: rewrite it for $arg" >&2; exit 1; }
+    [ "$first" = "# $arg" ] || { echo "$file's first line is '$first', not '# $arg': rewrite it for $arg" >&2; exit 1; }
     ;;
   body)
     printf '## Release Notes\n\n'
