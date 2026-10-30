@@ -172,7 +172,9 @@ impl Terminal for MacTerminal {
     fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String> {
         let app = match (self.choice)() {
             NewSessionTerminal::Iterm => self.iterm,
-            NewSessionTerminal::Terminal => self.terminal,
+            // Native is taken before the call reaches here; this arm only
+            // keeps the match exhaustive.
+            NewSessionTerminal::Terminal | NewSessionTerminal::Native => self.terminal,
         };
         app.open(command, cwd, label)
     }
