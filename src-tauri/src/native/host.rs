@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 #[cfg(unix)]
@@ -151,7 +152,10 @@ struct Term {
     tty: Option<String>,
     /// None once the pseudo console is closed (Windows).
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// Shared with the terminal's input thread, which types what is queued.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Input waiting for the input thread, in the order it was queued.
+    input: Sender<Vec<u8>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     /// The program until it is reaped: while it is here, `root` cannot
     /// belong to another process.
@@ -289,13 +293,15 @@ impl NativeHost {
             return Err("Could not start the session: it has no process id.".into());
         };
         let reader = pair.master.try_clone_reader().map_err(|e| format!("Could not read the terminal: {e}"))?;
-        let writer = pair.master.take_writer().map_err(|e| format!("Could not write to the terminal: {e}"))?;
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| format!("Could not write to the terminal: {e}"))?));
+        let (input, queued) = channel();
         let term = Arc::new(Term {
             root,
             #[cfg(unix)]
             tty: pair.master.tty_name().map(|p| p.display().to_string()),
             master: Mutex::new(Some(pair.master)),
-            writer: Mutex::new(writer),
+            writer: writer.clone(),
+            input,
             killer: Mutex::new(child.clone_killer()),
             #[cfg(unix)]
             child: Mutex::new(Some(child)),
@@ -327,6 +333,7 @@ impl NativeHost {
             });
             std::thread::Builder::new().name(format!("native-{id}")).spawn(move || read(id, term, reader, weak, &wake))
         };
+        let started = started.and_then(|_| std::thread::Builder::new().name(format!("native-{id}-input")).spawn(move || type_queued(&queued, &writer)));
         if let Err(e) = started {
             self.kill(id);
             return Err(format!("Could not start the session: {e}"));
@@ -342,7 +349,14 @@ impl NativeHost {
         lock(&self.terms).iter().map(|(id, t)| (*id, t.clone())).collect()
     }
 
-    /// Types `bytes` into the terminal.
+    /// Queues `bytes` to be typed into the terminal after what was queued
+    /// before, and returns at once: a program that is not reading its input
+    /// holds up only the terminal's input thread.
+    pub fn enqueue(&self, term: TermId, bytes: &[u8]) -> Result<(), String> {
+        self.get(term)?.input.send(bytes.to_vec()).map_err(|_| "That session's terminal has closed.".into())
+    }
+
+    /// Types `bytes` into the terminal, and returns once they are in.
     pub fn write(&self, term: TermId, bytes: &[u8]) -> Result<(), String> {
         let t = self.get(term)?;
         let mut w = lock(&t.writer);
@@ -523,6 +537,17 @@ fn reaped(t: &Term) -> bool {
     child.is_none()
 }
 
+/// A terminal's input thread: types each queued input in turn, until the
+/// terminal is dropped or cannot be typed into.
+fn type_queued(queued: &Receiver<Vec<u8>>, writer: &Mutex<Box<dyn Write + Send>>) {
+    for bytes in queued {
+        let mut w = lock(writer);
+        if w.write_all(&bytes).and_then(|()| w.flush()).is_err() {
+            return;
+        }
+    }
+}
+
 /// The host-wide sender: once output is waiting, what gathers over `batch`
 /// goes to each terminal's viewers; while output flows, a batch goes every
 /// `batch`. It sleeps while nothing is printed, and ends with the host.
@@ -690,6 +715,49 @@ mod tests {
         let got = within_2s(|| has(&seen.lock().unwrap().bytes, "ping"));
         host.kill_all();
         assert!(got);
+    }
+
+    /// Starts a terminal that copies every byte typed into it, untouched,
+    /// to `file`, and returns it once it is ready.
+    fn recorder(host: &NativeHost, file: &Path) -> TermId {
+        let term = sh(host, &format!("stty raw -echo; printf ready; cat > '{}'", file.display()));
+        let (seen, sink) = collector();
+        let at = host.attach(term, 0, sink).unwrap();
+        if !within_2s(|| has(&at.snapshot, "ready") || has(&seen.lock().unwrap().bytes, "ready")) {
+            host.kill_all();
+            panic!("the terminal never got ready");
+        }
+        term
+    }
+
+    #[test]
+    fn queued_input_reaches_the_program_in_order() {
+        let host = NativeHost::new(BATCH);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("typed");
+        let term = recorder(&host, &file);
+        let want: String = (0..300).map(|i| format!("{i:04},")).collect();
+        for i in 0..300 {
+            host.enqueue(term, format!("{i:04},").as_bytes()).unwrap();
+        }
+        let got = within_2s(|| std::fs::read_to_string(&file).is_ok_and(|s| s == want));
+        let typed = std::fs::read_to_string(&file).unwrap_or_default();
+        host.kill_all();
+        assert!(got, "typed {} bytes, out of order or short", typed.len());
+    }
+
+    #[test]
+    fn queuing_input_does_not_wait_for_the_program_to_read_it() {
+        let host = NativeHost::new(BATCH);
+        // sleep never reads, so the terminal's input fills up.
+        let term = sh(&host, "sleep 30");
+        let t = Instant::now();
+        let queued = (0..64).map(|_| host.enqueue(term, &[b'x'; 16 * 1024])).collect::<Result<Vec<()>, String>>();
+        let took = t.elapsed();
+        host.kill_all();
+        assert_eq!(queued, Ok(vec![(); 64]));
+        assert!(took < Duration::from_millis(200), "queuing 1 MB took {took:?}");
+        assert!(host.enqueue(term + 1000, b"x").is_err(), "no such terminal");
     }
 
     #[test]

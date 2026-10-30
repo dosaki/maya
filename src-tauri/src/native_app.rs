@@ -42,7 +42,8 @@ fn decode_input(data: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Attaches the viewer to the terminal `pid` runs in; frames go to `on_frame`.
-#[tauri::command]
+/// Off the main thread: the snapshot can hold 10,000 lines.
+#[tauri::command(async)]
 pub fn native_attach(state: TauriState<AppState>, pid: i32, on_frame: Channel<NativeFrame>) -> Result<NativeAttached, String> {
     // The store lock ends with this statement: attaching must not hold it.
     let tree = state.store.lock().unwrap().process_tree();
@@ -60,18 +61,20 @@ pub fn native_attach(state: TauriState<AppState>, pid: i32, on_frame: Channel<Na
     })
 }
 
-/// Types `data` (base64) into the terminal.
+/// Queues `data` (base64) to be typed into the terminal, and returns at
+/// once. It stays on the main thread, which runs commands in the order they
+/// come, so keystrokes keep their order.
 #[tauri::command]
 pub fn native_input(term: u64, data: String) -> Result<(), String> {
-    HOST.write(term, &decode_input(&data)?)
+    HOST.enqueue(term, &decode_input(&data)?)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn native_resize(term: u64, rows: u16, cols: u16) -> Result<(), String> {
     HOST.resize(term, rows, cols)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn native_detach(term: u64, viewer: u64) {
     HOST.detach(term, viewer);
 }

@@ -97,6 +97,8 @@ export function mountLive(host: HTMLElement, pid: number): LiveHandle {
   let queued: NativeFrame[] | null = [];
   // The size the program was last told.
   let told = { rows: 0, cols: 0 };
+  // Resizes run off the main thread: each waits for the one before, so the last size wins.
+  let resizing: Promise<unknown> = Promise.resolve();
 
   const apply = (frame: NativeFrame) => {
     if (frame.kind === "output") term.write(decode(frame.data));
@@ -114,7 +116,8 @@ export function mountLive(host: HTMLElement, pid: number): LiveHandle {
     fit.fit();
     if (!attached || ended || (term.rows === told.rows && term.cols === told.cols)) return;
     told = { rows: term.rows, cols: term.cols };
-    void invoke("native_resize", { term: attached.term, rows: term.rows, cols: term.cols }).catch(() => undefined);
+    const size = { term: attached.term, rows: term.rows, cols: term.cols };
+    resizing = resizing.then(() => invoke("native_resize", size)).catch(() => undefined);
   };
 
   const channel = new Channel<NativeFrame>();

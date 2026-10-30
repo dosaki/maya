@@ -188,6 +188,7 @@ describe("mountLive", () => {
     expect(c).not.toContain("resize 30x100");
     expect(calls("native_resize")).toEqual([]);
     term().parse();
+    await flush();
     expect(c.lastIndexOf("resize 30x100")).toBeGreaterThan(snapshot);
     expect(calls("native_resize")).toEqual([["native_resize", { term: 7, rows: 30, cols: 100 }]]);
   });
@@ -215,10 +216,30 @@ describe("mountLive", () => {
     expect(calls("native_resize")).toEqual([]);
     FakeFit.proposed = { rows: 30, cols: 100 };
     observed!();
+    await flush();
     expect(calls("native_resize")).toEqual([["native_resize", { term: 7, rows: 30, cols: 100 }]]);
     // The same size again is not sent twice.
     observed!();
+    await flush();
     expect(calls("native_resize")).toHaveLength(1);
+  });
+
+  it("sends a resize only once the one before it is done, so the last size wins", async () => {
+    await mounted();
+    let done: () => void = () => {};
+    invoke.mockImplementation((cmd: string) => (cmd === "native_resize" ? new Promise<void>((r) => (done = r)) : Promise.resolve(null)));
+    FakeFit.proposed = { rows: 30, cols: 100 };
+    observed!();
+    FakeFit.proposed = { rows: 20, cols: 90 };
+    observed!();
+    await flush();
+    expect(calls("native_resize")).toEqual([["native_resize", { term: 7, rows: 30, cols: 100 }]]);
+    done();
+    await flush();
+    expect(calls("native_resize").map((c) => c[1])).toEqual([
+      { term: 7, rows: 30, cols: 100 },
+      { term: 7, rows: 20, cols: 90 },
+    ]);
   });
 
   it("shows that the session ended on an exit frame and stops sending input", async () => {
