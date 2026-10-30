@@ -96,14 +96,17 @@ describe("copying a code block", () => {
     return writeText;
   }
 
-  it("puts a Copy button on every code block, and none on inline code", () => {
-    const el = renderMarkdown("some `inline` code\n\n```sh\nls\n```\n\n```\npwd\n```");
+  it("puts a Copy button on every fenced block, and none on inline code or a raw <pre>", () => {
+    const el = renderMarkdown("some `inline` code\n\n```sh\nls\n```\n\n```\npwd\n```\n\n<pre>raw</pre>");
+    expect(el.querySelectorAll("pre")).toHaveLength(3);
     const buttons = el.querySelectorAll("pre > button.md__copy");
     expect(buttons).toHaveLength(2);
     expect(el.querySelectorAll("button")).toHaveLength(2);
     for (const b of buttons) {
       expect(b.getAttribute("type")).toBe("button");
-      expect(b.getAttribute("aria-label")).toBe("Copy code");
+      // The visible label is the accessible name, so it says "Copied" when it does.
+      expect(b.hasAttribute("aria-label")).toBe(false);
+      expect(b.getAttribute("title")).toBe("Copy code");
       expect(b.textContent).toBe("Copy");
     }
   });
