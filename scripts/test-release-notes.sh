@@ -55,4 +55,16 @@ fi
 printf '# 0.42.0\n\n- A thing.' > "$dir/nonl.md"
 out="$(sh scripts/release-notes.sh body abc123 "$dir/nonl.md")"
 printf '%s\n' "$out" | grep -A 2 -- '^- A thing\.$' | sed -n 2p | grep -q '^$' || { echo "FAIL: no blank line between the notes and the install text" >&2; printf '%s\n' "$out" >&2; exit 1; }
+# The file keeps every version of the major, newest first: the release gets
+# only the top one.
+printf '# 0.42.0\n\n## New\n\n- The new thing.\n\n# 0.41.0\n\n## Fixed\n\n- An old thing.\n' > "$dir/many.md"
+passes "$dir/many.md" "several versions"
+out="$(sh scripts/release-notes.sh body abc123 "$dir/many.md")"
+printf '%s\n' "$out" | grep -q -- '^- The new thing\.$' || { echo "FAIL: the body lacks the top version's notes" >&2; printf '%s\n' "$out" >&2; exit 1; }
+if printf '%s\n' "$out" | grep -q -- 'An old thing\|^# 0.41.0'; then
+  echo "FAIL: the body carries an older version's notes" >&2
+  printf '%s\n' "$out" >&2
+  exit 1
+fi
+printf '%s\n' "$out" | grep -B 1 '^Built from' | head -n 1 | grep -q '^$' || { echo "FAIL: no blank line before the install text" >&2; printf '%s\n' "$out" >&2; exit 1; }
 echo "release-notes: ok"

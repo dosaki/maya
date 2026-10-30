@@ -2,6 +2,20 @@
 
 Date: 2026-10-30. Status: reviewed by a builder check, awaiting approval.
 
+## Amendment
+
+After the first review the user asked that Maya show all the notes of its
+current major release, not only the running version's. `RELEASE_NOTES.md`
+therefore keeps a `# <version>` section for every version of the current
+major, newest first, and starts afresh at a new major (0.x counts as one
+major). The check still compares the first line with the version files;
+the GitHub release takes only the top section; the app renders every
+section, each under a "Maya <version>" heading with its New and Fixed
+beneath it, and the phone's summary still names the running version. The
+56 releases before this one were given notes, drafted from their commits,
+so the file starts with all of 0.x. Where the design below says the file
+holds one version or is rewritten, read it with this change.
+
 ## Intent
 
 Every release of Maya carries notes written for the people who use it:
@@ -26,9 +40,10 @@ under the rule this adds to `CLAUDE.md`).
 ## Goals
 
 - `RELEASE_NOTES.md` at the repository root holds the notes for the
-  version in the version files, and only that version.
-- Each pull request that bumps the version rewrites it, in the same
-  pull request.
+  version in the version files, at the top, and every earlier version of
+  the same major release beneath it, newest first (see Amendment).
+- Each pull request that bumps the version adds the new version's
+  section at the top, in the same pull request.
 - The GitHub release for `v<version>` shows the notes under
   `## Release Notes`, above the install text and GitHub's generated
   "What's Changed" list.
@@ -44,8 +59,8 @@ under the rule this adds to `CLAUDE.md`).
 
 ## Non-goals
 
-- No history of past notes, in the repository or in the app. The file
-  holds one version; older notes live on their GitHub releases.
+- No notes from an earlier major release in the repository or the app;
+  those live on their GitHub releases.
 - No notes for an update that is offered but not yet installed. The app
   shows the notes of the build it is.
 - No change to the desktop Settings beyond the new group.

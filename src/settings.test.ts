@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
-import { RELEASE_NOTES } from "./release-notes";
+import { RUNNING_VERSION } from "./release-notes";
 import { gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
@@ -438,7 +438,7 @@ describe("renderSettings", () => {
     const s = el.querySelector<HTMLElement>(".settings__section[data-group=releaseNotes]")!;
     expect(s.hidden).toBe(false);
     expect(s.querySelector(".settings__heading")!.textContent).toBe("Release Notes");
-    expect(s.querySelector(".release-notes .settings__hint")!.textContent).toBe(`Maya ${RELEASE_NOTES.version}`);
+    expect(s.querySelector(".release-notes__version")!.textContent).toBe(`Maya ${RUNNING_VERSION}`);
   });
 
   it("puts each setting in its group", () => {

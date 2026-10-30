@@ -13,7 +13,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { carryEdits, groupSummary, initNetwork, renderNetwork, restoreEdits, type NetworkModel, type NetworkStatus } from "./network";
-import { RELEASE_NOTES } from "../release-notes";
+import { RUNNING_VERSION } from "../release-notes";
 
 const off: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, mainError: null };
 const joinedStatus: NetworkStatus = { ...off, role: "assistant", assistant: { connected: true, mainName: "laptop", error: null } };
@@ -103,7 +103,7 @@ describe("Settings as a list of groups", () => {
     const el = renderNetwork(base, handlers());
     const items = [...el.querySelectorAll<HTMLElement>(".settings-list__item")];
     expect(items.map((i) => i.querySelector(".settings-list__name")!.textContent)).toEqual(["Network", "Notifications", "Voice", "Session viewer", "Release Notes"]);
-    expect(items.map((i) => i.querySelector(".settings-list__summary")!.textContent)).toEqual(["Connected to laptop", "Awaiting decision", "Speak on, wake word off", "Chat", `Maya ${RELEASE_NOTES.version}`]);
+    expect(items.map((i) => i.querySelector(".settings-list__summary")!.textContent)).toEqual(["Connected to laptop", "Awaiting decision", "Speak on, wake word off", "Chat", `Maya ${RUNNING_VERSION}`]);
     expect(el.querySelector("input, select")).toBeNull();
   });
 

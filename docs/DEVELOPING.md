@@ -600,24 +600,25 @@ Three workflows in `.github/workflows/`:
 ## Releasing
 
 Releases follow semver. The version in `src-tauri/tauri.conf.json` is the
-release version; bump it everywhere, rewrite `RELEASE_NOTES.md` for it,
-commit and push to `main`:
+release version; bump it everywhere, add its section at the top of
+`RELEASE_NOTES.md`, commit and push to `main`:
 
     pnpm version:set 0.2.0      # or: sh scripts/set-version.sh 0.2.0
-    $EDITOR RELEASE_NOTES.md    # "# 0.2.0", then ## New and ## Fixed
+    $EDITOR RELEASE_NOTES.md    # on top: "# 0.2.0", then ## New and ## Fixed
     git commit -am "chore(release): 0.2.0"
     git push
 
 The Release workflow publishes `v0.2.0` for every platform. Its notes lead
-with `RELEASE_NOTES.md` under "Release Notes", then the install text, then
+with the top section of `RELEASE_NOTES.md` under "Release Notes", then the install text, then
 the list GitHub generates from the merged pull requests
 (`scripts/release-notes.sh` assembles them; `scripts/test-release-notes.sh`
-tests it in CI). The app shows the same file in Settings → Release Notes,
-built in at build time (`src/release-notes.ts`), so it is always the
-notes of the running version. A push whose version already has
+tests it in CI). The file keeps every version of the current major
+release, newest first, and starts afresh at a new major. The app shows
+all of it in Settings → Release Notes, built in at build time
+(`src/release-notes.ts`), so the running version is always at the top. A push whose version already has
 a release only builds; a mismatch between `src-tauri/tauri.conf.json`,
 `mobile/tauri.conf.json`, `package.json` and `Cargo.toml`, or a
-`RELEASE_NOTES.md` for another version, fails the run,
+`RELEASE_NOTES.md` whose top section is another version, fails the run,
 a pull request's too (see [CI](#ci)); `pnpm version:set` keeps all of
 them in step, the phone app's included. Pull requests bump the version themselves: see the rule in
 [CLAUDE.md](../CLAUDE.md).

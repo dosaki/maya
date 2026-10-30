@@ -8,7 +8,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { NetworkStatus } from "../settings";
 import { showToast } from "../toast";
 import { setViewerTheme } from "../modal";
-import { RELEASE_NOTES, renderReleaseNotes } from "../release-notes";
+import { renderReleaseNotes, RUNNING_VERSION } from "../release-notes";
 import { makeGroupHistory } from "./settings-history";
 import type { ViewerTheme } from "../types";
 
@@ -226,7 +226,7 @@ export function groupSummary(m: NetworkModel, g: PhoneGroup): string {
     case "viewer":
       return m.viewerTheme === "terminal" ? "Terminal" : "Chat";
     case "releaseNotes":
-      return `Maya ${RELEASE_NOTES.version}`;
+      return `Maya ${RUNNING_VERSION}`;
   }
 }
 

@@ -97,7 +97,7 @@ irm https://raw.githubusercontent.com/dosaki/maya/main/install.ps1 | iex
 
 From 0.18.0, Maya updates itself: a bar on the board offers each new
 release, and Settings has Check for updates. Settings → Release Notes
-shows what the version you are running brought. Running the same command
+lists what each version brought, the one you are running first. Running the same command
 again also updates Maya, and is the only way for an `.msi` or `.deb`
 install, where the bar offers a Download link instead.
 
