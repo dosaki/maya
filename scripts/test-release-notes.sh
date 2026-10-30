@@ -50,4 +50,9 @@ if printf '%s\n' "$out" | grep -q '^# 0.42.0'; then
   echo "FAIL: the body keeps the version line" >&2
   exit 1
 fi
+# Without a final newline the install text must still be its own paragraph,
+# not run on into the last bullet.
+printf '# 0.42.0\n\n- A thing.' > "$dir/nonl.md"
+out="$(sh scripts/release-notes.sh body abc123 "$dir/nonl.md")"
+printf '%s\n' "$out" | grep -A 2 -- '^- A thing\.$' | sed -n 2p | grep -q '^$' || { echo "FAIL: no blank line between the notes and the install text" >&2; printf '%s\n' "$out" >&2; exit 1; }
 echo "release-notes: ok"
