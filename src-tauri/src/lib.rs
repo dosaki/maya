@@ -12,6 +12,7 @@ pub mod native;
 pub mod net_app;
 mod brain_app;
 mod brain_route;
+mod native_app;
 mod remembered_app;
 #[cfg(target_os = "macos")]
 pub mod terminal_app;
@@ -1650,6 +1651,10 @@ pub fn run() {
         .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
         .invoke_handler(tauri::generate_handler![
+            native_app::native_attach,
+            native_app::native_input,
+            native_app::native_resize,
+            native_app::native_detach,
             git::get_git_status,
             git::store_git_token,
             git::clear_git_token,

@@ -1,0 +1,95 @@
+//! The commands the terminal viewer uses to attach to a Native session,
+//! type into it, resize it and detach. Bytes cross as base64 strings.
+
+use crate::native::host::{Frame, Sink};
+use crate::native::{screen, HOST};
+use crate::AppState;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use maya_core::native::root_of;
+use serde::Serialize;
+use tauri::ipc::Channel;
+use tauri::State as TauriState;
+
+/// What the viewer receives as the terminal runs.
+#[derive(Serialize, Clone)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum NativeFrame {
+    Output { data: String },
+    Exit,
+}
+
+/// What `native_attach` hands back: the screen so far and where to send input.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeAttached {
+    pub term: u64,
+    pub viewer: u64,
+    pub snapshot: String,
+    pub rows: u16,
+    pub cols: u16,
+}
+
+fn frame_of(frame: Frame) -> NativeFrame {
+    match frame {
+        Frame::Output(bytes) => NativeFrame::Output { data: STANDARD.encode(bytes) },
+        Frame::Exit => NativeFrame::Exit,
+    }
+}
+
+fn decode_input(data: &str) -> Result<Vec<u8>, String> {
+    STANDARD.decode(data).map_err(|e| format!("Input is not base64: {e}"))
+}
+
+/// Attaches the viewer to the terminal `pid` runs in; frames go to `on_frame`.
+#[tauri::command]
+pub fn native_attach(state: TauriState<AppState>, pid: i32, on_frame: Channel<NativeFrame>) -> Result<NativeAttached, String> {
+    // The store lock ends with this statement: attaching must not hold it.
+    let tree = state.store.lock().unwrap().process_tree();
+    let term = root_of(pid, &HOST.root_pids(), &tree)
+        .and_then(|root| HOST.term_for_root(root))
+        .ok_or("This session is not running in Maya.")?;
+    let sink: Sink = Box::new(move |frame| on_frame.send(frame_of(frame)).is_ok());
+    let attached = HOST.attach(term, screen::SCROLLBACK, sink)?;
+    Ok(NativeAttached {
+        term: attached.term,
+        viewer: attached.viewer,
+        snapshot: STANDARD.encode(attached.snapshot),
+        rows: attached.rows,
+        cols: attached.cols,
+    })
+}
+
+/// Types `data` (base64) into the terminal.
+#[tauri::command]
+pub fn native_input(term: u64, data: String) -> Result<(), String> {
+    HOST.write(term, &decode_input(&data)?)
+}
+
+#[tauri::command]
+pub fn native_resize(term: u64, rows: u16, cols: u16) -> Result<(), String> {
+    HOST.resize(term, rows, cols)
+}
+
+#[tauri::command]
+pub fn native_detach(term: u64, viewer: u64) {
+    HOST.detach(term, viewer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_go_to_the_viewer_as_base64() {
+        let out = serde_json::to_string(&frame_of(Frame::Output(vec![0xC3, 0xA9]))).unwrap();
+        assert_eq!(out, r#"{"kind":"output","data":"w6k="}"#);
+        assert_eq!(serde_json::to_string(&frame_of(Frame::Exit)).unwrap(), r#"{"kind":"exit"}"#);
+    }
+
+    #[test]
+    fn input_is_decoded_before_it_is_written() {
+        assert_eq!(decode_input("aGk=").unwrap(), b"hi");
+        assert!(decode_input("!!").is_err());
+    }
+}
