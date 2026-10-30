@@ -22,7 +22,7 @@ the right terminal first.
 - Starts new sessions and resumes old ones
 - Starts a new session in its own git worktree when you tick New worktree, on a new branch off the branch your checkout is on, so sessions in one repository do not step on each other
 - After a restart, offers to resume every session that was running, on this machine and on the paired ones, each in its own folder and terminal: from the Sessions tab, or by voice ("Maya, resume my sessions")
-- Runs sessions inside Maya, with no terminal app, when you choose Native (Settings › Sessions › New sessions open in): the session viewer is then the session's live terminal, and the session stops when Maya quits
+- Runs sessions inside Maya, with no terminal app, when you choose Native (Settings › Sessions › New sessions open in): in the terminal look the session's window is then its live terminal, and the session stops when Maya quits. A Native session you start, resume on its own or start to review a pull request opens its live terminal at once, before it shows on the board; one that ends before it shows there has Maya show the last lines it printed
 - Shows what a session's terminal shows: the conversation, each command's output, edit diffs, how long it has been working, and its model, folder and branch
   - As a chat or in a terminal look, like the agent's own terminal (Settings → Sessions, or the `>_` button on the session)
 - Shows each session's context, its account's usage limits and its cost so far, in the session window
@@ -566,8 +566,8 @@ write and drives them through their own interfaces.
   the tab, when several sessions share one); on Linux the sessions Maya
   starts run in tmux, which types into them, shown in GNOME Terminal.
   A Native session, on any of the three, is run by Maya in a hidden
-  pseudo-terminal she owns, so she types into it directly: the session's
-  viewer shows its live screen and takes every key. Quitting Maya (or
+  pseudo-terminal she owns, so she types into it directly: in the terminal
+  look the session's viewer shows its live screen and takes every key. Quitting Maya (or
   restarting to update) asks first when a Native session is Working, since
   Native sessions stop with Maya; those open at quit are offered back at the
   next start and come back as Native. For now, from another machine or the
