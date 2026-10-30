@@ -534,13 +534,14 @@ async function start(machine: string, dir: string | null, prompt: string, choice
     const r = await invoke<StartResult>("start_session", { dir, prompt, options: choices, machine });
     draft = "";
     draftName = "";
+    // The prompt is spent: closing the form, which the opener below does, must not keep it as a draft.
+    me.model.done = true;
     // A Native session's terminal opens at once, in place of this form.
     if (openStarted(r.nativeTerm, r.dir) || current !== me) {
       showToast(startedText(r));
       return;
     }
     // The prompt is spent: clear it everywhere and keep Start disabled until the modal closes.
-    me.model.done = true;
     me.model.busy = true;
     me.model.prompt = "";
     me.model.name = "";

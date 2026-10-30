@@ -75,6 +75,11 @@ describe("new-session options", () => {
     setNativeOpener(null);
     expect(opened).toEqual([[4, "/x/dev/a"]]);
     expect(document.getElementById("toast")!.textContent).toBe("Started in a");
+    // The start spent the prompt: the next form opens empty, so it cannot start the session twice.
+    await openNewSession();
+    await flush();
+    expect(document.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")!.value).toBe("");
+    closeNewSession();
   });
 
   it("enables Start only once the agent listing has landed, so a prompt cannot start under the wrong agent", async () => {
