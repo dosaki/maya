@@ -9,6 +9,7 @@ pub mod focus;
 pub mod listener;
 pub mod models;
 pub mod native;
+mod quit_guard;
 pub mod net_app;
 mod brain_app;
 mod brain_route;
@@ -1650,6 +1651,15 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
+        // Closing the window quits Maya, so it asks first too; "Quit
+        // anyway" then exits the app.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && quit_guard::ask_if_needed(window.app_handle(), false) {
+                    api.prevent_close();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             native_app::native_attach,
             native_app::native_input,
@@ -1740,7 +1750,9 @@ pub fn run() {
             list_machines,
             updater::update_kind,
             updater::update_check,
-            updater::update_install
+            updater::update_install,
+            quit_guard::native_working,
+            quit_guard::quit_confirmed
         ])
         .setup(move |app| {
             let log_path = dir.join("maya").join("maya.log");
@@ -1761,6 +1773,18 @@ pub fn run() {
             listener::install_speech_hook(app.handle().clone());
             #[cfg(target_os = "macos")]
             dock::set_dock_icon();
+            // Cmd+Q asks for an exit, which the quit guard can hold; the
+            // predefined Quit would end AppKit before it could.
+            #[cfg(target_os = "macos")]
+            {
+                app.set_menu(quit_guard::menu(app.handle())?)?;
+                app.on_menu_event(|app, event| {
+                    if event.id() == quit_guard::QUIT_ID {
+                        app.exit(0);
+                    }
+                });
+                quit_guard::watch_power_off();
+            }
             // Starts the agents' first listing, so the start form finds it ready.
             let _ = agents::snapshot();
             let handle = app.handle().clone();
@@ -1832,15 +1856,23 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(|app, event| {
+        .run(|app, event| match event {
+            // A quit that would stop a working Native session waits for the
+            // page's answer.
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                if quit_guard::ask_if_needed(app, quit_guard::agreed(code)) {
+                    api.prevent_exit();
+                }
+            }
             // A stalled model download otherwise keeps its curl child alive
             // under launchd after Maya quits, writing a 60-190 MB `.part`
             // file to nowhere.
-            if let tauri::RunEvent::Exit = event {
+            tauri::RunEvent::Exit => {
                 models::abort_all();
                 native::HOST.kill_all();
                 brain_app::quit(app);
             }
+            _ => {}
         });
 }
 

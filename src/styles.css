@@ -273,6 +273,9 @@ body { margin: 0; background: var(--bg); }
 .modal__setup p { margin: 0; color: var(--muted); }
 .firstrun__row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
 .firstrun__row:has(input:checked) { border-color: var(--working); }
+/* Above a session viewer, which may be open when a quit is asked about. */
+.modal--quit { z-index: 40; }
+.quit__actions { display: flex; gap: 8px; align-self: flex-end; }
 
 .settings label.settings__check { display: flex; align-items: center; justify-content: flex-start; gap: 8px; }
 .settings__check input { width: auto; }

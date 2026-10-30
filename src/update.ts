@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { askQuit } from "./quitguard";
 
 /** How this install updates: by itself, by a link to the release, or never (a debug build). */
 export type UpdateKind = "self" | "notice" | "off";
@@ -92,6 +93,13 @@ export function makeUpdates() {
     }
     // A failed install took the update it found, so a retry finds it again.
     const retry = state.phase === "error";
+    // The restart ends Native sessions: a working one is asked about first.
+    const working = await invoke<string[]>("native_working").catch(() => []);
+    if (working.length > 0 && !(await askQuit(working, true))) {
+      state = { phase: "available", info };
+      paint();
+      return;
+    }
     state = { phase: "downloading", info, percent: null };
     paint();
     try {

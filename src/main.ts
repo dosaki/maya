@@ -25,6 +25,7 @@ import { initDebug } from "./debug";
 import { maybeShowFirstRun } from "./firstrun";
 import { maybeShowKeysNotice } from "./notice";
 import { updates } from "./update";
+import { askQuit } from "./quitguard";
 
 let cards: Card[] = [];
 const guard = makeClickGuard();
@@ -343,6 +344,10 @@ async function start(): Promise<void> {
     if (ev.key === "Enter" && target.classList.contains("card")) act(target);
   });
 
+  // A quit held because it would stop a working Native session.
+  await listen<{ names: string[] }>("quit-confirm", (e) => {
+    void askQuit(e.payload.names, false).then((yes) => (yes ? invoke("quit_confirmed") : undefined));
+  });
   // "Show me …" by voice for a session in a terminal Maya hosts.
   await listen<{ pid: number }>("open-session", (e) => void openNative(e.payload.pid));
   await listen<Card[]>("sessions", (e) => {
