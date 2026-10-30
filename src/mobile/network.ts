@@ -1,16 +1,33 @@
-// The Network tab: this phone's name, joining a main or leaving it, the
-// notification and voice switches, the session viewer and the battery exemption.
+// The phone's Settings tab, laid out as Android's own: a list of groups,
+// each opening its page. Network (this phone's name, joining a main or
+// leaving it), Notifications (the switches and the battery exemption),
+// Voice, the session viewer, and the release notes.
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { NetworkStatus } from "../settings";
 import { showToast } from "../toast";
 import { setViewerTheme } from "../modal";
+import { renderReleaseNotes, RUNNING_VERSION } from "../release-notes";
+import { makeGroupHistory } from "./settings-history";
 import type { ViewerTheme } from "../types";
 
 export type { NetworkStatus } from "../settings";
 
+export type PhoneGroup = "network" | "notifications" | "voice" | "viewer" | "releaseNotes";
+
+/** The list's groups, in its order. */
+export const PHONE_GROUPS: readonly (readonly [PhoneGroup, string])[] = [
+  ["network", "Network"],
+  ["notifications", "Notifications"],
+  ["voice", "Voice"],
+  ["viewer", "Session viewer"],
+  ["releaseNotes", "Release Notes"],
+];
+
 export interface NetworkModel {
+  /** The group whose page is open; the list when absent or null. */
+  group?: PhoneGroup | null;
   /** The session viewer's look; chat when absent. */
   viewerTheme?: ViewerTheme;
   status: NetworkStatus;
@@ -39,6 +56,8 @@ export interface NetworkHandlers {
   onNewKeyCancel(): void;
   onStopListening(): void;
   onJoin(host: string, port: number, code: string): void;
+  onOpenGroup(g: PhoneGroup): void;
+  onBack(): void;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -87,10 +106,9 @@ function joinSection(h: NetworkHandlers, error: string | null): HTMLElement {
   return join;
 }
 
-export function renderNetwork(m: NetworkModel, h: NetworkHandlers): HTMLElement {
-  const root = el("div", "settings__body network");
+/** This phone, then Join a main (or Key, once joined). */
+function networkCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
   const joined = m.status.role === "assistant";
-
   const phone = section("This phone");
   const name = el("label", "", "Name ");
   const nameInput = el("input", "");
@@ -108,23 +126,22 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers): HTMLElement 
     phone.append(button("Leave", "leave", h.onStopListening));
   }
   if (m.status.pairAgain) phone.append(el("p", "settings__hint", "This Maya was updated to secure pairing — pair again."));
-  if (m.error) phone.append(el("p", "settings__error", m.error));
-  root.append(phone);
-  if (!joined) root.append(joinSection(h, m.status.mainError ?? null));
+  if (!joined) return [phone, joinSection(h, m.status.mainError ?? null)];
 
-  if (joined) {
-    const key = section("Key");
-    if (m.newKey) {
-      const c = el("div", "network__confirm");
-      c.append(el("p", "", "Drop every pairing and make a new key?"));
-      c.append(button(m.busy ? "Working…" : "Drop and make a new key", "new-key-confirm", h.onNewKey, true), button("Cancel", "new-key-cancel", h.onNewKeyCancel));
-      key.append(c);
-    } else {
-      key.append(button("New key", "new-key", h.onNewKeyAsk));
-    }
-    root.append(key);
+  const key = section("Key");
+  if (m.newKey) {
+    const c = el("div", "network__confirm");
+    c.append(el("p", "", "Drop every pairing and make a new key?"));
+    c.append(button(m.busy ? "Working…" : "Drop and make a new key", "new-key-confirm", h.onNewKey, true), button("Cancel", "new-key-cancel", h.onNewKeyCancel));
+    key.append(c);
+  } else {
+    key.append(button("New key", "new-key", h.onNewKeyAsk));
   }
+  return [phone, key];
+}
 
+/** The notification switches, then Battery, which keeps them coming with the screen off. */
+function notificationCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
   const notifications = section("Notifications");
   for (const [which, label, on, nameAttr] of [["awaiting", "Notify on Awaiting Decision", m.notifyAwaiting, "notifyAwaiting"], ["completed", "Notify on Completed", m.notifyCompleted, "notifyCompleted"]] as const) {
     const l = el("label", "settings__switch");
@@ -137,8 +154,14 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers): HTMLElement 
     notifications.append(l);
   }
   if (!m.notificationsAllowed) notifications.append(el("p", "settings__error", "Notifications are off for Maya in Android settings."));
-  root.append(notifications);
 
+  const battery = section("Battery");
+  battery.append(button("Keep Maya awake", "battery", h.onBattery));
+  battery.append(el("p", "settings__hint", "Android may otherwise stop Maya with the screen off."));
+  return [notifications, battery];
+}
+
+function voiceCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
   const voice = section("Voice");
   // The phone answers to its main's word; "Maya" until the main says.
   const word = m.status.assistant.wakeWord?.trim() || "Maya";
@@ -153,8 +176,10 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers): HTMLElement 
     voice.append(l);
   }
   voice.append(el("p", "settings__hint", `While Maya is on screen she reads out sessions that need you, and with the wake word on she listens for "${word}", the word set on the desktop main. She never listens with the app closed. Voice needs a desktop main.`));
-  root.append(voice);
+  return [voice];
+}
 
+function viewerCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
   const viewer = section("Session viewer");
   const viewerSel = el("select", "");
   viewerSel.name = "viewerTheme";
@@ -166,14 +191,72 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers): HTMLElement 
   viewerSel.value = m.viewerTheme ?? "chat";
   viewerSel.addEventListener("change", () => h.onViewerTheme?.(viewerSel.value as ViewerTheme));
   viewer.append(viewerSel);
-  root.append(viewer);
+  return [viewer];
+}
 
-  const battery = section("Battery");
-  battery.append(button("Keep Maya awake", "battery", h.onBattery));
-  battery.append(el("p", "settings__hint", "Android may otherwise stop Maya with the screen off."));
-  root.append(battery);
+function releaseNotesCards(): HTMLElement[] {
+  const notes = el("section", "settings__section");
+  notes.append(renderReleaseNotes());
+  return [notes];
+}
 
-  for (const b of root.querySelectorAll("button")) if (m.busy) b.disabled = true;
+const CARDS: Record<PhoneGroup, (m: NetworkModel, h: NetworkHandlers) => HTMLElement[]> = {
+  network: networkCards,
+  notifications: notificationCards,
+  voice: voiceCards,
+  viewer: viewerCards,
+  releaseNotes: releaseNotesCards,
+};
+
+/** The line under a group's name in the list: what is set under it. */
+export function groupSummary(m: NetworkModel, g: PhoneGroup): string {
+  switch (g) {
+    case "network": {
+      if (m.status.role !== "assistant") return "Not joined";
+      const link = m.status.assistant;
+      return link.connected && link.mainName ? `Connected to ${link.mainName}` : "Reconnecting…";
+    }
+    case "notifications": {
+      if (!m.notificationsAllowed) return "Off in Android settings";
+      const on = [m.notifyAwaiting && "Awaiting decision", m.notifyCompleted && "Completed"].filter(Boolean);
+      return on.length > 0 ? on.join(", ") : "Off";
+    }
+    case "voice":
+      return `Speak ${m.speak ? "on" : "off"}, wake word ${m.wakeWord ? "on" : "off"}`;
+    case "viewer":
+      return m.viewerTheme === "terminal" ? "Terminal" : "Chat";
+    case "releaseNotes":
+      return `Maya ${RUNNING_VERSION}`;
+  }
+}
+
+/** The list of groups, or the open group's page: a back arrow and its name, the error if any, then its cards. */
+export function renderNetwork(m: NetworkModel, h: NetworkHandlers): HTMLElement {
+  if (!m.group) {
+    const list = el("div", "settings__body settings-list");
+    for (const [g, title] of PHONE_GROUPS) {
+      const item = el("button", "settings-list__item");
+      item.type = "button";
+      item.dataset.group = g;
+      item.append(el("span", "settings-list__name", title), el("span", "settings-list__summary", groupSummary(m, g)));
+      item.addEventListener("click", () => h.onOpenGroup(g));
+      list.append(item);
+    }
+    return list;
+  }
+  const root = el("div", "settings__body network");
+  const bar = el("div", "settings-page__bar");
+  const back = el("button", "settings-page__back", "←");
+  back.type = "button";
+  back.dataset.action = "back";
+  back.setAttribute("aria-label", "Back");
+  back.addEventListener("click", h.onBack);
+  bar.append(back, el("h2", "settings-page__title", PHONE_GROUPS.find(([g]) => g === m.group)?.[1] ?? ""));
+  root.append(bar);
+  // On the page the user is on, whichever group's save failed.
+  if (m.error) root.append(el("p", "settings__error", m.error));
+  root.append(...CARDS[m.group](m, h));
+  for (const b of root.querySelectorAll<HTMLButtonElement>("button:not([data-action=back])")) if (m.busy) b.disabled = true;
   return root;
 }
 
@@ -238,10 +321,16 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     error: null,
     newKey: false,
   };
+  // What was typed but not saved, kept while its page is closed (another
+  // group, the list, another tab) and put back when it opens again.
+  let kept: Edits = {};
   const render = () => {
     const edits = carryEdits(pane, model);
+    // A field on screen says for itself whether it still differs.
+    for (const f of CARRIED) if (pane.querySelector(`input[name=${f}]`)) delete kept[f];
+    kept = { ...kept, ...edits, focus: undefined };
     pane.replaceChildren(renderNetwork(model, handlers));
-    restoreEdits(pane, edits);
+    restoreEdits(pane, { ...kept, focus: edits.focus });
   };
   // The permission changes behind the page (the first run's prompt, Android's
   // settings), so every repaint reads it again and repaints if it moved.
@@ -288,13 +377,17 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     setViewerTheme(model.viewerTheme);
   };
   const busy = async (f: () => Promise<void>) => {
+    // The page the save started on: its error shows there, or in a toast
+    // when the user has left it.
+    const at = model.group;
     model.busy = true;
     model.error = null;
     paint();
     try {
       await f();
     } catch (e) {
-      model.error = String(e);
+      if (model.group === at) model.error = String(e);
+      else showToast(String(e));
     }
     model.busy = false;
     paint();
@@ -326,10 +419,39 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     onJoin: (host, port, code) => void busy(async () => {
       setStatus(await invoke<NetworkStatus>("network_pair", { host, port, name: model.name, code }));
       await loadConfig();
+      // Joined: the next Join starts empty.
+      kept = { name: kept.name };
     }),
     onViewerTheme: (t) => void busy(() => saveConfig((c) => { c.viewerTheme = t; })),
     onBattery: () => void invoke("request_battery_exemption").catch((e) => showToast(String(e))),
+    onOpenGroup: (g) => {
+      model.group = g;
+      model.error = null;
+      groupHistory.opened(g);
+      paint();
+    },
+    onBack: () => closeGroup(),
   };
+  const groupHistory = makeGroupHistory();
+  const closeGroup = () => {
+    if (!model.group) return;
+    model.group = null;
+    model.error = null;
+    groupHistory.closed();
+    paint();
+  };
+  // Android's Back popped the group's entry: back to the list.
+  window.addEventListener("popstate", () => {
+    if (model.group && !groupHistory.holding()) {
+      model.group = null;
+      model.error = null;
+      paint();
+    }
+  });
+  // Another tab shown: Settings opens on the list next time.
+  window.addEventListener("maya:tab", (e) => {
+    if ((e as CustomEvent<string>).detail !== "settings") closeGroup();
+  });
   void listen<NetworkStatus>("network", (e) => setStatus(e.payload));
   // The viewer's own toggle saved the look.
   window.addEventListener("maya:config-changed", () => void loadConfig().then(paint).catch(() => undefined));

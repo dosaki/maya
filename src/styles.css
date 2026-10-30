@@ -102,6 +102,11 @@ body { margin: 0; background: var(--bg); }
 .settings__keys-name { min-width: 80px; }
 .settings__keys .settings__error:empty { display: none; }
 .settings__hint, .settings__progress { color: var(--muted); font-size: 12.5px; }
+.release-notes__version { margin: 18px 0 2px; font-size: 15px; font-weight: 600; color: var(--text); }
+.release-notes__version:first-child { margin-top: 0; }
+.release-notes .md h3 { margin: 8px 0 4px; font-size: 13px; color: var(--muted); }
+.release-notes .md ul { margin: 0; padding-left: 20px; }
+.release-notes .md li + li { margin-top: 4px; }
 .settings__code { font: 600 22px ui-monospace, monospace; letter-spacing: .15em; color: var(--gold-bright); }
 .settings button.settings__link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--muted); font-size: 12.5px; text-decoration: underline; cursor: pointer; }
 .settings__assistants { display: flex; flex-direction: column; }

@@ -64,12 +64,25 @@
 .network__confirm p { flex-basis: 100%; margin: 0; font-size: 13px; }
 .network__listening { margin: 0; font-weight: 600; }
 
-/* The Network tab fits a 320 px screen: one column below the desktop's
+/* A Settings page fits a 320 px screen: one column below the desktop's
    380 px minimum, and each field's label above a full-width input. */
 .settings.pane .settings__body.network { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 16px; align-items: start; }
 .network .settings__section { min-width: 0; }
 .network .settings__section > label:not(.settings__switch) { flex-direction: column; align-items: stretch; gap: 4px; }
 .network .settings__section > label:not(.settings__switch) > input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 8px 10px; }
+
+/* Settings opens on a list of groups, as Android's own does: each row the
+   group's name over what is set under it, tapping into the group's page. */
+.settings .settings-list { gap: 0; }
+.settings .settings-list__item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; position: relative; width: 100%; min-height: 56px; padding: 10px 36px 10px 16px; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: transparent; color: var(--text); text-align: left; font: inherit; }
+.settings .settings-list__item::after { content: "›"; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 20px; }
+.settings-list__name { font-size: 15px; }
+.settings-list__summary { color: var(--muted); font-size: 13px; }
+/* A group's page: the back arrow and its name, and its error, across every column. */
+.settings-page__bar, .settings__body.network > .settings__error { grid-column: 1 / -1; }
+.settings-page__bar { display: flex; align-items: center; gap: 8px; }
+.settings .settings-page__back { min-width: 40px; border: 0; background: transparent; font-size: 20px; }
+.settings-page__title { margin: 0; font-size: 16px; font-weight: 600; }
 
 
 /* The mic bar under the column strip: the mic, what was heard and said, Yes and No.

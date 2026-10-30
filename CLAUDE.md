@@ -22,3 +22,28 @@ a pull request that leaves the version alone releases nothing.
   own as `chore(release): <version>`.
 - Bump once per pull request. If `main` moves on before the merge, redo
   the bump against `main`'s new version.
+
+## Release notes
+
+`RELEASE_NOTES.md` holds the notes for every version of the current major
+release, newest first, each under a `# <version>` line. The release on
+GitHub leads with the top version's notes, and the app shows the whole
+file in Settings → Release Notes.
+
+- With the bump, add a section at the top of `RELEASE_NOTES.md` for the
+  new version: a line `# <version>`, then `## New` and `## Fixed` (leave
+  out a group with nothing in it). Each bullet says what changed for the
+  people who use Maya, in plain words, not commit subjects, and together
+  they cover everything the version ships. Leave the older sections as
+  they are.
+- A new major version starts the file afresh with its own section; the
+  older major's notes stay on its GitHub releases. (0.x counts as one
+  major, so the file starts afresh at 1.0.0.)
+- Commit it in the same `chore(release): <version>` commit as the bump.
+  When the bump is redone, redo the top section with it, for the new
+  version and everything it now ships.
+- Before every push, check the top section still names the version and
+  describes everything the branch ships: later commits change that. CI
+  fails when its version differs from the version files.
+- Write `\<word>`, not `<word>`, for a placeholder: Markdown drops an
+  unescaped one as a tag.

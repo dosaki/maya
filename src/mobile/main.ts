@@ -163,8 +163,10 @@ async function answer(card: Card, questionIndex: number, optionIndex: number, bu
 function openFromTap(sessionId: string): void {
   const card = cards.find((c) => c.sessionId === sessionId);
   if (card) {
-    tabs?.show("sessions");
+    // The card first: it takes over an open Settings group's history entry,
+    // so leaving Settings goes back over nothing and cannot close the card.
     open(card);
+    tabs?.show("sessions");
   } else {
     pendingTap = sessionId;
   }

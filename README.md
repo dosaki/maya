@@ -96,7 +96,8 @@ irm https://raw.githubusercontent.com/dosaki/maya/main/install.ps1 | iex
 ```
 
 From 0.18.0, Maya updates itself: a bar on the board offers each new
-release, and Settings has Check for updates. Running the same command
+release, and Settings has Check for updates. Settings → Release Notes
+lists what each version brought, the one you are running first. Running the same command
 again also updates Maya, and is the only way for an `.msi` or `.deb`
 install, where the bar offers a Download link instead.
 
@@ -226,13 +227,13 @@ it and pair the other computers to that computer.
 
 With the screen off Maya keeps running behind a persistent notification
 ("Joined to desk", or "Reconnecting to desk…" while the link is down).
-Android may still stop it on some phones: press **Keep Maya awake** on the
-Network tab to exempt it from battery optimisation. If the notification
+Android may still stop it on some phones: press **Keep Maya awake** in
+Settings › Notifications to exempt it from battery optimisation. If the notification
 disappears, open Maya again and the phone reconnects on its own. If the
 main's Wi‑Fi address changes, join again with the new one.
 
-Each ask and each finished turn is a notification you can turn off on the
-Network tab, or silence per channel in Android's settings; tapping one
+Each ask and each finished turn is a notification you can turn off in
+Settings › Notifications, or silence per channel in Android's settings; tapping one
 opens the card. Pull one down to read the whole ask, with its choices, or
 the whole last message. Answer from there: a question's first choices
 are buttons (Android allows three, numbered as the text numbers them
@@ -244,7 +245,7 @@ The phone also speaks and listens while the app is on screen. Tap the
 microphone and talk to Maya as you would on the computer: the computer's
 agent works out what you meant, says what it is about to do, and does it
 after five seconds unless you say "stop" or "no", or correct it; a Cancel
-button stops it too. With **Speak** on (the Network tab) the phone also
+button stops it too. With **Speak** on (Settings › Voice) the phone also
 says aloud when a session needs you; **Wake word "Maya"** (experimental)
 listens for her name without a tap. Android asks for the microphone the
 first time. Once the app leaves the screen the phone stops listening and

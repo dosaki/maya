@@ -29,6 +29,8 @@ jobs:
         run: sh scripts/release-version.sh
       - name: Check the updater manifest script
         run: sh scripts/test-updater-manifest.sh
+      - name: Check the release notes script
+        run: sh scripts/test-release-notes.sh
       - name: Check the Chatterbox server compiles
         run: python3 -m py_compile chatterbox/server.py
 
