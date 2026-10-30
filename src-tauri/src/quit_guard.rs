@@ -167,12 +167,12 @@ pub fn guard_terminate(app: &AppHandle) {
     use objc2_app_kit::NSApplication;
     let _ = APP.set(app.clone());
     let Some(mtm) = MainThreadMarker::new() else { return };
-    let Some(delegate) = NSApplication::sharedApplication(mtm).delegate() else {
+    let ns_app = NSApplication::sharedApplication(mtm);
+    let Some(delegate) = ns_app.delegate() else {
         log::line("app", "no app delegate: the Dock's Quit will not ask about Native sessions");
         return;
     };
-    let delegate: &AnyObject = delegate.as_ref();
-    let class = delegate.class();
+    let class = AsRef::<AnyObject>::as_ref(&*delegate).class();
     type ShouldTerminate = extern "C-unwind" fn(*mut AnyObject, objc2::runtime::Sel, *mut AnyObject) -> usize;
     let imp = application_should_terminate as ShouldTerminate;
     // SAFETY: the IMP's arguments and return match the type string `Q@:@`
@@ -183,7 +183,13 @@ pub fn guard_terminate(app: &AppHandle) {
     };
     if !added.as_bool() {
         log::line("app", "the app delegate already answers applicationShouldTerminate:; the Dock's Quit may not ask about Native sessions");
+        return;
     }
+    // AppKit may have noted which methods the delegate answers when it was
+    // set: setting the same delegate again has it look afresh. The delegate
+    // is held here, and tao keeps its own, so it lives through the swap.
+    ns_app.setDelegate(Some(&delegate));
+    log::line("app", "the app delegate now answers applicationShouldTerminate:");
 }
 
 /// Watches for macOS logging out, restarting or shutting down, and notes
