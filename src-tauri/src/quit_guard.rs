@@ -10,6 +10,8 @@
 //! `applicationShouldTerminate:`, so Maya adds one that runs the same check.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use maya_core::log;
 use maya_core::model::{Card, State};
@@ -19,9 +21,22 @@ use crate::AppState;
 
 /// Set once the user said "Quit anyway", so the exit it starts goes through.
 static CONFIRMED: AtomicBool = AtomicBool::new(false);
-/// Set when macOS logs out, restarts or shuts down: the system is ending
-/// Maya, and a question would only hold that up.
-static SYSTEM_ENDING: AtomicBool = AtomicBool::new(false);
+/// When macOS last said it is logging out, restarting or shutting down: the
+/// system is ending Maya, and a question would only hold that up.
+static SYSTEM_ENDING: Mutex<Option<Instant>> = Mutex::new(None);
+/// How long that counts: a log-out the user cancelled must not keep the
+/// question away for the rest of the run.
+const SYSTEM_ENDING_FOR: Duration = Duration::from_secs(30);
+
+/// Whether the system is still ending Maya at `now`, when it said so at `set`.
+pub fn still_ending(set: Option<Instant>, now: Instant) -> bool {
+    set.is_some_and(|at| now.saturating_duration_since(at) < SYSTEM_ENDING_FOR)
+}
+
+/// Whether the system is ending Maya now.
+fn system_ending() -> bool {
+    still_ending(*SYSTEM_ENDING.lock().unwrap_or_else(|e| e.into_inner()), Instant::now())
+}
 
 /// The names of the sessions a quit would stop while they work: this
 /// machine's Native sessions that are Working. Maya's own brain is not one.
@@ -60,7 +75,7 @@ fn working_now(app: &AppHandle) -> Vec<String> {
 /// it asked, so the caller holds the quit.
 pub fn ask_if_needed(app: &AppHandle, agreed: bool) -> bool {
     let confirmed = agreed || CONFIRMED.load(Ordering::SeqCst);
-    let ending = SYSTEM_ENDING.load(Ordering::SeqCst);
+    let ending = system_ending();
     // The store is read only when the answer could be yes.
     let working = if confirmed || ending { Vec::new() } else { working_now(app) };
     if !should_ask(confirmed, ending, &working) {
@@ -135,7 +150,7 @@ extern "C-unwind" fn application_should_terminate(_this: *mut objc2::runtime::An
     use objc2_app_kit::NSApplicationTerminateReply;
     // A panic must not cross into AppKit; a quit then goes on.
     let now = std::panic::catch_unwind(|| {
-        let ending = SYSTEM_ENDING.load(Ordering::SeqCst) || system_quit(quit_reason());
+        let ending = system_ending() || system_quit(quit_reason());
         terminate_now(ending, || APP.get().is_some_and(|app| ask_if_needed(app, false)))
     })
     .unwrap_or(true);
@@ -171,8 +186,8 @@ pub fn guard_terminate(app: &AppHandle) {
     }
 }
 
-/// Watches for macOS logging out, restarting or shutting down, and sets
-/// `SYSTEM_ENDING` when it does. Must run on the main thread, once.
+/// Watches for macOS logging out, restarting or shutting down, and notes
+/// the time in `SYSTEM_ENDING` when it does. Must run on the main thread, once.
 #[cfg(target_os = "macos")]
 pub fn watch_power_off() {
     use block2::RcBlock;
@@ -180,11 +195,11 @@ pub fn watch_power_off() {
     use objc2_foundation::NSNotification;
     use std::ptr::NonNull;
     let block = RcBlock::new(|_: NonNull<NSNotification>| {
-        SYSTEM_ENDING.store(true, Ordering::SeqCst);
+        *SYSTEM_ENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         log::line("app", "the system is ending Maya");
     });
     let center = NSWorkspace::sharedWorkspace().notificationCenter();
-    // SAFETY: a block that only stores an atomic and logs; no object is
+    // SAFETY: a block that only stores a time and logs; no object is
     // filtered on, and with no queue it runs on the posting (main) thread.
     let observer = unsafe { center.addObserverForName_object_queue_usingBlock(Some(NSWorkspaceWillPowerOffNotification), None, None, &block) };
     // The observer lives as long as Maya does.
@@ -224,6 +239,15 @@ mod tests {
         assert!(!should_ask(true, false, &["a".into()]));
         assert!(!should_ask(false, true, &["a".into()]));
         assert!(!should_ask(false, false, &[]));
+    }
+
+    #[test]
+    fn a_system_ending_lasts_30_seconds() {
+        let set = Instant::now();
+        assert!(!still_ending(None, set), "never set");
+        assert!(still_ending(Some(set), set));
+        assert!(still_ending(Some(set), set + Duration::from_secs(29)));
+        assert!(!still_ending(Some(set), set + SYSTEM_ENDING_FOR), "a cancelled log-out no longer counts");
     }
 
     #[test]
