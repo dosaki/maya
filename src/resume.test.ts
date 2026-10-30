@@ -5,6 +5,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(
 
 import { setLocalMachine } from "./machines";
 import { closeResume, openResume, renderResume } from "./resume";
+import { setNativeOpener } from "./nativeopen";
 
 const NOW = Date.parse("2026-09-29T11:00:00Z");
 const handlers = () => ({ onDir: vi.fn(), onResume: vi.fn(), onClose: vi.fn(), onOpenSettings: vi.fn(), onMachine: vi.fn(), onAgent: vi.fn() });
@@ -156,6 +157,30 @@ describe("resume flow", () => {
     await flush();
     expect(document.querySelector<HTMLSelectElement>("select[name=dir]")!.value).toBe("maya");
     expect(invoke).toHaveBeenLastCalledWith("list_resumable_sessions", { dir: "maya", machine: "", agent: "claude-code" });
+  });
+
+  it("opens a Native session it resumed at once", async () => {
+    const opened: [number, string][] = [];
+    setNativeOpener((term, dir) => opened.push([term, dir]));
+    invoke.mockImplementation((cmd: string, args: { dir?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "get_config") return Promise.resolve({ agent: null });
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      if (cmd === "list_project_dirs") return Promise.resolve(["eye", "maya"]);
+      if (cmd === "list_resumable_sessions") return Promise.resolve(args.dir === "maya" ? [{ id: "a1", title: "T", lastActiveMs: 1, running: false }] : []);
+      if (cmd === "resume_session") return Promise.resolve(6);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openResume();
+    await flush();
+    const select = document.querySelector<HTMLSelectElement>("select[name=dir]")!;
+    select.value = "maya";
+    select.dispatchEvent(new Event("change"));
+    await flush();
+    document.querySelector<HTMLButtonElement>("button[data-action=resume]")!.click();
+    await flush();
+    setNativeOpener(null);
+    expect(opened).toEqual([[6, "maya"]]);
   });
 
   it("shows the setup hint when no projects directory is set", async () => {

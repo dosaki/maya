@@ -1,6 +1,7 @@
 //! Where card actions go: a tty of a terminal Maya hosts goes to the host,
 //! any other to the platform's terminal. New sessions open where Settings says.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -9,7 +10,7 @@ use maya_core::answer;
 use maya_core::config::{self, NewSessionTerminal};
 use maya_core::terminal::Terminal;
 
-use super::host::NativeHost;
+use super::host::{NativeHost, TermId};
 
 /// The platform's terminal with Maya's own terminals in front of it.
 pub struct WithNative {
@@ -36,6 +37,20 @@ pub(crate) fn configured_choice() -> NewSessionTerminal {
     config::load(&maya_core::claude_dir().join("maya/config.json")).new_session_terminal
 }
 
+thread_local! {
+    /// The terminal this thread's last Native open started, for `opening`.
+    static OPENED: Cell<Option<TermId>> = const { Cell::new(None) };
+}
+
+/// Runs `f`, and hands back with its result the Native terminal it started,
+/// if it started one: the app opens its viewer at once. An action opens on
+/// the thread that runs it, so another thread's opens never count.
+pub fn opening<T>(f: impl FnOnce() -> T) -> (T, Option<TermId>) {
+    OPENED.set(None);
+    let out = f();
+    (out, OPENED.take())
+}
+
 /// What `focus` says for a Native tty: its terminal is in Maya, not a window.
 const NO_WINDOW: &str = "Open the session from its card.";
 
@@ -48,7 +63,9 @@ impl Terminal for WithNative {
     }
     /// A hosted terminal has no name for tmux to find it by.
     fn open_native(&self, command: &str, cwd: &Path, _label: &str) -> Result<Option<String>, String> {
-        self.host.spawn(command, cwd).map(|_| None)
+        let term = self.host.spawn(command, cwd)?;
+        OPENED.set(Some(term));
+        Ok(None)
     }
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
         match self.host.term_for_tty(tty) {
@@ -224,6 +241,21 @@ mod tests {
         assert_eq!(r.open("claude", Path::new("/"), "maya-1"), Ok(Some("app".into())));
         assert_eq!(inner.calls(), ["open claude"]);
         assert!(r.host.root_pids().is_empty());
+    }
+
+    #[test]
+    fn opening_hands_back_the_native_terminal_it_started() {
+        let (r, _) = route(native);
+        let (opened, term) = opening(|| r.open("sleep 30", Path::new("/"), "maya-1"));
+        let started = r.host.root_pids().first().and_then(|&root| r.host.term_for_root(root));
+        r.host.kill_all();
+        assert_eq!(opened, Ok(None));
+        assert!(term.is_some());
+        assert_eq!(term, started, "the terminal it started");
+
+        let (r, _) = route(app);
+        assert_eq!(opening(|| r.open("claude", Path::new("/"), "maya-1")).1, None, "a terminal app's window is not Maya's");
+        assert_eq!(opening(|| ()).1, None, "nothing opened, nothing handed back");
     }
 
     #[test]

@@ -14,6 +14,9 @@ export interface LiveHandle {
 /** What the backend streams to a viewer, bytes as base64. */
 type NativeFrame = { kind: "output"; data: string } | { kind: "exit" };
 
+/** The terminal to attach to: the one a session's process runs in, or one by its id. */
+export type LiveTarget = { pid: number } | { term: number };
+
 /** What `native_attach` hands back: the screen so far, at the size it was drawn for. */
 interface Attached {
   term: number;
@@ -77,11 +80,11 @@ function themeOf(host: HTMLElement): ITheme {
 const note = (text: string) => `\r\n\x1b[2m${text}\x1b[0m`;
 
 /**
- * Opens a terminal in `host` and attaches it to the Native terminal `pid`
- * runs in. The snapshot is drawn at the size it was taken at, then the
- * terminal fits `host` and the program is told the new size.
+ * Opens a terminal in `host` and attaches it to the Native terminal
+ * `target` names. The snapshot is drawn at the size it was taken at, then
+ * the terminal fits `host` and the program is told the new size.
  */
-export function mountLive(host: HTMLElement, pid: number): LiveHandle {
+export function mountLive(host: HTMLElement, target: LiveTarget): LiveHandle {
   const term = new Terminal({ scrollback: 10000, cursorBlink: true, allowProposedApi: false, theme: themeOf(host), fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12.5 });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -126,7 +129,8 @@ export function mountLive(host: HTMLElement, pid: number): LiveHandle {
     if (queued) queued.push(frame);
     else apply(frame);
   };
-  invoke<Attached>("native_attach", { pid, onFrame: channel })
+  const attach = "pid" in target ? invoke<Attached>("native_attach", { pid: target.pid, onFrame: channel }) : invoke<Attached>("native_attach_term", { term: target.term, onFrame: channel });
+  attach
     .then((a) => {
       if (disposed) {
         void invoke("native_detach", { term: a.term, viewer: a.viewer }).catch(() => undefined);

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { formatAge } from "./format";
 import { showToast } from "./toast";
+import { openStarted } from "./nativeopen";
 import { hasLocalMachine, initialChoices, machineChoices, type MachineChoice, type MachineInfo } from "./machines";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
@@ -347,9 +348,11 @@ async function resume(dir: string, sessionId: string): Promise<void> {
   const machine = me.model.machine;
   const agent = me.model.agent;
   try {
-    await invoke("resume_session", { dir, sessionId, machine, agent });
+    const term = await invoke<number | null>("resume_session", { dir, sessionId, machine, agent });
     if (current === me) closeResume();
     showToast(`Resuming in ${dir}`);
+    // A session resumed in a Native terminal shows it at once.
+    openStarted(term, dir);
   } catch (e) {
     if (current !== me) {
       showToast(String(e));

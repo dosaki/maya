@@ -577,13 +577,23 @@ fn open_review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo:
     open_in_browser(&pr.url)
 }
 
+/// A review just started: its folder, and the Native terminal it runs in
+/// when it runs in one, for the page to open at once.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Reviewing {
+    dir: String,
+    native_term: Option<u64>,
+}
+
 /// Opens a terminal that reviews a listed PR with Maya's agent and the
 /// review prompt from Settings, in a worktree of one clone per repository
 /// under the clones dir.
 #[tauri::command(async)]
-fn review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<String, String> {
+fn review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<Reviewing, String> {
     let pr = review_pr_for(&state, forge, &repo, number)?;
-    actions::start_review(&local(&state), &pr)
+    let (dir, native_term) = native::route::opening(|| actions::start_review(&local(&state), &pr));
+    Ok(Reviewing { dir: dir?, native_term })
 }
 
 fn claude_dir() -> std::path::PathBuf {
@@ -1330,15 +1340,18 @@ fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: Str
 }
 
 /// Opens a terminal in the folder resuming the session with `agent`.
+/// Returns the Native terminal it runs in when it runs in one, for the page
+/// to open at once.
 #[tauri::command(async)]
-fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<(), String> {
+fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<Option<u64>, String> {
     let agent = agent.unwrap_or_default();
     if !is_local(&machine) {
         let machine = machine.unwrap();
         check_remote_agent(agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
-        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent });
+        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent }).map(|()| None);
     }
-    actions::resume_session(&local(&state), agent, &dir, &session_id)
+    let (resumed, native_term) = native::route::opening(|| actions::resume_session(&local(&state), agent, &dir, &session_id));
+    resumed.map(|()| native_term)
 }
 
 #[tauri::command(async)]
@@ -1361,8 +1374,18 @@ fn list_agents(state: TauriState<AppState>, machine: Option<String>) -> AgentsRe
     agents_reply(local, remote, !local && merge::worktrees_of(&boards, name), agents::current)
 }
 
+/// A session just started, and the Native terminal it runs in when it runs
+/// in one, for the page to open at once.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Started {
+    #[serde(flatten)]
+    result: actions::StartResult,
+    native_term: Option<u64>,
+}
+
 #[tauri::command(async)]
-fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions, machine: Option<String>) -> Result<actions::StartResult, String> {
+fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions, machine: Option<String>) -> Result<Started, String> {
     if !is_local(&machine) {
         if prompt.trim().is_empty() {
             return Err("Type a prompt first.".into());
@@ -1372,9 +1395,10 @@ fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String
         let boards = remote_boards(&state);
         check_remote_agent(options.agent, &merge::agents_of(&boards, &machine), &machine)?;
         check_remote_worktree(&options, merge::worktrees_of(&boards, &machine), &machine)?;
-        return route_data(&app, &machine, start_kind_for(dir, prompt, options));
+        return route_data(&app, &machine, start_kind_for(dir, prompt, options)).map(|result| Started { result, native_term: None });
     }
-    actions::start_session(&local(&state), dir, prompt, options)
+    let (started, native_term) = native::route::opening(|| actions::start_session(&local(&state), dir, prompt, options));
+    started.map(|result| Started { result, native_term })
 }
 
 #[tauri::command(async)]
@@ -1643,6 +1667,7 @@ pub fn run() {
     let mut store = Store::new(dir.clone());
     store.judge_asks = true;
     store.set_native_roots(Box::new(|| native::HOST.root_pids()));
+    store.set_native_seen(Box::new(|roots| native::HOST.mark_carded(roots)));
     store.compact_events();
     let chat = maya_core::brain::chat::ChatLog::load(store.claude_dir().join("maya").join("brain").join("chat.json"));
     let brain = brain_app::BrainState::new(store.claude_dir());
@@ -1662,6 +1687,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             native_app::native_attach,
+            native_app::native_attach_term,
             native_app::native_input,
             native_app::native_resize,
             native_app::native_detach,
@@ -1771,6 +1797,7 @@ pub fn run() {
             focus::install_app_handle(app.handle().clone());
             notify::set_remote_speaker(voice::speak_remote);
             listener::install_speech_hook(app.handle().clone());
+            native_app::tell_unseen_ends(app.handle().clone());
             #[cfg(target_os = "macos")]
             dock::set_dock_icon();
             // Cmd+Q, the Dock's Quit and AppleScript end AppKit directly;

@@ -1,7 +1,7 @@
 //! The commands the terminal viewer uses to attach to a Native session,
 //! type into it, resize it and detach. Bytes cross as base64 strings.
 
-use crate::native::host::{Frame, Sink};
+use crate::native::host::{Frame, Sink, Unseen};
 use crate::native::{screen, HOST};
 use crate::AppState;
 use base64::engine::general_purpose::STANDARD;
@@ -10,6 +10,7 @@ use maya_core::native::root_of;
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State as TauriState;
+use tauri::{AppHandle, Emitter};
 
 /// What the viewer receives as the terminal runs.
 #[derive(Serialize, Clone)]
@@ -50,6 +51,17 @@ pub fn native_attach(state: TauriState<AppState>, pid: i32, on_frame: Channel<Na
     let term = root_of(pid, &HOST.root_pids(), &tree)
         .and_then(|root| HOST.term_for_root(root))
         .ok_or("This session is not running in Maya.")?;
+    attach(term, on_frame)
+}
+
+/// Attaches the viewer to terminal `term` itself, for a session started a
+/// moment ago that has no card yet.
+#[tauri::command(async)]
+pub fn native_attach_term(term: u64, on_frame: Channel<NativeFrame>) -> Result<NativeAttached, String> {
+    attach(term, on_frame)
+}
+
+fn attach(term: u64, on_frame: Channel<NativeFrame>) -> Result<NativeAttached, String> {
     let sink: Sink = Box::new(move |frame| on_frame.send(frame_of(frame)).is_ok());
     let attached = HOST.attach(term, screen::SCROLLBACK, sink)?;
     Ok(NativeAttached {
@@ -59,6 +71,31 @@ pub fn native_attach(state: TauriState<AppState>, pid: i32, on_frame: Channel<Na
         rows: attached.rows,
         cols: attached.cols,
     })
+}
+
+/// What the page is told when a Native terminal ends before any card
+/// showed it: the folder it ran in and its last lines.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeEnded {
+    pub term: u64,
+    pub dir: String,
+    pub lines: Vec<String>,
+}
+
+impl From<Unseen> for NativeEnded {
+    fn from(u: Unseen) -> NativeEnded {
+        NativeEnded { term: u.term, dir: u.cwd.display().to_string(), lines: u.lines }
+    }
+}
+
+/// Tells the page about each Native terminal that ends unseen.
+pub fn tell_unseen_ends(app: AppHandle) {
+    HOST.on_unseen_end(Box::new(move |u| {
+        let ended = NativeEnded::from(u);
+        maya_core::log::line("native", format!("a terminal in {} ended before its session showed", ended.dir));
+        let _ = app.emit("native-ended", ended);
+    }));
 }
 
 /// Queues `data` (base64) to be typed into the terminal, and returns at
@@ -88,6 +125,13 @@ mod tests {
         let out = serde_json::to_string(&frame_of(Frame::Output(vec![0xC3, 0xA9]))).unwrap();
         assert_eq!(out, r#"{"kind":"output","data":"w6k="}"#);
         assert_eq!(serde_json::to_string(&frame_of(Frame::Exit)).unwrap(), r#"{"kind":"exit"}"#);
+    }
+
+    #[test]
+    fn an_unseen_end_reaches_the_page_with_its_folder_and_lines() {
+        let ended = NativeEnded::from(Unseen { term: 3, cwd: "/work/eye".into(), lines: vec!["zsh: command not found: claude".into()] });
+        let json = serde_json::to_value(&ended).unwrap();
+        assert_eq!(json, serde_json::json!({ "term": 3, "dir": "/work/eye", "lines": ["zsh: command not found: claude"] }));
     }
 
     #[test]

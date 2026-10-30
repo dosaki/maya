@@ -5,7 +5,8 @@ import { cardActionFor } from "./actions";
 import { answerGuard, stopGuard } from "./answer";
 import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
-import { openModal, refreshModal, setProgress } from "./modal";
+import { openModal, openTermViewer, refreshModal, setProgress } from "./modal";
+import { endedText, openStarted, setNativeOpener } from "./nativeopen";
 import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
@@ -101,8 +102,10 @@ async function reviewAction(target: Element): Promise<void> {
     } else if (action.kind === "open-pr") {
       await invoke("open_review_pr", { forge: action.forge, repo: action.repo, number: action.number });
     } else {
-      const dir = await invoke<string>("review_pr", { forge: action.forge, repo: action.repo, number: action.number });
-      showToast(`Reviewing ${prRef(action)} in ${dir.split("/").filter(Boolean).pop() ?? dir}`);
+      const r = await invoke<{ dir: string; nativeTerm: number | null }>("review_pr", { forge: action.forge, repo: action.repo, number: action.number });
+      showToast(`Reviewing ${prRef(action)} in ${r.dir.split("/").filter(Boolean).pop() ?? r.dir}`);
+      // A review in a Native terminal shows it at once: a new clone may ask to trust its folder.
+      openStarted(r.nativeTerm, r.dir);
     }
   } catch (e) {
     showToast(String(e));
@@ -348,6 +351,14 @@ async function start(): Promise<void> {
   await listen<{ names: string[] }>("quit-confirm", (e) => {
     void askQuit(e.payload.names, false).then((yes) => (yes ? invoke("quit_confirmed") : undefined));
   });
+  // A Native session started or resumed here opens its terminal at once, in place of any open dialog.
+  setNativeOpener((term, dir) => {
+    closeNewSession();
+    closeResume();
+    openTermViewer(term, dir);
+  });
+  // A Native session that ended before it showed on the board says what it printed last.
+  await listen<{ term: number; dir: string; lines: string[] }>("native-ended", (e) => showToast(endedText(e.payload.dir, e.payload.lines), 10_000));
   // "Show me …" by voice for a session in a terminal Maya hosts.
   await listen<{ pid: number }>("open-session", (e) => void openNative(e.payload.pid));
   await listen<Card[]>("sessions", (e) => {

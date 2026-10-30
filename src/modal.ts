@@ -16,6 +16,7 @@ import { composerKey, sendShortcut } from "./keys";
 import { costText, hasReset, stageFor, usageStrip, type Stage } from "./usage";
 import { renderAnsi } from "./ansi";
 import { mountLive, type LiveHandle } from "./live";
+import { folderName } from "./nativeopen";
 
 /**
  * Composer features the page turns on: the phone has a picker instead of
@@ -956,7 +957,7 @@ function syncLive(host: HTMLElement, focus: boolean): void {
     current.live.handle.dispose();
     current.live = undefined;
   }
-  if (el && !current.live) current.live = { el, handle: mountLive(el, current.model.card.pid) };
+  if (el && !current.live) current.live = { el, handle: mountLive(el, { pid: current.model.card.pid }) };
   if (focus) current.live?.handle.focus();
 }
 
@@ -1192,7 +1193,66 @@ export async function openModal(card: Card): Promise<void> {
   await loadTurns({ force: true, focusInput: true });
 }
 
+/**
+ * The viewer of a Native session that has no card yet: the folder it runs
+ * in and its live terminal, without a card's controls.
+ */
+export function renderTermViewer(dir: string, onClose: () => void): HTMLElement {
+  const root = el("div", "modal modal--terminal");
+  const backdrop = el("div", "modal__backdrop");
+  const panel = el("section", "modal__panel");
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  applyPanelSize(panel, loadPanelSize());
+  const resizing = installEdgeResize(root, panel);
+  backdrop.addEventListener("click", () => {
+    if (!resizing(Date.now())) onClose();
+  });
+  const head = el("header", "modal__head");
+  const titles = el("div", "modal__titles");
+  titles.append(el("h2", "modal__title", folderName(dir)));
+  const close = el("button", "modal__close", "×");
+  close.type = "button";
+  close.dataset.action = "close";
+  close.setAttribute("aria-label", "Close");
+  close.addEventListener("click", () => onClose());
+  head.append(titles, close);
+  panel.append(head, el("div", "modal__live"));
+  root.append(backdrop, panel);
+  return root;
+}
+
+/** The open viewer of a Native terminal with no card, if any. */
+let bare: { handle: LiveHandle; keyHandler: (e: KeyboardEvent) => void } | null = null;
+
+/**
+ * Opens the live terminal `term` of a session just started in `dir`, before
+ * its card shows. Any open viewer closes first; opening a card closes this one.
+ */
+export function openTermViewer(term: number, dir: string): void {
+  closeModal();
+  const host = document.getElementById("modal-host");
+  if (!host) return;
+  host.replaceChildren(renderTermViewer(dir, closeModal));
+  watchPanelSize(host.querySelector<HTMLElement>(".modal__panel"));
+  const keyHandler = (e: KeyboardEvent) => {
+    // Escape in the live terminal is the program's.
+    if (e.key === "Escape" && !(e.target instanceof Element && e.target.closest(".modal__live"))) closeModal();
+  };
+  document.addEventListener("keydown", keyHandler);
+  const handle = mountLive(host.querySelector<HTMLElement>(".modal__live")!, { term });
+  bare = { handle, keyHandler };
+  handle.focus();
+}
+
 export function closeModal(): void {
+  if (bare) {
+    document.removeEventListener("keydown", bare.keyHandler);
+    watchPanelSize(null);
+    bare.handle.dispose();
+    bare = null;
+    document.getElementById("modal-host")?.replaceChildren();
+  }
   if (!current) return;
   if (enableTimer) clearTimeout(enableTimer);
   enableTimer = undefined;

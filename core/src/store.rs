@@ -34,6 +34,9 @@ pub struct Store {
     /// The pids of the programs Maya started in terminals she hosts; a
     /// session under one of them is Native. Replaced by the native host.
     native_roots: Box<dyn Fn() -> Vec<i32> + Send>,
+    /// Told, on each refresh with Native sessions, the roots that a card was
+    /// found under. Replaced by the native host.
+    native_seen: Box<dyn Fn(&[i32]) + Send>,
     /// OpenCode's sessions as of the last refresh.
     opencode: Vec<crate::opencode::Fetched>,
     /// Sessions of other harnesses, keyed by pid, kept between refreshes so
@@ -219,6 +222,7 @@ impl Store {
             opencode_state_file: opencode_state_file(&home),
             opencode_windows: Box::new(opencode_windows),
             native_roots: Box::new(Vec::new),
+            native_seen: Box::new(|_| ()),
             opencode: Vec::new(),
             foreign: std::collections::HashMap::new(),
             processes: Box::new(foreign::list_tui_processes),
@@ -352,6 +356,11 @@ impl Store {
     /// Where to ask for the pids of the programs Maya hosts, once per refresh.
     pub fn set_native_roots(&mut self, roots: Box<dyn Fn() -> Vec<i32> + Send>) {
         self.native_roots = roots;
+    }
+
+    /// Where to tell, on each refresh, the roots a card was found under.
+    pub fn set_native_seen(&mut self, seen: Box<dyn Fn(&[i32]) + Send>) {
+        self.native_seen = seen;
     }
 
     /// The newest OpenCode terminal open on `dir`.
@@ -764,9 +773,13 @@ impl Store {
         let roots = (self.native_roots)();
         if !roots.is_empty() {
             let tree = self.process_tree();
+            let mut seen = Vec::new();
             for card in &mut cards {
-                card.native = crate::native::root_of(card.pid, &roots, &tree).is_some();
+                let root = crate::native::root_of(card.pid, &roots, &tree);
+                card.native = root.is_some();
+                seen.extend(root);
             }
+            (self.native_seen)(&seen);
         }
         let due = self.pending.apply(&mut cards, now_ms);
         self.due_renames.extend(due);
@@ -1233,10 +1246,15 @@ mod tests {
         ).unwrap();
         let tree = vec![foreign::Proc { pid: 10, ppid: 1, tty: None, command: String::new() }, foreign::Proc { pid: 20, ppid: 10, tty: None, command: String::new() }, foreign::Proc { pid: 30, ppid: 20, tty: None, command: String::new() }];
         let mut store = Store::new(claude).with_alive(|_| true).with_process_tree(tree);
-        store.set_native_roots(Box::new(|| vec![10]));
+        store.set_native_roots(Box::new(|| vec![10, 99]));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let s = seen.clone();
+        store.set_native_seen(Box::new(move |roots| s.lock().unwrap().push(roots.to_vec())));
         assert!(store.refresh(1_000).iter().find(|c| c.session_id == "a").unwrap().native);
+        assert_eq!(*seen.lock().unwrap(), [vec![10]], "the roots a card was seen under, once per refresh");
         store.set_native_roots(Box::new(Vec::new));
         assert!(!store.refresh(2_000).iter().find(|c| c.session_id == "a").unwrap().native);
+        assert_eq!(seen.lock().unwrap().len(), 1, "no roots, nothing to tell");
     }
 
     #[test]

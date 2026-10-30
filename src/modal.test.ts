@@ -3,16 +3,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
-const live = vi.hoisted(() => ({ mounts: [] as { host: HTMLElement; pid: number; dispose: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn> }[] }));
+const live = vi.hoisted(() => ({ mounts: [] as { host: HTMLElement; pid?: number; term?: number; dispose: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn> }[] }));
 vi.mock("./live", () => ({
-  mountLive: (host: HTMLElement, pid: number) => {
-    const m = { host, pid, dispose: vi.fn(), focus: vi.fn() };
+  mountLive: (host: HTMLElement, target: { pid?: number; term?: number }) => {
+    const m = { host, pid: target.pid, term: target.term, dispose: vi.fn(), focus: vi.fn() };
     live.mounts.push(m);
     return m;
   },
 }));
 
-import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, applyStage, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isLive, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, openTermViewer, renderTermViewer, RESIZE_CLICK_GRACE_MS, anchorPanel, applyStage, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isLive, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
 import { comboLabel, defaultKeys, setKeyBindings } from "./keys";
 import type { Card, Turn } from "./types";
 
@@ -1167,5 +1167,46 @@ describe("a Native session's live terminal", () => {
     key(document.body, "Escape");
     expect(host().querySelector(".modal")).toBeNull();
     setViewerTheme("chat");
+  });
+});
+
+describe("the viewer of a Native session with no card yet", () => {
+  const host = () => document.getElementById("modal-host")!;
+  beforeEach(() => {
+    closeModal();
+    document.body.innerHTML = '<div id="modal-host"></div>';
+    live.mounts.length = 0;
+  });
+
+  it("shows the folder and the live terminal, without a card's controls", () => {
+    const onClose = vi.fn();
+    const root = renderTermViewer("/x/dev/eye", onClose);
+    expect(root.querySelector(".modal__title")?.textContent).toBe("eye");
+    expect(root.classList.contains("modal--terminal")).toBe(true);
+    expect(root.querySelector(".modal__live")).not.toBeNull();
+    for (const sel of [".modal__theme", ".modal__state", ".modal__composer", ".modal__statusline", ".modal__harness"]) expect(root.querySelector(sel)).toBeNull();
+    root.querySelector<HTMLButtonElement>(".modal__close")!.click();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("mounts the terminal by its id, and closing or opening a card disposes it", async () => {
+    openTermViewer(9, "C:\\work\\eye");
+    expect(host().querySelector(".modal__title")?.textContent).toBe("eye");
+    expect(live.mounts.map((m) => [m.term, m.pid])).toEqual([[9, undefined]]);
+    expect(live.mounts[0].host).toBe(host().querySelector(".modal__live"));
+    expect(live.mounts[0].focus).toHaveBeenCalled();
+    // Escape inside the terminal is the program's.
+    live.mounts[0].host.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(live.mounts[0].dispose).not.toHaveBeenCalled();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(live.mounts[0].dispose).toHaveBeenCalledTimes(1);
+    expect(host().childElementCount).toBe(0);
+
+    openTermViewer(9, "/x/dev/eye");
+    invoke.mockResolvedValue([]);
+    await openModal(base);
+    expect(live.mounts[1].dispose).toHaveBeenCalledTimes(1);
+    expect(host().querySelector(".modal__title")?.textContent).toBe("eye-1");
+    closeModal();
   });
 });

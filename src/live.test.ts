@@ -138,7 +138,7 @@ function host(): HTMLElement {
 
 async function mounted() {
   invoke.mockImplementation((cmd: string) => (cmd === "native_attach" ? Promise.resolve(attached) : Promise.resolve(null)));
-  const handle = mountLive(host(), 42);
+  const handle = mountLive(host(), { pid: 42 });
   await flush();
   term().parse();
   return handle;
@@ -170,10 +170,19 @@ describe("mountLive", () => {
     expect(term().written.every((w) => w instanceof Uint8Array)).toBe(true);
   });
 
+  it("attaches by terminal id to a session that has no card yet", async () => {
+    invoke.mockImplementation((cmd: string) => (cmd === "native_attach_term" ? Promise.resolve(attached) : Promise.resolve(null)));
+    mountLive(host(), { term: 9 });
+    await flush();
+    expect(calls("native_attach")).toEqual([]);
+    expect(calls("native_attach_term")).toEqual([["native_attach_term", { term: 9, onFrame: channel() }]]);
+    expect(term().text).toEqual(["hi"]);
+  });
+
   it("resizes to the attached size before writing the snapshot, and fits only once it is parsed", async () => {
     FakeFit.proposed = { rows: 30, cols: 100 };
     invoke.mockImplementation((cmd: string) => (cmd === "native_attach" ? Promise.resolve(attached) : Promise.resolve(null)));
-    mountLive(host(), 42);
+    mountLive(host(), { pid: 42 });
     // No fit before the snapshot is drawn: the panel's size would lay it out wrong.
     observed!();
     await flush();
@@ -196,7 +205,7 @@ describe("mountLive", () => {
   it("queues frames that arrive before the attach resolves and writes them after the snapshot", async () => {
     let resolve: (a: typeof attached) => void = () => {};
     invoke.mockImplementation((cmd: string) => (cmd === "native_attach" ? new Promise((r) => (resolve = r)) : Promise.resolve(null)));
-    mountLive(host(), 42);
+    mountLive(host(), { pid: 42 });
     channel().onmessage({ kind: "output", data: "YQ==" });
     channel().onmessage({ kind: "output", data: "Yg==" });
     expect(term().text).toEqual([]);
@@ -253,7 +262,7 @@ describe("mountLive", () => {
   it("an exit queued before the attach resolves is shown after the snapshot", async () => {
     let resolve: (a: typeof attached) => void = () => {};
     invoke.mockImplementation((cmd: string) => (cmd === "native_attach" ? new Promise((r) => (resolve = r)) : Promise.resolve(null)));
-    mountLive(host(), 42);
+    mountLive(host(), { pid: 42 });
     channel().onmessage({ kind: "exit" });
     resolve(attached);
     await flush();
@@ -263,7 +272,7 @@ describe("mountLive", () => {
 
   it("shows why it could not attach", async () => {
     invoke.mockImplementation((cmd: string) => (cmd === "native_attach" ? Promise.reject("This session is not running in Maya.") : Promise.resolve(null)));
-    mountLive(host(), 42);
+    mountLive(host(), { pid: 42 });
     await flush();
     expect(term().text.join("")).toContain("This session is not running in Maya.");
     term().dataListener!("x");
@@ -281,7 +290,7 @@ describe("mountLive", () => {
   it("detaches at once when disposed before the attach resolves", async () => {
     let resolve: (a: typeof attached) => void = () => {};
     invoke.mockImplementation((cmd: string) => (cmd === "native_attach" ? new Promise((r) => (resolve = r)) : Promise.resolve(null)));
-    const handle = mountLive(host(), 42);
+    const handle = mountLive(host(), { pid: 42 });
     handle.dispose();
     resolve(attached);
     await flush();
@@ -338,7 +347,7 @@ describe("mountLive", () => {
       expect(contrast(theme[name], "#fffdf8"), name).toBeGreaterThanOrEqual(4.5);
     }
     delete document.documentElement.dataset.theme;
-    mountLive(host(), 42);
+    mountLive(host(), { pid: 42 });
     expect((term().options.theme as Record<string, string>).white).toBeUndefined();
   });
 });

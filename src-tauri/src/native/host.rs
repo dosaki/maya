@@ -4,10 +4,10 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
@@ -39,6 +39,33 @@ pub enum Frame {
 
 /// A viewer's sink; returning false detaches it.
 pub type Sink = Box<dyn Fn(Frame) -> bool + Send>;
+
+/// How many of its last lines an unseen terminal tells.
+const LAST_LINES: usize = 3;
+
+/// A terminal that ended unseen: no card ever showed its session and no
+/// viewer was open on it. Where it ran and its last lines that are not blank.
+pub struct Unseen {
+    pub term: TermId,
+    pub cwd: PathBuf,
+    pub lines: Vec<String>,
+}
+
+/// Told each terminal that ends unseen.
+pub type UnseenHook = Box<dyn Fn(Unseen) + Send + Sync>;
+
+/// Whether a terminal's end is told: no card showed its session (`carded`),
+/// no viewer shows its final screen, and Maya is not quitting.
+pub fn tell_unseen(carded: bool, viewers: usize, quitting: bool) -> bool {
+    !carded && viewers == 0 && !quitting
+}
+
+/// Where unseen ends are told, and whether Maya is ending every terminal.
+#[derive(Default)]
+struct Ends {
+    unseen: OnceLock<UnseenHook>,
+    quitting: AtomicBool,
+}
 
 /// A viewer just attached: the screen to show it first, at the terminal's size.
 pub struct Attached {
@@ -148,6 +175,10 @@ fn deliver(delivery: &Delivery) -> Vec<u64> {
 struct Term {
     /// The program's pid; on Unix also its process group.
     root: i32,
+    /// The folder it started in.
+    cwd: PathBuf,
+    /// Set once a card showed its session.
+    carded: AtomicBool,
     #[cfg(unix)]
     tty: Option<String>,
     /// None once the pseudo console is closed (Windows).
@@ -240,6 +271,7 @@ impl Wake {
 pub struct NativeHost {
     terms: Arc<Terms>,
     wake: Arc<Wake>,
+    ends: Arc<Ends>,
     next_term: AtomicU64,
     next_viewer: AtomicU64,
 }
@@ -260,7 +292,7 @@ impl NativeHost {
             maya_core::log::line("native", format!("could not start the output sender ({e}): each terminal sends its own output"));
             wake.direct.store(true, Ordering::Relaxed);
         }
-        NativeHost { terms, wake, next_term: AtomicU64::new(1), next_viewer: AtomicU64::new(1) }
+        NativeHost { terms, wake, ends: Arc::default(), next_term: AtomicU64::new(1), next_viewer: AtomicU64::new(1) }
     }
 
     /// Starts `command` in a login shell in a new terminal, in `cwd`.
@@ -297,6 +329,8 @@ impl NativeHost {
         let (input, queued) = channel();
         let term = Arc::new(Term {
             root,
+            cwd: cwd.to_path_buf(),
+            carded: AtomicBool::new(false),
             #[cfg(unix)]
             tty: pair.master.tty_name().map(|p| p.display().to_string()),
             master: Mutex::new(Some(pair.master)),
@@ -313,10 +347,10 @@ impl NativeHost {
         let id = self.next_term.fetch_add(1, Ordering::Relaxed);
         lock(&self.terms).insert(id, term.clone());
         let weak = Arc::downgrade(&self.terms);
-        let wake = self.wake.clone();
+        let (wake, ends) = (self.wake.clone(), self.ends.clone());
         #[cfg(unix)]
         let started = std::thread::Builder::new().name(format!("native-{id}")).spawn(move || {
-            read(id, term.clone(), reader, weak, &wake);
+            read(id, term.clone(), reader, weak, &wake, &ends);
             // The tty closes as the program ends; a straggler is polled.
             while !reaped(&term) {
                 std::thread::sleep(Duration::from_millis(50));
@@ -331,7 +365,7 @@ impl NativeHost {
                 let _ = child.wait();
                 lock(&waited.master).take();
             });
-            std::thread::Builder::new().name(format!("native-{id}")).spawn(move || read(id, term, reader, weak, &wake))
+            std::thread::Builder::new().name(format!("native-{id}")).spawn(move || read(id, term, reader, weak, &wake, &ends))
         };
         let started = started.and_then(|_| std::thread::Builder::new().name(format!("native-{id}-input")).spawn(move || type_queued(&queued, &writer)));
         if let Err(e) = started {
@@ -418,6 +452,21 @@ impl NativeHost {
         }
     }
 
+    /// Notes that a card showed the session of each terminal whose
+    /// program's pid is in `roots`: its end is then not told.
+    pub fn mark_carded(&self, roots: &[i32]) {
+        for (_, t) in self.all() {
+            if roots.contains(&t.root) {
+                t.carded.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Where to tell each terminal that ends unseen; the first one set stays.
+    pub fn on_unseen_end(&self, hook: UnseenHook) {
+        let _ = self.ends.unseen.set(hook);
+    }
+
     pub fn term_for_root(&self, root_pid: i32) -> Option<TermId> {
         self.all().into_iter().find(|(_, t)| t.root == root_pid).map(|(id, _)| id)
     }
@@ -432,6 +481,8 @@ impl NativeHost {
     /// running after one shared grace period is killed, even one whose
     /// leader ended on the hangup.
     pub fn kill_all(&self) {
+        // Their ends are Maya's own doing: none is told.
+        self.ends.quitting.store(true, Ordering::SeqCst);
         let all: Vec<Arc<Term>> = self.all().into_iter().map(|(_, t)| t).collect();
         // No leader is reaped until the kill: an unreaped leader, even a
         // zombie, keeps its pid, so its group cannot be another's.
@@ -565,9 +616,9 @@ fn flush(terms: Weak<Terms>, wake: Arc<Wake>, batch: Duration) {
 }
 
 /// A terminal's reader: feeds what the program prints into the screen and
-/// the pending batch. At the end it sends the rest and `Exit`, and drops
-/// the terminal.
-fn read(id: TermId, term: Arc<Term>, mut reader: Box<dyn Read + Send>, terms: Weak<Terms>, wake: &Wake) {
+/// the pending batch. At the end it sends the rest and `Exit`, drops the
+/// terminal, and tells its end if it ended unseen.
+fn read(id: TermId, term: Arc<Term>, mut reader: Box<dyn Read + Send>, terms: Weak<Terms>, wake: &Wake, ends: &Ends) {
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         match reader.read(&mut buf) {
@@ -580,13 +631,13 @@ fn read(id: TermId, term: Arc<Term>, mut reader: Box<dyn Read + Send>, terms: We
             Err(_) => break,
         }
     }
-    let _sending = lock(&term.sending);
-    let delivery = {
+    let sending = lock(&term.sending);
+    let (delivery, lines) = {
         let mut out = lock(&term.out);
         out.ended = true;
         let delivery = out.take();
         out.viewers.clear();
-        delivery
+        (delivery, out.screen.last_lines(LAST_LINES))
     };
     if let Some(terms) = terms.upgrade() {
         lock(&terms).remove(&id);
@@ -595,6 +646,12 @@ fn read(id: TermId, term: Arc<Term>, mut reader: Box<dyn Read + Send>, terms: We
     for (id, sink, _) in &delivery {
         if !dead.contains(id) {
             (lock(sink))(Frame::Exit);
+        }
+    }
+    drop(sending);
+    if tell_unseen(term.carded.load(Ordering::Relaxed), delivery.len() - dead.len(), ends.quitting.load(Ordering::SeqCst)) {
+        if let Some(hook) = ends.unseen.get() {
+            hook(Unseen { term: id, cwd: term.cwd.clone(), lines });
         }
     }
 }
@@ -804,6 +861,49 @@ mod tests {
         assert_eq!(host.term_for_root(root), None);
         assert!(host.write(term, b"x").is_err());
         assert!(host.root_pids().is_empty());
+    }
+
+    #[test]
+    fn an_end_is_told_only_without_a_card_a_viewer_or_a_quit() {
+        assert!(tell_unseen(false, 0, false));
+        assert!(!tell_unseen(true, 0, false), "its card showed it");
+        assert!(!tell_unseen(false, 1, false), "an open viewer shows the final screen");
+        assert!(!tell_unseen(false, 0, true), "Maya is quitting");
+    }
+
+    /// A host that collects the ends it tells.
+    fn telling() -> (NativeHost, Arc<Mutex<Vec<Unseen>>>) {
+        let host = NativeHost::new(BATCH);
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let t = told.clone();
+        host.on_unseen_end(Box::new(move |u| t.lock().unwrap().push(u)));
+        (host, told)
+    }
+
+    #[test]
+    fn a_terminal_that_ends_before_its_card_tells_its_folder_and_last_lines() {
+        let (host, told) = telling();
+        let dir = tempfile::tempdir().unwrap();
+        let term = host.spawn_argv(&["/bin/sh".into(), "-c".into(), "printf 'one\\n\\ntwo\\nthree\\nfour\\n'; exit 3".into()], dir.path()).unwrap();
+        assert!(within_2s(|| !told.lock().unwrap().is_empty()), "the end was not told");
+        let told = told.lock().unwrap();
+        assert_eq!(told.len(), 1);
+        assert_eq!((told[0].term, told[0].cwd.as_path(), told[0].lines.as_slice()), (term, dir.path(), ["two", "three", "four"].map(String::from).as_slice()));
+    }
+
+    #[test]
+    fn a_terminal_seen_on_a_card_or_in_a_viewer_or_ended_by_a_quit_ends_quietly() {
+        let (host, told) = telling();
+        sh(&host, "sleep 0.3");
+        host.mark_carded(&host.root_pids());
+        let viewed = sh(&host, "sleep 0.3");
+        host.attach(viewed, 0, Box::new(|_| true)).unwrap();
+        assert!(within_2s(|| host.root_pids().is_empty()));
+        sh(&host, "sleep 30");
+        host.kill_all();
+        assert!(within_2s(|| host.root_pids().is_empty()));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(told.lock().unwrap().len(), 0);
     }
 
     #[test]

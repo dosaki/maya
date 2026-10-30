@@ -115,7 +115,7 @@ body { margin: 0; background: var(--bg); }
 .settings__confirm { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 8px; margin: 4px 0; border: 1px solid var(--border); border-radius: 6px; }
 .settings__confirm p { margin: 0; }
 .settings progress { width: 100%; }
-.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 20; }
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 20; white-space: pre-line; max-width: calc(100vw - 32px); overflow-wrap: anywhere; }
 .notice { position: fixed; bottom: 16px; right: 16px; max-width: 380px; padding: 12px 14px; border: 1px solid var(--gold-deep); border-radius: 10px; background: color-mix(in srgb, var(--gold) 8%, var(--panel)); color: var(--text); font-size: 13px; z-index: 20; box-shadow: 0 6px 20px rgb(0 0 0 / .25); }
 .notice p { margin: 0 0 10px; }
 .notice__actions { display: flex; gap: 8px; justify-content: flex-end; }

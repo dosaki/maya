@@ -37,6 +37,14 @@ impl Screen {
         (rows.get(), cols.get())
     }
 
+    /// Up to `n` of the screen's last lines that are not blank, as plain
+    /// text, oldest first.
+    pub fn last_lines(&self, n: usize) -> Vec<String> {
+        let contents = self.parser.screen().contents();
+        let lines: Vec<&str> = contents.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect();
+        lines[lines.len().saturating_sub(n)..].iter().map(|l| l.to_string()).collect()
+    }
+
     /// Bytes that make a fresh terminal of the same size show this screen:
     /// its contents, cursor and input modes, with up to `scrollback` lines
     /// of history above it.
@@ -136,6 +144,15 @@ mod tests {
         screen.feed(&[0xA9]);
         let fresh = replay(&mut screen, 0);
         assert_eq!(fresh.screen().contents(), "aé");
+    }
+
+    #[test]
+    fn the_last_lines_skip_blank_ones() {
+        let mut screen = Screen::new(10, 80);
+        screen.feed(b"one\r\n\r\ntwo  \r\n\x1b[31mthree\x1b[0m\r\nfour\r\n\r\n");
+        assert_eq!(screen.last_lines(3), ["two", "three", "four"]);
+        assert_eq!(screen.last_lines(9), ["one", "two", "three", "four"]);
+        assert!(Screen::new(5, 20).last_lines(3).is_empty());
     }
 
     #[test]

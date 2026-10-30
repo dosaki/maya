@@ -5,6 +5,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(
 
 import { setLocalMachine } from "./machines";
 import { CLAUDE_AGENT, closeNewSession, openNewSession } from "./newsession";
+import { setNativeOpener } from "./nativeopen";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -47,6 +48,33 @@ describe("new-session options", () => {
     expect(document.querySelector<HTMLSelectElement>("select[name=mode]")!.value).toBe("plan");
     // Remembered options are module state: put them back to Default for the other tests.
     for (const sel of document.querySelectorAll<HTMLSelectElement>("select")) sel.value = "";
+  });
+
+  it("opens a Native session's terminal at once, in place of the form", async () => {
+    const opened: [number, string][] = [];
+    setNativeOpener((term, dir) => {
+      closeNewSession();
+      opened.push([term, dir]);
+    });
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true });
+      if (cmd === "start_session") return Promise.resolve({ dir: "/x/dev/a", how: "chosen", nativeTerm: 4 });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    document.querySelector<HTMLSelectElement>("select[name=dir]")!.value = "a";
+    const ta = document.querySelector<HTMLTextAreaElement>("textarea[name=prompt]")!;
+    ta.value = "fix ci";
+    ta.dispatchEvent(new Event("input"));
+    document.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    await flush();
+    await flush();
+    setNativeOpener(null);
+    expect(opened).toEqual([[4, "/x/dev/a"]]);
+    expect(document.getElementById("toast")!.textContent).toBe("Started in a");
   });
 
   it("enables Start only once the agent listing has landed, so a prompt cannot start under the wrong agent", async () => {
