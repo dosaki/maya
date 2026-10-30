@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
+import { RELEASE_NOTES } from "./release-notes";
 import { gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
@@ -424,12 +425,20 @@ describe("renderSettings", () => {
   it("lists the groups in a sidebar, one titled section each, and shows only General at first", () => {
     const el = renderSettings(voiceBase, handlers());
     const nav = [...el.querySelectorAll<HTMLButtonElement>(".settings__nav button")];
-    expect(nav.map((b) => b.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug"]);
-    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug"]);
+    expect(nav.map((b) => b.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug", "Release Notes"]);
+    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug", "Release Notes"]);
     const sections = [...el.querySelectorAll<HTMLElement>(".settings__section")];
-    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "keyboard", "sessions", "git", "reviews", "notifications", "voice", "network", "debug"]);
+    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "keyboard", "sessions", "git", "reviews", "notifications", "voice", "network", "debug", "releaseNotes"]);
     expect(sections.filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["general"]);
-    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null, null, null]);
+    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null, null, null, null]);
+  });
+
+  it("shows the release notes, last in the sidebar", () => {
+    const el = renderSettings({ ...voiceBase, settingsGroup: "releaseNotes" }, handlers());
+    const s = el.querySelector<HTMLElement>(".settings__section[data-group=releaseNotes]")!;
+    expect(s.hidden).toBe(false);
+    expect(s.querySelector(".settings__heading")!.textContent).toBe("Release Notes");
+    expect(s.querySelector(".release-notes .settings__hint")!.textContent).toBe(`Maya ${RELEASE_NOTES.version}`);
   });
 
   it("puts each setting in its group", () => {

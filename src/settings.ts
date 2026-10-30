@@ -12,6 +12,7 @@ import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
 import { promoteLines } from "./promote";
+import { renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 import { updates } from "./update";
 
@@ -351,6 +352,7 @@ export const SETTINGS_GROUPS = [
   ["voice", "Voice"],
   ["network", "Network"],
   ["debug", "Debug"],
+  ["releaseNotes", "Release Notes"],
 ] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number][0];
 
@@ -627,7 +629,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   nav.append(...navButtons);
   content.append(...Object.values(sections));
   show(model.settingsGroup ?? "general");
-  const { general, keyboard, sessions, git, reviews, notifications, voice, network, debug } = sections;
+  const { general, keyboard, sessions, git, reviews, notifications, voice, network, debug, releaseNotes } = sections;
   const speaking = subsection("Speaking");
   const listening = subsection("Listening");
   voice.append(speaking, listening);
@@ -902,6 +904,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   debugBox.addEventListener("change", () => h.onDebugMode?.(debugBox.checked));
   debugLabel.append(debugBox, document.createTextNode(" Debug mode: show the Debug tab and Maya's own card"));
   debug.append(debugLabel);
+
+  releaseNotes.append(renderReleaseNotes());
 
   for (const conn of model.git ?? gitConnections(null)) {
     const p = conn.provider;
