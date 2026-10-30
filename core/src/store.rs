@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 /// Codex and Antigravity folders.
 type Discover = dyn Fn(&[(i32, String, Harness)], &Path, &Path) -> Vec<ForeignSession> + Send;
 
+/// Told the roots of the Native terminals a refresh found cards under.
+pub type NativeSeen = Box<dyn Fn(&[i32]) + Send>;
+
 pub struct Store {
     claude_dir: PathBuf,
     codex_dir: PathBuf,
@@ -36,7 +39,7 @@ pub struct Store {
     native_roots: Box<dyn Fn() -> Vec<i32> + Send>,
     /// Told, on each refresh with Native sessions, the roots that a card was
     /// found under. Replaced by the native host.
-    native_seen: Box<dyn Fn(&[i32]) + Send>,
+    native_seen: NativeSeen,
     /// OpenCode's sessions as of the last refresh.
     opencode: Vec<crate::opencode::Fetched>,
     /// Sessions of other harnesses, keyed by pid, kept between refreshes so
@@ -359,7 +362,7 @@ impl Store {
     }
 
     /// Where to tell, on each refresh, the roots a card was found under.
-    pub fn set_native_seen(&mut self, seen: Box<dyn Fn(&[i32]) + Send>) {
+    pub fn set_native_seen(&mut self, seen: NativeSeen) {
         self.native_seen = seen;
     }
 
