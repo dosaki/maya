@@ -480,6 +480,10 @@ body { margin: 0; background: var(--bg); }
 .modal__statusline--foot { display: none; }
 .modal--terminal .modal__statusline--foot { display: block; padding: 0 16px 8px 32px; background: #0a0a0a; color: #8a8478; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
 .modal--terminal .modal__statusline--head { display: none; }
+/* A Native session's live terminal fills the panel between the head and the status line; xterm reads its colours from these. */
+.modal__live { flex: 1; min-height: 0; padding: 8px 16px 4px; background: var(--term-bg); overflow: hidden; }
+.modal--terminal .modal__live { --term-bg: #0a0a0a; --term-fg: #e8e2d4; --term-cursor: #d9ab3c; --term-selection: rgba(217, 171, 60, .35); }
+.modal__live .xterm { height: 100%; }
 .ansi-b { font-weight: 600; }
 .ansi-d { opacity: .6; }
 /* A recorded line keeps its spacing; one wider than the panel scrolls inside the foot, in either look. */
@@ -552,6 +556,7 @@ body { margin: 0; background: var(--bg); }
 :root[data-theme="light"] .modal--terminal .menu__own { color: var(--text); }
 :root[data-theme="light"] .modal--terminal .turn--failed .turn__mark { color: #c0262c; }
 :root[data-theme="light"] .modal--terminal .modal__statusline--foot { background: var(--panel); color: var(--muted); }
+:root[data-theme="light"] .modal--terminal .modal__live { --term-bg: #fffdf8; --term-fg: #231f14; --term-cursor: #a97c16; --term-selection: rgba(169, 124, 22, .3); }
 .newsession__warning { margin: 0; color: var(--awaiting); }
 :root[data-theme="light"] .modal--terminal .usage { color: var(--muted); }
 :root[data-theme="light"] .modal--terminal .usage__pct { color: var(--text); }

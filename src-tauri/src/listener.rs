@@ -223,8 +223,13 @@ pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Res
             if let Some(msg) = remote_focus_refusal(machine.as_deref()) {
                 return Err(msg);
             }
-            let pid = state.store.lock().unwrap().card_for(&session, now_ms()).map(|c| c.pid).ok_or("Session is no longer running.")?;
-            crate::term::focus_pid(pid)?;
+            let card = state.store.lock().unwrap().card_for(&session, now_ms()).ok_or("Session is no longer running.")?;
+            // A terminal Maya hosts has no window: the page opens its viewer.
+            if card.native {
+                let _ = app.emit("open-session", serde_json::json!({ "pid": card.pid }));
+            } else {
+                crate::term::focus_pid(card.pid)?;
+            }
             Ok("Done.".into())
         }
         "compact" => {

@@ -15,6 +15,7 @@ import { renderToolTurn, resetToolUi } from "./toolturn";
 import { composerKey, sendShortcut } from "./keys";
 import { costText, hasReset, stageFor, usageStrip, type Stage } from "./usage";
 import { renderAnsi } from "./ansi";
+import { mountLive, type LiveHandle } from "./live";
 
 /**
  * Composer features the page turns on: the phone has a picker instead of
@@ -35,9 +36,23 @@ export function viewerTheme(): ViewerTheme {
   return theme;
 }
 
+/**
+ * True when the viewer shows `card` as its live terminal: a local session in
+ * a terminal Maya hosts, in the terminal look.
+ */
+export function isLive(card: Card, theme: ViewerTheme | undefined): boolean {
+  return theme === "terminal" && !!card.native && !card.machine;
+}
+
 /** Sets the viewer's look; an open panel is redrawn at once. */
 export function setViewerTheme(t: ViewerTheme): void {
+  const before = theme;
   theme = t;
+  // Into or out of the live terminal, the panel is drawn afresh.
+  if (current && isLive(current.model.card, before) !== isLive(current.model.card, t)) {
+    paint({ focusInput: true });
+    return;
+  }
   const root = document.querySelector<HTMLElement>("#modal-host .modal");
   if (!root) return;
   root.classList.toggle("modal--terminal", t === "terminal");
@@ -608,26 +623,38 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   head.append(titles, state, look, close);
   panel.append(head);
 
+  if (isLive(m.card, m.theme)) {
+    // The session's own terminal, typed into directly: it asks and answers there.
+    panel.append(el("div", "modal__live"), statusFoot(m.card, nowMs));
+    if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.warn ? "warn" : m.status.ok ? "ok" : "error"}`, m.status.text));
+    root.append(backdrop, panel);
+    return root;
+  }
+
   const menu = renderMenu(m.card, m.next ?? 0, { enabled: nowMs - m.card.stateSince >= OPEN_DELAY_MS, keyboardHints: composer.keyboardHints });
   if (m.card.state === "awaiting") {
     const banner = el("div", "modal__banner");
     const prose = m.card.awaiting?.kind === "text";
     const remote = !!m.card.machine;
+    // A Native session's terminal is this viewer's other look, not a window.
+    const native = !remote && !!m.card.native;
     // A multi-select menu is read-only: it is answered in the terminal.
     const answerable = !!menu && !m.card.awaiting?.questions[m.next ?? 0]?.multiSelect;
     const text = answerable
-      ? remote
+      ? remote || native
         ? "This session is asking. Answer below."
         : "This session is asking. Answer below or in its terminal."
       : prose
-        ? remote
+        ? remote || native
           ? `This session asked you something. Reply below. "${m.card.awaiting?.detail ?? ""}"`
           : `This session asked you something. Reply below or in its terminal. "${m.card.awaiting?.detail ?? ""}"`
         : remote
           ? `This session is waiting for a decision on ${m.card.machine}. Answer it there before replying.`
-          : "This session is waiting for a decision in its terminal. Answer it there before replying.";
+          : native
+            ? "This session is waiting for a decision in its terminal. Switch to the terminal look to answer it."
+            : "This session is waiting for a decision in its terminal. Answer it there before replying.";
     banner.append(el("span", "", text));
-    if (!m.card.machine) {
+    if (!remote && !native) {
       const open = el("button", "card__btn", "Open terminal");
       open.type = "button";
       open.addEventListener("click", () => h.onTerminal());
@@ -831,8 +858,11 @@ export function makeSendGuard(send: (text: string) => Promise<void>, lock: { inF
   };
 }
 
-/** `lastRemoteFetchAt`: when a remote card's history was last requested (ms). */
-let current: { model: ModalModel; keyHandler: (e: KeyboardEvent) => void; lastRemoteFetchAt: number } | null = null;
+/**
+ * `lastRemoteFetchAt`: when a remote card's history was last requested (ms).
+ * `live`: the live terminal on screen and the element it was mounted in.
+ */
+let current: { model: ModalModel; keyHandler: (e: KeyboardEvent) => void; lastRemoteFetchAt: number; live?: { el: HTMLElement; handle: LiveHandle } } | null = null;
 let progress: Progress | null = null;
 const attachments = makeAttachments();
 let unlistenDrop: (() => void) | null = null;
@@ -907,6 +937,29 @@ export function setProgress(p: Progress): void {
   progress = p;
 }
 
+/** What fills the bottom of a rendered panel; a change of it redraws the panel. */
+function bottomOf(root: HTMLElement): "live" | "menu" | "composer" | null {
+  if (root.querySelector(".modal__live")) return "live";
+  if (root.querySelector(".menu")) return "menu";
+  return root.querySelector(".modal__input") ? "composer" : null;
+}
+
+/**
+ * Mounts the live terminal in the panel's `.modal__live` when it has one and
+ * no terminal is mounted there yet; disposes one whose element is gone.
+ * `focus` gives the terminal the keyboard, as the composer gets it.
+ */
+function syncLive(host: HTMLElement, focus: boolean): void {
+  if (!current) return;
+  const el = host.querySelector<HTMLElement>(".modal__live");
+  if (current.live && current.live.el !== el) {
+    current.live.handle.dispose();
+    current.live = undefined;
+  }
+  if (el && !current.live) current.live = { el, handle: mountLive(el, current.model.card.pid) };
+  if (focus) current.live?.handle.focus();
+}
+
 /**
  * Re-renders the open modal. Keeps the draft, keeps the history scroll
  * position unless it was at the bottom, and focuses the composer only when
@@ -950,15 +1003,16 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   const delay = nextEnableDelay([m.card], Date.now());
   if (enableTimer) clearTimeout(enableTimer);
   enableTimer = delay === null ? undefined : setTimeout(() => { enableTimer = undefined; paint(); }, delay + 50);
-  // The panel is patched while it keeps its composer or its menu; switching
-  // between the two redraws it, the draft riding along in the model.
+  // The panel is patched while it keeps its composer, its menu or its live
+  // terminal; switching between them redraws it, the draft riding along in the model.
   const existing = host.querySelector<HTMLElement>(".modal");
-  const sameBottom = !!existing && (existing.querySelector(".menu") ? !!fresh.querySelector(".menu") : !!existing.querySelector(".modal__input") && !!fresh.querySelector(".modal__input"));
+  const sameBottom = !!existing && bottomOf(existing) !== null && bottomOf(existing) === bottomOf(fresh);
   if (existing && sameBottom) patchModal(existing, fresh);
   else {
     host.replaceChildren(fresh);
     watchPanelSize(host.querySelector<HTMLElement>(".modal__panel"));
   }
+  syncLive(host, opts.focusInput);
   const hist = host.querySelector(".modal__history");
   if (hist) hist.scrollTop = wasAtBottom ? hist.scrollHeight : oldScroll;
   if (opts.focusInput) host.querySelector<HTMLTextAreaElement>(".modal__input")?.focus();
@@ -1115,7 +1169,8 @@ export async function openModal(card: Card): Promise<void> {
   closeModal();
   resetToolUi();
   const keyHandler = (e: KeyboardEvent) => {
-    if (e.key === "Escape") dismiss();
+    // Escape in the live terminal is the program's.
+    if (e.key === "Escape" && !(e.target instanceof Element && e.target.closest(".modal__live"))) dismiss();
   };
   current = { model: { card, turns: [], status: null, draft: "" }, keyHandler, lastRemoteFetchAt: 0 };
   attachments.clear();
@@ -1143,6 +1198,7 @@ export function closeModal(): void {
   enableTimer = undefined;
   document.removeEventListener("keydown", current.keyHandler);
   watchPanelSize(null);
+  current.live?.handle.dispose();
   current = null;
   attachments.clear();
   document.getElementById("modal-host")?.replaceChildren();

@@ -3,8 +3,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
+const live = vi.hoisted(() => ({ mounts: [] as { host: HTMLElement; pid: number; dispose: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn> }[] }));
+vi.mock("./live", () => ({
+  mountLive: (host: HTMLElement, pid: number) => {
+    const m = { host, pid, dispose: vi.fn(), focus: vi.fn() };
+    live.mounts.push(m);
+    return m;
+  },
+}));
 
-import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, applyStage, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, RESIZE_CLICK_GRACE_MS, anchorPanel, applyStage, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isLive, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
 import { comboLabel, defaultKeys, setKeyBindings } from "./keys";
 import type { Card, Turn } from "./types";
 
@@ -1031,5 +1039,130 @@ describe("the open session view while a session asks", () => {
     await flush();
     expect(host().querySelector(".modal__status")?.textContent).toBe("The question has changed; pick again.");
     closeModal();
+  });
+});
+
+describe("a Native session's live terminal", () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+  const host = () => document.getElementById("modal-host")!;
+  const native: Card = { ...base, sessionId: "n1", pid: 42, native: true };
+  const key = (target: EventTarget, k: string) => target.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="modal-host"></div>';
+    invoke.mockReset();
+    invoke.mockImplementation((cmd: string) => Promise.resolve(cmd === "session_history" ? turns : null));
+    live.mounts.length = 0;
+  });
+
+  it("is live only for a local Native card in the terminal look", () => {
+    expect(isLive(native, "terminal")).toBe(true);
+    expect(isLive(native, "chat")).toBe(false);
+    expect(isLive(native, undefined)).toBe(false);
+    expect(isLive({ ...native, machine: "laptop" }, "terminal")).toBe(false);
+    expect(isLive(base, "terminal")).toBe(false);
+  });
+
+  it("a local Native card in the terminal look is a live terminal and nothing else", () => {
+    for (const card of [native, { ...asking, native: true, stateSince: 0 }]) {
+      const el = renderModal({ card, turns, status: null, draft: "", theme: "terminal" }, handlers(), 10_000);
+      expect(el.querySelector(".modal__head")).not.toBeNull();
+      expect(el.querySelector(".modal__live")).not.toBeNull();
+      expect(el.querySelector(".modal__statusline--foot")).not.toBeNull();
+      for (const gone of [".modal__composer", ".modal__banner", ".modal__history", ".menu", ".modal__tweaks", ".modal__chips"]) expect(el.querySelector(gone), gone).toBeNull();
+      const panel = el.querySelector(".modal__panel")!;
+      expect([...panel.children].map((c) => c.className)).toEqual(["modal__head", "modal__live", "modal__statusline modal__statusline--foot"]);
+    }
+  });
+
+  it("the live terminal fills the panel between the head and the status line, in the look's colours", () => {
+    expect(styles).toContain(".modal__live { flex: 1; min-height: 0;");
+    expect(styles).toContain(".modal--terminal .modal__live { --term-bg: #0a0a0a; --term-fg: #e8e2d4;");
+    expect(styles).toContain(':root[data-theme="light"] .modal--terminal .modal__live { --term-bg: #fffdf8; --term-fg: #231f14;');
+  });
+
+  it("a local Native card in the chat look keeps its reply box", () => {
+    const el = renderModal({ card: native, turns, status: null, draft: "", theme: "chat" }, handlers());
+    expect(el.querySelector(".modal__live")).toBeNull();
+    expect(el.querySelector(".modal__composer")).not.toBeNull();
+    expect(el.querySelector(".modal__history")).not.toBeNull();
+  });
+
+  it("a local Native card in the chat look is answered below, with no Open terminal button", () => {
+    const ask = { ...asking, native: true, stateSince: 0 };
+    const el = renderModal({ card: ask, turns, status: null, draft: "", theme: "chat" }, handlers(), 10_000);
+    expect(el.querySelector(".modal__banner")?.textContent).toBe("This session is asking. Answer below.");
+    expect(el.querySelector(".modal__banner button")).toBeNull();
+    const prose = { ...base, native: true, state: "awaiting" as const, awaiting: { kind: "text" as const, detail: "Ship it?", questions: [] } };
+    expect(renderModal({ card: prose, turns, status: null, draft: "" }, handlers()).querySelector(".modal__banner")?.textContent).toBe('This session asked you something. Reply below. "Ship it?"');
+  });
+
+  it("a remote Native card in the terminal look shows the transcript", () => {
+    const el = renderModal({ card: { ...native, machine: "laptop" }, turns, status: null, draft: "", theme: "terminal" }, handlers());
+    expect(el.querySelector(".modal__live")).toBeNull();
+    expect(el.querySelector(".modal__history")).not.toBeNull();
+  });
+
+  it("a repaint keeps the live terminal's element", () => {
+    const root = renderModal({ card: native, turns, status: null, draft: "", theme: "terminal" }, handlers());
+    const node = root.querySelector(".modal__live");
+    expect(node).not.toBeNull();
+    patchModal(root, renderModal({ card: { ...native, state: "working" }, turns, status: null, draft: "", theme: "terminal" }, handlers()));
+    expect(root.querySelector(".modal__live")).toBe(node);
+    expect(root.querySelector(".modal__state")?.textContent).toBe("Working");
+  });
+
+  it("opening mounts the terminal once for the card's pid and focuses it; board refreshes keep it", async () => {
+    setViewerTheme("terminal");
+    await openModal(native);
+    expect(live.mounts).toHaveLength(1);
+    const [m] = live.mounts;
+    expect(m.pid).toBe(42);
+    expect(m.host).toBe(host().querySelector(".modal__live"));
+    expect(m.focus).toHaveBeenCalled();
+    refreshModal([{ ...native, state: "working", stateSince: 5 }]);
+    await flush();
+    refreshModal([{ ...native, state: "idle", stateSince: 9 }]);
+    await flush();
+    expect(live.mounts).toHaveLength(1);
+    expect(host().querySelector(".modal__live")).toBe(m.host);
+    expect(m.dispose).not.toHaveBeenCalled();
+    closeModal();
+    expect(m.dispose).toHaveBeenCalledTimes(1);
+    setViewerTheme("chat");
+  });
+
+  it("switching to the chat look disposes the terminal, and back mounts a new one", async () => {
+    setViewerTheme("terminal");
+    await openModal(native);
+    const [first] = live.mounts;
+    setViewerTheme("chat");
+    expect(first.dispose).toHaveBeenCalledTimes(1);
+    expect(host().querySelector(".modal__live")).toBeNull();
+    expect(host().querySelector(".modal__composer")).not.toBeNull();
+    setViewerTheme("terminal");
+    expect(live.mounts).toHaveLength(2);
+    expect(host().querySelector(".modal__live")).toBe(live.mounts[1].host);
+    closeModal();
+    setViewerTheme("chat");
+  });
+
+  it("a Native card in the chat look mounts nothing", async () => {
+    setViewerTheme("chat");
+    await openModal(native);
+    expect(live.mounts).toHaveLength(0);
+    closeModal();
+  });
+
+  it("Escape inside the live terminal does not close the viewer", async () => {
+    setViewerTheme("terminal");
+    await openModal(native);
+    const inside = document.createElement("textarea");
+    host().querySelector(".modal__live")!.append(inside);
+    key(inside, "Escape");
+    expect(host().querySelector(".modal")).not.toBeNull();
+    key(document.body, "Escape");
+    expect(host().querySelector(".modal")).toBeNull();
+    setViewerTheme("chat");
   });
 });

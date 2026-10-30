@@ -1,3 +1,4 @@
+import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "./actions";
@@ -141,7 +142,21 @@ function paint(): void {
   tabs?.setSessionCounts(counts);
 }
 
+/**
+ * Opens the viewer of the local session `pid` when it runs in a terminal
+ * Maya hosts: that terminal is in the viewer, not a window. False otherwise.
+ */
+function openNative(pid: number): boolean {
+  const card = cards.find((c) => c.pid === pid && !c.machine && c.native);
+  if (!card) return false;
+  closeNewSession();
+  void openModal(card);
+  return true;
+}
+
+/** Brings forward the terminal of the local session `pid`. */
 async function focus(pid: number): Promise<void> {
+  if (openNative(pid)) return;
   try {
     await invoke("focus_session", { pid });
   } catch (e) {
@@ -328,6 +343,8 @@ async function start(): Promise<void> {
     if (ev.key === "Enter" && target.classList.contains("card")) act(target);
   });
 
+  // "Show me …" by voice for a session in a terminal Maya hosts.
+  await listen<{ pid: number }>("open-session", (e) => void openNative(e.payload.pid));
   await listen<Card[]>("sessions", (e) => {
     cards = e.payload;
     for (const c of cards) if (c.state !== "awaiting") progress.reset(c.sessionId);
