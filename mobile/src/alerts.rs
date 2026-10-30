@@ -359,7 +359,7 @@ mod tests {
             terminal: None,
             stale: false,
             model: None,
-            branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None,
+            branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None,
         }
     }
 

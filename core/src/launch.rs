@@ -1192,7 +1192,7 @@ mod tests {
         let card = |harness: Harness, state: State, kind: Option<AwaitKind>| Card {
             session_id: "s".into(), pid: 1, name: "n".into(), cwd: "/x".into(), state, state_since: 0, snippet: String::new(),
             awaiting: kind.map(|kind| Awaiting { kind, detail: String::new(), questions: vec![] }),
-            has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None
+            has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None
         };
         let working = card(Harness::ClaudeCode, State::Working, None);
         assert!(can_stop(&working));

@@ -569,7 +569,7 @@ mod tests {
         Card {
             session_id: id.into(), pid: 1, name: name.into(), cwd: format!("/Users/x/dev/proj-{id}"), state, state_since: 0, snippet: "".into(),
             awaiting: ask.map(|a| Awaiting { kind: AwaitKind::Text, detail: a.into(), questions: vec![] }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None
         }
     }
 
@@ -924,7 +924,7 @@ mod tests {
     }
 
     fn row(machine: Option<&str>, waiting: bool, id: &str) -> crate::remembered::RememberedRow {
-        crate::remembered::RememberedRow { machine: machine.map(String::from), waiting, entry: crate::remembered::Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: format!("/Users/x/dev/{id}"), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None } }
+        crate::remembered::RememberedRow { machine: machine.map(String::from), waiting, entry: crate::remembered::Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: format!("/Users/x/dev/{id}"), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None, native: false } }
     }
 
     #[test]

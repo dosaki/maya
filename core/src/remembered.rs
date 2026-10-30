@@ -53,6 +53,9 @@ pub struct Remembered {
     /// Why its last resume failed ("its folder is gone"…).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// It ran in a terminal Maya hosted (Native), so it resumes in one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub native: bool,
 }
 
 impl Remembered {
@@ -68,11 +71,12 @@ pub struct LiveSession {
     pub session_id: String,
     pub dir: String,
     pub name: String,
+    pub native: bool,
 }
 
 impl LiveSession {
     pub fn of(card: &Card) -> LiveSession {
-        LiveSession { agent: card.harness, session_id: card.session_id.clone(), dir: card.cwd.clone(), name: card.name.clone() }
+        LiveSession { agent: card.harness, session_id: card.session_id.clone(), dir: card.cwd.clone(), name: card.name.clone(), native: card.native }
     }
 }
 
@@ -185,9 +189,10 @@ impl Memory {
             seen.push(key.clone());
             match self.record.sessions.iter_mut().find(|e| e.key() == key) {
                 Some(e) => {
-                    if e.name != s.name || e.dir != s.dir || e.gone_at_ms.is_some() || e.offered || e.error.is_some() {
+                    if e.name != s.name || e.dir != s.dir || e.native != s.native || e.gone_at_ms.is_some() || e.offered || e.error.is_some() {
                         e.name = s.name.clone();
                         e.dir = s.dir.clone();
+                        e.native = s.native;
                         e.gone_at_ms = None;
                         e.offered = false;
                         e.offered_at_ms = None;
@@ -198,7 +203,7 @@ impl Memory {
                     e.last_seen_ms = now_ms;
                 }
                 None => {
-                    self.record.sessions.push(Remembered { agent: s.agent, session_id: s.session_id.clone(), dir: s.dir.clone(), name: s.name.clone(), first_seen_ms: now_ms, last_seen_ms: now_ms, gone_at_ms: None, offered: false, offered_at_ms: None, error: None });
+                    self.record.sessions.push(Remembered { agent: s.agent, session_id: s.session_id.clone(), dir: s.dir.clone(), name: s.name.clone(), first_seen_ms: now_ms, last_seen_ms: now_ms, gone_at_ms: None, offered: false, offered_at_ms: None, error: None, native: s.native });
                     self.dirty = true;
                 }
             }
@@ -386,11 +391,11 @@ mod tests {
     use crate::model::Harness;
 
     fn live(id: &str) -> LiveSession {
-        LiveSession { agent: Harness::ClaudeCode, session_id: id.into(), dir: format!("/Users/x/dev/{id}"), name: format!("{id}-name") }
+        LiveSession { agent: Harness::ClaudeCode, session_id: id.into(), dir: format!("/Users/x/dev/{id}"), name: format!("{id}-name"), native: false }
     }
 
     fn entry(id: &str) -> Remembered {
-        Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: format!("/Users/x/dev/{id}"), name: format!("{id}-name"), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None }
+        Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: format!("/Users/x/dev/{id}"), name: format!("{id}-name"), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None, native: false }
     }
 
     fn memory() -> (tempfile::TempDir, Memory) {
@@ -430,6 +435,16 @@ mod tests {
         m.observe(&[moved], 6_000);
         let a = m.entry(Harness::ClaudeCode, "a").unwrap();
         assert_eq!((a.dir.as_str(), a.name.as_str(), a.first_seen_ms, a.last_seen_ms), ("/Users/x/dev/two", "renamed", 1_000, 6_000));
+    }
+
+    #[test]
+    fn observe_records_that_a_session_is_native() {
+        let (_t, mut m) = memory();
+        m.classify_at_start(1);
+        m.observe(&[LiveSession { native: true, ..live("a") }], 1_000);
+        assert!(m.entry(Harness::ClaudeCode, "a").unwrap().native);
+        m.observe(&[live("a")], 2_000);
+        assert!(!m.entry(Harness::ClaudeCode, "a").unwrap().native);
     }
 
     #[test]

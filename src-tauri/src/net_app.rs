@@ -596,7 +596,7 @@ mod tests {
                 detail: "Ship it?".into(),
                 questions: vec![Question { question: "Ship it?".into(), header: "".into(), options: vec![Choice { label: "Yes".into(), description: "".into() }], multi_select: false, own: None, chat_row: None }],
             }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None
         }
     }
 
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn a_confirmed_resume_all_is_counted_again_on_the_main() {
-        let entry = maya_core::remembered::Remembered { agent: Harness::ClaudeCode, session_id: "a".into(), dir: "/x".into(), name: "a".into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None };
+        let entry = maya_core::remembered::Remembered { agent: Harness::ClaudeCode, session_id: "a".into(), dir: "/x".into(), name: "a".into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None, native: false };
         let ctx = VoiceContext { cards: vec![], dirs: vec![], machines: vec![], prs: vec![], remembered: vec![maya_core::remembered::RememberedRow { machine: None, waiting: false, entry }] };
         let action = serde_json::json!({"kind": "resume_all", "scope": "all", "count": 5});
         assert_eq!(revalidate(&action, &ctx).unwrap()["count"], 1, "counted against the list as it is now");

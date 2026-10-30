@@ -31,6 +31,9 @@ pub struct Store {
     opencode_state_file: PathBuf,
     /// The open OpenCode terminals as `(pid, folder)`; replaceable in tests.
     opencode_windows: Box<dyn Fn() -> Vec<(i32, String)> + Send>,
+    /// The pids of the programs Maya started in terminals she hosts; a
+    /// session under one of them is Native. Replaced by the native host.
+    native_roots: Box<dyn Fn() -> Vec<i32> + Send>,
     /// OpenCode's sessions as of the last refresh.
     opencode: Vec<crate::opencode::Fetched>,
     /// Sessions of other harnesses, keyed by pid, kept between refreshes so
@@ -215,6 +218,7 @@ impl Store {
             kiro_run_dir: dirs::data_local_dir().unwrap_or_else(|| home.join(".local/share")).join("kiro-cli/run"),
             opencode_state_file: opencode_state_file(&home),
             opencode_windows: Box::new(opencode_windows),
+            native_roots: Box::new(Vec::new),
             opencode: Vec::new(),
             foreign: std::collections::HashMap::new(),
             processes: Box::new(foreign::list_tui_processes),
@@ -343,6 +347,11 @@ impl Store {
     /// tty to its terminal tab's (`tty::outer_tty`).
     pub fn process_tree(&self) -> Vec<foreign::Proc> {
         (self.process_tree)()
+    }
+
+    /// Where to ask for the pids of the programs Maya hosts, once per refresh.
+    pub fn set_native_roots(&mut self, roots: Box<dyn Fn() -> Vec<i32> + Send>) {
+        self.native_roots = roots;
     }
 
     /// The newest OpenCode terminal open on `dir`.
@@ -751,6 +760,13 @@ impl Store {
         }));
         if let Some(hidden) = &self.hidden_session {
             cards.retain(|c| &c.session_id != hidden);
+        }
+        let roots = (self.native_roots)();
+        if !roots.is_empty() {
+            let tree = self.process_tree();
+            for card in &mut cards {
+                card.native = crate::native::root_of(card.pid, &roots, &tree).is_some();
+            }
         }
         let due = self.pending.apply(&mut cards, now_ms);
         self.due_renames.extend(due);
@@ -1204,6 +1220,23 @@ mod tests {
 
         let log = std::fs::read_to_string(claude.join("maya/events.jsonl")).unwrap();
         assert!(!log.contains("gone"));
+    }
+
+#[test]
+    fn a_session_under_a_native_root_is_marked_native() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().to_path_buf();
+        std::fs::create_dir_all(claude.join("sessions")).unwrap();
+        std::fs::write(
+            claude.join("sessions/30.json"),
+            r#"{"pid":30,"sessionId":"a","cwd":"/Users/x/dev/eye","name":"n","status":"idle","startedAt":1,"statusUpdatedAt":100}"#,
+        ).unwrap();
+        let tree = vec![foreign::Proc { pid: 10, ppid: 1, tty: None, command: String::new() }, foreign::Proc { pid: 20, ppid: 10, tty: None, command: String::new() }, foreign::Proc { pid: 30, ppid: 20, tty: None, command: String::new() }];
+        let mut store = Store::new(claude).with_alive(|_| true).with_process_tree(tree);
+        store.set_native_roots(Box::new(|| vec![10]));
+        assert!(store.refresh(1_000).iter().find(|c| c.session_id == "a").unwrap().native);
+        store.set_native_roots(Box::new(Vec::new));
+        assert!(!store.refresh(2_000).iter().find(|c| c.session_id == "a").unwrap().native);
     }
 
     #[test]

@@ -1364,7 +1364,7 @@ mod tests {
         Card {
             session_id: id.into(), pid: 1, name: name.into(), cwd: format!("/Users/x/dev/{name}"), state: State::Awaiting, state_since: 42, snippet: "".into(),
             awaiting: Some(Awaiting { kind: AwaitKind::Text, detail: ask.into(), questions: vec![] }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None
         }
     }
 
@@ -1461,7 +1461,7 @@ mod tests {
     use serde_json::json;
 
     fn remembered_row(machine: Option<&str>, id: &str) -> maya_core::remembered::RememberedRow {
-        maya_core::remembered::RememberedRow { machine: machine.map(String::from), waiting: false, entry: maya_core::remembered::Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: "/x".into(), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None } }
+        maya_core::remembered::RememberedRow { machine: machine.map(String::from), waiting: false, entry: maya_core::remembered::Remembered { agent: Harness::ClaudeCode, session_id: id.into(), dir: "/x".into(), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None, native: false } }
     }
 
     #[test]
