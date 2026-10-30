@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
@@ -187,20 +187,76 @@ impl Term {
 
 type Terms = Mutex<HashMap<TermId, Arc<Term>>>;
 
+/// What wakes the sender: output waiting to go, or the host gone.
+#[derive(Default)]
+struct Wake {
+    state: Mutex<WakeState>,
+    rung: Condvar,
+    /// Set when there is no sender thread: each reader sends its own output.
+    direct: AtomicBool,
+    /// How many batches the sender has sent.
+    rounds: AtomicU64,
+}
+
+#[derive(Default)]
+struct WakeState {
+    due: bool,
+    closed: bool,
+}
+
+impl Wake {
+    /// Output is waiting: the terminal's reader just fed some, and `term`
+    /// sends it at once when there is no sender.
+    fn ring(&self, term: &Term) {
+        if self.direct.load(Ordering::Relaxed) {
+            term.send();
+            return;
+        }
+        lock(&self.state).due = true;
+        self.rung.notify_one();
+    }
+
+    fn close(&self) {
+        lock(&self.state).closed = true;
+        self.rung.notify_one();
+    }
+
+    /// Blocks until output is waiting; false once the host is gone.
+    fn wait(&self) -> bool {
+        let mut state = lock(&self.state);
+        while !state.due && !state.closed {
+            state = self.rung.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        state.due = false;
+        !state.closed
+    }
+}
+
 /// The pseudo-terminals Maya hosts.
 pub struct NativeHost {
     terms: Arc<Terms>,
+    wake: Arc<Wake>,
     next_term: AtomicU64,
     next_viewer: AtomicU64,
 }
 
+impl Drop for NativeHost {
+    fn drop(&mut self) {
+        self.wake.close();
+    }
+}
+
 impl NativeHost {
-    /// A host that sends output every `batch`.
+    /// A host that sends output in batches gathered over `batch`.
     pub fn new(batch: Duration) -> NativeHost {
         let terms: Arc<Terms> = Arc::default();
-        let weak = Arc::downgrade(&terms);
-        let _ = std::thread::Builder::new().name("native-flush".into()).spawn(move || flush(weak, batch));
-        NativeHost { terms, next_term: AtomicU64::new(1), next_viewer: AtomicU64::new(1) }
+        let wake: Arc<Wake> = Arc::default();
+        let (weak, w) = (Arc::downgrade(&terms), wake.clone());
+        if let Err(e) = std::thread::Builder::new().name("native-flush".into()).spawn(move || flush(weak, w, batch)) {
+            maya_core::log::line("native", format!("could not start the output sender ({e}): each terminal sends its own output"));
+            wake.direct.store(true, Ordering::Relaxed);
+        }
+        NativeHost { terms, wake, next_term: AtomicU64::new(1), next_viewer: AtomicU64::new(1) }
     }
 
     /// Starts `command` in a login shell in a new terminal, in `cwd`.
@@ -251,9 +307,10 @@ impl NativeHost {
         let id = self.next_term.fetch_add(1, Ordering::Relaxed);
         lock(&self.terms).insert(id, term.clone());
         let weak = Arc::downgrade(&self.terms);
+        let wake = self.wake.clone();
         #[cfg(unix)]
         let started = std::thread::Builder::new().name(format!("native-{id}")).spawn(move || {
-            read(id, term.clone(), reader, weak);
+            read(id, term.clone(), reader, weak, &wake);
             // The tty closes as the program ends; a straggler is polled.
             while !reaped(&term) {
                 std::thread::sleep(Duration::from_millis(50));
@@ -268,7 +325,7 @@ impl NativeHost {
                 let _ = child.wait();
                 lock(&waited.master).take();
             });
-            std::thread::Builder::new().name(format!("native-{id}")).spawn(move || read(id, term, reader, weak))
+            std::thread::Builder::new().name(format!("native-{id}")).spawn(move || read(id, term, reader, weak, &wake))
         };
         if let Err(e) = started {
             self.kill(id);
@@ -400,6 +457,11 @@ impl NativeHost {
     }
 
     #[cfg(all(test, unix))]
+    fn flush_rounds(&self) -> u64 {
+        self.wake.rounds.load(Ordering::Relaxed)
+    }
+
+    #[cfg(all(test, unix))]
     fn viewers(&self, term: TermId) -> Vec<u64> {
         self.get(term).map(|t| lock(&t.out).viewers.iter().map(|v| v.id).collect()).unwrap_or_default()
     }
@@ -461,11 +523,13 @@ fn reaped(t: &Term) -> bool {
     child.is_none()
 }
 
-/// The host-wide sender: every `batch`, each terminal's pending output goes
-/// to its viewers. Ends with the host.
-fn flush(terms: Weak<Terms>, batch: Duration) {
-    loop {
+/// The host-wide sender: once output is waiting, what gathers over `batch`
+/// goes to each terminal's viewers; while output flows, a batch goes every
+/// `batch`. It sleeps while nothing is printed, and ends with the host.
+fn flush(terms: Weak<Terms>, wake: Arc<Wake>, batch: Duration) {
+    while wake.wait() {
         std::thread::sleep(batch);
+        wake.rounds.fetch_add(1, Ordering::Relaxed);
         let Some(terms) = terms.upgrade() else { return };
         let all: Vec<Arc<Term>> = lock(&terms).values().cloned().collect();
         drop(terms);
@@ -478,12 +542,15 @@ fn flush(terms: Weak<Terms>, batch: Duration) {
 /// A terminal's reader: feeds what the program prints into the screen and
 /// the pending batch. At the end it sends the rest and `Exit`, and drops
 /// the terminal.
-fn read(id: TermId, term: Arc<Term>, mut reader: Box<dyn Read + Send>, terms: Weak<Terms>) {
+fn read(id: TermId, term: Arc<Term>, mut reader: Box<dyn Read + Send>, terms: Weak<Terms>, wake: &Wake) {
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
-            Ok(n) => lock(&term.out).feed(&buf[..n]),
+            Ok(n) => {
+                lock(&term.out).feed(&buf[..n]);
+                wake.ring(&term);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(_) => break,
         }
@@ -638,6 +705,24 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert!(got, "only {} x arrived", early + seen.bytes.iter().filter(|&&b| b == b'x').count());
         assert!(seen.frames <= 40, "{} frames", seen.frames);
+    }
+
+    #[test]
+    fn the_sender_sleeps_while_nothing_is_printed() {
+        let host = NativeHost::new(BATCH);
+        let term = sh(&host, "stty -echo; cat");
+        let (seen, sink) = collector();
+        host.attach(term, 0, sink).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let before = host.flush_rounds();
+        std::thread::sleep(Duration::from_millis(300));
+        let idle = host.flush_rounds() - before;
+        host.write(term, b"ping\r").unwrap();
+        let got = within_2s(|| has(&seen.lock().unwrap().bytes, "ping"));
+        let busy = host.flush_rounds() - before;
+        host.kill_all();
+        assert_eq!(idle, 0, "the sender woke {idle} times with nothing to send");
+        assert!(got && busy > 0, "output still reaches the viewer");
     }
 
     #[test]
