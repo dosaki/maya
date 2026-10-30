@@ -469,32 +469,59 @@ pub fn without_appdir_prefix(xdg: &str, appdir: &str) -> String {
     xdg.split(':').filter(|e| *e != appdir && !e.starts_with(&format!("{appdir}/"))).collect::<Vec<_>>().join(":")
 }
 
-/// Clears the AppImage's environment from `cmd` when Maya runs as one
-/// (`APPIMAGE` set in `env`, Maya's own environment).
+/// The changes that clear the AppImage's environment when Maya runs as one
+/// (`APPIMAGE` set in `env`, Maya's own environment), in order: a variable
+/// with `None` is removed, one with `Some` is set to that value. Empty
+/// outside an AppImage.
 #[cfg(any(test, target_os = "linux"))]
-fn scrub_with(cmd: &mut std::process::Command, env: Vec<(String, String)>) {
+fn appimage_edits(env: &[(String, String)]) -> Vec<(String, Option<String>)> {
     let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
     if get("APPIMAGE").is_none() {
-        return;
+        return vec![];
     }
-    for var in APPIMAGE_VARS {
-        cmd.env_remove(var);
-    }
+    let mut edits: Vec<(String, Option<String>)> = APPIMAGE_VARS.iter().map(|v| (v.to_string(), None)).collect();
     let appdir = get("APPDIR").unwrap_or_default().trim_end_matches('/');
     if appdir.is_empty() {
-        return;
+        return edits;
     }
-    for (k, v) in &env {
+    for (k, v) in env {
         if APPIMAGE_VARS.contains(&k.as_str()) || !v.contains(appdir) {
             continue;
         }
         let kept = without_appdir_prefix(v, appdir);
         if kept.split(':').all(str::is_empty) {
-            cmd.env_remove(k);
+            edits.push((k.clone(), None));
         } else if kept != *v {
-            cmd.env(k, kept);
+            edits.push((k.clone(), Some(kept)));
         }
     }
+    edits
+}
+
+/// Clears the AppImage's environment from `cmd` when Maya runs as one
+/// (`APPIMAGE` set in `env`, Maya's own environment).
+#[cfg(any(test, target_os = "linux"))]
+fn scrub_with(cmd: &mut std::process::Command, env: Vec<(String, String)>) {
+    for (k, v) in appimage_edits(&env) {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        };
+    }
+}
+
+/// Maya's own environment, the variables that are valid UTF-8.
+#[cfg(target_os = "linux")]
+fn own_env() -> Vec<(String, String)> {
+    std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect()
+}
+
+/// The changes that start a process without the AppImage's environment, for
+/// a command builder other than `std::process::Command` (a pseudo-terminal's):
+/// `None` removes the variable, `Some` sets it. Empty outside an AppImage.
+#[cfg(target_os = "linux")]
+pub fn appimage_env_edits() -> Vec<(String, Option<String>)> {
+    appimage_edits(&own_env())
 }
 
 /// Starts `cmd` without the AppImage's environment, for the processes that
@@ -502,7 +529,7 @@ fn scrub_with(cmd: &mut std::process::Command, env: Vec<(String, String)>) {
 /// outside an AppImage and on other platforms.
 #[cfg(target_os = "linux")]
 pub fn scrub_appimage_env(cmd: &mut std::process::Command) {
-    scrub_with(cmd, std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect());
+    scrub_with(cmd, own_env());
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -808,6 +835,26 @@ mod tests {
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn the_appimage_edits_remove_its_variables_and_trim_the_lists_inside_its_mount() {
+        let m = "/tmp/.mount_maya-x";
+        let edits = appimage_edits(&env(&[
+            ("APPIMAGE", "/home/u/maya-app"),
+            ("APPDIR", m),
+            ("PATH", &format!("{m}/usr/bin:/usr/bin")),
+            ("LD_LIBRARY_PATH", &format!("{m}/usr/lib")),
+            ("HOME", "/home/u"),
+        ]));
+        let get = |k: &str| edits.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        for var in APPIMAGE_VARS {
+            assert_eq!(get(var), Some(None), "{var} is removed");
+        }
+        assert_eq!(get("PATH"), Some(Some("/usr/bin".into())));
+        assert_eq!(get("LD_LIBRARY_PATH"), Some(None), "nothing left outside the mount, so unset");
+        assert_eq!(get("HOME"), None, "untouched");
+        assert!(appimage_edits(&env(&[("PATH", "/usr/bin"), ("GTK_PATH", "/x")])).is_empty(), "outside an AppImage nothing changes");
     }
 
     #[test]

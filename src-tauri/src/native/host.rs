@@ -194,10 +194,13 @@ impl NativeHost {
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // Inside an AppImage, its variables and the entries of `PATH`,
+        // `LD_LIBRARY_PATH`, `XDG_*` and the rest inside its mount go.
         #[cfg(target_os = "linux")]
-        if std::env::var_os("APPIMAGE").is_some() {
-            for var in maya_core::launch::APPIMAGE_VARS {
-                cmd.env_remove(var);
+        for (k, v) in maya_core::launch::appimage_env_edits() {
+            match v {
+                Some(v) => cmd.env(k, v),
+                None => cmd.env_remove(k),
             }
         }
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| format!("Could not start the session: {e}"))?;
