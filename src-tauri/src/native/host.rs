@@ -8,7 +8,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
+#[cfg(unix)]
+use portable_pty::Child;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 use super::screen::Screen;
@@ -22,6 +26,9 @@ const MIN_ROWS: u16 = 5;
 const MIN_COLS: u16 = 20;
 /// How long output gathers before it goes to the viewers.
 pub const BATCH: Duration = Duration::from_millis(16);
+/// How long programs get to end on a hangup before they are killed.
+#[cfg(unix)]
+const GRACE: Duration = Duration::from_millis(400);
 
 pub enum Frame {
     Output(Vec<u8>),
@@ -127,6 +134,10 @@ struct Term {
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// The program until it is reaped: while it is here, `root` cannot
+    /// belong to another process.
+    #[cfg(unix)]
+    child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     out: Mutex<Out>,
     /// Held while frames go out, so each viewer gets them in order. Taken
     /// before `out`, and never needed by a sink.
@@ -204,6 +215,8 @@ impl NativeHost {
             master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(writer),
             killer: Mutex::new(child.clone_killer()),
+            #[cfg(unix)]
+            child: Mutex::new(Some(child)),
             out: Mutex::new(Out { screen: Screen::new(DEFAULT_ROWS, DEFAULT_COLS), pending: Vec::new(), viewers: Vec::new(), ended: false }),
             sending: Mutex::new(()),
         });
@@ -212,8 +225,11 @@ impl NativeHost {
         let weak = Arc::downgrade(&self.terms);
         #[cfg(unix)]
         let started = std::thread::Builder::new().name(format!("native-{id}")).spawn(move || {
-            read(id, term, reader, weak);
-            let _ = child.wait();
+            read(id, term.clone(), reader, weak);
+            // The tty closes as the program ends; a straggler is polled.
+            while !reaped(&term) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
         });
         #[cfg(windows)]
         let started = {
@@ -312,26 +328,37 @@ impl NativeHost {
         self.all().into_iter().map(|(_, t)| t.root).collect()
     }
 
-    /// Ends every terminal's program, for when Maya quits.
+    /// Ends every terminal's program, for when Maya quits. On Unix each
+    /// gets a hangup, and the ones still running after one shared grace
+    /// period are killed.
     pub fn kill_all(&self) {
-        for (id, _) in self.all() {
-            self.kill(id);
+        let all: Vec<Arc<Term>> = self.all().into_iter().map(|(_, t)| t).collect();
+        for t in &all {
+            hang_up(t);
+        }
+        #[cfg(unix)]
+        {
+            let end = Instant::now() + GRACE;
+            while Instant::now() < end && !all.iter().all(|t| reaped(t)) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            for t in &all {
+                let child = lock(&t.child);
+                if child.is_some() {
+                    // SAFETY: a signal to a process group whose leader is
+                    // not reaped (the lock keeps it so), so not a reused pid.
+                    unsafe {
+                        libc::kill(-t.root, libc::SIGKILL);
+                    }
+                }
+            }
         }
     }
 
     fn kill(&self, term: TermId) {
-        let Ok(t) = self.get(term) else { return };
-        // portable-pty makes the program a session leader, so its pid is
-        // also its process group: the hangup reaches what it started.
-        #[cfg(unix)]
-        // SAFETY: a signal to a process group; `root` is always positive.
-        unsafe {
-            libc::kill(-t.root, libc::SIGHUP);
+        if let Ok(t) = self.get(term) {
+            hang_up(&t);
         }
-        let _ = lock(&t.killer).kill();
-        // Closing the pseudo console ends the processes in it.
-        #[cfg(windows)]
-        lock(&t.master).take();
     }
 
     #[cfg(all(test, unix))]
@@ -343,6 +370,33 @@ impl NativeHost {
     fn tty(&self, term: TermId) -> Option<String> {
         self.get(term).ok()?.tty.clone()
     }
+}
+
+/// Asks a terminal's program to end.
+fn hang_up(t: &Term) {
+    // portable-pty makes the program a session leader, so its pid is also
+    // its process group: the hangup reaches what it started.
+    #[cfg(unix)]
+    // SAFETY: a signal to a process group; `root` is always positive.
+    unsafe {
+        libc::kill(-t.root, libc::SIGHUP);
+    }
+    let _ = lock(&t.killer).kill();
+    // Closing the pseudo console ends the processes in it.
+    #[cfg(windows)]
+    lock(&t.master).take();
+}
+
+/// Reaps the terminal's program if it has ended; true once it is reaped.
+#[cfg(unix)]
+fn reaped(t: &Term) -> bool {
+    let mut child = lock(&t.child);
+    if let Some(c) = child.as_mut() {
+        if !matches!(c.try_wait(), Ok(None)) {
+            *child = None;
+        }
+    }
+    child.is_none()
 }
 
 /// The host-wide sender: every `batch`, each terminal's pending output goes
@@ -613,7 +667,24 @@ mod tests {
         sh(&host, "sleep 30");
         let roots = host.root_pids();
         assert_eq!(roots.len(), 2);
+        let t = Instant::now();
         host.kill_all();
+        assert!(t.elapsed() < Duration::from_millis(300), "kill_all waited for programs that ended at once");
         assert!(within_2s(|| roots.iter().all(|&p| !alive(p))), "a program outlived kill_all");
+    }
+
+    #[test]
+    fn kill_all_kills_a_program_that_ignores_the_hangup() {
+        let host = NativeHost::new(BATCH);
+        sh(&host, "trap '' HUP; sleep 30");
+        sh(&host, "trap '' HUP; sleep 30");
+        let roots = host.root_pids();
+        // Let the shells set their traps.
+        std::thread::sleep(Duration::from_millis(200));
+        let t = Instant::now();
+        host.kill_all();
+        let took = t.elapsed();
+        assert!(within_2s(|| roots.iter().all(|&p| !alive(p))), "a program that ignores SIGHUP outlived kill_all");
+        assert!(took < Duration::from_millis(700), "kill_all took {took:?}: the grace period is not shared");
     }
 }
