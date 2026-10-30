@@ -481,9 +481,10 @@ body { margin: 0; background: var(--bg); }
 .modal--terminal .modal__statusline--foot { display: block; padding: 0 16px 8px 32px; background: #0a0a0a; color: #8a8478; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
 .modal--terminal .modal__statusline--head { display: none; }
 /* A Native session's live terminal fills the panel between the head and the status line; xterm reads its colours from these. */
-.modal__live { flex: 1; min-height: 0; padding: 8px 16px 4px; background: var(--term-bg); overflow: hidden; }
+.modal__live { flex: 1; min-height: 0; background: var(--term-bg); overflow: hidden; }
 .modal--terminal .modal__live { --term-bg: #0a0a0a; --term-fg: #e8e2d4; --term-cursor: #d9ab3c; --term-selection: rgba(217, 171, 60, .35); }
-.modal__live .xterm { height: 100%; }
+/* The fit add-on measures the terminal's parent and takes off only the terminal's own padding: the parent has none. */
+.modal__live .xterm { height: 100%; padding: 8px 16px 4px; }
 .ansi-b { font-weight: 600; }
 .ansi-d { opacity: .6; }
 /* A recorded line keeps its spacing; one wider than the panel scrolls inside the foot, in either look. */

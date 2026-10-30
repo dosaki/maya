@@ -1076,7 +1076,10 @@ describe("a Native session's live terminal", () => {
   });
 
   it("the live terminal fills the panel between the head and the status line, in the look's colours", () => {
-    expect(styles).toContain(".modal__live { flex: 1; min-height: 0;");
+    expect(styles).toContain(".modal__live { flex: 1; min-height: 0; background: var(--term-bg); overflow: hidden; }");
+    // Padded inside the terminal, which the fit add-on takes off, never on the parent it measures.
+    expect(styles).toContain(".modal__live .xterm { height: 100%; padding: 8px 16px 4px; }");
+    expect(styles).not.toMatch(/\.modal__live \{[^}]*padding/);
     expect(styles).toContain(".modal--terminal .modal__live { --term-bg: #0a0a0a; --term-fg: #e8e2d4;");
     expect(styles).toContain(':root[data-theme="light"] .modal--terminal .modal__live { --term-bg: #fffdf8; --term-fg: #231f14;');
   });

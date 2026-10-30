@@ -42,11 +42,35 @@ function encode(bytes: Uint8Array): string {
   return btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join(""));
 }
 
-/** The terminal look's colours, from the CSS variables the viewer sets. */
+/**
+ * The 16 ANSI colours on Maya's light background (#fffdf8): xterm's own are
+ * made for a dark one, where its white and yellow would not read.
+ */
+export const LIGHT_ANSI = {
+  black: "#231f14",
+  red: "#b3261e",
+  green: "#2e6b30",
+  yellow: "#7a5a00",
+  blue: "#1d56b0",
+  magenta: "#8a3aa3",
+  cyan: "#0e6a73",
+  white: "#5f5847",
+  brightBlack: "#4a4335",
+  brightRed: "#a1200f",
+  brightGreen: "#275c29",
+  brightYellow: "#6b4f00",
+  brightBlue: "#174a99",
+  brightMagenta: "#77308d",
+  brightCyan: "#0b5b63",
+  brightWhite: "#3d3729",
+} satisfies ITheme;
+
+/** The terminal look's colours, from the CSS variables the viewer sets, with the light palette in the light theme. */
 function themeOf(host: HTMLElement): ITheme {
   const css = getComputedStyle(host);
   const v = (name: string) => css.getPropertyValue(name).trim() || undefined;
-  return { background: v("--term-bg"), foreground: v("--term-fg"), cursor: v("--term-cursor"), selectionBackground: v("--term-selection") };
+  const own = { background: v("--term-bg"), foreground: v("--term-fg"), cursor: v("--term-cursor"), selectionBackground: v("--term-selection") };
+  return document.documentElement.dataset.theme === "light" ? { ...LIGHT_ANSI, ...own } : own;
 }
 
 /** A dim line of Maya's own under the program's output. */
@@ -66,6 +90,9 @@ export function mountLive(host: HTMLElement, pid: number): LiveHandle {
   let attached: Attached | null = null;
   let ended = false;
   let disposed = false;
+  // Fitting waits for the snapshot to be parsed: xterm parses writes later
+  // but resizes at once, so an earlier fit would lay the snapshot out wrong.
+  let ready = false;
   // Frames that arrive before the snapshot is drawn wait for it.
   let queued: NativeFrame[] | null = [];
   // The size the program was last told.
@@ -83,7 +110,7 @@ export function mountLive(host: HTMLElement, pid: number): LiveHandle {
     void invoke("native_input", { term: attached.term, data: encode(bytes) }).catch(() => undefined);
   };
   const refit = () => {
-    if (disposed) return;
+    if (disposed || !ready) return;
     fit.fit();
     if (!attached || ended || (term.rows === told.rows && term.cols === told.cols)) return;
     told = { rows: term.rows, cols: term.cols };
@@ -107,16 +134,21 @@ export function mountLive(host: HTMLElement, pid: number): LiveHandle {
       // The snapshot's layout is the program's size: draw it at that size.
       term.resize(a.cols, a.rows);
       term.reset();
-      term.write(decode(a.snapshot));
+      term.write(decode(a.snapshot), () => {
+        ready = true;
+        refit();
+      });
+      // Writes stay in order: what came meanwhile follows the snapshot.
       const waiting = queued ?? [];
       queued = null;
       for (const frame of waiting) apply(frame);
-      refit();
     })
     .catch((e) => {
       if (disposed) return;
       queued = null;
       ended = true;
+      ready = true;
+      refit();
       term.write(note(String(e)));
     });
 
@@ -128,13 +160,19 @@ export function mountLive(host: HTMLElement, pid: number): LiveHandle {
   term.attachCustomKeyEventHandler((ev) => {
     const key = copyPasteKey(ev, mac);
     if (!key) return true;
+    // On macOS the webview's own paste (not prevented) reaches xterm's
+    // textarea, and xterm pastes it, bracketed when the program asks;
+    // reading the clipboard instead would show WebKit's Paste prompt.
+    if (key === "paste" && mac) return false;
     if (ev.type === "keydown") {
-      // Neither the webview's own paste nor the key itself reaches the program.
+      // Neither the webview's own copy or paste nor the key itself reaches the program.
       ev.preventDefault();
       if (key === "copy") {
         const text = term.getSelection();
         if (text) void navigator.clipboard.writeText(text).catch(() => undefined);
       } else {
+        // Elsewhere Ctrl+V is the program's (^V), and not every webview pastes
+        // on Ctrl+Shift+V: read the clipboard, the webview's own paste prevented.
         void navigator.clipboard
           .readText()
           .then((text) => {
@@ -148,7 +186,6 @@ export function mountLive(host: HTMLElement, pid: number): LiveHandle {
 
   const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => refit());
   observer?.observe(host);
-  refit();
 
   return {
     dispose() {

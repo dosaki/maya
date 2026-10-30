@@ -224,8 +224,14 @@ pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Res
                 return Err(msg);
             }
             let card = state.store.lock().unwrap().card_for(&session, now_ms()).ok_or("Session is no longer running.")?;
-            // A terminal Maya hosts has no window: the page opens its viewer.
+            // A terminal Maya hosts has no window of its own: Maya's comes
+            // forward and the page opens the session's viewer.
             if card.native {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
                 let _ = app.emit("open-session", serde_json::json!({ "pid": card.pid }));
             } else {
                 crate::term::focus_pid(card.pid)?;
