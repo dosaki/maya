@@ -4,7 +4,8 @@
 #   version=<the version in src-tauri/tauri.conf.json>
 #   release=true    when no release v<version> exists yet, else release=false
 # Fails when src-tauri/tauri.conf.json, mobile/tauri.conf.json,
-# package.json and Cargo.toml disagree.
+# package.json and Cargo.toml disagree, and when RELEASE_NOTES.md is not
+# for that version (scripts/release-notes.sh).
 # Needs node and an authenticated gh (GH_TOKEN).
 # Usage: sh scripts/release-version.sh >> "$GITHUB_OUTPUT"
 set -eu
@@ -18,6 +19,7 @@ if [ "$version" != "$pkg" ] || [ "$version" != "$cargo_version" ] || [ "$version
   echo "run: sh scripts/set-version.sh $version" >&2
   exit 1
 fi
+sh scripts/release-notes.sh check "$version"
 echo "version=$version"
 if gh release view "v$version" >/dev/null 2>&1; then
   echo "v$version is already released; bump the version to publish another" >&2
