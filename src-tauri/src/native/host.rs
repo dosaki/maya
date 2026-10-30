@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 #[cfg(unix)]
@@ -157,6 +157,10 @@ struct Term {
     /// belong to another process.
     #[cfg(unix)]
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
+    /// Set while `kill_all` needs the program unreaped, so that its process
+    /// group stays its own until the kill.
+    #[cfg(unix)]
+    reap_held: AtomicBool,
     out: Mutex<Out>,
     /// Held while frames go out, so each viewer gets them in order. Taken
     /// before `out`, and never needed by a sink.
@@ -239,6 +243,8 @@ impl NativeHost {
             killer: Mutex::new(child.clone_killer()),
             #[cfg(unix)]
             child: Mutex::new(Some(child)),
+            #[cfg(unix)]
+            reap_held: AtomicBool::new(false),
             out: Mutex::new(Out { screen: Screen::new(DEFAULT_ROWS, DEFAULT_COLS), pending: Vec::new(), viewers: Vec::new(), ended: false }),
             sending: Mutex::new(()),
         });
@@ -351,17 +357,24 @@ impl NativeHost {
     }
 
     /// Ends every terminal's program, for when Maya quits. On Unix each
-    /// gets a hangup, and the ones still running after one shared grace
-    /// period are killed.
+    /// process group gets a hangup, and every group with a process still
+    /// running after one shared grace period is killed, even one whose
+    /// leader ended on the hangup.
     pub fn kill_all(&self) {
         let all: Vec<Arc<Term>> = self.all().into_iter().map(|(_, t)| t).collect();
+        // No leader is reaped until the kill: an unreaped leader, even a
+        // zombie, keeps its pid, so its group cannot be another's.
+        #[cfg(unix)]
+        for t in &all {
+            t.reap_held.store(true, Ordering::SeqCst);
+        }
         for t in &all {
             hang_up(t);
         }
         #[cfg(unix)]
         {
             let end = Instant::now() + GRACE;
-            while Instant::now() < end && !all.iter().all(|t| reaped(t)) {
+            while Instant::now() < end && !all.iter().all(|t| settled(t)) {
                 std::thread::sleep(Duration::from_millis(10));
             }
             for t in &all {
@@ -373,6 +386,9 @@ impl NativeHost {
                         libc::kill(-t.root, libc::SIGKILL);
                     }
                 }
+            }
+            for t in &all {
+                t.reap_held.store(false, Ordering::SeqCst);
             }
         }
     }
@@ -409,10 +425,34 @@ fn hang_up(t: &Term) {
     lock(&t.master).take();
 }
 
+/// Whether nothing in the terminal's process group runs any more. Its
+/// terminal closes once no process has it open; on macOS that also happens
+/// when the group's leader ends, so the group is asked as well (a zombie
+/// leader does not count there).
+#[cfg(unix)]
+fn settled(t: &Term) -> bool {
+    if !lock(&t.out).ended {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: signal 0 only checks; the leader is unreaped, so the group is its own.
+        unsafe { libc::kill(-t.root, 0) != 0 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
 /// Reaps the terminal's program if it has ended; true once it is reaped.
+/// While `kill_all` holds reaping, false.
 #[cfg(unix)]
 fn reaped(t: &Term) -> bool {
     let mut child = lock(&t.child);
+    if t.reap_held.load(Ordering::SeqCst) {
+        return false;
+    }
     if let Some(c) = child.as_mut() {
         if !matches!(c.try_wait(), Ok(None)) {
             *child = None;
@@ -723,8 +763,9 @@ mod tests {
     #[test]
     fn kill_all_kills_a_program_that_ignores_the_hangup() {
         let host = NativeHost::new(BATCH);
-        sh(&host, "trap '' HUP; sleep 30");
-        sh(&host, "trap '' HUP; sleep 30");
+        for _ in 0..3 {
+            sh(&host, "trap '' HUP; sleep 30");
+        }
         let roots = host.root_pids();
         // Let the shells set their traps.
         std::thread::sleep(Duration::from_millis(200));
@@ -732,6 +773,38 @@ mod tests {
         host.kill_all();
         let took = t.elapsed();
         assert!(within_2s(|| roots.iter().all(|&p| !alive(p))), "a program that ignores SIGHUP outlived kill_all");
-        assert!(took < Duration::from_millis(700), "kill_all took {took:?}: the grace period is not shared");
+        // One grace period each would take 1200 ms.
+        assert!(took < Duration::from_millis(1000), "kill_all took {took:?}: the grace period is not shared");
+    }
+
+    #[test]
+    fn kill_all_kills_what_ignores_the_hangup_after_its_leader_ended() {
+        let host = NativeHost::new(BATCH);
+        // The shell ends on the hangup; the sleep it started ignores it and keeps the tty.
+        let term = sh(&host, "(trap '' HUP; exec sleep 30) & echo pid=$!; wait");
+        let (seen, sink) = collector();
+        let at = host.attach(term, 0, sink).unwrap();
+        let pid = |bytes: &[u8]| {
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            text.split("pid=").nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()?.parse::<i32>().ok())
+        };
+        let mut member = None;
+        within_2s(|| {
+            member = pid(&at.snapshot).or_else(|| pid(&seen.lock().unwrap().bytes));
+            member.is_some()
+        });
+        let Some(member) = member else {
+            host.kill_all();
+            panic!("the shell never said its sleep's pid");
+        };
+        // Let the sleep set its trap.
+        std::thread::sleep(Duration::from_millis(200));
+        host.kill_all();
+        let gone = within_2s(|| !alive(member));
+        if !gone {
+            // SAFETY: the test's own sleep, still running.
+            unsafe { libc::kill(member, libc::SIGKILL) };
+        }
+        assert!(gone, "a program that ignores SIGHUP outlived its leader and kill_all");
     }
 }
