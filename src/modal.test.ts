@@ -1163,6 +1163,26 @@ describe("a Native session's live terminal", () => {
     closeModal();
   });
 
+  it("reads no history while live, and reads it again on switching to the chat look", async () => {
+    const history = () => invoke.mock.calls.filter((c) => c[0] === "session_history").length;
+    setViewerTheme("terminal");
+    await openModal(native);
+    refreshModal([{ ...native, state: "working", stateSince: 5 }]);
+    await flush();
+    refreshModal([{ ...native, state: "working", stateSince: 5 }]);
+    await flush();
+    expect(history()).toBe(0);
+    expect(host().querySelector(".modal__state")?.textContent).toBe("Working");
+    setViewerTheme("chat");
+    await flush();
+    expect(history()).toBe(1);
+    expect(host().querySelectorAll(".modal__history .turn")).toHaveLength(turns.length);
+    refreshModal([{ ...native, state: "idle", stateSince: 9 }]);
+    await flush();
+    expect(history()).toBe(2);
+    closeModal();
+  });
+
   it("a Native card in the chat look mounts nothing", async () => {
     setViewerTheme("chat");
     await openModal(native);

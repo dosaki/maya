@@ -49,9 +49,11 @@ export function isLive(card: Card, theme: ViewerTheme | undefined): boolean {
 export function setViewerTheme(t: ViewerTheme): void {
   const before = theme;
   theme = t;
-  // Into or out of the live terminal, the panel is drawn afresh.
+  // Into or out of the live terminal, the panel is drawn afresh; out of it,
+  // the history unread while it was live is read again.
   if (current && isLive(current.model.card, before) !== isLive(current.model.card, t)) {
     paint({ focusInput: true });
+    if (!isLive(current.model.card, t)) void loadTurns({ force: true });
     return;
   }
   const root = document.querySelector<HTMLElement>("#modal-host .modal");
@@ -1183,9 +1185,12 @@ const guardedCommand = makeSendGuard(async (text: string) => {
   }
 }, composerLock);
 
-/** Fetches history; repaints only when something visible changed (or `force`). */
+/**
+ * Fetches history; repaints only when something visible changed (or
+ * `force`). Not while the viewer shows the live terminal, which shows no history.
+ */
 async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): Promise<void> {
-  if (!current) return;
+  if (!current || isLive(current.model.card, theme)) return;
   const { card } = current.model;
   if (card.machine) current.lastRemoteFetchAt = Date.now();
   let turns: Turn[];
@@ -1345,6 +1350,6 @@ export function refreshModal(cards: Card[]): void {
     redrawStrip(root, fresh);
     redrawFoot(root, fresh);
   }
-  if (refetch) void loadTurns({ force: stateChanged });
+  if (refetch && !isLive(fresh, theme)) void loadTurns({ force: stateChanged });
   else if (stateChanged) paint();
 }
