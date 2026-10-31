@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 #[cfg(unix)]
@@ -37,15 +37,34 @@ pub enum Frame {
     Exit,
 }
 
-/// Bytes for a terminal's input thread to type, with where to say how
-/// typing them went when someone waits for that.
-type Input = (Vec<u8>, Option<Sender<Result<(), String>>>);
+/// Bytes for a terminal's input thread to type, with the write waiting
+/// for them, if one is.
+type Input = (Vec<u8>, Option<Waiting>);
+
+/// A write waiting for its bytes to be typed: where to say how it went,
+/// and whether the input thread has started on them or the write gave up.
+struct Waiting {
+    done: Sender<Result<(), String>>,
+    state: Arc<AtomicU8>,
+}
+
+/// The bytes of a waiting write are not typed yet.
+const QUEUED: u8 = 0;
+/// The input thread is typing them.
+const TYPING: u8 = 1;
+/// The write gave up waiting: they are never typed.
+const DROPPED: u8 = 2;
+
+/// How long Maya's own input waits behind input the program is not reading.
+const WRITE_WAIT: Duration = Duration::from_secs(5);
 
 /// A viewer's sink; returning false detaches it.
 pub type Sink = Box<dyn Fn(Frame) -> bool + Send>;
 
 /// What a call on a terminal that has ended says.
 const CLOSED: &str = "That session's terminal has closed.";
+/// What a write says when the program did not take its input in time.
+const NOT_READING: &str = "That session isn't reading its input.";
 
 /// How many of its last lines an unseen terminal tells.
 const LAST_LINES: usize = 3;
@@ -458,12 +477,28 @@ impl NativeHost {
     }
 
     /// Types `bytes` into the terminal after what was queued before, and
-    /// returns once they are in, or why they could not be.
+    /// returns once they are in, or why they could not be. A program that
+    /// has not read what came before within 5 seconds fails it: its callers
+    /// hold up every other session's replies meanwhile.
     pub fn write(&self, term: TermId, bytes: &[u8]) -> Result<(), String> {
+        self.write_within(term, bytes, WRITE_WAIT)
+    }
+
+    /// `write`, giving up after `wait`. Bytes given up on before the input
+    /// thread started on them are never typed.
+    fn write_within(&self, term: TermId, bytes: &[u8], wait: Duration) -> Result<(), String> {
         let (done, typed) = channel();
-        self.get(term)?.input.send((bytes.to_vec(), Some(done))).map_err(|_| CLOSED.to_string())?;
-        // No answer: the input thread ended before it got to them.
-        typed.recv().unwrap_or_else(|_| Err(CLOSED.into()))
+        let state = Arc::new(AtomicU8::new(QUEUED));
+        self.get(term)?.input.send((bytes.to_vec(), Some(Waiting { done, state: state.clone() }))).map_err(|_| CLOSED.to_string())?;
+        match typed.recv_timeout(wait) {
+            Ok(typed) => typed,
+            // No answer: the input thread ended before it got to them.
+            Err(RecvTimeoutError::Disconnected) => Err(CLOSED.into()),
+            Err(RecvTimeoutError::Timeout) => match state.compare_exchange(QUEUED, DROPPED, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => Err(NOT_READING.into()),
+                Err(_) => Err(format!("{NOT_READING} Part of what was sent may still go in.")),
+            },
+        }
     }
 
     /// Resizes the terminal, to at least 5 rows by 20 columns. The terminal
@@ -705,11 +740,15 @@ fn reaped(t: &Term) -> bool {
 /// how it went to whoever waits, until the terminal is dropped or cannot be
 /// typed into.
 fn type_queued(queued: &Receiver<Input>, mut writer: Box<dyn Write + Send>) {
-    for (bytes, done) in queued {
+    for (bytes, waiting) in queued {
+        // A write that gave up waiting is dropped, not typed late.
+        if waiting.as_ref().is_some_and(|w| w.state.compare_exchange(QUEUED, TYPING, Ordering::SeqCst, Ordering::SeqCst).is_err()) {
+            continue;
+        }
         let typed = writer.write_all(&bytes).and_then(|()| writer.flush()).map_err(|e| format!("Could not type into the terminal: {e}"));
         let failed = typed.is_err();
-        if let Some(done) = done {
-            let _ = done.send(typed);
+        if let Some(w) = waiting {
+            let _ = w.done.send(typed);
         }
         if failed {
             return;
@@ -782,8 +821,17 @@ mod tests {
     use std::time::Instant;
 
     /// Polls `done` every 10 ms for up to 2 s.
-    fn within_2s(mut done: impl FnMut() -> bool) -> bool {
-        let end = Instant::now() + Duration::from_secs(2);
+    fn within_2s(done: impl FnMut() -> bool) -> bool {
+        within(Duration::from_secs(2), done)
+    }
+
+    /// Polls `done` every 10 ms for up to 5 s.
+    fn within_5s(done: impl FnMut() -> bool) -> bool {
+        within(Duration::from_secs(5), done)
+    }
+
+    fn within(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+        let end = Instant::now() + limit;
         while Instant::now() < end {
             if done() {
                 return true;
@@ -963,6 +1011,27 @@ mod tests {
         assert_eq!(wrote, Ok(()));
         assert!(got, "typed {:?}", typed.get(typed.len().saturating_sub(40)..).unwrap_or(&typed));
         assert!(host.write(term, b"x").is_err(), "the terminal is gone");
+    }
+
+    #[test]
+    fn a_write_the_program_does_not_read_in_time_fails_and_is_never_typed() {
+        let host = NativeHost::new(BATCH);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("typed");
+        // It reads nothing for a while, and a big paste fills its input first.
+        let term = slow_recorder(&host, &file, 1.5);
+        host.enqueue(term, &[b'a'; 64 * 1024]).unwrap();
+        let t = Instant::now();
+        let wrote = host.write_within(term, b"Z", Duration::from_millis(200));
+        let took = t.elapsed();
+        let all_in = within_5s(|| std::fs::read(&file).is_ok_and(|b| b.len() >= 64 * 1024));
+        std::thread::sleep(Duration::from_millis(200));
+        let typed = std::fs::read(&file).unwrap_or_default();
+        host.kill_all();
+        assert_eq!(wrote, Err(NOT_READING.to_string()));
+        assert!(took < Duration::from_secs(1), "the write waited {took:?}");
+        assert!(all_in, "the paste never went in");
+        assert!(!typed.contains(&b'Z'), "the write that failed was typed later");
     }
 
     #[test]
