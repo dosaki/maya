@@ -41,6 +41,12 @@ fn terminal() -> &'static dyn terminal::Terminal {
     &*native::route::TERMINAL
 }
 
+/// Where Settings says new sessions open: read on each use, so a change
+/// counts at once. Terminal when there is no choice or it cannot be read.
+pub(crate) fn new_session_terminal() -> config::NewSessionTerminal {
+    config::load(&maya_core::claude_dir().join("maya/config.json")).new_session_terminal
+}
+
 /// Opens an http(s) URL in the default browser.
 #[cfg(target_os = "macos")]
 fn open_in_browser(url: &str) -> Result<(), String> {

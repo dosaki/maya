@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use maya_core::answer;
-use maya_core::config::{self, NewSessionTerminal};
+use maya_core::config::NewSessionTerminal;
 use maya_core::terminal::Terminal;
 
 use super::host::{NativeHost, TermId};
@@ -21,7 +21,7 @@ pub struct WithNative {
 }
 
 /// The terminal every card action goes through.
-pub static TERMINAL: LazyLock<WithNative> = LazyLock::new(|| WithNative { inner: platform(), host: &super::HOST, choice: configured_choice });
+pub static TERMINAL: LazyLock<WithNative> = LazyLock::new(|| WithNative { inner: platform(), host: &super::HOST, choice: crate::new_session_terminal });
 
 #[cfg(not(target_os = "linux"))]
 fn platform() -> &'static dyn Terminal {
@@ -30,11 +30,6 @@ fn platform() -> &'static dyn Terminal {
 #[cfg(target_os = "linux")]
 fn platform() -> &'static dyn Terminal {
     &*crate::term::TERMINAL
-}
-
-/// The choice saved in Settings; Terminal when there is none or it cannot be read.
-pub(crate) fn configured_choice() -> NewSessionTerminal {
-    config::load(&maya_core::claude_dir().join("maya/config.json")).new_session_terminal
 }
 
 thread_local! {
