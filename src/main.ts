@@ -5,7 +5,7 @@ import { answerGuard, stopGuard } from "./answer";
 import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
 import { openModal, openTermViewer, refreshModal, setProgress } from "./modal";
-import { endedText, openStarted, setNativeOpener } from "./nativeopen";
+import { endedText, localNativeCard, openStarted, setNativeOpener } from "./nativeopen";
 import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
@@ -150,7 +150,7 @@ function paint(): void {
  * Maya hosts: that terminal is in the viewer, not a window. False otherwise.
  */
 function openNative(pid: number): boolean {
-  const card = cards.find((c) => c.pid === pid && !c.machine && c.native);
+  const card = localNativeCard(cards, pid);
   if (!card) return false;
   closeNewSession();
   void openModal(card);
