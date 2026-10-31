@@ -1238,7 +1238,7 @@ mod tests {
         assert!(!log.contains("gone"));
     }
 
-#[test]
+    #[test]
     fn a_session_under_a_native_root_is_marked_native() {
         let dir = tempfile::tempdir().unwrap();
         let claude = dir.path().to_path_buf();
