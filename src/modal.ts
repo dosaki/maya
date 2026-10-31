@@ -929,7 +929,8 @@ export function setOnDismiss(f: (() => void) | null): void {
   onDismiss = f;
 }
 
-function dismiss(): void {
+/** Closes the open session window as its × does, telling the board; does nothing when none is open. */
+export function dismissModal(): void {
   if (!current) return;
   closeModal();
   onDismiss?.();
@@ -1022,7 +1023,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
     onToggleTheme: () => void toggleTheme(),
     onSend: (text) => void guardedSend(text),
     onTerminal: () => void invoke("focus_session", { pid: m.card.pid }).catch((e) => setStatus(false, String(e))),
-    onClose: dismiss,
+    onClose: dismissModal,
     onPick: (q, pick, el) => void answerPick(q, pick, el),
     onStop: (button) => void stop(button),
     onSetOption: (setting, value) => void setOption(setting, value),
@@ -1212,7 +1213,7 @@ export async function openModal(card: Card): Promise<void> {
   resetToolUi();
   const keyHandler = (e: KeyboardEvent) => {
     // Escape in the live terminal is the program's.
-    if (e.key === "Escape" && !(e.target instanceof Element && e.target.closest(".modal__live"))) dismiss();
+    if (e.key === "Escape" && !(e.target instanceof Element && e.target.closest(".modal__live"))) dismissModal();
   };
   current = { model: { card, turns: [], status: null, draft: "" }, keyHandler, lastRemoteFetchAt: 0 };
   attachments.clear();

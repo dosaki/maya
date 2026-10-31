@@ -23,27 +23,3 @@ export function keepFocusedAboveKeyboard(win: Window = window): void {
     });
   });
 }
-
-// A session's card sits in a fixed layer, and some web views keep that layer
-// the full screen with the keyboard up: its reply box stayed under the
-// keyboard, and as the layer does not scroll, nothing could lift it. The
-// visual viewport is the part of the page left on show, whatever the web
-// view does with its layout, so the layer is sized to it (see mobile.css).
-
-/** The part of the page on show: the visual viewport, or a stand-in. */
-export interface VisibleArea extends EventTarget {
-  offsetTop: number;
-  height: number;
-}
-
-/** Keeps `--visible-top` and `--visible-height` on `root` naming the part of the page on show. */
-export function trackVisibleArea(root: HTMLElement = document.documentElement, area: VisibleArea | null = window.visualViewport): void {
-  if (!area) return;
-  const update = () => {
-    root.style.setProperty("--visible-top", `${area.offsetTop}px`);
-    root.style.setProperty("--visible-height", `${area.height}px`);
-  };
-  update();
-  area.addEventListener("resize", update);
-  area.addEventListener("scroll", update);
-}
