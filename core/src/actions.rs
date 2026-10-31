@@ -815,8 +815,8 @@ fn resume_remembered_with(l: &Local, entries: &[Remembered], pause: &mut dyn FnM
                 opened = true;
                 let command = resume::resume_command(e.agent, &path, &e.session_id);
                 // A session that ran in a terminal Maya hosts comes back in one.
-                let opened = if e.native { l.terminal.open_native(&command, &path, &tmux_label()) } else { l.terminal.open(&command, &path, &tmux_label()) };
-                opened.map(|_| ())
+                let result = if e.native { l.terminal.open_native(&command, &path, &tmux_label()) } else { l.terminal.open(&command, &path, &tmux_label()) };
+                result.map(|_| ())
             }
             Err(why) => Err(why),
         };
