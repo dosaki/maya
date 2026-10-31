@@ -7,10 +7,10 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use maya_core::answer;
-use maya_core::config::{self, NewSessionTerminal};
+use maya_core::config::NewSessionTerminal;
 use maya_core::terminal::Terminal;
 
-use super::host::{NativeHost, TermId};
+use super::host::{NativeHost, TermId, Unwritten};
 
 /// The platform's terminal with Maya's own terminals in front of it.
 pub struct WithNative {
@@ -21,7 +21,7 @@ pub struct WithNative {
 }
 
 /// The terminal every card action goes through.
-pub static TERMINAL: LazyLock<WithNative> = LazyLock::new(|| WithNative { inner: platform(), host: &super::HOST, choice: configured_choice });
+pub static TERMINAL: LazyLock<WithNative> = LazyLock::new(|| WithNative { inner: platform(), host: &super::HOST, choice: crate::new_session_terminal });
 
 #[cfg(not(target_os = "linux"))]
 fn platform() -> &'static dyn Terminal {
@@ -30,11 +30,6 @@ fn platform() -> &'static dyn Terminal {
 #[cfg(target_os = "linux")]
 fn platform() -> &'static dyn Terminal {
     &*crate::term::TERMINAL
-}
-
-/// The choice saved in Settings; Terminal when there is none or it cannot be read.
-pub(crate) fn configured_choice() -> NewSessionTerminal {
-    config::load(&maya_core::claude_dir().join("maya/config.json")).new_session_terminal
 }
 
 thread_local! {
@@ -51,6 +46,21 @@ pub fn opening<T>(f: impl FnOnce() -> T) -> (T, Option<TermId>) {
     (out, OPENED.take())
 }
 
+impl WithNative {
+    /// Starts `command` in a terminal of Maya's own in `cwd`, named by `folder`.
+    fn spawn(&self, command: &str, cwd: &Path, folder: &Path) -> Result<Option<String>, String> {
+        let term = self.host.spawn_for_folder(command, cwd, folder)?;
+        OPENED.set(Some(term));
+        Ok(None)
+    }
+}
+
+/// A reply's failure as `type_reply` gives it: 0 when none of it went in;
+/// 1 when part of it may have, so it is not sent again another way.
+fn reply_failure(u: Unwritten) -> (usize, String) {
+    (usize::from(u.partly), u.why)
+}
+
 /// What `focus` says for a Native tty: its terminal is in Maya, not a window.
 const NO_WINDOW: &str = "Open the session from its card.";
 
@@ -61,28 +71,33 @@ impl Terminal for WithNative {
             NewSessionTerminal::Terminal | NewSessionTerminal::Iterm => self.inner.open(command, cwd, label),
         }
     }
+    fn open_for_folder(&self, command: &str, cwd: &Path, folder: &Path, label: &str) -> Result<Option<String>, String> {
+        match (self.choice)() {
+            NewSessionTerminal::Native => self.spawn(command, cwd, folder),
+            NewSessionTerminal::Terminal | NewSessionTerminal::Iterm => self.inner.open_for_folder(command, cwd, folder, label),
+        }
+    }
     /// A hosted terminal has no name for tmux to find it by.
     fn open_native(&self, command: &str, cwd: &Path, _label: &str) -> Result<Option<String>, String> {
-        let term = self.host.spawn(command, cwd)?;
-        OPENED.set(Some(term));
-        Ok(None)
+        self.spawn(command, cwd, cwd)
     }
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
         match self.host.term_for_tty(tty) {
-            Some(term) => self.host.write(term, format!("{text}\r").as_bytes()),
+            Some(term) => self.host.write(term, format!("{text}\r").as_bytes()).map_err(|u| u.why),
             None => self.inner.type_line(tty, text),
         }
     }
     fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
         match self.host.term_for_tty(tty) {
-            Some(term) => self.host.write(term, keys.as_bytes()),
+            Some(term) => self.host.write(term, keys.as_bytes()).map_err(|u| u.why),
             None => self.inner.press_keys(tty, keys),
         }
     }
-    /// One write: the reply either went in whole or not at all.
+    /// One write: the reply went in whole, or not at all, or (given up on
+    /// while it was being typed) perhaps in part, which counts as typed.
     fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
         match self.host.term_for_tty(tty) {
-            Some(term) => self.host.write(term, answer::reply_keys(lines).as_bytes()).map_err(|why| (0, why)),
+            Some(term) => self.host.write(term, answer::reply_keys(lines).as_bytes()).map_err(reply_failure),
             None => self.inner.type_reply(tty, lines),
         }
     }
@@ -119,6 +134,7 @@ impl Terminal for WithNative {
 mod tests {
     use super::*;
     use crate::native::host::{Frame, TermId, BATCH};
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -161,8 +177,9 @@ mod tests {
             self.record(format!("focus {tty}"));
             Ok(())
         }
-        fn name_for_tty(&self, _tty: &str) -> Option<String> {
-            None
+        fn name_for_tty(&self, tty: &str) -> Option<String> {
+            self.record(format!("name {tty}"));
+            Some("tab".into())
         }
     }
 
@@ -259,6 +276,21 @@ mod tests {
     }
 
     #[test]
+    fn a_session_opened_for_a_folder_is_named_by_it() {
+        let (r, inner) = route(native);
+        let opened = r.open_for_folder("sleep 30", Path::new("/"), Path::new("/work/bedrock-451"), "maya-1");
+        let starting = r.host.starting();
+        r.host.kill_all();
+        assert_eq!(opened, Ok(None));
+        assert_eq!(starting, [PathBuf::from("/work/bedrock-451")], "named by its folder, not where it started");
+        assert!(inner.calls().is_empty(), "{:?}", inner.calls());
+
+        let (r, inner) = route(app);
+        assert_eq!(r.open_for_folder("claude", Path::new("/"), Path::new("/work/bedrock-451"), "maya-1"), Ok(Some("app".into())));
+        assert_eq!(inner.calls(), ["open claude"]);
+    }
+
+    #[test]
     fn open_native_always_uses_the_host() {
         let (r, inner) = route(app);
         let opened = r.open_native("sleep 30", Path::new("/"), "maya-1");
@@ -304,6 +336,27 @@ mod tests {
 
         r.type_reply(OTHER, &lines).unwrap();
         assert_eq!(inner.calls(), [format!("reply {OTHER} a|b")]);
+    }
+
+    #[test]
+    fn the_inner_terminal_names_only_the_ttys_the_host_does_not_have() {
+        let (r, inner) = route(app);
+        let term = r.host.spawn("sleep 30", Path::new("/")).unwrap();
+        let tty = r.host.tty(term).unwrap();
+        let names = r.names_for_ttys(&[tty, OTHER.to_string()]);
+        r.host.kill_all();
+        assert_eq!(inner.calls(), [format!("name {OTHER}")]);
+        assert_eq!(names, HashMap::from([(OTHER.to_string(), "tab".to_string())]));
+    }
+
+    #[test]
+    fn a_reply_that_may_have_partly_gone_in_is_not_counted_as_unsent() {
+        let none = Unwritten { why: "That session isn't reading its input.".into(), partly: false };
+        let some = Unwritten { why: "That session isn't reading its input. Part of what was sent may still go in.".into(), partly: true };
+        assert_eq!(reply_failure(none), (0, "That session isn't reading its input.".to_string()));
+        let (typed, why) = reply_failure(some);
+        assert!(typed > 0, "a reply sent through the inbox too would arrive twice");
+        assert!(why.contains("Part of what was sent"));
     }
 
     #[test]

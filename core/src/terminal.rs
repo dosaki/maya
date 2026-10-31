@@ -12,6 +12,13 @@ pub trait Terminal: Send + Sync {
     fn open_native(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String> {
         self.open(command, cwd, label)
     }
+    /// `open` for a session whose own folder, `folder`, is made by `command`
+    /// after it starts in `cwd` (a review's worktree): a terminal that names
+    /// a session by its folder before the session shows names it by `folder`.
+    fn open_for_folder(&self, command: &str, cwd: &Path, folder: &Path, label: &str) -> Result<Option<String>, String> {
+        let _ = folder;
+        self.open(command, cwd, label)
+    }
     /// Types `text` then Enter into the terminal hosting `tty`.
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String>;
     /// Presses `keys` in the terminal hosting `tty` exactly as given, with
@@ -82,12 +89,18 @@ pub mod test_support {
         pub fail_after: Option<usize>,
         /// Ttys whose terminal closes with its agent, as a Native one does.
         pub native: Mutex<std::collections::HashSet<String>>,
+        /// The folder each `open_for_folder` named its session by.
+        pub folders: Mutex<Vec<PathBuf>>,
     }
 
     impl Terminal for FakeTerminal {
         fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String> {
             self.calls.lock().unwrap().push(Call::Open { command: command.into(), cwd: cwd.into(), label: label.into() });
             Ok(Some(label.into()))
+        }
+        fn open_for_folder(&self, command: &str, cwd: &Path, folder: &Path, label: &str) -> Result<Option<String>, String> {
+            self.folders.lock().unwrap().push(folder.into());
+            self.open(command, cwd, label)
         }
         fn open_native(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String> {
             self.calls.lock().unwrap().push(Call::OpenNative { command: command.into(), cwd: cwd.into(), label: label.into() });

@@ -1,3 +1,5 @@
+import type { Card } from "./types";
+
 /**
  * A Native session the app just started or resumed opens its live terminal
  * at once, before its card shows (a folder-trust question, a login or an
@@ -30,4 +32,9 @@ export function folderName(dir: string): string {
 export function endedText(dir: string, lines: string[]): string {
   const head = `The session in ${folderName(dir)} ended before it showed on the board`;
   return lines.length ? `${head}:\n${lines.join("\n")}` : `${head}.`;
+}
+
+/** The card of the session `pid` when it runs on this machine in a terminal Maya hosts, whose viewer is then its terminal. */
+export function localNativeCard(cards: Card[], pid: number): Card | undefined {
+  return cards.find((c) => c.pid === pid && !c.machine && c.native);
 }

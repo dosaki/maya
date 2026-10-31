@@ -1,6 +1,8 @@
 // The live terminal of a Native session: an xterm.js terminal attached to
 // the pseudo-terminal Maya hosts, typed into directly as in a terminal app.
 
+// xterm's own styles come with this module: only a page that opens a live terminal loads them.
+import "@xterm/xterm/css/xterm.css";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal, type ITheme } from "@xterm/xterm";
@@ -47,7 +49,8 @@ function encode(bytes: Uint8Array): string {
 
 /**
  * The 16 ANSI colours on Maya's light background (#fffdf8): xterm's own are
- * made for a dark one, where its white and yellow would not read.
+ * made for a dark one, where its white and yellow would not read. Bright
+ * black is muted text, so it stays a mid-grey (3:1) while the rest read at 4.5:1.
  */
 export const LIGHT_ANSI = {
   black: "#231f14",
@@ -58,7 +61,7 @@ export const LIGHT_ANSI = {
   magenta: "#8a3aa3",
   cyan: "#0e6a73",
   white: "#5f5847",
-  brightBlack: "#4a4335",
+  brightBlack: "#8a8170",
   brightRed: "#a1200f",
   brightGreen: "#275c29",
   brightYellow: "#6b4f00",
@@ -193,12 +196,18 @@ export function mountLive(host: HTMLElement, target: LiveTarget): LiveHandle {
 
   const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => refit());
   observer?.observe(host);
+  // Maya's theme changes on the page's root: the open terminal takes its colours at once.
+  const restyle = new MutationObserver(() => {
+    if (!disposed) term.options.theme = themeOf(host);
+  });
+  restyle.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
   return {
     dispose() {
       if (disposed) return;
       disposed = true;
       observer?.disconnect();
+      restyle.disconnect();
       if (attached) void invoke("native_detach", { term: attached.term, viewer: attached.viewer }).catch(() => undefined);
       term.dispose();
     },

@@ -63,8 +63,9 @@ pub fn should_ask(confirmed: bool, system_ending: bool, working: &[String]) -> b
 /// code comes from an update, which the page asked about before installing
 /// (and which `ExitRequestApi::prevent_exit` would not stop). No code means
 /// the last window has gone: its close was asked about, and no window is
-/// left to ask in. Any other code is an exit Maya asked for (Cmd+Q, "Quit
-/// anyway"), which goes through the check.
+/// left to ask in. Any other code is an exit Maya asked for, which goes
+/// through the check: "Quit anyway"'s `app.exit(0)`. (Cmd+Q no longer
+/// gets here: `applicationShouldTerminate:` asks before it.)
 pub fn agreed(code: Option<i32>) -> bool {
     match code {
         None => true,
@@ -72,11 +73,19 @@ pub fn agreed(code: Option<i32>) -> bool {
     }
 }
 
+/// `f` on what `m` guards, or nothing (the default) when its lock is
+/// poisoned. On a quit a panic would end Maya before her exit runs, which
+/// ends her terminals and downloads.
+fn unless_poisoned<T, R: Default>(m: &Mutex<T>, f: impl FnOnce(&mut T) -> R) -> R {
+    m.lock().map(|mut guard| f(&mut guard)).unwrap_or_default()
+}
+
 /// What a quit would stop, from a fresh read of the store. Only the read
 /// holds its lock: no terminal names, no announcements. The read marks the
-/// terminals a card shows, so `starting` comes after it.
+/// terminals a card shows, so `starting` comes after it. A store whose lock
+/// is poisoned has no cards to ask about.
 fn working_now(app: &AppHandle) -> Vec<String> {
-    let cards = app.state::<AppState>().store.lock().unwrap().refresh(crate::now_ms());
+    let cards = unless_poisoned(&app.state::<AppState>().store, |store| store.refresh(crate::now_ms()));
     stopping(&cards, &crate::native::HOST.starting())
 }
 
@@ -290,8 +299,22 @@ mod tests {
     }
 
     #[test]
+    fn a_poisoned_lock_reads_as_nothing() {
+        let m = std::sync::Arc::new(Mutex::new(vec![1]));
+        assert_eq!(unless_poisoned(&m, |v| v.clone()), [1]);
+        let held = m.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("poisons the lock");
+        })
+        .join();
+        assert!(m.is_poisoned());
+        assert_eq!(unless_poisoned(&m, |v| v.clone()), Vec::<i32>::new());
+    }
+
+    #[test]
     fn an_update_restart_and_a_closed_last_window_were_already_asked_about() {
-        assert!(!agreed(Some(0)), "Cmd+Q and Quit anyway's exit go through the check");
+        assert!(!agreed(Some(0)), "Quit anyway's exit goes through the check");
         assert!(agreed(Some(tauri::RESTART_EXIT_CODE)), "the page asked before installing the update");
         assert!(agreed(None), "the last window's close was asked about, and no window is left to ask in");
     }

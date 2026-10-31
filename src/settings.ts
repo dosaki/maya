@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
-import { builtinVoiceName, isLinux, isMac, isWindows, recognizerOptions, secretStore, thisComputerLower } from "./platform";
+import { builtinVoiceName, isLinux, isWindows, recognizerOptions, secretStore, thisComputerLower } from "./platform";
 import type { ColorTheme, GitProvider, Harness, NewSessionTerminal, ViewerTheme } from "./types";
 import { setViewerTheme } from "./modal";
 import { COLOR_THEMES, applyColorTheme, asColorTheme } from "./theme";
@@ -582,12 +582,11 @@ export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean 
   return (model.networkRole ?? model.network?.role) === "main" && !!code && nowMs <= code.expiresAt + PAIRING_TICK_MS;
 }
 
-/** The places a new session can open on this platform, as [value, label]. */
+/** The places a new session can open on this platform, as [value, label]. Settings shows only on a desktop: neither Windows nor Linux is a Mac. */
 export function terminalChoices(): [NewSessionTerminal, string][] {
-  if (isMac()) return [["terminal", "Terminal"], ["iterm", "iTerm2"], ["native", "Native"]];
   if (isWindows()) return [["terminal", "Windows Terminal"], ["native", "Native"]];
   if (isLinux()) return [["terminal", "Terminal (tmux)"], ["native", "Native"]];
-  return [["terminal", "Terminal"], ["native", "Native"]];
+  return [["terminal", "Terminal"], ["iterm", "iTerm2"], ["native", "Native"]];
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {

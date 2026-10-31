@@ -138,7 +138,7 @@ pub struct MacTerminal {
     choice: fn() -> NewSessionTerminal,
 }
 
-pub static TERMINAL: MacTerminal = MacTerminal { iterm: &ItermApp, terminal: &TerminalApp, choice: crate::native::route::configured_choice };
+pub static TERMINAL: MacTerminal = MacTerminal { iterm: &ItermApp, terminal: &TerminalApp, choice: crate::new_session_terminal };
 
 impl MacTerminal {
     /// The apps to ask about a tty, in order.
