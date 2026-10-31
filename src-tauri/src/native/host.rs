@@ -1303,8 +1303,10 @@ mod tests {
     fn a_group_is_signalled_only_while_its_leader_is_unreaped() {
         let host = NativeHost::new(BATCH);
         let running = sh(&host, "sleep 30");
-        let ended = sh(&host, "exit 0");
-        let (running, ended) = (host.get(running).unwrap(), host.get(ended).unwrap());
+        // It ends only once its terminal is held here, so the host cannot drop it first.
+        let ending = sh(&host, "read l; exit 0");
+        let (running, ended) = (host.get(running).unwrap(), host.get(ending).unwrap());
+        host.write(ending, b"\r").unwrap();
         assert!(within_2s(|| lock(&ended.child).is_none()), "the program that ended was never reaped");
         let signalled = (signal_group(&running, 0), signal_group(&ended, libc::SIGHUP));
         host.kill_all();
@@ -1344,6 +1346,30 @@ mod tests {
         assert!(t.elapsed() < Duration::from_millis(300), "kill_all waited for programs that ended at once");
         assert_eq!(sleeps.len(), 2, "each shell runs its sleep");
         assert!(within_2s(|| roots.iter().chain(&sleeps).all(|&p| !alive(p))), "a program or what it started outlived kill_all");
+    }
+
+    #[test]
+    fn kill_all_kills_a_child_that_ignores_the_hangup() {
+        let host = NativeHost::new(BATCH);
+        // The shell ends on the hangup; its sleep ignores it, so only the
+        // kill sent to the whole group after the grace period ends it.
+        sh(&host, "(trap '' HUP; sleep 30); :");
+        let root = host.root_pids()[0];
+        let mut child = Vec::new();
+        within_2s(|| {
+            child = children_of(root);
+            !child.is_empty()
+        });
+        // Let the sleep start with the hangup ignored.
+        std::thread::sleep(Duration::from_millis(200));
+        host.kill_all();
+        let gone = within_2s(|| child.iter().all(|&p| !alive(p)));
+        for &p in &child {
+            // SAFETY: the test's own sleep, if it is still running.
+            unsafe { libc::kill(p, libc::SIGKILL) };
+        }
+        assert!(!child.is_empty(), "the shell never started its sleep");
+        assert!(gone, "a child that ignores SIGHUP outlived kill_all");
     }
 
     #[test]
