@@ -63,8 +63,9 @@ pub fn should_ask(confirmed: bool, system_ending: bool, working: &[String]) -> b
 /// code comes from an update, which the page asked about before installing
 /// (and which `ExitRequestApi::prevent_exit` would not stop). No code means
 /// the last window has gone: its close was asked about, and no window is
-/// left to ask in. Any other code is an exit Maya asked for (Cmd+Q, "Quit
-/// anyway"), which goes through the check.
+/// left to ask in. Any other code is an exit Maya asked for, which goes
+/// through the check: "Quit anyway"'s `app.exit(0)`. (Cmd+Q no longer
+/// gets here: `applicationShouldTerminate:` asks before it.)
 pub fn agreed(code: Option<i32>) -> bool {
     match code {
         None => true,
@@ -313,7 +314,7 @@ mod tests {
 
     #[test]
     fn an_update_restart_and_a_closed_last_window_were_already_asked_about() {
-        assert!(!agreed(Some(0)), "Cmd+Q and Quit anyway's exit go through the check");
+        assert!(!agreed(Some(0)), "Quit anyway's exit goes through the check");
         assert!(agreed(Some(tauri::RESTART_EXIT_CODE)), "the page asked before installing the update");
         assert!(agreed(None), "the last window's close was asked about, and no window is left to ask in");
     }
