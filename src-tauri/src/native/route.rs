@@ -170,8 +170,9 @@ mod tests {
             self.record(format!("focus {tty}"));
             Ok(())
         }
-        fn name_for_tty(&self, _tty: &str) -> Option<String> {
-            None
+        fn name_for_tty(&self, tty: &str) -> Option<String> {
+            self.record(format!("name {tty}"));
+            Some("tab".into())
         }
     }
 
@@ -328,6 +329,17 @@ mod tests {
 
         r.type_reply(OTHER, &lines).unwrap();
         assert_eq!(inner.calls(), [format!("reply {OTHER} a|b")]);
+    }
+
+    #[test]
+    fn the_inner_terminal_names_only_the_ttys_the_host_does_not_have() {
+        let (r, inner) = route(app);
+        let term = r.host.spawn("sleep 30", Path::new("/")).unwrap();
+        let tty = r.host.tty(term).unwrap();
+        let names = r.names_for_ttys(&[tty, OTHER.to_string()]);
+        r.host.kill_all();
+        assert_eq!(inner.calls(), [format!("name {OTHER}")]);
+        assert_eq!(names, HashMap::from([(OTHER.to_string(), "tab".to_string())]));
     }
 
     #[test]
