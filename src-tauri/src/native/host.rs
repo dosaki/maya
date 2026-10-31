@@ -514,6 +514,11 @@ impl NativeHost {
         }
         #[cfg(windows)]
         {
+            // Finding a console's process and walking the process tree is
+            // dear, and every tty is asked about: with no terminal, none is Maya's.
+            if lock(&self.terms).is_empty() {
+                return None;
+            }
             let pid = i32::try_from(maya_core::win_console::console_pid(tty)?).ok()?;
             let tree: Vec<maya_core::foreign::Proc> = maya_core::win_process::tree()
                 .into_iter()
