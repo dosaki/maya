@@ -72,11 +72,19 @@ pub fn agreed(code: Option<i32>) -> bool {
     }
 }
 
+/// `f` on what `m` guards, or nothing (the default) when its lock is
+/// poisoned. On a quit a panic would end Maya before her exit runs, which
+/// ends her terminals and downloads.
+fn unless_poisoned<T, R: Default>(m: &Mutex<T>, f: impl FnOnce(&mut T) -> R) -> R {
+    m.lock().map(|mut guard| f(&mut guard)).unwrap_or_default()
+}
+
 /// What a quit would stop, from a fresh read of the store. Only the read
 /// holds its lock: no terminal names, no announcements. The read marks the
-/// terminals a card shows, so `starting` comes after it.
+/// terminals a card shows, so `starting` comes after it. A store whose lock
+/// is poisoned has no cards to ask about.
 fn working_now(app: &AppHandle) -> Vec<String> {
-    let cards = app.state::<AppState>().store.lock().unwrap().refresh(crate::now_ms());
+    let cards = unless_poisoned(&app.state::<AppState>().store, |store| store.refresh(crate::now_ms()));
     stopping(&cards, &crate::native::HOST.starting())
 }
 
@@ -287,6 +295,20 @@ mod tests {
         assert!(system_quit(Some(u32::from_be_bytes(*b"rlgo"))));
         assert!(system_quit(Some(u32::from_be_bytes(*b"shut"))));
         assert!(!system_quit(None), "the Dock's Quit and AppleScript give none");
+    }
+
+    #[test]
+    fn a_poisoned_lock_reads_as_nothing() {
+        let m = std::sync::Arc::new(Mutex::new(vec![1]));
+        assert_eq!(unless_poisoned(&m, |v| v.clone()), [1]);
+        let held = m.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = held.lock().unwrap();
+            panic!("poisons the lock");
+        })
+        .join();
+        assert!(m.is_poisoned());
+        assert_eq!(unless_poisoned(&m, |v| v.clone()), Vec::<i32>::new());
     }
 
     #[test]
