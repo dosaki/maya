@@ -347,7 +347,12 @@ impl NativeHost {
 
     fn spawn_argv(&self, argv: &[String], cwd: &Path, folder: &Path) -> Result<TermId, String> {
         let size = PtySize { rows: DEFAULT_ROWS, cols: DEFAULT_COLS, pixel_width: 0, pixel_height: 0 };
-        let pair = retrying(std::thread::sleep, || native_pty_system().openpty(size)).map_err(|e| format!("Could not open a terminal: {e}"))?;
+        let pair = retrying(std::thread::sleep, || native_pty_system().openpty(size)).map_err(|e| {
+            if !refused_for_now(&e) {
+                maya_core::log::line("native", format!("could not open a terminal, not tried again: {e}"));
+            }
+            format!("Could not open a terminal: {e}")
+        })?;
         let mut cmd = CommandBuilder::from_argv(argv.iter().map(Into::into).collect());
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
@@ -890,47 +895,50 @@ mod tests {
         assert_eq!(shell_argv("claude")[1..], ["-l", "-c", "claude"]);
     }
 
-    /// How openpty fails now and then on macOS while another thread forks.
-    const REFUSED: &str = "failed to openpty: Os { code: -6, kind: Uncategorized, message: \"Unknown error: -6\" }";
+    /// How openpty fails now and then on macOS while another thread forks,
+    /// as portable-pty words it around std's own formatting of the error.
+    fn refused() -> String {
+        format!("failed to openpty: {:?}", std::io::Error::from_raw_os_error(-6))
+    }
 
     #[test]
     fn opening_a_terminal_is_tried_again_a_few_times() {
         let mut calls = 0;
         let mut pauses = Vec::new();
-        let got: Result<u32, &str> = retrying(
+        let got: Result<u32, String> = retrying(
             |d| pauses.push(d),
             || {
                 calls += 1;
-                if calls < 3 { Err(REFUSED) } else { Ok(calls) }
+                if calls < 3 { Err(refused()) } else { Ok(calls) }
             },
         );
         assert_eq!(got, Ok(3));
         assert_eq!(pauses, [Duration::from_millis(10), Duration::from_millis(20)]);
 
         let (mut calls, mut pauses) = (0, 0);
-        let got: Result<(), &str> = retrying(
+        let got: Result<(), String> = retrying(
             |_| pauses += 1,
             || {
                 calls += 1;
-                Err(REFUSED)
+                Err(refused())
             },
         );
-        assert_eq!((got, calls, pauses), (Err(REFUSED), OPEN_TRIES, OPEN_TRIES - 1));
+        assert_eq!((got, calls, pauses), (Err(refused()), OPEN_TRIES, OPEN_TRIES - 1));
     }
 
     #[test]
     fn any_other_failure_to_open_a_terminal_is_not_tried_again() {
-        let full = "failed to openpty: Os { code: 24, kind: Uncategorized, message: \"Too many open files\" }";
+        let full = format!("failed to openpty: {:?}", std::io::Error::from_raw_os_error(libc::EMFILE));
         let (mut calls, mut pauses) = (0, 0);
-        let got: Result<(), &str> = retrying(
+        let got: Result<(), String> = retrying(
             |_| pauses += 1,
             || {
                 calls += 1;
-                Err(full)
+                Err(full.clone())
             },
         );
-        assert_eq!((got, calls, pauses), (Err(full), 1, 0));
-        assert!(refused_for_now(&REFUSED) && !refused_for_now(&full));
+        assert_eq!((got, calls, pauses), (Err(full.clone()), 1, 0));
+        assert!(refused_for_now(&refused()) && !refused_for_now(&full));
     }
 
     #[test]
