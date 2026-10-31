@@ -63,6 +63,21 @@ pub type Sink = Box<dyn Fn(Frame) -> bool + Send>;
 
 /// What a call on a terminal that has ended says.
 const CLOSED: &str = "That session's terminal has closed.";
+/// Why a write did not go in whole, and whether some of it may have.
+#[derive(Debug, PartialEq)]
+pub struct Unwritten {
+    pub why: String,
+    /// The write gave up while its bytes were being typed: part of them
+    /// may be in, or still go in.
+    pub partly: bool,
+}
+
+impl Unwritten {
+    fn none(why: impl Into<String>) -> Unwritten {
+        Unwritten { why: why.into(), partly: false }
+    }
+}
+
 /// What a write says when the program did not take its input in time.
 const NOT_READING: &str = "That session isn't reading its input.";
 
@@ -485,24 +500,30 @@ impl NativeHost {
     /// returns once they are in, or why they could not be. A program that
     /// has not read what came before within 5 seconds fails it: its callers
     /// hold up every other session's replies meanwhile.
-    pub fn write(&self, term: TermId, bytes: &[u8]) -> Result<(), String> {
+    pub fn write(&self, term: TermId, bytes: &[u8]) -> Result<(), Unwritten> {
         self.write_within(term, bytes, WRITE_WAIT)
     }
 
     /// `write`, giving up after `wait`. Bytes given up on before the input
     /// thread started on them are never typed.
-    fn write_within(&self, term: TermId, bytes: &[u8], wait: Duration) -> Result<(), String> {
+    fn write_within(&self, term: TermId, bytes: &[u8], wait: Duration) -> Result<(), Unwritten> {
         let (done, typed) = channel();
         let state = Arc::new(AtomicU8::new(QUEUED));
-        self.get(term)?.input.send((bytes.to_vec(), Some(Waiting { done, state: state.clone() }))).map_err(|_| CLOSED.to_string())?;
+        self.get(term).map_err(Unwritten::none)?.input.send((bytes.to_vec(), Some(Waiting { done, state: state.clone() }))).map_err(|_| Unwritten::none(CLOSED))?;
         match typed.recv_timeout(wait) {
-            Ok(typed) => typed,
+            Ok(typed) => typed.map_err(Unwritten::none),
             // No answer: the input thread ended before it got to them.
-            Err(RecvTimeoutError::Disconnected) => Err(CLOSED.into()),
-            Err(RecvTimeoutError::Timeout) => match state.compare_exchange(QUEUED, DROPPED, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(_) => Err(NOT_READING.into()),
-                Err(_) => Err(format!("{NOT_READING} Part of what was sent may still go in.")),
-            },
+            Err(RecvTimeoutError::Disconnected) => Err(Unwritten::none(CLOSED)),
+            Err(RecvTimeoutError::Timeout) => {
+                // Typed just as the wait ran out: that answer stands.
+                if let Ok(typed) = typed.try_recv() {
+                    return typed.map_err(Unwritten::none);
+                }
+                match state.compare_exchange(QUEUED, DROPPED, Ordering::SeqCst, Ordering::SeqCst) {
+                    Ok(_) => Err(Unwritten::none(NOT_READING)),
+                    Err(_) => Err(Unwritten { why: format!("{NOT_READING} Part of what was sent may still go in."), partly: true }),
+                }
+            }
         }
     }
 
@@ -1036,10 +1057,26 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         let typed = std::fs::read(&file).unwrap_or_default();
         host.kill_all();
-        assert_eq!(wrote, Err(NOT_READING.to_string()));
+        assert_eq!(wrote, Err(Unwritten { why: NOT_READING.into(), partly: false }));
         assert!(took < Duration::from_secs(1), "the write waited {took:?}");
         assert!(all_in, "the paste never went in");
         assert!(!typed.contains(&b'Z'), "the write that failed was typed later");
+    }
+
+    #[test]
+    fn a_write_given_up_on_while_it_is_being_typed_says_part_of_it_may_go_in() {
+        let host = NativeHost::new(BATCH);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("typed");
+        // It reads nothing for a while, so the write fills its input and waits there.
+        let term = slow_recorder(&host, &file, 1.5);
+        let wrote = host.write_within(term, &[b'w'; 64 * 1024], Duration::from_millis(200));
+        let all_in = within_5s(|| std::fs::read(&file).is_ok_and(|b| b.len() >= 64 * 1024));
+        host.kill_all();
+        let err = wrote.unwrap_err();
+        assert!(err.partly, "{}", err.why);
+        assert!(err.why.starts_with(NOT_READING), "{}", err.why);
+        assert!(all_in, "what had begun to go in went in");
     }
 
     #[test]

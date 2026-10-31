@@ -10,7 +10,7 @@ use maya_core::answer;
 use maya_core::config::NewSessionTerminal;
 use maya_core::terminal::Terminal;
 
-use super::host::{NativeHost, TermId};
+use super::host::{NativeHost, TermId, Unwritten};
 
 /// The platform's terminal with Maya's own terminals in front of it.
 pub struct WithNative {
@@ -55,6 +55,12 @@ impl WithNative {
     }
 }
 
+/// A reply's failure as `type_reply` gives it: 0 when none of it went in;
+/// 1 when part of it may have, so it is not sent again another way.
+fn reply_failure(u: Unwritten) -> (usize, String) {
+    (usize::from(u.partly), u.why)
+}
+
 /// What `focus` says for a Native tty: its terminal is in Maya, not a window.
 const NO_WINDOW: &str = "Open the session from its card.";
 
@@ -77,20 +83,21 @@ impl Terminal for WithNative {
     }
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
         match self.host.term_for_tty(tty) {
-            Some(term) => self.host.write(term, format!("{text}\r").as_bytes()),
+            Some(term) => self.host.write(term, format!("{text}\r").as_bytes()).map_err(|u| u.why),
             None => self.inner.type_line(tty, text),
         }
     }
     fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
         match self.host.term_for_tty(tty) {
-            Some(term) => self.host.write(term, keys.as_bytes()),
+            Some(term) => self.host.write(term, keys.as_bytes()).map_err(|u| u.why),
             None => self.inner.press_keys(tty, keys),
         }
     }
-    /// One write: the reply either went in whole or not at all.
+    /// One write: the reply went in whole, or not at all, or (given up on
+    /// while it was being typed) perhaps in part, which counts as typed.
     fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
         match self.host.term_for_tty(tty) {
-            Some(term) => self.host.write(term, answer::reply_keys(lines).as_bytes()).map_err(|why| (0, why)),
+            Some(term) => self.host.write(term, answer::reply_keys(lines).as_bytes()).map_err(reply_failure),
             None => self.inner.type_reply(tty, lines),
         }
     }
@@ -340,6 +347,16 @@ mod tests {
         r.host.kill_all();
         assert_eq!(inner.calls(), [format!("name {OTHER}")]);
         assert_eq!(names, HashMap::from([(OTHER.to_string(), "tab".to_string())]));
+    }
+
+    #[test]
+    fn a_reply_that_may_have_partly_gone_in_is_not_counted_as_unsent() {
+        let none = Unwritten { why: "That session isn't reading its input.".into(), partly: false };
+        let some = Unwritten { why: "That session isn't reading its input. Part of what was sent may still go in.".into(), partly: true };
+        assert_eq!(reply_failure(none), (0, "That session isn't reading its input.".to_string()));
+        let (typed, why) = reply_failure(some);
+        assert!(typed > 0, "a reply sent through the inbox too would arrive twice");
+        assert!(why.contains("Part of what was sent"));
     }
 
     #[test]
