@@ -23,7 +23,8 @@ import { updates } from "../update";
 import { makeCardHistory } from "./card-history";
 import { chatTabShown } from "./chat-tab";
 import { initVoice } from "./voice";
-import { keepFocusedAboveKeyboard, trackVisibleArea } from "./keyboard";
+import { keepFocusedAboveKeyboard } from "./keyboard";
+import { closeOverlays } from "./overlays";
 import { initNetwork } from "./network";
 import { watchTaps } from "./notify-tap";
 import { initSetup } from "./setup";
@@ -179,6 +180,8 @@ async function start(): Promise<void> {
   const rememberedHost = document.getElementById("remembered");
   if (rememberedHost) initRemembered(rememberedHost);
   tabs = makeTabs((tab) => {
+    // A session or dialog is a pane under the top bar: a tab leaves none of them over the pane it shows.
+    closeOverlays();
     const strip = document.getElementById("strip-host");
     if (strip) strip.hidden = tab !== "sessions";
     const voice = document.getElementById("voice-host");
@@ -204,7 +207,6 @@ async function start(): Promise<void> {
   layout();
   window.addEventListener("resize", layout);
   keepFocusedAboveKeyboard();
-  trackVisibleArea();
   // Android's back button pops the history entry a card pushed: close the card.
   window.addEventListener("popstate", () => closeModal());
   const board = document.getElementById("board");
