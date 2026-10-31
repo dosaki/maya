@@ -85,7 +85,7 @@ pub struct NativeEnded {
 
 impl From<Unseen> for NativeEnded {
     fn from(u: Unseen) -> NativeEnded {
-        NativeEnded { term: u.term, dir: u.cwd.display().to_string(), lines: u.lines }
+        NativeEnded { term: u.term, dir: u.folder.display().to_string(), lines: u.lines }
     }
 }
 
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn an_unseen_end_reaches_the_page_with_its_folder_and_lines() {
-        let ended = NativeEnded::from(Unseen { term: 3, cwd: "/work/eye".into(), lines: vec!["zsh: command not found: claude".into()] });
+        let ended = NativeEnded::from(Unseen { term: 3, folder: "/work/eye".into(), lines: vec!["zsh: command not found: claude".into()] });
         let json = serde_json::to_value(&ended).unwrap();
         assert_eq!(json, serde_json::json!({ "term": 3, "dir": "/work/eye", "lines": ["zsh: command not found: claude"] }));
     }

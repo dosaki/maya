@@ -51,6 +51,15 @@ pub fn opening<T>(f: impl FnOnce() -> T) -> (T, Option<TermId>) {
     (out, OPENED.take())
 }
 
+impl WithNative {
+    /// Starts `command` in a terminal of Maya's own in `cwd`, named by `folder`.
+    fn spawn(&self, command: &str, cwd: &Path, folder: &Path) -> Result<Option<String>, String> {
+        let term = self.host.spawn_for_folder(command, cwd, folder)?;
+        OPENED.set(Some(term));
+        Ok(None)
+    }
+}
+
 /// What `focus` says for a Native tty: its terminal is in Maya, not a window.
 const NO_WINDOW: &str = "Open the session from its card.";
 
@@ -61,11 +70,15 @@ impl Terminal for WithNative {
             NewSessionTerminal::Terminal | NewSessionTerminal::Iterm => self.inner.open(command, cwd, label),
         }
     }
+    fn open_for_folder(&self, command: &str, cwd: &Path, folder: &Path, label: &str) -> Result<Option<String>, String> {
+        match (self.choice)() {
+            NewSessionTerminal::Native => self.spawn(command, cwd, folder),
+            NewSessionTerminal::Terminal | NewSessionTerminal::Iterm => self.inner.open_for_folder(command, cwd, folder, label),
+        }
+    }
     /// A hosted terminal has no name for tmux to find it by.
     fn open_native(&self, command: &str, cwd: &Path, _label: &str) -> Result<Option<String>, String> {
-        let term = self.host.spawn(command, cwd)?;
-        OPENED.set(Some(term));
-        Ok(None)
+        self.spawn(command, cwd, cwd)
     }
     fn type_line(&self, tty: &str, text: &str) -> Result<(), String> {
         match self.host.term_for_tty(tty) {
@@ -119,6 +132,7 @@ impl Terminal for WithNative {
 mod tests {
     use super::*;
     use crate::native::host::{Frame, TermId, BATCH};
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -256,6 +270,21 @@ mod tests {
         let (r, _) = route(app);
         assert_eq!(opening(|| r.open("claude", Path::new("/"), "maya-1")).1, None, "a terminal app's window is not Maya's");
         assert_eq!(opening(|| ()).1, None, "nothing opened, nothing handed back");
+    }
+
+    #[test]
+    fn a_session_opened_for_a_folder_is_named_by_it() {
+        let (r, inner) = route(native);
+        let opened = r.open_for_folder("sleep 30", Path::new("/"), Path::new("/work/bedrock-451"), "maya-1");
+        let starting = r.host.starting();
+        r.host.kill_all();
+        assert_eq!(opened, Ok(None));
+        assert_eq!(starting, [PathBuf::from("/work/bedrock-451")], "named by its folder, not where it started");
+        assert!(inner.calls().is_empty(), "{:?}", inner.calls());
+
+        let (r, inner) = route(app);
+        assert_eq!(r.open_for_folder("claude", Path::new("/"), Path::new("/work/bedrock-451"), "maya-1"), Ok(Some("app".into())));
+        assert_eq!(inner.calls(), ["open claude"]);
     }
 
     #[test]

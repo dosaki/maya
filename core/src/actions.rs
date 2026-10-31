@@ -917,7 +917,8 @@ pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, 
         store.refresh(now_ms());
         store.live_session_ids()
     };
-    l.terminal.open(&crate::reviews::shell_command(agent, &target, &url, &crate::reviews::session_name(pr.forge, &pr.repo, pr.number), &file, grok_id.as_deref()), &clones, &tmux_label())?;
+    let command = crate::reviews::shell_command(agent, &target, &url, &crate::reviews::session_name(pr.forge, &pr.repo, pr.number), &file, grok_id.as_deref());
+    l.terminal.open_for_folder(&command, &clones, &target.dir, &tmux_label())?;
     if agent != model::Harness::ClaudeCode {
         let name = crate::reviews::session_name(pr.forge, &pr.repo, pr.number);
         l.store.lock().unwrap().add_pending_name(crate::pending_names::PendingName::new(agent, &target.dir.to_string_lossy(), &name, now_ms(), known, grok_id));
@@ -1586,6 +1587,8 @@ mod tests {
         assert!(Path::new(&folder).ends_with(Path::new("clones").join("bedrock-451")), "{folder}");
         // The terminal opens in the clones root, so it must exist by then.
         assert!(dir.path().join("clones").is_dir());
+        // It is named by the review's own folder, which its command makes.
+        assert_eq!(*fake.folders.lock().unwrap(), [PathBuf::from(&folder)]);
         let calls = fake.calls.lock().unwrap();
         let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
         assert!(command.contains("git clone -- 'git@github.com:Org/bedrock.git'") && command.ends_with("&& codex -- \"$p\""), "{command}");

@@ -44,10 +44,11 @@ pub type Sink = Box<dyn Fn(Frame) -> bool + Send>;
 const LAST_LINES: usize = 3;
 
 /// A terminal that ended unseen: no card ever showed its session and no
-/// viewer was open on it. Where it ran and its last lines that are not blank.
+/// viewer was open on it. The folder it is named by and its last lines
+/// that are not blank.
 pub struct Unseen {
     pub term: TermId,
-    pub cwd: PathBuf,
+    pub folder: PathBuf,
     pub lines: Vec<String>,
 }
 
@@ -175,8 +176,9 @@ fn deliver(delivery: &Delivery) -> Vec<u64> {
 struct Term {
     /// The program's pid; on Unix also its process group.
     root: i32,
-    /// The folder it started in.
-    cwd: PathBuf,
+    /// The folder it is named by: where it started, or the folder its
+    /// session works in when its command makes that (a review's worktree).
+    folder: PathBuf,
     /// Set once a card showed its session.
     carded: AtomicBool,
     #[cfg(unix)]
@@ -297,12 +299,18 @@ impl NativeHost {
 
     /// Starts `command` in a login shell in a new terminal, in `cwd`.
     pub fn spawn(&self, command: &str, cwd: &Path) -> Result<TermId, String> {
-        #[cfg(windows)]
-        maya_core::launch::git_bash().ok_or("Git for Windows is not installed; Maya needs its bash to start sessions (https://git-scm.com/download/win).")?;
-        self.spawn_argv(&shell_argv(command), cwd)
+        self.spawn_for_folder(command, cwd, cwd)
     }
 
-    fn spawn_argv(&self, argv: &[String], cwd: &Path) -> Result<TermId, String> {
+    /// `spawn` for a session whose own folder, `folder`, is made by
+    /// `command` (a review's worktree): the terminal is named by `folder`.
+    pub fn spawn_for_folder(&self, command: &str, cwd: &Path, folder: &Path) -> Result<TermId, String> {
+        #[cfg(windows)]
+        maya_core::launch::git_bash().ok_or("Git for Windows is not installed; Maya needs its bash to start sessions (https://git-scm.com/download/win).")?;
+        self.spawn_argv(&shell_argv(command), cwd, folder)
+    }
+
+    fn spawn_argv(&self, argv: &[String], cwd: &Path, folder: &Path) -> Result<TermId, String> {
         let size = PtySize { rows: DEFAULT_ROWS, cols: DEFAULT_COLS, pixel_width: 0, pixel_height: 0 };
         let pair = retrying(std::thread::sleep, || native_pty_system().openpty(size)).map_err(|e| format!("Could not open a terminal: {e}"))?;
         let mut cmd = CommandBuilder::from_argv(argv.iter().map(Into::into).collect());
@@ -329,7 +337,7 @@ impl NativeHost {
         let (input, queued) = channel();
         let term = Arc::new(Term {
             root,
-            cwd: cwd.to_path_buf(),
+            folder: folder.to_path_buf(),
             carded: AtomicBool::new(false),
             #[cfg(unix)]
             tty: pair.master.tty_name().map(|p| p.display().to_string()),
@@ -470,7 +478,7 @@ impl NativeHost {
     /// The folder of every terminal no card has shown yet: its session is
     /// still starting, so the board does not show it.
     pub fn starting(&self) -> Vec<PathBuf> {
-        self.all().into_iter().filter(|(_, t)| !t.carded.load(Ordering::Relaxed)).map(|(_, t)| t.cwd.clone()).collect()
+        self.all().into_iter().filter(|(_, t)| !t.carded.load(Ordering::Relaxed)).map(|(_, t)| t.folder.clone()).collect()
     }
 
     pub fn term_for_root(&self, root_pid: i32) -> Option<TermId> {
@@ -657,7 +665,7 @@ fn read(id: TermId, term: Arc<Term>, mut reader: Box<dyn Read + Send>, terms: We
     drop(sending);
     if tell_unseen(term.carded.load(Ordering::Relaxed), delivery.len() - dead.len(), ends.quitting.load(Ordering::SeqCst)) {
         if let Some(hook) = ends.unseen.get() {
-            hook(Unseen { term: id, cwd: term.cwd.clone(), lines });
+            hook(Unseen { term: id, folder: term.folder.clone(), lines });
         }
     }
 }
@@ -712,7 +720,7 @@ mod tests {
 
     /// Starts `script` in `/bin/sh` in a fresh PTY.
     fn sh(host: &NativeHost, script: &str) -> TermId {
-        host.spawn_argv(&["/bin/sh".into(), "-c".into(), script.into()], Path::new("/")).unwrap()
+        host.spawn_argv(&["/bin/sh".into(), "-c".into(), script.into()], Path::new("/"), Path::new("/")).unwrap()
     }
 
     fn alive(pid: i32) -> bool {
@@ -900,11 +908,22 @@ mod tests {
     fn a_terminal_that_ends_before_its_card_tells_its_folder_and_last_lines() {
         let (host, told) = telling();
         let dir = tempfile::tempdir().unwrap();
-        let term = host.spawn_argv(&["/bin/sh".into(), "-c".into(), "printf 'one\\n\\ntwo\\nthree\\nfour\\n'; exit 3".into()], dir.path()).unwrap();
+        let term = host.spawn_argv(&["/bin/sh".into(), "-c".into(), "printf 'one\\n\\ntwo\\nthree\\nfour\\n'; exit 3".into()], dir.path(), dir.path()).unwrap();
         assert!(within_2s(|| !told.lock().unwrap().is_empty()), "the end was not told");
         let told = told.lock().unwrap();
         assert_eq!(told.len(), 1);
-        assert_eq!((told[0].term, told[0].cwd.as_path(), told[0].lines.as_slice()), (term, dir.path(), ["two", "three", "four"].map(String::from).as_slice()));
+        assert_eq!((told[0].term, told[0].folder.as_path(), told[0].lines.as_slice()), (term, dir.path(), ["two", "three", "four"].map(String::from).as_slice()));
+    }
+
+    #[test]
+    fn a_terminal_started_for_another_folder_is_named_by_it() {
+        let (host, told) = telling();
+        let made = Path::new("/work/bedrock-451");
+        let term = host.spawn_argv(&["/bin/sh".into(), "-c".into(), "read l".into()], Path::new("/"), made).unwrap();
+        assert_eq!(host.starting(), [made]);
+        host.write(term, b"\r").unwrap();
+        assert!(within_2s(|| !told.lock().unwrap().is_empty()), "the end was not told");
+        assert_eq!(told.lock().unwrap()[0].folder, made);
     }
 
     #[test]
