@@ -14,7 +14,9 @@ use std::time::Instant;
 
 #[cfg(unix)]
 use portable_pty::Child;
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+#[cfg(windows)]
+use portable_pty::ChildKiller;
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 use super::screen::Screen;
 
@@ -189,6 +191,8 @@ struct Term {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     /// Input waiting for the input thread, in the order it was queued.
     input: Sender<Vec<u8>>,
+    /// Ends the program on Windows; on Unix its process group is signalled.
+    #[cfg(windows)]
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     /// The program until it is reaped: while it is here, `root` cannot
     /// belong to another process.
@@ -344,6 +348,7 @@ impl NativeHost {
             master: Mutex::new(Some(pair.master)),
             writer: writer.clone(),
             input,
+            #[cfg(windows)]
             killer: Mutex::new(child.clone_killer()),
             #[cfg(unix)]
             child: Mutex::new(Some(child)),
@@ -514,14 +519,7 @@ impl NativeHost {
                 std::thread::sleep(Duration::from_millis(10));
             }
             for t in &all {
-                let child = lock(&t.child);
-                if child.is_some() {
-                    // SAFETY: a signal to a process group whose leader is
-                    // not reaped (the lock keeps it so), so not a reused pid.
-                    unsafe {
-                        libc::kill(-t.root, libc::SIGKILL);
-                    }
-                }
+                signal_group(t, libc::SIGKILL);
             }
             for t in &all {
                 t.reap_held.store(false, Ordering::SeqCst);
@@ -554,16 +552,32 @@ impl NativeHost {
 /// Asks a terminal's program to end.
 fn hang_up(t: &Term) {
     // portable-pty makes the program a session leader, so its pid is also
-    // its process group: the hangup reaches what it started.
+    // its process group: the hangup reaches it and what it started.
     #[cfg(unix)]
-    // SAFETY: a signal to a process group; `root` is always positive.
-    unsafe {
-        libc::kill(-t.root, libc::SIGHUP);
-    }
-    let _ = lock(&t.killer).kill();
-    // Closing the pseudo console ends the processes in it.
+    signal_group(t, libc::SIGHUP);
     #[cfg(windows)]
-    lock(&t.master).take();
+    {
+        let _ = lock(&t.killer).kill();
+        // Closing the pseudo console ends the processes in it.
+        lock(&t.master).take();
+    }
+}
+
+/// Sends `signal` to the terminal's process group, only while its leader
+/// is unreaped: an unreaped leader, even a zombie, keeps its pid, so the
+/// group cannot be another's. True when it was sent.
+#[cfg(unix)]
+fn signal_group(t: &Term, signal: i32) -> bool {
+    let child = lock(&t.child);
+    if child.is_none() {
+        return false;
+    }
+    // SAFETY: a signal to a process group whose leader is not reaped (the
+    // lock keeps it so), so not a reused pid; `root` is always positive.
+    unsafe {
+        libc::kill(-t.root, signal);
+    }
+    true
 }
 
 /// Whether nothing in the terminal's process group runs any more. Its
@@ -1033,6 +1047,18 @@ mod tests {
         host.kill_all();
         assert_eq!(roots.len(), 1);
         assert_eq!(found, (Some(term), None, Some(term), Some(term), None));
+    }
+
+    #[test]
+    fn a_group_is_signalled_only_while_its_leader_is_unreaped() {
+        let host = NativeHost::new(BATCH);
+        let running = sh(&host, "sleep 30");
+        let ended = sh(&host, "exit 0");
+        let (running, ended) = (host.get(running).unwrap(), host.get(ended).unwrap());
+        assert!(within_2s(|| lock(&ended.child).is_none()), "the program that ended was never reaped");
+        let signalled = (signal_group(&running, 0), signal_group(&ended, libc::SIGHUP));
+        host.kill_all();
+        assert_eq!(signalled, (true, false), "a reaped leader's pid may be another's by now");
     }
 
     #[test]
