@@ -350,6 +350,23 @@ describe("mountLive", () => {
     mountLive(host(), { pid: 42 });
     expect((term().options.theme as Record<string, string>).white).toBeUndefined();
   });
+
+  it("takes Maya's new theme while it is open, and stops following it once disposed", async () => {
+    const handle = await mounted();
+    const theme = () => term().options.theme as Record<string, string>;
+    expect(theme().white).toBeUndefined();
+    document.documentElement.dataset.theme = "light";
+    await flush();
+    expect(theme().white).toBe(LIGHT_ANSI.white);
+    expect(theme().brightBlack).toBe(LIGHT_ANSI.brightBlack);
+    delete document.documentElement.dataset.theme;
+    await flush();
+    expect(theme().white).toBeUndefined();
+    handle.dispose();
+    document.documentElement.dataset.theme = "light";
+    await flush();
+    expect(theme().white).toBeUndefined();
+  });
 });
 
 function luminance(hex: string): number {

@@ -195,12 +195,18 @@ export function mountLive(host: HTMLElement, target: LiveTarget): LiveHandle {
 
   const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => refit());
   observer?.observe(host);
+  // Maya's theme changes on the page's root: the open terminal takes its colours at once.
+  const restyle = new MutationObserver(() => {
+    if (!disposed) term.options.theme = themeOf(host);
+  });
+  restyle.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
   return {
     dispose() {
       if (disposed) return;
       disposed = true;
       observer?.disconnect();
+      restyle.disconnect();
       if (attached) void invoke("native_detach", { term: attached.term, viewer: attached.viewer }).catch(() => undefined);
       term.dispose();
     },
