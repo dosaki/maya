@@ -12,11 +12,9 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
 
-#[cfg(unix)]
-use portable_pty::Child;
 #[cfg(windows)]
 use portable_pty::ChildKiller;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use super::screen::Screen;
 
@@ -346,12 +344,20 @@ impl NativeHost {
         }
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| format!("Could not start the session: {e}"))?;
         drop(pair.slave);
-        let Some(root) = child.process_id().and_then(|p| i32::try_from(p).ok()) else {
-            let _ = child.kill();
-            return Err("Could not start the session: it has no process id.".into());
+        // From here on, a failure ends the program it started.
+        let hosted = (|| -> Result<_, String> {
+            let root = child.process_id().and_then(|p| i32::try_from(p).ok()).ok_or("Could not start the session: it has no process id.")?;
+            let reader = pair.master.try_clone_reader().map_err(|e| format!("Could not read the terminal: {e}"))?;
+            let writer = pair.master.take_writer().map_err(|e| format!("Could not write to the terminal: {e}"))?;
+            Ok((root, reader, writer))
+        })();
+        let (root, reader, writer) = match hosted {
+            Ok(hosted) => hosted,
+            Err(why) => {
+                end_unhosted(child.as_mut());
+                return Err(why);
+            }
         };
-        let reader = pair.master.try_clone_reader().map_err(|e| format!("Could not read the terminal: {e}"))?;
-        let writer = pair.master.take_writer().map_err(|e| format!("Could not write to the terminal: {e}"))?;
         let (input, queued) = channel();
         let term = Arc::new(Term {
             root,
@@ -372,6 +378,8 @@ impl NativeHost {
         });
         let id = self.next_term.fetch_add(1, Ordering::Relaxed);
         lock(&self.terms).insert(id, term.clone());
+        // Kept for when a thread cannot start: each takes its own.
+        let kept = term.clone();
         let weak = Arc::downgrade(&self.terms);
         let (wake, ends) = (self.wake.clone(), self.ends.clone());
         #[cfg(unix)]
@@ -391,18 +399,47 @@ impl NativeHost {
             // The pseudo console outlives its program, and the reader sees
             // no end until it closes: close it once the program ends.
             let waited = term.clone();
-            std::thread::spawn(move || {
-                let _ = child.wait();
-                lock(&waited.master).take();
-            });
-            std::thread::Builder::new().name(format!("native-{id}")).spawn(move || read(id, term, reader, weak, &wake, &ends))
+            std::thread::Builder::new()
+                .name(format!("native-{id}-wait"))
+                .spawn(move || {
+                    let _ = child.wait();
+                    lock(&waited.master).take();
+                })
+                .and_then(|_| std::thread::Builder::new().name(format!("native-{id}")).spawn(move || read(id, term, reader, weak, &wake, &ends)))
         };
         let started = started.and_then(|_| std::thread::Builder::new().name(format!("native-{id}-input")).spawn(move || type_queued(&queued, writer)));
         if let Err(e) = started {
-            self.kill(id);
+            self.abandon(id, &kept);
             return Err(format!("Could not start the session: {e}"));
         }
         Ok(id)
+    }
+
+    /// Drops terminal `id`, whose threads could not all start, and ends its
+    /// program; on Unix the program is reaped too (on Windows nothing is
+    /// left to reap). Its end is not told: spawn's error says what went wrong.
+    fn abandon(&self, id: TermId, t: &Term) {
+        t.carded.store(true, Ordering::Relaxed);
+        lock(&self.terms).remove(&id);
+        #[cfg(unix)]
+        {
+            let child = {
+                let mut held = lock(&t.child);
+                if held.is_some() {
+                    // SAFETY: the leader is unreaped (the lock keeps it so),
+                    // so the group is its own.
+                    unsafe {
+                        libc::kill(-t.root, libc::SIGKILL);
+                    }
+                }
+                held.take()
+            };
+            if let Some(mut c) = child {
+                let _ = c.wait();
+            }
+        }
+        #[cfg(windows)]
+        hang_up(t);
     }
 
     fn get(&self, term: TermId) -> Result<Arc<Term>, String> {
@@ -549,12 +586,6 @@ impl NativeHost {
         }
     }
 
-    fn kill(&self, term: TermId) {
-        if let Ok(t) = self.get(term) {
-            hang_up(&t);
-        }
-    }
-
     #[cfg(all(test, unix))]
     fn flush_rounds(&self) -> u64 {
         self.wake.rounds.load(Ordering::Relaxed)
@@ -569,6 +600,24 @@ impl NativeHost {
     pub(crate) fn tty(&self, term: TermId) -> Option<String> {
         self.get(term).ok()?.tty.clone()
     }
+}
+
+/// Ends a program Maya started but cannot host, and reaps it. On Unix its
+/// process group is killed, so what it started goes too.
+fn end_unhosted(child: &mut (dyn Child + Send + Sync)) {
+    #[cfg(unix)]
+    if let Some(root) = child.process_id().and_then(|p| i32::try_from(p).ok()) {
+        // SAFETY: the program is not reaped until the wait below, so its
+        // group is its own.
+        unsafe {
+            libc::kill(-root, libc::SIGKILL);
+        }
+    } else {
+        let _ = child.kill();
+    }
+    #[cfg(windows)]
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Asks a terminal's program to end.
@@ -996,6 +1045,28 @@ mod tests {
         assert_eq!(reap_gap(Duration::from_millis(1999)), Duration::from_millis(50));
         assert_eq!(reap_gap(Duration::from_secs(2)), Duration::from_secs(1));
         assert_eq!(reap_gap(Duration::from_secs(3600)), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_program_that_cannot_be_hosted_is_ended_and_reaped() {
+        let pair = native_pty_system().openpty(PtySize { rows: 5, cols: 20, pixel_width: 0, pixel_height: 0 }).unwrap();
+        let mut child = pair.slave.spawn_command(CommandBuilder::from_argv(["/bin/sh", "-c", "sleep 30; :"].map(Into::into).to_vec())).unwrap();
+        let pid = child.process_id().unwrap() as i32;
+        end_unhosted(child.as_mut());
+        assert!(!alive(pid), "still running, or not reaped");
+    }
+
+    #[test]
+    fn a_terminal_whose_threads_cannot_start_is_dropped_and_its_program_ended_quietly() {
+        let (host, told) = telling();
+        let term = sh(&host, "sleep 30; :");
+        let root = host.root_pids()[0];
+        let t = host.get(term).unwrap();
+        host.abandon(term, &t);
+        assert!(host.root_pids().is_empty(), "still in the host");
+        assert!(within_2s(|| !alive(root)), "still running, or not reaped");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(told.lock().unwrap().len(), 0, "spawn's error says why, not a toast");
     }
 
     #[test]
