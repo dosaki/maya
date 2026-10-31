@@ -15,7 +15,7 @@ import { renderToolTurn, resetToolUi } from "./toolturn";
 import { composerKey, sendShortcut } from "./keys";
 import { costText, hasReset, stageFor, usageStrip, type Stage } from "./usage";
 import { renderAnsi } from "./ansi";
-import { mountLive, type LiveHandle } from "./live";
+import type { LiveHandle, LiveTarget } from "./live";
 import { folderName } from "./nativeopen";
 
 /**
@@ -945,6 +945,42 @@ function bottomOf(root: HTMLElement): "live" | "menu" | "composer" | null {
   return root.querySelector(".modal__input") ? "composer" : null;
 }
 
+/** The live terminal's code, loaded the first time one opens: xterm.js stays out of the page's bundle and the phone's. */
+let liveCode: Promise<typeof import("./live")> | null = null;
+
+/**
+ * Mounts a live terminal in `el` once its code has loaded. A handle
+ * disposed before then, or an element gone from the page, mounts nothing;
+ * a focus asked for meanwhile is given once it mounts.
+ */
+function mountLater(el: HTMLElement, target: LiveTarget): LiveHandle {
+  let handle: LiveHandle | null = null;
+  let disposed = false;
+  let focus = false;
+  liveCode ??= import("./live");
+  liveCode
+    .then(({ mountLive }) => {
+      if (disposed || !el.isConnected) return;
+      handle = mountLive(el, target);
+      if (focus) handle.focus();
+    })
+    .catch((e) => {
+      // The next terminal tries to load it again.
+      liveCode = null;
+      if (!disposed) el.textContent = `Could not load the terminal: ${String(e)}`;
+    });
+  return {
+    dispose() {
+      disposed = true;
+      handle?.dispose();
+    },
+    focus() {
+      if (handle) handle.focus();
+      else focus = true;
+    },
+  };
+}
+
 /**
  * Mounts the live terminal in the panel's `.modal__live` when it has one and
  * no terminal is mounted there yet; disposes one whose element is gone.
@@ -957,7 +993,7 @@ function syncLive(host: HTMLElement, focus: boolean): void {
     current.live.handle.dispose();
     current.live = undefined;
   }
-  if (el && !current.live) current.live = { el, handle: mountLive(el, { pid: current.model.card.pid }) };
+  if (el && !current.live) current.live = { el, handle: mountLater(el, { pid: current.model.card.pid }) };
   if (focus) current.live?.handle.focus();
 }
 
@@ -1240,7 +1276,7 @@ export function openTermViewer(term: number, dir: string): void {
     if (e.key === "Escape" && !(e.target instanceof Element && e.target.closest(".modal__live"))) closeModal();
   };
   document.addEventListener("keydown", keyHandler);
-  const handle = mountLive(host.querySelector<HTMLElement>(".modal__live")!, { term });
+  const handle = mountLater(host.querySelector<HTMLElement>(".modal__live")!, { term });
   bare = { handle, keyHandler };
   handle.focus();
 }

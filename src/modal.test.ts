@@ -1118,6 +1118,7 @@ describe("a Native session's live terminal", () => {
   it("opening mounts the terminal once for the card's pid and focuses it; board refreshes keep it", async () => {
     setViewerTheme("terminal");
     await openModal(native);
+    await flush();
     expect(live.mounts).toHaveLength(1);
     const [m] = live.mounts;
     expect(m.pid).toBe(42);
@@ -1138,16 +1139,28 @@ describe("a Native session's live terminal", () => {
   it("switching to the chat look disposes the terminal, and back mounts a new one", async () => {
     setViewerTheme("terminal");
     await openModal(native);
+    await flush();
     const [first] = live.mounts;
     setViewerTheme("chat");
     expect(first.dispose).toHaveBeenCalledTimes(1);
     expect(host().querySelector(".modal__live")).toBeNull();
     expect(host().querySelector(".modal__composer")).not.toBeNull();
     setViewerTheme("terminal");
+    await flush();
     expect(live.mounts).toHaveLength(2);
     expect(host().querySelector(".modal__live")).toBe(live.mounts[1].host);
     closeModal();
     setViewerTheme("chat");
+  });
+
+  it("switching to the chat look before the terminal's code has loaded mounts nothing", async () => {
+    setViewerTheme("terminal");
+    const opening = openModal(native);
+    setViewerTheme("chat");
+    await opening;
+    await flush();
+    expect(live.mounts).toHaveLength(0);
+    closeModal();
   });
 
   it("a Native card in the chat look mounts nothing", async () => {
@@ -1171,6 +1184,7 @@ describe("a Native session's live terminal", () => {
 });
 
 describe("the viewer of a Native session with no card yet", () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
   const host = () => document.getElementById("modal-host")!;
   beforeEach(() => {
     closeModal();
@@ -1189,8 +1203,16 @@ describe("the viewer of a Native session with no card yet", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("closing the viewer before the terminal's code has loaded mounts nothing", async () => {
+    openTermViewer(9, "/x/dev/eye");
+    closeModal();
+    await flush();
+    expect(live.mounts).toHaveLength(0);
+  });
+
   it("mounts the terminal by its id, and closing or opening a card disposes it", async () => {
     openTermViewer(9, "C:\\work\\eye");
+    await flush();
     expect(host().querySelector(".modal__title")?.textContent).toBe("eye");
     expect(live.mounts.map((m) => [m.term, m.pid])).toEqual([[9, undefined]]);
     expect(live.mounts[0].host).toBe(host().querySelector(".modal__live"));
@@ -1203,6 +1225,7 @@ describe("the viewer of a Native session with no card yet", () => {
     expect(host().childElementCount).toBe(0);
 
     openTermViewer(9, "/x/dev/eye");
+    await flush();
     invoke.mockResolvedValue([]);
     await openModal(base);
     expect(live.mounts[1].dispose).toHaveBeenCalledTimes(1);

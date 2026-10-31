@@ -1,6 +1,8 @@
 // The live terminal of a Native session: an xterm.js terminal attached to
 // the pseudo-terminal Maya hosts, typed into directly as in a terminal app.
 
+// xterm's own styles come with this module: only a page that opens a live terminal loads them.
+import "@xterm/xterm/css/xterm.css";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal, type ITheme } from "@xterm/xterm";
