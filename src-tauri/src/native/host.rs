@@ -185,7 +185,7 @@ struct Term {
     carded: AtomicBool,
     #[cfg(unix)]
     tty: Option<String>,
-    /// None once the pseudo console is closed (Windows).
+    /// None once the pseudo console is closed (Windows). Taken before `out`.
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     /// Shared with the terminal's input thread, which types what is queued.
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -410,11 +410,14 @@ impl NativeHost {
         w.write_all(bytes).and_then(|()| w.flush()).map_err(|e| format!("Could not type into the terminal: {e}"))
     }
 
-    /// Resizes the terminal, to at least 5 rows by 20 columns.
+    /// Resizes the terminal, to at least 5 rows by 20 columns. The terminal
+    /// stays locked until its screen is resized too, so two resizes at once
+    /// cannot leave them at different sizes.
     pub fn resize(&self, term: TermId, rows: u16, cols: u16) -> Result<(), String> {
         let t = self.get(term)?;
         let (rows, cols) = (rows.max(MIN_ROWS), cols.max(MIN_COLS));
-        if let Some(m) = lock(&t.master).as_ref() {
+        let master = lock(&t.master);
+        if let Some(m) = master.as_ref() {
             m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| format!("Could not resize the terminal: {e}"))?;
         }
         lock(&t.out).screen.resize(rows, cols);
