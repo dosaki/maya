@@ -377,9 +377,13 @@ impl NativeHost {
         #[cfg(unix)]
         let started = std::thread::Builder::new().name(format!("native-{id}")).spawn(move || {
             read(id, term.clone(), reader, weak, &wake, &ends);
-            // The tty closes as the program ends; a straggler is polled.
+            // The end of its output is the terminal's end. What still runs
+            // in its process group (a program that let go of the terminal)
+            // is hung up, as when a terminal window closes, and then reaped.
+            signal_group(&term, libc::SIGHUP);
+            let ended = Instant::now();
             while !reaped(&term) {
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(reap_gap(ended.elapsed()));
             }
         });
         #[cfg(windows)]
@@ -615,6 +619,18 @@ fn settled(t: &Term) -> bool {
     #[cfg(not(target_os = "macos"))]
     {
         true
+    }
+}
+
+/// How long to wait before checking again on a program its terminal
+/// ended without, after `waited`: 50 ms at first, as it usually ends with
+/// the terminal, then a second, for one that goes on running.
+#[cfg(unix)]
+fn reap_gap(waited: Duration) -> Duration {
+    if waited < Duration::from_secs(2) {
+        Duration::from_millis(50)
+    } else {
+        Duration::from_secs(1)
     }
 }
 
@@ -956,6 +972,30 @@ mod tests {
         assert_eq!(host.term_for_root(root), None);
         assert!(host.write(term, b"x").is_err());
         assert!(host.root_pids().is_empty());
+    }
+
+    /// On Linux the terminal ends once no process has it open. (On macOS
+    /// it lasts while its session leader runs, which then ends it.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_program_that_lets_go_of_its_terminal_is_hung_up_once_the_terminal_ends() {
+        let host = NativeHost::new(BATCH);
+        sh(&host, "exec </dev/null >/dev/null 2>&1; sleep 30; :");
+        let root = host.root_pids()[0];
+        let gone = within_2s(|| !alive(root));
+        if !gone {
+            // SAFETY: the test's own shell, still running.
+            unsafe { libc::kill(-root, libc::SIGKILL) };
+        }
+        assert!(gone, "the program outlived its terminal");
+    }
+
+    #[test]
+    fn a_program_left_running_is_checked_on_less_often_after_a_while() {
+        assert_eq!(reap_gap(Duration::ZERO), Duration::from_millis(50));
+        assert_eq!(reap_gap(Duration::from_millis(1999)), Duration::from_millis(50));
+        assert_eq!(reap_gap(Duration::from_secs(2)), Duration::from_secs(1));
+        assert_eq!(reap_gap(Duration::from_secs(3600)), Duration::from_secs(1));
     }
 
     #[test]
