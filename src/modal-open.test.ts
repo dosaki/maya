@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-import { openModal, setViewerTheme } from "./modal";
+import { dismissModal, openModal, setOnDismiss, setViewerTheme } from "./modal";
 import type { Card } from "./types";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -56,5 +56,25 @@ describe("the viewer's look", () => {
     await flush();
     expect(saved).toEqual({ completedTimeoutMinutes: 30, viewerTheme: "terminal" });
     setViewerTheme("chat");
+  });
+});
+
+describe("dismissModal", () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="modal-host"></div>';
+    invoke.mockReset();
+  });
+
+  it("closes the open window and tells the board once", async () => {
+    invoke.mockImplementation((cmd: string) => (cmd === "session_history" ? Promise.resolve([]) : Promise.reject(new Error(cmd))));
+    const onDismiss = vi.fn();
+    setOnDismiss(onDismiss);
+    await openModal(kiro);
+    dismissModal();
+    expect(document.getElementById("modal-host")!.childNodes.length).toBe(0);
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    dismissModal();
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+    setOnDismiss(null);
   });
 });
