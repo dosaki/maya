@@ -1,3 +1,20 @@
+# 0.44.2
+
+## Fixed
+
+- Maya's window and the phone app start with less to load: the live terminal's code now loads only when a live terminal opens, so the phone never loads it.
+- While a session's window shows its live terminal, Maya no longer reads the session's history again at each board refresh. It reads it again when you switch back to the chat look.
+- A live terminal that is open when you change Maya's theme now takes the new theme's colours at once.
+- In the light theme, muted text in a live terminal, such as zsh's suggestions, is grey again and not nearly black.
+- When a Native session that reviews a pull request ends before it shows on the board, Maya names the pull request's folder, not the clones folder. The question before a quit names it the same way while the review is still starting.
+- The question before a quit now shows even when part of Maya's window fails to start, and if "Quit anyway" fails, Maya says why.
+- The question before a quit has a title, and Tab and Shift+Tab stay on its two buttons.
+- A reply, an answer or a Stop that Maya types into a Native session now goes in after the keys you typed in its live terminal, not between them.
+- A program that a Native session's terminal leaves running now ends with that terminal.
+- If Maya cannot set up a Native session's terminal, the program it started no longer keeps running, and an error opening the terminal shows at once.
+- A Native session that stops reading what is typed into it no longer holds up replies, answers and Stop for your other sessions, or the board. After 5 seconds Maya says that the session isn't reading its input.
+- Rare cases where Maya could signal a process that was not hers, leave a live terminal at two sizes, or close without stopping her Native sessions are fixed. Finding which sessions are Native also takes less work at each board refresh.
+
 # 0.44.1
 
 ## Fixed
