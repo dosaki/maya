@@ -520,11 +520,8 @@ impl NativeHost {
                 return None;
             }
             let pid = i32::try_from(maya_core::win_console::console_pid(tty)?).ok()?;
-            let tree: Vec<maya_core::foreign::Proc> = maya_core::win_process::tree()
-                .into_iter()
-                .map(|(pid, ppid)| maya_core::foreign::Proc { pid: pid as i32, ppid: ppid as i32, tty: None, command: String::new() })
-                .collect();
-            let root = maya_core::native::root_of(pid, &self.root_pids(), &tree)?;
+            let parents: HashMap<i32, i32> = maya_core::win_process::tree().into_iter().map(|(pid, ppid)| (pid as i32, ppid as i32)).collect();
+            let root = maya_core::native::root_of(pid, &self.root_pids(), &parents)?;
             self.term_for_root(root)
         }
     }

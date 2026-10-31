@@ -6,7 +6,7 @@ use crate::native::{screen, HOST};
 use crate::AppState;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use maya_core::native::root_of;
+use maya_core::native::{parents, root_of};
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State as TauriState;
@@ -48,7 +48,7 @@ fn decode_input(data: &str) -> Result<Vec<u8>, String> {
 pub fn native_attach(state: TauriState<AppState>, pid: i32, on_frame: Channel<NativeFrame>) -> Result<NativeAttached, String> {
     // The store lock ends with this statement: attaching must not hold it.
     let tree = state.store.lock().unwrap().process_tree();
-    let term = root_of(pid, &HOST.root_pids(), &tree)
+    let term = root_of(pid, &HOST.root_pids(), &parents(&tree))
         .and_then(|root| HOST.term_for_root(root))
         .ok_or("This session is not running in Maya.")?;
     attach(term, on_frame)

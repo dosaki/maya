@@ -775,10 +775,10 @@ impl Store {
         }
         let roots = (self.native_roots)();
         if !roots.is_empty() {
-            let tree = self.process_tree();
+            let parents = crate::native::parents(&self.process_tree());
             let mut seen = Vec::new();
             for card in &mut cards {
-                let root = crate::native::root_of(card.pid, &roots, &tree);
+                let root = crate::native::root_of(card.pid, &roots, &parents);
                 card.native = root.is_some();
                 seen.extend(root);
             }
