@@ -49,7 +49,8 @@ function encode(bytes: Uint8Array): string {
 
 /**
  * The 16 ANSI colours on Maya's light background (#fffdf8): xterm's own are
- * made for a dark one, where its white and yellow would not read.
+ * made for a dark one, where its white and yellow would not read. Bright
+ * black is muted text, so it stays a mid-grey (3:1) while the rest read at 4.5:1.
  */
 export const LIGHT_ANSI = {
   black: "#231f14",
@@ -60,7 +61,7 @@ export const LIGHT_ANSI = {
   magenta: "#8a3aa3",
   cyan: "#0e6a73",
   white: "#5f5847",
-  brightBlack: "#4a4335",
+  brightBlack: "#8a8170",
   brightRed: "#a1200f",
   brightGreen: "#275c29",
   brightYellow: "#6b4f00",
