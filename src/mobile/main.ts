@@ -24,7 +24,7 @@ import { makeCardHistory } from "./card-history";
 import { chatTabShown } from "./chat-tab";
 import { initVoice } from "./voice";
 import { keepFocusedAboveKeyboard } from "./keyboard";
-import { closeOverlays } from "./overlays";
+import { closeOverlaysOnTabTaps } from "./overlays";
 import { initNetwork } from "./network";
 import { watchTaps } from "./notify-tap";
 import { initSetup } from "./setup";
@@ -180,14 +180,14 @@ async function start(): Promise<void> {
   const rememberedHost = document.getElementById("remembered");
   if (rememberedHost) initRemembered(rememberedHost);
   tabs = makeTabs((tab) => {
-    // A session or dialog is a pane under the top bar: a tab leaves none of them over the pane it shows.
-    closeOverlays();
     const strip = document.getElementById("strip-host");
     if (strip) strip.hidden = tab !== "sessions";
     const voice = document.getElementById("voice-host");
     if (voice) voice.hidden = tab !== "sessions";
     if (rememberedHost) rememberedHost.hidden = tab !== "sessions";
   });
+  // A session or dialog is a pane under the top bar: tapping a tab leaves none of them over the pane it shows.
+  closeOverlaysOnTabTaps();
   void initVoice();
   initChat({ sendButton: true });
   const recheckNotifications = initNetwork((s) => {
