@@ -1242,17 +1242,39 @@ mod tests {
         assert_eq!(signalled, (true, false), "a reaped leader's pid may be another's by now");
     }
 
+    /// The pids whose parent is `pid`, as `ps` lists them.
+    fn children_of(pid: i32) -> Vec<i32> {
+        let out = std::process::Command::new("ps").args(["-A", "-o", "pid=", "-o", "ppid="]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace().map(|n| n.parse::<i32>().ok());
+                Some((f.next()??, f.next()??))
+            })
+            .filter(|&(_, ppid)| ppid == pid)
+            .map(|(child, _)| child)
+            .collect()
+    }
+
     #[test]
     fn kill_all_ends_every_program() {
         let host = NativeHost::new(BATCH);
-        sh(&host, "sleep 30");
-        sh(&host, "sleep 30");
+        // `; :` keeps each shell from exec'ing its sleep: the sleep is the
+        // shell's child, and must end with it.
+        sh(&host, "sleep 30; :");
+        sh(&host, "sleep 30; :");
         let roots = host.root_pids();
         assert_eq!(roots.len(), 2);
+        let mut sleeps = Vec::new();
+        within_2s(|| {
+            sleeps = roots.iter().flat_map(|&r| children_of(r)).collect();
+            sleeps.len() == 2
+        });
         let t = Instant::now();
         host.kill_all();
         assert!(t.elapsed() < Duration::from_millis(300), "kill_all waited for programs that ended at once");
-        assert!(within_2s(|| roots.iter().all(|&p| !alive(p))), "a program outlived kill_all");
+        assert_eq!(sleeps.len(), 2, "each shell runs its sleep");
+        assert!(within_2s(|| roots.iter().chain(&sleeps).all(|&p| !alive(p))), "a program or what it started outlived kill_all");
     }
 
     #[test]
