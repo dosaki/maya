@@ -115,7 +115,7 @@ body { margin: 0; background: var(--bg); }
 .settings__confirm { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 8px; margin: 4px 0; border: 1px solid var(--border); border-radius: 6px; }
 .settings__confirm p { margin: 0; }
 .settings progress { width: 100%; }
-.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 20; }
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 20; white-space: pre-line; max-width: calc(100vw - 32px); overflow-wrap: anywhere; }
 .notice { position: fixed; bottom: 16px; right: 16px; max-width: 380px; padding: 12px 14px; border: 1px solid var(--gold-deep); border-radius: 10px; background: color-mix(in srgb, var(--gold) 8%, var(--panel)); color: var(--text); font-size: 13px; z-index: 20; box-shadow: 0 6px 20px rgb(0 0 0 / .25); }
 .notice p { margin: 0 0 10px; }
 .notice__actions { display: flex; gap: 8px; justify-content: flex-end; }
@@ -273,6 +273,9 @@ body { margin: 0; background: var(--bg); }
 .modal__setup p { margin: 0; color: var(--muted); }
 .firstrun__row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
 .firstrun__row:has(input:checked) { border-color: var(--working); }
+/* Above a session viewer, which may be open when a quit is asked about. */
+.modal--quit { z-index: 40; }
+.quit__actions { display: flex; gap: 8px; align-self: flex-end; }
 
 .settings label.settings__check { display: flex; align-items: center; justify-content: flex-start; gap: 8px; }
 .settings__check input { width: auto; }
@@ -480,6 +483,11 @@ body { margin: 0; background: var(--bg); }
 .modal__statusline--foot { display: none; }
 .modal--terminal .modal__statusline--foot { display: block; padding: 0 16px 8px 32px; background: #0a0a0a; color: #8a8478; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
 .modal--terminal .modal__statusline--head { display: none; }
+/* A Native session's live terminal fills the panel between the head and the status line; xterm reads its colours from these. */
+.modal__live { flex: 1; min-height: 0; background: var(--term-bg); overflow: hidden; }
+.modal--terminal .modal__live { --term-bg: #0a0a0a; --term-fg: #e8e2d4; --term-cursor: #d9ab3c; --term-selection: rgba(217, 171, 60, .35); }
+/* The fit add-on measures the terminal's parent and takes off only the terminal's own padding: the parent has none. */
+.modal__live .xterm { height: 100%; padding: 8px 16px 4px; }
 .ansi-b { font-weight: 600; }
 .ansi-d { opacity: .6; }
 /* A recorded line keeps its spacing; one wider than the panel scrolls inside the foot, in either look. */
@@ -552,6 +560,7 @@ body { margin: 0; background: var(--bg); }
 :root[data-theme="light"] .modal--terminal .menu__own { color: var(--text); }
 :root[data-theme="light"] .modal--terminal .turn--failed .turn__mark { color: #c0262c; }
 :root[data-theme="light"] .modal--terminal .modal__statusline--foot { background: var(--panel); color: var(--muted); }
+:root[data-theme="light"] .modal--terminal .modal__live { --term-bg: #fffdf8; --term-fg: #231f14; --term-cursor: #a97c16; --term-selection: rgba(169, 124, 22, .3); }
 .newsession__warning { margin: 0; color: var(--awaiting); }
 :root[data-theme="light"] .modal--terminal .usage { color: var(--muted); }
 :root[data-theme="light"] .modal--terminal .usage__pct { color: var(--text); }

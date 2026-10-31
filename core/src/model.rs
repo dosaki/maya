@@ -157,6 +157,10 @@ pub struct Card {
     /// never counted, announced or mirrored.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub brain: bool,
+    /// Running in a terminal Maya hosts herself (Native), not in one of the
+    /// user's terminal apps.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native: bool,
     /// True when the card is Working only because a background shell the
     /// turn started still runs: there is no turn to stop.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -206,6 +210,19 @@ mod tests {
         c.brain = true;
         let back: Card = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert!(back.brain);
+    }
+
+    #[test]
+    fn a_native_flag_is_omitted_when_false_and_read_back_when_true() {
+        let mut c: Card = serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "pid": 1, "name": "n", "cwd": "/x", "state": "idle", "stateSince": 0,
+            "snippet": "", "awaiting": null, "hasInbox": false, "harness": "claude-code", "pr": null, "context": null
+        }))
+        .unwrap();
+        assert!(!serde_json::to_string(&c).unwrap().contains("\"native\""));
+        c.native = true;
+        let back: Card = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
+        assert!(back.native);
     }
 
     #[test]
@@ -261,7 +278,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None
+            stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["context"]["percent"], 62);

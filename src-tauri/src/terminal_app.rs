@@ -2,7 +2,7 @@
 //! activation afterwards needs AppKit, so these live in the app.
 
 use crate::terminal_iterm::ItermApp;
-use maya_core::config::{self, NewSessionTerminal};
+use maya_core::config::NewSessionTerminal;
 use maya_core::launch::applescript_run;
 use maya_core::terminal::Terminal;
 use std::path::Path;
@@ -138,12 +138,7 @@ pub struct MacTerminal {
     choice: fn() -> NewSessionTerminal,
 }
 
-pub static TERMINAL: MacTerminal = MacTerminal { iterm: &ItermApp, terminal: &TerminalApp, choice: configured_choice };
-
-/// The choice saved in Settings; Terminal when there is none or it cannot be read.
-fn configured_choice() -> NewSessionTerminal {
-    config::load(&maya_core::claude_dir().join("maya/config.json")).new_session_terminal
-}
+pub static TERMINAL: MacTerminal = MacTerminal { iterm: &ItermApp, terminal: &TerminalApp, choice: crate::native::route::configured_choice };
 
 impl MacTerminal {
     /// The apps to ask about a tty, in order.
@@ -172,7 +167,9 @@ impl Terminal for MacTerminal {
     fn open(&self, command: &str, cwd: &Path, label: &str) -> Result<Option<String>, String> {
         let app = match (self.choice)() {
             NewSessionTerminal::Iterm => self.iterm,
-            NewSessionTerminal::Terminal => self.terminal,
+            // Native is taken before the call reaches here; this arm only
+            // keeps the match exhaustive.
+            NewSessionTerminal::Terminal | NewSessionTerminal::Native => self.terminal,
         };
         app.open(command, cwd, label)
     }

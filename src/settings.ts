@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
-import { builtinVoiceName, isMac, recognizerOptions, secretStore, thisComputerLower } from "./platform";
+import { builtinVoiceName, isLinux, isMac, isWindows, recognizerOptions, secretStore, thisComputerLower } from "./platform";
 import type { ColorTheme, GitProvider, Harness, NewSessionTerminal, ViewerTheme } from "./types";
 import { setViewerTheme } from "./modal";
 import { COLOR_THEMES, applyColorTheme, asColorTheme } from "./theme";
@@ -582,6 +582,14 @@ export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean 
   return (model.networkRole ?? model.network?.role) === "main" && !!code && nowMs <= code.expiresAt + PAIRING_TICK_MS;
 }
 
+/** The places a new session can open on this platform, as [value, label]. */
+export function terminalChoices(): [NewSessionTerminal, string][] {
+  if (isMac()) return [["terminal", "Terminal"], ["iterm", "iTerm2"], ["native", "Native"]];
+  if (isWindows()) return [["terminal", "Windows Terminal"], ["native", "Native"]];
+  if (isLinux()) return [["terminal", "Terminal (tmux)"], ["native", "Native"]];
+  return [["terminal", "Terminal"], ["native", "Native"]];
+}
+
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {
   const root = document.createElement("div");
   root.className = "settings__body settings__body--sidebar";
@@ -831,22 +839,22 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   viewerSel.addEventListener("change", () => h.onViewerTheme?.(viewerSel.value as ViewerTheme));
   viewerLabel.append(viewerSel);
   sessions.append(viewerLabel);
-  if (isMac()) {
-    const terminalLabel = document.createElement("label");
-    terminalLabel.textContent = "New sessions open in";
-    const terminalSel = document.createElement("select");
-    terminalSel.name = "newSessionTerminal";
-    for (const [value, text] of [["terminal", "Terminal"], ["iterm", "iTerm2"]] as const) {
-      const o = document.createElement("option");
-      o.value = value;
-      o.textContent = text;
-      terminalSel.append(o);
-    }
-    terminalSel.value = model.newSessionTerminal ?? "terminal";
-    terminalSel.addEventListener("change", () => h.onNewSessionTerminal?.(terminalSel.value as NewSessionTerminal));
-    terminalLabel.append(terminalSel);
-    sessions.append(terminalLabel);
+  const terminalLabel = document.createElement("label");
+  terminalLabel.textContent = "New sessions open in";
+  const terminalSel = document.createElement("select");
+  terminalSel.name = "newSessionTerminal";
+  const choices = terminalChoices();
+  for (const [value, text] of choices) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = text;
+    terminalSel.append(o);
   }
+  const saved = model.newSessionTerminal ?? "terminal";
+  terminalSel.value = choices.some(([value]) => value === saved) ? saved : "terminal";
+  terminalSel.addEventListener("change", () => h.onNewSessionTerminal?.(terminalSel.value as NewSessionTerminal));
+  terminalLabel.append(terminalSel);
+  sessions.append(terminalLabel);
 
   const clonesLabel = document.createElement("label");
   clonesLabel.textContent = "Clones directory (for reviews and worktrees)";

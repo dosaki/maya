@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     fn remembered_row(machine: Option<&str>, waiting: bool, id: &str) -> maya_core::remembered::RememberedRow {
-        maya_core::remembered::RememberedRow { machine: machine.map(String::from), waiting, entry: maya_core::remembered::Remembered { agent: maya_core::model::Harness::ClaudeCode, session_id: id.into(), dir: "/x".into(), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None } }
+        maya_core::remembered::RememberedRow { machine: machine.map(String::from), waiting, entry: maya_core::remembered::Remembered { agent: maya_core::model::Harness::ClaudeCode, session_id: id.into(), dir: "/x".into(), name: id.into(), first_seen_ms: 1, last_seen_ms: 2, gone_at_ms: None, offered: true, offered_at_ms: None, error: None, native: false } }
     }
 
     #[test]

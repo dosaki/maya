@@ -24,6 +24,7 @@ pub mod interpreter;
 pub mod launch;
 pub mod log;
 pub mod model;
+pub mod native;
 pub mod net;
 pub mod notify;
 pub mod opencode;

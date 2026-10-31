@@ -577,6 +577,15 @@ Three workflows in `.github/workflows/`:
   `ear.rs`, `wake.rs`,
   `listener.rs`, `models.rs` (the voice assistant), and
   `remembered_app.rs` (resuming and forgetting what was running, for the banner and the voice; the heartbeat).
+- `src-tauri/src/native/` — Native sessions, which run in pseudo-terminals Maya
+  hosts instead of a terminal app: `host.rs` (the terminals, their output
+  batched to viewers), `screen.rs` (a headless screen and its history, shown
+  to a viewer that opens late) and `route.rs` (card actions on a tty Maya
+  hosts go to the host, any other to the platform's terminal; new sessions
+  open where Settings says). `native_app.rs` has the Tauri commands (attach,
+  type, resize), `quit_guard.rs` asks before a quit or an update stops a
+  Working Native session, and the viewer is
+  `src/live.ts` (xterm.js) with `src/quitguard.ts` for the warning.
 - `chatterbox/` — a small OpenAI-compatible speech server (`server.py`, a `Dockerfile`, `compose.yaml` and a `voices/` folder) for Maya's voice server; see [chatterbox.md](chatterbox.md).
 - `cli/src/` — `main.rs` and `args.rs` (subcommand parsing), `commands.rs`
   (`pair`, `status`, `hooks`, `config`, `start`), `run_cmd.rs` (`run`, the headless

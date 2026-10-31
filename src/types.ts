@@ -176,6 +176,8 @@ export interface Card {
   stale?: boolean;
   /** Maya's own resident session: shown only in debug mode and never counted. */
   brain?: boolean;
+  /** Running in a terminal Maya hosts herself, not in one of the user's terminal apps. */
+  native?: boolean;
   /** Working only because a background shell outlived the turn: there is no turn to stop. */
   shell?: boolean;
   /** Tokens and cost the session has used so far, when its agent reports them. */
@@ -329,5 +331,5 @@ export type ViewerTheme = "chat" | "terminal";
 /** The colours of Maya's windows; dark is the look Maya always had. */
 export type ColorTheme = "dark" | "light";
 
-/** The macOS app that opens the windows of sessions Maya starts. */
-export type NewSessionTerminal = "terminal" | "iterm";
+/** Where new sessions open: the macOS app that opens their windows, or Native, where Maya hosts the terminal. */
+export type NewSessionTerminal = "terminal" | "iterm" | "native";

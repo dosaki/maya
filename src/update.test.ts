@@ -21,9 +21,10 @@ const text = () => document.querySelector("#update-bar .update-bar__text")?.text
 const labels = () => [...document.querySelectorAll<HTMLButtonElement>("#update-bar button")].map((b) => b.textContent);
 const press = (label: string) => [...document.querySelectorAll<HTMLButtonElement>("#update-bar button")].find((b) => b.textContent === label)!.click();
 
-function backend(kind: string, check: () => Promise<UpdateInfo | null>, install = () => new Promise<void>(() => {})) {
+function backend(kind: string, check: () => Promise<UpdateInfo | null>, install = () => new Promise<void>(() => {}), working: string[] = []) {
   invoke.mockImplementation((cmd: string) => {
     if (cmd === "update_kind") return Promise.resolve(kind);
+    if (cmd === "native_working") return Promise.resolve(working);
     if (cmd === "update_check") return check();
     if (cmd === "update_install") return install();
     if (cmd === "open_url") return Promise.resolve();
@@ -165,7 +166,56 @@ describe("makeUpdates", () => {
     invoke.mockClear();
     press("Try again");
     await flush();
-    expect(invoke.mock.calls.map((c) => c[0])).toEqual(["update_check", "update_install"]);
+    expect(invoke.mock.calls.map((c) => c[0])).toEqual(["native_working", "update_check", "update_install"]);
+  });
+
+  it("installs the update without asking when no Native session is working", async () => {
+    backend("self", () => Promise.resolve(info));
+    await makeUpdates().init();
+    await flush();
+    press("Update");
+    await flush();
+    expect(document.querySelector("#quit-host .modal")).toBeNull();
+    expect(invoke).toHaveBeenCalledWith("update_install");
+  });
+
+  it("does not install when it cannot tell whether a Native session is working", async () => {
+    backend("self", () => Promise.resolve(info));
+    const plain = invoke.getMockImplementation()!;
+    invoke.mockImplementation((cmd: string) => (cmd === "native_working" ? Promise.reject(new Error("gone")) : plain(cmd)));
+    await makeUpdates().init();
+    await flush();
+    press("Update");
+    await flush();
+    expect(invoke).not.toHaveBeenCalledWith("update_install");
+    expect(text()).toContain("could not tell whether a Native session is working");
+  });
+
+  it("asks first when a Native session is working, and installs on Restart anyway", async () => {
+    backend("self", () => Promise.resolve(info), undefined, ["fix-ci"]);
+    await makeUpdates().init();
+    await flush();
+    press("Update");
+    await flush();
+    expect(document.querySelector("#quit-host p")?.textContent).toBe("This Native session is working and will stop when Maya restarts to update: fix-ci.");
+    expect(invoke).not.toHaveBeenCalledWith("update_install");
+    [...document.querySelectorAll<HTMLButtonElement>("#quit-host button")].find((b) => b.textContent === "Restart anyway")!.click();
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("update_install");
+    expect(text()).toBe("Downloading Maya 0.19.0…");
+  });
+
+  it("does not install the update when the user cancels", async () => {
+    backend("self", () => Promise.resolve(info), undefined, ["fix-ci", "docs"]);
+    await makeUpdates().init();
+    await flush();
+    press("Update");
+    await flush();
+    [...document.querySelectorAll<HTMLButtonElement>("#quit-host button")].find((b) => b.textContent === "Cancel")!.click();
+    await flush();
+    expect(invoke).not.toHaveBeenCalledWith("update_install");
+    expect(text()).toBe("Maya 0.19.0 is ready.");
+    expect(labels()).toEqual(["Update", "Later"]);
   });
 
   it("Download opens the release's link and installs nothing", async () => {

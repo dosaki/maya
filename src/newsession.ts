@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { showToast } from "./toast";
+import { openStarted } from "./nativeopen";
 import { composerKey, sendShortcut } from "./keys";
 import { hasLocalMachine, initialChoices, machineChoices, type MachineChoice, type MachineInfo } from "./machines";
 import { harnessLabel } from "./harness";
@@ -127,6 +128,8 @@ interface StartResult {
   how: "chosen" | "classifier" | "fallback";
   /** The terminal's name for the new session, where it has names (tmux). */
   terminal?: string;
+  /** The Native terminal the session runs in, opened at once; null in a terminal app. */
+  nativeTerm?: number | null;
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -531,12 +534,14 @@ async function start(machine: string, dir: string | null, prompt: string, choice
     const r = await invoke<StartResult>("start_session", { dir, prompt, options: choices, machine });
     draft = "";
     draftName = "";
-    if (current !== me) {
+    // The prompt is spent: closing the form, which the opener below does, must not keep it as a draft.
+    me.model.done = true;
+    // A Native session's terminal opens at once, in place of this form.
+    if (openStarted(r.nativeTerm, r.dir) || current !== me) {
       showToast(startedText(r));
       return;
     }
     // The prompt is spent: clear it everywhere and keep Start disabled until the modal closes.
-    me.model.done = true;
     me.model.busy = true;
     me.model.prompt = "";
     me.model.name = "";

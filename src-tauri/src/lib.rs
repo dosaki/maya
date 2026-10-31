@@ -8,9 +8,12 @@ pub mod ear;
 pub mod focus;
 pub mod listener;
 pub mod models;
+pub mod native;
+mod quit_guard;
 pub mod net_app;
 mod brain_app;
 mod brain_route;
+mod native_app;
 mod remembered_app;
 #[cfg(target_os = "macos")]
 pub mod terminal_app;
@@ -33,14 +36,9 @@ pub(crate) use terminal_win as term;
 #[cfg(target_os = "linux")]
 pub(crate) use terminal_linux as term;
 
-/// This platform's one terminal, as the core's seam.
-#[cfg(not(target_os = "linux"))]
+/// This platform's terminal with Maya's own in front of it, as the core's seam.
 fn terminal() -> &'static dyn terminal::Terminal {
-    &term::TERMINAL
-}
-#[cfg(target_os = "linux")]
-fn terminal() -> &'static dyn terminal::Terminal {
-    &*term::TERMINAL
+    &*native::route::TERMINAL
 }
 
 /// Opens an http(s) URL in the default browser.
@@ -579,13 +577,23 @@ fn open_review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo:
     open_in_browser(&pr.url)
 }
 
+/// A review just started: its folder, and the Native terminal it runs in
+/// when it runs in one, for the page to open at once.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Reviewing {
+    dir: String,
+    native_term: Option<u64>,
+}
+
 /// Opens a terminal that reviews a listed PR with Maya's agent and the
 /// review prompt from Settings, in a worktree of one clone per repository
 /// under the clones dir.
 #[tauri::command(async)]
-fn review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<String, String> {
+fn review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<Reviewing, String> {
     let pr = review_pr_for(&state, forge, &repo, number)?;
-    actions::start_review(&local(&state), &pr)
+    let (dir, native_term) = native::route::opening(|| actions::start_review(&local(&state), &pr));
+    Ok(Reviewing { dir: dir?, native_term })
 }
 
 fn claude_dir() -> std::path::PathBuf {
@@ -1332,15 +1340,18 @@ fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: Str
 }
 
 /// Opens a terminal in the folder resuming the session with `agent`.
+/// Returns the Native terminal it runs in when it runs in one, for the page
+/// to open at once.
 #[tauri::command(async)]
-fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<(), String> {
+fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<Option<u64>, String> {
     let agent = agent.unwrap_or_default();
     if !is_local(&machine) {
         let machine = machine.unwrap();
         check_remote_agent(agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
-        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent });
+        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent }).map(|()| None);
     }
-    actions::resume_session(&local(&state), agent, &dir, &session_id)
+    let (resumed, native_term) = native::route::opening(|| actions::resume_session(&local(&state), agent, &dir, &session_id));
+    resumed.map(|()| native_term)
 }
 
 #[tauri::command(async)]
@@ -1363,8 +1374,18 @@ fn list_agents(state: TauriState<AppState>, machine: Option<String>) -> AgentsRe
     agents_reply(local, remote, !local && merge::worktrees_of(&boards, name), agents::current)
 }
 
+/// A session just started, and the Native terminal it runs in when it runs
+/// in one, for the page to open at once.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Started {
+    #[serde(flatten)]
+    result: actions::StartResult,
+    native_term: Option<u64>,
+}
+
 #[tauri::command(async)]
-fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions, machine: Option<String>) -> Result<actions::StartResult, String> {
+fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String>, prompt: String, options: launch::LaunchOptions, machine: Option<String>) -> Result<Started, String> {
     if !is_local(&machine) {
         if prompt.trim().is_empty() {
             return Err("Type a prompt first.".into());
@@ -1374,9 +1395,10 @@ fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String
         let boards = remote_boards(&state);
         check_remote_agent(options.agent, &merge::agents_of(&boards, &machine), &machine)?;
         check_remote_worktree(&options, merge::worktrees_of(&boards, &machine), &machine)?;
-        return route_data(&app, &machine, start_kind_for(dir, prompt, options));
+        return route_data(&app, &machine, start_kind_for(dir, prompt, options)).map(|result| Started { result, native_term: None });
     }
-    actions::start_session(&local(&state), dir, prompt, options)
+    let (started, native_term) = native::route::opening(|| actions::start_session(&local(&state), dir, prompt, options));
+    started.map(|result| Started { result, native_term })
 }
 
 #[tauri::command(async)]
@@ -1644,6 +1666,8 @@ pub fn run() {
     let dir = claude_dir();
     let mut store = Store::new(dir.clone());
     store.judge_asks = true;
+    store.set_native_roots(Box::new(|| native::HOST.root_pids()));
+    store.set_native_seen(Box::new(|roots| native::HOST.mark_carded(roots)));
     store.compact_events();
     let chat = maya_core::brain::chat::ChatLog::load(store.claude_dir().join("maya").join("brain").join("chat.json"));
     let brain = brain_app::BrainState::new(store.claude_dir());
@@ -1652,7 +1676,21 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
+        // Closing the window quits Maya, so it asks first too; "Quit
+        // anyway" then exits the app.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && quit_guard::ask_if_needed(window.app_handle(), false) {
+                    api.prevent_close();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            native_app::native_attach,
+            native_app::native_attach_term,
+            native_app::native_input,
+            native_app::native_resize,
+            native_app::native_detach,
             git::get_git_status,
             git::store_git_token,
             git::clear_git_token,
@@ -1738,7 +1776,9 @@ pub fn run() {
             list_machines,
             updater::update_kind,
             updater::update_check,
-            updater::update_install
+            updater::update_install,
+            quit_guard::native_working,
+            quit_guard::quit_confirmed
         ])
         .setup(move |app| {
             let log_path = dir.join("maya").join("maya.log");
@@ -1757,8 +1797,16 @@ pub fn run() {
             focus::install_app_handle(app.handle().clone());
             notify::set_remote_speaker(voice::speak_remote);
             listener::install_speech_hook(app.handle().clone());
+            native_app::tell_unseen_ends(app.handle().clone());
             #[cfg(target_os = "macos")]
             dock::set_dock_icon();
+            // Cmd+Q, the Dock's Quit and AppleScript end AppKit directly;
+            // the quit guard answers AppKit's question before they do.
+            #[cfg(target_os = "macos")]
+            {
+                quit_guard::guard_terminate(app.handle());
+                quit_guard::watch_power_off();
+            }
             // Starts the agents' first listing, so the start form finds it ready.
             let _ = agents::snapshot();
             let handle = app.handle().clone();
@@ -1830,14 +1878,23 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(|app, event| {
+        .run(|app, event| match event {
+            // A quit that would stop a working Native session waits for the
+            // page's answer.
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                if quit_guard::ask_if_needed(app, quit_guard::agreed(code)) {
+                    api.prevent_exit();
+                }
+            }
             // A stalled model download otherwise keeps its curl child alive
             // under launchd after Maya quits, writing a 60-190 MB `.part`
             // file to nowhere.
-            if let tauri::RunEvent::Exit = event {
+            tauri::RunEvent::Exit => {
                 models::abort_all();
+                native::HOST.kill_all();
                 brain_app::quit(app);
             }
+            _ => {}
         });
 }
 
@@ -1933,7 +1990,7 @@ mod route_tests {
             machine: Some("laptop".into()),
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None, brain: false, shell: false, usage: None, limits: None, status_line: None };
+            stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None };
         assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));
         assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
         assert_eq!(pr_link(&card("/Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");

@@ -321,7 +321,7 @@ pub fn derive(i: &DeriveInput) -> Card {
         machine: None,
         machine_address: None, machine_platform: None,
         terminal: None,
-        stale: false, model: None, branch: None, brain: false, shell, usage: None, limits: None, status_line: None
+        stale: false, model: None, branch: None, brain: false, native: false, shell, usage: None, limits: None, status_line: None
     }
 }
 

@@ -1,10 +1,12 @@
+import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "./actions";
 import { answerGuard, stopGuard } from "./answer";
 import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
-import { openModal, refreshModal, setProgress } from "./modal";
+import { openModal, openTermViewer, refreshModal, setProgress } from "./modal";
+import { endedText, openStarted, setNativeOpener } from "./nativeopen";
 import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
@@ -24,6 +26,7 @@ import { initDebug } from "./debug";
 import { maybeShowFirstRun } from "./firstrun";
 import { maybeShowKeysNotice } from "./notice";
 import { updates } from "./update";
+import { askQuit } from "./quitguard";
 
 let cards: Card[] = [];
 const guard = makeClickGuard();
@@ -99,8 +102,10 @@ async function reviewAction(target: Element): Promise<void> {
     } else if (action.kind === "open-pr") {
       await invoke("open_review_pr", { forge: action.forge, repo: action.repo, number: action.number });
     } else {
-      const dir = await invoke<string>("review_pr", { forge: action.forge, repo: action.repo, number: action.number });
-      showToast(`Reviewing ${prRef(action)} in ${dir.split("/").filter(Boolean).pop() ?? dir}`);
+      const r = await invoke<{ dir: string; nativeTerm: number | null }>("review_pr", { forge: action.forge, repo: action.repo, number: action.number });
+      showToast(`Reviewing ${prRef(action)} in ${r.dir.split("/").filter(Boolean).pop() ?? r.dir}`);
+      // A review in a Native terminal shows it at once: a new clone may ask to trust its folder.
+      openStarted(r.nativeTerm, r.dir);
     }
   } catch (e) {
     showToast(String(e));
@@ -141,7 +146,21 @@ function paint(): void {
   tabs?.setSessionCounts(counts);
 }
 
+/**
+ * Opens the viewer of the local session `pid` when it runs in a terminal
+ * Maya hosts: that terminal is in the viewer, not a window. False otherwise.
+ */
+function openNative(pid: number): boolean {
+  const card = cards.find((c) => c.pid === pid && !c.machine && c.native);
+  if (!card) return false;
+  closeNewSession();
+  void openModal(card);
+  return true;
+}
+
+/** Brings forward the terminal of the local session `pid`. */
 async function focus(pid: number): Promise<void> {
+  if (openNative(pid)) return;
   try {
     await invoke("focus_session", { pid });
   } catch (e) {
@@ -328,6 +347,20 @@ async function start(): Promise<void> {
     if (ev.key === "Enter" && target.classList.contains("card")) act(target);
   });
 
+  // A quit held because it would stop a working Native session.
+  await listen<{ names: string[] }>("quit-confirm", (e) => {
+    void askQuit(e.payload.names, false).then((yes) => (yes ? invoke("quit_confirmed") : undefined));
+  });
+  // A Native session started or resumed here opens its terminal at once, in place of any open dialog.
+  setNativeOpener((term, dir) => {
+    closeNewSession();
+    closeResume();
+    openTermViewer(term, dir);
+  });
+  // A Native session that ended before it showed on the board says what it printed last.
+  await listen<{ term: number; dir: string; lines: string[] }>("native-ended", (e) => showToast(endedText(e.payload.dir, e.payload.lines), 10_000));
+  // "Show me …" by voice for a session in a terminal Maya hosts.
+  await listen<{ pid: number }>("open-session", (e) => void openNative(e.payload.pid));
   await listen<Card[]>("sessions", (e) => {
     cards = e.payload;
     for (const c of cards) if (c.state !== "awaiting") progress.reset(c.sessionId);

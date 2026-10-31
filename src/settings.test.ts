@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
 import { RUNNING_VERSION } from "./release-notes";
-import { gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -1344,13 +1344,13 @@ describe("where new sessions open", () => {
 
   afterEach(() => pretend(original));
 
-  it("offers Terminal or iTerm2 under Sessions on a Mac and saves the choice", () => {
+  it("offers Terminal, iTerm2 or Native under Sessions on a Mac and saves the choice", () => {
     pretend(MAC);
     const h = { ...handlers(), onNewSessionTerminal: vi.fn() };
     const el = renderSettings({ ...voiceBase, newSessionTerminal: "terminal" }, h);
     const sessions = el.querySelector(".settings__section--sessions")!;
     const sel = sessions.querySelector<HTMLSelectElement>("select[name=newSessionTerminal]")!;
-    expect([...sel.options].map((o) => o.textContent)).toEqual(["Terminal", "iTerm2"]);
+    expect([...sel.options].map((o) => o.textContent)).toEqual(["Terminal", "iTerm2", "Native"]);
     expect(sel.value).toBe("terminal");
     sel.value = "iterm";
     sel.dispatchEvent(new Event("change"));
@@ -1365,11 +1365,35 @@ describe("where new sessions open", () => {
     expect(fresh.querySelector<HTMLSelectElement>("select[name=newSessionTerminal]")!.value).toBe("terminal");
   });
 
-  it("is not offered on Windows or Linux, where there is no iTerm2", () => {
-    pretend("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0");
-    expect(renderSettings({ ...voiceBase }, handlers()).querySelector("select[name=newSessionTerminal]")).toBeNull();
-    pretend("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 (KHTML, like Gecko)");
-    expect(renderSettings({ ...voiceBase }, handlers()).querySelector("select[name=newSessionTerminal]")).toBeNull();
+  const WINDOWS = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/130.0";
+  const LINUX = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 (KHTML, like Gecko)";
+
+  it("offers Terminal, iTerm2 and Native on macOS", () => {
+    pretend(MAC);
+    expect(terminalChoices()).toEqual([["terminal", "Terminal"], ["iterm", "iTerm2"], ["native", "Native"]]);
+  });
+  it("offers Windows Terminal and Native on Windows", () => {
+    pretend(WINDOWS);
+    expect(terminalChoices()).toEqual([["terminal", "Windows Terminal"], ["native", "Native"]]);
+  });
+  it("offers Terminal (tmux) and Native on Linux", () => {
+    pretend(LINUX);
+    expect(terminalChoices()).toEqual([["terminal", "Terminal (tmux)"], ["native", "Native"]]);
+  });
+  it("shows New sessions open in on every desktop platform and saves native", () => {
+    for (const ua of [WINDOWS, LINUX]) {
+      pretend(ua);
+      const h = { ...handlers(), onNewSessionTerminal: vi.fn() };
+      const sel = renderSettings({ ...voiceBase }, h).querySelector<HTMLSelectElement>("select[name=newSessionTerminal]")!;
+      sel.value = "native";
+      sel.dispatchEvent(new Event("change"));
+      expect(h.onNewSessionTerminal).toHaveBeenCalledWith("native");
+    }
+  });
+  it("shows Terminal on Windows when the saved value is iterm", () => {
+    pretend(WINDOWS);
+    const sel = renderSettings({ ...voiceBase, newSessionTerminal: "iterm" }, handlers()).querySelector<HTMLSelectElement>("select[name=newSessionTerminal]")!;
+    expect(sel.value).toBe("terminal");
   });
 });
 

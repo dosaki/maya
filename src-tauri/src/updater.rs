@@ -68,8 +68,9 @@ pub async fn update_check(app: AppHandle, pending: State<'_, Pending>) -> Result
 }
 
 /// Downloads and installs the update the last check found, reporting
-/// `update-progress`, then relaunches Maya. Sessions live in their
-/// terminals, so the relaunch ends none of them.
+/// `update-progress`, then relaunches Maya. Sessions in external terminals
+/// live on; Native sessions end, which the window asks about before it calls
+/// this.
 #[tauri::command]
 pub async fn update_install(app: AppHandle, pending: State<'_, Pending>) -> Result<(), String> {
     let Some(found) = pending.0.lock().unwrap().take() else {

@@ -1,3 +1,17 @@
+# 0.44.0
+
+## New
+
+- Sessions can now run inside Maya, on macOS, Windows and Linux: choose Native in Settings › Sessions › New sessions open in. A Native session opens no terminal app; the other choices work as before.
+- In the terminal look, a Native session's window is its live terminal and takes every key, including arrows, Esc, Tab, Ctrl+C, paste and slash commands such as /config. Copy and paste are Cmd+C and Cmd+V on macOS, and Ctrl+Shift+C and Ctrl+Shift+V on Windows and Linux. In the chat look, the reply box and the answer menu work as before.
+- A card's Terminal button opens a Native session's window, in the look you last chose. In the terminal look, that is its live terminal.
+- A Native session you start with the + button, resume on its own, or start to review a pull request opens its live terminal at once, before it shows on the board. A question such as whether to trust the folder, a login, or an error shows there.
+- If a Native session ends before it shows on the board, Maya says which folder it was in and shows the last lines it printed.
+- On Linux, a Native session takes typed keys without tmux.
+- Native sessions stop when Maya quits. Quitting Maya, closing its window or restarting to update asks first when a Native session is working, or is still starting and not yet on the board. Logging out or shutting down is never held up.
+- Native sessions that were open when Maya quit are offered back the next time it starts, in the Sessions tab or by voice ("Maya, resume my sessions"), and come back as Native.
+- For now, another machine's Maya and the phone show a Native session as its chat and transcript, not as its live terminal.
+
 # 0.43.0
 
 ## New

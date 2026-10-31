@@ -22,6 +22,7 @@ the right terminal first.
 - Starts new sessions and resumes old ones
 - Starts a new session in its own git worktree when you tick New worktree, on a new branch off the branch your checkout is on, so sessions in one repository do not step on each other
 - After a restart, offers to resume every session that was running, on this machine and on the paired ones, each in its own folder and terminal: from the Sessions tab, or by voice ("Maya, resume my sessions")
+- Runs sessions inside Maya, with no terminal app, when you choose Native (Settings › Sessions › New sessions open in): in the terminal look the session's window is then its live terminal, and the session stops when Maya quits. A Native session you start, resume on its own or start to review a pull request opens its live terminal at once, before it shows on the board; one that ends before it shows there has Maya show the last lines it printed
 - Shows what a session's terminal shows: the conversation, each command's output, edit diffs, how long it has been working, and its model, folder and branch
   - As a chat or in a terminal look, like the agent's own terminal (Settings → Sessions, or the `>_` button on the session)
 - Shows each session's context, its account's usage limits and its cost so far, in the session window
@@ -130,7 +131,10 @@ Sessions run in Terminal.app or in iTerm2. Settings › Sessions › New
 sessions open in picks where the windows of the sessions Maya starts open
 (Terminal by default). Maya types into, and brings forward, a session in
 either app by its terminal device, wherever you started it. macOS may ask
-once whether Maya can control iTerm2: allow it.
+once whether Maya can control iTerm2: allow it. Native runs the session
+inside Maya instead: no terminal app opens, the session's viewer is its live
+terminal (Cmd+C and Cmd+V copy and paste), and the session stops when Maya
+quits.
 
 macOS shows the Focus state only to apps with Full Disk Access. Without it
 Maya cannot tell that a Focus mode such as Do Not Disturb is on, and keeps
@@ -146,7 +150,10 @@ puts it in the Start menu. The builds are not signed, so the `.exe` or
 info, then Run anyway.
 
 Sessions Maya starts run in Git Bash, in a
-[Windows Terminal](https://aka.ms/terminal) window when it is installed.
+[Windows Terminal](https://aka.ms/terminal) window when it is installed, or,
+if you choose Native in Settings › Sessions › New sessions open in, inside
+Maya with no window (the session's viewer is its live terminal; Ctrl+Shift+C
+and Ctrl+Shift+V copy and paste; the session stops when Maya quits).
 Install Claude Code with its native installer (the command above), so that
 `claude.exe` is on the PATH; npm's `claude.cmd` cannot take the multi-line
 prompts Maya sends.
@@ -163,11 +170,15 @@ in): the desktop app keeps its network key in GNOME Keyring through
 `secret-tool`, and without it the network does not start ("Could not
 reach the key store"). For the ElevenLabs voice, also
 install `pulseaudio-utils` (for `paplay`; `ffplay` works too). Sessions
-open in GNOME Terminal, Ptyxis or any `x-terminal-emulator`.
+open in GNOME Terminal, Ptyxis or any `x-terminal-emulator`, or, if you
+choose Native in Settings › Sessions › New sessions open in, inside Maya with
+no window (the session's viewer is its live terminal; Ctrl+Shift+C and
+Ctrl+Shift+V copy and paste; the session stops when Maya quits).
 
 What is different on Linux:
 
-- **Sessions run in tmux.** A session Maya starts or resumes runs in a
+- **Sessions run in tmux**, unless you choose Native, which takes typed
+  keys without tmux. A session Maya starts or resumes runs in a
   tmux session (`maya-<8 hex>`) shown in a terminal window, and Maya
   types answers, slash commands and `!` shell lines into it through tmux.
   A session you started by hand outside tmux is on the board and takes
@@ -554,6 +565,14 @@ write and drives them through their own interfaces.
   into it and brings its Windows Terminal window forward (the window, not
   the tab, when several sessions share one); on Linux the sessions Maya
   starts run in tmux, which types into them, shown in GNOME Terminal.
+  A Native session, on any of the three, is run by Maya in a hidden
+  pseudo-terminal she owns, so she types into it directly: in the terminal
+  look the session's viewer shows its live screen and takes every key. Quitting Maya (or
+  restarting to update) asks first when a Native session is Working, or is
+  still starting and not yet on the board, since
+  Native sessions stop with Maya; those open at quit are offered back at the
+  next start and come back as Native. For now, from another machine or the
+  phone, a Native session shows the transcript views, not the live terminal.
 - **Pull requests** come from GitHub's and GitLab's APIs, refreshed every two minutes.
 - **Deployments** come from GitHub's API, checked every two minutes on the main or a standalone Maya: runs waiting for your approval, in repos pushed to in the last 7 days that have an environment with required reviewers.
 - **Voice** is a small listener sidecar (Apple's recogniser or whisper.cpp)

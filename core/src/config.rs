@@ -167,7 +167,9 @@ pub struct Config {
     /// The colours of the desktop windows; the phone keeps its own look.
     #[serde(default)]
     pub color_theme: ColorTheme,
-    /// The app new sessions open in on macOS; the other systems have one terminal.
+    /// Where new sessions open: a terminal app (Terminal or iTerm2 on macOS,
+    /// the system's one elsewhere), or Native, a terminal Maya hosts herself
+    /// on every platform.
     #[serde(default)]
     pub new_session_terminal: NewSessionTerminal,
     /// The Enter combinations that send a message and make a new line; None
@@ -241,14 +243,17 @@ pub enum ColorTheme {
     Light,
 }
 
-/// The macOS app that opens the windows of sessions Maya starts. Typing and
-/// focus find a session in either app, whatever this says.
+/// Where new sessions open: on macOS the app that opens the windows of
+/// sessions Maya starts (typing and focus find a session in either app,
+/// whatever this says), or Native. On every platform, Native means Maya hosts
+/// the session's terminal herself.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NewSessionTerminal {
     #[default]
     Terminal,
     Iterm,
+    Native,
 }
 
 /// A code host Maya reads pull requests from.
@@ -799,6 +804,14 @@ mod tests {
         let text = serde_json::to_string(&set).unwrap();
         assert!(text.contains(r#""newSessionTerminal":"iterm""#), "{text}");
         assert_eq!(serde_json::from_str::<Config>(&text).unwrap().new_session_terminal, NewSessionTerminal::Iterm);
+    }
+
+    #[test]
+    fn native_round_trips_as_native() {
+        let set = Config { new_session_terminal: NewSessionTerminal::Native, ..Config::default() };
+        let text = serde_json::to_string(&set).unwrap();
+        assert!(text.contains(r#""newSessionTerminal":"native""#), "{text}");
+        assert_eq!(serde_json::from_str::<Config>(&text).unwrap().new_session_terminal, NewSessionTerminal::Native);
     }
 
     #[test]
