@@ -39,8 +39,15 @@ pub enum Frame {
     Exit,
 }
 
+/// Bytes for a terminal's input thread to type, with where to say how
+/// typing them went when someone waits for that.
+type Input = (Vec<u8>, Option<Sender<Result<(), String>>>);
+
 /// A viewer's sink; returning false detaches it.
 pub type Sink = Box<dyn Fn(Frame) -> bool + Send>;
+
+/// What a call on a terminal that has ended says.
+const CLOSED: &str = "That session's terminal has closed.";
 
 /// How many of its last lines an unseen terminal tells.
 const LAST_LINES: usize = 3;
@@ -195,10 +202,9 @@ struct Term {
     tty: Option<String>,
     /// None once the pseudo console is closed (Windows). Taken before `out`.
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
-    /// Shared with the terminal's input thread, which types what is queued.
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    /// Input waiting for the input thread, in the order it was queued.
-    input: Sender<Vec<u8>>,
+    /// Input waiting for the terminal's input thread, which types it in
+    /// the order it was queued.
+    input: Sender<Input>,
     /// Ends the program on Windows; on Unix its process group is signalled.
     #[cfg(windows)]
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
@@ -345,7 +351,7 @@ impl NativeHost {
             return Err("Could not start the session: it has no process id.".into());
         };
         let reader = pair.master.try_clone_reader().map_err(|e| format!("Could not read the terminal: {e}"))?;
-        let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| format!("Could not write to the terminal: {e}"))?));
+        let writer = pair.master.take_writer().map_err(|e| format!("Could not write to the terminal: {e}"))?;
         let (input, queued) = channel();
         let term = Arc::new(Term {
             root,
@@ -354,7 +360,6 @@ impl NativeHost {
             #[cfg(unix)]
             tty: pair.master.tty_name().map(|p| p.display().to_string()),
             master: Mutex::new(Some(pair.master)),
-            writer: writer.clone(),
             input,
             #[cfg(windows)]
             killer: Mutex::new(child.clone_killer()),
@@ -388,7 +393,7 @@ impl NativeHost {
             });
             std::thread::Builder::new().name(format!("native-{id}")).spawn(move || read(id, term, reader, weak, &wake, &ends))
         };
-        let started = started.and_then(|_| std::thread::Builder::new().name(format!("native-{id}-input")).spawn(move || type_queued(&queued, &writer)));
+        let started = started.and_then(|_| std::thread::Builder::new().name(format!("native-{id}-input")).spawn(move || type_queued(&queued, writer)));
         if let Err(e) = started {
             self.kill(id);
             return Err(format!("Could not start the session: {e}"));
@@ -397,7 +402,7 @@ impl NativeHost {
     }
 
     fn get(&self, term: TermId) -> Result<Arc<Term>, String> {
-        lock(&self.terms).get(&term).cloned().ok_or_else(|| "That session's terminal has closed.".into())
+        lock(&self.terms).get(&term).cloned().ok_or_else(|| CLOSED.into())
     }
 
     fn all(&self) -> Vec<(TermId, Arc<Term>)> {
@@ -408,14 +413,16 @@ impl NativeHost {
     /// before, and returns at once: a program that is not reading its input
     /// holds up only the terminal's input thread.
     pub fn enqueue(&self, term: TermId, bytes: &[u8]) -> Result<(), String> {
-        self.get(term)?.input.send(bytes.to_vec()).map_err(|_| "That session's terminal has closed.".into())
+        self.get(term)?.input.send((bytes.to_vec(), None)).map_err(|_| CLOSED.into())
     }
 
-    /// Types `bytes` into the terminal, and returns once they are in.
+    /// Types `bytes` into the terminal after what was queued before, and
+    /// returns once they are in, or why they could not be.
     pub fn write(&self, term: TermId, bytes: &[u8]) -> Result<(), String> {
-        let t = self.get(term)?;
-        let mut w = lock(&t.writer);
-        w.write_all(bytes).and_then(|()| w.flush()).map_err(|e| format!("Could not type into the terminal: {e}"))
+        let (done, typed) = channel();
+        self.get(term)?.input.send((bytes.to_vec(), Some(done))).map_err(|_| CLOSED.to_string())?;
+        // No answer: the input thread ended before it got to them.
+        typed.recv().unwrap_or_else(|_| Err(CLOSED.into()))
     }
 
     /// Resizes the terminal, to at least 5 rows by 20 columns. The terminal
@@ -439,7 +446,7 @@ impl NativeHost {
         let viewer = self.next_viewer.fetch_add(1, Ordering::Relaxed);
         let mut out = lock(&t.out);
         if out.ended {
-            return Err("That session's terminal has closed.".into());
+            return Err(CLOSED.into());
         }
         let (snapshot, rows, cols) = out.attach(viewer, scrollback, sink);
         Ok(Attached { term, viewer, snapshot, rows, cols })
@@ -627,12 +634,17 @@ fn reaped(t: &Term) -> bool {
     child.is_none()
 }
 
-/// A terminal's input thread: types each queued input in turn, until the
-/// terminal is dropped or cannot be typed into.
-fn type_queued(queued: &Receiver<Vec<u8>>, writer: &Mutex<Box<dyn Write + Send>>) {
-    for bytes in queued {
-        let mut w = lock(writer);
-        if w.write_all(&bytes).and_then(|()| w.flush()).is_err() {
+/// A terminal's input thread: types each queued input in turn, and says
+/// how it went to whoever waits, until the terminal is dropped or cannot be
+/// typed into.
+fn type_queued(queued: &Receiver<Input>, mut writer: Box<dyn Write + Send>) {
+    for (bytes, done) in queued {
+        let typed = writer.write_all(&bytes).and_then(|()| writer.flush()).map_err(|e| format!("Could not type into the terminal: {e}"));
+        let failed = typed.is_err();
+        if let Some(done) = done {
+            let _ = done.send(typed);
+        }
+        if failed {
             return;
         }
     }
@@ -834,7 +846,12 @@ mod tests {
     /// Starts a terminal that copies every byte typed into it, untouched,
     /// to `file`, and returns it once it is ready.
     fn recorder(host: &NativeHost, file: &Path) -> TermId {
-        let term = sh(host, &format!("stty raw -echo; printf ready; cat > '{}'", file.display()));
+        slow_recorder(host, file, 0.0)
+    }
+
+    /// `recorder`, reading nothing for `wait` seconds once it is ready.
+    fn slow_recorder(host: &NativeHost, file: &Path, wait: f32) -> TermId {
+        let term = sh(host, &format!("stty raw -echo; printf ready; sleep {wait}; cat > '{}'", file.display()));
         let (seen, sink) = collector();
         let at = host.attach(term, 0, sink).unwrap();
         if !within_2s(|| has(&at.snapshot, "ready") || has(&seen.lock().unwrap().bytes, "ready")) {
@@ -858,6 +875,27 @@ mod tests {
         let typed = std::fs::read_to_string(&file).unwrap_or_default();
         host.kill_all();
         assert!(got, "typed {} bytes, out of order or short", typed.len());
+    }
+
+    #[test]
+    fn written_input_follows_what_was_queued_before_it() {
+        let host = NativeHost::new(BATCH);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("typed");
+        // The program reads nothing at first, so the queued input waits.
+        let term = slow_recorder(&host, &file, 0.3);
+        let queued: String = (0..300).map(|i| format!("{i:04},")).collect();
+        for i in 0..300 {
+            host.enqueue(term, format!("{i:04},").as_bytes()).unwrap();
+        }
+        let wrote = host.write(term, b"end");
+        let want = format!("{queued}end");
+        let got = within_2s(|| std::fs::read_to_string(&file).is_ok_and(|s| s == want));
+        let typed = std::fs::read_to_string(&file).unwrap_or_default();
+        host.kill_all();
+        assert_eq!(wrote, Ok(()));
+        assert!(got, "typed {:?}", typed.get(typed.len().saturating_sub(40)..).unwrap_or(&typed));
+        assert!(host.write(term, b"x").is_err(), "the terminal is gone");
     }
 
     #[test]
