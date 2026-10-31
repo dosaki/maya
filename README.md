@@ -22,7 +22,7 @@ the right terminal first.
 - Starts new sessions and resumes old ones
 - Starts a new session in its own git worktree when you tick New worktree, on a new branch off the branch your checkout is on, so sessions in one repository do not step on each other
 - After a restart, offers to resume every session that was running, on this machine and on the paired ones, each in its own folder and terminal: from the Sessions tab, or by voice ("Maya, resume my sessions")
-- Runs sessions inside Maya, with no terminal app, when you choose Native (Settings › Sessions › New sessions open in): in the terminal look the session's window is then its live terminal, and the session stops when Maya quits. A Native session you start, resume on its own or start to review a pull request opens its live terminal at once, before it shows on the board; one that ends before it shows there has Maya show the last lines it printed
+- Runs sessions inside Maya, with no terminal app, when you choose Native (Settings › Sessions › New sessions open in): in the terminal look the session's window is then its live terminal, and the session stops when Maya quits. When you start a Native session, resume a single one, or start one to review a pull request, its live terminal opens at once, before the session shows on the board. If the session ends before it shows there, Maya shows the last lines it printed
 - Shows what a session's terminal shows: the conversation, each command's output, edit diffs, how long it has been working, and its model, folder and branch
   - As a chat or in a terminal look, like the agent's own terminal (Settings → Sessions, or the `>_` button on the session)
 - Shows each session's context, its account's usage limits and its cost so far, in the session window
@@ -504,7 +504,8 @@ too, with no desktop and no app: the `maya` command line tool.
   answer, compact, rename, change model, effort or mode, start and resume.
   It remembers the sessions running on its machine too, so after a restart
   the main offers to resume them.
-  Start and resume land in a tmux session named `maya-<8 hex>`, shown in the
+  Start and resume land in a tmux session named `maya-<8 hex>` (Native is
+  the desktop app's alone, so the `maya` command always uses tmux), shown in the
   card's tooltip on the main as `attach: tmux attach -t …`; answering, slash
   commands and Shift+Tab need that session to be inside tmux — a `claude`
   started in a plain SSH shell is shown on the board but can only be
