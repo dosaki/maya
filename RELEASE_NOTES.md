@@ -1,3 +1,9 @@
+# 0.44.1
+
+## Fixed
+
+- On the phone, a session opens under the top bar, like Chat, and tapping its reply box brings up the keyboard. The new-session and resume dialogs open the same way, and tapping a tab closes them.
+
 # 0.44.0
 
 ## New
