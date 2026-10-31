@@ -259,6 +259,13 @@ async function loadDebugMode(): Promise<void> {
 }
 
 async function start(): Promise<void> {
+  // A quit held because it would stop a working Native session. First, so
+  // that nothing failing below can leave a quit held with no question.
+  await listen<{ names: string[] }>("quit-confirm", (e) => {
+    void askQuit(e.payload.names, false)
+      .then((yes) => (yes ? invoke("quit_confirmed") : undefined))
+      .catch((err) => showToast(String(err)));
+  });
   void initSettings();
   void updates.init();
   void initMute();
@@ -346,10 +353,6 @@ async function start(): Promise<void> {
     if (ev.key === "Enter" && target.classList.contains("card")) act(target);
   });
 
-  // A quit held because it would stop a working Native session.
-  await listen<{ names: string[] }>("quit-confirm", (e) => {
-    void askQuit(e.payload.names, false).then((yes) => (yes ? invoke("quit_confirmed") : undefined));
-  });
   // A Native session started or resumed here opens its terminal at once, in place of any open dialog.
   setNativeOpener((term, dir) => {
     closeNewSession();
