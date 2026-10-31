@@ -107,13 +107,21 @@ fn login_argv(shell: Option<&str>, command: &str) -> Vec<String> {
 /// now and then while another thread forks.
 const OPEN_TRIES: u32 = 5;
 
-/// Runs `f` until it succeeds, up to `OPEN_TRIES` times, with `pause` given
-/// 10 ms more after each failure; the last error when every try failed.
-fn retrying<T, E>(mut pause: impl FnMut(Duration), mut f: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+/// Whether opening a pseudo-terminal failed the way macOS refuses one now
+/// and then while another thread forks (`Unknown error: -6`), which passes.
+fn refused_for_now(e: &impl std::fmt::Display) -> bool {
+    let e = e.to_string();
+    e.contains("Unknown error: -6") || e.contains("code: -6,")
+}
+
+/// Runs `f` until it succeeds, up to `OPEN_TRIES` times while it fails as
+/// `refused_for_now` says, with `pause` given 10 ms more after each
+/// failure; the error when it fails any other way or every try failed.
+fn retrying<T, E: std::fmt::Display>(mut pause: impl FnMut(Duration), mut f: impl FnMut() -> Result<T, E>) -> Result<T, E> {
     let mut tries = 1;
     loop {
         match f() {
-            Err(_) if tries < OPEN_TRIES => {
+            Err(e) if tries < OPEN_TRIES && refused_for_now(&e) => {
                 pause(Duration::from_millis(10 * u64::from(tries)));
                 tries += 1;
             }
@@ -755,6 +763,9 @@ mod tests {
         assert_eq!(shell_argv("claude")[1..], ["-l", "-c", "claude"]);
     }
 
+    /// How openpty fails now and then on macOS while another thread forks.
+    const REFUSED: &str = "failed to openpty: Os { code: -6, kind: Uncategorized, message: \"Unknown error: -6\" }";
+
     #[test]
     fn opening_a_terminal_is_tried_again_a_few_times() {
         let mut calls = 0;
@@ -763,7 +774,7 @@ mod tests {
             |d| pauses.push(d),
             || {
                 calls += 1;
-                if calls < 3 { Err("busy") } else { Ok(calls) }
+                if calls < 3 { Err(REFUSED) } else { Ok(calls) }
             },
         );
         assert_eq!(got, Ok(3));
@@ -774,10 +785,25 @@ mod tests {
             |_| pauses += 1,
             || {
                 calls += 1;
-                Err("busy")
+                Err(REFUSED)
             },
         );
-        assert_eq!((got, calls, pauses), (Err("busy"), OPEN_TRIES, OPEN_TRIES - 1));
+        assert_eq!((got, calls, pauses), (Err(REFUSED), OPEN_TRIES, OPEN_TRIES - 1));
+    }
+
+    #[test]
+    fn any_other_failure_to_open_a_terminal_is_not_tried_again() {
+        let full = "failed to openpty: Os { code: 24, kind: Uncategorized, message: \"Too many open files\" }";
+        let (mut calls, mut pauses) = (0, 0);
+        let got: Result<(), &str> = retrying(
+            |_| pauses += 1,
+            || {
+                calls += 1;
+                Err(full)
+            },
+        );
+        assert_eq!((got, calls, pauses), (Err(full), 1, 0));
+        assert!(refused_for_now(&REFUSED) && !refused_for_now(&full));
     }
 
     #[test]
