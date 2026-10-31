@@ -982,16 +982,17 @@ mod tests {
     #[test]
     fn a_burst_of_output_arrives_in_few_frames() {
         let host = NativeHost::new(Duration::from_millis(50));
-        let term = sh(&host, "i=0; while [ $i -lt 2000 ]; do printf x; i=$((i+1)); done; sleep 1");
+        // The burst waits for a line, typed once the viewer is attached, so all of it streams.
+        let term = sh(&host, "read l; i=0; while [ $i -lt 2000 ]; do printf x; i=$((i+1)); done; sleep 1");
         let (seen, sink) = collector();
-        let at = host.attach(term, 0, sink).unwrap();
-        std::thread::sleep(Duration::from_secs(1));
-        let early = at.snapshot.iter().filter(|&&b| b == b'x').count();
-        let got = within_2s(|| early + seen.lock().unwrap().bytes.iter().filter(|&&b| b == b'x').count() >= 2000);
+        host.attach(term, 0, sink).unwrap();
+        host.write(term, b"\r").unwrap();
+        let xs = || seen.lock().unwrap().bytes.iter().filter(|&&b| b == b'x').count();
+        let got = within_2s(|| xs() >= 2000);
         host.kill_all();
-        let seen = seen.lock().unwrap();
-        assert!(got, "only {} x arrived", early + seen.bytes.iter().filter(|&&b| b == b'x').count());
-        assert!(seen.frames <= 40, "{} frames", seen.frames);
+        assert!(got, "only {} x arrived in output frames", xs());
+        let frames = seen.lock().unwrap().frames;
+        assert!(frames <= 40, "{frames} frames");
     }
 
     #[test]
