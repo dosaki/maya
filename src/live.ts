@@ -114,6 +114,14 @@ export function fitFont(width: number, cols: number): number {
   return Math.max(8, Math.min(12.5, Math.floor((width / (cols * 0.6)) * 2) / 2));
 }
 
+/**
+ * The font size, between 8 and 12.5 px in half pixels, at which `rows`
+ * lines fit `height` pixels; past 8 px the terminal scrolls up and down.
+ */
+export function fitFontHeight(height: number, rows: number): number {
+  return Math.max(8, Math.min(12.5, Math.floor((height / (rows * 1.2)) * 2) / 2));
+}
+
 /** A viewer's way to the terminal it shows. */
 interface Link {
   send(bytes: Uint8Array): void;
@@ -286,9 +294,10 @@ function attachLocal(term: Terminal, fit: FitAddon, target: { pid: number } | { 
 
 /**
  * Attaches `term` to the Native terminal of `session` on another Maya. It
- * draws the host's size and never resizes it: the font fits the columns to
- * `host` instead. A lost link tries again every `REATTACH_MS`, and a gap in
- * the numbering takes a fresh snapshot.
+ * draws the host's size and never resizes it: the font fits the columns and
+ * lines to `host` instead, which scrolls past the smallest font. A lost
+ * link tries again every `REATTACH_MS`, and a gap in the numbering takes a
+ * fresh snapshot.
  */
 function attachRemote(term: Terminal, host: HTMLElement, session: string): Link {
   // One try at attaching: its sub once the attach resolves, and whether
@@ -305,13 +314,26 @@ function attachRemote(term: Terminal, host: HTMLElement, session: string): Link 
   let lost = false;
   let retry: ReturnType<typeof setTimeout> | undefined;
 
+  // Keeps the cursor's line in view when even the smallest font leaves the host's screen taller than `host`.
+  const reveal = () => {
+    if (disposed || host.scrollHeight <= host.clientHeight) return;
+    const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+    if (!screen || term.rows <= 0) return;
+    const cell = screen.offsetHeight / term.rows;
+    const top = screen.getBoundingClientRect().top - host.getBoundingClientRect().top + host.scrollTop + term.buffer.active.cursorY * cell;
+    if (top < host.scrollTop) host.scrollTop = top;
+    else if (top + cell > host.scrollTop + host.clientHeight) host.scrollTop = top + cell - host.clientHeight;
+  };
   const refit = () => {
     if (disposed) return;
-    // The terminal's own padding is not room for columns.
+    // The terminal's own padding is not room for columns or lines.
     const css = term.element ? getComputedStyle(term.element) : null;
-    const padding = css ? (parseFloat(css.paddingLeft) || 0) + (parseFloat(css.paddingRight) || 0) : 0;
-    const size = fitFont(host.clientWidth - padding, term.cols);
+    const px = (side: "Left" | "Right" | "Top" | "Bottom") => parseFloat(css?.[`padding${side}`] ?? "") || 0;
+    const width = host.clientWidth - px("Left") - px("Right");
+    const height = host.clientHeight - px("Top") - px("Bottom");
+    const size = Math.min(fitFont(width, term.cols), fitFontHeight(height, term.rows));
     if (term.options.fontSize !== size) term.options.fontSize = size;
+    reveal();
   };
   const detach = (t: Try) => {
     if (t.sub === null || t.over) return;
@@ -341,7 +363,7 @@ function attachRemote(term: Terminal, host: HTMLElement, session: string): Link 
       return;
     }
     last = frame.seq;
-    if (frame.kind === "output") term.write(decode(frame.data));
+    if (frame.kind === "output") term.write(decode(frame.data), reveal);
     else if (frame.kind === "size") {
       term.resize(frame.cols, frame.rows);
       refit();
@@ -361,7 +383,7 @@ function attachRemote(term: Terminal, host: HTMLElement, session: string): Link 
       term.resize(frame.cols, frame.rows);
       term.reset();
       refit();
-      term.write(decode(frame.snapshot));
+      term.write(decode(frame.snapshot), reveal);
       // What came early follows the snapshot, in order.
       const early = held.sort((a, b) => a.seq - b.seq);
       held = [];

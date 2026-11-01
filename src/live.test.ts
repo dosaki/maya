@@ -16,6 +16,8 @@ const { FakeTerminal, FakeFit, FakeChannel } = vi.hoisted(() => {
     pasted: string[] = [];
     disposed = false;
     modes = { applicationCursorKeysMode: false };
+    element: HTMLElement | undefined = undefined;
+    buffer = { active: { cursorY: 0 } };
     constructor(options: Record<string, unknown>) {
       this.options = options;
       FakeTerminal.last = this;
@@ -122,7 +124,7 @@ class FakeObserver {
 }
 vi.stubGlobal("ResizeObserver", FakeObserver);
 
-import { EXTRA_KEYS, LIGHT_ANSI, REATTACH_MS, copyPasteKey, fitFont, keyBytes, mountLive } from "./live";
+import { EXTRA_KEYS, LIGHT_ANSI, REATTACH_MS, copyPasteKey, fitFont, fitFontHeight, keyBytes, mountLive } from "./live";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const attached = { term: 7, viewer: 1, snapshot: "aGk=", rows: 40, cols: 120 };
@@ -491,6 +493,7 @@ describe("mountLive on a remote session", () => {
     const h = host();
     let width = 1200;
     Object.defineProperty(h, "clientWidth", { get: () => width });
+    Object.defineProperty(h, "clientHeight", { get: () => 10_000 });
     invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
     mountLive(h, { session: "s1", remote: true });
     await flush();
@@ -501,6 +504,54 @@ describe("mountLive on a remote session", () => {
     width = 600;
     observed!();
     expect(term().options.fontSize).toBe(8);
+  });
+
+  it("fits the font to the host's lines too, the smaller fit winning", async () => {
+    const h = host();
+    let height = 1000;
+    Object.defineProperty(h, "clientWidth", { get: () => 1200 });
+    Object.defineProperty(h, "clientHeight", { get: () => height });
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
+    mountLive(h, { session: "s1", remote: true });
+    await flush();
+    send(snapshot("hi", 40, 120));
+    expect(term().options.fontSize).toBe(12.5);
+    height = 480;
+    observed!();
+    expect(term().options.fontSize).toBe(fitFontHeight(480, 40));
+    expect(term().options.fontSize).toBe(10);
+  });
+
+  it("keeps the cursor's line in view when the screen is taller than the panel", async () => {
+    const h = host();
+    let scrollTop = 0;
+    Object.defineProperty(h, "clientHeight", { get: () => 200 });
+    Object.defineProperty(h, "scrollHeight", { get: () => 600 });
+    Object.defineProperty(h, "scrollTop", { get: () => scrollTop, set: (v: number) => (scrollTop = v) });
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
+    mountLive(h, { session: "s1", remote: true });
+    // jsdom lays nothing out: the screen is 50 lines of 10 px, 8 px below the panel's top.
+    const xterm = document.createElement("div");
+    const screen = document.createElement("div");
+    screen.className = "xterm-screen";
+    xterm.append(screen);
+    h.append(xterm);
+    Object.defineProperty(screen, "offsetHeight", { get: () => 500 });
+    screen.getBoundingClientRect = () => ({ top: 8 - scrollTop }) as DOMRect;
+    h.getBoundingClientRect = () => ({ top: 0 }) as DOMRect;
+    term().element = xterm;
+    await flush();
+    send(snapshot("hi", 50, 80));
+    term().buffer.active.cursorY = 45;
+    // Only once xterm has parsed the write is the cursor where it says.
+    expect(scrollTop).toBe(0);
+    term().parse();
+    // Line 45 runs from 458 to 468 px: the panel's 200 px end with it.
+    expect(scrollTop).toBe(268);
+    term().buffer.active.cursorY = 2;
+    send({ seq: 1, kind: "output", data: b64("\x1b[H") });
+    term().parse();
+    expect(scrollTop).toBe(28);
   });
 
   it("types keys into the remote terminal by its sub, and the extra keys follow the cursor mode", async () => {
@@ -644,6 +695,20 @@ describe("mountLive on a remote session", () => {
     expect(drawn()).toEqual(["back"]);
   });
 
+  it("disposed while it waits to try again, it never tries", async () => {
+    vi.useFakeTimers();
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
+    const handle = mountLive(host(), { session: "s1", remote: true });
+    await vi.advanceTimersByTimeAsync(0);
+    send({ seq: 0, kind: "lost" });
+    expect(vi.getTimerCount()).toBe(1);
+    handle.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(REATTACH_MS * 3);
+    expect(calls("live_attach_remote")).toHaveLength(1);
+    expect(calls("live_detach_remote")).toEqual([]);
+  });
+
   it("a gap in the numbering attaches again", async () => {
     let next = 5;
     invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(next++) : Promise.resolve(null)));
@@ -680,6 +745,13 @@ describe("the extra keys", () => {
     expect(keyBytes("ctrl-c", true)).toBe("\x03");
     expect(EXTRA_KEYS.map(([, l]) => l)).toEqual(["Esc", "Tab", "Ctrl+C", "←", "↑", "↓", "→"]);
     expect(EXTRA_KEYS.map(([k]) => k)).toEqual(["esc", "tab", "ctrl-c", "left", "up", "down", "right"]);
+  });
+
+  it("fitFontHeight fits the lines between 8 and 12.5", () => {
+    expect(fitFontHeight(300, 50)).toBe(8);
+    expect(fitFontHeight(600, 24)).toBe(12.5);
+    expect(fitFontHeight(400, 40)).toBe(8);
+    expect(fitFontHeight(480, 40)).toBe(10);
   });
 
   it("fitFont fits the columns between 8 and 12.5", () => {

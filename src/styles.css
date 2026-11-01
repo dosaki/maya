@@ -488,9 +488,9 @@ body { margin: 0; background: var(--bg); }
 .modal--terminal .modal__live { --term-bg: #0a0a0a; --term-fg: #e8e2d4; --term-cursor: #d9ab3c; --term-selection: rgba(217, 171, 60, .35); }
 /* The fit add-on measures the terminal's parent and takes off only the terminal's own padding: the parent has none. */
 .modal__live .xterm { height: 100%; padding: 8px 16px 4px; }
-/* A terminal on another Maya keeps its host's size: one wider than the panel at the smallest font scrolls sideways. */
-.modal__live--remote { overflow-x: auto; }
-.modal__live--remote .xterm { width: max-content; }
+/* A terminal on another Maya keeps its host's size: one larger than the panel at the smallest font scrolls, either way. */
+.modal__live--remote { overflow: auto; }
+.modal__live--remote .xterm { width: max-content; height: auto; }
 /* The phone's extra keys under its live terminal: one row of equal keys, scrolling sideways when it overflows. */
 .modal__keys { display: flex; gap: 6px; padding: 6px 8px; overflow-x: auto; flex: none; background: #0a0a0a; }
 .modal__keys .card__btn { flex: 1 0 44px; padding: 8px 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

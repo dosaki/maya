@@ -1279,7 +1279,9 @@ describe("a Native session's live terminal", () => {
     const el = renderModal({ card: { ...native, machine: "desk", live: true }, turns, status: null, draft: "", theme: "terminal" }, handlers());
     expect(el.querySelector(".modal__live")?.classList.contains("modal__live--remote")).toBe(true);
     expect(el.querySelector(".modal__history")).toBeNull();
-    expect(css(".modal__live--remote")).toMatchObject({ "overflow-x": "auto" });
+    // Past the smallest font it scrolls either way, the terminal at its own size.
+    expect(css(".modal__live--remote")).toMatchObject({ overflow: "auto" });
+    expect(css(".modal__live--remote .xterm")).toMatchObject({ width: "max-content", height: "auto" });
     // The desktop has no extra keys.
     expect(el.querySelector(".modal__keys")).toBeNull();
   });

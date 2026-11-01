@@ -662,9 +662,9 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const banner = el("div", "modal__banner");
     const prose = m.card.awaiting?.kind === "text";
     const remote = !!m.card.machine;
-    // A Native session's terminal is this viewer's other look, not a window;
-    // on another Maya, only when its card says the terminal can be opened from here.
-    const native = remote ? !!m.card.live : !!m.card.native;
+    // A Native session's terminal is this viewer's other look, not a window,
+    // when the terminal look would show it live.
+    const native = isLive(m.card, "terminal");
     // A multi-select menu is read-only: it is answered in the terminal.
     const answerable = !!menu && !m.card.awaiting?.questions[m.next ?? 0]?.multiSelect;
     const text = answerable
