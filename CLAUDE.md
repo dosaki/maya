@@ -47,3 +47,8 @@ file in Settings → Release Notes.
   fails when its version differs from the version files.
 - Write `\<word>`, not `<word>`, for a placeholder: Markdown drops an
   unescaped one as a tag.
+
+## Lore
+
+- **Pitfall:** Maya's WKWebView drops `:hover` (and a tooltip, a selection) from a node that is replaced, until the pointer moves; repaint with `morph` or `keepEqualChildren` from `src/morph.ts` instead of `replaceChildren`. (2026-11-01)
+- **Tip:** Playwright's WebKit with the real `src/styles.css` reproduces WebKit layout bugs, but not the hover loss above: headless WebKit re-applies `:hover` after a node swap, so check hover in the app itself. (2026-10-30, 2026-11-01)

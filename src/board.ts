@@ -1,5 +1,6 @@
 import { renderCard } from "./card";
 import { iconElement } from "./icons";
+import { morph } from "./morph";
 import { COLUMNS, type Card } from "./types";
 
 /** `emptyText` fills a column with no cards: "No matches" while a search narrows the board. */
@@ -66,22 +67,14 @@ export function countable(cards: Card[]): Card[] {
 }
 
 /**
- * Replaces the board inside `host` with `fresh`, carrying each column's
- * scroll position over so a repaint does not jump the lists back to the top.
+ * Shows `fresh` in `host`, patching the board already there in place: the
+ * columns keep their nodes, so their scroll positions (and the phone's
+ * sideways one), and each card that stays in its column keeps its node, so
+ * the one under the pointer keeps its hover. A card that changes column is
+ * built afresh: it is no longer under the pointer anyway.
  */
 export function swapBoard(host: HTMLElement, fresh: HTMLElement): void {
-  const scroll = new Map<string, number>();
-  for (const col of host.querySelectorAll<HTMLElement>(".column")) {
-    const list = col.querySelector<HTMLElement>(".column__cards");
-    if (list && col.dataset.state) scroll.set(col.dataset.state, list.scrollTop);
-  }
-  // The board itself scrolls sideways on a phone; that position is kept too.
-  const across = host.querySelector<HTMLElement>(".board")?.scrollLeft ?? 0;
-  host.replaceChildren(fresh);
-  for (const col of fresh.querySelectorAll<HTMLElement>(".column")) {
-    const list = col.querySelector<HTMLElement>(".column__cards");
-    const top = col.dataset.state ? scroll.get(col.dataset.state) : undefined;
-    if (list && top) list.scrollTop = top;
-  }
-  if (across) fresh.scrollLeft = across;
+  const old = host.querySelector<HTMLElement>(":scope > .board");
+  if (old) morph(old, fresh);
+  else host.replaceChildren(fresh);
 }

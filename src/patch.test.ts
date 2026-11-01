@@ -53,6 +53,35 @@ describe("patchModal", () => {
     expect(root.querySelector(".modal__status")?.textContent).toBe("Delivered");
   });
 
+  // A swapped history rebuilt every turn: WebKit dropped the hover (a code
+  // block's Copy button) and any text selection each time one arrived.
+  it("keeps the history and the nodes of turns already shown when a turn arrives", () => {
+    const first = [{ kind: "user" as const, text: "hi" }, { kind: "assistant" as const, text: "```\ncode\n```" }];
+    const root = renderModal({ card: base, turns: first, status: null, draft: "" }, handlers());
+    const hist = root.querySelector(".modal__history");
+    const [user, reply] = root.querySelectorAll(".turn");
+    const turns = [...first, { kind: "assistant" as const, text: "more" }];
+    patchModal(root, renderModal({ card: base, turns, status: null, draft: "" }, handlers()));
+    expect(root.querySelector(".modal__history")).toBe(hist);
+    const now = root.querySelectorAll(".turn");
+    expect(now[0]).toBe(user);
+    expect(now[1]).toBe(reply);
+    expect(now[2].textContent).toContain("more");
+    expect(hist!.outerHTML).toBe(renderModal({ card: base, turns, status: null, draft: "" }, handlers()).querySelector(".modal__history")!.outerHTML);
+  });
+
+  it("keeps the turns still shown when the oldest one drops off the capped history", () => {
+    const first = [{ kind: "user" as const, text: "a" }, { kind: "assistant" as const, text: "b" }, { kind: "user" as const, text: "c" }];
+    const root = renderModal({ card: base, turns: first, status: null, draft: "" }, handlers());
+    const [, b, c] = root.querySelectorAll(".turn");
+    const turns = [...first.slice(1), { kind: "assistant" as const, text: "d" }];
+    patchModal(root, renderModal({ card: base, turns, status: null, draft: "" }, handlers()));
+    const now = root.querySelectorAll(".turn");
+    expect(now[0]).toBe(b);
+    expect(now[1]).toBe(c);
+    expect(now[2].textContent).toContain("d");
+  });
+
   it("removes the banner and status when the fresh render has none", () => {
     const root = renderModal({ card: { ...base, state: "awaiting", awaiting: { kind: "plan", detail: "x", questions: [] } }, turns: [], status: { ok: false, text: "e" }, draft: "" }, handlers());
     patchModal(root, renderModal({ card: base, turns: [], status: null, draft: "" }, handlers()));

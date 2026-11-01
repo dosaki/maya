@@ -1,3 +1,9 @@
+# 0.44.3
+
+## Fixed
+
+- The board, a session's window and Chat no longer flicker when they update. The card under the pointer keeps its highlight, a code block keeps its Copy button while you hover it, and a text selection or tooltip is no longer lost when a new turn arrives.
+
 # 0.44.2
 
 ## Fixed

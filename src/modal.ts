@@ -6,6 +6,7 @@ import { renderMarkdown } from "./markdown";
 import { projectName } from "./format";
 import { iconElement } from "./icons";
 import { MENU_PICK, renderMenu, type MenuPick } from "./menu";
+import { keepEqualChildren } from "./morph";
 import { CLAUDE_AGENT, renderChoice, type AgentInfo } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay } from "./options";
 import type { Progress } from "./progress";
@@ -812,7 +813,11 @@ export function patchModal(root: HTMLElement, fresh: HTMLElement): void {
   swap(".modal__statusline--head");
   swap(".modal__statusline--foot");
   swap(".modal__banner", ".modal__history");
-  swap(".modal__history");
+  // Turns already shown keep their nodes, so their hover and a selection in them.
+  const hist = panel.querySelector(".modal__history");
+  const freshHist = freshPanel.querySelector(".modal__history");
+  if (hist && freshHist) keepEqualChildren(hist, freshHist);
+  else swap(".modal__history");
   // The pickers arrive with the agent list, after the first paint; a choice
   // waiting for Apply keeps the row it was made in.
   const pending = [...panel.querySelectorAll<HTMLSelectElement>(".modal__tweaks select")].some((s) => s.value !== "");
