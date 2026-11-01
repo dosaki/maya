@@ -3,7 +3,8 @@
 //!
 //! Threads: the app's `start` spawns one connection thread that loops
 //! `run_once` through `reconnect`, waiting `backoff_ms` between failures. `run_once` owns the socket, and
-//! its read timeout (`TICK`) is the loop's tick: each turn sends the results
+//! its read timeout (`TICK`, `LIVE_TICK` while a live terminal streams on the
+//! link) is the loop's tick: each turn sends the results
 //! finished commands queued, a board when one is due, a ping every ten
 //! seconds, then tries one read. Each command runs on its own short-lived
 //! thread and queues its `result` on the connection's channel; a result that
@@ -16,6 +17,7 @@
 //! `store` one at a time, never one while holding the other.
 
 use super::identity::{decode_key, encode_key, Keypair};
+use super::live::{self, FrameSink, LiveTerms, TermEvent, TermFrame, TermView};
 use super::protocol::{decode_down, encode, Attachment, CommandKind, Down, Request, Up, DEFAULT_PORT, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
 use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
@@ -96,6 +98,10 @@ pub trait Executor: Send + Sync {
     fn remembered(&self) -> Option<Vec<crate::remembered::Remembered>> {
         None
     }
+    /// The terminals this Maya streams to the main; `None` from a Maya with none.
+    fn live_terms(&self) -> Option<Arc<dyn LiveTerms>> {
+        None
+    }
 }
 
 /// What the client tells the app.
@@ -151,6 +157,11 @@ pub trait ClientNotify: Send + Sync {
     /// Where this Maya's requests to the main go out; `None` sends none.
     fn lane(&self) -> Option<Arc<RequestLane>> {
         None
+    }
+    /// True while this Maya views a live terminal through the main: its link
+    /// then ticks at `LIVE_TICK`.
+    fn live(&self) -> bool {
+        false
     }
 }
 
@@ -231,6 +242,80 @@ impl Drop for Attached {
             lane.detach(*generation);
         }
     }
+}
+
+/// What the main reads when it asks a Maya with no live terminals for one.
+const NO_TERMINALS: &str = "This Maya has no live terminals.";
+/// What the main reads for keys to a terminal this Maya does not stream to it.
+const NO_SUCH_TERMINAL: &str = "This terminal is not open here.";
+/// What the main reads for keys that are not base64.
+const UNREADABLE_KEYS: &str = "The keys could not be read.";
+
+/// The terminals one connection streams to the main, by the main's `sub`.
+/// Every view still open is detached when the pump ends, however it ends.
+struct Streams {
+    terms: Option<Arc<dyn LiveTerms>>,
+    subs: HashMap<u64, TermView>,
+}
+
+impl Streams {
+    /// Streams `session` to the main as `sub`, in place of whatever `sub` streamed before.
+    fn attach(&mut self, sub: u64, session: &str, tx: &Sender<Up>) {
+        self.detach(sub);
+        let Some(terms) = &self.terms else {
+            return term_error(tx, sub, NO_TERMINALS.into());
+        };
+        let out = tx.clone();
+        // The host calls it from its own threads, holding its locks: it only
+        // queues, and is false once the pump has ended.
+        let sink: FrameSink = Box::new(move |frame| out.send(Up::TermFrame { sub, frame }).is_ok());
+        match live::open(&**terms, session, sink) {
+            Ok(view) => {
+                log::line("network", format!("terminal {sub} attached"));
+                self.subs.insert(sub, view);
+            }
+            Err(e) => {
+                log::line("network", format!("terminal {sub} not attached: {e}"));
+                term_error(tx, sub, e);
+            }
+        }
+    }
+
+    /// Types `data`, base64, into `sub`'s terminal. A failure ends the view:
+    /// its `Error` frame is the last the main hears of it.
+    fn input(&mut self, sub: u64, data: &str, tx: &Sender<Up>) {
+        let (Some(terms), Some(view)) = (&self.terms, self.subs.get(&sub)) else {
+            return term_error(tx, sub, NO_SUCH_TERMINAL.into());
+        };
+        let typed = base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|_| UNREADABLE_KEYS.to_string()).and_then(|bytes| terms.input(view, &bytes));
+        if let Err(e) = typed {
+            log::line("network", format!("terminal {sub} ended: {e}"));
+            term_error(tx, sub, e);
+            self.detach(sub);
+        }
+    }
+
+    fn detach(&mut self, sub: u64) {
+        if let (Some(terms), Some(view)) = (&self.terms, self.subs.remove(&sub)) {
+            terms.detach(&view);
+            log::line("network", format!("terminal {sub} detached"));
+        }
+    }
+}
+
+impl Drop for Streams {
+    fn drop(&mut self) {
+        if let Some(terms) = &self.terms {
+            for (_, view) in self.subs.drain() {
+                terms.detach(&view);
+            }
+        }
+    }
+}
+
+/// Tells the main `sub` cannot be shown; nothing follows it.
+fn term_error(tx: &Sender<Up>, sub: u64, message: String) {
+    let _ = tx.send(Up::TermFrame { sub, frame: TermFrame { seq: 0, event: TermEvent::Error { message } } });
 }
 
 /// 1, 2, 4, 8 and 16 seconds, then every 30.
@@ -569,6 +654,8 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
     let mut last_board: Option<(Instant, String)> = None;
     // The first board goes out right after `welcome`.
     let mut board_wanted = true;
+    let mut streams = Streams { terms: exec.live_terms(), subs: HashMap::new() };
+    let mut tick = TICK;
     loop {
         if stopped(stop) {
             return Ok(());
@@ -603,11 +690,17 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
             send_up(ch, &Up::Ping)?;
             last_ping = Instant::now();
         }
+        // A live terminal on the link, either way, has its frames go out within `LIVE_TICK`.
+        let want = live::tick_for(!streams.subs.is_empty() || notify.live(), TICK);
+        if want != tick {
+            let _ = ch.ws.get_ref().set_read_timeout(Some(want));
+            tick = want;
+        }
         match ch.read() {
             Ok(Got::Text(t)) => {
                 last_read = Instant::now();
                 match decode_down(&t) {
-                    Ok(down) => handle(down, exec, notify, &lane, &tx, &leaving)?,
+                    Ok(down) => handle(down, exec, notify, &lane, &tx, &leaving, &mut streams)?,
                     Err(e) => log::line("network", format!("main: ignored a message: {e}")),
                 }
             }
@@ -626,7 +719,7 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
     }
 }
 
-fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, tx: &Sender<Up>, leaving: &Arc<AtomicBool>) -> Result<(), String> {
+fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, tx: &Sender<Up>, leaving: &Arc<AtomicBool>, streams: &mut Streams) -> Result<(), String> {
     match down {
         Down::Command { id, kind: CommandKind::Promote { list, summary } } => {
             log::line("network", format!("command {id} promote"));
@@ -668,7 +761,10 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
         }
         Down::Bye { reason } => return Err(bye_message(&reason)),
         Down::Pong => {}
-        Down::TermAttach { .. } | Down::TermInput { .. } | Down::TermDetach { .. } | Down::TermFrame { .. } => log::line("network", "main: terminal message not handled yet"),
+        Down::TermAttach { sub, session } => streams.attach(sub, &session, tx),
+        Down::TermInput { sub, data } => streams.input(sub, &data, tx),
+        Down::TermDetach { sub } => streams.detach(sub),
+        Down::TermFrame { .. } => log::line("network", "main: terminal frame not handled yet"),
         Down::Move { host, port, key } => {
             let host = clean(&host);
             if decode_key(&key).is_err() {
@@ -838,6 +934,7 @@ impl ClientNotify for PairNotify {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::live::{EventSink, TermOpened};
 
     #[test]
     fn frames_from_the_main_are_small_until_welcome() {
@@ -1008,9 +1105,194 @@ mod tests {
         let turn = serde_json::json!({"id": 3, "role": "assistant", "text": "Done."});
         let status = serde_json::json!({"dot": "working", "pending": null, "job": "x", "ready": true});
         for down in [Down::Chat { turn: turn.clone() }, Down::Brain { status: status.clone() }] {
-            handle(down, &exec, &notify, &None, &tx, &leaving).unwrap();
+            handle(down, &exec, &notify, &None, &tx, &leaving, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
         }
         assert_eq!(*recorder.0.lock().unwrap(), [("chat", turn), ("brain", status)]);
+    }
+
+    /// A host that records what the network asks of it and keeps the sink it is given.
+    #[derive(Default)]
+    struct FakeTerms {
+        sink: Mutex<Option<EventSink>>,
+        inputs: Mutex<Vec<(TermView, Vec<u8>)>>,
+        detached: Mutex<Vec<TermView>>,
+        fail: bool,
+    }
+
+    const VIEW: TermView = TermView { term: 1, viewer: 2 };
+
+    impl LiveTerms for FakeTerms {
+        fn attach(&self, _session: &str, sink: EventSink) -> Result<TermOpened, String> {
+            if self.fail {
+                return Err("This session is not running in Maya.".into());
+            }
+            *self.sink.lock().unwrap() = Some(sink);
+            Ok(TermOpened { view: VIEW, snapshot: b"hi".to_vec(), rows: 40, cols: 120 })
+        }
+        fn input(&self, view: &TermView, data: &[u8]) -> Result<(), String> {
+            self.inputs.lock().unwrap().push((*view, data.to_vec()));
+            Ok(())
+        }
+        fn detach(&self, view: &TermView) {
+            self.detached.lock().unwrap().push(*view);
+        }
+    }
+
+    /// An assistant with no sessions, serving `terms` when it has them.
+    struct Hosting(Option<Arc<FakeTerms>>);
+
+    impl Executor for Hosting {
+        fn execute(&self, _: CommandKind) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+        fn board(&self) -> (Vec<Card>, Vec<String>) {
+            (vec![], vec![])
+        }
+        fn live_terms(&self) -> Option<Arc<dyn LiveTerms>> {
+            self.0.clone().map(|t| t as Arc<dyn LiveTerms>)
+        }
+    }
+
+    struct Silent;
+
+    impl ClientNotify for Silent {
+        fn paired(&self, _: &str) {}
+        fn connected(&self, _: &str) {}
+        fn disconnected(&self, _: &str) {}
+        fn removed(&self) {}
+    }
+
+    /// A welcomed link over loopback: the assistant's end runs `pump` on a
+    /// thread until `stop`; the main's end is returned for the test to drive.
+    fn serving(terms: Option<Arc<FakeTerms>>, stop: Arc<AtomicBool>) -> (Chan, std::thread::JoinHandle<Result<(), String>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let joiner = std::thread::spawn(move || {
+            let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream.set_read_timeout(Some(TICK)).unwrap();
+            tungstenite::client::client(format!("ws://127.0.0.1:{port}/"), stream).unwrap().0
+        });
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(TICK)).unwrap();
+        let main = tungstenite::accept(stream).unwrap();
+        let (a, m) = secure::transport_pair();
+        let mut assistant = Channel::new(joiner.join().unwrap(), a);
+        let (exec, notify): (Arc<dyn Executor>, Arc<dyn ClientNotify>) = (Arc::new(Hosting(terms)), Arc::new(Silent));
+        let run = std::thread::spawn(move || pump(&mut assistant, &exec, &notify, &stop));
+        (Channel::new(main, m), run)
+    }
+
+    fn send_down(main: &mut Chan, down: Down) {
+        main.send(&encode(&down)).unwrap();
+    }
+
+    /// The next terminal frame the assistant sent; boards and pings are skipped.
+    fn next_frame(main: &mut Chan) -> (u64, TermFrame) {
+        let end = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < end {
+            if let Ok(Got::Text(t)) = main.read() {
+                if let Ok(Up::TermFrame { sub, frame }) = crate::net::protocol::decode_up(&t) {
+                    return (sub, frame);
+                }
+            }
+        }
+        panic!("no terminal frame within 5 s");
+    }
+
+    fn wait_for(what: &str, done: impl Fn() -> bool) {
+        let end = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < end, "{what} within 5 s");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn an_assistant_streams_a_live_terminal_to_the_main() {
+        let terms = Arc::new(FakeTerms::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut main, run) = serving(Some(terms.clone()), stop.clone());
+        send_down(&mut main, Down::TermAttach { sub: 5, session: "s1".into() });
+        assert_eq!(next_frame(&mut main), (5, TermFrame { seq: 0, event: TermEvent::Attached { snapshot: "aGk=".into(), rows: 40, cols: 120 } }));
+        assert!(terms.sink.lock().unwrap().as_ref().unwrap()(TermEvent::Output { data: "eA==".into() }));
+        assert_eq!(next_frame(&mut main), (5, TermFrame { seq: 1, event: TermEvent::Output { data: "eA==".into() } }));
+        send_down(&mut main, Down::TermInput { sub: 5, data: "aGk=".into() });
+        wait_for("the keys", || !terms.inputs.lock().unwrap().is_empty());
+        assert_eq!(*terms.inputs.lock().unwrap(), [(VIEW, b"hi".to_vec())]);
+        send_down(&mut main, Down::TermDetach { sub: 5 });
+        wait_for("the detach", || !terms.detached.lock().unwrap().is_empty());
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW]);
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW], "a detached view is not detached again");
+    }
+
+    #[test]
+    fn an_unknown_session_or_no_terminals_answers_with_an_error_frame() {
+        let error = |message: &str| TermFrame { seq: 0, event: TermEvent::Error { message: message.into() } };
+        let terms = Arc::new(FakeTerms { fail: true, ..Default::default() });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut main, run) = serving(Some(terms.clone()), stop.clone());
+        send_down(&mut main, Down::TermAttach { sub: 5, session: "gone".into() });
+        assert_eq!(next_frame(&mut main), (5, error("This session is not running in Maya.")));
+        // Nothing was stored for it, so its keys have nowhere to go.
+        send_down(&mut main, Down::TermInput { sub: 5, data: "aGk=".into() });
+        assert_eq!(next_frame(&mut main), (5, error(NO_SUCH_TERMINAL)));
+        assert!(terms.inputs.lock().unwrap().is_empty());
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+        assert!(terms.detached.lock().unwrap().is_empty(), "nothing was attached");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut main, run) = serving(None, stop.clone());
+        send_down(&mut main, Down::TermAttach { sub: 6, session: "s1".into() });
+        assert_eq!(next_frame(&mut main), (6, error("This Maya has no live terminals.")));
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn keys_that_do_not_decode_end_the_view() {
+        let terms = Arc::new(FakeTerms::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut main, run) = serving(Some(terms.clone()), stop.clone());
+        send_down(&mut main, Down::TermAttach { sub: 5, session: "s1".into() });
+        assert_eq!(next_frame(&mut main).1.seq, 0);
+        send_down(&mut main, Down::TermInput { sub: 5, data: "not base64!".into() });
+        assert_eq!(next_frame(&mut main), (5, TermFrame { seq: 0, event: TermEvent::Error { message: UNREADABLE_KEYS.into() } }));
+        wait_for("the detach", || !terms.detached.lock().unwrap().is_empty());
+        assert!(terms.inputs.lock().unwrap().is_empty());
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW], "detached once, when the error went out");
+    }
+
+    #[test]
+    fn attaching_a_sub_again_detaches_its_old_view_first() {
+        let terms = Arc::new(FakeTerms::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut main, run) = serving(Some(terms.clone()), stop.clone());
+        send_down(&mut main, Down::TermAttach { sub: 5, session: "s1".into() });
+        assert_eq!(next_frame(&mut main).1.seq, 0);
+        send_down(&mut main, Down::TermAttach { sub: 5, session: "s1".into() });
+        assert_eq!(next_frame(&mut main).1.seq, 0);
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW], "the old view went before the new one came");
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW, VIEW]);
+    }
+
+    #[test]
+    fn the_pump_detaches_its_viewers_when_the_link_ends() {
+        let terms = Arc::new(FakeTerms::default());
+        let (mut main, run) = serving(Some(terms.clone()), Arc::new(AtomicBool::new(false)));
+        send_down(&mut main, Down::TermAttach { sub: 5, session: "s1".into() });
+        assert_eq!(next_frame(&mut main).1.seq, 0);
+        drop(main);
+        assert!(run.join().unwrap().is_err(), "the link dropped");
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW]);
+        // The pump has ended: the host hears its viewer is gone.
+        assert!(!terms.sink.lock().unwrap().as_ref().unwrap()(TermEvent::Exit));
     }
 
     #[test]
