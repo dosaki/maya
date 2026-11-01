@@ -1162,10 +1162,16 @@ fn send_queued(ch: &mut Chan, link: &Link) -> Option<String> {
             // A frame of a view since ended (detached, or after its `Error`).
             Ok(Down::TermFrame { sub, .. }) if !link.terms.borrow().contains_key(&sub) => {}
             Ok(down) => {
-                // A relayed view's last frame: its relay has ended already.
+                // A view's last frame lets it go, so the link's tick can drop
+                // back: a relay has ended already; the main's own view is
+                // detached (harmless once its terminal ended). Never under
+                // the server's mutex.
                 if let Down::TermFrame { sub, frame } = &down {
-                    if frame.event.ends() && matches!(link.terms.borrow().get(sub), Some(LinkTerm::Relayed(_))) {
-                        link.terms.borrow_mut().remove(sub);
+                    if frame.event.ends() {
+                        let ended = link.terms.borrow_mut().remove(sub);
+                        if let (Some(LinkTerm::Local(view)), Some(host)) = (ended, &link.host) {
+                            host.detach(&view);
+                        }
                     }
                 }
                 let last = matches!(down, Down::Bye { .. } | Down::Move { .. });
@@ -3743,6 +3749,26 @@ mod tests {
         // Closing the phone's connection detaches the view still open.
         drop(phone);
         wait_until(|| terms.detached.lock().unwrap().len() == 3);
+        handle.stop();
+    }
+
+    #[test]
+    fn the_main_lets_its_own_view_go_once_its_terminal_exits() {
+        let terms = Arc::new(FakeTerms::default());
+        let (handle, mut phone, _) = hosting(terms.clone());
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: None, session: "s1".into() });
+        assert_eq!(next_term(&mut phone).1.seq, 0);
+        assert!(terms.sink.lock().unwrap().as_ref().unwrap()(TermEvent::Exit));
+        assert_eq!(next_term(&mut phone), (1, TermFrame { seq: 1, event: TermEvent::Exit }));
+        // The view went with its last frame: nothing is held, so the link's tick drops back.
+        send(&mut phone, &Up::TermInput { sub: 1, data: "aGk=".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error("This terminal is not open here.")));
+        assert!(terms.inputs.lock().unwrap().is_empty(), "the keys never reached the ended terminal");
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW]);
+        // Closing the connection detaches nothing more.
+        drop(phone);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW]);
         handle.stop();
     }
 
