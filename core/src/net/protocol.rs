@@ -510,7 +510,7 @@ mod tests {
         let s = encode(&mv);
         assert!(s.contains(r#""type":"move""#) && s.contains(r#""key":"a2V5""#), "{s}");
         assert_eq!(decode_down(&s).unwrap(), mv);
-        let entry = crate::config::PairedAssistant { id: "a1".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), key: "a2V5".into(), address: String::new(), last_seen: None, mirror: false };
+        let entry = crate::config::PairedAssistant { id: "a1".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), key: "a2V5".into(), address: String::new(), last_seen: None, mirror: false, generation: 0 };
         let p = Down::Command { id: 3, kind: CommandKind::Promote { list: vec![entry], summary: None } };
         let s = encode(&p);
         assert!(s.contains(r#""kind":"promote""#) && s.contains(r#""key":"a2V5""#) && !s.contains("token"), "{s}");

@@ -8,6 +8,7 @@ pub mod promote;
 pub mod identity;
 pub mod secure;
 pub mod live;
+pub mod group;
 
 use crate::config::{Config, NetworkRole, PairedAssistant};
 use serde::Serialize;
@@ -31,6 +32,9 @@ pub struct NetworkStatus {
     pub code_used_up: bool,
     /// Protocol 1 pairings were dropped on update (`NetworkConfig::pair_again`).
     pub pair_again: bool,
+    /// Every device of the group: this one first, then the others.
+    #[serde(default)]
+    pub devices: Vec<group::DeviceRow>,
 }
 
 pub const CODE_USED_UP: &str = "Code used up after 3 wrong tries — Regenerate.";
@@ -242,7 +246,7 @@ mod tests {
 
     #[test]
     fn a_main_that_cannot_listen_says_why_and_keeps_its_paired_list() {
-        let p = |id: &str, name: &str, address: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: address.into(), last_seen: Some(42), mirror: false };
+        let p = |id: &str, name: &str, address: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: address.into(), last_seen: Some(42), mirror: false, generation: 0 };
         let status = NetworkStatus { role: NetworkRole::Main, assistants: paired_offline(&[p("a1", "laptop", "10.0.0.5"), p("b2", "desk", "10.0.0.6")]), main_error: Some("Could not listen on port 4127: Address already in use".into()), ..Default::default() };
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["mainError"], "Could not listen on port 4127: Address already in use");

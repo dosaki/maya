@@ -290,7 +290,7 @@ impl Server {
     fn record_pairing(&mut self, key: &str, address: &str, name: &str, hostname: &str, platform: &str, mirror: bool) -> (PairedAssistant, Option<PairedAssistant>) {
         let again = self.paired.iter().position(|p| p.key == key);
         let Some(i) = again else {
-            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), key: key.into(), address: address.into(), last_seen: None, mirror };
+            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), key: key.into(), address: address.into(), last_seen: None, mirror, generation: 0 };
             self.paired.push(a.clone());
             self.pairings_in_flight.insert(a.id.clone());
             return (a, None);

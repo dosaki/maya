@@ -9,7 +9,7 @@ use crate::config::{Config, NetworkRole, PairedAssistant};
 /// connects to the new main with its own key. Its address is filled in by
 /// the new main at its first connection.
 pub fn own_entry(main_name: &str, key: &str) -> PairedAssistant {
-    PairedAssistant { id: new_id(), name: main_name.into(), hostname: super::local_hostname(), platform: std::env::consts::OS.into(), key: key.into(), address: String::new(), last_seen: None, mirror: false }
+    PairedAssistant { id: new_id(), name: main_name.into(), hostname: super::local_hostname(), platform: std::env::consts::OS.into(), key: key.into(), address: String::new(), last_seen: None, mirror: false, generation: 0 }
 }
 
 /// Every paired assistant but the one promoted, then the old main's own entry.
@@ -45,7 +45,7 @@ mod tests {
     use super::*;
 
     fn entry(id: &str, name: &str) -> PairedAssistant {
-        PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), key: format!("k-{id}"), address: "10.0.0.9".into(), last_seen: Some(5), mirror: false }
+        PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), key: format!("k-{id}"), address: "10.0.0.9".into(), last_seen: Some(5), mirror: false, generation: 0 }
     }
 
     #[test]

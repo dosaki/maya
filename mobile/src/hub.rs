@@ -1293,7 +1293,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config::default();
         config.network.role = NetworkRole::Main;
-        config.network.assistants = vec![PairedAssistant { id: "a1".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false }];
+        config.network.assistants = vec![PairedAssistant { id: "a1".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false, generation: 0 }];
         config::save(&settings_path(dir.path()), &config).unwrap();
         let settings = load_settings(dir.path(), "Pixel 8");
         assert_eq!(settings.config.network.role, NetworkRole::Off);

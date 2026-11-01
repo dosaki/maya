@@ -2017,7 +2017,7 @@ mod route_tests {
         let path = dir.join("maya/config.json");
         let mut config = Config::default();
         config.network.pair_again = true;
-        let a = config::PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false };
+        let a = config::PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false, generation: 0 };
         let saved_ok = save_network(&path, &mut config, |n| {
             n.pair_again = false;
             n.assistants.push(a);
@@ -2033,7 +2033,7 @@ mod route_tests {
     fn a_paired_list_that_cannot_be_saved_is_not_changed() {
         let dir = std::env::temp_dir().join(format!("maya-save-paired-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let p = |id: &str| config::PairedAssistant { id: id.into(), name: id.into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false };
+        let p = |id: &str| config::PairedAssistant { id: id.into(), name: id.into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false, generation: 0 };
         let mut config = Config::default();
         config.network.assistants = vec![p("a1"), p("b2")];
         // A file where the config's directory should be: the save fails.
@@ -2056,7 +2056,7 @@ mod route_tests {
         let path = dir.join("maya/config.json");
         let mut config = Config::default();
         config.network.role = config::NetworkRole::Assistant;
-        let late = config::PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false };
+        let late = config::PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false, generation: 0 };
         assert_eq!(save_paired(&path, &mut config, |l| *l = vec![late]), Ok(()));
         assert!(config.network.assistants.is_empty());
         assert!(!path.exists(), "nothing is written");
