@@ -1001,7 +1001,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             return None;
         }
     };
-    let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since } = hello else {
+    let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, .. } = hello else {
         log::line("network", format!("{ip}: first message was not a hello"));
         bye(ch, "protocol");
         return None;
@@ -1839,7 +1839,7 @@ impl ServerHandle {
         self.ctx.announce();
         let summary = summary(&to);
         log::line("network", format!("{label}: handing over the main role ({} assistants{})", list.len(), if summary.is_some() { ", with a summary" } else { "" }));
-        let data = send_command_to(&self.shared, id, CommandKind::Promote { list, summary }, timeout).map_err(|e| {
+        let data = send_command_to(&self.shared, id, CommandKind::Promote { list, summary, removed: vec![], version: 0 }, timeout).map_err(|e| {
             // A dropped connection leaves the same doubt as silence: G may already be a main.
             if e.ends_with(NO_ANSWER) || e.ends_with(LEFT_BEFORE_ANSWER) {
                 format!("{label} did not answer; it may have become a main on its own. Check it before trying again.")
@@ -2023,7 +2023,7 @@ mod tests {
     }
 
     pub(crate) fn hello_up(name: &str, caps: &[&str]) -> Up {
-        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect(), brain_dormant_since: None }
+        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect(), brain_dormant_since: None, group: None }
     }
 
     /// Pairs a new Maya (key `me`) whose `hello` carries `caps`; returns its
@@ -2259,7 +2259,7 @@ mod tests {
         assert!(matches!(recv(&mut phone), Down::Response { id: 3, ok: true, .. }));
         let seen: Vec<Option<String>> = counter.requests.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
         assert_eq!(seen, [None, None, Some("laptop".to_string())], "the main's own name means the main");
-        send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::Promote { list: vec![], summary: None }) });
+        send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::Promote { list: vec![], summary: None, removed: vec![], version: 0 }) });
         assert_eq!(recv(&mut phone), Down::Response { id: 4, ok: false, error: Some("That cannot be requested.".into()), data: None });
         handle.stop();
     }
@@ -2285,7 +2285,7 @@ mod tests {
         let noise = secure::connect(&mut ws, &me, &handle.public_key(), soon(), &|| false).unwrap();
         let mut g = Channel::new(ws, noise);
         let Up::Hello { protocol, app, name, hostname, platform, caps, .. } = hello_up("laptop", &["follow", "lead"]) else { panic!() };
-        send(&mut g, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since: Some(77) });
+        send(&mut g, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since: Some(77), group: None });
         assert!(matches!(recv(&mut g), Down::Welcome { .. }));
         let h = handle.clone();
         let asked = Arc::new(Mutex::new(None));
@@ -2898,7 +2898,7 @@ mod tests {
         let mut raw = connect(port);
         let (noise, _) = secure::pair(&mut raw, &twin_key, &code, soon(), &|| false).unwrap();
         let mut same = Channel::new(raw, noise);
-        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None });
+        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None, group: None });
         assert!(matches!(recv(&mut same), Down::Welcome { .. }));
         let twin = lock(&handle.shared).paired.iter().find(|p| p.key == crate::net::identity::encode_key(&twin_key.public)).unwrap().id.clone();
         assert_eq!(handle.status().assistants.iter().find(|a| a.id == twin).unwrap().note, None);

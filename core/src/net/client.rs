@@ -631,7 +631,7 @@ fn connection(config: &NetworkConfig, identity: &Keypair, exec: &Arc<dyn Executo
 /// `learned` is the main's key from a pairing, kept only once welcomed.
 fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, learned: Option<[u8; 32]>, deadline: Instant) -> Result<(String, Option<bool>, Vec<String>), String> {
     let hostname = super::local_hostname();
-    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps(), brain_dormant_since: notify.brain_dormant_since() };
+    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps(), brain_dormant_since: notify.brain_dormant_since(), group: None };
     send_up(ch, &hello)?;
     loop {
         match read_down(ch, stop, deadline)? {
@@ -734,7 +734,7 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
 
 fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, tx: &Sender<Up>, leaving: &Arc<AtomicBool>, streams: &mut Streams) -> Result<(), String> {
     match down {
-        Down::Command { id, kind: CommandKind::Promote { list, summary } } => {
+        Down::Command { id, kind: CommandKind::Promote { list, summary, .. } } => {
             log::line("network", format!("command {id} promote"));
             let (notify, out, leaving) = (notify.clone(), tx.clone(), leaving.clone());
             // On its own thread, as every command: becoming the main starts a server.
@@ -800,6 +800,7 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
             None => log::line("network", format!("main: response {id} with no request lane")),
         },
         Down::Welcome { .. } => log::line("network", "main: ignored a welcome after welcome"),
+        Down::Group(_) => {}
         Down::Chat { turn } => notify.chat_turn(turn),
         Down::Brain { status } => notify.brain_status(status),
     }
