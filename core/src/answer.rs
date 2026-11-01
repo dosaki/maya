@@ -142,7 +142,13 @@ pub const SEND: &str = "\x1b[13u";
 /// that ends in `\` gets a space.
 pub fn reply_lines(text: &str) -> Vec<String> {
     let text = typeable(text);
-    text.trim_matches('\n').split('\n').map(|l| if l.ends_with('\\') { format!("{l} ") } else { l.to_string() }).collect()
+    text.trim_matches('\n').split('\n').map(keep_backslash).collect()
+}
+
+/// `line` with a space after a final `\`, which Claude Code would otherwise
+/// drop and read, with the Enter after it, as a new line.
+fn keep_backslash(line: &str) -> String {
+    if line.ends_with('\\') { format!("{line} ") } else { line.to_string() }
 }
 
 /// A reply's lines as the keys that type and send it.
@@ -183,6 +189,9 @@ pub enum Pick {
 pub enum Step {
     /// Type the text, then Enter.
     Line(String),
+    /// Type the text, then send it as a reply is sent (`Terminal::type_reply`),
+    /// so a long line's Enter is not read as part of the text.
+    Reply(String),
     /// Wait this many milliseconds.
     Pause(u64),
 }
@@ -215,7 +224,7 @@ pub fn steps_for_pick(q: &Question, question: usize, count: usize, pick: &Pick) 
         Pick::Option { index } => submit(vec![Step::Line(keys_for_option(*index))]),
         Pick::Own { text } => {
             let row = q.own.as_ref().map_or(q.options.len(), |o| o.row);
-            submit(vec![Step::Line(keys_for_option(row) + &own_line(text).unwrap_or_default())])
+            submit(vec![Step::Reply(keys_for_option(row) + &keep_backslash(&own_line(text).unwrap_or_default()))])
         }
         Pick::Chat => vec![Step::Line(keys_for_option(q.chat_row.unwrap_or(q.options.len() + 1)))],
         // Multi-select is answered in the terminal until its keys are known.
@@ -462,8 +471,16 @@ mod tests {
     }
 
     #[test]
-    fn own_words_go_on_the_own_row() {
-        assert_eq!(steps_for_pick(&q_own(2), 0, 1, &Pick::Own { text: "use redis".into() }), vec![Step::Line("\x1b[B\x1b[Buse redis".into())]);
+    fn own_words_go_on_the_own_row_and_are_sent_as_a_reply() {
+        assert_eq!(steps_for_pick(&q_own(2), 0, 1, &Pick::Own { text: "use redis".into() }), vec![Step::Reply("\x1b[B\x1b[Buse redis".into())]);
+        // Claude Code turns `\` then Enter into a new line, as in a reply.
+        assert_eq!(steps_for_pick(&q_own(2), 0, 1, &Pick::Own { text: "a\\".into() }), vec![Step::Reply("\x1b[B\x1b[Ba\\ ".into())]);
+    }
+
+    #[test]
+    fn own_words_on_the_last_of_several_questions_still_submit() {
+        let steps = steps_for_pick(&q_own(2), 1, 2, &Pick::Own { text: "x".into() });
+        assert_eq!(steps, vec![Step::Reply("\x1b[B\x1b[Bx".into()), Step::Pause(SUBMIT_DELAY_MS), Step::Line("".into())]);
     }
 
     #[test]
