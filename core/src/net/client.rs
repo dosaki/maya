@@ -706,8 +706,7 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
         }
         // A live terminal on the link, either way, has its frames go out within `LIVE_TICK`.
         let want = live::tick_for(!streams.subs.is_empty() || notify.live(), TICK);
-        if want != tick {
-            let _ = ch.ws.get_ref().set_read_timeout(Some(want));
+        if want != tick && ch.ws.get_ref().set_read_timeout(Some(want)).is_ok() {
             tick = want;
         }
         match ch.read() {
