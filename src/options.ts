@@ -52,7 +52,7 @@ export function renderOptions(card: Card, next: number, opts: { descriptions: bo
   if (q.multiSelect) {
     const note = document.createElement("div");
     note.className = "options__note";
-    note.textContent = "Multi-select: answer in the terminal";
+    note.textContent = "Multi-select: open the session to tick several";
     root.append(note);
   }
   if (aw.questions.length > 1) {

@@ -227,10 +227,34 @@ pub fn steps_for_pick(q: &Question, question: usize, count: usize, pick: &Pick) 
             submit(vec![Step::Reply(keys_for_option(row) + &keep_backslash(&own_line(text).unwrap_or_default()))])
         }
         Pick::Chat => vec![Step::Line(keys_for_option(q.chat_row.unwrap_or(q.options.len() + 1)))],
-        // Multi-select is answered in the terminal until its keys are known.
-        Pick::Options { .. } => Vec::new(),
+        Pick::Options { indexes } => steps_for_options(q, question, count, indexes),
     }
 }
+
+/// The steps that tick `indexes` of a multi-select question: one Enter
+/// each, from the top down, as Enter leaves the cursor on the row it ticked;
+/// then Enter on the Submit row (Next before the last question), the row
+/// after the own row. The last question of a multi-select ask, even a
+/// single one, ends on the review screen.
+fn steps_for_options(q: &Question, question: usize, count: usize, indexes: &[usize]) -> Vec<Step> {
+    let mut rows = indexes.to_vec();
+    rows.sort_unstable();
+    rows.dedup();
+    let mut steps = Vec::new();
+    let mut at = 0;
+    for i in rows {
+        steps.push(Step::Line(keys_for_option(i - at)));
+        at = i;
+    }
+    steps.push(Step::Line(keys_for_option(q.options.len() + 1 - at)));
+    if question + 1 == count {
+        steps.push(Step::Pause(SUBMIT_DELAY_MS));
+        steps.push(Step::Line(String::new()));
+    }
+    steps
+}
+
+const PICK_SEVERAL: &str = "Pick one or more options, then send them.";
 
 /// Refuses unless the card is still waiting on the ask the buttons were
 /// rendered for (`ask_id` is that ask's awaiting timestamp), the pick fits
@@ -247,6 +271,11 @@ pub fn check_pick(card: &Card, ask_id: u64, question: usize, pick: &Pick, now_ms
         return Err("That question has no such option.".into());
     };
     match pick {
+        Pick::Option { .. } | Pick::Options { .. } if q.multi_select != matches!(pick, Pick::Options { .. }) => {
+            return Err(if q.multi_select { PICK_SEVERAL } else { "That question takes one answer." }.into());
+        }
+        Pick::Options { indexes } if indexes.is_empty() => return Err(PICK_SEVERAL.into()),
+        Pick::Options { indexes } if indexes.iter().any(|i| *i >= q.options.len()) => return Err("That question has no such option.".into()),
         Pick::Option { index } if *index >= q.options.len() => return Err("That question has no such option.".into()),
         Pick::Own { text } => {
             if q.own.is_none() {
@@ -256,9 +285,6 @@ pub fn check_pick(card: &Card, ask_id: u64, question: usize, pick: &Pick, now_ms
         }
         Pick::Chat if q.chat_row.is_none() => return Err("That question cannot be set aside.".into()),
         _ => {}
-    }
-    if q.multi_select || matches!(pick, Pick::Options { .. }) {
-        return Err("Multi-select questions must be answered in the terminal.".into());
     }
     if now_ms.saturating_sub(card.state_since) < OPEN_DELAY_MS {
         return Err("Give the terminal a second to show the question.".into());
@@ -404,7 +430,7 @@ mod tests {
         assert!(check(&c, 1000, 0, 1, 1500).unwrap_err().contains("second"));
         assert!(check(&c, 1000, 0, 3, 2000).unwrap_err().contains("no such option"));
         assert!(check(&c, 1000, 2, 0, 2000).unwrap_err().contains("no such option"));
-        assert!(check(&c, 1000, 1, 0, 2000).unwrap_err().contains("Multi-select"));
+        assert_eq!(check(&c, 1000, 1, 0, 2000).unwrap_err(), PICK_SEVERAL);
         // The board rendered an earlier ask; the session has since moved to a new one.
         assert!(check(&c, 900, 0, 0, 2000).unwrap_err().contains("changed"));
         let mut working = c.clone();
@@ -483,6 +509,39 @@ mod tests {
         assert_eq!(steps, vec![Step::Reply("\x1b[B\x1b[Bx".into()), Step::Pause(SUBMIT_DELAY_MS), Step::Line("".into())]);
     }
 
+    fn q_multi(n: usize) -> Question {
+        let mut q = q(n, true);
+        crate::claude_menus::ask_rows(&mut q);
+        q
+    }
+
+    #[test]
+    fn options_tick_each_row_then_submit_and_confirm() {
+        // Enter ticks a row and leaves the cursor on it; Submit is past the own row.
+        let steps = steps_for_pick(&q_multi(3), 0, 1, &Pick::Options { indexes: vec![2, 0, 2] });
+        assert_eq!(
+            steps,
+            vec![
+                Step::Line("".into()),
+                Step::Line("\x1b[B\x1b[B".into()),
+                Step::Line("\x1b[B\x1b[B".into()),
+                Step::Pause(SUBMIT_DELAY_MS),
+                Step::Line("".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn options_before_the_last_question_go_on_to_the_next() {
+        let steps = steps_for_pick(&q_multi(2), 0, 2, &Pick::Options { indexes: vec![1] });
+        assert_eq!(steps, vec![Step::Line("\x1b[B".into()), Step::Line("\x1b[B\x1b[B".into())]);
+    }
+
+    #[test]
+    fn chat_on_a_multi_select_question_is_past_the_submit_row() {
+        assert_eq!(steps_for_pick(&q_multi(2), 0, 1, &Pick::Chat), vec![Step::Line("\x1b[B\x1b[B\x1b[B\x1b[B".into())]);
+    }
+
     #[test]
     fn chat_goes_to_the_chat_row() {
         assert_eq!(steps_for_pick(&q_own(2), 0, 1, &Pick::Chat), vec![Step::Line("\x1b[B\x1b[B\x1b[B".into())]);
@@ -525,11 +584,16 @@ mod tests {
 
     #[test]
     fn check_pick_refuses_picks_the_question_does_not_take() {
-        let c = card(vec![q(2, false), q(2, true)], 1000);
+        let c = card(vec![q(2, false), q_multi(2)], 1000);
         assert_eq!(check_pick(&c, 1000, 0, &Pick::Own { text: "x".into() }, 2000).unwrap_err(), "That question takes no answer of your own.");
         assert_eq!(check_pick(&c, 1000, 0, &Pick::Chat, 2000).unwrap_err(), "That question cannot be set aside.");
-        assert!(check_pick(&c, 1000, 0, &Pick::Options { indexes: vec![0] }, 2000).unwrap_err().contains("Multi-select"));
-        assert!(check_pick(&c, 1000, 1, &Pick::Option { index: 0 }, 2000).unwrap_err().contains("Multi-select"));
+        assert_eq!(check_pick(&c, 1000, 0, &Pick::Options { indexes: vec![0] }, 2000).unwrap_err(), "That question takes one answer.");
+        assert_eq!(check_pick(&c, 1000, 1, &Pick::Option { index: 0 }, 2000).unwrap_err(), "Pick one or more options, then send them.");
+        assert_eq!(check_pick(&c, 1000, 1, &Pick::Own { text: "x".into() }, 2000).unwrap_err(), "That question takes no answer of your own.");
+        assert_eq!(check_pick(&c, 1000, 1, &Pick::Options { indexes: vec![] }, 2000).unwrap_err(), "Pick one or more options, then send them.");
+        assert!(check_pick(&c, 1000, 1, &Pick::Options { indexes: vec![0, 2] }, 2000).unwrap_err().contains("no such option"));
+        assert_eq!(check_pick(&c, 1000, 1, &Pick::Options { indexes: vec![1, 0] }, 2000), Ok(()));
+        assert_eq!(check_pick(&c, 1000, 1, &Pick::Chat, 2000), Ok(()));
         assert!(check_pick(&c, 1000, 0, &Pick::Option { index: 2 }, 2000).unwrap_err().contains("no such option"));
         assert!(check_pick(&c, 1000, 5, &Pick::Chat, 2000).unwrap_err().contains("no such option"));
         let c = card(vec![q_own(2)], 1000);

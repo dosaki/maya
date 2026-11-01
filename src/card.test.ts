@@ -178,6 +178,6 @@ describe("renderCard: options and Stop", () => {
 
   it("keeps the multi-select note on a multi-select card", () => {
     const el = renderCard({ ...asking, awaiting: { kind: "question", detail: "Which?", questions: [{ ...question, multiSelect: true, own: undefined, chatRow: undefined }] } }, 5000);
-    expect(el.querySelector(".options__note")?.textContent).toBe("Multi-select: answer in the terminal");
+    expect(el.querySelector(".options__note")?.textContent).toBe("Multi-select: open the session to tick several");
   });
 });
