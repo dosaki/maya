@@ -1,3 +1,13 @@
+# 0.45.0
+
+## New
+
+- A Native session's live terminal now opens on the main Maya for an assistant's session, and on the phone for the main's or an assistant's session. You watch it and type into it through the Maya that runs the session.
+- The live terminal keeps the size of the Maya that runs it, and never resizes it from afar. The text shrinks to fit the width and height, down to a small limit, then the terminal scrolls and keeps the cursor line in view.
+- On the phone, a row of extra keys sits under the live terminal: Esc, Tab, Ctrl+C and the arrow keys.
+- After a dropped connection, the live terminal says "Connection lost. Reconnecting…" and tries again by itself every 2 seconds.
+- Both Mayas, and the phone, need this version or later. Otherwise the session shows the transcript views, as before.
+
 # 0.44.3
 
 ## Fixed
