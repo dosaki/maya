@@ -34,6 +34,14 @@ pub enum TermEvent {
     Lost,
 }
 
+impl TermEvent {
+    /// Whether this is the last frame of its subscription: `Exit`, `Error`
+    /// and `Lost` end it, and nothing follows them.
+    pub fn ends(&self) -> bool {
+        matches!(self, TermEvent::Exit | TermEvent::Error { .. } | TermEvent::Lost)
+    }
+}
+
 /// A `TermEvent` numbered in the order the viewer must apply it.
 /// `Attached` is `seq` 0 and what follows counts from 1; output that
 /// raced ahead of the snapshot carries a higher `seq` and is held until it.
