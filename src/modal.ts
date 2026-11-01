@@ -16,13 +16,15 @@ import { composerKey, sendShortcut } from "./keys";
 import { costText, hasReset, stageFor, usageStrip, type Stage } from "./usage";
 import { renderAnsi } from "./ansi";
 import type { LiveHandle, LiveTarget } from "./live";
+import { EXTRA_KEYS, type ExtraKey } from "./livekeys";
 import { folderName } from "./nativeopen";
 
 /**
  * Composer features the page turns on: the phone has a picker instead of
- * drag-and-drop, and no keyboard to hint at in the menu.
+ * drag-and-drop, no keyboard to hint at in the menu, and a row of the keys
+ * its on-screen keyboard lacks under a live terminal.
  */
-const composer = { attachButton: false, keyboardHints: true };
+const composer = { attachButton: false, keyboardHints: true, terminalKeys: false };
 
 export function setComposerOptions(o: Partial<typeof composer>): void {
   Object.assign(composer, o);
@@ -38,11 +40,12 @@ export function viewerTheme(): ViewerTheme {
 }
 
 /**
- * True when the viewer shows `card` as its live terminal: a local session in
- * a terminal Maya hosts, in the terminal look.
+ * True when the viewer shows `card` as its live terminal: a session in a
+ * terminal Maya hosts, in the terminal look; on another Maya, only when the
+ * card says its terminal can be opened from here.
  */
 export function isLive(card: Card, theme: ViewerTheme | undefined): boolean {
-  return theme === "terminal" && !!card.native && !card.machine;
+  return theme === "terminal" && !!card.native && (!card.machine || !!card.live);
 }
 
 /** Sets the viewer's look; an open panel is redrawn at once. */
@@ -116,6 +119,8 @@ export interface ModalHandlers {
   onRemoveAttachment?(path: string): void;
   /** Files pasted into the composer, to be saved and attached. */
   onPasteFiles?(files: { name: string; file: File }[]): void;
+  /** Type one of the extra keys into the live terminal. */
+  onLiveKey?(key: ExtraKey): void;
 }
 
 /**
@@ -567,6 +572,21 @@ function statusFoot(card: Card, nowMs: number): HTMLElement {
   return foot;
 }
 
+/** The phone's row of extra keys under the live terminal: the keys its on-screen keyboard cannot send. */
+function renderLiveKeys(h: ModalHandlers): HTMLElement {
+  const row = el("div", "modal__keys");
+  for (const [key, label] of EXTRA_KEYS) {
+    const button = el("button", "card__btn", label);
+    button.type = "button";
+    // Taking no focus, the terminal keeps it and the keyboard stays up.
+    button.addEventListener("pointerdown", (e) => e.preventDefault());
+    button.addEventListener("mousedown", (e) => e.preventDefault());
+    button.addEventListener("click", () => h.onLiveKey?.(key));
+    row.append(button);
+  }
+  return row;
+}
+
 /** The chat look's part of it, beside the header's folder, PR and ctx %: model · branch. */
 export function headStatus(card: Card): string {
   return [card.model, card.branch].filter(Boolean).join(" · ");
@@ -628,7 +648,10 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
 
   if (isLive(m.card, m.theme)) {
     // The session's own terminal, typed into directly: it asks and answers there.
-    panel.append(el("div", "modal__live"), statusFoot(m.card, nowMs));
+    // One on another Maya keeps its host's size, so a wide one scrolls sideways.
+    panel.append(el("div", m.card.machine ? "modal__live modal__live--remote" : "modal__live"));
+    if (composer.terminalKeys) panel.append(renderLiveKeys(h));
+    panel.append(statusFoot(m.card, nowMs));
     if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.warn ? "warn" : m.status.ok ? "ok" : "error"}`, m.status.text));
     root.append(backdrop, panel);
     return root;
@@ -639,8 +662,9 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     const banner = el("div", "modal__banner");
     const prose = m.card.awaiting?.kind === "text";
     const remote = !!m.card.machine;
-    // A Native session's terminal is this viewer's other look, not a window.
-    const native = !remote && !!m.card.native;
+    // A Native session's terminal is this viewer's other look, not a window;
+    // on another Maya, only when its card says the terminal can be opened from here.
+    const native = remote ? !!m.card.live : !!m.card.native;
     // A multi-select menu is read-only: it is answered in the terminal.
     const answerable = !!menu && !m.card.awaiting?.questions[m.next ?? 0]?.multiSelect;
     const text = answerable
@@ -651,10 +675,10 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
         ? remote || native
           ? `This session asked you something. Reply below. "${m.card.awaiting?.detail ?? ""}"`
           : `This session asked you something. Reply below or in its terminal. "${m.card.awaiting?.detail ?? ""}"`
-        : remote
-          ? `This session is waiting for a decision on ${m.card.machine}. Answer it there before replying.`
-          : native
-            ? "This session is waiting for a decision in its terminal. Switch to the terminal look to answer it."
+        : native
+          ? "This session is waiting for a decision in its terminal. Switch to the terminal look to answer it."
+          : remote
+            ? `This session is waiting for a decision on ${m.card.machine}. Answer it there before replying.`
             : "This session is waiting for a decision in its terminal. Answer it there before replying.";
     banner.append(el("span", "", text));
     if (!remote && !native) {
@@ -981,6 +1005,9 @@ function mountLater(el: HTMLElement, target: LiveTarget): LiveHandle {
       if (handle) handle.focus();
       else focus = true;
     },
+    press(key) {
+      handle?.press(key);
+    },
   };
 }
 
@@ -996,7 +1023,10 @@ function syncLive(host: HTMLElement, focus: boolean): void {
     current.live.handle.dispose();
     current.live = undefined;
   }
-  if (el && !current.live) current.live = { el, handle: mountLater(el, { pid: current.model.card.pid }) };
+  const card = current.model.card;
+  // A session on another Maya is reached by its id, through the main.
+  const target: LiveTarget = card.machine ? { session: card.sessionId, remote: true } : { pid: card.pid };
+  if (el && !current.live) current.live = { el, handle: mountLater(el, target) };
   if (focus) current.live?.handle.focus();
 }
 
@@ -1038,6 +1068,7 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
       paint();
     },
     onPasteFiles: (files) => void attachPasted(files),
+    onLiveKey: (key) => current?.live?.handle.press(key),
   });
   // Rows and Stop rendered inside the open delay: repaint once it has elapsed.
   const delay = nextEnableDelay([m.card], Date.now());

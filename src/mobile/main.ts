@@ -31,7 +31,7 @@ import { initSetup } from "./setup";
 import { activeColumn, columnWidth, columnsFor, openingColumn, renderStrip, scrollLeftFor, visibleColumns } from "./strip";
 
 setLocalMachine(false);
-setComposerOptions({ attachButton: true, keyboardHints: false });
+setComposerOptions({ attachButton: true, keyboardHints: false, terminalKeys: true });
 
 let cards: Card[] = [];
 let opened = false;
