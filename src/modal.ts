@@ -666,8 +666,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     // A Native session's terminal is this viewer's other look, not a window,
     // when the terminal look would show it live.
     const native = isLive(m.card, "terminal");
-    // A multi-select menu is read-only: it is answered in the terminal.
-    const answerable = !!menu && !m.card.awaiting?.questions[m.next ?? 0]?.multiSelect;
+    const answerable = !!menu;
     const text = answerable
       ? remote || native
         ? "This session is asking. Answer below."

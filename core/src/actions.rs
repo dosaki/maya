@@ -258,6 +258,7 @@ pub fn answer_pick(l: &Local, session_id: &str, ask_id: u64, question: usize, pi
     for step in steps {
         match step {
             answer::Step::Line(text) => l.terminal.type_line(&tty, &text)?,
+            answer::Step::Reply(text) => l.terminal.type_reply(&tty, &[text]).map_err(|(_, why)| why)?,
             answer::Step::Pause(ms) => std::thread::sleep(Duration::from_millis(ms)),
         }
     }

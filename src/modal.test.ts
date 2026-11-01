@@ -677,12 +677,15 @@ describe("renderModal", () => {
     setComposerOptions({ keyboardHints: true });
   });
 
-  it("shows a multi-select question read-only and sends the user to the terminal", () => {
-    const multi = { ...asking, awaiting: { kind: "question" as const, detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: true, options: [{ label: "A", description: "" }] }] } };
-    const el = renderModal({ card: multi, turns: [], status: null, draft: "", next: 0 }, handlers(), 6000);
-    expect(el.querySelector(".menu__note")?.textContent).toBe("Multi-select: answer in the terminal");
-    expect(el.querySelector(".menu [data-action=pick]")).toBeNull();
-    expect(el.querySelector(".modal__banner")?.textContent).toContain("Answer it there");
+  it("answers a multi-select question from the menu", () => {
+    const multi = { ...asking, awaiting: { kind: "question" as const, detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: true, options: [{ label: "A", description: "" }, { label: "B", description: "" }] }] } };
+    const h = handlers();
+    const el = renderModal({ card: multi, turns: [], status: null, draft: "", next: 0 }, h, 6000);
+    expect(el.querySelector(".modal__banner")?.textContent).toContain("Answer below");
+    el.querySelector<HTMLElement>(".menu [data-row='1']")!.click();
+    const send = el.querySelector<HTMLButtonElement>(".menu button[data-action=options]")!;
+    send.click();
+    expect(h.onPick).toHaveBeenCalledWith(0, { kind: "options", indexes: [1] }, send);
   });
 
   it("Stop shows only when canStop, and sits next to Send", () => {
