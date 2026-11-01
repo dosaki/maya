@@ -61,7 +61,8 @@ const DROPPED: u8 = 2;
 /// How long Maya's own input waits behind input the program is not reading.
 const WRITE_WAIT: Duration = Duration::from_secs(5);
 
-/// A viewer's sink; returning false detaches it.
+/// A viewer's sink; returning false detaches it. It must queue the frame
+/// and return at once: `resize` runs it with the terminal locked.
 pub type Sink = Box<dyn Fn(Frame) -> bool + Send>;
 
 /// What a call on a terminal that has ended says.
@@ -533,23 +534,25 @@ impl NativeHost {
     /// Resizes the terminal, to at least 5 rows by 20 columns. The terminal
     /// stays locked until its screen is resized too, so two resizes at once
     /// cannot leave them at different sizes. When the size changed, each
-    /// viewer gets the pending batch and then `Size`, so it draws what came
-    /// before at the old size. A sink must not resize: it runs with the
-    /// terminal locked.
+    /// viewer gets the pending batch and then `Size`, and what the program
+    /// prints once resized follows it. A sink must not resize: it runs with
+    /// the terminal locked.
     pub fn resize(&self, term: TermId, rows: u16, cols: u16) -> Result<(), String> {
         let t = self.get(term)?;
         let (rows, cols) = (rows.max(MIN_ROWS), cols.max(MIN_COLS));
         let master = lock(&t.master);
-        if let Some(m) = master.as_ref() {
-            m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| format!("Could not resize the terminal: {e}"))?;
-        }
+        let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+        let resize_pty = || master.as_ref().map_or(Ok(()), |m| m.resize(size).map_err(|e| format!("Could not resize the terminal: {e}")));
         // Only a resize changes the screen's size, and `master` keeps out another.
         if lock(&t.out).screen.size() == (rows, cols) {
-            return Ok(());
+            return resize_pty();
         }
         let _sending = lock(&t.sending);
         let delivery = {
+            // The program is resized with `out` held, so what it prints for
+            // the new size is fed after the batch is cut, onto the resized screen.
             let mut out = lock(&t.out);
+            resize_pty()?;
             out.screen.resize(rows, cols);
             out.take()
         };
@@ -1332,6 +1335,40 @@ mod tests {
             .collect();
         assert!(has(&before, "ab"), "the output before the resize came after it: {resized:?}");
         assert_eq!(again, 0, "a resize to the same size sent something");
+    }
+
+    #[test]
+    fn what_the_program_prints_on_a_resize_follows_the_size() {
+        let host = Arc::new(NativeHost::new(BATCH));
+        let term = sh(&host, "stty -echo; trap 'printf W' WINCH; printf ready; while :; do sleep 0.05; done");
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let f = frames.clone();
+        let sink: Sink = Box::new(move |frame| {
+            f.lock().unwrap().push(frame);
+            true
+        });
+        let at = host.attach(term, 0, sink).unwrap();
+        let printed = |frames: &[Frame], s: &str| frames.iter().any(|f| matches!(f, Frame::Output(b) if has(b, s)));
+        if !within_2s(|| has(&at.snapshot, "ready") || printed(&frames.lock().unwrap(), "ready")) {
+            host.kill_all();
+            panic!("the terminal never got ready");
+        }
+        // Frames are held back while the resize starts, so its redraw would wait in the batch.
+        let t = host.get(term).unwrap();
+        let sending = lock(&t.sending);
+        let h = host.clone();
+        let resizing = std::thread::spawn(move || h.resize(term, 30, 100));
+        within(Duration::from_millis(500), || has(&lock(&t.out).pending, "W"));
+        drop(sending);
+        let resized = resizing.join().unwrap();
+        let redrawn = within_2s(|| printed(&frames.lock().unwrap(), "W"));
+        host.kill_all();
+        let frames = frames.lock().unwrap();
+        let size = frames.iter().position(|f| *f == Frame::Size { rows: 30, cols: 100 });
+        let w = frames.iter().position(|f| matches!(f, Frame::Output(b) if has(b, "W")));
+        assert_eq!(resized, Ok(()));
+        assert!(redrawn, "the program never printed on the resize");
+        assert!(size.is_some() && size < w, "the redraw came before the size: {frames:?}");
     }
 
     #[test]
