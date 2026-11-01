@@ -251,6 +251,17 @@ describe("mountLive", () => {
     ]);
   });
 
+  it("a local viewer ignores size frames", async () => {
+    await mounted();
+    channel().onmessage({ kind: "size", rows: 30, cols: 100 } as { kind: string });
+    await flush();
+    expect(term().calls).not.toContain("resize 30x100");
+    expect(calls("native_resize")).toEqual([]);
+    expect(term().text.join("")).not.toContain("[Session ended]");
+    term().dataListener!("x");
+    expect(calls("native_input")).toHaveLength(1);
+  });
+
   it("shows that the session ended on an exit frame and stops sending input", async () => {
     await mounted();
     channel().onmessage({ kind: "exit" });

@@ -31,8 +31,11 @@ pub const BATCH: Duration = Duration::from_millis(16);
 #[cfg(unix)]
 const GRACE: Duration = Duration::from_millis(400);
 
+#[derive(Debug, PartialEq)]
 pub enum Frame {
     Output(Vec<u8>),
+    /// The terminal was resized: what follows is drawn at this size.
+    Size { rows: u16, cols: u16 },
     /// The program ended; no frame follows.
     Exit,
 }
@@ -529,7 +532,10 @@ impl NativeHost {
 
     /// Resizes the terminal, to at least 5 rows by 20 columns. The terminal
     /// stays locked until its screen is resized too, so two resizes at once
-    /// cannot leave them at different sizes.
+    /// cannot leave them at different sizes. When the size changed, each
+    /// viewer gets the pending batch and then `Size`, so it draws what came
+    /// before at the old size. A sink must not resize: it runs with the
+    /// terminal locked.
     pub fn resize(&self, term: TermId, rows: u16, cols: u16) -> Result<(), String> {
         let t = self.get(term)?;
         let (rows, cols) = (rows.max(MIN_ROWS), cols.max(MIN_COLS));
@@ -537,7 +543,25 @@ impl NativeHost {
         if let Some(m) = master.as_ref() {
             m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| format!("Could not resize the terminal: {e}"))?;
         }
-        lock(&t.out).screen.resize(rows, cols);
+        // Only a resize changes the screen's size, and `master` keeps out another.
+        if lock(&t.out).screen.size() == (rows, cols) {
+            return Ok(());
+        }
+        let _sending = lock(&t.sending);
+        let delivery = {
+            let mut out = lock(&t.out);
+            out.screen.resize(rows, cols);
+            out.take()
+        };
+        let mut dead = deliver(&delivery);
+        for (id, sink, _) in &delivery {
+            if !dead.contains(id) && !(lock(sink))(Frame::Size { rows, cols }) {
+                dead.push(*id);
+            }
+        }
+        if !dead.is_empty() {
+            lock(&t.out).viewers.retain(|v| !dead.contains(&v.id));
+        }
         Ok(())
     }
 
@@ -886,6 +910,7 @@ mod tests {
                     s.frames += 1;
                 }
                 Frame::Exit => s.exited = true,
+                Frame::Size { .. } => {}
             }
             true
         });
@@ -1274,6 +1299,39 @@ mod tests {
         let at = host.attach(term, 0, Box::new(|_| true)).unwrap();
         host.kill_all();
         assert_eq!((at.rows, at.cols), (5, 20));
+    }
+
+    #[test]
+    fn a_resize_tells_viewers_the_new_size_after_the_output_before_it() {
+        // Batches go out a second apart, so the output is still pending when the resize comes.
+        let host = NativeHost::new(Duration::from_secs(1));
+        let term = sh(&host, "stty -echo; read l; printf ab; read l");
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let f = frames.clone();
+        let sink: Sink = Box::new(move |frame| {
+            f.lock().unwrap().push(frame);
+            true
+        });
+        host.attach(term, 0, sink).unwrap();
+        host.write(term, b"\r").unwrap();
+        let t = host.get(term).unwrap();
+        let pending = within_2s(|| has(&lock(&t.out).pending, "ab"));
+        host.resize(term, 30, 100).unwrap();
+        let resized = std::mem::take(&mut *frames.lock().unwrap());
+        host.resize(term, 30, 100).unwrap();
+        let again = frames.lock().unwrap().len();
+        host.kill_all();
+        assert!(pending, "the output never arrived");
+        assert_eq!(resized.last(), Some(&Frame::Size { rows: 30, cols: 100 }));
+        let before: Vec<u8> = resized[..resized.len() - 1]
+            .iter()
+            .flat_map(|f| match f {
+                Frame::Output(b) => b.clone(),
+                other => panic!("{other:?} before the size"),
+            })
+            .collect();
+        assert!(has(&before, "ab"), "the output before the resize came after it: {resized:?}");
+        assert_eq!(again, 0, "a resize to the same size sent something");
     }
 
     #[test]

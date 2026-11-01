@@ -14,7 +14,7 @@ export interface LiveHandle {
 }
 
 /** What the backend streams to a viewer, bytes as base64. */
-type NativeFrame = { kind: "output"; data: string } | { kind: "exit" };
+type NativeFrame = { kind: "output"; data: string } | { kind: "size"; rows: number; cols: number } | { kind: "exit" };
 
 /** The terminal to attach to: the one a session's process runs in, or one by its id. */
 export type LiveTarget = { pid: number } | { term: number };
@@ -108,6 +108,8 @@ export function mountLive(host: HTMLElement, target: LiveTarget): LiveHandle {
 
   const apply = (frame: NativeFrame) => {
     if (frame.kind === "output") term.write(decode(frame.data));
+    // The size is for viewers on other machines: this one sizes the terminal itself.
+    else if (frame.kind === "size") return;
     else if (!ended) {
       ended = true;
       term.write(note("[Session ended]"));

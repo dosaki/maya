@@ -1,11 +1,12 @@
 //! The commands the terminal viewer uses to attach to a Native session,
 //! type into it, resize it and detach. Bytes cross as base64 strings.
 
-use crate::native::host::{Frame, Sink, Unseen};
+use crate::native::host::{Frame, Sink, TermId, Unseen};
 use crate::native::{screen, HOST};
 use crate::AppState;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use maya_core::foreign::Proc;
 use maya_core::native::{parents, root_of};
 use serde::Serialize;
 use tauri::ipc::Channel;
@@ -17,6 +18,7 @@ use tauri::{AppHandle, Emitter};
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum NativeFrame {
     Output { data: String },
+    Size { rows: u16, cols: u16 },
     Exit,
 }
 
@@ -34,6 +36,7 @@ pub struct NativeAttached {
 fn frame_of(frame: Frame) -> NativeFrame {
     match frame {
         Frame::Output(bytes) => NativeFrame::Output { data: STANDARD.encode(bytes) },
+        Frame::Size { rows, cols } => NativeFrame::Size { rows, cols },
         Frame::Exit => NativeFrame::Exit,
     }
 }
@@ -48,10 +51,16 @@ fn decode_input(data: &str) -> Result<Vec<u8>, String> {
 pub fn native_attach(state: TauriState<AppState>, pid: i32, on_frame: Channel<NativeFrame>) -> Result<NativeAttached, String> {
     // The store lock ends with this statement: attaching must not hold it.
     let tree = state.store.lock().unwrap().process_tree();
-    let term = root_of(pid, &HOST.root_pids(), &parents(&tree))
-        .and_then(|root| HOST.term_for_root(root))
-        .ok_or("This session is not running in Maya.")?;
+    let term = term_for_pid(&tree, pid).ok_or(NOT_RUNNING)?;
     attach(term, on_frame)
+}
+
+/// What attaching to a session says when Maya hosts no terminal for it.
+pub(crate) const NOT_RUNNING: &str = "This session is not running in Maya.";
+
+/// The hosted terminal that `pid` runs in, walking up `tree` to its program.
+pub(crate) fn term_for_pid(tree: &[Proc], pid: i32) -> Option<TermId> {
+    root_of(pid, &HOST.root_pids(), &parents(tree)).and_then(|root| HOST.term_for_root(root))
 }
 
 /// Attaches the viewer to terminal `term` itself, for a session started a
@@ -125,6 +134,11 @@ mod tests {
         let out = serde_json::to_string(&frame_of(Frame::Output(vec![0xC3, 0xA9]))).unwrap();
         assert_eq!(out, r#"{"kind":"output","data":"w6k="}"#);
         assert_eq!(serde_json::to_string(&frame_of(Frame::Exit)).unwrap(), r#"{"kind":"exit"}"#);
+    }
+
+    #[test]
+    fn a_size_frame_reaches_the_viewer() {
+        assert_eq!(serde_json::to_string(&frame_of(Frame::Size { rows: 30, cols: 100 })).unwrap(), r#"{"kind":"size","rows":30,"cols":100}"#);
     }
 
     #[test]
