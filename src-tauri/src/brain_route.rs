@@ -38,7 +38,7 @@ pub(crate) fn brain_card(session_id: &str, agent: Harness, cwd: &str, working: b
         branch: None,
         brain: true,
         native: false,
-        shell: false, usage: None, limits: None, status_line: None
+        shell: false, usage: None, limits: None, status_line: None, live: false
     }
 }
 

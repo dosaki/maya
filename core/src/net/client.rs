@@ -668,6 +668,7 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
         }
         Down::Bye { reason } => return Err(bye_message(&reason)),
         Down::Pong => {}
+        Down::TermAttach { .. } | Down::TermInput { .. } | Down::TermDetach { .. } | Down::TermFrame { .. } => log::line("network", "main: terminal message not handled yet"),
         Down::Move { host, port, key } => {
             let host = clean(&host);
             if decode_key(&key).is_err() {

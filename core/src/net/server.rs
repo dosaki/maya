@@ -1137,6 +1137,7 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
             lock(&ctx.shared).touch(&link.id);
             send_down(ch, &Down::Pong)?;
         }
+        Up::TermAttach { .. } | Up::TermInput { .. } | Up::TermDetach { .. } | Up::TermFrame { .. } => log::line("network", format!("{}: terminal message not handled yet", link.label)),
         Up::Request { id, machine, request } => {
             let (allowed, tx) = {
                 let mut s = lock(&ctx.shared);
@@ -2014,7 +2015,7 @@ mod tests {
     }
 
     pub(crate) fn card(id: &str, name: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None }
+        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false }
     }
 
     #[test]

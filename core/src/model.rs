@@ -174,6 +174,9 @@ pub struct Card {
     /// The line the agent's own status line shows, when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_line: Option<String>,
+    /// This card's live terminal can be opened from the Maya showing it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub live: bool,
 }
 
 #[cfg(test)]
@@ -278,7 +281,7 @@ mod tests {
             machine: None,
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None
+            stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false
         };
         let json = serde_json::to_value(&card).unwrap();
         assert_eq!(json["context"]["percent"], 62);

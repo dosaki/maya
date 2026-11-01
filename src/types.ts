@@ -186,6 +186,8 @@ export interface Card {
   limits?: AccountLimits | null;
   /** The line the agent's own status line shows. */
   statusLine?: string | null;
+  /** This card's live terminal can be opened from the Maya showing it. */
+  live?: boolean;
 }
 
 export interface TokenCounts {

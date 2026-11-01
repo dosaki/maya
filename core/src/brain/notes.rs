@@ -37,7 +37,7 @@ pub(crate) mod tests {
         Card {
             session_id: id.into(), pid: 1, name: name.into(), cwd: format!("/x/{id}"), state, state_since: 0, snippet: "".into(),
             awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None,
-            machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None
+            machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false
         }
     }
 

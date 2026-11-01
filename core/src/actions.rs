@@ -1055,7 +1055,7 @@ mod tests {
 
     /// A working session's card, under the agent's own name.
     fn test_card(id: &str, harness: Harness, cwd: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state: State::Working, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None }
+        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state: State::Working, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false }
     }
 
     /// Codex rollout lines: a turn starting, and that turn finished with a reply.

@@ -1375,7 +1375,7 @@ mod tests {
         Card {
             session_id: id.into(), pid: 1, name: name.into(), cwd: format!("/Users/x/dev/{name}"), state: State::Awaiting, state_since: 42, snippet: "".into(),
             awaiting: Some(Awaiting { kind: AwaitKind::Text, detail: ask.into(), questions: vec![] }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false
         }
     }
 

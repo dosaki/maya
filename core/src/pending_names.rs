@@ -216,7 +216,7 @@ mod tests {
     use crate::model::{Card, Harness, State};
 
     fn card(id: &str, harness: Harness, cwd: &str, state: State, snippet: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state, state_since: 0, snippet: snippet.into(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None }
+        Card { session_id: id.into(), pid: 1, name: format!("auto-{id}"), cwd: cwd.into(), state, state_since: 0, snippet: snippet.into(), awaiting: None, has_inbox: false, harness, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false }
     }
 
     fn pending(name: &str, known: &[&str]) -> PendingName {

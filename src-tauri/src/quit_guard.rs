@@ -241,7 +241,7 @@ mod tests {
         Card {
             session_id: name.into(), pid: 0, name: name.into(), cwd: String::new(), state, state_since: 0, snippet: String::new(),
             awaiting: None, has_inbox: false, harness: Harness::ClaudeCode, pr: None, context: None, machine: None,
-            machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native, shell: false, usage: None, limits: None, status_line: None
+            machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native, shell: false, usage: None, limits: None, status_line: None, live: false
         }
     }
 
