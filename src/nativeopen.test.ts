@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { endedText, folderName, openStarted, setNativeOpener } from "./nativeopen";
+import { endedText, folderName, localNativeCard, openStarted, setNativeOpener } from "./nativeopen";
+import type { Card } from "./types";
 
 describe("opening a Native session the app just started", () => {
   it("opens the terminal only when the start put the session in one", () => {
@@ -28,5 +29,17 @@ describe("the toast for a Native session that ended before its card", () => {
     expect(folderName("C:\\a\\b")).toBe("b");
     expect(folderName("eye")).toBe("eye");
     expect(folderName("/")).toBe("/");
+  });
+});
+
+describe("the card whose live terminal a session's pid opens", () => {
+  const card = (sessionId: string, pid: number, more: Partial<Card> = {}): Card =>
+    ({ sessionId, pid, name: sessionId, cwd: "/x", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: false, harness: "claude-code", pr: null, context: null, ...more }) as Card;
+
+  it("is this machine's Native card with that pid", () => {
+    const cards = [card("plain", 7), card("remote", 7, { native: true, machine: "laptop" }), card("here", 7, { native: true }), card("other", 8, { native: true })];
+    expect(localNativeCard(cards, 7)?.sessionId).toBe("here");
+    expect(localNativeCard(cards, 9)).toBeUndefined();
+    expect(localNativeCard([card("plain", 7), card("remote", 7, { native: true, machine: "laptop" })], 7)).toBeUndefined();
   });
 });

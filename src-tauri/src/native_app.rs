@@ -6,7 +6,7 @@ use crate::native::{screen, HOST};
 use crate::AppState;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use maya_core::native::root_of;
+use maya_core::native::{parents, root_of};
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State as TauriState;
@@ -48,7 +48,7 @@ fn decode_input(data: &str) -> Result<Vec<u8>, String> {
 pub fn native_attach(state: TauriState<AppState>, pid: i32, on_frame: Channel<NativeFrame>) -> Result<NativeAttached, String> {
     // The store lock ends with this statement: attaching must not hold it.
     let tree = state.store.lock().unwrap().process_tree();
-    let term = root_of(pid, &HOST.root_pids(), &tree)
+    let term = root_of(pid, &HOST.root_pids(), &parents(&tree))
         .and_then(|root| HOST.term_for_root(root))
         .ok_or("This session is not running in Maya.")?;
     attach(term, on_frame)
@@ -85,7 +85,7 @@ pub struct NativeEnded {
 
 impl From<Unseen> for NativeEnded {
     fn from(u: Unseen) -> NativeEnded {
-        NativeEnded { term: u.term, dir: u.cwd.display().to_string(), lines: u.lines }
+        NativeEnded { term: u.term, dir: u.folder.display().to_string(), lines: u.lines }
     }
 }
 
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn an_unseen_end_reaches_the_page_with_its_folder_and_lines() {
-        let ended = NativeEnded::from(Unseen { term: 3, cwd: "/work/eye".into(), lines: vec!["zsh: command not found: claude".into()] });
+        let ended = NativeEnded::from(Unseen { term: 3, folder: "/work/eye".into(), lines: vec!["zsh: command not found: claude".into()] });
         let json = serde_json::to_value(&ended).unwrap();
         assert_eq!(json, serde_json::json!({ "term": 3, "dir": "/work/eye", "lines": ["zsh: command not found: claude"] }));
     }

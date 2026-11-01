@@ -337,18 +337,39 @@ describe("mountLive", () => {
     expect(press("v", { ctrlKey: true }).kept).toBe(true);
   });
 
-  it("gives the light theme a palette whose every colour reads on its background; the dark keeps xterm's", async () => {
+  it("gives the light theme a palette whose every colour reads on its background, muted text dimmer; the dark keeps xterm's", async () => {
     document.documentElement.dataset.theme = "light";
     await mounted();
     const theme = term().options.theme as Record<string, string>;
     const names = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite"];
     for (const name of names) {
       expect(theme[name], name).toBe(LIGHT_ANSI[name as keyof typeof LIGHT_ANSI]);
-      expect(contrast(theme[name], "#fffdf8"), name).toBeGreaterThanOrEqual(4.5);
+      // Bright black is muted text (autosuggestions, secondary lines): it reads, but dimmer than the rest.
+      if (name === "brightBlack") {
+        expect(contrast(theme[name], "#fffdf8"), name).toBeGreaterThanOrEqual(3);
+        expect(contrast(theme[name], "#fffdf8"), name).toBeLessThan(4.5);
+      } else expect(contrast(theme[name], "#fffdf8"), name).toBeGreaterThanOrEqual(4.5);
     }
     delete document.documentElement.dataset.theme;
     mountLive(host(), { pid: 42 });
     expect((term().options.theme as Record<string, string>).white).toBeUndefined();
+  });
+
+  it("takes Maya's new theme while it is open, and stops following it once disposed", async () => {
+    const handle = await mounted();
+    const theme = () => term().options.theme as Record<string, string>;
+    expect(theme().white).toBeUndefined();
+    document.documentElement.dataset.theme = "light";
+    await flush();
+    expect(theme().white).toBe(LIGHT_ANSI.white);
+    expect(theme().brightBlack).toBe(LIGHT_ANSI.brightBlack);
+    delete document.documentElement.dataset.theme;
+    await flush();
+    expect(theme().white).toBeUndefined();
+    handle.dispose();
+    document.documentElement.dataset.theme = "light";
+    await flush();
+    expect(theme().white).toBeUndefined();
   });
 });
 

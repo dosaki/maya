@@ -16,6 +16,77 @@ import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, openTermViewer, renderTermViewer,
 import { comboLabel, defaultKeys, setKeyBindings } from "./keys";
 import type { Card, Turn } from "./types";
 
+/** One rule of styles.css: the at-rules it sits in, its selectors and its declarations. */
+interface CssRule {
+  at: string;
+  selectors: string[];
+  decls: Record<string, string>;
+}
+
+const squash = (text: string) => text.replace(/\s+/g, " ").trim();
+
+/** `list` split at its top-level commas: a comma inside :is(…) stays. */
+function topLevel(list: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (list[i] === "(") depth++;
+    else if (list[i] === ")") depth--;
+    else if (list[i] === "," && depth === 0) {
+      parts.push(list.slice(from, i));
+      from = i + 1;
+    }
+  }
+  return [...parts, list.slice(from)].map(squash).filter(Boolean);
+}
+
+/** Every rule in `css`, in order, comments left out. */
+function cssRules(css: string): CssRule[] {
+  const text = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules: CssRule[] = [];
+  const at: string[] = [];
+  let from = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "}") {
+      at.pop();
+      from = i + 1;
+    } else if (text[i] === "{") {
+      const prelude = squash(text.slice(from, i));
+      const close = text.indexOf("}", i);
+      const open = text.indexOf("{", i + 1);
+      // An at-rule holding rules of its own (@media): the rules inside count as in it.
+      if (prelude.startsWith("@") && open !== -1 && open < close) {
+        at.push(prelude);
+        from = i + 1;
+        continue;
+      }
+      const decls: Record<string, string> = {};
+      for (const d of text.slice(i + 1, close).split(";")) {
+        const colon = d.indexOf(":");
+        if (colon > 0) decls[squash(d.slice(0, colon))] = squash(d.slice(colon + 1));
+      }
+      rules.push({ at: at.join(" "), selectors: topLevel(prelude), decls });
+      i = close;
+      from = close + 1;
+    }
+  }
+  return rules;
+}
+
+const RULES = cssRules(styles);
+
+/**
+ * What styles.css declares for `selector` outside any at-rule, every rule
+ * naming it merged in order, so a test checks values and not how the file
+ * is laid out.
+ */
+function css(selector: string): Record<string, string> {
+  const found = RULES.filter((r) => !r.at && r.selectors.includes(squash(selector)));
+  if (!found.length) throw new Error(`styles.css has no "${selector}" rule`);
+  return Object.assign({}, ...found.map((r) => r.decls));
+}
+
 const base: Card = { sessionId: "s", pid: 1, name: "eye-1", cwd: "/x/dev/eye", state: "idle", stateSince: 0, snippet: "", awaiting: null, hasInbox: true, harness: "claude-code", pr: null, context: null };
 const asking: Card = { ...base, state: "awaiting", stateSince: 5000,
   awaiting: { kind: "question", detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "desc a" }], own: { label: "Type something", row: 1 }, chatRow: 2 }] } };
@@ -338,21 +409,23 @@ describe("renderModal", () => {
   });
 
   it("hides the header's status line at narrow and chip, and the folder at chip", () => {
-    expect(styles).toContain('.modal__head[data-stage="narrow"] .modal__statusline--head, .modal__head[data-stage="chip"] .modal__statusline--head { display: none; }');
-    expect(styles).toContain('.modal__head[data-stage="chip"] .modal__project { display: none; }');
-    expect(styles).toContain(".usage { flex: none; display: flex;");
+    expect(css('.modal__head[data-stage="narrow"] .modal__statusline--head').display).toBe("none");
+    expect(css('.modal__head[data-stage="chip"] .modal__statusline--head').display).toBe("none");
+    expect(css('.modal__head[data-stage="chip"] .modal__project').display).toBe("none");
+    expect(css(".usage")).toMatchObject({ flex: "none", display: "flex" });
   });
 
   it("keeps every item in the head on one line: the status line gives way first, then the title", () => {
     // Every item of the titles row keeps its width and its line; the strip never shrinks below its meters.
-    expect(styles).toContain(".modal__titles > * { flex: none; white-space: nowrap; }");
-    expect(styles).toContain(".usage { flex: none; display: flex;");
-    expect(styles).toContain(".modal__project { color: var(--muted); font-size: 12px; white-space: nowrap; }");
-    expect(styles).toContain(".modal__state { flex: none; white-space: nowrap;");
+    expect(css(".modal__titles > *")).toMatchObject({ flex: "none", "white-space": "nowrap" });
+    expect(css(".usage")).toMatchObject({ flex: "none", display: "flex" });
+    expect(css(".modal__project")["white-space"]).toBe("nowrap");
+    expect(css(".modal__state")).toMatchObject({ flex: "none", "white-space": "nowrap" });
     // The two that may shrink, the status line far sooner than the title, each ending in an ellipsis.
-    expect(styles).toContain(".modal__titles > .modal__title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }");
-    expect(styles).toContain(".modal__titles > .modal__statusline--head { flex: 0 100000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
-    expect(styles).toContain(".modal__titles { flex: 1; display: flex; align-items: baseline; gap: 8px; min-width: 0; }");
+    const ellipsis = { "min-width": "0", overflow: "hidden", "text-overflow": "ellipsis" };
+    expect(css(".modal__titles > .modal__title")).toMatchObject({ flex: "0 1 auto", ...ellipsis });
+    expect(css(".modal__titles > .modal__statusline--head")).toMatchObject({ flex: "0 100000 auto", "white-space": "nowrap", ...ellipsis });
+    expect(css(".modal__titles")).toMatchObject({ flex: "1", display: "flex", "align-items": "baseline", "min-width": "0" });
     // The rules land on what renderModal draws.
     const el = renderModal({ card: { ...base, model: "claude-opus-5", branch: "feat/x" }, turns: [], status: null, draft: "" }, handlers());
     const titles = el.querySelector(".modal__head > .modal__titles")!;
@@ -360,15 +433,15 @@ describe("renderModal", () => {
   });
 
   it("keeps limit bars blue until 75 percent turns them amber, and context bars gold", () => {
-    expect(styles).toContain('.usage__meter[data-kind="limit"] .usage__fill { background: var(--working); }');
-    expect(styles).toContain('.usage__meter[data-band="high"] .usage__fill { background: var(--awaiting); }');
+    expect(css('.usage__meter[data-kind="limit"] .usage__fill').background).toBe("var(--working)");
+    expect(css('.usage__meter[data-band="high"] .usage__fill').background).toBe("var(--awaiting)");
     // No mid-band fill colour: a limit at 50-74% must not look like the context bar.
-    expect(styles).not.toMatch(/data-band="mid"\][^{]*\.usage__fill/);
+    expect(RULES.some((r) => r.selectors.some((sel) => /data-band="mid"\][^,]*\.usage__fill/.test(sel)))).toBe(false);
   });
 
   it("mutes a window whose reset passed, in both looks", () => {
     // Four classes and attributes: above the terminal look's `.modal--terminal .usage__pct` colours.
-    expect(styles).toContain('.usage .usage__meter[data-reset="passed"] .usage__pct { color: inherit; font-style: italic; }');
+    expect(css('.usage .usage__meter[data-reset="passed"] .usage__pct')).toMatchObject({ color: "inherit", "font-style": "italic" });
   });
 
   it("tells the user to reply when the session asked in prose", () => {
@@ -765,15 +838,16 @@ describe("viewer theme", () => {
   });
 
   it("hides the markers in the chat look and draws the terminal look's colours and font", () => {
-    expect(styles).toContain(".turn__mark, .modal__prompt { display: none; }");
-    expect(styles).toContain(".modal--terminal .turn__mark { display: inline;");
-    expect(styles).toContain(".modal--terminal .modal__panel { background: #0a0a0a; color: #e8e2d4; }");
-    expect(styles).toContain("ui-monospace, SFMono-Regular, Menlo, monospace");
+    expect(css(".turn__mark").display).toBe("none");
+    expect(css(".modal__prompt").display).toBe("none");
+    expect(css(".modal--terminal .turn__mark").display).toBe("inline");
+    expect(css(".modal--terminal .modal__panel")).toMatchObject({ background: "#0a0a0a", color: "#e8e2d4" });
+    expect(css(".modal--terminal .turn")["font-family"]).toBe("ui-monospace, SFMono-Regular, Menlo, monospace");
   });
 
   it("gives the terminal look's user lines a lighter row, as the CLI does, in both themes", () => {
-    expect(styles).toContain(".modal--terminal .turn--user { background: #1a1915; padding: 4px 6px; margin: 0 -6px; border-radius: 4px; }");
-    expect(styles).toContain(':root[data-theme="light"] .modal--terminal .turn--user { background: color-mix(in srgb, var(--bg) 70%, transparent); }');
+    expect(css(".modal--terminal .turn--user")).toMatchObject({ background: "#1a1915", padding: "4px 6px", margin: "0 -6px" });
+    expect(css(':root[data-theme="light"] .modal--terminal .turn--user').background).toBe("color-mix(in srgb, var(--bg) 70%, transparent)");
   });
 
   it("keeps a multi-line tool call whole in one .turn__text, in both looks", () => {
@@ -871,15 +945,17 @@ describe("working and status lines", () => {
   });
 
   it("shows the foot in the terminal look and the header part in the chat look", () => {
-    expect(styles).toContain(".modal__statusline--foot { display: none; }");
-    expect(styles).toContain(".modal--terminal .modal__statusline--foot { display: block;");
-    expect(styles).toContain(".modal--terminal .modal__statusline--head { display: none; }");
+    expect(css(".modal__statusline--foot").display).toBe("none");
+    expect(css(".modal--terminal .modal__statusline--foot").display).toBe("block");
+    expect(css(".modal--terminal .modal__statusline--head").display).toBe("none");
   });
 
   it("scrolls a recorded line wider than the panel inside the foot instead of overflowing it", () => {
-    expect(styles).toContain(".modal__statusline--recorded { white-space: pre; overflow-x: auto; overflow-y: hidden; }");
+    expect(css(".modal__statusline--recorded")).toMatchObject({ "white-space": "pre", "overflow-x": "auto", "overflow-y": "hidden" });
     // No look sets the foot's overflow back.
-    expect(styles).not.toMatch(/modal__statusline--(foot|recorded)[^{]*\{[^}]*overflow(-x)?: visible/);
+    const foot = RULES.filter((r) => r.selectors.some((sel) => /modal__statusline--(foot|recorded)/.test(sel)));
+    expect(foot.length).toBeGreaterThan(0);
+    for (const r of foot) for (const prop of ["overflow", "overflow-x"]) expect(r.decls[prop], `${r.selectors.join(", ")} ${prop}`).not.toBe("visible");
   });
 
   it("a repaint carries the status lines and the working line along", () => {
@@ -1076,12 +1152,12 @@ describe("a Native session's live terminal", () => {
   });
 
   it("the live terminal fills the panel between the head and the status line, in the look's colours", () => {
-    expect(styles).toContain(".modal__live { flex: 1; min-height: 0; background: var(--term-bg); overflow: hidden; }");
+    expect(css(".modal__live")).toMatchObject({ flex: "1", "min-height": "0", background: "var(--term-bg)", overflow: "hidden" });
     // Padded inside the terminal, which the fit add-on takes off, never on the parent it measures.
-    expect(styles).toContain(".modal__live .xterm { height: 100%; padding: 8px 16px 4px; }");
-    expect(styles).not.toMatch(/\.modal__live \{[^}]*padding/);
-    expect(styles).toContain(".modal--terminal .modal__live { --term-bg: #0a0a0a; --term-fg: #e8e2d4;");
-    expect(styles).toContain(':root[data-theme="light"] .modal--terminal .modal__live { --term-bg: #fffdf8; --term-fg: #231f14;');
+    expect(css(".modal__live .xterm")).toMatchObject({ height: "100%", padding: "8px 16px 4px" });
+    expect(css(".modal__live").padding).toBeUndefined();
+    expect(css(".modal--terminal .modal__live")).toMatchObject({ "--term-bg": "#0a0a0a", "--term-fg": "#e8e2d4" });
+    expect(css(':root[data-theme="light"] .modal--terminal .modal__live')).toMatchObject({ "--term-bg": "#fffdf8", "--term-fg": "#231f14" });
   });
 
   it("a local Native card in the chat look keeps its reply box", () => {
@@ -1118,6 +1194,7 @@ describe("a Native session's live terminal", () => {
   it("opening mounts the terminal once for the card's pid and focuses it; board refreshes keep it", async () => {
     setViewerTheme("terminal");
     await openModal(native);
+    await flush();
     expect(live.mounts).toHaveLength(1);
     const [m] = live.mounts;
     expect(m.pid).toBe(42);
@@ -1138,16 +1215,48 @@ describe("a Native session's live terminal", () => {
   it("switching to the chat look disposes the terminal, and back mounts a new one", async () => {
     setViewerTheme("terminal");
     await openModal(native);
+    await flush();
     const [first] = live.mounts;
     setViewerTheme("chat");
     expect(first.dispose).toHaveBeenCalledTimes(1);
     expect(host().querySelector(".modal__live")).toBeNull();
     expect(host().querySelector(".modal__composer")).not.toBeNull();
     setViewerTheme("terminal");
+    await flush();
     expect(live.mounts).toHaveLength(2);
     expect(host().querySelector(".modal__live")).toBe(live.mounts[1].host);
     closeModal();
     setViewerTheme("chat");
+  });
+
+  it("switching to the chat look before the terminal's code has loaded mounts nothing", async () => {
+    setViewerTheme("terminal");
+    const opening = openModal(native);
+    setViewerTheme("chat");
+    await opening;
+    await flush();
+    expect(live.mounts).toHaveLength(0);
+    closeModal();
+  });
+
+  it("reads no history while live, and reads it again on switching to the chat look", async () => {
+    const history = () => invoke.mock.calls.filter((c) => c[0] === "session_history").length;
+    setViewerTheme("terminal");
+    await openModal(native);
+    refreshModal([{ ...native, state: "working", stateSince: 5 }]);
+    await flush();
+    refreshModal([{ ...native, state: "working", stateSince: 5 }]);
+    await flush();
+    expect(history()).toBe(0);
+    expect(host().querySelector(".modal__state")?.textContent).toBe("Working");
+    setViewerTheme("chat");
+    await flush();
+    expect(history()).toBe(1);
+    expect(host().querySelectorAll(".modal__history .turn")).toHaveLength(turns.length);
+    refreshModal([{ ...native, state: "idle", stateSince: 9 }]);
+    await flush();
+    expect(history()).toBe(2);
+    closeModal();
   });
 
   it("a Native card in the chat look mounts nothing", async () => {
@@ -1171,6 +1280,7 @@ describe("a Native session's live terminal", () => {
 });
 
 describe("the viewer of a Native session with no card yet", () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
   const host = () => document.getElementById("modal-host")!;
   beforeEach(() => {
     closeModal();
@@ -1189,8 +1299,16 @@ describe("the viewer of a Native session with no card yet", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("closing the viewer before the terminal's code has loaded mounts nothing", async () => {
+    openTermViewer(9, "/x/dev/eye");
+    closeModal();
+    await flush();
+    expect(live.mounts).toHaveLength(0);
+  });
+
   it("mounts the terminal by its id, and closing or opening a card disposes it", async () => {
     openTermViewer(9, "C:\\work\\eye");
+    await flush();
     expect(host().querySelector(".modal__title")?.textContent).toBe("eye");
     expect(live.mounts.map((m) => [m.term, m.pid])).toEqual([[9, undefined]]);
     expect(live.mounts[0].host).toBe(host().querySelector(".modal__live"));
@@ -1203,6 +1321,7 @@ describe("the viewer of a Native session with no card yet", () => {
     expect(host().childElementCount).toBe(0);
 
     openTermViewer(9, "/x/dev/eye");
+    await flush();
     invoke.mockResolvedValue([]);
     await openModal(base);
     expect(live.mounts[1].dispose).toHaveBeenCalledTimes(1);

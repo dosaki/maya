@@ -1,4 +1,3 @@
-import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { cardActionFor } from "./actions";
@@ -6,7 +5,7 @@ import { answerGuard, stopGuard } from "./answer";
 import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
 import { openModal, openTermViewer, refreshModal, setProgress } from "./modal";
-import { endedText, openStarted, setNativeOpener } from "./nativeopen";
+import { endedText, localNativeCard, openStarted, setNativeOpener } from "./nativeopen";
 import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
@@ -151,7 +150,7 @@ function paint(): void {
  * Maya hosts: that terminal is in the viewer, not a window. False otherwise.
  */
 function openNative(pid: number): boolean {
-  const card = cards.find((c) => c.pid === pid && !c.machine && c.native);
+  const card = localNativeCard(cards, pid);
   if (!card) return false;
   closeNewSession();
   void openModal(card);
@@ -260,6 +259,13 @@ async function loadDebugMode(): Promise<void> {
 }
 
 async function start(): Promise<void> {
+  // A quit held because it would stop a working Native session. First, so
+  // that nothing failing below can leave a quit held with no question.
+  await listen<{ names: string[] }>("quit-confirm", (e) => {
+    void askQuit(e.payload.names, false)
+      .then((yes) => (yes ? invoke("quit_confirmed") : undefined))
+      .catch((err) => showToast(String(err)));
+  });
   void initSettings();
   void updates.init();
   void initMute();
@@ -347,10 +353,6 @@ async function start(): Promise<void> {
     if (ev.key === "Enter" && target.classList.contains("card")) act(target);
   });
 
-  // A quit held because it would stop a working Native session.
-  await listen<{ names: string[] }>("quit-confirm", (e) => {
-    void askQuit(e.payload.names, false).then((yes) => (yes ? invoke("quit_confirmed") : undefined));
-  });
   // A Native session started or resumed here opens its terminal at once, in place of any open dialog.
   setNativeOpener((term, dir) => {
     closeNewSession();

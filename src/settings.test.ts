@@ -1380,8 +1380,12 @@ describe("where new sessions open", () => {
     pretend(LINUX);
     expect(terminalChoices()).toEqual([["terminal", "Terminal (tmux)"], ["native", "Native"]]);
   });
+  it("takes any page that is not on Windows or Linux for a Mac's, as the rest of the page does", () => {
+    pretend("Mozilla/5.0 (jsdom)");
+    expect(terminalChoices()).toEqual([["terminal", "Terminal"], ["iterm", "iTerm2"], ["native", "Native"]]);
+  });
   it("shows New sessions open in on every desktop platform and saves native", () => {
-    for (const ua of [WINDOWS, LINUX]) {
+    for (const ua of [MAC, WINDOWS, LINUX]) {
       pretend(ua);
       const h = { ...handlers(), onNewSessionTerminal: vi.fn() };
       const sel = renderSettings({ ...voiceBase }, h).querySelector<HTMLSelectElement>("select[name=newSessionTerminal]")!;

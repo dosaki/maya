@@ -5,16 +5,16 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
 
-#[cfg(unix)]
-use portable_pty::Child;
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+#[cfg(windows)]
+use portable_pty::ChildKiller;
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use super::screen::Screen;
 
@@ -37,17 +37,59 @@ pub enum Frame {
     Exit,
 }
 
+/// Bytes for a terminal's input thread to type, with the write waiting
+/// for them, if one is.
+type Input = (Vec<u8>, Option<Waiting>);
+
+/// A write waiting for its bytes to be typed: where to say how it went,
+/// and whether the input thread has started on them or the write gave up.
+struct Waiting {
+    done: Sender<Result<(), String>>,
+    state: Arc<AtomicU8>,
+}
+
+/// The bytes of a waiting write are not typed yet.
+const QUEUED: u8 = 0;
+/// The input thread is typing them.
+const TYPING: u8 = 1;
+/// The write gave up waiting: they are never typed.
+const DROPPED: u8 = 2;
+
+/// How long Maya's own input waits behind input the program is not reading.
+const WRITE_WAIT: Duration = Duration::from_secs(5);
+
 /// A viewer's sink; returning false detaches it.
 pub type Sink = Box<dyn Fn(Frame) -> bool + Send>;
+
+/// What a call on a terminal that has ended says.
+const CLOSED: &str = "That session's terminal has closed.";
+/// Why a write did not go in whole, and whether some of it may have.
+#[derive(Debug, PartialEq)]
+pub struct Unwritten {
+    pub why: String,
+    /// The write gave up while its bytes were being typed: part of them
+    /// may be in, or still go in.
+    pub partly: bool,
+}
+
+impl Unwritten {
+    fn none(why: impl Into<String>) -> Unwritten {
+        Unwritten { why: why.into(), partly: false }
+    }
+}
+
+/// What a write says when the program did not take its input in time.
+const NOT_READING: &str = "That session isn't reading its input.";
 
 /// How many of its last lines an unseen terminal tells.
 const LAST_LINES: usize = 3;
 
 /// A terminal that ended unseen: no card ever showed its session and no
-/// viewer was open on it. Where it ran and its last lines that are not blank.
+/// viewer was open on it. The folder it is named by and its last lines
+/// that are not blank.
 pub struct Unseen {
     pub term: TermId,
-    pub cwd: PathBuf,
+    pub folder: PathBuf,
     pub lines: Vec<String>,
 }
 
@@ -104,13 +146,21 @@ fn login_argv(shell: Option<&str>, command: &str) -> Vec<String> {
 /// now and then while another thread forks.
 const OPEN_TRIES: u32 = 5;
 
-/// Runs `f` until it succeeds, up to `OPEN_TRIES` times, with `pause` given
-/// 10 ms more after each failure; the last error when every try failed.
-fn retrying<T, E>(mut pause: impl FnMut(Duration), mut f: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+/// Whether opening a pseudo-terminal failed the way macOS refuses one now
+/// and then while another thread forks (`Unknown error: -6`), which passes.
+fn refused_for_now(e: &impl std::fmt::Display) -> bool {
+    let e = e.to_string();
+    e.contains("Unknown error: -6") || e.contains("code: -6,")
+}
+
+/// Runs `f` until it succeeds, up to `OPEN_TRIES` times while it fails as
+/// `refused_for_now` says, with `pause` given 10 ms more after each
+/// failure; the error when it fails any other way or every try failed.
+fn retrying<T, E: std::fmt::Display>(mut pause: impl FnMut(Duration), mut f: impl FnMut() -> Result<T, E>) -> Result<T, E> {
     let mut tries = 1;
     loop {
         match f() {
-            Err(_) if tries < OPEN_TRIES => {
+            Err(e) if tries < OPEN_TRIES && refused_for_now(&e) => {
                 pause(Duration::from_millis(10 * u64::from(tries)));
                 tries += 1;
             }
@@ -175,18 +225,20 @@ fn deliver(delivery: &Delivery) -> Vec<u64> {
 struct Term {
     /// The program's pid; on Unix also its process group.
     root: i32,
-    /// The folder it started in.
-    cwd: PathBuf,
+    /// The folder it is named by: where it started, or the folder its
+    /// session works in when its command makes that (a review's worktree).
+    folder: PathBuf,
     /// Set once a card showed its session.
     carded: AtomicBool,
     #[cfg(unix)]
     tty: Option<String>,
-    /// None once the pseudo console is closed (Windows).
+    /// None once the pseudo console is closed (Windows). Taken before `out`.
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
-    /// Shared with the terminal's input thread, which types what is queued.
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    /// Input waiting for the input thread, in the order it was queued.
-    input: Sender<Vec<u8>>,
+    /// Input waiting for the terminal's input thread, which types it in
+    /// the order it was queued.
+    input: Sender<Input>,
+    /// Ends the program on Windows; on Unix its process group is signalled.
+    #[cfg(windows)]
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     /// The program until it is reaped: while it is here, `root` cannot
     /// belong to another process.
@@ -297,14 +349,25 @@ impl NativeHost {
 
     /// Starts `command` in a login shell in a new terminal, in `cwd`.
     pub fn spawn(&self, command: &str, cwd: &Path) -> Result<TermId, String> {
-        #[cfg(windows)]
-        maya_core::launch::git_bash().ok_or("Git for Windows is not installed; Maya needs its bash to start sessions (https://git-scm.com/download/win).")?;
-        self.spawn_argv(&shell_argv(command), cwd)
+        self.spawn_for_folder(command, cwd, cwd)
     }
 
-    fn spawn_argv(&self, argv: &[String], cwd: &Path) -> Result<TermId, String> {
+    /// `spawn` for a session whose own folder, `folder`, is made by
+    /// `command` (a review's worktree): the terminal is named by `folder`.
+    pub fn spawn_for_folder(&self, command: &str, cwd: &Path, folder: &Path) -> Result<TermId, String> {
+        #[cfg(windows)]
+        maya_core::launch::git_bash().ok_or("Git for Windows is not installed; Maya needs its bash to start sessions (https://git-scm.com/download/win).")?;
+        self.spawn_argv(&shell_argv(command), cwd, folder)
+    }
+
+    fn spawn_argv(&self, argv: &[String], cwd: &Path, folder: &Path) -> Result<TermId, String> {
         let size = PtySize { rows: DEFAULT_ROWS, cols: DEFAULT_COLS, pixel_width: 0, pixel_height: 0 };
-        let pair = retrying(std::thread::sleep, || native_pty_system().openpty(size)).map_err(|e| format!("Could not open a terminal: {e}"))?;
+        let pair = retrying(std::thread::sleep, || native_pty_system().openpty(size)).map_err(|e| {
+            if !refused_for_now(&e) {
+                maya_core::log::line("native", format!("could not open a terminal, not tried again: {e}"));
+            }
+            format!("Could not open a terminal: {e}")
+        })?;
         let mut cmd = CommandBuilder::from_argv(argv.iter().map(Into::into).collect());
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
@@ -320,22 +383,30 @@ impl NativeHost {
         }
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| format!("Could not start the session: {e}"))?;
         drop(pair.slave);
-        let Some(root) = child.process_id().and_then(|p| i32::try_from(p).ok()) else {
-            let _ = child.kill();
-            return Err("Could not start the session: it has no process id.".into());
+        // From here on, a failure ends the program it started.
+        let hosted = (|| -> Result<_, String> {
+            let root = child.process_id().and_then(|p| i32::try_from(p).ok()).ok_or("Could not start the session: it has no process id.")?;
+            let reader = pair.master.try_clone_reader().map_err(|e| format!("Could not read the terminal: {e}"))?;
+            let writer = pair.master.take_writer().map_err(|e| format!("Could not write to the terminal: {e}"))?;
+            Ok((root, reader, writer))
+        })();
+        let (root, reader, writer) = match hosted {
+            Ok(hosted) => hosted,
+            Err(why) => {
+                end_unhosted(child.as_mut());
+                return Err(why);
+            }
         };
-        let reader = pair.master.try_clone_reader().map_err(|e| format!("Could not read the terminal: {e}"))?;
-        let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| format!("Could not write to the terminal: {e}"))?));
         let (input, queued) = channel();
         let term = Arc::new(Term {
             root,
-            cwd: cwd.to_path_buf(),
+            folder: folder.to_path_buf(),
             carded: AtomicBool::new(false),
             #[cfg(unix)]
             tty: pair.master.tty_name().map(|p| p.display().to_string()),
             master: Mutex::new(Some(pair.master)),
-            writer: writer.clone(),
             input,
+            #[cfg(windows)]
             killer: Mutex::new(child.clone_killer()),
             #[cfg(unix)]
             child: Mutex::new(Some(child)),
@@ -346,14 +417,20 @@ impl NativeHost {
         });
         let id = self.next_term.fetch_add(1, Ordering::Relaxed);
         lock(&self.terms).insert(id, term.clone());
+        // Kept for when a thread cannot start: each takes its own.
+        let kept = term.clone();
         let weak = Arc::downgrade(&self.terms);
         let (wake, ends) = (self.wake.clone(), self.ends.clone());
         #[cfg(unix)]
         let started = std::thread::Builder::new().name(format!("native-{id}")).spawn(move || {
             read(id, term.clone(), reader, weak, &wake, &ends);
-            // The tty closes as the program ends; a straggler is polled.
+            // The end of its output is the terminal's end. What still runs
+            // in its process group (a program that let go of the terminal)
+            // is hung up, as when a terminal window closes, and then reaped.
+            signal_group(&term, libc::SIGHUP);
+            let ended = Instant::now();
             while !reaped(&term) {
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(reap_gap(ended.elapsed()));
             }
         });
         #[cfg(windows)]
@@ -361,22 +438,51 @@ impl NativeHost {
             // The pseudo console outlives its program, and the reader sees
             // no end until it closes: close it once the program ends.
             let waited = term.clone();
-            std::thread::spawn(move || {
-                let _ = child.wait();
-                lock(&waited.master).take();
-            });
-            std::thread::Builder::new().name(format!("native-{id}")).spawn(move || read(id, term, reader, weak, &wake, &ends))
+            std::thread::Builder::new()
+                .name(format!("native-{id}-wait"))
+                .spawn(move || {
+                    let _ = child.wait();
+                    lock(&waited.master).take();
+                })
+                .and_then(|_| std::thread::Builder::new().name(format!("native-{id}")).spawn(move || read(id, term, reader, weak, &wake, &ends)))
         };
-        let started = started.and_then(|_| std::thread::Builder::new().name(format!("native-{id}-input")).spawn(move || type_queued(&queued, &writer)));
+        let started = started.and_then(|_| std::thread::Builder::new().name(format!("native-{id}-input")).spawn(move || type_queued(&queued, writer)));
         if let Err(e) = started {
-            self.kill(id);
+            self.abandon(id, &kept);
             return Err(format!("Could not start the session: {e}"));
         }
         Ok(id)
     }
 
+    /// Drops terminal `id`, whose threads could not all start, and ends its
+    /// program; on Unix the program is reaped too (on Windows nothing is
+    /// left to reap). Its end is not told: spawn's error says what went wrong.
+    fn abandon(&self, id: TermId, t: &Term) {
+        t.carded.store(true, Ordering::Relaxed);
+        lock(&self.terms).remove(&id);
+        #[cfg(unix)]
+        {
+            let child = {
+                let mut held = lock(&t.child);
+                if held.is_some() {
+                    // SAFETY: the leader is unreaped (the lock keeps it so),
+                    // so the group is its own.
+                    unsafe {
+                        libc::kill(-t.root, libc::SIGKILL);
+                    }
+                }
+                held.take()
+            };
+            if let Some(mut c) = child {
+                let _ = c.wait();
+            }
+        }
+        #[cfg(windows)]
+        hang_up(t);
+    }
+
     fn get(&self, term: TermId) -> Result<Arc<Term>, String> {
-        lock(&self.terms).get(&term).cloned().ok_or_else(|| "That session's terminal has closed.".into())
+        lock(&self.terms).get(&term).cloned().ok_or_else(|| CLOSED.into())
     }
 
     fn all(&self) -> Vec<(TermId, Arc<Term>)> {
@@ -387,21 +493,48 @@ impl NativeHost {
     /// before, and returns at once: a program that is not reading its input
     /// holds up only the terminal's input thread.
     pub fn enqueue(&self, term: TermId, bytes: &[u8]) -> Result<(), String> {
-        self.get(term)?.input.send(bytes.to_vec()).map_err(|_| "That session's terminal has closed.".into())
+        self.get(term)?.input.send((bytes.to_vec(), None)).map_err(|_| CLOSED.into())
     }
 
-    /// Types `bytes` into the terminal, and returns once they are in.
-    pub fn write(&self, term: TermId, bytes: &[u8]) -> Result<(), String> {
-        let t = self.get(term)?;
-        let mut w = lock(&t.writer);
-        w.write_all(bytes).and_then(|()| w.flush()).map_err(|e| format!("Could not type into the terminal: {e}"))
+    /// Types `bytes` into the terminal after what was queued before, and
+    /// returns once they are in, or why they could not be. A program that
+    /// has not read what came before within 5 seconds fails it: its callers
+    /// hold up every other session's replies meanwhile.
+    pub fn write(&self, term: TermId, bytes: &[u8]) -> Result<(), Unwritten> {
+        self.write_within(term, bytes, WRITE_WAIT)
     }
 
-    /// Resizes the terminal, to at least 5 rows by 20 columns.
+    /// `write`, giving up after `wait`. Bytes given up on before the input
+    /// thread started on them are never typed.
+    fn write_within(&self, term: TermId, bytes: &[u8], wait: Duration) -> Result<(), Unwritten> {
+        let (done, typed) = channel();
+        let state = Arc::new(AtomicU8::new(QUEUED));
+        self.get(term).map_err(Unwritten::none)?.input.send((bytes.to_vec(), Some(Waiting { done, state: state.clone() }))).map_err(|_| Unwritten::none(CLOSED))?;
+        match typed.recv_timeout(wait) {
+            Ok(typed) => typed.map_err(Unwritten::none),
+            // No answer: the input thread ended before it got to them.
+            Err(RecvTimeoutError::Disconnected) => Err(Unwritten::none(CLOSED)),
+            Err(RecvTimeoutError::Timeout) => {
+                // Typed just as the wait ran out: that answer stands.
+                if let Ok(typed) = typed.try_recv() {
+                    return typed.map_err(Unwritten::none);
+                }
+                match state.compare_exchange(QUEUED, DROPPED, Ordering::SeqCst, Ordering::SeqCst) {
+                    Ok(_) => Err(Unwritten::none(NOT_READING)),
+                    Err(_) => Err(Unwritten { why: format!("{NOT_READING} Part of what was sent may still go in."), partly: true }),
+                }
+            }
+        }
+    }
+
+    /// Resizes the terminal, to at least 5 rows by 20 columns. The terminal
+    /// stays locked until its screen is resized too, so two resizes at once
+    /// cannot leave them at different sizes.
     pub fn resize(&self, term: TermId, rows: u16, cols: u16) -> Result<(), String> {
         let t = self.get(term)?;
         let (rows, cols) = (rows.max(MIN_ROWS), cols.max(MIN_COLS));
-        if let Some(m) = lock(&t.master).as_ref() {
+        let master = lock(&t.master);
+        if let Some(m) = master.as_ref() {
             m.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| format!("Could not resize the terminal: {e}"))?;
         }
         lock(&t.out).screen.resize(rows, cols);
@@ -415,7 +548,7 @@ impl NativeHost {
         let viewer = self.next_viewer.fetch_add(1, Ordering::Relaxed);
         let mut out = lock(&t.out);
         if out.ended {
-            return Err("That session's terminal has closed.".into());
+            return Err(CLOSED.into());
         }
         let (snapshot, rows, cols) = out.attach(viewer, scrollback, sink);
         Ok(Attached { term, viewer, snapshot, rows, cols })
@@ -442,12 +575,14 @@ impl NativeHost {
         }
         #[cfg(windows)]
         {
+            // Finding a console's process and walking the process tree is
+            // dear, and every tty is asked about: with no terminal, none is Maya's.
+            if lock(&self.terms).is_empty() {
+                return None;
+            }
             let pid = i32::try_from(maya_core::win_console::console_pid(tty)?).ok()?;
-            let tree: Vec<maya_core::foreign::Proc> = maya_core::win_process::tree()
-                .into_iter()
-                .map(|(pid, ppid)| maya_core::foreign::Proc { pid: pid as i32, ppid: ppid as i32, tty: None, command: String::new() })
-                .collect();
-            let root = maya_core::native::root_of(pid, &self.root_pids(), &tree)?;
+            let parents: HashMap<i32, i32> = maya_core::win_process::tree().into_iter().map(|(pid, ppid)| (pid as i32, ppid as i32)).collect();
+            let root = maya_core::native::root_of(pid, &self.root_pids(), &parents)?;
             self.term_for_root(root)
         }
     }
@@ -470,7 +605,7 @@ impl NativeHost {
     /// The folder of every terminal no card has shown yet: its session is
     /// still starting, so the board does not show it.
     pub fn starting(&self) -> Vec<PathBuf> {
-        self.all().into_iter().filter(|(_, t)| !t.carded.load(Ordering::Relaxed)).map(|(_, t)| t.cwd.clone()).collect()
+        self.all().into_iter().filter(|(_, t)| !t.carded.load(Ordering::Relaxed)).map(|(_, t)| t.folder.clone()).collect()
     }
 
     pub fn term_for_root(&self, root_pid: i32) -> Option<TermId> {
@@ -506,24 +641,11 @@ impl NativeHost {
                 std::thread::sleep(Duration::from_millis(10));
             }
             for t in &all {
-                let child = lock(&t.child);
-                if child.is_some() {
-                    // SAFETY: a signal to a process group whose leader is
-                    // not reaped (the lock keeps it so), so not a reused pid.
-                    unsafe {
-                        libc::kill(-t.root, libc::SIGKILL);
-                    }
-                }
+                signal_group(t, libc::SIGKILL);
             }
             for t in &all {
                 t.reap_held.store(false, Ordering::SeqCst);
             }
-        }
-    }
-
-    fn kill(&self, term: TermId) {
-        if let Ok(t) = self.get(term) {
-            hang_up(&t);
         }
     }
 
@@ -543,19 +665,53 @@ impl NativeHost {
     }
 }
 
+/// Ends a program Maya started but cannot host, and reaps it. On Unix its
+/// process group is killed, so what it started goes too.
+fn end_unhosted(child: &mut (dyn Child + Send + Sync)) {
+    #[cfg(unix)]
+    if let Some(root) = child.process_id().and_then(|p| i32::try_from(p).ok()) {
+        // SAFETY: the program is not reaped until the wait below, so its
+        // group is its own.
+        unsafe {
+            libc::kill(-root, libc::SIGKILL);
+        }
+    } else {
+        let _ = child.kill();
+    }
+    #[cfg(windows)]
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Asks a terminal's program to end.
 fn hang_up(t: &Term) {
     // portable-pty makes the program a session leader, so its pid is also
-    // its process group: the hangup reaches what it started.
+    // its process group: the hangup reaches it and what it started.
     #[cfg(unix)]
-    // SAFETY: a signal to a process group; `root` is always positive.
-    unsafe {
-        libc::kill(-t.root, libc::SIGHUP);
-    }
-    let _ = lock(&t.killer).kill();
-    // Closing the pseudo console ends the processes in it.
+    signal_group(t, libc::SIGHUP);
     #[cfg(windows)]
-    lock(&t.master).take();
+    {
+        let _ = lock(&t.killer).kill();
+        // Closing the pseudo console ends the processes in it.
+        lock(&t.master).take();
+    }
+}
+
+/// Sends `signal` to the terminal's process group, only while its leader
+/// is unreaped: an unreaped leader, even a zombie, keeps its pid, so the
+/// group cannot be another's. True when it was sent.
+#[cfg(unix)]
+fn signal_group(t: &Term, signal: i32) -> bool {
+    let child = lock(&t.child);
+    if child.is_none() {
+        return false;
+    }
+    // SAFETY: a signal to a process group whose leader is not reaped (the
+    // lock keeps it so), so not a reused pid; `root` is always positive.
+    unsafe {
+        libc::kill(-t.root, signal);
+    }
+    true
 }
 
 /// Whether nothing in the terminal's process group runs any more. Its
@@ -578,6 +734,18 @@ fn settled(t: &Term) -> bool {
     }
 }
 
+/// How long to wait before checking again on a program its terminal
+/// ended without, after `waited`: 50 ms at first, as it usually ends with
+/// the terminal, then a second, for one that goes on running.
+#[cfg(unix)]
+fn reap_gap(waited: Duration) -> Duration {
+    if waited < Duration::from_secs(2) {
+        Duration::from_millis(50)
+    } else {
+        Duration::from_secs(1)
+    }
+}
+
 /// Reaps the terminal's program if it has ended; true once it is reaped.
 /// While `kill_all` holds reaping, false.
 #[cfg(unix)]
@@ -594,12 +762,21 @@ fn reaped(t: &Term) -> bool {
     child.is_none()
 }
 
-/// A terminal's input thread: types each queued input in turn, until the
-/// terminal is dropped or cannot be typed into.
-fn type_queued(queued: &Receiver<Vec<u8>>, writer: &Mutex<Box<dyn Write + Send>>) {
-    for bytes in queued {
-        let mut w = lock(writer);
-        if w.write_all(&bytes).and_then(|()| w.flush()).is_err() {
+/// A terminal's input thread: types each queued input in turn, and says
+/// how it went to whoever waits, until the terminal is dropped or cannot be
+/// typed into.
+fn type_queued(queued: &Receiver<Input>, mut writer: Box<dyn Write + Send>) {
+    for (bytes, waiting) in queued {
+        // A write that gave up waiting is dropped, not typed late.
+        if waiting.as_ref().is_some_and(|w| w.state.compare_exchange(QUEUED, TYPING, Ordering::SeqCst, Ordering::SeqCst).is_err()) {
+            continue;
+        }
+        let typed = writer.write_all(&bytes).and_then(|()| writer.flush()).map_err(|e| format!("Could not type into the terminal: {e}"));
+        let failed = typed.is_err();
+        if let Some(w) = waiting {
+            let _ = w.done.send(typed);
+        }
+        if failed {
             return;
         }
     }
@@ -657,7 +834,7 @@ fn read(id: TermId, term: Arc<Term>, mut reader: Box<dyn Read + Send>, terms: We
     drop(sending);
     if tell_unseen(term.carded.load(Ordering::Relaxed), delivery.len() - dead.len(), ends.quitting.load(Ordering::SeqCst)) {
         if let Some(hook) = ends.unseen.get() {
-            hook(Unseen { term: id, cwd: term.cwd.clone(), lines });
+            hook(Unseen { term: id, folder: term.folder.clone(), lines });
         }
     }
 }
@@ -670,8 +847,17 @@ mod tests {
     use std::time::Instant;
 
     /// Polls `done` every 10 ms for up to 2 s.
-    fn within_2s(mut done: impl FnMut() -> bool) -> bool {
-        let end = Instant::now() + Duration::from_secs(2);
+    fn within_2s(done: impl FnMut() -> bool) -> bool {
+        within(Duration::from_secs(2), done)
+    }
+
+    /// Polls `done` every 10 ms for up to 5 s.
+    fn within_5s(done: impl FnMut() -> bool) -> bool {
+        within(Duration::from_secs(5), done)
+    }
+
+    fn within(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+        let end = Instant::now() + limit;
         while Instant::now() < end {
             if done() {
                 return true;
@@ -712,7 +898,7 @@ mod tests {
 
     /// Starts `script` in `/bin/sh` in a fresh PTY.
     fn sh(host: &NativeHost, script: &str) -> TermId {
-        host.spawn_argv(&["/bin/sh".into(), "-c".into(), script.into()], Path::new("/")).unwrap()
+        host.spawn_argv(&["/bin/sh".into(), "-c".into(), script.into()], Path::new("/"), Path::new("/")).unwrap()
     }
 
     fn alive(pid: i32) -> bool {
@@ -730,29 +916,50 @@ mod tests {
         assert_eq!(shell_argv("claude")[1..], ["-l", "-c", "claude"]);
     }
 
+    /// How openpty fails now and then on macOS while another thread forks,
+    /// as portable-pty words it around std's own formatting of the error.
+    fn refused() -> String {
+        format!("failed to openpty: {:?}", std::io::Error::from_raw_os_error(-6))
+    }
+
     #[test]
     fn opening_a_terminal_is_tried_again_a_few_times() {
         let mut calls = 0;
         let mut pauses = Vec::new();
-        let got: Result<u32, &str> = retrying(
+        let got: Result<u32, String> = retrying(
             |d| pauses.push(d),
             || {
                 calls += 1;
-                if calls < 3 { Err("busy") } else { Ok(calls) }
+                if calls < 3 { Err(refused()) } else { Ok(calls) }
             },
         );
         assert_eq!(got, Ok(3));
         assert_eq!(pauses, [Duration::from_millis(10), Duration::from_millis(20)]);
 
         let (mut calls, mut pauses) = (0, 0);
-        let got: Result<(), &str> = retrying(
+        let got: Result<(), String> = retrying(
             |_| pauses += 1,
             || {
                 calls += 1;
-                Err("busy")
+                Err(refused())
             },
         );
-        assert_eq!((got, calls, pauses), (Err("busy"), OPEN_TRIES, OPEN_TRIES - 1));
+        assert_eq!((got, calls, pauses), (Err(refused()), OPEN_TRIES, OPEN_TRIES - 1));
+    }
+
+    #[test]
+    fn any_other_failure_to_open_a_terminal_is_not_tried_again() {
+        let full = format!("failed to openpty: {:?}", std::io::Error::from_raw_os_error(libc::EMFILE));
+        let (mut calls, mut pauses) = (0, 0);
+        let got: Result<(), String> = retrying(
+            |_| pauses += 1,
+            || {
+                calls += 1;
+                Err(full.clone())
+            },
+        );
+        assert_eq!((got, calls, pauses), (Err(full.clone()), 1, 0));
+        assert!(refused_for_now(&refused()) && !refused_for_now(&full));
     }
 
     #[test]
@@ -783,7 +990,12 @@ mod tests {
     /// Starts a terminal that copies every byte typed into it, untouched,
     /// to `file`, and returns it once it is ready.
     fn recorder(host: &NativeHost, file: &Path) -> TermId {
-        let term = sh(host, &format!("stty raw -echo; printf ready; cat > '{}'", file.display()));
+        slow_recorder(host, file, 0.0)
+    }
+
+    /// `recorder`, reading nothing for `wait` seconds once it is ready.
+    fn slow_recorder(host: &NativeHost, file: &Path, wait: f32) -> TermId {
+        let term = sh(host, &format!("stty raw -echo; printf ready; sleep {wait}; cat > '{}'", file.display()));
         let (seen, sink) = collector();
         let at = host.attach(term, 0, sink).unwrap();
         if !within_2s(|| has(&at.snapshot, "ready") || has(&seen.lock().unwrap().bytes, "ready")) {
@@ -810,6 +1022,64 @@ mod tests {
     }
 
     #[test]
+    fn written_input_follows_what_was_queued_before_it() {
+        let host = NativeHost::new(BATCH);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("typed");
+        // The program reads nothing at first, so the queued input waits.
+        let term = slow_recorder(&host, &file, 0.3);
+        let queued: String = (0..300).map(|i| format!("{i:04},")).collect();
+        for i in 0..300 {
+            host.enqueue(term, format!("{i:04},").as_bytes()).unwrap();
+        }
+        let wrote = host.write(term, b"end");
+        let want = format!("{queued}end");
+        let got = within_2s(|| std::fs::read_to_string(&file).is_ok_and(|s| s == want));
+        let typed = std::fs::read_to_string(&file).unwrap_or_default();
+        host.kill_all();
+        assert_eq!(wrote, Ok(()));
+        assert!(got, "typed {:?}", typed.get(typed.len().saturating_sub(40)..).unwrap_or(&typed));
+        assert!(host.write(term, b"x").is_err(), "the terminal is gone");
+    }
+
+    #[test]
+    fn a_write_the_program_does_not_read_in_time_fails_and_is_never_typed() {
+        let host = NativeHost::new(BATCH);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("typed");
+        // It reads nothing for a while, and a big paste fills its input first.
+        let term = slow_recorder(&host, &file, 1.5);
+        host.enqueue(term, &[b'a'; 64 * 1024]).unwrap();
+        let t = Instant::now();
+        let wrote = host.write_within(term, b"Z", Duration::from_millis(200));
+        let took = t.elapsed();
+        let all_in = within_5s(|| std::fs::read(&file).is_ok_and(|b| b.len() >= 64 * 1024));
+        std::thread::sleep(Duration::from_millis(200));
+        let typed = std::fs::read(&file).unwrap_or_default();
+        host.kill_all();
+        assert_eq!(wrote, Err(Unwritten { why: NOT_READING.into(), partly: false }));
+        assert!(took < Duration::from_secs(1), "the write waited {took:?}");
+        assert!(all_in, "the paste never went in");
+        assert!(!typed.contains(&b'Z'), "the write that failed was typed later");
+    }
+
+    #[test]
+    fn a_write_given_up_on_while_it_is_being_typed_says_part_of_it_may_go_in() {
+        let host = NativeHost::new(BATCH);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("typed");
+        // It reads nothing for a while, so the write fills its input and waits there.
+        let term = slow_recorder(&host, &file, 1.5);
+        let wrote = host.write_within(term, &[b'w'; 64 * 1024], Duration::from_millis(200));
+        let all_in = within_5s(|| std::fs::read(&file).is_ok_and(|b| b.len() >= 64 * 1024));
+        host.kill_all();
+        let err = wrote.unwrap_err();
+        assert!(err.partly, "{}", err.why);
+        assert!(err.why.starts_with(NOT_READING), "{}", err.why);
+        assert!(all_in, "what had begun to go in went in");
+    }
+
+    #[test]
     fn queuing_input_does_not_wait_for_the_program_to_read_it() {
         let host = NativeHost::new(BATCH);
         // sleep never reads, so the terminal's input fills up.
@@ -826,16 +1096,17 @@ mod tests {
     #[test]
     fn a_burst_of_output_arrives_in_few_frames() {
         let host = NativeHost::new(Duration::from_millis(50));
-        let term = sh(&host, "i=0; while [ $i -lt 2000 ]; do printf x; i=$((i+1)); done; sleep 1");
+        // The burst waits for a line, typed once the viewer is attached, so all of it streams.
+        let term = sh(&host, "read l; i=0; while [ $i -lt 2000 ]; do printf x; i=$((i+1)); done; sleep 1");
         let (seen, sink) = collector();
-        let at = host.attach(term, 0, sink).unwrap();
-        std::thread::sleep(Duration::from_secs(1));
-        let early = at.snapshot.iter().filter(|&&b| b == b'x').count();
-        let got = within_2s(|| early + seen.lock().unwrap().bytes.iter().filter(|&&b| b == b'x').count() >= 2000);
+        host.attach(term, 0, sink).unwrap();
+        host.write(term, b"\r").unwrap();
+        let xs = || seen.lock().unwrap().bytes.iter().filter(|&&b| b == b'x').count();
+        let got = within_2s(|| xs() >= 2000);
         host.kill_all();
-        let seen = seen.lock().unwrap();
-        assert!(got, "only {} x arrived", early + seen.bytes.iter().filter(|&&b| b == b'x').count());
-        assert!(seen.frames <= 40, "{} frames", seen.frames);
+        assert!(got, "only {} x arrived in output frames", xs());
+        let frames = seen.lock().unwrap().frames;
+        assert!(frames <= 40, "{frames} frames");
     }
 
     #[test]
@@ -869,6 +1140,52 @@ mod tests {
         assert!(host.root_pids().is_empty());
     }
 
+    /// On Linux the terminal ends once no process has it open. (On macOS
+    /// it lasts while its session leader runs, which then ends it.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_program_that_lets_go_of_its_terminal_is_hung_up_once_the_terminal_ends() {
+        let host = NativeHost::new(BATCH);
+        sh(&host, "exec </dev/null >/dev/null 2>&1; sleep 30; :");
+        let root = host.root_pids()[0];
+        let gone = within_2s(|| !alive(root));
+        if !gone {
+            // SAFETY: the test's own shell, still running.
+            unsafe { libc::kill(-root, libc::SIGKILL) };
+        }
+        assert!(gone, "the program outlived its terminal");
+    }
+
+    #[test]
+    fn a_program_left_running_is_checked_on_less_often_after_a_while() {
+        assert_eq!(reap_gap(Duration::ZERO), Duration::from_millis(50));
+        assert_eq!(reap_gap(Duration::from_millis(1999)), Duration::from_millis(50));
+        assert_eq!(reap_gap(Duration::from_secs(2)), Duration::from_secs(1));
+        assert_eq!(reap_gap(Duration::from_secs(3600)), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_program_that_cannot_be_hosted_is_ended_and_reaped() {
+        let pair = native_pty_system().openpty(PtySize { rows: 5, cols: 20, pixel_width: 0, pixel_height: 0 }).unwrap();
+        let mut child = pair.slave.spawn_command(CommandBuilder::from_argv(["/bin/sh", "-c", "sleep 30; :"].map(Into::into).to_vec())).unwrap();
+        let pid = child.process_id().unwrap() as i32;
+        end_unhosted(child.as_mut());
+        assert!(!alive(pid), "still running, or not reaped");
+    }
+
+    #[test]
+    fn a_terminal_whose_threads_cannot_start_is_dropped_and_its_program_ended_quietly() {
+        let (host, told) = telling();
+        let term = sh(&host, "sleep 30; :");
+        let root = host.root_pids()[0];
+        let t = host.get(term).unwrap();
+        host.abandon(term, &t);
+        assert!(host.root_pids().is_empty(), "still in the host");
+        assert!(within_2s(|| !alive(root)), "still running, or not reaped");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(told.lock().unwrap().len(), 0, "spawn's error says why, not a toast");
+    }
+
     #[test]
     fn a_terminal_is_starting_until_a_card_shows_it() {
         let host = NativeHost::new(BATCH);
@@ -900,11 +1217,22 @@ mod tests {
     fn a_terminal_that_ends_before_its_card_tells_its_folder_and_last_lines() {
         let (host, told) = telling();
         let dir = tempfile::tempdir().unwrap();
-        let term = host.spawn_argv(&["/bin/sh".into(), "-c".into(), "printf 'one\\n\\ntwo\\nthree\\nfour\\n'; exit 3".into()], dir.path()).unwrap();
+        let term = host.spawn_argv(&["/bin/sh".into(), "-c".into(), "printf 'one\\n\\ntwo\\nthree\\nfour\\n'; exit 3".into()], dir.path(), dir.path()).unwrap();
         assert!(within_2s(|| !told.lock().unwrap().is_empty()), "the end was not told");
         let told = told.lock().unwrap();
         assert_eq!(told.len(), 1);
-        assert_eq!((told[0].term, told[0].cwd.as_path(), told[0].lines.as_slice()), (term, dir.path(), ["two", "three", "four"].map(String::from).as_slice()));
+        assert_eq!((told[0].term, told[0].folder.as_path(), told[0].lines.as_slice()), (term, dir.path(), ["two", "three", "four"].map(String::from).as_slice()));
+    }
+
+    #[test]
+    fn a_terminal_started_for_another_folder_is_named_by_it() {
+        let (host, told) = telling();
+        let made = Path::new("/work/bedrock-451");
+        let term = host.spawn_argv(&["/bin/sh".into(), "-c".into(), "read l".into()], Path::new("/"), made).unwrap();
+        assert_eq!(host.starting(), [made]);
+        host.write(term, b"\r").unwrap();
+        assert!(within_2s(|| !told.lock().unwrap().is_empty()), "the end was not told");
+        assert_eq!(told.lock().unwrap()[0].folder, made);
     }
 
     #[test]
@@ -1017,16 +1345,76 @@ mod tests {
     }
 
     #[test]
+    fn a_group_is_signalled_only_while_its_leader_is_unreaped() {
+        let host = NativeHost::new(BATCH);
+        let running = sh(&host, "sleep 30");
+        // It ends only once its terminal is held here, so the host cannot drop it first.
+        let ending = sh(&host, "read l; exit 0");
+        let (running, ended) = (host.get(running).unwrap(), host.get(ending).unwrap());
+        host.write(ending, b"\r").unwrap();
+        assert!(within_2s(|| lock(&ended.child).is_none()), "the program that ended was never reaped");
+        let signalled = (signal_group(&running, 0), signal_group(&ended, libc::SIGHUP));
+        host.kill_all();
+        assert_eq!(signalled, (true, false), "a reaped leader's pid may be another's by now");
+    }
+
+    /// The pids whose parent is `pid`, as `ps` lists them.
+    fn children_of(pid: i32) -> Vec<i32> {
+        let out = std::process::Command::new("ps").args(["-A", "-o", "pid=", "-o", "ppid="]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split_whitespace().map(|n| n.parse::<i32>().ok());
+                Some((f.next()??, f.next()??))
+            })
+            .filter(|&(_, ppid)| ppid == pid)
+            .map(|(child, _)| child)
+            .collect()
+    }
+
+    #[test]
     fn kill_all_ends_every_program() {
         let host = NativeHost::new(BATCH);
-        sh(&host, "sleep 30");
-        sh(&host, "sleep 30");
+        // `; :` keeps each shell from exec'ing its sleep: the sleep is the
+        // shell's child, and must end with it.
+        sh(&host, "sleep 30; :");
+        sh(&host, "sleep 30; :");
         let roots = host.root_pids();
         assert_eq!(roots.len(), 2);
+        let mut sleeps = Vec::new();
+        within_2s(|| {
+            sleeps = roots.iter().flat_map(|&r| children_of(r)).collect();
+            sleeps.len() == 2
+        });
         let t = Instant::now();
         host.kill_all();
         assert!(t.elapsed() < Duration::from_millis(300), "kill_all waited for programs that ended at once");
-        assert!(within_2s(|| roots.iter().all(|&p| !alive(p))), "a program outlived kill_all");
+        assert_eq!(sleeps.len(), 2, "each shell runs its sleep");
+        assert!(within_2s(|| roots.iter().chain(&sleeps).all(|&p| !alive(p))), "a program or what it started outlived kill_all");
+    }
+
+    #[test]
+    fn kill_all_kills_a_child_that_ignores_the_hangup() {
+        let host = NativeHost::new(BATCH);
+        // The shell ends on the hangup; its sleep ignores it, so only the
+        // kill sent to the whole group after the grace period ends it.
+        sh(&host, "(trap '' HUP; sleep 30); :");
+        let root = host.root_pids()[0];
+        let mut child = Vec::new();
+        within_2s(|| {
+            child = children_of(root);
+            !child.is_empty()
+        });
+        // Let the sleep start with the hangup ignored.
+        std::thread::sleep(Duration::from_millis(200));
+        host.kill_all();
+        let gone = within_2s(|| child.iter().all(|&p| !alive(p)));
+        for &p in &child {
+            // SAFETY: the test's own sleep, if it is still running.
+            unsafe { libc::kill(p, libc::SIGKILL) };
+        }
+        assert!(!child.is_empty(), "the shell never started its sleep");
+        assert!(gone, "a child that ignores SIGHUP outlived kill_all");
     }
 
     #[test]

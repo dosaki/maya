@@ -47,7 +47,9 @@ impl Screen {
 
     /// Bytes that make a fresh terminal of the same size show this screen:
     /// its contents, cursor and input modes, with up to `scrollback` lines
-    /// of history above it.
+    /// of history above it. What vt100 keeps no record of is not carried:
+    /// the scroll region, origin mode, the saved cursor, and the main
+    /// screen while the alternate screen is up.
     pub fn snapshot(&mut self, scrollback: usize) -> Vec<u8> {
         let (rows, cols) = self.size();
         let mut out = String::from("\x1bc");
@@ -66,8 +68,8 @@ impl Screen {
                     s = s.saturating_sub(page);
                 }
                 screen.set_scrollback(0);
-                // n line ends from the top row and rows - 1 more scroll
-                // exactly the n lines into the viewer's history.
+                // Each of the n lines ended in a line break, so rows - 1
+                // more push exactly those n lines into the viewer's history.
                 out.push_str(&"\r\n".repeat(page - 1));
             }
         }
@@ -115,8 +117,34 @@ mod tests {
         fresh.screen_mut().set_scrollback(1);
         assert_eq!(fresh.screen().rows(0, 80).next().unwrap(), "l14");
 
-        let fresh = replay(&mut screen, 3);
+        let mut fresh = replay(&mut screen, 3);
         assert_eq!(fresh.screen().scrollback_len(), 3);
+        let history: Vec<String> = (1..=3).rev().map(|s| top_row(&mut fresh, s)).collect();
+        assert_eq!(history, ["l12", "l13", "l14"], "the newest three");
+    }
+
+    /// The top row of `parser`'s screen scrolled back `s` lines.
+    fn top_row(parser: &mut vt100::Parser, s: usize) -> String {
+        parser.screen_mut().set_scrollback(s);
+        let (_, cols) = parser.screen().size();
+        parser.screen().rows(0, cols.get()).next().unwrap()
+    }
+
+    #[test]
+    fn the_history_keeps_its_colours_and_its_wrapped_lines() {
+        let mut screen = Screen::new(5, 20);
+        let long = format!("{}{}", "a".repeat(20), "b".repeat(5));
+        screen.feed(format!("\x1b[31mred\x1b[0m\r\nplain\r\n{long}\r\n").as_bytes());
+        // Enough lines to push those into the history.
+        screen.feed((0..10).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\r\n").as_bytes());
+
+        let mut fresh = replay(&mut screen, SCROLLBACK);
+        let depth = fresh.screen().scrollback_len();
+        fresh.screen_mut().set_scrollback(depth);
+        let screen = fresh.screen();
+        assert_eq!(screen.rows(0, 20).take(4).collect::<Vec<_>>(), ["red", "plain", "a".repeat(20).as_str(), "bbbbb"], "both halves of the wrapped line");
+        assert_eq!(screen.cell(0, 0).unwrap().fgcolor(), vt100::Color::Idx(1), "the coloured line");
+        assert_eq!(screen.cell(1, 0).unwrap().fgcolor(), vt100::Color::Default, "the line after it");
     }
 
     #[test]

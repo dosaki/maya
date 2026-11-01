@@ -7,10 +7,12 @@ const press = (label: string) => buttons().find((b) => b.textContent === label)!
 describe("quitText", () => {
   it("names the sessions that will stop", () => {
     expect(quitText(["fix-ci", "docs"], false)).toEqual({
+      title: "Quit Maya?",
       text: "These Native sessions are working and will stop if Maya quits: fix-ci, docs.",
       yes: "Quit anyway",
     });
     expect(quitText(["fix-ci"], true)).toEqual({
+      title: "Restart Maya to update?",
       text: "This Native session is working and will stop when Maya restarts to update: fix-ci.",
       yes: "Restart anyway",
     });
@@ -51,6 +53,37 @@ describe("askQuit", () => {
     document.querySelector("#quit-host .modal__panel")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await expect(answer).resolves.toBe(false);
     expect(reached).toBe(false);
+  });
+
+  it("is labelled by its title and described by its sentence", () => {
+    void askQuit(["fix-ci"], false);
+    const panel = document.querySelector("#quit-host [role=alertdialog]")!;
+    expect(document.getElementById(panel.getAttribute("aria-labelledby")!)?.textContent).toBe("Quit Maya?");
+    expect(document.getElementById(panel.getAttribute("aria-describedby")!)?.textContent).toContain("will stop if Maya quits");
+    press("Cancel");
+  });
+
+  it("keeps Tab and Shift+Tab within its buttons", async () => {
+    const answer = askQuit(["fix-ci"], false);
+    const [cancel, yes] = buttons();
+    const tab = (shiftKey: boolean) => {
+      const ev = new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true });
+      document.activeElement!.dispatchEvent(ev);
+      return ev.defaultPrevented;
+    };
+    expect(document.activeElement).toBe(cancel);
+    expect(tab(false)).toBe(true);
+    expect(document.activeElement).toBe(yes);
+    expect(tab(false)).toBe(true);
+    expect(document.activeElement).toBe(cancel);
+    expect(tab(true)).toBe(true);
+    expect(document.activeElement).toBe(yes);
+    // Focus that got out (a click behind it) comes back on the next Tab.
+    document.body.focus();
+    tab(false);
+    expect(document.activeElement).toBe(cancel);
+    press("Cancel");
+    await expect(answer).resolves.toBe(false);
   });
 
   it("a second ask replaces the first, which counts as Cancel", async () => {
