@@ -24,6 +24,12 @@
 //! in the app's lib.rs), and nothing takes the server's mutex while holding `store`.
 //! `LiveTerms` takes `store` too, so it is never called with the server's
 //! mutex held; its sinks only queue on a connection's channel.
+//!
+//! Relays: the main passes an assistant's live terminal on to a viewer, a
+//! mirroring Maya or its own page, under a sub of its own with the assistant
+//! (`Server::relays`). A mirroring Maya's frames are queued on its channel
+//! with the mutex held, so none lands after its view ended; the page's sink
+//! is called only once the mutex is let go.
 
 use super::merge::{display_names, RemoteBoard};
 use super::identity::{encode_key, Keypair};
@@ -180,6 +186,50 @@ pub struct Server {
     /// This main hosts live terminals (`Notify::live_terms`), so it can
     /// stream its own and relay its assistants'. A phone acting as main cannot.
     terminals: bool,
+    /// Assistants' live terminals this main relays to a viewer, by the sub
+    /// the main chose with the assistant (from `next`, never reused).
+    relays: HashMap<u64, Relay>,
+}
+
+/// An assistant's live terminal the main relays to one viewer.
+struct Relay {
+    assistant: String,
+    /// The assistant's connection the relay was made on.
+    assistant_serial: u64,
+    to: RelayTo,
+}
+
+/// Who views a relayed terminal.
+enum RelayTo {
+    /// A mirroring Maya's connection, under the sub it chose.
+    Mirror { id: String, serial: u64, sub: u64 },
+    /// The main's own page. Shared, so the assistant's connection can call it
+    /// once it has let go of the server's mutex.
+    Page(PageSink),
+}
+
+type PageSink = Arc<Mutex<FrameSink>>;
+
+/// What a viewer reads for a Maya that is away, or that this main does not know.
+const NOT_CONNECTED: &str = "That Maya is not connected.";
+/// What a viewer reads for a Maya too old to stream its terminals.
+const CANNOT_SHARE: &str = "That Maya cannot share a live terminal. Update it.";
+
+/// Relays `session`'s live terminal on the assistant shown as `machine` to
+/// `to`, under a new sub of the main's (the relay's id). The assistant hears
+/// `term_attach` and answers with frames; nothing is sent when it is refused.
+fn relay_attach(s: &mut Server, machine: &str, session: &str, to: RelayTo) -> Result<u64, String> {
+    let conn = s.id_for(machine).and_then(|id| s.conns.get(&id).map(|c| (c.tx.clone(), c.serial, id)));
+    let Some((tx, assistant_serial, assistant)) = conn else { return Err(NOT_CONNECTED.into()) };
+    if !s.peers.get(&assistant).is_some_and(|p| p.caps.iter().any(|c| c == CAP_TERMINAL)) {
+        return Err(CANNOT_SHARE.into());
+    }
+    let rid = s.next();
+    if tx.send(Down::TermAttach { sub: rid, session: session.into() }).is_err() {
+        return Err(NOT_CONNECTED.into());
+    }
+    s.relays.insert(rid, Relay { assistant, assistant_serial, to });
+    Ok(rid)
 }
 
 /// The main's board as its page shows it; local cards have no `machine`.
@@ -191,7 +241,7 @@ struct MirrorBoard {
 
 impl Server {
     fn new(paired: Vec<PairedAssistant>, main_name: String) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, wake_word: None, main_name, terminals: false }
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, wake_word: None, main_name, terminals: false, relays: HashMap::new() }
     }
 
     /// The entry `id` lets its Maya mirror.
@@ -324,6 +374,45 @@ impl Server {
             .collect();
         boards.sort_by(|a, b| a.machine.cmp(&b.machine));
         self.boards = boards;
+    }
+
+    /// Ends the relay `rid` from the viewer's side: the assistant is told to
+    /// stop streaming it, if that connection is still the current one.
+    fn end_relay(&mut self, rid: u64) -> Option<Relay> {
+        let relay = self.relays.remove(&rid)?;
+        if let Some(c) = self.conns.get(&relay.assistant).filter(|c| c.serial == relay.assistant_serial) {
+            let _ = c.tx.send(Down::TermDetach { sub: rid });
+        }
+        Some(relay)
+    }
+
+    /// Passes keys, base64, on to the assistant that streams the relay `rid`.
+    fn relay_input(&self, rid: u64, data: String) -> Result<(), String> {
+        let relay = self.relays.get(&rid).ok_or(super::client::NO_SUCH_TERMINAL)?;
+        match self.conns.get(&relay.assistant).filter(|c| c.serial == relay.assistant_serial) {
+            Some(c) if c.tx.send(Down::TermInput { sub: rid, data }).is_ok() => Ok(()),
+            _ => Err(NOT_CONNECTED.into()),
+        }
+    }
+
+    /// Ends every relay the assistant's connection `serial` streamed: each
+    /// viewer hears it is `Lost`. A mirroring Maya's frame is queued here,
+    /// while its connection still holds the sub; the page's sinks come back,
+    /// to be called once the mutex is let go.
+    fn lose_relays(&mut self, serial: u64) -> Vec<PageSink> {
+        let lost: Vec<u64> = self.relays.iter().filter(|(_, r)| r.assistant_serial == serial).map(|(rid, _)| *rid).collect();
+        let mut pages = vec![];
+        for relay in lost.into_iter().filter_map(|rid| self.relays.remove(&rid)) {
+            match relay.to {
+                RelayTo::Mirror { id, serial, sub } => {
+                    if let Some(c) = self.conns.get(&id).filter(|c| c.serial == serial) {
+                        let _ = c.tx.send(Down::TermFrame { sub, frame: TermFrame { seq: 0, event: TermEvent::Lost } });
+                    }
+                }
+                RelayTo::Page(sink) => pages.push(sink),
+            }
+        }
+        pages
     }
 
     fn fail_pending(&mut self, serial: u64) {
@@ -669,6 +758,11 @@ struct Link {
     terms: std::cell::RefCell<HashMap<u64, LinkTerm>>,
     /// The terminals this main hosts, to detach the views it held.
     host: Option<Arc<dyn LiveTerms>>,
+    /// Its `hello` said it streams live terminals (`CAP_TERMINAL`), so the
+    /// main may relay them.
+    streams: bool,
+    /// The server, to end the relays it held.
+    shared: Arc<Mutex<Server>>,
 }
 
 /// A live terminal a mirroring Maya views through this connection.
@@ -677,19 +771,29 @@ enum LinkTerm {
     /// One of this main's own terminals.
     Local(TermView),
     /// An assistant's terminal, relayed under the main's own sub to it.
-    #[allow(dead_code)]
     Relayed(u64),
 }
 
 impl Link {
-    /// Forgets `sub`, detaching its view; true when it was held.
+    /// Forgets `sub`, detaching its view or ending its relay; true when it was held.
+    /// Never called with the server's mutex held.
     fn end_term(&self, sub: u64) -> bool {
         let Some(term) = self.terms.borrow_mut().remove(&sub) else { return false };
-        if let (LinkTerm::Local(view), Some(host)) = (term, &self.host) {
-            host.detach(&view);
+        match (term, &self.host) {
+            (LinkTerm::Local(view), Some(host)) => host.detach(&view),
+            // Unless it already ended (its last frame, or the assistant left).
+            (LinkTerm::Relayed(rid), _) => {
+                lock(&self.shared).end_relay(rid);
+            }
+            (LinkTerm::Local(_), None) => {}
         }
         log::line("network", format!("{}: terminal {sub} detached", self.label));
         true
+    }
+
+    /// Whether the main relays a terminal this connection's assistant streams.
+    fn relaying(&self) -> bool {
+        self.streams && lock(&self.shared).relays.values().any(|r| r.assistant_serial == self.serial)
     }
 
     /// Forgets every sub, detaching their views.
@@ -701,8 +805,9 @@ impl Link {
     }
 }
 
-/// However the connection ends, the views it held are detached; never with
-/// the server's mutex held, as `LiveTerms` takes the app's `store`.
+/// However the connection ends, the views it held are detached and its
+/// relays ended; never with the server's mutex held, as `LiveTerms` takes
+/// the app's `store` and a relay takes the mutex.
 impl Drop for Link {
     fn drop(&mut self) {
         self.end_terms();
@@ -906,6 +1011,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
     }
     let name = Some(clean(&name)).filter(|n| !n.is_empty()).or_else(|| Some(hostname.clone()).filter(|h| !h.is_empty())).unwrap_or_else(|| "assistant".into());
     let wants_mirror = caps.iter().any(|c| c == CAP_MIRROR);
+    let streams = caps.iter().any(|c| c == CAP_TERMINAL);
     let key = encode_key(&accepted.key);
     let (id, pairing) = if accepted.paired {
         let p = pair(ctx, ch, &key, &ip, &name, &hostname, &platform, wants_mirror)?;
@@ -976,7 +1082,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             return None;
         }
     };
-    let link = Link { id, serial, label, rx, first_board: std::cell::Cell::new(true), wants_mirror, mirror_sent: std::cell::Cell::new(0), mirror_at: std::cell::Cell::new(None), terms: Default::default(), host: ctx.terms.clone() };
+    let link = Link { id, serial, label, rx, first_board: std::cell::Cell::new(true), wants_mirror, mirror_sent: std::cell::Cell::new(0), mirror_at: std::cell::Cell::new(None), terms: Default::default(), host: ctx.terms.clone(), streams, shared: ctx.shared.clone() };
     // Authenticated: boards and results may now be large. Sealing adds a
     // little to each frame, which `open_frame` caps at `MAX_FRAME`.
     ch.ws.set_config(|c| {
@@ -1050,6 +1156,12 @@ fn send_queued(ch: &mut Chan, link: &Link) -> Option<String> {
             // A frame of a view since ended (detached, or after its `Error`).
             Ok(Down::TermFrame { sub, .. }) if !link.terms.borrow().contains_key(&sub) => {}
             Ok(down) => {
+                // A relayed view's last frame: its relay has ended already.
+                if let Down::TermFrame { sub, frame } = &down {
+                    if matches!(frame.event, TermEvent::Exit | TermEvent::Error { .. } | TermEvent::Lost) && matches!(link.terms.borrow().get(sub), Some(LinkTerm::Relayed(_))) {
+                        link.terms.borrow_mut().remove(sub);
+                    }
+                }
                 let last = matches!(down, Down::Bye { .. } | Down::Move { .. });
                 let why = if matches!(down, Down::Move { .. }) { "moved" } else { "removed" };
                 if let Err(e) = send_down(ch, &down) {
@@ -1130,8 +1242,8 @@ fn pump(ctx: &Ctx, ch: &mut Chan, link: &Link) -> String {
                 return e;
             }
         }
-        // A live terminal on the link has its frames go out within `LIVE_TICK`.
-        let want = live::tick_for(!link.terms.borrow().is_empty(), TICK);
+        // A live terminal on the link, viewed or relayed, has its frames go out within `LIVE_TICK`.
+        let want = live::tick_for(!link.terms.borrow().is_empty() || link.relaying(), TICK);
         if want != tick && ch.ws.get_ref().set_read_timeout(Some(want)).is_ok() {
             tick = want;
         }
@@ -1219,12 +1331,13 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
             lock(&ctx.shared).touch(&link.id);
             send_down(ch, &Down::Pong)?;
         }
-        Up::TermAttach { sub, machine, session } => term_attach(ctx, ch, link, sub, machine, &session)?,
-        Up::TermInput { sub, data } => term_input(ctx, ch, link, sub, &data)?,
+        Up::TermAttach { sub, machine, session } => link_attach(ctx, ch, link, sub, machine, &session)?,
+        Up::TermInput { sub, data } => link_input(ctx, ch, link, sub, &data)?,
         Up::TermDetach { sub } => {
+            lock(&ctx.shared).touch(&link.id);
             link.end_term(sub);
         }
-        Up::TermFrame { .. } => log::line("network", format!("{}: terminal frame not handled yet", link.label)),
+        Up::TermFrame { sub, frame } => relay_frame(ctx, link, sub, frame),
         Up::Request { id, machine, request } => {
             let (allowed, tx) = {
                 let mut s = lock(&ctx.shared);
@@ -1268,8 +1381,6 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
 
 /// What a Maya reads for a terminal when it may not mirror this main.
 const MAY_NOT_SEE: &str = "This Maya may not see the main's sessions.";
-/// What a Maya reads for an assistant's terminal, which this main does not relay yet.
-const NOT_YET: &str = "Not yet.";
 
 /// Tells this connection's Maya `sub` cannot be shown; nothing follows it.
 /// Sent at once, not queued: by then `sub` is no longer held, so frames
@@ -1278,10 +1389,11 @@ fn term_error(ch: &mut Chan, sub: u64, message: String) -> Result<(), String> {
     send_down(ch, &Down::TermFrame { sub, frame: TermFrame { seq: 0, event: TermEvent::Error { message } } })
 }
 
-/// Streams this main's own terminal of `session` to the connection's Maya
-/// as `sub`, in place of whatever `sub` showed before. A refusal or a
-/// failure answers with an `Error` frame. `LiveTerms` is called with no lock held.
-fn term_attach(ctx: &Ctx, ch: &mut Chan, link: &Link, sub: u64, machine: Option<String>, session: &str) -> Result<(), String> {
+/// Streams the terminal of `session` to the connection's Maya as `sub`, in
+/// place of whatever `sub` showed before: this main's own, or one it relays
+/// from the assistant shown as `machine`. A refusal or a failure answers
+/// with an `Error` frame. `LiveTerms` is called with no lock held.
+fn link_attach(ctx: &Ctx, ch: &mut Chan, link: &Link, sub: u64, machine: Option<String>, session: &str) -> Result<(), String> {
     // The old view's frames still queued go with it, so none follows the new snapshot.
     if link.end_term(sub) {
         if let Some(why) = send_queued(ch, link) {
@@ -1299,8 +1411,22 @@ fn term_attach(ctx: &Ctx, ch: &mut Chan, link: &Link, sub: u64, machine: Option<
         return term_error(ch, sub, MAY_NOT_SEE.into());
     }
     // The main's own name, like none, means the main.
-    if machine.map(|m| clean(&m)).is_some_and(|m| !m.is_empty() && m != ctx.main_name) {
-        return term_error(ch, sub, NOT_YET.into());
+    if let Some(machine) = machine.map(|m| clean(&m)).filter(|m| !m.is_empty() && *m != ctx.main_name) {
+        // Inserted before this connection drains its queue again, so the
+        // relay's first frame finds the sub held.
+        let to = RelayTo::Mirror { id: link.id.clone(), serial: link.serial, sub };
+        let relayed = relay_attach(&mut lock(&ctx.shared), &machine, session, to);
+        return match relayed {
+            Ok(rid) => {
+                log::line("network", format!("{}: terminal {sub} relayed from {machine} as {rid}", link.label));
+                link.terms.borrow_mut().insert(sub, LinkTerm::Relayed(rid));
+                Ok(())
+            }
+            Err(e) => {
+                log::line("network", format!("{}: terminal {sub} not relayed from {machine}: {e}", link.label));
+                term_error(ch, sub, e)
+            }
+        };
     }
     let Some(terms) = &ctx.terms else {
         return term_error(ch, sub, super::client::NO_TERMINALS.into());
@@ -1321,9 +1447,10 @@ fn term_attach(ctx: &Ctx, ch: &mut Chan, link: &Link, sub: u64, machine: Option<
     }
 }
 
-/// Types `data`, base64, into `sub`'s terminal. A refusal or a failure ends
-/// the view: its `Error` frame is the last the Maya hears of it.
-fn term_input(ctx: &Ctx, ch: &mut Chan, link: &Link, sub: u64, data: &str) -> Result<(), String> {
+/// Types `data`, base64, into `sub`'s terminal; a relayed one's assistant
+/// reads the keys itself. A refusal or a failure ends the view: its `Error`
+/// frame is the last the Maya hears of it.
+fn link_input(ctx: &Ctx, ch: &mut Chan, link: &Link, sub: u64, data: &str) -> Result<(), String> {
     let allowed = {
         let mut s = lock(&ctx.shared);
         s.touch(&link.id);
@@ -1333,6 +1460,20 @@ fn term_input(ctx: &Ctx, ch: &mut Chan, link: &Link, sub: u64, data: &str) -> Re
     let typed = match (held, &ctx.terms) {
         _ if !allowed => Err(MAY_NOT_SEE.to_string()),
         (Some(LinkTerm::Local(view)), Some(terms)) => base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|_| super::client::UNREADABLE_KEYS.to_string()).and_then(|bytes| terms.input(&view, &bytes)),
+        (Some(LinkTerm::Relayed(rid)), _) => {
+            let forwarded = lock(&ctx.shared).relay_input(rid, data.into());
+            if forwarded.is_err() {
+                // The relay's last frame (`Exit`, `Error`, `Lost`) may be
+                // queued: it goes out first, and the Maya knows it ended.
+                if let Some(why) = send_queued(ch, link) {
+                    return Err(why);
+                }
+                if !link.terms.borrow().contains_key(&sub) {
+                    return Ok(());
+                }
+            }
+            forwarded
+        }
         _ => return term_error(ch, sub, super::client::NO_SUCH_TERMINAL.into()),
     };
     if let Err(e) = typed {
@@ -1365,6 +1506,48 @@ fn check_terms(ctx: &Ctx, ch: &mut Chan, link: &Link) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Passes on a frame an assistant streams as the relay `rid` to the relay's
+/// viewer, unchanged. A frame for a relay this main no longer knows, or
+/// one another connection of that assistant made, is dropped. `Exit` and
+/// `Error` end the relay, as does a viewer that is gone; the assistant is
+/// told to stop. A page's sink is called with no lock held.
+fn relay_frame(ctx: &Ctx, link: &Link, rid: u64, frame: TermFrame) {
+    let ends = matches!(frame.event, TermEvent::Exit | TermEvent::Error { .. });
+    let page = {
+        let mut s = lock(&ctx.shared);
+        s.touch(&link.id);
+        let Some(relay) = s.relays.get(&rid).filter(|r| r.assistant_serial == link.serial) else {
+            log::line("network", format!("{}: dropped a frame for terminal {rid}, which is not relayed", link.label));
+            return;
+        };
+        // A mirroring Maya's is queued under the lock: once the relay is
+        // ended and that connection's queue flushed, none can follow.
+        let to = match &relay.to {
+            RelayTo::Mirror { id, serial, sub } => Ok(s.conns.get(id).filter(|c| c.serial == *serial).is_some_and(|c| c.tx.send(Down::TermFrame { sub: *sub, frame: frame.clone() }).is_ok())),
+            RelayTo::Page(sink) => Err(sink.clone()),
+        };
+        match to {
+            Ok(sent) => {
+                if ends || !sent {
+                    s.end_relay(rid);
+                }
+                return;
+            }
+            Err(sink) => {
+                if ends {
+                    s.end_relay(rid);
+                }
+                sink
+            }
+        }
+    };
+    let alive = (*lock(&page))(frame);
+    if !alive && !ends {
+        let gone = lock(&ctx.shared).end_relay(rid);
+        drop(gone);
+    }
 }
 
 /// An unreadable board still says the assistant is alive: the kept board
@@ -1407,10 +1590,10 @@ fn mark_board(ctx: &Ctx, link: &Link, unreadable: bool) {
     }
 }
 
-/// Forgets a closed connection: its board greys, its commands fail, and
-/// when it was last seen is saved.
+/// Forgets a closed connection: its board greys, its commands fail, its
+/// relays' viewers hear they are lost, and when it was last seen is saved.
 fn leave(ctx: &Ctx, link: &Link, reason: &str) {
-    let current = {
+    let (current, pages) = {
         let mut s = lock(&ctx.shared);
         let current = s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial);
         if current {
@@ -1430,8 +1613,12 @@ fn leave(ctx: &Ctx, link: &Link, reason: &str) {
             }
         }
         s.fail_pending(link.serial);
-        current
+        (current, s.lose_relays(link.serial))
     };
+    let lost = TermFrame { seq: 0, event: TermEvent::Lost };
+    for page in pages {
+        (*lock(&page))(lost.clone());
+    }
     log::line("network", format!("{}: disconnected ({reason})", link.label));
     if current && !ctx.stopped() {
         ctx.announce();
@@ -1457,6 +1644,50 @@ pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::ListResumable { .. } => "list_resumable",
         CommandKind::History { .. } => "history",
         CommandKind::Promote { .. } => "promote",
+    }
+}
+
+/// Shows this main's page the live terminal of `session` on the assistant
+/// shown as `machine`. Its frames go to `sink`, the snapshot as `seq` 0 and
+/// then in order, from that assistant's connection thread with no lock
+/// held; `false` from it ends the relay. An `Exit`, `Error` or `Lost` frame
+/// is the last. Returns the sub for `term_input` and `term_detach`.
+pub fn term_attach(shared: &Arc<Mutex<Server>>, machine: &str, session: &str, sink: FrameSink) -> Result<u64, String> {
+    let rid = relay_attach(&mut lock(shared), machine, session, RelayTo::Page(Arc::new(Mutex::new(sink))))?;
+    log::line("network", format!("terminal {rid} relayed from {machine} to this Maya"));
+    Ok(rid)
+}
+
+/// The page's relay `sub`, if it is one.
+fn page_relay(s: &Server, sub: u64) -> bool {
+    s.relays.get(&sub).is_some_and(|r| matches!(r.to, RelayTo::Page(_)))
+}
+
+/// Types `data`, base64, into the page's relayed terminal `sub`. Keys that
+/// cannot be passed on end the relay.
+pub fn term_input(shared: &Arc<Mutex<Server>>, sub: u64, data: String) -> Result<(), String> {
+    let (typed, gone) = {
+        let mut s = lock(shared);
+        if !page_relay(&s, sub) {
+            return Err(super::client::NO_SUCH_TERMINAL.into());
+        }
+        let typed = s.relay_input(sub, data);
+        let gone = if typed.is_err() { s.end_relay(sub) } else { None };
+        (typed, gone)
+    };
+    drop(gone);
+    typed
+}
+
+/// Stops showing the page the relayed terminal `sub`. A frame already on its
+/// way may still reach the sink just after.
+pub fn term_detach(shared: &Arc<Mutex<Server>>, sub: u64) {
+    let gone = {
+        let mut s = lock(shared);
+        if page_relay(&s, sub) { s.end_relay(sub) } else { None }
+    };
+    if gone.is_some() {
+        log::line("network", format!("terminal {sub} no longer relayed to this Maya"));
     }
 }
 
@@ -3426,12 +3657,18 @@ mod tests {
         sink: Mutex<Option<EventSink>>,
         inputs: Mutex<Vec<(TermView, Vec<u8>)>>,
         detached: Mutex<Vec<TermView>>,
+        /// Attaching fails while set, as for a session not running in Maya.
+        fail: AtomicBool,
     }
 
     const VIEW: TermView = TermView { term: 1, viewer: 2 };
+    const NOT_RUNNING: &str = "This session is not running in Maya.";
 
     impl LiveTerms for FakeTerms {
         fn attach(&self, _session: &str, sink: EventSink) -> Result<TermOpened, String> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(NOT_RUNNING.into());
+            }
             *self.sink.lock().unwrap() = Some(sink);
             Ok(TermOpened { view: VIEW, snapshot: b"hi".to_vec(), rows: 40, cols: 120 })
         }
@@ -3509,7 +3746,7 @@ mod tests {
         let terms = Arc::new(FakeTerms::default());
         let (handle, mut phone, id) = hosting(terms.clone());
         send(&mut phone, &Up::TermAttach { sub: 1, machine: Some("laptop".into()), session: "s1".into() });
-        assert_eq!(next_term(&mut phone), (1, term_error("Not yet.")));
+        assert_eq!(next_term(&mut phone), (1, term_error("That Maya is not connected.")));
         send(&mut phone, &Up::TermInput { sub: 1, data: "aGk=".into() });
         assert_eq!(next_term(&mut phone), (1, term_error("This terminal is not open here.")));
         send(&mut phone, &Up::TermAttach { sub: 2, machine: None, session: "s1".into() });
@@ -3551,6 +3788,294 @@ mod tests {
         handle.mirror(board);
         let Down::Mirror { cards, .. } = recv(&mut phone) else { panic!("expected a mirror") };
         assert_eq!(live_of(&cards), want(false), "a main with no terminals marks none of its own live");
+        handle.stop();
+    }
+
+    #[test]
+    fn a_maya_that_reconnects_while_it_watches_lets_its_old_view_go_at_once() {
+        let terms = Arc::new(FakeTerms::default());
+        let (handle, port) = test_server_with(Arc::new(Counter { terms: Some(terms.clone()), ..Default::default() }));
+        let (mut phone, _, me, _) = pair_client_caps(&handle, port, "Pixel", &[CAP_MIRROR, CAP_CHAT]);
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: None, session: "s1".into() });
+        assert_eq!(next_term(&mut phone).1.seq, 0);
+        // The old connection stays open and silent; the new one replaces it.
+        let replaced = Instant::now();
+        let mut again = connect_as(&handle, port, &me, "Pixel", &[CAP_MIRROR, CAP_CHAT]);
+        assert!(matches!(recv(&mut again), Down::Welcome { .. }));
+        wait_until(|| !terms.detached.lock().unwrap().is_empty());
+        assert!(replaced.elapsed() < Duration::from_secs(2), "detached well before SILENCE, not when it ran out");
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW]);
+        drop(phone);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_main_without_terminals_or_a_failed_attach_answers_with_an_error_and_holds_nothing() {
+        let (handle, port) = test_server();
+        let (mut phone, _, _, _) = pair_client_caps(&handle, port, "Pixel", &[CAP_MIRROR, CAP_CHAT]);
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: None, session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error("This Maya has no live terminals.")));
+        handle.stop();
+
+        let terms = Arc::new(FakeTerms { fail: AtomicBool::new(true), ..Default::default() });
+        let (handle, mut phone, _) = hosting(terms.clone());
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: None, session: "gone".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error(NOT_RUNNING)));
+        send(&mut phone, &Up::TermInput { sub: 1, data: "aGk=".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error("This terminal is not open here.")), "nothing was held for it");
+        assert!(terms.inputs.lock().unwrap().is_empty());
+        assert!(terms.detached.lock().unwrap().is_empty(), "nothing was attached");
+        handle.stop();
+    }
+
+    #[test]
+    fn keys_that_do_not_decode_end_the_main_s_own_view() {
+        let terms = Arc::new(FakeTerms::default());
+        let (handle, mut phone, _) = hosting(terms.clone());
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: None, session: "s1".into() });
+        assert_eq!(next_term(&mut phone).1.seq, 0);
+        send(&mut phone, &Up::TermInput { sub: 1, data: "not base64!".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error("The keys could not be read.")));
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW]);
+        send(&mut phone, &Up::TermInput { sub: 1, data: "aGk=".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error("This terminal is not open here.")), "the view was forgotten");
+        assert!(terms.inputs.lock().unwrap().is_empty());
+        handle.stop();
+    }
+
+    /// An assistant with no sessions that streams `terms`.
+    struct Hosting(Arc<FakeTerms>);
+
+    impl client::Executor for Hosting {
+        fn execute(&self, _: CommandKind) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+        fn board(&self) -> (Vec<Card>, Vec<String>) {
+            (vec![], vec![])
+        }
+        fn live_terms(&self) -> Option<Arc<dyn LiveTerms>> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// A main, an assistant "laptop" run by the real client that hosts
+    /// `terms` (and says so with `CAP_TERMINAL` when `live`), and a phone
+    /// that mirrors the main.
+    struct Relaying {
+        handle: ServerHandle,
+        phone: Client,
+        stop: Arc<AtomicBool>,
+        run: std::thread::JoinHandle<Result<(), String>>,
+    }
+
+    fn relaying(terms: Arc<FakeTerms>, live: bool) -> Relaying {
+        let (handle, port) = test_server();
+        let (ch, laptop, key) = pair_client(&handle, port, "laptop");
+        drop(ch);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == laptop && a.connected));
+        let notify = Arc::new(Leader { caps: if live { vec![CAP_TERMINAL.into()] } else { vec![] }, ..Default::default() });
+        let config = NetworkConfig { name: "laptop".into(), ..assistant_config(port, &handle) };
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        let run = std::thread::spawn(move || client::run_once(&config, &key, Arc::new(Hosting(terms)), notify, &s, None));
+        let (phone, pixel, _, _) = pair_client_caps(&handle, port, "Pixel", &[CAP_MIRROR, CAP_CHAT]);
+        wait_until(|| {
+            let s = lock(&handle.shared);
+            s.conns.contains_key(&laptop) && s.conns.contains_key(&pixel)
+        });
+        Relaying { handle, phone, stop, run }
+    }
+
+    /// The main's page: a sink that keeps every frame it is sent.
+    fn page() -> (FrameSink, Arc<Mutex<Vec<TermFrame>>>) {
+        let got = Arc::new(Mutex::new(vec![]));
+        let g = got.clone();
+        (Box::new(move |f| { g.lock().unwrap().push(f); true }), got)
+    }
+
+    /// The snapshot `FakeTerms` gives.
+    fn attached() -> TermFrame {
+        TermFrame { seq: 0, event: TermEvent::Attached { snapshot: "aGk=".into(), rows: 40, cols: 120 } }
+    }
+
+    /// A round trip through the assistant: what it sent before its answer
+    /// has reached the main, and what the main sent it before has reached it.
+    fn through_laptop(handle: &ServerHandle) {
+        assert_eq!(send_command_with(&handle.shared, "laptop", CommandKind::Compact { session: "s1".into() }, Duration::from_secs(5)), Ok(None));
+    }
+
+    /// The phone hears nothing of its terminals before its next `Pong`.
+    fn no_term_frame(phone: &mut Client) {
+        send(phone, &Up::Ping);
+        loop {
+            match recv(phone) {
+                Down::Pong => break,
+                Down::TermFrame { sub, frame } => panic!("an unexpected frame for {sub}: {frame:?}"),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn a_mirror_watches_an_assistant_s_terminal_through_the_main() {
+        let terms = Arc::new(FakeTerms::default());
+        let Relaying { handle, mut phone, stop, run } = relaying(terms.clone(), true);
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: Some("laptop".into()), session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (1, attached()));
+        assert!(terms.sink.lock().unwrap().as_ref().unwrap()(TermEvent::Output { data: "eA==".into() }));
+        assert_eq!(next_term(&mut phone), (1, TermFrame { seq: 1, event: TermEvent::Output { data: "eA==".into() } }));
+        send(&mut phone, &Up::TermInput { sub: 1, data: "aGk=".into() });
+        wait_until(|| !terms.inputs.lock().unwrap().is_empty());
+        assert_eq!(*terms.inputs.lock().unwrap(), [(VIEW, b"hi".to_vec())]);
+        send(&mut phone, &Up::TermDetach { sub: 1 });
+        wait_until(|| !terms.detached.lock().unwrap().is_empty());
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW]);
+        assert!(lock(&handle.shared).relays.is_empty(), "a detach removes the relay");
+        // Attaching a sub again replaces its relay: the old one goes first.
+        send(&mut phone, &Up::TermAttach { sub: 2, machine: Some("laptop".into()), session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (2, attached()));
+        send(&mut phone, &Up::TermAttach { sub: 2, machine: Some("laptop".into()), session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (2, attached()));
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW, VIEW], "the old relay was detached before the new one came");
+        assert_eq!(lock(&handle.shared).relays.len(), 1);
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+        handle.stop();
+    }
+
+    #[test]
+    fn the_main_s_page_watches_an_assistant_s_terminal() {
+        let terms = Arc::new(FakeTerms::default());
+        let Relaying { handle, stop, run, .. } = relaying(terms.clone(), true);
+        let (sink, got) = page();
+        let sub = term_attach(&handle.shared, "laptop", "s1", sink).unwrap();
+        wait_until(|| !got.lock().unwrap().is_empty());
+        assert_eq!(*got.lock().unwrap(), [attached()]);
+        assert!(terms.sink.lock().unwrap().as_ref().unwrap()(TermEvent::Output { data: "eA==".into() }));
+        wait_until(|| got.lock().unwrap().len() == 2);
+        assert_eq!(got.lock().unwrap()[1], TermFrame { seq: 1, event: TermEvent::Output { data: "eA==".into() } });
+        assert_eq!(term_input(&handle.shared, sub, "aGk=".into()), Ok(()));
+        wait_until(|| !terms.inputs.lock().unwrap().is_empty());
+        assert_eq!(*terms.inputs.lock().unwrap(), [(VIEW, b"hi".to_vec())]);
+        term_detach(&handle.shared, sub);
+        wait_until(|| !terms.detached.lock().unwrap().is_empty());
+        assert!(lock(&handle.shared).relays.is_empty());
+        assert_eq!(term_input(&handle.shared, sub, "aGk=".into()), Err("This terminal is not open here.".into()));
+        // A page that is gone says so at its first frame, and its relay goes.
+        let gone: FrameSink = Box::new(|_| false);
+        let sub = term_attach(&handle.shared, "laptop", "s1", gone).unwrap();
+        wait_until(|| terms.detached.lock().unwrap().len() == 2);
+        assert!(!lock(&handle.shared).relays.contains_key(&sub));
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+        handle.stop();
+    }
+
+    #[test]
+    fn a_relay_to_a_maya_without_live_terminals_is_refused() {
+        const CANNOT: &str = "That Maya cannot share a live terminal. Update it.";
+        const NOT_CONNECTED: &str = "That Maya is not connected.";
+        let terms = Arc::new(FakeTerms::default());
+        let Relaying { handle, mut phone, stop, run } = relaying(terms.clone(), false);
+        let (sink, got) = page();
+        assert_eq!(term_attach(&handle.shared, "laptop", "s1", sink).unwrap_err(), CANNOT);
+        assert_eq!(term_attach(&handle.shared, "nowhere", "s1", page().0).unwrap_err(), NOT_CONNECTED);
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: Some("laptop".into()), session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error(CANNOT)));
+        through_laptop(&handle);
+        assert!(terms.sink.lock().unwrap().is_none(), "the assistant was asked for nothing");
+        assert!(got.lock().unwrap().is_empty());
+        assert!(lock(&handle.shared).relays.is_empty());
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.name == "laptop" && a.connected));
+        assert_eq!(term_attach(&handle.shared, "laptop", "s1", page().0).unwrap_err(), NOT_CONNECTED, "a paired Maya that is away");
+        handle.stop();
+    }
+
+    #[test]
+    fn an_assistant_that_leaves_tells_its_viewers_they_are_lost() {
+        let terms = Arc::new(FakeTerms::default());
+        let Relaying { handle, mut phone, stop, run } = relaying(terms.clone(), true);
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: Some("laptop".into()), session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (1, attached()));
+        let (sink, got) = page();
+        let sub = term_attach(&handle.shared, "laptop", "s1", sink).unwrap();
+        wait_until(|| !got.lock().unwrap().is_empty());
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+        let lost = TermFrame { seq: 0, event: TermEvent::Lost };
+        assert_eq!(next_term(&mut phone), (1, lost.clone()));
+        wait_until(|| got.lock().unwrap().len() == 2);
+        assert_eq!(got.lock().unwrap()[1], lost);
+        assert!(lock(&handle.shared).relays.is_empty());
+        // Both let the sub go: its keys have nowhere to go.
+        assert_eq!(term_input(&handle.shared, sub, "aGk=".into()), Err("This terminal is not open here.".into()));
+        send(&mut phone, &Up::TermInput { sub: 1, data: "aGk=".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error("This terminal is not open here.")));
+        handle.stop();
+    }
+
+    #[test]
+    fn an_ended_session_ends_its_relay() {
+        let terms = Arc::new(FakeTerms::default());
+        let Relaying { handle, mut phone, stop, run } = relaying(terms.clone(), true);
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: Some("laptop".into()), session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (1, attached()));
+        let sink = terms.sink.lock().unwrap().take().unwrap();
+        assert!(sink(TermEvent::Exit));
+        assert_eq!(next_term(&mut phone), (1, TermFrame { seq: 1, event: TermEvent::Exit }));
+        assert!(lock(&handle.shared).relays.is_empty());
+        // The assistant is told to let go of it.
+        wait_until(|| !terms.detached.lock().unwrap().is_empty());
+        // What the assistant still sends for it goes nowhere.
+        sink(TermEvent::Output { data: "eQ==".into() });
+        through_laptop(&handle);
+        no_term_frame(&mut phone);
+        send(&mut phone, &Up::TermInput { sub: 1, data: "aGk=".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error("This terminal is not open here.")), "the phone's sub ended with it");
+        assert!(terms.inputs.lock().unwrap().is_empty());
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+        handle.stop();
+    }
+
+    #[test]
+    fn an_assistant_s_error_ends_the_relay() {
+        let terms = Arc::new(FakeTerms { fail: AtomicBool::new(true), ..Default::default() });
+        let Relaying { handle, mut phone, stop, run } = relaying(terms.clone(), true);
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: Some("laptop".into()), session: "gone".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error(NOT_RUNNING)));
+        assert!(lock(&handle.shared).relays.is_empty());
+        terms.fail.store(false, Ordering::SeqCst);
+        send(&mut phone, &Up::TermAttach { sub: 2, machine: Some("laptop".into()), session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (2, attached()));
+        // The assistant cannot read the keys: it ends its view, and so does every relay.
+        send(&mut phone, &Up::TermInput { sub: 2, data: "not base64!".into() });
+        assert_eq!(next_term(&mut phone), (2, term_error("The keys could not be read.")));
+        assert!(lock(&handle.shared).relays.is_empty());
+        send(&mut phone, &Up::TermInput { sub: 2, data: "aGk=".into() });
+        assert_eq!(next_term(&mut phone), (2, term_error("This terminal is not open here.")));
+        through_laptop(&handle);
+        assert!(terms.inputs.lock().unwrap().is_empty());
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW], "the assistant let it go on its own");
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+        handle.stop();
+    }
+
+    #[test]
+    fn a_mirror_that_leaves_detaches_from_the_assistant() {
+        let terms = Arc::new(FakeTerms::default());
+        let Relaying { handle, mut phone, stop, run } = relaying(terms.clone(), true);
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: Some("laptop".into()), session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (1, attached()));
+        drop(phone);
+        wait_until(|| !terms.detached.lock().unwrap().is_empty());
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW]);
+        assert!(lock(&handle.shared).relays.is_empty());
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
         handle.stop();
     }
 
