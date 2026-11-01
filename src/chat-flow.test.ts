@@ -39,6 +39,20 @@ describe("chat flow", () => {
     expect(log.scrollTop).toBe(900);
   });
 
+  it("keeps the log and the turns already shown when a turn or a status arrives", async () => {
+    initChat();
+    await flush();
+    on<ChatTurn[]>("chat-reset")({ payload: [{ who: "maya", text: "one", at: 1, via: "maya" }] });
+    const log = document.querySelector(".chat__log");
+    const first = document.querySelector(".chat__turn");
+    on<ChatTurn>("chat")({ payload: { who: "maya", text: "two", at: 2, via: "chat" } });
+    on<BrainStatus>("brain")({ payload: status({ dot: "working" }) });
+    expect(document.querySelector(".chat__log")).toBe(log);
+    const turns = document.querySelectorAll(".chat__turn");
+    expect(turns[0]).toBe(first);
+    expect(turns[1].textContent).toContain("two");
+  });
+
   it("colours the tab dot by status and marks the chat seen when opened", async () => {
     const tabs = makeTabs();
     initChat();
