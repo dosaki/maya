@@ -468,8 +468,9 @@ impl Hub {
 
     /// Opens the live terminal of the board's `session` to `sink`, through
     /// the main; its frames come back to `sink` (`term_frame`). Returns the
-    /// sub for `term_input` and `term_detach`. Refused while the main is not
-    /// connected.
+    /// sub for `term_input` and `term_detach`. While the main is not
+    /// connected the sub is told `Lost` at once, so the viewer tries again
+    /// as it does after any dropped link.
     pub fn term_attach(&self, session: &str, sink: FrameSink) -> Result<u64, String> {
         let card = self.cards().into_iter().find(|c| c.session_id == session && c.live).ok_or(NOT_LIVE)?;
         let sub = self.next_term.fetch_add(1, Ordering::SeqCst);
@@ -479,9 +480,12 @@ impl Hub {
         // `Lost` (`lose_terms` follows the link's reset), so no sub outlives it.
         let connected = self.link.lock().unwrap().connected;
         let sent = if connected { self.send_up(Up::TermAttach { sub, machine: card.machine, session: session.into() }) } else { Err(NOT_CONNECTED.into()) };
-        if let Err(e) = sent {
-            self.terms.lock().unwrap().remove(&sub);
-            return Err(e);
+        if sent.is_err() {
+            // Out of the map before it is told: the sink may attach again.
+            let taken = self.terms.lock().unwrap().remove(&sub);
+            if let Some(sink) = taken {
+                (sink.lock().unwrap_or_else(|e| e.into_inner()))(TermFrame { seq: 0, event: TermEvent::Lost });
+            }
         }
         Ok(sub)
     }
@@ -1491,8 +1495,11 @@ mod tests {
         const CANNOT: &str = "This session's live terminal can't be opened from here.";
         assert_eq!(hub.term_attach("off", viewer(true).0), Err(CANNOT.to_string()));
         assert_eq!(hub.term_attach("nowhere", viewer(true).0), Err(CANNOT.to_string()));
-        // A live card, but no link carries the attach: the sub is dropped.
-        assert_eq!(hub.term_attach("on", viewer(true).0), Err(maya_core::net::client::LOST.to_string()));
+        // A live card, but no link carries the attach: the sub is told it is
+        // lost, so the viewer tries again, and dropped.
+        let (sink, got) = viewer(true);
+        assert!(hub.term_attach("on", sink).is_ok());
+        assert_eq!(*got.lock().unwrap(), vec![TermFrame { seq: 0, event: TermEvent::Lost }]);
         assert!(hub.terms.lock().unwrap().is_empty());
     }
 
@@ -1539,16 +1546,19 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_opens_only_while_the_main_is_connected() {
+    fn a_terminal_opened_while_the_main_is_away_is_lost_and_tried_again() {
         let hub = test_hub();
         let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
         hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("desk".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() }, true);
         notify.mirrored(true, vec![mirrored_card("on", true)], vec![]);
         // The board stays, greyed, while the link is down.
         hub.set_link_for_test(AssistantLink { connected: false, main_name: Some("desk".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() }, true);
-        assert_eq!(hub.term_attach("on", viewer(true).0), Err(NOT_CONNECTED.to_string()));
+        let (sink, got) = viewer(true);
+        assert!(hub.term_attach("on", sink).is_ok(), "not a refusal: the viewer tries again");
+        assert_eq!(*got.lock().unwrap(), vec![TermFrame { seq: 0, event: TermEvent::Lost }]);
         assert!(hub.sent.lock().unwrap().is_empty(), "nothing went out");
         assert!(hub.terms.lock().unwrap().is_empty());
+        assert!(!notify.live());
     }
 
     #[test]
