@@ -177,6 +177,9 @@ pub struct Hub {
     /// What `joined` answers in a test, so it needs no running client.
     #[cfg(test)]
     joined_override: Mutex<Option<bool>>,
+    /// What `send_up` was given, in a test: the lane has no link there. Taken alone.
+    #[cfg(test)]
+    sent: Mutex<Vec<Up>>,
 }
 
 /// Whether board events may be spoken at all: Speak is on and the phone is
@@ -193,6 +196,8 @@ impl Hub {
             maya_dir, settings: Mutex::new(settings), client: Mutex::new(None), client_error: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), chat: Mutex::new(ChatView::default()), chat_fetch: AtomicU64::new(0), lane: Arc::new(RequestLane::default()), terms: Mutex::new(HashMap::new()), next_term: AtomicU64::new(1), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, voice: OnceLock::new(), silenced: OnceLock::new(),
             #[cfg(test)]
             joined_override: Mutex::new(None),
+            #[cfg(test)]
+            sent: Mutex::new(Vec::new()),
         })
     }
 
@@ -463,13 +468,18 @@ impl Hub {
 
     /// Opens the live terminal of the board's `session` to `sink`, through
     /// the main; its frames come back to `sink` (`term_frame`). Returns the
-    /// sub for `term_input` and `term_detach`.
+    /// sub for `term_input` and `term_detach`. Refused while the main is not
+    /// connected.
     pub fn term_attach(&self, session: &str, sink: FrameSink) -> Result<u64, String> {
         let card = self.cards().into_iter().find(|c| c.session_id == session && c.live).ok_or(NOT_LIVE)?;
         let sub = self.next_term.fetch_add(1, Ordering::SeqCst);
         // In before the attach goes out, so no frame for it is dropped.
         self.terms.lock().unwrap().insert(sub, Arc::new(Mutex::new(sink)));
-        if let Err(e) = self.lane.send(Up::TermAttach { sub, machine: card.machine, session: session.into() }) {
+        // Checked once the sub is in: a link that goes after this tells it
+        // `Lost` (`lose_terms` follows the link's reset), so no sub outlives it.
+        let connected = self.link.lock().unwrap().connected;
+        let sent = if connected { self.send_up(Up::TermAttach { sub, machine: card.machine, session: session.into() }) } else { Err(NOT_CONNECTED.into()) };
+        if let Err(e) = sent {
             self.terms.lock().unwrap().remove(&sub);
             return Err(e);
         }
@@ -481,7 +491,7 @@ impl Hub {
         if !self.terms.lock().unwrap().contains_key(&sub) {
             return Err(NO_SUCH_TERMINAL.into());
         }
-        self.lane.send(Up::TermInput { sub, data })
+        self.send_up(Up::TermInput { sub, data })
     }
 
     /// Stops viewing the live terminal `sub`. A frame already on its way may
@@ -489,8 +499,15 @@ impl Hub {
     pub fn term_detach(&self, sub: u64) {
         let open = self.terms.lock().unwrap().remove(&sub).is_some();
         if open {
-            let _ = self.lane.send(Up::TermDetach { sub });
+            let _ = self.send_up(Up::TermDetach { sub });
         }
+    }
+
+    /// Sends `up` to the main on the lane; a test keeps it too.
+    fn send_up(&self, up: Up) -> Result<(), String> {
+        #[cfg(test)]
+        self.sent.lock().unwrap().push(up.clone());
+        self.lane.send(up)
     }
 
     /// Tells every live viewer its link is gone (`Lost`, so it attaches
@@ -651,11 +668,14 @@ impl Hub {
         if let Some(old) = old {
             old.stop();
         }
-        // The new link's main knows none of the old one's subs.
-        self.lose_terms();
         *self.link.lock().unwrap() = AssistantLink { retrying: true, ..Default::default() };
         self.mirror_seeded.store(false, Ordering::SeqCst);
         *self.mirror.lock().unwrap() = MirrorView::default();
+        // The new link's main knows none of the old one's subs. After the
+        // link and the board go, so a viewer told `Lost` that attaches again
+        // is refused, not sent on the old link, which may still be up: its
+        // client is stopped, not joined, and its `disconnected` is silenced.
+        self.lose_terms();
         self.forget_chat();
         let key = match self.identity() {
             Ok(k) => k,
@@ -988,11 +1008,18 @@ impl ClientNotify for HubClientNotify {
             let mut terms = h.terms.lock().unwrap();
             if ends { terms.remove(&sub) } else { terms.get(&sub).cloned() }
         };
-        // A sub detached or ended since: its late frames are dropped.
-        let Some(sink) = sink else { return };
+        // A sub detached or ended since: its late frames are dropped. A
+        // snapshot for one is an attach that raced a restart of the client:
+        // the main holds a view nobody watches, so it is told to let it go.
+        let Some(sink) = sink else {
+            if matches!(frame.event, TermEvent::Attached { .. }) {
+                let _ = h.send_up(Up::TermDetach { sub });
+            }
+            return;
+        };
         let open = (sink.lock().unwrap_or_else(|e| e.into_inner()))(frame);
         if !open && !ends && h.terms.lock().unwrap().remove(&sub).is_some() {
-            let _ = h.lane.send(Up::TermDetach { sub });
+            let _ = h.send_up(Up::TermDetach { sub });
         }
     }
     fn moved(&self, host: &str, port: u16, key: &str) -> Result<(), String> {
@@ -1033,7 +1060,9 @@ mod tests {
     }
 
     fn test_hub_with(sink: Arc<dyn Sink>) -> Arc<Hub> {
-        let dir = std::env::temp_dir().join(format!("maya-hub-test-{}-{}", std::process::id(), now_ms()));
+        // Numbered too: two tests may start in the same millisecond, and one that starts the client writes its key there.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("maya-hub-test-{}-{}-{}", std::process::id(), now_ms(), NEXT.fetch_add(1, Ordering::SeqCst)));
         let settings = Settings { path: settings_path(&dir), config: Config::default() };
         Hub::new(dir, settings, Arc::new(NoAlerts), sink)
     }
@@ -1493,6 +1522,59 @@ mod tests {
         notify.term_frame(sub, output.clone());
         assert_eq!(*got.lock().unwrap(), [output]);
         assert!(hub.terms.lock().unwrap().is_empty(), "a closed viewer is detached");
+    }
+
+    #[test]
+    fn a_snapshot_for_a_sub_the_phone_does_not_hold_lets_the_main_s_view_go() {
+        let hub = test_hub();
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        let attached = TermFrame { seq: 0, event: TermEvent::Attached { snapshot: "aGk=".into(), rows: 40, cols: 120 } };
+        notify.term_frame(7, attached);
+        assert_eq!(*hub.sent.lock().unwrap(), [Up::TermDetach { sub: 7 }], "an attach that raced a restart");
+        // Any other late frame, as after a detach, sends nothing.
+        notify.term_frame(7, TermFrame { seq: 1, event: TermEvent::Output { data: "eA==".into() } });
+        notify.term_frame(7, TermFrame { seq: 2, event: TermEvent::Exit });
+        assert_eq!(hub.sent.lock().unwrap().len(), 1);
+        assert!(hub.terms.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_terminal_opens_only_while_the_main_is_connected() {
+        let hub = test_hub();
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("desk".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() }, true);
+        notify.mirrored(true, vec![mirrored_card("on", true)], vec![]);
+        // The board stays, greyed, while the link is down.
+        hub.set_link_for_test(AssistantLink { connected: false, main_name: Some("desk".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() }, true);
+        assert_eq!(hub.term_attach("on", viewer(true).0), Err(NOT_CONNECTED.to_string()));
+        assert!(hub.sent.lock().unwrap().is_empty(), "nothing went out");
+        assert!(hub.terms.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_viewer_that_attaches_again_as_the_client_restarts_is_refused_and_leaves_no_sub() {
+        let hub = test_hub();
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("desk".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() }, true);
+        notify.mirrored(true, vec![mirrored_card("on", true)], vec![]);
+        // A viewer told it is lost attaches again at once, from inside its sink.
+        let again: Arc<Mutex<Vec<Result<u64, String>>>> = Arc::default();
+        let (weak, out) = (Arc::downgrade(&hub), again.clone());
+        hub.insert_term_for_test(Box::new(move |frame| {
+            if frame.event == TermEvent::Lost {
+                let h = weak.upgrade().unwrap();
+                out.lock().unwrap().push(h.term_attach("on", viewer(true).0));
+            }
+            true
+        }));
+        hub.start_client();
+        let again = again.lock().unwrap().clone();
+        assert_eq!(again.len(), 1, "the viewer was told it is lost");
+        assert!(again[0].is_err(), "the old link's state was gone first: {again:?}");
+        assert!(hub.sent.lock().unwrap().is_empty(), "no attach went out on the old link");
+        assert!(hub.terms.lock().unwrap().is_empty(), "no sub is left behind");
+        assert!(!notify.live(), "so the new link does not tick fast");
+        hub.stop_client();
     }
 
     #[test]
