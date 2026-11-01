@@ -65,6 +65,17 @@ describe("keepEqualChildren", () => {
     expect(old.children[1]).not.toBe(bar);
   });
 
+  // The history keeps the last 30 turns and the chat the last 500: once full,
+  // each new turn drops the oldest and every other one shifts up a place.
+  it("keeps the turns that shifted up when the first one dropped off", () => {
+    const old = html(`<div><p>1</p><p>2</p><p>3</p></div>`);
+    const [, two, three] = [...old.children];
+    keepEqualChildren(old, html(`<div><p>2</p><p>3</p><p>4</p></div>`));
+    expect(old.innerHTML).toBe(`<p>2</p><p>3</p><p>4</p>`);
+    expect(old.children[0]).toBe(two);
+    expect(old.children[1]).toBe(three);
+  });
+
   it("drops children the fresh render no longer has", () => {
     const old = html(`<div><p>1</p><p>2</p></div>`);
     keepEqualChildren(old, html(`<div><p>1</p></div>`));

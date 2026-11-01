@@ -70,6 +70,18 @@ describe("patchModal", () => {
     expect(hist!.outerHTML).toBe(renderModal({ card: base, turns, status: null, draft: "" }, handlers()).querySelector(".modal__history")!.outerHTML);
   });
 
+  it("keeps the turns still shown when the oldest one drops off the capped history", () => {
+    const first = [{ kind: "user" as const, text: "a" }, { kind: "assistant" as const, text: "b" }, { kind: "user" as const, text: "c" }];
+    const root = renderModal({ card: base, turns: first, status: null, draft: "" }, handlers());
+    const [, b, c] = root.querySelectorAll(".turn");
+    const turns = [...first.slice(1), { kind: "assistant" as const, text: "d" }];
+    patchModal(root, renderModal({ card: base, turns, status: null, draft: "" }, handlers()));
+    const now = root.querySelectorAll(".turn");
+    expect(now[0]).toBe(b);
+    expect(now[1]).toBe(c);
+    expect(now[2].textContent).toContain("d");
+  });
+
   it("removes the banner and status when the fresh render has none", () => {
     const root = renderModal({ card: { ...base, state: "awaiting", awaiting: { kind: "plan", detail: "x", questions: [] } }, turns: [], status: { ok: false, text: "e" }, draft: "" }, handlers());
     patchModal(root, renderModal({ card: base, turns: [], status: null, draft: "" }, handlers()));

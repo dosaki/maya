@@ -69,8 +69,9 @@ export function countable(cards: Card[]): Card[] {
 /**
  * Shows `fresh` in `host`, patching the board already there in place: the
  * columns keep their nodes, so their scroll positions (and the phone's
- * sideways one), and each card still on the board keeps its node, so the
- * one under the pointer keeps its hover.
+ * sideways one), and each card that stays in its column keeps its node, so
+ * the one under the pointer keeps its hover. A card that changes column is
+ * built afresh: it is no longer under the pointer anyway.
  */
 export function swapBoard(host: HTMLElement, fresh: HTMLElement): void {
   const old = host.querySelector<HTMLElement>(":scope > .board");

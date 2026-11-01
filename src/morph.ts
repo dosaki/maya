@@ -36,27 +36,40 @@ export function morph(old: Element, fresh: Element): void {
     else if (o.nodeValue !== f.nodeValue) o.nodeValue = f.nodeValue;
     return o;
   });
+  place(old, wanted);
+}
+
+/** Makes `parent`'s children exactly `wanted`, in order, moving only what has to move. */
+function place(parent: Element, wanted: Node[]): void {
   // Dropping the leftovers first leaves the kept nodes in place unless they really moved.
   const kept = new Set(wanted);
-  for (const n of [...old.childNodes]) if (!kept.has(n)) n.remove();
+  for (const n of [...parent.childNodes]) if (!kept.has(n)) n.remove();
   wanted.forEach((n, i) => {
-    if (old.childNodes[i] !== n) old.insertBefore(n, old.childNodes[i] ?? null);
+    if (parent.childNodes[i] !== n) parent.insertBefore(n, parent.childNodes[i] ?? null);
   });
 }
 
 /**
- * Makes `old`'s children those of `fresh`, keeping each old child equal to
- * the fresh one in its place and taking the fresh node for the rest. For a
- * list of rendered turns, whose nodes carry listeners of their own. A
- * child that `within` picks, in both, is kept and patched the same way.
+ * Makes `old`'s children those of `fresh`, keeping each old child that is
+ * equal to a fresh one, in order, and taking the fresh node for the rest. For
+ * a list of rendered turns, whose nodes carry listeners of their own: the
+ * lists are capped, so the oldest turn drops off as a new one arrives, and
+ * the turns after it are found where they now are. A child that `within`
+ * picks, in both, is kept and patched the same way.
  */
 export function keepEqualChildren(old: Element, fresh: Element, within?: (el: Element) => boolean): void {
-  const wanted = [...fresh.childNodes];
-  wanted.forEach((f, i) => {
-    const o = old.childNodes[i];
-    if (!o) old.append(f);
-    else if (within && o instanceof Element && f instanceof Element && o.tagName === f.tagName && within(o) && within(f)) keepEqualChildren(o, f, within);
-    else if (!o.isEqualNode(f)) old.replaceChild(f, o);
+  const olds = [...old.childNodes];
+  let from = 0;
+  const wanted = [...fresh.childNodes].map((f) => {
+    for (let k = from; k < olds.length; k++) {
+      const o = olds[k];
+      const nest = !!within && o instanceof Element && f instanceof Element && o.tagName === f.tagName && within(o) && within(f);
+      if (!nest && !o.isEqualNode(f)) continue;
+      if (nest) keepEqualChildren(o as Element, f as Element, within);
+      from = k + 1;
+      return o;
+    }
+    return f;
   });
-  while (old.childNodes.length > wanted.length) old.lastChild!.remove();
+  place(old, wanted);
 }
