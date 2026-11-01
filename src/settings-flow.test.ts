@@ -950,6 +950,7 @@ describe("settings flow", () => {
     localStorage.removeItem("maya.settingsGroup");
   });
 
+  // Three full repaints take 3–4 s on the Windows runner, too near the 5 s default.
   it("keeps focus inside the same provider block through a repaint", async () => {
     const both = [
       { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" } },
@@ -985,5 +986,5 @@ describe("settings flow", () => {
       expect(document.activeElement).toBe(gl().querySelector(sel));
     }
     localStorage.removeItem("maya.settingsGroup");
-  });
+  }, 15_000);
 });
