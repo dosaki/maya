@@ -10,6 +10,7 @@ use maya_core::answer::Pick;
 use maya_core::config::Config;
 use maya_core::launch::LaunchOptions;
 use maya_core::model::{Card, Harness};
+use maya_core::net::live::TermFrame;
 use maya_core::net::protocol::{CommandKind, Request};
 use maya_core::net::routing::{agents_reply, remote_attachments, AgentsReply, MachineInfo};
 use maya_core::net::NetworkStatus;
@@ -20,6 +21,7 @@ use maya_core::{attachments, log};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::sync::Arc;
+use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -48,6 +50,25 @@ pub fn session_history(hub: H, session_id: String) -> Result<Vec<Turn>, String> 
 pub fn send_reply(hub: H, session_id: String, text: String, attachments: Vec<String>) -> Result<Option<Route>, String> {
     let attachments = remote_attachments(&attachments)?;
     hub.send(&session_id, |session| CommandKind::Reply { session, text, attachments }).map(|d| Route::from_data(d.as_ref()))
+}
+
+/// Opens the live terminal of `session_id`, a card the main shows, through
+/// the main; its frames go to `on_frame`. Returns the sub.
+#[tauri::command(async)]
+pub fn live_attach_remote(hub: H, session_id: String, on_frame: Channel<TermFrame>) -> Result<u64, String> {
+    hub.term_attach(&session_id, Box::new(move |frame| on_frame.send(frame).is_ok()))
+}
+
+/// Types `data` (base64) into the live terminal `sub`. It stays on the main
+/// thread, which runs commands in the order they come, so keys keep their order.
+#[tauri::command]
+pub fn live_input_remote(hub: H, sub: u64, data: String) -> Result<(), String> {
+    hub.term_input(sub, data)
+}
+
+#[tauri::command(async)]
+pub fn live_detach_remote(hub: H, sub: u64) {
+    hub.term_detach(sub);
 }
 
 #[tauri::command(async)]

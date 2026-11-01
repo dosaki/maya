@@ -9,14 +9,16 @@ use maya_core::config::{self, Config, NetworkRole};
 use maya_core::log;
 use maya_core::model::Card;
 use maya_core::net::identity::{self, Keypair};
-use maya_core::net::client::{check_pair_args, pair_with, reconnect, ClientHandle, ClientNotify, Executor, RequestLane, NOT_CONNECTED, NOT_PAIRED, REMOVED, REQUEST_TIMEOUT};
-use maya_core::net::protocol::{CommandKind, Request, CAP_CHAT, CAP_FOLLOW, CAP_MIRROR, DEFAULT_PORT};
+use maya_core::net::client::{check_pair_args, pair_with, reconnect, ClientHandle, ClientNotify, Executor, RequestLane, NOT_CONNECTED, NOT_PAIRED, NO_SUCH_TERMINAL, REMOVED, REQUEST_TIMEOUT};
+use maya_core::net::live::{FrameSink, TermEvent, TermFrame};
+use maya_core::net::protocol::{CommandKind, Request, Up, CAP_CHAT, CAP_FOLLOW, CAP_MIRROR, DEFAULT_PORT};
 use maya_core::net::routing::MachineInfo;
 use maya_core::remembered::{self, RememberedRow, ResumeOutcome};
 use maya_core::net::{AssistantLink, MirrorAccess, NetworkStatus};
 use maya_core::notify::Notifier;
 use maya_core::transcript::{Turn, TurnKind};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -102,6 +104,9 @@ fn phone_caps() -> Vec<String> {
     vec![CAP_FOLLOW.into(), CAP_MIRROR.into(), CAP_CHAT.into()]
 }
 
+/// What opening a live terminal says for a card that cannot show one here.
+const NOT_LIVE: &str = "This session's live terminal can't be opened from here.";
+
 /// The main's name while the link has not said it yet.
 const SOME_MAIN: &str = "the main Maya";
 
@@ -123,7 +128,7 @@ pub struct Hub {
     /// Serializes `refresh`, so a stale snapshot never overtakes a newer one.
     /// Lock order: `refresh` first, alone (its callers hold no other lock);
     /// `settings`, `notifier`, `posted`, `client`, `client_error`, `link`,
-    /// `mirror` and `chat` are taken alone, never while holding another hub lock. `stop_client`
+    /// `mirror`, `chat` and `terms` are taken alone, never while holding another hub lock. `stop_client`
     /// joins the client thread, which may be in a callback that calls
     /// `refresh`, so it holds no hub lock while it joins. `lane` has its own
     /// lock, never held here.
@@ -145,6 +150,12 @@ pub struct Hub {
     chat_fetch: AtomicU64,
     /// Where the page's commands go while joined.
     pub lane: Arc<RequestLane>,
+    /// The live terminals the page views through the main, by sub. Never
+    /// held while a viewer's sink runs or the lane sends: each sink has its
+    /// own lock, taken alone, which keeps its frames in order.
+    terms: Mutex<HashMap<u64, Arc<Mutex<FrameSink>>>>,
+    /// The next sub; never reused, so a late frame for an old one is dropped.
+    next_term: AtomicU64,
     /// This phone's key pair, read from `identity.key` once and kept.
     identity: Mutex<Option<Arc<Keypair>>>,
     /// The first mirror of the current link was seeded into the notifier.
@@ -179,7 +190,7 @@ impl Hub {
     pub fn new(maya_dir: PathBuf, settings: Settings, alerts: Arc<dyn Alerts>, sink: Arc<dyn Sink>) -> Arc<Hub> {
         Arc::new_cyclic(|me| Hub {
             me: me.clone(),
-            maya_dir, settings: Mutex::new(settings), client: Mutex::new(None), client_error: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), chat: Mutex::new(ChatView::default()), chat_fetch: AtomicU64::new(0), lane: Arc::new(RequestLane::default()), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, voice: OnceLock::new(), silenced: OnceLock::new(),
+            maya_dir, settings: Mutex::new(settings), client: Mutex::new(None), client_error: Mutex::new(None), link: Mutex::new(AssistantLink::default()), refresh: Mutex::new(()), mirror: Mutex::new(MirrorView::default()), chat: Mutex::new(ChatView::default()), chat_fetch: AtomicU64::new(0), lane: Arc::new(RequestLane::default()), terms: Mutex::new(HashMap::new()), next_term: AtomicU64::new(1), identity: Mutex::new(None), mirror_seeded: AtomicBool::new(false), notifier: Mutex::new(Notifier::default()), posted: Mutex::new(Posted::default()), alerts, sink, voice: OnceLock::new(), silenced: OnceLock::new(),
             #[cfg(test)]
             joined_override: Mutex::new(None),
         })
@@ -450,6 +461,55 @@ impl Hub {
         self.lane.request(machine.map(str::to_string), request, REQUEST_TIMEOUT)
     }
 
+    /// Opens the live terminal of the board's `session` to `sink`, through
+    /// the main; its frames come back to `sink` (`term_frame`). Returns the
+    /// sub for `term_input` and `term_detach`.
+    pub fn term_attach(&self, session: &str, sink: FrameSink) -> Result<u64, String> {
+        let card = self.cards().into_iter().find(|c| c.session_id == session && c.live).ok_or(NOT_LIVE)?;
+        let sub = self.next_term.fetch_add(1, Ordering::SeqCst);
+        // In before the attach goes out, so no frame for it is dropped.
+        self.terms.lock().unwrap().insert(sub, Arc::new(Mutex::new(sink)));
+        if let Err(e) = self.lane.send(Up::TermAttach { sub, machine: card.machine, session: session.into() }) {
+            self.terms.lock().unwrap().remove(&sub);
+            return Err(e);
+        }
+        Ok(sub)
+    }
+
+    /// Types `data`, base64, into the live terminal `sub`.
+    pub fn term_input(&self, sub: u64, data: String) -> Result<(), String> {
+        if !self.terms.lock().unwrap().contains_key(&sub) {
+            return Err(NO_SUCH_TERMINAL.into());
+        }
+        self.lane.send(Up::TermInput { sub, data })
+    }
+
+    /// Stops viewing the live terminal `sub`. A frame already on its way may
+    /// still reach its sink just after.
+    pub fn term_detach(&self, sub: u64) {
+        let open = self.terms.lock().unwrap().remove(&sub).is_some();
+        if open {
+            let _ = self.lane.send(Up::TermDetach { sub });
+        }
+    }
+
+    /// Tells every live viewer its link is gone (`Lost`, so it attaches
+    /// again) and forgets them all.
+    fn lose_terms(&self) {
+        let sinks: Vec<_> = self.terms.lock().unwrap().drain().map(|(_, s)| s).collect();
+        for sink in sinks {
+            (sink.lock().unwrap_or_else(|e| e.into_inner()))(TermFrame { seq: 0, event: TermEvent::Lost });
+        }
+    }
+
+    /// Adds a viewer as an attach would, with nothing sent to the main.
+    #[cfg(test)]
+    pub(crate) fn insert_term_for_test(&self, sink: FrameSink) -> u64 {
+        let sub = self.next_term.fetch_add(1, Ordering::SeqCst);
+        self.terms.lock().unwrap().insert(sub, Arc::new(Mutex::new(sink)));
+        sub
+    }
+
     /// The session whose notification has this id, if its card is on the board.
     pub fn session_for_notification(&self, id: i32) -> Option<String> {
         self.cards().into_iter().map(|c| c.session_id).find(|s| alerts::notification_id(s) == id)
@@ -591,6 +651,8 @@ impl Hub {
         if let Some(old) = old {
             old.stop();
         }
+        // The new link's main knows none of the old one's subs.
+        self.lose_terms();
         *self.link.lock().unwrap() = AssistantLink { retrying: true, ..Default::default() };
         self.mirror_seeded.store(false, Ordering::SeqCst);
         *self.mirror.lock().unwrap() = MirrorView::default();
@@ -684,6 +746,7 @@ impl Hub {
         *self.link.lock().unwrap() = AssistantLink::default();
         *self.mirror.lock().unwrap() = MirrorView::default();
         self.forget_chat();
+        self.lose_terms();
         self.refresh();
     }
 
@@ -762,6 +825,12 @@ impl ClientNotify for HubClientNotify {
         self.refresh();
     }
     fn disconnected(&self, error: &str) {
+        // Every live viewer's link has gone with it; each attaches again.
+        if !self.stop.load(Ordering::SeqCst) {
+            if let Some(h) = self.hub.upgrade() {
+                h.lose_terms();
+            }
+        }
         let retrying = error != NOT_PAIRED && error != REMOVED;
         self.set(|l| {
             l.connected = false;
@@ -775,6 +844,7 @@ impl ClientNotify for HubClientNotify {
         // A removed phone mirrors nothing: its board and Chat go, and the tab hides.
         if let Some(h) = self.hub.upgrade() {
             h.forget_mirror();
+            h.lose_terms();
         }
         self.set(|l| {
             l.connected = false;
@@ -902,6 +972,28 @@ impl ClientNotify for HubClientNotify {
     }
     fn lane(&self) -> Option<Arc<RequestLane>> {
         self.hub.upgrade().map(|h| h.lane.clone())
+    }
+    fn live(&self) -> bool {
+        self.hub.upgrade().is_some_and(|h| !h.terms.lock().unwrap().is_empty())
+    }
+    /// Hands the frame to its viewer. An `Exit`, `Error` or `Lost` is the
+    /// last of its sub; a viewer that has gone is detached from the main.
+    fn term_frame(&self, sub: u64, frame: TermFrame) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(h) = self.hub.upgrade() else { return };
+        let ends = frame.event.ends();
+        let sink = {
+            let mut terms = h.terms.lock().unwrap();
+            if ends { terms.remove(&sub) } else { terms.get(&sub).cloned() }
+        };
+        // A sub detached or ended since: its late frames are dropped.
+        let Some(sink) = sink else { return };
+        let open = (sink.lock().unwrap_or_else(|e| e.into_inner()))(frame);
+        if !open && !ends && h.terms.lock().unwrap().remove(&sub).is_some() {
+            let _ = h.lane.send(Up::TermDetach { sub });
+        }
     }
     fn moved(&self, host: &str, port: u16, key: &str) -> Result<(), String> {
         let h = self.hub.upgrade().ok_or("the app is gone")?;
@@ -1324,6 +1416,83 @@ mod tests {
         let turns = hub.chat.lock().unwrap().turns.clone();
         assert_eq!(turns.len(), 500);
         assert_eq!(turns[0]["text"], 1, "the oldest goes");
+    }
+
+    /// A viewer that keeps every frame it is sent and answers `open`.
+    fn viewer(open: bool) -> (FrameSink, Arc<Mutex<Vec<TermFrame>>>) {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let keep = got.clone();
+        (Box::new(move |f| {
+            keep.lock().unwrap().push(f);
+            open
+        }), got)
+    }
+
+    fn mirrored_card(id: &str, live: bool) -> Card {
+        Card {
+            session_id: id.into(), pid: 0, name: "hexgrid".into(), cwd: "/w".into(), state: maya_core::model::State::Working, state_since: 1, snippet: String::new(), awaiting: None, has_inbox: true,
+            harness: maya_core::model::Harness::ClaudeCode, pr: None, context: None, machine: Some("laptop".into()), machine_address: None, machine_platform: None, terminal: None, stale: false,
+            model: None, branch: None, brain: false, native: true, shell: false, usage: None, limits: None, status_line: None, live,
+        }
+    }
+
+    #[test]
+    fn a_disconnect_tells_every_live_viewer_it_is_lost() {
+        let hub = test_hub();
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        let (a, got_a) = viewer(true);
+        let (b, got_b) = viewer(true);
+        hub.insert_term_for_test(a);
+        hub.insert_term_for_test(b);
+        assert!(notify.live(), "the link ticks fast while a viewer is open");
+        notify.disconnected("Lost the connection to the main Maya.");
+        let lost = TermFrame { seq: 0, event: TermEvent::Lost };
+        assert_eq!(*got_a.lock().unwrap(), [lost.clone()]);
+        assert_eq!(*got_b.lock().unwrap(), [lost]);
+        assert!(hub.terms.lock().unwrap().is_empty());
+        assert!(!notify.live());
+    }
+
+    #[test]
+    fn only_a_live_card_s_terminal_opens() {
+        let hub = test_hub();
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("desk".into()), mirror: Some(MirrorAccess::Allowed), ..Default::default() }, true);
+        notify.mirrored(true, vec![mirrored_card("off", false), mirrored_card("on", true)], vec![]);
+        const CANNOT: &str = "This session's live terminal can't be opened from here.";
+        assert_eq!(hub.term_attach("off", viewer(true).0), Err(CANNOT.to_string()));
+        assert_eq!(hub.term_attach("nowhere", viewer(true).0), Err(CANNOT.to_string()));
+        // A live card, but no link carries the attach: the sub is dropped.
+        assert_eq!(hub.term_attach("on", viewer(true).0), Err(maya_core::net::client::LOST.to_string()));
+        assert!(hub.terms.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_frame_reaches_its_viewer_and_an_exit_ends_it() {
+        let hub = test_hub();
+        let notify = HubClientNotify { hub: Arc::downgrade(&hub), stop: Arc::new(AtomicBool::new(false)) };
+        let (sink, got) = viewer(true);
+        let sub = hub.insert_term_for_test(sink);
+        let output = TermFrame { seq: 1, event: TermEvent::Output { data: "aGk=".into() } };
+        notify.term_frame(sub, output.clone());
+        notify.term_frame(sub + 1, TermFrame { seq: 1, event: TermEvent::Output { data: "eA==".into() } });
+        assert_eq!(*got.lock().unwrap(), [output.clone()], "another sub's frame is not this viewer's");
+        assert!(hub.terms.lock().unwrap().contains_key(&sub));
+        notify.term_frame(sub, TermFrame { seq: 2, event: TermEvent::Exit });
+        assert_eq!(*got.lock().unwrap(), [output.clone(), TermFrame { seq: 2, event: TermEvent::Exit }]);
+        assert!(hub.terms.lock().unwrap().is_empty(), "nothing follows an exit");
+        assert_eq!(hub.term_input(sub, "aGk=".into()), Err("This terminal is not open here.".to_string()));
+
+        // An error ends it too; so does a viewer that has gone.
+        let (sink, _) = viewer(true);
+        let sub = hub.insert_term_for_test(sink);
+        notify.term_frame(sub, TermFrame { seq: 0, event: TermEvent::Error { message: "This session is not running in Maya.".into() } });
+        assert!(hub.terms.lock().unwrap().is_empty());
+        let (sink, got) = viewer(false);
+        let sub = hub.insert_term_for_test(sink);
+        notify.term_frame(sub, output.clone());
+        assert_eq!(*got.lock().unwrap(), [output]);
+        assert!(hub.terms.lock().unwrap().is_empty(), "a closed viewer is detached");
     }
 
     #[test]

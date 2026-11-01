@@ -159,10 +159,13 @@ pub trait ClientNotify: Send + Sync {
         None
     }
     /// True while this Maya views a live terminal through the main: its link
-    /// then ticks at `LIVE_TICK`.
+    /// then ticks at `LIVE_TICK`. Asked on every turn of the link: keep it cheap.
     fn live(&self) -> bool {
         false
     }
+    /// A frame of the live terminal this Maya attached as `sub` through the
+    /// main (`Up::TermAttach`). Runs on the client thread: do not wait here.
+    fn term_frame(&self, _sub: u64, _frame: TermFrame) {}
 }
 
 /// Requests to the main from this Maya's page, matched to their answers by
@@ -207,6 +210,16 @@ impl RequestLane {
         }
     }
 
+    /// Sends `up` to the main on the current link, with no answer to wait
+    /// for; `LOST` while no link is up.
+    pub fn send(&self, up: Up) -> Result<(), String> {
+        let l = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match &l.out {
+            Some(out) if out.send(up).is_ok() => Ok(()),
+            _ => Err(LOST.into()),
+        }
+    }
+
     fn attach(&self, out: Sender<Up>) -> u64 {
         let mut l = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         l.generation += 1;
@@ -246,8 +259,9 @@ impl Drop for Attached {
 
 /// What the main reads when it asks a Maya with no live terminals for one.
 pub(crate) const NO_TERMINALS: &str = "This Maya has no live terminals.";
-/// What the main reads for keys to a terminal this Maya does not stream to it.
-pub(crate) const NO_SUCH_TERMINAL: &str = "This terminal is not open here.";
+/// What a viewer's keys to a terminal that is not open to it get back: the
+/// main's from this Maya, the page's from the main or the phone.
+pub const NO_SUCH_TERMINAL: &str = "This terminal is not open here.";
 /// What the main reads for keys that are not base64.
 pub(crate) const UNREADABLE_KEYS: &str = "The keys could not be read.";
 
@@ -764,7 +778,7 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
         Down::TermAttach { sub, session } => streams.attach(sub, &session, tx),
         Down::TermInput { sub, data } => streams.input(sub, &data, tx),
         Down::TermDetach { sub } => streams.detach(sub),
-        Down::TermFrame { .. } => log::line("network", "main: terminal frame not handled yet"),
+        Down::TermFrame { sub, frame } => notify.term_frame(sub, frame),
         Down::Move { host, port, key } => {
             let host = clean(&host);
             if decode_key(&key).is_err() {
@@ -1108,6 +1122,40 @@ mod tests {
             handle(down, &exec, &notify, &None, &tx, &leaving, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
         }
         assert_eq!(*recorder.0.lock().unwrap(), [("chat", turn), ("brain", status)]);
+    }
+
+    #[test]
+    fn a_terminal_frame_from_the_main_reaches_the_notify() {
+        #[derive(Default)]
+        struct Viewer(Mutex<Vec<(u64, TermFrame)>>);
+        impl ClientNotify for Viewer {
+            fn paired(&self, _: &str) {}
+            fn connected(&self, _: &str) {}
+            fn disconnected(&self, _: &str) {}
+            fn removed(&self) {}
+            fn term_frame(&self, sub: u64, frame: TermFrame) {
+                self.0.lock().unwrap().push((sub, frame));
+            }
+        }
+        let viewer = Arc::new(Viewer::default());
+        let (exec, notify): (Arc<dyn Executor>, Arc<dyn ClientNotify>) = (Arc::new(Hosting(None)), viewer.clone());
+        let (tx, _rx) = channel();
+        let leaving = Arc::new(AtomicBool::new(false));
+        let frame = TermFrame { seq: 1, event: TermEvent::Output { data: "aGk=".into() } };
+        handle(Down::TermFrame { sub: 3, frame: frame.clone() }, &exec, &notify, &None, &tx, &leaving, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
+        assert_eq!(*viewer.0.lock().unwrap(), [(3, frame)]);
+    }
+
+    #[test]
+    fn the_lane_sends_on_the_current_link_and_says_lost_without_one() {
+        let lane = RequestLane::default();
+        assert_eq!(lane.send(Up::TermDetach { sub: 1 }), Err(LOST.to_string()), "never attached");
+        let (tx, rx) = channel();
+        let generation = lane.attach(tx);
+        assert_eq!(lane.send(Up::TermDetach { sub: 2 }), Ok(()));
+        assert!(matches!(rx.try_recv(), Ok(Up::TermDetach { sub: 2 })));
+        lane.detach(generation);
+        assert_eq!(lane.send(Up::TermDetach { sub: 3 }), Err(LOST.to_string()), "the link ended");
     }
 
     /// A host that records what the network asks of it and keeps the sink it is given.
