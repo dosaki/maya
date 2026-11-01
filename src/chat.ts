@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { composerKey } from "./keys";
 import { renderMarkdown } from "./markdown";
+import { keepEqualChildren } from "./morph";
 import { showToast } from "./toast";
 
 export type Dot = "idle" | "working" | "waiting" | "unread";
@@ -160,14 +161,19 @@ export function initChat(opts: { sendButton?: boolean } = {}): void {
     const focused = !!old && document.activeElement === old;
     const atEnd = !log || log.scrollHeight - log.scrollTop - log.clientHeight < 40;
     const scroll = log?.scrollTop ?? 0;
-    pane.replaceChildren(
-      renderChat({ turns, status, draft, sendButton: opts.sendButton }, {
-        onSend: (text) => void invoke("chat_send", { text }).catch((e) => notSent(text, e)),
-        onCancel: () => void invoke("window_cancel").catch(() => undefined),
-        onStop: () => void invoke("brain_stop").catch(() => undefined),
-        onOpenLink: (url) => void invoke("open_url", { url }).catch((e) => showToast(String(e))),
-      }),
-    );
+    const fresh = renderChat({ turns, status, draft, sendButton: opts.sendButton }, {
+      onSend: (text) => void invoke("chat_send", { text }).catch((e) => notSent(text, e)),
+      onCancel: () => void invoke("window_cancel").catch(() => undefined),
+      onStop: () => void invoke("brain_stop").catch(() => undefined),
+      onOpenLink: (url) => void invoke("open_url", { url }).catch((e) => showToast(String(e))),
+    });
+    // The log and the turns already in it keep their nodes, so a hovered
+    // code block keeps its Copy button and a selection survives.
+    const shown = pane.querySelector<HTMLElement>(":scope > .chat");
+    if (shown) {
+      shown.className = fresh.className;
+      keepEqualChildren(shown, fresh, (el) => el.classList.contains("chat__log"));
+    } else pane.replaceChildren(fresh);
     const next = pane.querySelector<HTMLElement>(".chat__log");
     if (next) next.scrollTop = atEnd ? next.scrollHeight : scroll;
     if (focused) {

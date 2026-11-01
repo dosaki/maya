@@ -179,6 +179,24 @@ describe("swapBoard", () => {
     expect(host.querySelector<HTMLElement>(".column--working .column__cards")!.scrollTop).toBe(40);
     expect(host.querySelector<HTMLElement>(".column--completed .column__cards")!.scrollTop).toBe(0);
   });
+
+  // WebKit drops :hover from a replaced node until the pointer moves, so a
+  // repaint that rebuilt the cards blinked the one under the pointer.
+  it("keeps the nodes of cards still on the board and updates them in place", () => {
+    const host = document.createElement("div");
+    const before = [card({ sessionId: "a" }), card({ sessionId: "b", state: "working" }), card({ sessionId: "gone", state: "awaiting" })];
+    swapBoard(host, renderBoard(before, NOW));
+    const board = host.querySelector(".board");
+    const a = host.querySelector('[data-session-id="a"]');
+    const b = host.querySelector('[data-session-id="b"]');
+    const after = [card({ sessionId: "a", name: "renamed" }), card({ sessionId: "new", stateSince: NOW }), card({ sessionId: "b", state: "working" })];
+    swapBoard(host, renderBoard(after, NOW + 120_000));
+    expect(host.querySelector(".board")).toBe(board);
+    expect(host.querySelector('[data-session-id="a"]')).toBe(a);
+    expect(host.querySelector('[data-session-id="b"]')).toBe(b);
+    expect(host.querySelector('[data-session-id="gone"]')).toBeNull();
+    expect(host.innerHTML).toBe(renderBoard(after, NOW + 120_000).outerHTML);
+  });
 });
 
 describe("renderBoard", () => {
@@ -242,10 +260,7 @@ describe("swapBoard on a sideways-scrolling board", () => {
     host.append(renderBoard([card({})], NOW));
     const old = host.querySelector<HTMLElement>(".board")!;
     Object.defineProperty(old, "scrollLeft", { value: 640, writable: true });
-    const fresh = renderBoard([card({})], NOW);
-    let set = 0;
-    Object.defineProperty(fresh, "scrollLeft", { get: () => set, set: (v: number) => { set = v; } });
-    swapBoard(host, fresh);
-    expect(set).toBe(640);
+    swapBoard(host, renderBoard([card({})], NOW + 60_000));
+    expect(host.querySelector<HTMLElement>(".board")!.scrollLeft).toBe(640);
   });
 });
