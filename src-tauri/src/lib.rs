@@ -249,6 +249,10 @@ impl Notify for TauriNetNotify {
         }
         caps
     }
+    fn live_terms(&self) -> Option<std::sync::Arc<dyn net::live::LiveTerms>> {
+        // Asked once, when the server starts.
+        Some(std::sync::Arc::new(crate::native::live_terms::NativeTerms::new(self.app.clone())))
+    }
 }
 
 /// The assistants' last snapshots when this Maya is the main; else none.
@@ -1697,6 +1701,9 @@ pub fn run() {
             native_app::native_input,
             native_app::native_resize,
             native_app::native_detach,
+            native_app::live_attach_remote,
+            native_app::live_input_remote,
+            native_app::live_detach_remote,
             git::get_git_status,
             git::store_git_token,
             git::clear_git_token,
@@ -1996,7 +2003,7 @@ mod route_tests {
             machine: Some("laptop".into()),
             machine_address: None, machine_platform: None,
             terminal: None,
-            stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None };
+            stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false };
         assert_eq!(pr_link(&card(" https://github.com/o/r/pull/7 ")), Ok("https://github.com/o/r/pull/7".to_string()));
         assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
         assert_eq!(pr_link(&card("/Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");

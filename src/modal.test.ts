@@ -3,10 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
-const live = vi.hoisted(() => ({ mounts: [] as { host: HTMLElement; pid?: number; term?: number; dispose: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn> }[] }));
+const live = vi.hoisted(() => ({ mounts: [] as { host: HTMLElement; pid?: number; term?: number; session?: string; remote?: boolean; dispose: ReturnType<typeof vi.fn>; focus: ReturnType<typeof vi.fn>; press: ReturnType<typeof vi.fn> }[] }));
 vi.mock("./live", () => ({
-  mountLive: (host: HTMLElement, target: { pid?: number; term?: number }) => {
-    const m = { host, pid: target.pid, term: target.term, dispose: vi.fn(), focus: vi.fn() };
+  mountLive: (host: HTMLElement, target: { pid?: number; term?: number; session?: string; remote?: boolean }) => {
+    const m = { host, pid: target.pid, term: target.term, session: target.session, remote: target.remote, dispose: vi.fn(), focus: vi.fn(), press: vi.fn() };
     live.mounts.push(m);
     return m;
   },
@@ -1264,6 +1264,77 @@ describe("a Native session's live terminal", () => {
     await openModal(native);
     expect(live.mounts).toHaveLength(0);
     closeModal();
+  });
+
+  it("a remote card is live only when it says so", () => {
+    expect(isLive({ ...native, machine: "desk", live: true }, "terminal")).toBe(true);
+    expect(isLive({ ...native, machine: "desk", live: true }, "chat")).toBe(false);
+    expect(isLive({ ...native, machine: "desk" }, "terminal")).toBe(false);
+    expect(isLive({ ...native, machine: "desk", live: false }, "terminal")).toBe(false);
+    expect(isLive({ ...base, machine: "desk", live: true }, "terminal")).toBe(false);
+    expect(isLive(native, "terminal")).toBe(true);
+  });
+
+  it("a remote live card in the terminal look is a live terminal that scrolls sideways", () => {
+    const el = renderModal({ card: { ...native, machine: "desk", live: true }, turns, status: null, draft: "", theme: "terminal" }, handlers());
+    expect(el.querySelector(".modal__live")?.classList.contains("modal__live--remote")).toBe(true);
+    expect(el.querySelector(".modal__history")).toBeNull();
+    // Past the smallest font it scrolls either way, the terminal at its own size.
+    expect(css(".modal__live--remote")).toMatchObject({ overflow: "auto" });
+    expect(css(".modal__live--remote .xterm")).toMatchObject({ width: "max-content", height: "auto" });
+    // The desktop has no extra keys.
+    expect(el.querySelector(".modal__keys")).toBeNull();
+  });
+
+  it("a remote live card asking in its terminal says to switch to the terminal look", () => {
+    const card = { ...base, native: true, machine: "desk", live: true, state: "awaiting" as const, awaiting: { kind: "permission" as const, detail: "Run ls?", questions: [] } };
+    const banner = (c: Card) => renderModal({ card: c, turns, status: null, draft: "", theme: "chat" }, handlers()).querySelector(".modal__banner")?.textContent;
+    expect(banner(card)).toBe("This session is waiting for a decision in its terminal. Switch to the terminal look to answer it.");
+    expect(banner({ ...card, live: false })).toBe("This session is waiting for a decision on desk. Answer it there before replying.");
+  });
+
+  it("opening a remote live card mounts its terminal by session id", async () => {
+    setViewerTheme("terminal");
+    await openModal({ ...native, machine: "desk", live: true });
+    await flush();
+    expect(live.mounts.map((m) => [m.session, m.remote, m.pid])).toEqual([["n1", true, undefined]]);
+    closeModal();
+    setViewerTheme("chat");
+  });
+
+  it("the phone's live viewer shows the extra keys and they type", async () => {
+    setComposerOptions({ terminalKeys: true });
+    try {
+      setViewerTheme("terminal");
+      await openModal({ ...native, machine: "desk", live: true });
+      await flush();
+      const panel = host().querySelector(".modal__panel")!;
+      expect([...panel.children].map((c) => c.className)).toEqual(["modal__head", "modal__live modal__live--remote", "modal__keys", "modal__statusline modal__statusline--foot"]);
+      const buttons = [...host().querySelectorAll<HTMLButtonElement>(".modal__keys button")];
+      expect(buttons.map((b) => b.textContent)).toEqual(["Esc", "Tab", "Ctrl+C", "←", "↑", "↓", "→"]);
+      // Pressing a key keeps the terminal's focus, so the keyboard stays up.
+      const down = new PointerEvent("pointerdown", { bubbles: true, cancelable: true });
+      buttons[2].dispatchEvent(down);
+      expect(down.defaultPrevented).toBe(true);
+      buttons[2].click();
+      expect(live.mounts[0].press).toHaveBeenCalledWith("ctrl-c");
+      // A repaint keeps the row, and its keys still type.
+      refreshModal([{ ...native, machine: "desk", live: true, state: "working", stateSince: 5 }]);
+      await flush();
+      host().querySelectorAll<HTMLButtonElement>(".modal__keys button")[0].click();
+      expect(live.mounts[0].press).toHaveBeenLastCalledWith("esc");
+      expect(live.mounts).toHaveLength(1);
+      closeModal();
+      // Only a live viewer has them.
+      setViewerTheme("chat");
+      await openModal({ ...native, machine: "desk", live: true });
+      expect(host().querySelector(".modal__keys")).toBeNull();
+      closeModal();
+    } finally {
+      setComposerOptions({ terminalKeys: false });
+      setViewerTheme("chat");
+    }
+    expect(css(".modal__keys")).toMatchObject({ display: "flex", "overflow-x": "auto" });
   });
 
   it("Escape inside the live terminal does not close the viewer", async () => {

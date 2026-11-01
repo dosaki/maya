@@ -10,7 +10,8 @@ use crate::listener::{self, Interpreted, VoiceContext};
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
-use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD, CAP_WORKTREE};
+use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD, CAP_TERMINAL, CAP_WORKTREE};
+use maya_core::net::live::LiveTerms;
 use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, check_remote_worktree, target_of, Target, ROUTE_TIMEOUT};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
 use crate::net::AssistantLink;
@@ -84,7 +85,7 @@ pub fn send_command(app: &AppHandle, machine: &str, kind: CommandKind, timeout: 
 /// Starts the client with the stored config, reconnecting until stopped.
 pub fn start(app: AppHandle) -> ClientHandle {
     let board_due = Arc::new(AtomicBool::new(false));
-    let exec: Arc<dyn Executor> = Arc::new(TauriExecutor { app: app.clone(), board_due: board_due.clone() });
+    let exec: Arc<dyn Executor> = Arc::new(TauriExecutor::new(app.clone(), board_due.clone()));
     let notify_app = app.clone();
     let mut handle = ClientHandle::spawn(move |stop| {
         let notify: Arc<dyn ClientNotify> = Arc::new(TauriClientNotify { app: notify_app, stop: stop.clone() });
@@ -110,7 +111,7 @@ pub fn push_board(app: &AppHandle) {
 /// once connected.
 pub fn pair(app: &AppHandle, host: &str, port: u16, name: &str, code: &str) -> Result<String, String> {
     // The connection ends at `welcome`, so no command reaches this executor.
-    let exec: Arc<dyn Executor> = Arc::new(TauriExecutor { app: app.clone(), board_due: Arc::new(AtomicBool::new(false)) });
+    let exec: Arc<dyn Executor> = Arc::new(TauriExecutor::new(app.clone(), Arc::new(AtomicBool::new(false))));
     let (main, main_key) = pair_with(exec, identity(app)?, host, port, name, code, vec![])?;
     crate::update_config(app, |c| {
         c.network.role = NetworkRole::Assistant;
@@ -175,7 +176,7 @@ impl ClientNotify for TauriClientNotify {
     }
 
     fn caps(&self) -> Vec<String> {
-        vec![CAP_FOLLOW.into(), CAP_LEAD.into(), CAP_WORKTREE.into()]
+        vec![CAP_FOLLOW.into(), CAP_LEAD.into(), CAP_WORKTREE.into(), CAP_TERMINAL.into()]
     }
 
     /// From her record: None when this Maya never ran a brain.
@@ -242,6 +243,14 @@ impl ClientNotify for TauriClientNotify {
 struct TauriExecutor {
     app: AppHandle,
     board_due: Arc<AtomicBool>,
+    terms: Arc<dyn LiveTerms>,
+}
+
+impl TauriExecutor {
+    fn new(app: AppHandle, board_due: Arc<AtomicBool>) -> TauriExecutor {
+        let terms = Arc::new(crate::native::live_terms::NativeTerms::new(app.clone()));
+        TauriExecutor { app, board_due, terms }
+    }
 }
 
 impl Executor for TauriExecutor {
@@ -270,6 +279,10 @@ impl Executor for TauriExecutor {
 
     fn agents(&self) -> Option<Vec<maya_core::agents::AgentInfo>> {
         Some(maya_core::agents::snapshot())
+    }
+
+    fn live_terms(&self) -> Option<Arc<dyn LiveTerms>> {
+        Some(self.terms.clone())
     }
 }
 
@@ -596,7 +609,7 @@ mod tests {
                 detail: "Ship it?".into(),
                 questions: vec![Question { question: "Ship it?".into(), header: "".into(), options: vec![Choice { label: "Yes".into(), description: "".into() }], multi_select: false, own: None, chat_row: None }],
             }),
-            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None
+            has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false
         }
     }
 

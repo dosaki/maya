@@ -79,7 +79,7 @@ pub fn derive(s: &ForeignSession, t: &ForeignTail, prose: &Prose, now_ms: u64, c
         machine: None,
         machine_address: None, machine_platform: None,
         terminal: None,
-        stale: false, model: t.model.clone(), branch: None, brain: false, native: false, shell: false, usage: t.usage.clone(), limits: t.limits.clone(), status_line: None
+        stale: false, model: t.model.clone(), branch: None, brain: false, native: false, shell: false, usage: t.usage.clone(), limits: t.limits.clone(), status_line: None, live: false
     }
 }
 

@@ -576,7 +576,7 @@ pub fn card_for(s: &SessionInfo, live: &Live, snippet: Option<String>, context_w
         terminal: None,
         stale: false,
         model: s.model.as_ref().map(|(p, m, _)| format!("{p}/{m}")),
-        branch: None, brain: false, native: false, shell: false, usage: Some(crate::usage::SessionUsage { tokens: s.tokens, cost: Some(crate::usage::Cost { micros: s.cost_micros, unit: crate::usage::CostUnit::Usd, estimated: false, models: vec![] }) }), limits: None, status_line: None
+        branch: None, brain: false, native: false, shell: false, usage: Some(crate::usage::SessionUsage { tokens: s.tokens, cost: Some(crate::usage::Cost { micros: s.cost_micros, unit: crate::usage::CostUnit::Usd, estimated: false, models: vec![] }) }), limits: None, status_line: None, live: false
     })
 }
 

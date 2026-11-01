@@ -15,6 +15,9 @@ const { FakeTerminal, FakeFit, FakeChannel } = vi.hoisted(() => {
     selection = "";
     pasted: string[] = [];
     disposed = false;
+    modes = { applicationCursorKeysMode: false };
+    element: HTMLElement | undefined = undefined;
+    buffer = { active: { cursorY: 0 } };
     constructor(options: Record<string, unknown>) {
       this.options = options;
       FakeTerminal.last = this;
@@ -121,7 +124,7 @@ class FakeObserver {
 }
 vi.stubGlobal("ResizeObserver", FakeObserver);
 
-import { LIGHT_ANSI, copyPasteKey, mountLive } from "./live";
+import { EXTRA_KEYS, LIGHT_ANSI, REATTACH_MS, copyPasteKey, fitFont, fitFontHeight, keyBytes, mountLive } from "./live";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const attached = { term: 7, viewer: 1, snapshot: "aGk=", rows: 40, cols: 120 };
@@ -249,6 +252,17 @@ describe("mountLive", () => {
       { term: 7, rows: 30, cols: 100 },
       { term: 7, rows: 20, cols: 90 },
     ]);
+  });
+
+  it("a local viewer ignores size frames", async () => {
+    await mounted();
+    channel().onmessage({ kind: "size", rows: 30, cols: 100 } as { kind: string });
+    await flush();
+    expect(term().calls).not.toContain("resize 30x100");
+    expect(calls("native_resize")).toEqual([]);
+    expect(term().text.join("")).not.toContain("[Session ended]");
+    term().dataListener!("x");
+    expect(calls("native_input")).toHaveLength(1);
   });
 
   it("shows that the session ended on an exit frame and stops sending input", async () => {
@@ -396,5 +410,353 @@ describe("copyPasteKey", () => {
     expect(copyPasteKey(key("c", { ctrlKey: true }), false)).toBeNull();
     expect(copyPasteKey(key("c", { metaKey: true }), false)).toBeNull();
     expect(copyPasteKey(key("x", { metaKey: true }), true)).toBeNull();
+  });
+});
+
+describe("mountLive on a remote session", () => {
+  type Frame = { seq: number; kind: string; [field: string]: unknown };
+  const send = (frame: Frame) => (FakeChannel.last as { onmessage: (m: Frame) => void }).onmessage(frame);
+  const b64 = (s: string) => btoa(s);
+  const snapshot = (text: string, rows = 40, cols = 120): Frame => ({ seq: 0, kind: "attached", snapshot: b64(text), rows, cols });
+  /** What was drawn since the terminal was last reset. */
+  const drawn = () => {
+    const c = term().calls;
+    return c.slice(c.lastIndexOf("reset") + 1).filter((x) => x.startsWith("write ")).map((x) => x.slice(6));
+  };
+  const resizes = () => invoke.mock.calls.filter((c) => /resize/.test(String(c[0])));
+
+  /** Mounts a remote viewer whose attach resolves to `sub`, with its snapshot drawn. */
+  async function remote(sub = 5) {
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(sub) : Promise.resolve(null)));
+    const handle = mountLive(host(), { session: "s1", remote: true });
+    await flush();
+    send(snapshot("hi"));
+    return handle;
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    invoke.mockReset();
+    FakeFit.proposed = { rows: 40, cols: 120 };
+    FakeTerminal.last = null;
+    FakeChannel.last = null;
+    observed = null;
+    vi.useRealTimers();
+  });
+
+  it("attaches by session id through live_attach_remote and draws the snapshot at the host's size", async () => {
+    await remote();
+    expect(calls("live_attach_remote")).toEqual([["live_attach_remote", { sessionId: "s1", onFrame: FakeChannel.last }]]);
+    expect(calls("native_attach")).toEqual([]);
+    const c = term().calls;
+    expect(c.indexOf("resize 40x120")).toBeLessThan(c.indexOf("reset"));
+    expect(drawn()).toEqual(["hi"]);
+    send({ seq: 1, kind: "output", data: b64("x") });
+    expect(drawn()).toEqual(["hi", "x"]);
+  });
+
+  it("frames_that_arrive_before_the_snapshot_are_drawn_after_it", async () => {
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
+    mountLive(host(), { session: "s1", remote: true });
+    await flush();
+    send({ seq: 2, kind: "output", data: b64("c") });
+    send({ seq: 1, kind: "output", data: b64("b") });
+    expect(term().text).toEqual([]);
+    send(snapshot("a"));
+    send({ seq: 3, kind: "output", data: b64("d") });
+    expect(term().calls).toContain("resize 40x120");
+    expect(drawn()).toEqual(["a", "b", "c", "d"]);
+    expect(calls("live_detach_remote")).toEqual([]);
+    expect(calls("live_attach_remote")).toHaveLength(1);
+  });
+
+  it("a_remote_viewer_never_resizes", async () => {
+    await remote();
+    FakeFit.proposed = { rows: 30, cols: 100 };
+    observed!();
+    await flush();
+    send({ seq: 1, kind: "size", rows: 20, cols: 90 });
+    observed!();
+    await flush();
+    expect(resizes()).toEqual([]);
+    expect(term().calls).not.toContain("resize 30x100");
+  });
+
+  it("a size frame resizes the remote terminal", async () => {
+    await remote();
+    send({ seq: 1, kind: "size", rows: 30, cols: 100 });
+    expect(term().calls[term().calls.length - 1]).toBe("resize 30x100");
+    expect(resizes()).toEqual([]);
+  });
+
+  it("fits the font to the host's columns, on the snapshot, on a size frame and when the panel resizes", async () => {
+    const h = host();
+    let width = 1200;
+    Object.defineProperty(h, "clientWidth", { get: () => width });
+    Object.defineProperty(h, "clientHeight", { get: () => 10_000 });
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
+    mountLive(h, { session: "s1", remote: true });
+    await flush();
+    send(snapshot("hi"));
+    expect(term().options.fontSize).toBe(12.5);
+    send({ seq: 1, kind: "size", rows: 40, cols: 200 });
+    expect(term().options.fontSize).toBe(fitFont(1200, 200));
+    width = 600;
+    observed!();
+    expect(term().options.fontSize).toBe(8);
+  });
+
+  it("fits the font to the host's lines too, the smaller fit winning", async () => {
+    const h = host();
+    let height = 1000;
+    Object.defineProperty(h, "clientWidth", { get: () => 1200 });
+    Object.defineProperty(h, "clientHeight", { get: () => height });
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
+    mountLive(h, { session: "s1", remote: true });
+    await flush();
+    send(snapshot("hi", 40, 120));
+    expect(term().options.fontSize).toBe(12.5);
+    height = 480;
+    observed!();
+    expect(term().options.fontSize).toBe(fitFontHeight(480, 40));
+    expect(term().options.fontSize).toBe(10);
+  });
+
+  it("keeps the cursor's line in view when the screen is taller than the panel", async () => {
+    const h = host();
+    let scrollTop = 0;
+    Object.defineProperty(h, "clientHeight", { get: () => 200 });
+    Object.defineProperty(h, "scrollHeight", { get: () => 600 });
+    Object.defineProperty(h, "scrollTop", { get: () => scrollTop, set: (v: number) => (scrollTop = v) });
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
+    mountLive(h, { session: "s1", remote: true });
+    // jsdom lays nothing out: the screen is 50 lines of 10 px, 8 px below the panel's top.
+    const xterm = document.createElement("div");
+    const screen = document.createElement("div");
+    screen.className = "xterm-screen";
+    xterm.append(screen);
+    h.append(xterm);
+    Object.defineProperty(screen, "offsetHeight", { get: () => 500 });
+    screen.getBoundingClientRect = () => ({ top: 8 - scrollTop }) as DOMRect;
+    h.getBoundingClientRect = () => ({ top: 0 }) as DOMRect;
+    term().element = xterm;
+    await flush();
+    send(snapshot("hi", 50, 80));
+    term().buffer.active.cursorY = 45;
+    // Only once xterm has parsed the write is the cursor where it says.
+    expect(scrollTop).toBe(0);
+    term().parse();
+    // Line 45 runs from 458 to 468 px: the panel's 200 px end with it.
+    expect(scrollTop).toBe(268);
+    term().buffer.active.cursorY = 2;
+    send({ seq: 1, kind: "output", data: b64("\x1b[H") });
+    term().parse();
+    expect(scrollTop).toBe(28);
+  });
+
+  it("types keys into the remote terminal by its sub, and the extra keys follow the cursor mode", async () => {
+    const handle = await remote(5);
+    term().dataListener!("é");
+    handle.press("ctrl-c");
+    handle.press("up");
+    term().modes.applicationCursorKeysMode = true;
+    handle.press("up");
+    expect(calls("live_input_remote").map((c) => c[1])).toEqual([
+      { sub: 5, data: "w6k=" },
+      { sub: 5, data: b64("\x03") },
+      { sub: 5, data: b64("\x1b[A") },
+      { sub: 5, data: b64("\x1bOA") },
+    ]);
+    expect(calls("native_input")).toEqual([]);
+  });
+
+  it("a local viewer's extra keys go to native_input", async () => {
+    const handle = await mounted();
+    handle.press("esc");
+    expect(calls("native_input")).toEqual([["native_input", { term: 7, data: b64("\x1b") }]]);
+  });
+
+  it("detaches its sub on dispose, and at once when disposed before the attach resolves", async () => {
+    const handle = await remote(5);
+    handle.dispose();
+    expect(calls("live_detach_remote")).toEqual([["live_detach_remote", { sub: 5 }]]);
+    expect(term().disposed).toBe(true);
+
+    invoke.mockReset();
+    let resolve: (sub: number) => void = () => {};
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? new Promise((r) => (resolve = r)) : Promise.resolve(null)));
+    const early = mountLive(host(), { session: "s1", remote: true });
+    early.dispose();
+    resolve(6);
+    await flush();
+    expect(calls("live_detach_remote")).toEqual([["live_detach_remote", { sub: 6 }]]);
+  });
+
+  it("shows that the session ended and stops typing", async () => {
+    await remote();
+    send({ seq: 1, kind: "exit" });
+    expect(term().text.join("")).toContain("[Session ended]");
+    term().dataListener!("x");
+    expect(calls("live_input_remote")).toEqual([]);
+  });
+
+  it("shows an error frame and does not attach again", async () => {
+    vi.useFakeTimers();
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
+    const handle = mountLive(host(), { session: "s1", remote: true });
+    await vi.advanceTimersByTimeAsync(0);
+    send({ seq: 0, kind: "error", message: "That Maya cannot share a live terminal. Update it." });
+    expect(term().text.join("")).toContain("[That Maya cannot share a live terminal. Update it.]");
+    await vi.advanceTimersByTimeAsync(REATTACH_MS * 3);
+    expect(calls("live_attach_remote")).toHaveLength(1);
+    term().dataListener!("x");
+    handle.dispose();
+    // The error ended the sub: nothing is typed into it or detached from it.
+    expect(calls("live_input_remote")).toEqual([]);
+    expect(calls("live_detach_remote")).toEqual([]);
+  });
+
+  it("shows why the first attach was refused and does not try again", async () => {
+    vi.useFakeTimers();
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.reject("That Maya is not connected.") : Promise.resolve(null)));
+    mountLive(host(), { session: "s1", remote: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(term().text.join("")).toContain("[That Maya is not connected.]");
+    await vi.advanceTimersByTimeAsync(REATTACH_MS * 3);
+    expect(calls("live_attach_remote")).toHaveLength(1);
+  });
+
+  it("a_lost_viewer_attaches_again", async () => {
+    vi.useFakeTimers();
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
+    const handle = mountLive(host(), { session: "s1", remote: true });
+    await vi.advanceTimersByTimeAsync(0);
+    send(snapshot("hi"));
+    send({ seq: 0, kind: "lost" });
+    expect(term().text[term().text.length - 1]).toContain("[Connection lost. Reconnecting…]");
+    // The lost sub is gone: nothing is typed into it or detached from it.
+    term().dataListener!("x");
+    expect(calls("live_input_remote")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(REATTACH_MS - 1);
+    expect(calls("live_attach_remote")).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls("live_attach_remote")).toHaveLength(2);
+    // Each try has its own channel: the old one is no longer heard.
+    expect(calls("live_attach_remote")[1][1].onFrame).not.toBe(calls("live_attach_remote")[0][1].onFrame);
+    expect(calls("live_detach_remote")).toEqual([]);
+    send(snapshot("back"));
+    expect(drawn()).toEqual(["back"]);
+    await vi.advanceTimersByTimeAsync(REATTACH_MS * 3);
+    expect(calls("live_attach_remote")).toHaveLength(2);
+    term().dataListener!("y");
+    expect(calls("live_input_remote")).toEqual([["live_input_remote", { sub: 5, data: b64("y") }]]);
+    handle.dispose();
+  });
+
+  it("a lost that comes before the attach resolves still attaches again, never touching the lost sub", async () => {
+    vi.useFakeTimers();
+    let resolve: (sub: number) => void = () => {};
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? new Promise((r) => (resolve = r)) : Promise.resolve(null)));
+    const handle = mountLive(host(), { session: "s1", remote: true });
+    send({ seq: 0, kind: "lost" });
+    resolve(5);
+    await vi.advanceTimersByTimeAsync(0);
+    term().dataListener!("x");
+    expect(calls("live_input_remote")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(REATTACH_MS);
+    expect(calls("live_attach_remote")).toHaveLength(2);
+    resolve(6);
+    await vi.advanceTimersByTimeAsync(0);
+    handle.dispose();
+    expect(calls("live_detach_remote")).toEqual([["live_detach_remote", { sub: 6 }]]);
+  });
+
+  it("a refused try after a lost keeps trying, quietly, until the snapshot comes", async () => {
+    vi.useFakeTimers();
+    let up = false;
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? (up ? Promise.resolve(7) : Promise.reject("That Maya is not connected.")) : Promise.resolve(null)));
+    up = true;
+    mountLive(host(), { session: "s1", remote: true });
+    await vi.advanceTimersByTimeAsync(0);
+    send(snapshot("hi"));
+    up = false;
+    send({ seq: 1, kind: "output", data: b64("x") });
+    send({ seq: 0, kind: "lost" });
+    await vi.advanceTimersByTimeAsync(REATTACH_MS * 2);
+    expect(calls("live_attach_remote")).toHaveLength(3);
+    expect(term().text.join("")).not.toContain("not connected");
+    expect(term().text.filter((t) => t.includes("Reconnecting"))).toHaveLength(1);
+    up = true;
+    await vi.advanceTimersByTimeAsync(REATTACH_MS);
+    expect(calls("live_attach_remote")).toHaveLength(4);
+    send(snapshot("back"));
+    await vi.advanceTimersByTimeAsync(REATTACH_MS * 3);
+    expect(calls("live_attach_remote")).toHaveLength(4);
+    expect(drawn()).toEqual(["back"]);
+  });
+
+  it("disposed while it waits to try again, it never tries", async () => {
+    vi.useFakeTimers();
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(5) : Promise.resolve(null)));
+    const handle = mountLive(host(), { session: "s1", remote: true });
+    await vi.advanceTimersByTimeAsync(0);
+    send({ seq: 0, kind: "lost" });
+    expect(vi.getTimerCount()).toBe(1);
+    handle.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(REATTACH_MS * 3);
+    expect(calls("live_attach_remote")).toHaveLength(1);
+    expect(calls("live_detach_remote")).toEqual([]);
+  });
+
+  it("a gap in the numbering attaches again", async () => {
+    let next = 5;
+    invoke.mockImplementation((cmd: string) => (cmd === "live_attach_remote" ? Promise.resolve(next++) : Promise.resolve(null)));
+    mountLive(host(), { session: "s1", remote: true });
+    await flush();
+    send(snapshot("hi"));
+    send({ seq: 1, kind: "output", data: b64("a") });
+    const first = FakeChannel.last;
+    send({ seq: 3, kind: "output", data: b64("c") });
+    expect(drawn()).toEqual(["hi", "a"]);
+    expect(calls("live_detach_remote")).toEqual([["live_detach_remote", { sub: 5 }]]);
+    expect(calls("live_attach_remote")).toHaveLength(2);
+    expect(term().text.join("")).not.toContain("Reconnecting");
+    await flush();
+    // The old channel is no longer heard; the new one draws afresh.
+    (first as { onmessage: (m: Frame) => void }).onmessage({ seq: 4, kind: "output", data: b64("old") });
+    send(snapshot("fresh"));
+    send({ seq: 1, kind: "output", data: b64("b") });
+    expect(drawn()).toEqual(["fresh", "b"]);
+    term().dataListener!("k");
+    expect(calls("live_input_remote")).toEqual([["live_input_remote", { sub: 6, data: b64("k") }]]);
+  });
+});
+
+describe("the extra keys", () => {
+  it("keyBytes follows the cursor mode", () => {
+    expect(keyBytes("up", false)).toBe("\x1b[A");
+    expect(keyBytes("up", true)).toBe("\x1bOA");
+    expect(keyBytes("down", false)).toBe("\x1b[B");
+    expect(keyBytes("right", true)).toBe("\x1bOC");
+    expect(keyBytes("left", false)).toBe("\x1b[D");
+    expect(keyBytes("esc", true)).toBe("\x1b");
+    expect(keyBytes("tab", false)).toBe("\t");
+    expect(keyBytes("ctrl-c", true)).toBe("\x03");
+    expect(EXTRA_KEYS.map(([, l]) => l)).toEqual(["Esc", "Tab", "Ctrl+C", "←", "↑", "↓", "→"]);
+    expect(EXTRA_KEYS.map(([k]) => k)).toEqual(["esc", "tab", "ctrl-c", "left", "up", "down", "right"]);
+  });
+
+  it("fitFontHeight fits the lines between 8 and 12.5", () => {
+    expect(fitFontHeight(300, 50)).toBe(8);
+    expect(fitFontHeight(600, 24)).toBe(12.5);
+    expect(fitFontHeight(400, 40)).toBe(8);
+    expect(fitFontHeight(480, 40)).toBe(10);
+  });
+
+  it("fitFont fits the columns between 8 and 12.5", () => {
+    expect(fitFont(1200, 120)).toBe(12.5);
+    expect(fitFont(400, 120)).toBe(8);
+    expect(fitFont(800, 120)).toBe(11);
   });
 });

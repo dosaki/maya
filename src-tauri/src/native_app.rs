@@ -1,13 +1,18 @@
 //! The commands the terminal viewer uses to attach to a Native session,
-//! type into it, resize it and detach. Bytes cross as base64 strings.
+//! type into it, resize it and detach, here or (as the main) on a connected
+//! Maya. Bytes cross as base64 strings.
 
-use crate::native::host::{Frame, Sink, Unseen};
+use crate::native::host::{Frame, Sink, TermId, Unseen};
 use crate::native::{screen, HOST};
-use crate::AppState;
+use crate::{remote_machine_of, AppState};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use maya_core::foreign::Proc;
 use maya_core::native::{parents, root_of};
+use maya_core::net::live::TermFrame;
+use maya_core::net::server::{self, Server};
 use serde::Serialize;
+use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::State as TauriState;
 use tauri::{AppHandle, Emitter};
@@ -17,6 +22,7 @@ use tauri::{AppHandle, Emitter};
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum NativeFrame {
     Output { data: String },
+    Size { rows: u16, cols: u16 },
     Exit,
 }
 
@@ -34,6 +40,7 @@ pub struct NativeAttached {
 fn frame_of(frame: Frame) -> NativeFrame {
     match frame {
         Frame::Output(bytes) => NativeFrame::Output { data: STANDARD.encode(bytes) },
+        Frame::Size { rows, cols } => NativeFrame::Size { rows, cols },
         Frame::Exit => NativeFrame::Exit,
     }
 }
@@ -48,10 +55,16 @@ fn decode_input(data: &str) -> Result<Vec<u8>, String> {
 pub fn native_attach(state: TauriState<AppState>, pid: i32, on_frame: Channel<NativeFrame>) -> Result<NativeAttached, String> {
     // The store lock ends with this statement: attaching must not hold it.
     let tree = state.store.lock().unwrap().process_tree();
-    let term = root_of(pid, &HOST.root_pids(), &parents(&tree))
-        .and_then(|root| HOST.term_for_root(root))
-        .ok_or("This session is not running in Maya.")?;
+    let term = term_for_pid(&tree, pid).ok_or(NOT_RUNNING)?;
     attach(term, on_frame)
+}
+
+/// What attaching to a session says when Maya hosts no terminal for it.
+pub(crate) const NOT_RUNNING: &str = "This session is not running in Maya.";
+
+/// The hosted terminal that `pid` runs in, walking up `tree` to its program.
+pub(crate) fn term_for_pid(tree: &[Proc], pid: i32) -> Option<TermId> {
+    root_of(pid, &HOST.root_pids(), &parents(tree)).and_then(|root| HOST.term_for_root(root))
 }
 
 /// Attaches the viewer to terminal `term` itself, for a session started a
@@ -116,6 +129,47 @@ pub fn native_detach(term: u64, viewer: u64) {
     HOST.detach(term, viewer);
 }
 
+/// What opening a remote terminal says for a session no connected Maya lists.
+const NOT_REMOTE: &str = "This session is not on a connected Maya.";
+/// What a remote terminal command says when this Maya runs no server.
+const NOT_MAIN: &str = "This Maya is not the main.";
+
+/// The running server, or `NOT_MAIN`.
+fn main_server(state: &AppState) -> Result<Arc<Mutex<Server>>, String> {
+    let server = state.network.lock().unwrap().server.as_ref().map(|s| s.shared.clone());
+    server.ok_or_else(|| NOT_MAIN.into())
+}
+
+/// Where a remote terminal is relayed from: the server, then the machine
+/// that lists the session (asked only once there is a server).
+fn relay_target<S>(server: Result<S, String>, machine: impl FnOnce() -> Option<String>) -> Result<(S, String), String> {
+    let server = server?;
+    Ok((server, machine().ok_or(NOT_REMOTE)?))
+}
+
+/// Opens the live terminal of `session_id` on the connected Maya that lists
+/// it, through this main's server; its frames go to `on_frame`. Returns the
+/// sub for `live_input_remote` and `live_detach_remote`.
+#[tauri::command(async)]
+pub fn live_attach_remote(state: TauriState<AppState>, session_id: String, on_frame: Channel<TermFrame>) -> Result<u64, String> {
+    let (server, machine) = relay_target(main_server(&state), || remote_machine_of(&state, &session_id))?;
+    server::term_attach(&server, &machine, &session_id, Box::new(move |frame| on_frame.send(frame).is_ok()))
+}
+
+/// Types `data` (base64) into the remote terminal `sub`. On the main thread,
+/// as `native_input`, so keystrokes keep their order.
+#[tauri::command]
+pub fn live_input_remote(state: TauriState<AppState>, sub: u64, data: String) -> Result<(), String> {
+    server::term_input(&main_server(&state)?, sub, data)
+}
+
+#[tauri::command(async)]
+pub fn live_detach_remote(state: TauriState<AppState>, sub: u64) {
+    if let Ok(server) = main_server(&state) {
+        server::term_detach(&server, sub);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,10 +182,23 @@ mod tests {
     }
 
     #[test]
+    fn a_size_frame_reaches_the_viewer() {
+        assert_eq!(serde_json::to_string(&frame_of(Frame::Size { rows: 30, cols: 100 })).unwrap(), r#"{"kind":"size","rows":30,"cols":100}"#);
+    }
+
+    #[test]
     fn an_unseen_end_reaches_the_page_with_its_folder_and_lines() {
         let ended = NativeEnded::from(Unseen { term: 3, folder: "/work/eye".into(), lines: vec!["zsh: command not found: claude".into()] });
         let json = serde_json::to_value(&ended).unwrap();
         assert_eq!(json, serde_json::json!({ "term": 3, "dir": "/work/eye", "lines": ["zsh: command not found: claude"] }));
+    }
+
+    #[test]
+    fn a_remote_terminal_needs_the_main_and_a_connected_maya() {
+        let no_server: Result<(), String> = Err(NOT_MAIN.into());
+        assert_eq!(relay_target(no_server, || panic!("not asked without a server")), Err(NOT_MAIN.to_string()));
+        assert_eq!(relay_target(Ok(()), || None), Err(NOT_REMOTE.to_string()));
+        assert_eq!(relay_target(Ok(()), || Some("laptop".into())), Ok(((), "laptop".to_string())));
     }
 
     #[test]

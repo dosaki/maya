@@ -1,6 +1,7 @@
 //! Native sessions: terminals Maya hosts herself in pseudo-terminals.
 
 pub mod host;
+pub mod live_terms;
 pub mod route;
 pub mod screen;
 

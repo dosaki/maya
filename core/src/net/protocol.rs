@@ -3,6 +3,7 @@
 
 use crate::launch::LaunchOptions;
 use crate::model::Card;
+use crate::net::live::TermFrame;
 use base64::Engine;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,9 @@ pub const CAP_VOICE: &str = "voice";
 pub const CAP_CHAT: &str = "chat";
 /// A Maya with this cap starts a session in a new worktree when asked (`LaunchOptions::worktree`).
 pub const CAP_WORKTREE: &str = "worktree";
+/// A Maya with this cap can show the live terminal of a Native session it hosts
+/// (`term_attach`, `term_input`, `term_detach`, `term_frame`).
+pub const CAP_TERMINAL: &str = "terminal";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +81,14 @@ pub enum Up {
     /// names the target for kinds that need one; the main's own name, or
     /// none, means the main.
     Request { id: u64, #[serde(default)] machine: Option<String>, request: Request },
+    /// Show the live terminal of `session` (on `machine`, or the main's own when none) as `term_frame`s tagged `sub`.
+    TermAttach { sub: u64, #[serde(default)] machine: Option<String>, session: String },
+    /// Type into the terminal attached as `sub`; `data` is base64.
+    TermInput { sub: u64, data: String },
+    /// Stop the terminal attached as `sub`.
+    TermDetach { sub: u64 },
+    /// An event of the terminal a viewer attached as `sub`, relayed up from the Maya hosting it.
+    TermFrame { sub: u64, frame: TermFrame },
     Ping,
 }
 
@@ -130,6 +142,14 @@ pub enum Down {
     Brain { status: Value },
     /// The answer to the `request` with this id.
     Response { id: u64, ok: bool, #[serde(default)] error: Option<String>, #[serde(default)] data: Option<Value> },
+    /// Show the live terminal of `session` as `term_frame`s tagged `sub`.
+    TermAttach { sub: u64, session: String },
+    /// Type into the terminal attached as `sub`; `data` is base64.
+    TermInput { sub: u64, data: String },
+    /// Stop the terminal attached as `sub`.
+    TermDetach { sub: u64 },
+    /// An event of the terminal attached as `sub`.
+    TermFrame { sub: u64, frame: TermFrame },
     Pong,
 }
 
@@ -302,6 +322,36 @@ mod tests {
     }
 
     #[test]
+    fn terminal_frames_round_trip_with_their_tags() {
+        use crate::net::live::TermEvent;
+        let f = TermFrame { seq: 3, event: TermEvent::Output { data: "w6k=".into() } };
+        let up = Up::TermFrame { sub: 9, frame: f.clone() };
+        let s = encode(&up);
+        assert!(s.contains(r#""type":"term_frame""#) && s.contains(r#""seq":3"#) && s.contains(r#""kind":"output""#), "{s}");
+        assert_eq!(decode_up(&s).unwrap(), up);
+        for up in [Up::TermAttach { sub: 1, machine: Some("laptop".into()), session: "s1".into() }, Up::TermInput { sub: 1, data: "aGk=".into() }, Up::TermDetach { sub: 1 }] {
+            assert_eq!(decode_up(&encode(&up)).unwrap(), up);
+        }
+        for down in [Down::TermAttach { sub: 2, session: "s1".into() }, Down::TermInput { sub: 2, data: "aGk=".into() }, Down::TermDetach { sub: 2 }, Down::TermFrame { sub: 2, frame: TermFrame { seq: 0, event: TermEvent::Lost } }] {
+            assert_eq!(decode_down(&encode(&down)).unwrap(), down);
+        }
+        assert_eq!(decode_up(r#"{"type":"term_attach","sub":1,"session":"s1"}"#).unwrap(), Up::TermAttach { sub: 1, machine: None, session: "s1".into() });
+        assert_eq!(CAP_TERMINAL, "terminal");
+    }
+
+    #[test]
+    fn a_card_says_live_only_when_it_is() {
+        use crate::model::{Card, Harness, State};
+        let card = Card { session_id: "s1".into(), pid: 1, name: "s1".into(), cwd: "/x".into(), state: State::Idle, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness: Harness::Kiro, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false };
+        let plain = serde_json::to_string(&card).unwrap();
+        assert!(!plain.contains("live"), "{plain}");
+        assert!(!serde_json::from_str::<Card>(&plain).unwrap().live, "a card without the field is not live");
+        let live = serde_json::to_string(&Card { live: true, ..card }).unwrap();
+        assert!(live.contains(r#""live":true"#), "{live}");
+        assert!(serde_json::from_str::<Card>(&live).unwrap().live);
+    }
+
+    #[test]
     fn voice_requests_round_trip() {
         let ask = Up::Request { id: 7, machine: None, request: Request::Interpret { command: "what needs me".into(), history: vec![VoiceTurn { who: "user".into(), text: "hi".into() }, VoiceTurn { who: "maya".into(), text: "Hello.".into() }] } };
         assert_eq!(decode_up(&encode(&ask)).unwrap(), ask);
@@ -386,7 +436,7 @@ mod tests {
     #[test]
     fn a_card_from_an_agent_this_maya_does_not_know_still_decodes() {
         use crate::model::{Card, Harness, State};
-        let card = Card { session_id: "s1".into(), pid: 1, name: "s1".into(), cwd: "/x".into(), state: State::Idle, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness: Harness::Kiro, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None };
+        let card = Card { session_id: "s1".into(), pid: 1, name: "s1".into(), cwd: "/x".into(), state: State::Idle, state_since: 0, snippet: String::new(), awaiting: None, has_inbox: false, harness: Harness::Kiro, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false };
         let text = encode(&Up::Board { cards: vec![card], dirs: vec![], agents: None, remembered: None }).replace("\"harness\":\"kiro\"", "\"harness\":\"future-agent\"");
         let Up::Board { cards, .. } = decode_up(&text).unwrap() else { panic!() };
         assert_eq!(cards[0].harness, Harness::Other);

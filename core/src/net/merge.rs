@@ -25,6 +25,9 @@ pub struct RemoteBoard {
     /// Whether its Maya starts a session in a worktree when asked: it is
     /// connected and announced `CAP_WORKTREE`.
     pub worktrees: bool,
+    /// Whether its native cards' live terminals can be opened from here:
+    /// its Maya announced `CAP_TERMINAL` and this main hosts terminals too.
+    pub terminals: bool,
     pub received_at: u64,
     pub connected: bool,
 }
@@ -57,6 +60,7 @@ pub fn merged(local: Vec<Card>, remotes: &[RemoteBoard], now_ms: u64) -> Vec<Car
             c.machine_address = Some(b.address.clone()).filter(|a| !a.is_empty());
             c.machine_platform = Some(b.platform.clone()).filter(|p| !p.is_empty());
             c.stale = stale;
+            c.live = c.native && b.terminals && b.connected;
             out.push(c);
         }
     }
@@ -140,11 +144,11 @@ mod tests {
     use crate::model::{Card, Harness, State};
 
     fn card(id: &str, name: &str) -> Card {
-        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None }
+        Card { session_id: id.into(), pid: 1, name: name.into(), cwd: "/x/p".into(), state: State::Idle, state_since: 0, snippet: "".into(), awaiting: None, has_inbox: true, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None, terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false }
     }
 
     fn board(machine: &str, hostname: &str, ids: &[&str], received_at: u64, connected: bool) -> RemoteBoard {
-        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, remembered: None, worktrees: false, received_at, connected }
+        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, remembered: None, worktrees: false, terminals: false, received_at, connected }
     }
 
     #[test]
@@ -231,6 +235,22 @@ mod tests {
         assert_eq!(route(&local_ids, &boards, "same", 0), None);
         assert_eq!(route(&local_ids, &boards, "r1", 0).as_deref(), Some("laptop"));
         assert_eq!(route(&[], &boards, "same", 0).as_deref(), Some("laptop"), "once the local session ends, the remote one routes");
+    }
+
+    #[test]
+    fn only_a_board_from_a_maya_with_live_terminals_marks_its_native_cards_live() {
+        let native = |b: &mut RemoteBoard| b.cards[0].native = true;
+        let mut hosts = board("desk", "h1", &["d1", "d2"], 1_000, true);
+        native(&mut hosts);
+        hosts.terminals = true;
+        let mut older = board("laptop", "h2", &["l1"], 1_000, true);
+        native(&mut older);
+        let mut away = board("mini", "h3", &["m1"], 1_000, false);
+        native(&mut away);
+        away.terminals = true;
+        let live: Vec<(String, bool)> = merged(vec![], &[hosts, older, away], 1_500).into_iter().map(|c| (c.session_id, c.live)).collect();
+        let want = [("d1", true), ("d2", false), ("l1", false), ("m1", false)].map(|(id, l)| (id.to_string(), l));
+        assert_eq!(live, want, "only the native card of a connected board whose Maya hosts terminals");
     }
 
     #[test]
