@@ -2,7 +2,8 @@
 //! their board snapshots and sends them commands.
 //!
 //! Threads: one accept loop, and one thread per connection that owns its
-//! socket. The socket's read timeout (`TICK`) is the loop's tick: each turn
+//! socket. The socket's read timeout (`TICK`, `LIVE_TICK` while a live
+//! terminal streams on the link) is the loop's tick: each turn
 //! writes the `Down` frames queued on the connection's channel, then tries
 //! one read. A separate deadline (`SILENCE`) drops a peer that sends nothing,
 //! and the stop flag ends every thread within a tick. Before `welcome` a
@@ -10,7 +11,8 @@
 //! such connections are open at once, `MAX_PRE_AUTH_PER_ADDRESS` of them
 //! from any one address. Dropping a
 //! connection's sender (a newer connection for the same assistant, or its
-//! removal) ends that connection too.
+//! removal) ends that connection too; one that streams a live terminal,
+//! whose sinks hold a copy of the sender, ends once it is no longer current.
 //!
 //! Locks: `Server` sits behind one mutex held only for bookkeeping. `Notify`
 //! is never called with it held, so the Tauri adapter may take the app's own
@@ -20,10 +22,13 @@
 //! older snapshot can never overwrite a newer one. Their adapter takes only
 //! `store`, which comes after the server's mutex in that order (`AppState`
 //! in the app's lib.rs), and nothing takes the server's mutex while holding `store`.
+//! `LiveTerms` takes `store` too, so it is never called with the server's
+//! mutex held; its sinks only queue on a connection's channel.
 
 use super::merge::{display_names, RemoteBoard};
 use super::identity::{encode_key, Keypair};
-use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_CHAT, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, CAP_WORKTREE, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
+use super::live::{self, FrameSink, LiveTerms, TermEvent, TermFrame, TermView};
+use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_CHAT, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, CAP_TERMINAL, CAP_WORKTREE, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
 use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use super::{AssistantStatus, NetworkStatus, PairingCode};
@@ -32,6 +37,7 @@ use crate::log;
 use crate::model::Card;
 use crate::remembered::{Key, RememberedRow};
 use crate::store::now_ms;
+use base64::Engine;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
@@ -88,6 +94,11 @@ pub trait Notify: Send + Sync {
     /// What this main offers a mirroring Maya, sent in `welcome`.
     fn main_caps(&self) -> Vec<String> {
         vec![]
+    }
+    /// The terminals this main hosts and streams to a mirroring Maya; `None`
+    /// from a main with none (a phone). Asked once, when the server starts.
+    fn live_terms(&self) -> Option<Arc<dyn LiveTerms>> {
+        None
     }
 }
 
@@ -166,6 +177,9 @@ pub struct Server {
     /// This main's name, so an assistant with the same name gets a label of
     /// its own (the main's own name means the main in a request).
     main_name: String,
+    /// This main hosts live terminals (`Notify::live_terms`), so it can
+    /// stream its own and relay its assistants'. A phone acting as main cannot.
+    terminals: bool,
 }
 
 /// The main's board as its page shows it; local cards have no `machine`.
@@ -177,7 +191,7 @@ struct MirrorBoard {
 
 impl Server {
     fn new(paired: Vec<PairedAssistant>, main_name: String) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, wake_word: None, main_name }
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, wake_word: None, main_name, terminals: false }
     }
 
     /// The entry `id` lets its Maya mirror.
@@ -302,7 +316,10 @@ impl Server {
             .iter()
             .zip(labels)
             .filter_map(|(p, (id, label))| {
-                self.by_id.get(&id).map(|b| RemoteBoard { machine: label, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), worktrees: self.peers.get(&id).is_some_and(|p| p.caps.iter().any(|c| c == CAP_WORKTREE)), ..b.clone() })
+                self.by_id.get(&id).map(|b| {
+                    let can = |cap: &str| self.peers.get(&id).is_some_and(|p| p.caps.iter().any(|c| c == cap));
+                    RemoteBoard { machine: label, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), worktrees: can(CAP_WORKTREE), terminals: self.terminals && can(CAP_TERMINAL), ..b.clone() }
+                })
             })
             .collect();
         boards.sort_by(|a, b| a.machine.cmp(&b.machine));
@@ -353,6 +370,8 @@ struct Ctx {
     live: AtomicUsize,
     /// Connections accepted and not yet through `welcome`.
     pre_auth: Mutex<HandshakeSlots>,
+    /// The terminals this main hosts, as `Notify::live_terms` gave them at start.
+    terms: Option<Arc<dyn LiveTerms>>,
 }
 
 /// Connections not yet through `welcome`, in all and per peer address.
@@ -583,9 +602,12 @@ pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>
         let c = lock(&config_view);
         (c.assistants.clone(), main_name_of(&c))
     };
-    let shared = Arc::new(Mutex::new(Server::new(paired, main_name.clone())));
+    let terms = notify.live_terms();
+    let mut server = Server::new(paired, main_name.clone());
+    server.terminals = terms.is_some();
+    let shared = Arc::new(Mutex::new(server));
     let stop = Arc::new(AtomicBool::new(false));
-    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name, identity, live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()) });
+    let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name, identity, live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()), terms });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
     log::line("network", format!("listening on port {port}"));
@@ -642,6 +664,49 @@ struct Link {
     /// The serial of the last mirror sent on this connection, and when.
     mirror_sent: std::cell::Cell<u64>,
     mirror_at: std::cell::Cell<Option<Instant>>,
+    /// The live terminals this connection's Maya views, by the `sub` it chose.
+    /// Frames go out only for a sub held here.
+    terms: std::cell::RefCell<HashMap<u64, LinkTerm>>,
+    /// The terminals this main hosts, to detach the views it held.
+    host: Option<Arc<dyn LiveTerms>>,
+}
+
+/// A live terminal a mirroring Maya views through this connection.
+#[derive(Clone, Copy, Debug)]
+enum LinkTerm {
+    /// One of this main's own terminals.
+    Local(TermView),
+    /// An assistant's terminal, relayed under the main's own sub to it.
+    #[allow(dead_code)]
+    Relayed(u64),
+}
+
+impl Link {
+    /// Forgets `sub`, detaching its view; true when it was held.
+    fn end_term(&self, sub: u64) -> bool {
+        let Some(term) = self.terms.borrow_mut().remove(&sub) else { return false };
+        if let (LinkTerm::Local(view), Some(host)) = (term, &self.host) {
+            host.detach(&view);
+        }
+        log::line("network", format!("{}: terminal {sub} detached", self.label));
+        true
+    }
+
+    /// Forgets every sub, detaching their views.
+    fn end_terms(&self) {
+        let subs: Vec<u64> = self.terms.borrow().keys().copied().collect();
+        for sub in subs {
+            self.end_term(sub);
+        }
+    }
+}
+
+/// However the connection ends, the views it held are detached; never with
+/// the server's mutex held, as `LiveTerms` takes the app's `store`.
+impl Drop for Link {
+    fn drop(&mut self) {
+        self.end_terms();
+    }
 }
 
 /// Counts a connection as pre-auth until dropped (`welcome` sent, or it failed).
@@ -733,6 +798,8 @@ fn serve(ctx: &Ctx, stream: TcpStream, addr: SocketAddr) {
     // close to be answered (a client stopped for "Pair again") finds the
     // main already counting it as gone.
     leave(ctx, &link, &reason);
+    // Its views are detached now, not a second later once the close is done.
+    drop(link);
     finish_ws(&mut ch.ws);
 }
 
@@ -909,7 +976,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             return None;
         }
     };
-    let link = Link { id, serial, label, rx, first_board: std::cell::Cell::new(true), wants_mirror, mirror_sent: std::cell::Cell::new(0), mirror_at: std::cell::Cell::new(None) };
+    let link = Link { id, serial, label, rx, first_board: std::cell::Cell::new(true), wants_mirror, mirror_sent: std::cell::Cell::new(0), mirror_at: std::cell::Cell::new(None), terms: Default::default(), host: ctx.terms.clone() };
     // Authenticated: boards and results may now be large. Sealing adds a
     // little to each frame, which `open_frame` caps at `MAX_FRAME`.
     ch.ws.set_config(|c| {
@@ -980,6 +1047,8 @@ const NOT_CURRENT: &str = "replaced by a newer connection";
 fn send_queued(ch: &mut Chan, link: &Link) -> Option<String> {
     loop {
         match link.rx.try_recv() {
+            // A frame of a view since ended (detached, or after its `Error`).
+            Ok(Down::TermFrame { sub, .. }) if !link.terms.borrow().contains_key(&sub) => {}
             Ok(down) => {
                 let last = matches!(down, Down::Bye { .. } | Down::Move { .. });
                 let why = if matches!(down, Down::Move { .. }) { "moved" } else { "removed" };
@@ -1016,6 +1085,7 @@ fn mirror_due(ctx: &Ctx, link: &Link) -> Option<Down> {
             if c.machine.is_none() {
                 c.machine = Some(ctx.main_name.clone());
                 c.machine_platform = Some(std::env::consts::OS.into());
+                c.live = c.native && s.terminals;
             }
             c
         })
@@ -1037,6 +1107,7 @@ fn mirror_due(ctx: &Ctx, link: &Link) -> Option<Down> {
 /// Runs a registered connection until it closes; returns why.
 fn pump(ctx: &Ctx, ch: &mut Chan, link: &Link) -> String {
     let mut deadline = Instant::now() + SILENCE;
+    let mut tick = TICK;
     loop {
         if ctx.stopped() {
             return "the main stopped".into();
@@ -1045,6 +1116,12 @@ fn pump(ctx: &Ctx, ch: &mut Chan, link: &Link) -> String {
         if Instant::now() > deadline {
             return "silent for 15 s".into();
         }
+        match check_terms(ctx, ch, link) {
+            Ok(()) => {}
+            // A `bye` queued for a removed Maya still goes out.
+            Err(e) if e == NOT_CURRENT => return send_queued(ch, link).unwrap_or(e),
+            Err(e) => return e,
+        }
         if let Some(why) = send_queued(ch, link) {
             return why;
         }
@@ -1052,6 +1129,11 @@ fn pump(ctx: &Ctx, ch: &mut Chan, link: &Link) -> String {
             if let Err(e) = send_down(ch, &mirror) {
                 return e;
             }
+        }
+        // A live terminal on the link has its frames go out within `LIVE_TICK`.
+        let want = live::tick_for(!link.terms.borrow().is_empty(), TICK);
+        if want != tick && ch.ws.get_ref().set_read_timeout(Some(want)).is_ok() {
+            tick = want;
         }
         match ch.read() {
             Ok(Got::Text(t)) => {
@@ -1106,7 +1188,7 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
                 if current {
                     s.touch(&link.id);
                     // `sync_boards` fills in the label, hostname, platform and address.
-                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, agents, remembered, worktrees: false, received_at: now_ms(), connected: true });
+                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, agents, remembered, worktrees: false, terminals: false, received_at: now_ms(), connected: true });
                     s.sync_boards();
                 }
                 current
@@ -1137,7 +1219,12 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
             lock(&ctx.shared).touch(&link.id);
             send_down(ch, &Down::Pong)?;
         }
-        Up::TermAttach { .. } | Up::TermInput { .. } | Up::TermDetach { .. } | Up::TermFrame { .. } => log::line("network", format!("{}: terminal message not handled yet", link.label)),
+        Up::TermAttach { sub, machine, session } => term_attach(ctx, ch, link, sub, machine, &session)?,
+        Up::TermInput { sub, data } => term_input(ctx, ch, link, sub, &data)?,
+        Up::TermDetach { sub } => {
+            link.end_term(sub);
+        }
+        Up::TermFrame { .. } => log::line("network", format!("{}: terminal frame not handled yet", link.label)),
         Up::Request { id, machine, request } => {
             let (allowed, tx) = {
                 let mut s = lock(&ctx.shared);
@@ -1175,6 +1262,107 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
             }
         }
         Up::Hello { .. } => log::line("network", format!("{}: ignored a hello after welcome", link.label)),
+    }
+    Ok(())
+}
+
+/// What a Maya reads for a terminal when it may not mirror this main.
+const MAY_NOT_SEE: &str = "This Maya may not see the main's sessions.";
+/// What a Maya reads for an assistant's terminal, which this main does not relay yet.
+const NOT_YET: &str = "Not yet.";
+
+/// Tells this connection's Maya `sub` cannot be shown; nothing follows it.
+/// Sent at once, not queued: by then `sub` is no longer held, so frames
+/// still queued for it are dropped.
+fn term_error(ch: &mut Chan, sub: u64, message: String) -> Result<(), String> {
+    send_down(ch, &Down::TermFrame { sub, frame: TermFrame { seq: 0, event: TermEvent::Error { message } } })
+}
+
+/// Streams this main's own terminal of `session` to the connection's Maya
+/// as `sub`, in place of whatever `sub` showed before. A refusal or a
+/// failure answers with an `Error` frame. `LiveTerms` is called with no lock held.
+fn term_attach(ctx: &Ctx, ch: &mut Chan, link: &Link, sub: u64, machine: Option<String>, session: &str) -> Result<(), String> {
+    // The old view's frames still queued go with it, so none follows the new snapshot.
+    if link.end_term(sub) {
+        if let Some(why) = send_queued(ch, link) {
+            return Err(why);
+        }
+    }
+    let (allowed, tx) = {
+        let mut s = lock(&ctx.shared);
+        s.touch(&link.id);
+        let tx = s.conns.get(&link.id).filter(|c| c.serial == link.serial).map(|c| c.tx.clone());
+        (link.wants_mirror && s.may_mirror(&link.id), tx)
+    };
+    let Some(tx) = tx else { return Err(NOT_CURRENT.into()) };
+    if !allowed {
+        return term_error(ch, sub, MAY_NOT_SEE.into());
+    }
+    // The main's own name, like none, means the main.
+    if machine.map(|m| clean(&m)).is_some_and(|m| !m.is_empty() && m != ctx.main_name) {
+        return term_error(ch, sub, NOT_YET.into());
+    }
+    let Some(terms) = &ctx.terms else {
+        return term_error(ch, sub, super::client::NO_TERMINALS.into());
+    };
+    // The host calls it from its own threads, holding its locks: it only
+    // queues, and is false once the connection has ended.
+    let sink: FrameSink = Box::new(move |frame| tx.send(Down::TermFrame { sub, frame }).is_ok());
+    match live::open(&**terms, session, sink) {
+        Ok(view) => {
+            log::line("network", format!("{}: terminal {sub} attached", link.label));
+            link.terms.borrow_mut().insert(sub, LinkTerm::Local(view));
+            Ok(())
+        }
+        Err(e) => {
+            log::line("network", format!("{}: terminal {sub} not attached: {e}", link.label));
+            term_error(ch, sub, e)
+        }
+    }
+}
+
+/// Types `data`, base64, into `sub`'s terminal. A refusal or a failure ends
+/// the view: its `Error` frame is the last the Maya hears of it.
+fn term_input(ctx: &Ctx, ch: &mut Chan, link: &Link, sub: u64, data: &str) -> Result<(), String> {
+    let allowed = {
+        let mut s = lock(&ctx.shared);
+        s.touch(&link.id);
+        link.wants_mirror && s.may_mirror(&link.id)
+    };
+    let held = link.terms.borrow().get(&sub).copied();
+    let typed = match (held, &ctx.terms) {
+        _ if !allowed => Err(MAY_NOT_SEE.to_string()),
+        (Some(LinkTerm::Local(view)), Some(terms)) => base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|_| super::client::UNREADABLE_KEYS.to_string()).and_then(|bytes| terms.input(&view, &bytes)),
+        _ => return term_error(ch, sub, super::client::NO_SUCH_TERMINAL.into()),
+    };
+    if let Err(e) = typed {
+        log::line("network", format!("{}: terminal {sub} ended: {e}", link.label));
+        link.end_term(sub);
+        term_error(ch, sub, e)?;
+    }
+    Ok(())
+}
+
+/// Ends the views this connection holds once its Maya may no longer see
+/// them, with an `Error` frame each. `Err` when a newer connection replaced
+/// this one: the views' senders no longer let that end it.
+fn check_terms(ctx: &Ctx, ch: &mut Chan, link: &Link) -> Result<(), String> {
+    if link.terms.borrow().is_empty() {
+        return Ok(());
+    }
+    let (current, allowed) = {
+        let s = lock(&ctx.shared);
+        (s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial), link.wants_mirror && s.may_mirror(&link.id))
+    };
+    if !current {
+        return Err(NOT_CURRENT.into());
+    }
+    if !allowed {
+        let subs: Vec<u64> = link.terms.borrow().keys().copied().collect();
+        for sub in subs {
+            link.end_term(sub);
+            term_error(ch, sub, MAY_NOT_SEE.into())?;
+        }
     }
     Ok(())
 }
@@ -1451,6 +1639,7 @@ mod tests {
     use crate::net::client;
     use std::sync::atomic::AtomicBool;
     use crate::net::identity::Keypair;
+    use crate::net::live::{EventSink, LiveTerms, TermEvent, TermFrame, TermOpened, TermView};
     use crate::net::protocol::{decode_down, encode, CommandKind, Down, Request, Up, CAP_VOICE, PROTOCOL};
     use crate::net::secure::{self, Channel, Got};
     use std::net::TcpStream;
@@ -1482,6 +1671,8 @@ mod tests {
         pub caps: Mutex<Vec<String>>,
         /// Requests a mirroring Maya made, with the machine asked.
         pub requests: Mutex<Vec<(Option<String>, Request)>>,
+        /// The live terminals this main hosts; none when unset.
+        terms: Option<Arc<FakeTerms>>,
         notifier: Mutex<crate::notify::Notifier>,
         server: std::sync::OnceLock<Arc<Mutex<Server>>>,
     }
@@ -1525,6 +1716,9 @@ mod tests {
         }
         fn main_caps(&self) -> Vec<String> {
             self.caps.lock().unwrap().clone()
+        }
+        fn live_terms(&self) -> Option<Arc<dyn LiveTerms>> {
+            self.terms.clone().map(|t| t as Arc<dyn LiveTerms>)
         }
         fn request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {
             if let Request::Command(CommandKind::Compact { session }) = &request {
@@ -2251,7 +2445,7 @@ mod tests {
         let mut s = Server::new(vec![], "desk".into());
         let (first, previous) = s.record_pairing("a2V5", "192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
         assert!(previous.is_none());
-        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None, worktrees: false, received_at: 0, connected: false });
+        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None, worktrees: false, terminals: false, received_at: 0, connected: false });
         // The same key from another address: the same machine, at its new address.
         let (second, previous) = s.record_pairing("a2V5", "192.168.55.80", "Gnowee", "TKC-0176", "macos", false);
         assert_eq!(previous.as_ref(), Some(&first));
@@ -3223,6 +3417,140 @@ mod tests {
         assert!(cards.is_empty(), "the board it already had");
         assert_eq!(remembered[0].machine.as_deref(), Some(main.as_str()), "the main's own rows carry its name");
         assert_eq!((remembered[1].machine.as_deref(), remembered[1].waiting), (Some("laptop"), true));
+        handle.stop();
+    }
+
+    /// A host that records what the network asks of it and keeps the sink it is given.
+    #[derive(Default)]
+    struct FakeTerms {
+        sink: Mutex<Option<EventSink>>,
+        inputs: Mutex<Vec<(TermView, Vec<u8>)>>,
+        detached: Mutex<Vec<TermView>>,
+    }
+
+    const VIEW: TermView = TermView { term: 1, viewer: 2 };
+
+    impl LiveTerms for FakeTerms {
+        fn attach(&self, _session: &str, sink: EventSink) -> Result<TermOpened, String> {
+            *self.sink.lock().unwrap() = Some(sink);
+            Ok(TermOpened { view: VIEW, snapshot: b"hi".to_vec(), rows: 40, cols: 120 })
+        }
+        fn input(&self, view: &TermView, data: &[u8]) -> Result<(), String> {
+            self.inputs.lock().unwrap().push((*view, data.to_vec()));
+            Ok(())
+        }
+        fn detach(&self, view: &TermView) {
+            self.detached.lock().unwrap().push(*view);
+        }
+    }
+
+    /// A main hosting `terms`, and a phone that mirrors it with Chat.
+    fn hosting(terms: Arc<FakeTerms>) -> (ServerHandle, Client, String) {
+        let (handle, port) = test_server_with(Arc::new(Counter { terms: Some(terms), ..Default::default() }));
+        let (phone, id, _, _) = pair_client_caps(&handle, port, "Pixel", &[CAP_MIRROR, CAP_CHAT]);
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        (handle, phone, id)
+    }
+
+    /// The next terminal frame the main sent; boards and the like are skipped.
+    fn next_term(ch: &mut Client) -> (u64, TermFrame) {
+        let end = soon();
+        loop {
+            assert!(Instant::now() < end, "no terminal frame within 5 s");
+            if let Down::TermFrame { sub, frame } = recv(ch) {
+                return (sub, frame);
+            }
+        }
+    }
+
+    fn term_error(message: &str) -> TermFrame {
+        TermFrame { seq: 0, event: TermEvent::Error { message: message.into() } }
+    }
+
+    #[test]
+    fn the_main_streams_its_own_live_terminal_to_a_mirror() {
+        let terms = Arc::new(FakeTerms::default());
+        let (handle, mut phone, _) = hosting(terms.clone());
+        let main = main_name_of(&NetworkConfig::default());
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: Some(main), session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (1, TermFrame { seq: 0, event: TermEvent::Attached { snapshot: "aGk=".into(), rows: 40, cols: 120 } }));
+        assert!(terms.sink.lock().unwrap().as_ref().unwrap()(TermEvent::Output { data: "eA==".into() }));
+        assert_eq!(next_term(&mut phone), (1, TermFrame { seq: 1, event: TermEvent::Output { data: "eA==".into() } }));
+        send(&mut phone, &Up::TermInput { sub: 1, data: "aGk=".into() });
+        wait_until(|| !terms.inputs.lock().unwrap().is_empty());
+        assert_eq!(*terms.inputs.lock().unwrap(), [(VIEW, b"hi".to_vec())]);
+        send(&mut phone, &Up::TermDetach { sub: 1 });
+        wait_until(|| !terms.detached.lock().unwrap().is_empty());
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW]);
+        // Output the host sends after the detach never reaches the phone.
+        terms.sink.lock().unwrap().as_ref().unwrap()(TermEvent::Output { data: "eQ==".into() });
+        send(&mut phone, &Up::Ping);
+        loop {
+            match recv(&mut phone) {
+                Down::Pong => break,
+                Down::TermFrame { .. } => panic!("a frame for a sub the phone let go"),
+                _ => {}
+            }
+        }
+        // No machine, like the main's own name, means the main; attaching a sub again replaces its view.
+        send(&mut phone, &Up::TermAttach { sub: 2, machine: None, session: "s1".into() });
+        assert_eq!(next_term(&mut phone).1.seq, 0);
+        send(&mut phone, &Up::TermAttach { sub: 2, machine: None, session: "s1".into() });
+        assert_eq!(next_term(&mut phone).1.seq, 0);
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW, VIEW], "the old view went before the new one came");
+        // Closing the phone's connection detaches the view still open.
+        drop(phone);
+        wait_until(|| terms.detached.lock().unwrap().len() == 3);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_mirror_that_may_not_mirror_gets_an_error_frame() {
+        let terms = Arc::new(FakeTerms::default());
+        let (handle, mut phone, id) = hosting(terms.clone());
+        send(&mut phone, &Up::TermAttach { sub: 1, machine: Some("laptop".into()), session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error("Not yet.")));
+        send(&mut phone, &Up::TermInput { sub: 1, data: "aGk=".into() });
+        assert_eq!(next_term(&mut phone), (1, term_error("This terminal is not open here.")));
+        send(&mut phone, &Up::TermAttach { sub: 2, machine: None, session: "s1".into() });
+        assert_eq!(next_term(&mut phone).1.seq, 0);
+        // Switched off, the open view ends at once, and its keys are refused.
+        handle.set_mirror(&id, false).unwrap();
+        assert_eq!(next_term(&mut phone), (2, term_error("This Maya may not see the main's sessions.")));
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW]);
+        send(&mut phone, &Up::TermInput { sub: 2, data: "aGk=".into() });
+        assert_eq!(next_term(&mut phone), (2, term_error("This Maya may not see the main's sessions.")));
+        assert!(terms.inputs.lock().unwrap().is_empty(), "the keys were refused");
+        send(&mut phone, &Up::TermAttach { sub: 3, machine: None, session: "s1".into() });
+        assert_eq!(next_term(&mut phone), (3, term_error("This Maya may not see the main's sessions.")));
+        assert_eq!(*terms.detached.lock().unwrap(), [VIEW], "only the view that was open");
+        handle.stop();
+    }
+
+    #[test]
+    fn the_main_marks_its_own_native_cards_live_for_a_mirror_only_when_it_hosts_terminals() {
+        let mut native = card("l1", "native");
+        native.native = true;
+        let mut remote = card("r1", "remote");
+        remote.native = true;
+        remote.live = true;
+        remote.machine = Some("laptop".into());
+        let board = vec![native, card("l2", "plain"), remote];
+        let live_of = |cards: &[Card]| cards.iter().map(|c| (c.session_id.clone(), c.live)).collect::<Vec<_>>();
+        let want = |l1: bool| vec![("l1".to_string(), l1), ("l2".to_string(), false), ("r1".to_string(), true)];
+
+        let (handle, mut phone, _) = hosting(Arc::new(FakeTerms::default()));
+        handle.mirror(board.clone());
+        let Down::Mirror { cards, .. } = recv(&mut phone) else { panic!("expected a mirror") };
+        assert_eq!(live_of(&cards), want(true), "a native card of a main with terminals is live; a remote card keeps its own");
+        handle.stop();
+
+        let (handle, port) = test_server();
+        let (mut phone, _, _, _) = pair_client_caps(&handle, port, "Pixel", &[CAP_MIRROR, CAP_CHAT]);
+        wait_until(|| handle.status().assistants.iter().any(|a| a.connected));
+        handle.mirror(board);
+        let Down::Mirror { cards, .. } = recv(&mut phone) else { panic!("expected a mirror") };
+        assert_eq!(live_of(&cards), want(false), "a main with no terminals marks none of its own live");
         handle.stop();
     }
 

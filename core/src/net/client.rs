@@ -245,11 +245,11 @@ impl Drop for Attached {
 }
 
 /// What the main reads when it asks a Maya with no live terminals for one.
-const NO_TERMINALS: &str = "This Maya has no live terminals.";
+pub(crate) const NO_TERMINALS: &str = "This Maya has no live terminals.";
 /// What the main reads for keys to a terminal this Maya does not stream to it.
-const NO_SUCH_TERMINAL: &str = "This terminal is not open here.";
+pub(crate) const NO_SUCH_TERMINAL: &str = "This terminal is not open here.";
 /// What the main reads for keys that are not base64.
-const UNREADABLE_KEYS: &str = "The keys could not be read.";
+pub(crate) const UNREADABLE_KEYS: &str = "The keys could not be read.";
 
 /// The terminals one connection streams to the main, by the main's `sub`.
 /// Every view still open is detached when the pump ends, however it ends.

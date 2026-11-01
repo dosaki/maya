@@ -249,6 +249,10 @@ impl Notify for TauriNetNotify {
         }
         caps
     }
+    fn live_terms(&self) -> Option<std::sync::Arc<dyn net::live::LiveTerms>> {
+        // Asked once, when the server starts.
+        Some(std::sync::Arc::new(crate::native::live_terms::NativeTerms::new(self.app.clone())))
+    }
 }
 
 /// The assistants' last snapshots when this Maya is the main; else none.
