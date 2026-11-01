@@ -22,7 +22,7 @@ the right terminal first.
 - Starts new sessions and resumes old ones
 - Starts a new session in its own git worktree when you tick New worktree, on a new branch off the branch your checkout is on, so sessions in one repository do not step on each other
 - After a restart, offers to resume every session that was running, on this machine and on the paired ones, each in its own folder and terminal: from the Sessions tab, or by voice ("Maya, resume my sessions")
-- Runs sessions inside Maya, with no terminal app, when you choose Native (Settings › Sessions › New sessions open in): in the terminal look the session's window is then its live terminal, and the session stops when Maya quits. When you start a Native session, resume a single one, or start one to review a pull request, its live terminal opens at once, before the session shows on the board. If the session ends before it shows there, Maya shows the last lines it printed
+- Runs sessions inside Maya, with no terminal app, when you choose Native (Settings › Sessions › New sessions open in): in the terminal look the session's window is then its live terminal, and the session stops when Maya quits. When you start a Native session, resume a single one, or start one to review a pull request, its live terminal opens at once, before the session shows on the board. If the session ends before it shows there, Maya shows the last lines it printed. From the main, or the phone, you can also watch and type into a Native session's live terminal through the Maya that runs it
 - Shows what a session's terminal shows: the conversation, each command's output, edit diffs, how long it has been working, and its model, folder and branch
   - As a chat or in a terminal look, like the agent's own terminal (Settings → Sessions, or the `>_` button on the session)
 - Shows each session's context, its account's usage limits and its cost so far, in the session window
@@ -572,8 +572,15 @@ write and drives them through their own interfaces.
   restarting to update) asks first when a Native session is Working, or is
   still starting and not yet on the board, since
   Native sessions stop with Maya; those open at quit are offered back at the
-  next start and come back as Native. For now, from another machine or the
-  phone, a Native session shows the transcript views, not the live terminal.
+  next start and come back as Native. The live terminal also opens on the
+  main for an assistant's Native session, and on the phone for the main's or
+  an assistant's, through the Maya that runs it: you watch it and type into
+  it, and it keeps that Maya's size (never resized from afar), shrinking the
+  text to fit and then scrolling to keep the cursor line in view. The phone
+  has a row of extra keys under it (Esc, Tab, Ctrl+C and the arrows). After a
+  dropped connection it says so and tries again every 2 seconds. Both Mayas
+  (and the phone) need this version or later; otherwise the session shows the
+  transcript views, as before.
 - **Pull requests** come from GitHub's and GitLab's APIs, refreshed every two minutes.
 - **Deployments** come from GitHub's API, checked every two minutes on the main or a standalone Maya: runs waiting for your approval, in repos pushed to in the last 7 days that have an environment with required reviewers.
 - **Voice** is a small listener sidecar (Apple's recogniser or whisper.cpp)
