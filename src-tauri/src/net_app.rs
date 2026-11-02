@@ -120,6 +120,7 @@ pub fn pair(app: &AppHandle, host: &str, port: u16, name: &str, code: &str) -> R
         c.network.name = name.trim().into();
         c.network.main_key = main_key;
         c.network.pair_again = false;
+        c.network.end_redirect();
         c.listen = false;
     })?;
     log::line("network", format!("paired with {main}"));
@@ -173,6 +174,14 @@ impl ClientNotify for TauriClientNotify {
             l.error = Some(REMOVED.into());
             l.retrying = false;
         });
+        // No longer in the group: nobody is to be sent anywhere from here.
+        // Only the redirect stops; the role and the link stay as they are.
+        let redirecting = self.app.state::<AppState>().store.lock().unwrap().config.network.redirect_port != 0;
+        if redirecting && !self.stop.load(Ordering::SeqCst) {
+            if let Err(e) = crate::update_config(&self.app, |c| c.network.end_redirect()) {
+                log::line("network", format!("could not stop the redirect: {e}"));
+            }
+        }
     }
 
     fn caps(&self) -> Vec<String> {
@@ -198,9 +207,30 @@ impl ClientNotify for TauriClientNotify {
         };
         let handed = group.members.len().saturating_sub(1);
         promote::as_main(&mut after, group);
-        let handle = start_with(Arc::new(crate::TauriNetNotify { app: self.app.clone() }), Arc::new(Mutex::new(after.network.clone())), after.listen_port(), identity(&self.app)?)?;
+        // This Maya's own redirect (it handed over once before) may hold
+        // the port it is to listen on: it stops first, and comes back if
+        // this Maya stays an assistant.
+        let redirect = state.network.lock().unwrap().redirect.take();
+        if let Some(r) = &redirect {
+            r.stop();
+        }
+        let restore = || {
+            if redirect.is_some() {
+                crate::start_redirect(&self.app);
+            }
+        };
+        let view = Arc::new(Mutex::new(after.network.clone()));
+        let started = identity(&self.app).and_then(|id| crate::bind_retrying(|| start_with(Arc::new(crate::TauriNetNotify { app: self.app.clone() }), view.clone(), after.listen_port(), id.clone())));
+        let handle = match started {
+            Ok(h) => h,
+            Err(e) => {
+                restore();
+                return Err(e);
+            }
+        };
         if let Err(e) = config::save(&path, &after) {
             handle.stop();
+            restore();
             return Err(format!("Could not save the settings: {e}"));
         }
         let port = handle.port();

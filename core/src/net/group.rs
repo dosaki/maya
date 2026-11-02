@@ -136,6 +136,19 @@ pub fn join(n: &mut NetworkConfig, my_key: &str, key: &str, host: &str, port: u1
     Ok(())
 }
 
+/// A new key is a new identity: no group, no main, no redirect, role Off.
+pub fn start_afresh(n: &mut NetworkConfig) {
+    n.role = NetworkRole::Off;
+    n.assistants.clear();
+    n.removed.clear();
+    n.group_version = 0;
+    n.main_key.clear();
+    n.main_host.clear();
+    n.main_port = 0;
+    n.pair_again = false;
+    n.end_redirect();
+}
+
 /// This Maya's own entry in the group.
 pub fn me(n: &NetworkConfig, key: &str) -> PairedAssistant {
     let hostname = super::local_hostname();
@@ -328,6 +341,16 @@ mod tests {
         assert_eq!(n.main_key, "A");
         assert!(!n.pair_again);
         assert_eq!(n.redirect_port, 0);
+    }
+
+    #[test]
+    fn a_new_key_starts_the_group_afresh() {
+        let mut n = net(vec![entry("A", "one")]);
+        n.removed.push(entry("B", "two"));
+        (n.role, n.group_version, n.redirect_port, n.main_key, n.main_host, n.main_port, n.pair_again) = (NetworkRole::Assistant, 7, 9000, "A".into(), "h".into(), 5001, true);
+        n.name = "desk".into();
+        start_afresh(&mut n);
+        assert_eq!(n, NetworkConfig { name: "desk".into(), ..Default::default() }, "only the name stays");
     }
 
     #[test]

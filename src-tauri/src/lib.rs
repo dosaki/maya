@@ -899,15 +899,7 @@ fn network_new_key(app: AppHandle, state: TauriState<AppState>) -> Result<Networ
     let before = state.store.lock().unwrap().config.clone();
     let k = net_app::new_key_with(
         || {
-            update_config(&app, |c| {
-                c.network.role = config::NetworkRole::Off;
-                c.network.assistants.clear();
-                c.network.main_key.clear();
-                c.network.main_host.clear();
-                c.network.main_port = 0;
-                c.network.pair_again = false;
-            })
-            .map(|_| ())
+            update_config(&app, |c| net::group::start_afresh(&mut c.network)).map(|_| ())
         },
         |secret| {
             // Stored and cached under one lock, so two New keys at once (or
@@ -935,6 +927,7 @@ fn network_forget_main(app: AppHandle, state: TauriState<AppState>) -> Result<Ne
         c.network.main_key.clear();
         c.network.main_host.clear();
         c.network.main_port = 0;
+        c.network.end_redirect();
     })?;
     Ok(network_status_of(&state))
 }
@@ -955,6 +948,60 @@ fn network_set_mirror(app: AppHandle, state: TauriState<AppState>, id: String, o
     Ok(network_status_of(&state))
 }
 
+/// A server just stopped lets go of its port within a tick; `start` is
+/// tried again for up to 750 ms.
+pub(crate) fn bind_retrying(mut start: impl FnMut() -> Result<net::server::ServerHandle, String>) -> Result<net::server::ServerHandle, String> {
+    let mut started = start();
+    for _ in 0..5 {
+        if started.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        started = start();
+    }
+    started
+}
+
+/// Starts the old main's redirect listener on the port it listened on as
+/// main, replacing any running one; a no-op without a redirect to keep.
+/// A port it cannot take is only logged: members it would have moved find
+/// the new main when they are moved by hand.
+pub(crate) fn start_redirect(app: &AppHandle) {
+    stop_redirect(app);
+    let (redirect, view) = {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        (net::redirect_of(&store.config), store.config.network.clone())
+    };
+    let Some((port, to)) = redirect else { return };
+    let view = std::sync::Arc::new(Mutex::new(view));
+    let wanted = Some((port, to.clone()));
+    let started = net_app::identity(app).and_then(|id| bind_retrying(|| net::server::start_redirect(view.clone(), port, id.clone(), to.clone())));
+    match started {
+        Ok(handle) => {
+            // The config may have moved on while it bound (a `StopRedirect`
+            // ran meanwhile): then this one stops at once.
+            let state = app.state::<AppState>();
+            let mut n = state.network.lock().unwrap();
+            let still = net::redirect_of(&state.store.lock().unwrap().config) == wanted;
+            let displaced = if still { n.redirect.replace(handle) } else { Some(handle) };
+            drop(n);
+            if let Some(old) = displaced {
+                old.stop();
+            }
+        }
+        Err(e) => log::line("network", format!("no redirect to the new main: {e}")),
+    }
+}
+
+/// Stops the redirect listener, if running.
+fn stop_redirect(app: &AppHandle) {
+    let redirect = app.state::<AppState>().network.lock().unwrap().redirect.take();
+    if let Some(r) = redirect {
+        r.stop();
+    }
+}
+
 /// Starts the main's server on the configured port, replacing any running
 /// one; with `show_code` (the role just turned on) it opens pairing at once.
 fn start_main(app: &AppHandle, show_code: bool) {
@@ -962,17 +1009,7 @@ fn start_main(app: &AppHandle, show_code: bool) {
     let port = app.state::<AppState>().store.lock().unwrap().config.listen_port();
     // A server just stopped lets go of the port within a tick; retry briefly.
     // The key store is read once, not at every retry.
-    let started = net_app::identity(app).and_then(|id| {
-        let mut started = net_app::start_server(app.clone(), port, id.clone());
-        for _ in 0..5 {
-            if started.is_ok() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(150));
-            started = net_app::start_server(app.clone(), port, id.clone());
-        }
-        started
-    });
+    let started = net_app::identity(app).and_then(|id| bind_retrying(|| net_app::start_server(app.clone(), port, id.clone())));
     match started {
         Ok(handle) => {
             // Another start may have finished meanwhile; the displaced server stops.
@@ -1591,6 +1628,12 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
         config.network.assistants = before.network.assistants.clone();
         config.network.main_key = before.network.main_key.clone();
         config.network.pair_again = before.network.pair_again;
+        // So do the group's tombstones and version, and the redirect a
+        // handover left; switching the role by hand ends that.
+        config.network.removed = before.network.removed.clone();
+        config.network.group_version = before.network.group_version;
+        config.network.redirect_port = before.network.redirect_port;
+        net::settle_role_change(&before.network, &mut config.network);
         // Mute belongs to the top-bar button, which may have saved it after
         // the page fetched this config.
         config.muted = before.muted;
@@ -1673,6 +1716,8 @@ fn apply_config_change(app: &AppHandle, before: &Config, config: &Config) {
                 start_assistant(app);
             }
             NetChange::StopAssistant => stop_assistant(app),
+            NetChange::StartRedirect | NetChange::RestartRedirect => start_redirect(app),
+            NetChange::StopRedirect => stop_redirect(app),
         }
     }
 }
@@ -1883,7 +1928,11 @@ pub fn run() {
                     let net_handle = app.handle().clone();
                     std::thread::spawn(move || start_main(&net_handle, false));
                 }
-                config::NetworkRole::Assistant => start_assistant(app.handle()),
+                config::NetworkRole::Assistant => {
+                    start_assistant(app.handle());
+                    let redirect_handle = app.handle().clone();
+                    std::thread::spawn(move || start_redirect(&redirect_handle));
+                }
                 config::NetworkRole::Off => {}
             }
             // The main listens for an assistant.

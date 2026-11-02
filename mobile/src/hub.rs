@@ -627,14 +627,7 @@ impl Hub {
     /// the key file are written.
     pub fn new_key(&self) -> Result<NetworkStatus, String> {
         let before = self.settings.lock().unwrap().config.clone();
-        self.update_config(|c| {
-            c.network.role = NetworkRole::Off;
-            c.network.assistants.clear();
-            c.network.main_key.clear();
-            c.network.main_host.clear();
-            c.network.main_port = 0;
-            c.network.pair_again = false;
-        })?;
+        self.update_config(|c| maya_core::net::group::start_afresh(&mut c.network))?;
         let mut held = self.identity.lock().unwrap();
         match identity::replace(&self.maya_dir.join(identity::FILE)) {
             Ok(k) => *held = Some(Arc::new(k)),

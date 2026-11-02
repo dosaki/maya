@@ -204,6 +204,8 @@ pub struct Server {
     /// Assistants' live terminals this main relays to a viewer, by the sub
     /// the main chose with the assistant (from `next`, never reused).
     relays: HashMap<u64, Relay>,
+    /// A redirect listener's new main: members that come back are sent there.
+    redirect: Option<MoveTarget>,
 }
 
 /// An assistant's live terminal the main relays to one viewer.
@@ -256,7 +258,7 @@ struct MirrorBoard {
 
 impl Server {
     fn new(group: GroupCopy, own: PairedAssistant, main_name: String) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired: group.members, removed: group.removed, version: group.version, own, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, wake_word: None, main_name, terminals: false, relays: HashMap::new() }
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired: group.members, removed: group.removed, version: group.version, own, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, wake_word: None, main_name, terminals: false, relays: HashMap::new(), redirect: None }
     }
 
     /// The group as it is saved: no entry for this main.
@@ -579,6 +581,9 @@ impl ServerHandle {
     pub fn open_pairing(&self, now_ms: u64) -> Result<(String, u64), String> {
         let (code, expires, status) = {
             let mut s = lock(&self.shared);
+            if s.redirect.is_some() {
+                return Err("This Maya is no longer the main.".into());
+            }
             if s.handover {
                 log::line("network", "pairing stays closed during a handover");
                 return Err("A handover is already running.".into());
@@ -724,10 +729,6 @@ impl ServerHandle {
     }
 }
 
-/// Binds `port` on every interface (0 picks a free one) and starts accepting.
-/// `config_view` supplies the group (members, tombstones, version) at start;
-/// from then on the server's own group is the truth and `Notify` reports
-/// changes to it.
 /// What assistants see as the main's name in `welcome`: the configured
 /// name, or this computer's hostname when it is blank.
 pub fn main_name_of(c: &NetworkConfig) -> String {
@@ -735,7 +736,46 @@ pub fn main_name_of(c: &NetworkConfig) -> String {
     if n.is_empty() { super::local_hostname() } else { n.to_string() }
 }
 
+/// Binds `port` on every interface (0 picks a free one) and starts accepting.
+/// `config_view` supplies the group (members, tombstones, version) at start;
+/// from then on the server's own group is the truth and `Notify` reports
+/// changes to it.
 pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>>, port: u16, identity: Arc<Keypair>) -> Result<ServerHandle, String> {
+    start(notify, config_view, port, identity, None)
+}
+
+/// Where the main is now: what a redirect sends in `Move`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveTarget {
+    pub host: String,
+    pub port: u16,
+    pub key: String,
+}
+
+/// A redirect's notifier: it saves nothing and has no page to tell.
+struct Quiet;
+
+impl Notify for Quiet {
+    fn board_changed(&self) {}
+    fn board_seeded(&self, _: &[Card]) {}
+    fn status_changed(&self, _: NetworkStatus) {}
+    fn paired(&self, _: &PairedAssistant, _: &GroupCopy) -> Result<(), String> {
+        Ok(())
+    }
+    fn paired_list_changed(&self, _: &GroupCopy) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The old main's redirect listener, on the port it listened on as main:
+/// a live member of the group that comes back gets the group and a `Move`
+/// to `to`, then the connection ends. It pairs nobody, refuses unknown and
+/// removed keys as a main does, merges nothing and keeps no boards.
+pub fn start_redirect(config_view: Arc<Mutex<NetworkConfig>>, port: u16, identity: Arc<Keypair>, to: MoveTarget) -> Result<ServerHandle, String> {
+    start(Arc::new(Quiet), config_view, port, identity, Some(to))
+}
+
+fn start(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>>, port: u16, identity: Arc<Keypair>, redirect: Option<MoveTarget>) -> Result<ServerHandle, String> {
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("Could not listen on port {port}: {e}. Choose another port."))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -743,15 +783,20 @@ pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>
         let c = lock(&config_view);
         (group::of_config(&c), group::me(&c, &identity.public_b64()), main_name_of(&c))
     };
+    let what = match &redirect {
+        Some(to) => format!("redirecting on port {port} to {}:{}", to.host, to.port),
+        None => format!("listening on port {port}"),
+    };
     let terms = notify.live_terms();
     let mut server = Server::new(group, own, main_name.clone());
     server.terminals = terms.is_some();
+    server.redirect = redirect;
     let shared = Arc::new(Mutex::new(server));
     let stop = Arc::new(AtomicBool::new(false));
     let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name, identity, live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()), terms });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
-    log::line("network", format!("listening on port {port}"));
+    log::line("network", what);
     Ok(ServerHandle { shared, stop, port, ctx })
 }
 
@@ -1132,19 +1177,27 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
     let streams = caps.iter().any(|c| c == CAP_TERMINAL);
     let key = encode_key(&accepted.key);
     let (id, pairing) = if accepted.paired {
+        // A redirect opens no pairing window, so no code gets this far.
+        if lock(&ctx.shared).redirect.is_some() {
+            bye(ch, secure::WRONG_CODE_REASON);
+            return None;
+        }
         let p = pair(ctx, ch, &key, &ip, &name, &hostname, &platform, wants_mirror)?;
         (p.entry.id.clone(), Some(p))
     } else {
         // Only a live member's copy is read, and only for its removals,
-        // which may include the member itself.
-        let (known, merged) = {
+        // which may include the member itself. A redirect reads none: the
+        // group is no longer its to change.
+        let (known, merged, redirect) = {
             let mut s = lock(&ctx.shared);
+            let redirect = s.redirect.clone().map(|to| (to, s.wire()));
             match s.paired.iter().find(|p| p.key == key).map(|p| p.id.clone()) {
+                Some(id) if redirect.is_some() => (Some(id), false, redirect),
                 Some(id) => {
                     let merged = copy.as_ref().is_some_and(|theirs| take_removals(ctx, &mut s, theirs));
-                    (s.paired.iter().any(|p| p.key == key).then_some(id), merged)
+                    (s.paired.iter().any(|p| p.key == key).then_some(id), merged, None)
                 }
-                None => (None, false),
+                None => (None, false, None),
             }
         };
         if merged {
@@ -1157,6 +1210,10 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             bye(ch, "removed");
             return None;
         };
+        if let Some((to, wire)) = redirect {
+            send_to_new_main(ctx, ch, &name, wire, to);
+            return None;
+        }
         (id, None)
     };
     let (tx, rx) = channel();
@@ -1243,6 +1300,20 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
     ctx.announce();
     ctx.notify.board_changed();
     Some(link)
+}
+
+/// A redirect's answer to a returning member: `welcome`, the group (which
+/// holds the new main, so the member may follow it), then `Move`. The
+/// connection ends after it; nothing is registered.
+fn send_to_new_main(ctx: &Ctx, ch: &mut Chan, who: &str, wire: GroupCopy, to: MoveTarget) {
+    let (host, port) = (to.host.clone(), to.port);
+    let sent = send_down(ch, &Down::Welcome { name: ctx.main_name.clone(), mirror: None, caps: vec![] })
+        .and_then(|()| send_down(ch, &Down::Group(wire)))
+        .and_then(|()| send_down(ch, &Down::Move { host: to.host, port: to.port, key: to.key }));
+    match sent {
+        Ok(()) => log::line("network", format!("{who}: sent to the new main at {host}:{port}")),
+        Err(e) => log::line("network", format!("{who}: could not send it to the new main: {e}")),
+    }
 }
 
 /// A pairing recorded but not yet saved: it is saved just before `welcome`,
@@ -4710,6 +4781,90 @@ mod tests {
         assert_eq!(sent, version);
         assert_eq!(list.last().unwrap().id, key_of_main(&handle), "the old main's own entry has its key as its id");
         let _ = t.join();
+        handle.stop();
+    }
+
+    /// The old main's redirect listener: its group holds `members` and the
+    /// tombstones `removed`, and it points to `to`.
+    fn redirect_server(members: Vec<crate::config::PairedAssistant>, removed: Vec<crate::config::PairedAssistant>, to: MoveTarget) -> (ServerHandle, u16) {
+        let view = NetworkConfig { role: NetworkRole::Assistant, assistants: members, removed, group_version: 5, ..Default::default() };
+        let handle = start_redirect(Arc::new(Mutex::new(view)), 0, Arc::new(Keypair::generate()), to).unwrap();
+        let port = handle.port();
+        (handle, port)
+    }
+
+    /// `run_once` for a client of the redirect, stopped (and failed) if it
+    /// has not ended within 5 s.
+    fn run_bounded(config: NetworkConfig, key: &Keypair, notify: Arc<Leader>) -> Result<(), String> {
+        let (stop, k) = (Arc::new(AtomicBool::new(false)), key.clone());
+        let s = stop.clone();
+        let run = std::thread::spawn(move || client::run_once(&config, &k, Arc::new(NoSessions), notify, &s, None));
+        let end = Instant::now() + Duration::from_secs(5);
+        while !run.is_finished() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ended = run.is_finished();
+        stop.store(true, Ordering::SeqCst);
+        let out = run.join().unwrap();
+        assert!(ended, "the client was still connected after 5 s");
+        out
+    }
+
+    fn new_main_at(key: &str) -> MoveTarget {
+        MoveTarget { host: "10.0.0.9".into(), port: 5001, key: key.into() }
+    }
+
+    #[test]
+    fn a_returning_member_is_moved_to_the_new_main() {
+        let (a, t, g) = (Keypair::generate(), Keypair::generate().public_b64(), Keypair::generate().public_b64());
+        let (handle, port) = redirect_server(vec![a_member(&a.public_b64(), "laptop"), a_member(&t, "new main"), a_member(&g, "gone")], vec![], new_main_at(&t));
+        // A pinned the old main's key, and its copy says G was removed.
+        let mut tomb = a_member(&g, "gone");
+        tomb.generation = 9;
+        let config = NetworkConfig { assistants: vec![a_member(&t, "new main"), a_member(&key_of_main(&handle), "old main")], removed: vec![tomb], ..assistant_config(port, &handle) };
+        let notify = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+        let out = run_bounded(config, &a, notify.clone());
+        assert_eq!(out, Err(client::MOVED.into()));
+        assert_eq!(*notify.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001, t.clone())));
+        let groups = notify.groups.lock().unwrap().clone();
+        assert!(groups.last().is_some_and(|g| g.members.iter().any(|m| m.key == t)), "the group came before the move");
+        let s = lock(&handle.shared);
+        assert!(s.paired.iter().any(|p| p.key == g), "a redirect merges nothing");
+        assert!(s.boards.is_empty() && s.conns.is_empty(), "and keeps no boards or connections");
+        drop(s);
+        handle.stop();
+    }
+
+    #[test]
+    fn the_redirect_hands_over_a_main_paired_after_the_device_left() {
+        let (a, t) = (Keypair::generate(), Keypair::generate().public_b64());
+        let (handle, port) = redirect_server(vec![a_member(&a.public_b64(), "laptop"), a_member(&t, "new main")], vec![], new_main_at(&t));
+        // A's own copy has never heard of T.
+        let config = NetworkConfig { assistants: vec![a_member(&key_of_main(&handle), "old main"), a_member(&Keypair::generate().public_b64(), "mini")], ..assistant_config(port, &handle) };
+        let notify = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+        let out = run_bounded(config, &a, notify.clone());
+        assert_eq!(out, Err(client::MOVED.into()));
+        assert_eq!(*notify.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001, t)));
+        handle.stop();
+    }
+
+    #[test]
+    fn a_stranger_gets_no_redirect() {
+        let (a, t, x) = (Keypair::generate(), Keypair::generate().public_b64(), Keypair::generate());
+        let (handle, port) = redirect_server(vec![a_member(&t, "new main")], vec![a_member(&a.public_b64(), "laptop")], new_main_at(&t));
+        for (who, k) in [("a tombstoned key", &a), ("an unknown key", &x)] {
+            let notify = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+            let out = run_bounded(assistant_config(port, &handle), k, notify.clone());
+            assert_eq!(out, Err(client::REMOVED.into()), "{who}");
+            assert_eq!(*notify.moved.lock().unwrap(), None, "{who}");
+            assert!(notify.groups.lock().unwrap().is_empty(), "{who} gets no group");
+        }
+        // Nor does a code pair anything.
+        assert!(handle.open_pairing(crate::store::now_ms()).is_err(), "a redirect opens no pairing");
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, ..Default::default() };
+        let out = client::run_once(&config, &x, Arc::new(NoSessions), Arc::new(FakeClientNotify::default()), &AtomicBool::new(false), Some("123456"));
+        assert_eq!(out, Err(client::WRONG_CODE.into()));
+        assert!(lock(&handle.shared).paired.iter().all(|p| p.key == t), "nobody was paired");
         handle.stop();
     }
 
