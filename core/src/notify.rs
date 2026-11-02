@@ -2,11 +2,9 @@ use crate::model::{AwaitKind, Card, State};
 use crate::state::truncate;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
-#[cfg(any(test, target_os = "linux"))]
-use std::path::Path;
 #[cfg(all(unix, not(target_os = "android")))]
 use std::process::{Command, Stdio};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -194,6 +192,8 @@ const BUILTIN: &str = "the built-in voice";
 /// A line to speak and the voices to try for it, decided when it is queued.
 pub struct Utterance {
     pub text: String,
+    /// `text` in the pieces it is spoken in, one after another.
+    pub pieces: Vec<String>,
     /// The remote voices to try in order; the built-in voice speaks when
     /// none of them does.
     pub voices: Vec<RemoteVoice>,
@@ -208,7 +208,13 @@ pub struct Utterance {
 
 impl Utterance {
     pub fn new(text: String, voices: Vec<RemoteVoice>) -> Utterance {
-        Utterance { text, voices, trial: false, done: None, volume: 100 }
+        Utterance { pieces: vec![text.clone()], text, voices, trial: false, done: None, volume: 100 }
+    }
+
+    /// A line spoken in these pieces; its text is the pieces joined.
+    pub fn in_pieces(pieces: Vec<String>, voices: Vec<RemoteVoice>) -> Utterance {
+        let text = pieces.join(" ");
+        Utterance { pieces, ..Utterance::new(text, voices) }
     }
 }
 
@@ -305,9 +311,14 @@ pub fn focus_status() -> Option<bool> {
 
 static SPEECH: OnceLock<Mutex<mpsc::Sender<Utterance>>> = OnceLock::new();
 
-/// Speaks `(voice, text, volume)` with a remote voice, going no further than
-/// `Reach`: with `CacheOnly` it plays a cached line and otherwise fails.
-pub type RemoteSpeaker = fn(&RemoteVoice, &str, u8, Reach) -> Result<(), String>;
+/// How the remote voices speak: `fetch` gives the audio file for a line,
+/// going no further than `Reach` (with `CacheOnly` a line that is not cached
+/// is `Err("not cached")`, with `Network` it is synthesised into the cache),
+/// and `play` plays a file at a volume, waiting until it ends.
+pub struct RemoteSpeaker {
+    pub fetch: fn(&RemoteVoice, &str, Reach) -> Result<PathBuf, String>,
+    pub play: fn(&Path, u8) -> Result<(), String>,
+}
 
 static REMOTE_SPEAKER: OnceLock<RemoteSpeaker> = OnceLock::new();
 
@@ -371,37 +382,112 @@ fn say_text(line: &str, volume: u8) -> String {
 #[cfg(target_os = "android")]
 fn say_builtin(_line: &str, _volume: u8) {}
 
-/// The function that speaks one line with a remote voice, as `speak_chain` takes it.
-type RemoteFn<'a> = dyn Fn(&RemoteVoice, &str, u8, Reach) -> Result<(), String> + 'a;
+/// The file for the next piece, being fetched while the current one plays.
+pub(crate) enum Ahead {
+    Ready(Result<PathBuf, String>),
+    Running(std::thread::JoinHandle<Result<PathBuf, String>>),
+}
 
-/// Speaks `u` with the first voice in its chain that can. A voice marked
-/// down only plays a cached line, silently moving on when it has none
-/// (unless this is a trial); any other voice goes to the network, and a
-/// failure marks it down and is reported. The built-in voice speaks when no
-/// remote voice did.
-fn speak_chain(u: &Utterance, marks: &mut DownMarks, now: Instant, remote: &RemoteFn, builtin: &dyn Fn(&str, u8)) -> SpeechReport {
-    let mut failures = Vec::new();
-    for v in &u.voices {
-        let fp = v.fingerprint();
-        if !u.trial && marks.is_down(fp, now) {
-            if remote(v, &u.text, u.volume, Reach::CacheOnly).is_ok() {
-                return SpeechReport { spoken_by: v.label(), failures };
-            }
-            continue;
+impl Ahead {
+    /// Runs `f` on a thread of its own. Dropped unwaited, the thread still
+    /// finishes, so what it fetched lands in the cache.
+    fn spawn(f: impl FnOnce() -> Result<PathBuf, String> + Send + 'static) -> Ahead {
+        match std::thread::Builder::new().name("speech-ahead".into()).spawn(f) {
+            Ok(h) => Ahead::Running(h),
+            Err(e) => Ahead::Ready(Err(format!("could not start the fetch: {e}"))),
         }
-        match remote(v, &u.text, u.volume, Reach::Network) {
-            Ok(()) => {
-                marks.clear(fp);
-                return SpeechReport { spoken_by: v.label(), failures };
-            }
-            Err(e) => {
-                marks.mark(fp, now);
-                failures.push(format!("{} failed: {}.", capitalised(v.label()), e.trim_end_matches('.')));
+    }
+
+    /// The fetched file, once the fetch is done.
+    fn wait(self) -> Result<PathBuf, String> {
+        match self {
+            Ahead::Ready(r) => r,
+            Ahead::Running(h) => h.join().unwrap_or_else(|_| Err("the fetch stopped".into())),
+        }
+    }
+}
+
+/// What `speak_chain` speaks with: the remote voices' fetch and play, and
+/// the built-in voice.
+trait Speak {
+    fn fetch(&self, v: &RemoteVoice, text: &str, reach: Reach) -> Result<PathBuf, String>;
+    /// Starts fetching `text`, to be waited for later.
+    fn fetch_ahead(&self, v: &RemoteVoice, text: &str, reach: Reach) -> Ahead;
+    fn play(&self, path: &Path, volume: u8) -> Result<(), String>;
+    fn builtin(&self, text: &str, volume: u8);
+}
+
+impl Speak for RemoteSpeaker {
+    fn fetch(&self, v: &RemoteVoice, text: &str, reach: Reach) -> Result<PathBuf, String> {
+        (self.fetch)(v, text, reach)
+    }
+
+    fn fetch_ahead(&self, v: &RemoteVoice, text: &str, reach: Reach) -> Ahead {
+        let (fetch, v, text) = (self.fetch, v.clone(), text.to_string());
+        Ahead::spawn(move || fetch(&v, &text, reach))
+    }
+
+    fn play(&self, path: &Path, volume: u8) -> Result<(), String> {
+        (self.play)(path, volume)
+    }
+
+    fn builtin(&self, text: &str, volume: u8) {
+        say_builtin(text, volume)
+    }
+}
+
+/// Speaks `u` piece by piece with the first voice in its chain that can,
+/// fetching each next piece with that voice while the current one plays. A
+/// voice marked down only plays cached pieces, silently moving on at the
+/// first it has not (unless this is a trial); any other voice goes to the
+/// network, and a failure to fetch or play marks it down and is reported.
+/// A voice that gave up on a piece is not asked again for the rest of the
+/// line; after the last remote voice, the built-in voice speaks the rest.
+fn speak_chain(u: &Utterance, marks: &mut DownMarks, now: Instant, s: &dyn Speak) -> SpeechReport {
+    let mut failures = Vec::new();
+    let mut spoken_by = BUILTIN;
+    // The voice speaking now, as an index into `u.voices`.
+    let mut at = 0;
+    // The fetch started for the next piece, and the voice it was started with.
+    let mut ahead: Option<(usize, Ahead)> = None;
+    for (i, piece) in u.pieces.iter().enumerate() {
+        let mut started = ahead.take();
+        loop {
+            let Some(v) = u.voices.get(at) else {
+                s.builtin(piece, u.volume);
+                spoken_by = BUILTIN;
+                break;
+            };
+            let fp = v.fingerprint();
+            let reach = if !u.trial && marks.is_down(fp, now) { Reach::CacheOnly } else { Reach::Network };
+            let file = match started.take() {
+                Some((by, a)) if by == at => a.wait(),
+                _ => s.fetch(v, piece, reach),
+            };
+            let spoken = file.and_then(|path| {
+                if let Some(next) = u.pieces.get(i + 1) {
+                    ahead = Some((at, s.fetch_ahead(v, next, reach)));
+                }
+                s.play(&path, u.volume)
+            });
+            match spoken {
+                Ok(()) => {
+                    if reach == Reach::Network {
+                        marks.clear(fp);
+                    }
+                    spoken_by = v.label();
+                    break;
+                }
+                Err(_) if reach == Reach::CacheOnly => at += 1,
+                Err(e) => {
+                    marks.mark(fp, now);
+                    failures.push(format!("{} failed: {}.", capitalised(v.label()), e.trim_end_matches('.')));
+                    at += 1;
+                }
             }
         }
     }
-    builtin(&u.text, u.volume);
-    SpeechReport { spoken_by: BUILTIN, failures }
+    SpeechReport { spoken_by, failures }
 }
 
 /// `s` with its first letter upper-cased, to start a sentence.
@@ -411,16 +497,19 @@ fn capitalised(s: &str) -> String {
 }
 
 /// Speaks one line through its chain of voices, with the installed remote
-/// speaker; without one, the built-in voice speaks.
+/// speaker; without one, the built-in voice speaks each piece in turn.
 fn speak_line(u: &Utterance) -> SpeechReport {
     let Some(remote) = REMOTE_SPEAKER.get() else {
-        say_builtin(&u.text, u.volume);
+        for p in &u.pieces {
+            say_builtin(p, u.volume);
+        }
         return SpeechReport { spoken_by: BUILTIN, failures: vec![] };
     };
     let now = Instant::now();
-    // Held across synthesis and playback: safe only because the speech thread is DOWN's sole user.
+    // Held across the whole line: safe only because the speech thread is DOWN's
+    // sole user. The threads fetching ahead never touch it; they only return a result.
     let mut marks = DOWN.lock().unwrap_or_else(|e| e.into_inner());
-    speak_chain(u, &mut marks, now, remote, &say_builtin)
+    speak_chain(u, &mut marks, now, remote)
 }
 
 /// Speaks `u` with `speak`, calling `hook` before and after, then tells
@@ -716,31 +805,103 @@ mod tests {
         RemoteVoice::Server { maya_dir: "/m".into(), base: "http://h:1".into(), voice: "default".into(), model: String::new(), key: None }
     }
 
-    /// Remote voices that answer from a script per label and record each
-    /// call, and a built-in voice that records what it said.
+    /// One call the chain made on the test double.
+    enum Call {
+        Fetch(&'static str, Reach, String),
+        Ahead(&'static str, Reach, String),
+        Play(String),
+        Builtin(String),
+    }
+
+    /// Remote voices that answer from a script per label or per (label,
+    /// piece) and log each call in order, and a built-in voice that records
+    /// what it said. A fetched file's path is the piece itself.
     #[derive(Default)]
     struct Voices {
         answers: std::cell::RefCell<std::collections::HashMap<&'static str, Result<(), String>>>,
-        calls: std::cell::RefCell<Vec<(&'static str, Reach)>>,
+        fails: std::cell::RefCell<std::collections::HashMap<(&'static str, String), String>>,
+        misses: std::cell::RefCell<HashSet<(&'static str, String)>>,
+        log: std::cell::RefCell<Vec<Call>>,
         builtin: std::cell::RefCell<Vec<String>>,
     }
 
     impl Voices {
+        /// Every fetch with this voice answers `result`, whatever the piece and reach.
         fn answer(&self, label: &'static str, result: Result<(), &str>) {
             self.answers.borrow_mut().insert(label, result.map_err(String::from));
         }
 
-        fn speak(&self, u: &Utterance, marks: &mut DownMarks, now: Instant) -> SpeechReport {
-            let remote = |v: &RemoteVoice, _: &str, _: u8, reach: Reach| {
-                self.calls.borrow_mut().push((v.label(), reach));
-                self.answers.borrow().get(v.label()).cloned().unwrap_or(Ok(()))
-            };
-            let builtin = |text: &str, _: u8| self.builtin.borrow_mut().push(text.to_string());
-            speak_chain(u, marks, now, &remote, &builtin)
+        /// Fetching `piece` with this voice over the network fails with `err`.
+        fn fail(&self, label: &'static str, piece: &str, err: &str) {
+            self.fails.borrow_mut().insert((label, piece.to_string()), err.to_string());
         }
 
+        /// `piece` is not in this voice's cache.
+        fn fail_cache(&self, label: &'static str, piece: &str) {
+            self.misses.borrow_mut().insert((label, piece.to_string()));
+        }
+
+        fn answer_for(&self, v: &RemoteVoice, text: &str, reach: Reach) -> Result<PathBuf, String> {
+            let key = (v.label(), text.to_string());
+            if reach == Reach::CacheOnly && self.misses.borrow().contains(&key) {
+                return Err("not cached".into());
+            }
+            if reach == Reach::Network {
+                if let Some(e) = self.fails.borrow().get(&key) {
+                    return Err(e.clone());
+                }
+            }
+            self.answers.borrow().get(v.label()).cloned().unwrap_or(Ok(())).map(|()| PathBuf::from(text))
+        }
+
+        fn speak(&self, u: &Utterance, marks: &mut DownMarks, now: Instant) -> SpeechReport {
+            speak_chain(u, marks, now, self)
+        }
+
+        /// The calls so far, as lines (`"fetch ElevenLabs Network p1"`), emptying the log.
+        fn take_log(&self) -> Vec<String> {
+            std::mem::take(&mut *self.log.borrow_mut())
+                .into_iter()
+                .map(|c| match c {
+                    Call::Fetch(label, reach, text) => format!("fetch {label} {reach:?} {text}"),
+                    Call::Ahead(label, reach, text) => format!("ahead {label} {reach:?} {text}"),
+                    Call::Play(text) => format!("play {text}"),
+                    Call::Builtin(text) => format!("builtin {text}"),
+                })
+                .collect()
+        }
+
+        /// The fetches so far, ahead or not, by voice and reach, emptying the log.
         fn take_calls(&self) -> Vec<(&'static str, Reach)> {
-            std::mem::take(&mut *self.calls.borrow_mut())
+            std::mem::take(&mut *self.log.borrow_mut())
+                .into_iter()
+                .filter_map(|c| match c {
+                    Call::Fetch(label, reach, _) | Call::Ahead(label, reach, _) => Some((label, reach)),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    impl Speak for Voices {
+        fn fetch(&self, v: &RemoteVoice, text: &str, reach: Reach) -> Result<PathBuf, String> {
+            self.log.borrow_mut().push(Call::Fetch(v.label(), reach, text.to_string()));
+            self.answer_for(v, text, reach)
+        }
+
+        fn fetch_ahead(&self, v: &RemoteVoice, text: &str, reach: Reach) -> Ahead {
+            self.log.borrow_mut().push(Call::Ahead(v.label(), reach, text.to_string()));
+            Ahead::Ready(self.answer_for(v, text, reach))
+        }
+
+        fn play(&self, path: &Path, _volume: u8) -> Result<(), String> {
+            self.log.borrow_mut().push(Call::Play(path.display().to_string()));
+            Ok(())
+        }
+
+        fn builtin(&self, text: &str, _volume: u8) {
+            self.log.borrow_mut().push(Call::Builtin(text.to_string()));
+            self.builtin.borrow_mut().push(text.to_string());
         }
     }
 
@@ -847,6 +1008,94 @@ mod tests {
         assert_eq!(v.take_calls(), [(ELEVEN, Reach::Network)], "a trial ignores the mark");
         v.speak(&line(), &mut marks, t0 + Duration::from_secs(2));
         assert_eq!(v.take_calls(), [(ELEVEN, Reach::Network)], "the success cleared the mark");
+    }
+
+    fn reply(n: usize) -> Utterance {
+        Utterance::in_pieces((1..=n).map(|i| format!("p{i}")).collect(), vec![eleven(), server()])
+    }
+
+    #[test]
+    fn the_next_piece_is_fetched_before_the_current_one_plays() {
+        let v = Voices::default();
+        v.speak(&reply(3), &mut DownMarks::default(), Instant::now());
+        assert_eq!(v.take_log(), ["fetch ElevenLabs Network p1", "ahead ElevenLabs Network p2", "play p1", "ahead ElevenLabs Network p3", "play p2", "play p3"]);
+    }
+
+    #[test]
+    fn a_failure_mid_reply_moves_the_rest_to_the_next_voice() {
+        let v = Voices::default();
+        v.fail(ELEVEN, "p2", "502");
+        let mut marks = DownMarks::default();
+        let report = v.speak(&reply(3), &mut marks, Instant::now());
+        let log = v.take_log();
+        assert_eq!(log.iter().filter(|l| l.starts_with("play")).collect::<Vec<_>>(), ["play p1", "play p2", "play p3"], "each piece is heard once");
+        assert!(!log.iter().skip_while(|l| !l.contains("p2")).any(|l| l.contains(ELEVEN) && l.contains("p3")), "ElevenLabs is not asked for p3: {log:?}");
+        assert_eq!(report, SpeechReport { spoken_by: SERVER, failures: vec!["ElevenLabs failed: 502.".into()] });
+        assert!(marks.is_down(eleven().fingerprint(), Instant::now()));
+    }
+
+    #[test]
+    fn a_failed_prefetch_counts_as_the_voice_failing_on_that_piece() {
+        // p2 fails when fetched ahead: p2 is fetched from the server at its turn, then p3 ahead from the server.
+        let v = Voices::default();
+        v.fail(ELEVEN, "p2", "timeout");
+        v.speak(&reply(3), &mut DownMarks::default(), Instant::now());
+        let log = v.take_log();
+        let at = |s: &str| log.iter().position(|l| l == s).unwrap_or_else(|| panic!("{s} missing from {log:?}"));
+        assert!(at("ahead ElevenLabs Network p2") < at("play p1"));
+        assert!(at("play p1") < at("fetch the voice server Network p2"));
+        assert!(at("fetch the voice server Network p2") < at("ahead the voice server Network p3"));
+    }
+
+    #[test]
+    fn with_every_remote_voice_failing_the_builtin_speaks_the_rest() {
+        let v = Voices::default();
+        v.fail(ELEVEN, "p2", "a");
+        v.fail(SERVER, "p2", "b");
+        let report = v.speak(&reply(3), &mut DownMarks::default(), Instant::now());
+        assert_eq!(*v.builtin.borrow(), ["p2", "p3"]);
+        assert_eq!(report.spoken_by, "the built-in voice");
+        assert_eq!(report.failures.len(), 2);
+    }
+
+    #[test]
+    fn a_voice_marked_down_plays_cached_pieces_only() {
+        let v = Voices::default();
+        let mut marks = DownMarks::default();
+        let t0 = Instant::now();
+        marks.mark(eleven().fingerprint(), t0);
+        v.fail_cache(ELEVEN, "p2");
+        let report = v.speak(&reply(3), &mut marks, t0 + Duration::from_secs(1));
+        let log = v.take_log();
+        assert!(log.contains(&"fetch ElevenLabs CacheOnly p1".to_string()), "{log:?}");
+        assert!(!log.iter().any(|l| l.contains("ElevenLabs Network")), "a down voice never goes to the network: {log:?}");
+        assert!(!log.iter().any(|l| l.contains(ELEVEN) && l.contains("p3")), "after a miss the rest stays with the next voice: {log:?}");
+        assert!(report.failures.is_empty(), "a cache miss while down is not a failure");
+    }
+
+    #[test]
+    fn a_reply_is_one_utterance_between_the_hook_calls() {
+        let log = std::sync::Mutex::new(Vec::<String>::new());
+        let hook = |p: SpeechPhase| log.lock().unwrap().push(format!("{p:?}"));
+        deliver(Utterance::in_pieces(vec!["One.".into(), "Two.".into()], vec![]), Some(&hook), &|u: &Utterance| {
+            log.lock().unwrap().push(format!("speak {}", u.pieces.len()));
+            SpeechReport { spoken_by: "the built-in voice", failures: vec![] }
+        });
+        assert_eq!(*log.lock().unwrap(), ["Starting(\"One. Two.\")", "speak 2", "Finished"]);
+    }
+
+    #[test]
+    fn fetching_ahead_runs_on_another_thread() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let ahead = Ahead::spawn(move || {
+            started_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            Ok(PathBuf::from("/m/voice/x.wav"))
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).expect("the fetch started without being waited for");
+        go_tx.send(()).unwrap();
+        assert_eq!(ahead.wait(), Ok(PathBuf::from("/m/voice/x.wav")));
     }
 
     #[test]

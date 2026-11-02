@@ -1934,7 +1934,7 @@ pub fn run() {
             log::line("app", format!("{} sessions were running when Maya last stopped", offered.len()));
             #[cfg(target_os = "macos")]
             focus::install_app_handle(app.handle().clone());
-            notify::set_remote_speaker(voice::speak_remote);
+            notify::set_remote_speaker(notify::RemoteSpeaker { fetch: voice::fetch_remote, play: voice::play });
             listener::install_speech_hook(app.handle().clone());
             native_app::tell_unseen_ends(app.handle().clone());
             #[cfg(target_os = "macos")]
