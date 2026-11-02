@@ -1,3 +1,18 @@
+# 0.47.0
+
+## New
+
+- Every Maya (the computer, the phone and the `maya` command) now keeps your whole group of trusted devices. Pair a device once with a code. After that it never needs a code again, whichever Maya is the main.
+- When you use Make main, every device follows the new main with no code. This includes a device that was off or away at that moment: when it is back it goes to the old main, which points it to the new one. This works only while the old main can still be reached. If it cannot, press Join on that device (no code).
+- New Settings › Devices, on the computer and on the phone. It lists your devices, shows which one is the main and when each was last seen.
+- Remove, from any Maya, takes a device out of every Maya. The main cannot be removed: make another Maya the main first.
+- Join connects a Maya to a main that is already in your group, with no code. It asks for the main's address and port, filled in from the last ones seen.
+- On the main, the list of paired devices, Make main and "Sees and controls all sessions" moved from Settings › Network to Settings › Devices.
+- Only pairing with a code on the main adds a device. A stolen device that you remove cannot have slipped another device into your group.
+- `maya devices` lists the group, and `maya devices join <name or id> <host>[:port]` joins a main in the group with no code; stop `maya run` first, as for `maya pair`. To remove a device, use a computer or the phone.
+- New key now also clears the device list, because a new key is a new device.
+- Upgrading: an assistant from 0.46 lists its main straight away after it upgrades. All your Mayas should run this version.
+
 # 0.46.0
 
 ## New
