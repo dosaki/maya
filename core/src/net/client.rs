@@ -18,12 +18,13 @@
 
 use super::identity::{decode_key, encode_key, Keypair};
 use super::live::{self, FrameSink, LiveTerms, TermEvent, TermFrame, TermView};
-use super::protocol::{decode_down, encode, Attachment, CommandKind, Down, Request, Up, DEFAULT_PORT, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
+use super::protocol::{decode_down, encode, Attachment, CommandKind, Down, Request, Up, CAP_PICK_TERMINAL, DEFAULT_PORT, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
 use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use crate::config::{NetworkConfig, NetworkRole};
 use crate::log;
 use crate::model::Card;
+use crate::terminal_choice::TerminalChoices;
 use base64::Engine;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -96,6 +97,11 @@ pub trait Executor: Send + Sync {
     /// What was running on this machine when its Maya last stopped, for
     /// the main's banner; `None` from a Maya that does not remember.
     fn remembered(&self) -> Option<Vec<crate::remembered::Remembered>> {
+        None
+    }
+    /// The terminals this machine can open a session in, for the main's picker;
+    /// `None` from a Maya that offers no pick.
+    fn terminals(&self) -> Option<TerminalChoices> {
         None
     }
     /// The terminals this Maya streams to the main; `None` from a Maya with none.
@@ -616,12 +622,12 @@ fn connection(config: &NetworkConfig, identity: &Keypair, exec: &Arc<dyn Executo
         }
     };
     let mut ch = Channel::new(ws, noise);
-    let out = handshake(&mut ch, config, &**notify, stop, learned, deadline).and_then(|(main, mirror, caps)| {
+    let out = handshake(&mut ch, config, exec, &**notify, stop, learned, deadline).and_then(|(main, mirror, caps, sent)| {
         log::line("network", format!("connected to {main}"));
         notify.connected(&main);
         notify.mirror_offer(mirror);
         notify.main_caps(&caps);
-        pump(&mut ch, exec, notify, stop)
+        pump(&mut ch, exec, notify, stop, caps.iter().any(|c| c == CAP_PICK_TERMINAL), sent)
     });
     finish(&mut ch.ws);
     out
@@ -629,9 +635,10 @@ fn connection(config: &NetworkConfig, identity: &Keypair, exec: &Arc<dyn Executo
 
 /// `hello`, then `welcome`; returns the main's name, its mirror offer and its caps.
 /// `learned` is the main's key from a pairing, kept only once welcomed.
-fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, learned: Option<[u8; 32]>, deadline: Instant) -> Result<(String, Option<bool>, Vec<String>), String> {
+fn handshake(ch: &mut Chan, config: &NetworkConfig, exec: &Arc<dyn Executor>, notify: &dyn ClientNotify, stop: &AtomicBool, learned: Option<[u8; 32]>, deadline: Instant) -> Result<(String, Option<bool>, Vec<String>, Option<TerminalChoices>), String> {
     let hostname = super::local_hostname();
-    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps(), brain_dormant_since: notify.brain_dormant_since() };
+    let terminals = exec.terminals();
+    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps(), brain_dormant_since: notify.brain_dormant_since(), terminals: terminals.clone() };
     send_up(ch, &hello)?;
     loop {
         match read_down(ch, stop, deadline)? {
@@ -647,7 +654,7 @@ fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, s
                     notify.paired(&encode_key(&key));
                 }
                 let name = clean(&name);
-                return Ok((if name.is_empty() { "the main Maya".into() } else { name }, mirror, caps));
+                return Ok((if name.is_empty() { "the main Maya".into() } else { name }, mirror, caps, terminals));
             }
             Down::Bye { reason } => return Err(bye_message(&reason)),
             other => log::line("network", format!("main: ignored {} before welcome", encode(&other).chars().take(40).collect::<String>())),
@@ -656,7 +663,7 @@ fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, s
 }
 
 /// Runs a welcomed connection until it drops or `stop` is set.
-fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, stop: &AtomicBool) -> Result<(), String> {
+fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, stop: &AtomicBool, reads_terminals: bool, mut last_terminals: Option<TerminalChoices>) -> Result<(), String> {
     let (tx, rx) = channel::<Up>();
     let lane = notify.lane();
     let _attached = Attached(lane.as_ref().map(|l| (l.clone(), l.attach(tx.clone()))));
@@ -698,6 +705,13 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
             if refresh || last_board.as_ref().map_or(true, |(_, f)| *f != frame) {
                 ch.send(&frame).map_err(|e| format!("Lost the connection to the main Maya: {e}"))?;
                 last_board = Some((Instant::now(), frame));
+            }
+            // A Settings save asks for a board, so a changed pick rides the same turn.
+            if reads_terminals {
+                if let Some(now) = exec.terminals().filter(|t| last_terminals.as_ref() != Some(t)) {
+                    send_up(ch, &Up::Terminals { terminals: now.clone() })?;
+                    last_terminals = Some(now);
+                }
             }
         }
         if last_ping.elapsed() >= PING_EVERY {
@@ -947,6 +961,7 @@ impl ClientNotify for PairNotify {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::NewSessionTerminal;
     use crate::net::live::{EventSink, TermOpened};
 
     #[test]
@@ -1209,9 +1224,8 @@ mod tests {
         fn removed(&self) {}
     }
 
-    /// A welcomed link over loopback: the assistant's end runs `pump` on a
-    /// thread until `stop`; the main's end is returned for the test to drive.
-    fn serving(terms: Option<Arc<FakeTerms>>, stop: Arc<AtomicBool>) -> (Chan, std::thread::JoinHandle<Result<(), String>>) {
+    /// A loopback link: the assistant's end and the main's end.
+    fn loopback() -> (Chan, Chan) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let joiner = std::thread::spawn(move || {
@@ -1223,10 +1237,20 @@ mod tests {
         stream.set_read_timeout(Some(TICK)).unwrap();
         let main = tungstenite::accept(stream).unwrap();
         let (a, m) = secure::transport_pair();
-        let mut assistant = Channel::new(joiner.join().unwrap(), a);
-        let (exec, notify): (Arc<dyn Executor>, Arc<dyn ClientNotify>) = (Arc::new(Hosting(terms)), Arc::new(Silent));
-        let run = std::thread::spawn(move || pump(&mut assistant, &exec, &notify, &stop));
-        (Channel::new(main, m), run)
+        (Channel::new(joiner.join().unwrap(), a), Channel::new(main, m))
+    }
+
+    /// A welcomed link over loopback: the assistant's end runs `pump` on a
+    /// thread until `stop`; the main's end is returned for the test to drive.
+    fn serving(terms: Option<Arc<FakeTerms>>, stop: Arc<AtomicBool>) -> (Chan, std::thread::JoinHandle<Result<(), String>>) {
+        serving_exec(Arc::new(Hosting(terms)), false, None, stop)
+    }
+
+    fn serving_exec(exec: Arc<dyn Executor>, reads_terminals: bool, sent: Option<TerminalChoices>, stop: Arc<AtomicBool>) -> (Chan, std::thread::JoinHandle<Result<(), String>>) {
+        let (mut assistant, main) = loopback();
+        let notify: Arc<dyn ClientNotify> = Arc::new(Silent);
+        let run = std::thread::spawn(move || pump(&mut assistant, &exec, &notify, &stop, reads_terminals, sent));
+        (main, run)
     }
 
     fn send_down(main: &mut Chan, down: Down) {
@@ -1252,6 +1276,116 @@ mod tests {
             assert!(Instant::now() < end, "{what} within 5 s");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// An assistant whose terminals the test changes between board turns.
+    #[derive(Default)]
+    struct Choosing {
+        now: Mutex<Option<TerminalChoices>>,
+        board: AtomicBool,
+    }
+
+    impl Executor for Choosing {
+        fn execute(&self, _: CommandKind) -> Result<Option<Value>, String> {
+            Ok(None)
+        }
+        fn board(&self) -> (Vec<Card>, Vec<String>) {
+            (vec![], vec![])
+        }
+        fn board_requested(&self) -> bool {
+            self.board.swap(false, Ordering::SeqCst)
+        }
+        fn terminals(&self) -> Option<TerminalChoices> {
+            self.now.lock().unwrap().clone()
+        }
+    }
+
+    fn choices(default: NewSessionTerminal) -> TerminalChoices {
+        crate::terminal_choice::describe("macos", default)
+    }
+
+    /// How long a check that nothing arrives waits: three board gaps, so a
+    /// board turn surely runs inside it even on a loaded CI machine.
+    const QUIET: Duration = Duration::from_secs(3);
+
+    /// Reads the main's end until the first terminals frame, or panics after 10 s.
+    fn first_terminals(main: &mut Chan) -> TerminalChoices {
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < end, "an Up::Terminals within 10 s");
+            if let Ok(Got::Text(t)) = main.read() {
+                if let Ok(Up::Terminals { terminals }) = crate::net::protocol::decode_up(&t) {
+                    return terminals;
+                }
+            }
+        }
+    }
+
+    /// Reads the main's end for `window`, returning the terminals frames seen.
+    fn terminals_within(main: &mut Chan, window: Duration) -> Vec<TerminalChoices> {
+        let end = Instant::now() + window;
+        let mut seen = vec![];
+        while Instant::now() < end {
+            if let Ok(Got::Text(t)) = main.read() {
+                if let Ok(Up::Terminals { terminals }) = crate::net::protocol::decode_up(&t) {
+                    seen.push(terminals);
+                }
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn hello_carries_the_executor_s_terminals() {
+        let exec: Arc<dyn Executor> = Arc::new(Choosing { now: Mutex::new(Some(choices(NewSessionTerminal::Iterm))), ..Default::default() });
+        let (mut assistant, mut main) = loopback();
+        let stop = Arc::new(AtomicBool::new(false));
+        let notify: Arc<dyn ClientNotify> = Arc::new(Silent);
+        let run = std::thread::spawn(move || {
+            let config = NetworkConfig::default();
+            handshake(&mut assistant, &config, &exec, &*notify, &stop, None, Instant::now() + Duration::from_secs(5)).map(|_| ())
+        });
+        let end = Instant::now() + Duration::from_secs(5);
+        let hello = loop {
+            assert!(Instant::now() < end, "a hello within 5 s");
+            if let Ok(Got::Text(t)) = main.read() {
+                break crate::net::protocol::decode_up(&t).unwrap();
+            }
+        };
+        let Up::Hello { terminals, .. } = hello else { panic!("not a hello: {hello:?}") };
+        assert_eq!(terminals, Some(choices(NewSessionTerminal::Iterm)));
+        send_down(&mut main, Down::Welcome { name: "main".into(), mirror: None, caps: vec![] });
+        assert_eq!(run.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn a_change_is_sent_to_a_main_that_reads_it() {
+        let exec = Arc::new(Choosing { now: Mutex::new(Some(choices(NewSessionTerminal::Terminal))), ..Default::default() });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut main, run) = serving_exec(exec.clone(), true, exec.terminals(), stop.clone());
+        exec.board.store(true, Ordering::SeqCst);
+        assert!(terminals_within(&mut main, QUIET).is_empty(), "what hello sent is not sent again");
+        *exec.now.lock().unwrap() = Some(choices(NewSessionTerminal::Native));
+        exec.board.store(true, Ordering::SeqCst);
+        assert_eq!(first_terminals(&mut main), choices(NewSessionTerminal::Native));
+        // Another board turn with nothing changed sends nothing more.
+        exec.board.store(true, Ordering::SeqCst);
+        assert!(terminals_within(&mut main, QUIET).is_empty(), "once for one change");
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn an_older_main_is_not_sent_updates() {
+        let exec = Arc::new(Choosing { now: Mutex::new(Some(choices(NewSessionTerminal::Terminal))), ..Default::default() });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut main, run) = serving_exec(exec.clone(), false, exec.terminals(), stop.clone());
+        assert!(terminals_within(&mut main, QUIET).is_empty());
+        *exec.now.lock().unwrap() = Some(choices(NewSessionTerminal::Native));
+        exec.board.store(true, Ordering::SeqCst);
+        assert!(terminals_within(&mut main, QUIET).is_empty(), "no Up::Terminals for a main without the cap");
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
     }
 
     #[test]

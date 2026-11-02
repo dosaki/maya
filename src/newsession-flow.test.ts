@@ -363,3 +363,70 @@ describe("new-session machine picker", () => {
     }
   });
 });
+
+describe("new-session terminal pick", () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<div id="modal-host"></div><div id="toast" class="toast" hidden></div>';
+    invoke.mockReset();
+  });
+  afterEach(() => closeNewSession());
+
+  const mac = { platform: "macos", choices: ["terminal", "iterm", "native"], default: "terminal" };
+  const linux = { platform: "linux", choices: ["terminal", "native"], default: "native" };
+  const machines = [
+    { name: "A", hostname: "a", platform: "macos", connected: true },
+    { name: "B", hostname: "b", platform: "linux", connected: true },
+  ];
+
+  it("shows the last-chosen machine's choices when the earlier machine's listing lands late", async () => {
+    const pending: Record<string, (v: unknown) => void> = {};
+    invoke.mockImplementation((cmd: string, args?: { machine?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve(machines);
+      if (cmd === "list_project_dirs") return Promise.resolve(["a"]);
+      if (cmd === "list_agents") {
+        if (args?.machine === "") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true });
+        return new Promise((r) => { pending[args!.machine!] = r; });
+      }
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await openNewSession();
+    await flush();
+    const choose = async (m: string) => {
+      const sel = document.querySelector<HTMLSelectElement>("select[name=machine]")!;
+      sel.value = m;
+      sel.dispatchEvent(new Event("change"));
+      await flush();
+    };
+    await choose("A");
+    await choose("B");
+    pending["A"]({ agents: [CLAUDE_AGENT], names: true, terminals: mac });
+    await flush();
+    pending["B"]({ agents: [CLAUDE_AGENT], names: true, terminals: linux });
+    await flush();
+    await flush();
+    const pick = document.querySelector<HTMLSelectElement>("select[name=terminal]")!;
+    expect([...pick.options].map((o) => o.value)).toEqual(["terminal", "native"]);
+    expect(pick.value).toBe("native");
+  });
+
+  it("keeps a pick the user changed when a late reply repaints the form", async () => {
+    let dirs: (v: unknown) => void = () => {};
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "list_project_dirs") return new Promise((r) => { dirs = r; });
+      if (cmd === "list_agents") return Promise.resolve({ agents: [CLAUDE_AGENT], names: true, terminals: mac });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    void openNewSession();
+    await flush();
+    const pick = document.querySelector<HTMLSelectElement>("select[name=terminal]")!;
+    expect(pick.value).toBe("terminal");
+    pick.value = "iterm";
+    dirs(["a"]);
+    await flush();
+    expect(document.querySelector<HTMLSelectElement>("select[name=terminal]")!.value).toBe("iterm");
+    const model = document.querySelector<HTMLSelectElement>("select[name=model]")!;
+    model.dispatchEvent(new Event("change"));
+    expect(document.querySelector<HTMLSelectElement>("select[name=terminal]")!.value).toBe("iterm");
+  });
+});

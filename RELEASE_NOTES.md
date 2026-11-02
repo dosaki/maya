@@ -1,3 +1,10 @@
+# 0.47.0
+
+## New
+
+- New Session and Resume have a Terminal picker. It starts on the terminal chosen in Settings, and changing it opens only that session somewhere else: Terminal, iTerm2 or Native on a Mac, Windows Terminal or Native on Windows, Terminal (tmux) or Native on Linux.
+- On another machine or from the phone, the picker lists that machine's terminals and its own default. An assistant tells the main when its setting changes.
+
 # 0.46.0
 
 ## New

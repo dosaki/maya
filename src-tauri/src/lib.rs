@@ -43,8 +43,22 @@ fn terminal() -> &'static dyn terminal::Terminal {
 
 /// Where Settings says new sessions open: read on each use, so a change
 /// counts at once. Terminal when there is no choice or it cannot be read.
-pub(crate) fn new_session_terminal() -> config::NewSessionTerminal {
+fn saved_new_session_terminal() -> config::NewSessionTerminal {
     config::load(&maya_core::claude_dir().join("maya/config.json")).new_session_terminal
+}
+
+/// Where a new session opens now: the terminal picked for this thread's open,
+/// else where Settings says.
+pub(crate) fn new_session_terminal() -> config::NewSessionTerminal {
+    native::route::picked().unwrap_or_else(saved_new_session_terminal)
+}
+
+/// Runs `f` (an open) in the terminal `pick` names, when it names one this
+/// machine has; refuses before anything opens when it does not. Settings is
+/// read here directly, so the check sees this machine's own choice.
+pub(crate) fn open_with_pick<T>(pick: Option<config::NewSessionTerminal>, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    maya_core::terminal_choice::check_pick(pick, &maya_core::terminal_choice::local(saved_new_session_terminal()), "this machine")?;
+    native::route::with_terminal(pick, f)
 }
 
 /// Opens an http(s) URL in the default browser.
@@ -95,7 +109,7 @@ use config::Config;
 use listener::VoiceState;
 use maya_core::agents;
 use maya_core::config::GitProvider;
-use maya_core::net::routing::{agents_reply, check_remote_agent, check_remote_worktree, machines_of, remote_attachments, AgentsReply, MachineInfo, ROUTE_TIMEOUT};
+use maya_core::net::routing::{agents_reply, check_remote_agent, check_remote_terminal, check_remote_worktree, machines_of, remote_attachments, AgentsReply, MachineInfo, ROUTE_TIMEOUT};
 use model::{Card, Harness};
 use net::merge;
 use net::protocol::CommandKind;
@@ -247,6 +261,7 @@ impl Notify for TauriNetNotify {
         if launch::find_binary(brain).is_ok() {
             caps.push(net::protocol::CAP_VOICE.to_string());
         }
+        caps.push(net::protocol::CAP_PICK_TERMINAL.to_string());
         caps
     }
     fn live_terms(&self) -> Option<std::sync::Arc<dyn net::live::LiveTerms>> {
@@ -1353,14 +1368,16 @@ fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: Str
 /// Returns the Native terminal it runs in when it runs in one, for the page
 /// to open at once.
 #[tauri::command(async)]
-fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<Option<u64>, String> {
+fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>, terminal: Option<config::NewSessionTerminal>) -> Result<Option<u64>, String> {
     let agent = agent.unwrap_or_default();
     if !is_local(&machine) {
         let machine = machine.unwrap();
-        check_remote_agent(agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
-        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent }).map(|()| None);
+        let boards = remote_boards(&state);
+        check_remote_agent(agent, &merge::agents_of(&boards, &machine), &machine)?;
+        check_remote_terminal(terminal, &merge::terminal_choices_of(&boards, &machine), merge::is_connected(&boards, &machine), &machine)?;
+        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent, terminal }).map(|()| None);
     }
-    let (resumed, native_term) = native::route::opening(|| actions::resume_session(&local(&state), agent, &dir, &session_id));
+    let (resumed, native_term) = native::route::opening(|| open_with_pick(terminal, || actions::resume_session(&local(&state), agent, &dir, &session_id)));
     resumed.map(|()| native_term)
 }
 
@@ -1381,7 +1398,8 @@ fn list_agents(state: TauriState<AppState>, machine: Option<String>) -> AgentsRe
     let boards = remote_boards(&state);
     let name = machine.as_deref().unwrap_or_default();
     let remote = if local { None } else { merge::agents_of(&boards, name) };
-    agents_reply(local, remote, !local && merge::worktrees_of(&boards, name), agents::current)
+    let terminals = if local { Some(maya_core::terminal_choice::local(saved_new_session_terminal())) } else { merge::terminal_choices_of(&boards, name) };
+    agents_reply(local, remote, !local && merge::worktrees_of(&boards, name), terminals, agents::current)
 }
 
 /// A session just started, and the Native terminal it runs in when it runs
@@ -1405,9 +1423,13 @@ fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String
         let boards = remote_boards(&state);
         check_remote_agent(options.agent, &merge::agents_of(&boards, &machine), &machine)?;
         check_remote_worktree(&options, merge::worktrees_of(&boards, &machine), &machine)?;
+        check_remote_terminal(options.terminal, &merge::terminal_choices_of(&boards, &machine), merge::is_connected(&boards, &machine), &machine)?;
         return route_data(&app, &machine, start_kind_for(dir, prompt, options)).map(|result| Started { result, native_term: None });
     }
-    let (started, native_term) = native::route::opening(|| actions::start_session(&local(&state), dir, prompt, options));
+    let (started, native_term) = native::route::opening(|| {
+        let pick = options.terminal;
+        open_with_pick(pick, || actions::start_session(&local(&state), dir, prompt, options))
+    });
     started.map(|result| Started { result, native_term })
 }
 
@@ -2079,14 +2101,14 @@ mod route_tests {
 
     #[test]
     fn an_older_remote_offers_claude_and_no_name() {
-        let r = agents_reply(false, None, false, || panic!("not local"));
+        let r = agents_reply(false, None, false, None, || panic!("not local"));
         assert_eq!(r.agents, vec![maya_core::agents::claude()]);
         assert!(!r.names);
-        let r = agents_reply(false, Some(vec![maya_core::agents::claude(), maya_core::agents::info_for(Harness::Grok, None)]), false, || panic!("not local"));
+        let r = agents_reply(false, Some(vec![maya_core::agents::claude(), maya_core::agents::info_for(Harness::Grok, None)]), false, None, || panic!("not local"));
         assert_eq!(r.agents.len(), 2);
         assert!(r.names);
-        assert!(agents_reply(true, None, false, || vec![maya_core::agents::claude()]).names);
-        assert!(agents_reply(false, None, true, || panic!("not local")).worktrees);
+        assert!(agents_reply(true, None, false, None, || vec![maya_core::agents::claude()]).names);
+        assert!(agents_reply(false, None, true, None, || panic!("not local")).worktrees);
     }
 
     #[test]

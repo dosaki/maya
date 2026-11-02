@@ -36,6 +36,9 @@ pub const CAP_WORKTREE: &str = "worktree";
 /// A Maya with this cap can show the live terminal of a Native session it hosts
 /// (`term_attach`, `term_input`, `term_detach`, `term_frame`).
 pub const CAP_TERMINAL: &str = "terminal";
+/// From an assistant in `hello`: it honours a terminal pick in Start and Resume.
+/// From a main in `welcome.caps`: it reads `Up::Terminals`.
+pub const CAP_PICK_TERMINAL: &str = "pick-terminal";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -66,7 +69,12 @@ pub enum Up {
         /// from an older Maya.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         brain_dormant_since: Option<u64>,
+        /// The terminals this machine can open a session in; None from an older Maya.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminals: Option<crate::terminal_choice::TerminalChoices>,
     },
+    /// This machine's terminals changed (a Settings change); sent only to a main with `CAP_PICK_TERMINAL`.
+    Terminals { terminals: crate::terminal_choice::TerminalChoices },
     Board {
         cards: Vec<Card>,
         dirs: Vec<String>,
@@ -205,7 +213,15 @@ pub enum CommandKind {
     CycleMode { session: String },
     Slash { session: String, text: String },
     Start { dir: Option<String>, prompt: String, options: LaunchOptions },
-    Resume { dir: String, session: String, #[serde(default)] agent: crate::model::Harness },
+    Resume {
+        dir: String,
+        session: String,
+        #[serde(default)]
+        agent: crate::model::Harness,
+        /// Where to open it; None uses the Settings choice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal: Option<crate::config::NewSessionTerminal>,
+    },
     ListResumable { dir: String, #[serde(default)] agent: crate::model::Harness },
     History { session: String },
     /// Forget these remembered sessions (Dismiss, Forget unticked).
@@ -399,14 +415,23 @@ mod tests {
     #[test]
     fn resume_without_an_agent_means_claude_code() {
         let k: CommandKind = serde_json::from_str(r#"{"kind":"resume","dir":"maya","session":"abc"}"#).unwrap();
-        assert_eq!(k, CommandKind::Resume { dir: "maya".into(), session: "abc".into(), agent: crate::model::Harness::ClaudeCode });
+        assert_eq!(k, CommandKind::Resume { dir: "maya".into(), session: "abc".into(), agent: crate::model::Harness::ClaudeCode, terminal: None });
         let k: CommandKind = serde_json::from_str(r#"{"kind":"list_resumable","dir":"maya","agent":"grok"}"#).unwrap();
         assert_eq!(k, CommandKind::ListResumable { dir: "maya".into(), agent: crate::model::Harness::Grok });
     }
 
     #[test]
+    fn a_resume_without_a_terminal_reads_as_before_and_one_with_it_round_trips() {
+        let old: CommandKind = serde_json::from_str(r#"{"kind":"resume","dir":"d","session":"s"}"#).unwrap();
+        assert!(matches!(old, CommandKind::Resume { terminal: None, .. }));
+        let new = CommandKind::Resume { dir: "d".into(), session: "s".into(), agent: Default::default(), terminal: Some(crate::config::NewSessionTerminal::Native) };
+        let back: CommandKind = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back, new);
+    }
+
+    #[test]
     fn messages_round_trip_with_a_type_tag() {
-        let up = Up::Hello { protocol: PROTOCOL, app: "0.1.0".into(), name: "laptop".into(), hostname: "tiagos-mbp".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None };
+        let up = Up::Hello { protocol: PROTOCOL, app: "0.1.0".into(), name: "laptop".into(), hostname: "tiagos-mbp".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None, terminals: None };
         let s = encode(&up);
         assert!(s.contains("\"type\":\"hello\""), "{s}");
         assert_eq!(decode_up(&s).unwrap(), up);
@@ -498,7 +523,7 @@ mod tests {
         let old = r#"{"type":"hello","protocol":2,"app":"0.15.0","name":"n","hostname":"h","platform":"macos"}"#;
         let Up::Hello { caps, .. } = decode_up(old).unwrap() else { panic!() };
         assert!(caps.is_empty());
-        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![CAP_FOLLOW.into(), CAP_LEAD.into()], brain_dormant_since: None };
+        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![CAP_FOLLOW.into(), CAP_LEAD.into()], brain_dormant_since: None, terminals: None };
         let s = encode(&hello);
         assert!(s.contains(r#""caps":["follow","lead"]"#), "{s}");
         assert_eq!(decode_up(&s).unwrap(), hello);
@@ -532,15 +557,42 @@ mod tests {
 
     #[test]
     fn hello_says_when_her_brain_went_dormant_and_an_older_hello_says_never() {
-        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: Some(42) };
+        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: Some(42), terminals: None };
         let s = encode(&hello);
         assert!(s.contains(r#""brain_dormant_since":42"#), "{s}");
         assert_eq!(decode_up(&s).unwrap(), hello);
-        let never = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None };
+        let never = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None, terminals: None };
         assert!(!encode(&never).contains("brain_dormant_since"));
         let old = r#"{"type":"hello","protocol":2,"app":"0.26.0","name":"n","hostname":"h","platform":"macos","caps":["lead"]}"#;
         let Up::Hello { brain_dormant_since, .. } = decode_up(old).unwrap() else { panic!() };
         assert_eq!(brain_dormant_since, None);
+    }
+
+    #[test]
+    fn a_hello_from_an_older_maya_has_no_terminals() {
+        let old = r#"{"type":"hello","protocol":2,"app":"0.30.0","name":"n","hostname":"h","platform":"macos","caps":["lead"]}"#;
+        let Up::Hello { terminals, .. } = decode_up(old).unwrap() else { panic!() };
+        assert_eq!(terminals, None);
+    }
+
+    #[test]
+    fn a_hello_carries_the_terminals() {
+        use crate::config::NewSessionTerminal;
+        let terminals = Some(crate::terminal_choice::describe("linux", NewSessionTerminal::Terminal));
+        let hello = Up::Hello { protocol: PROTOCOL, app: "x".into(), name: "n".into(), hostname: "h".into(), platform: "linux".into(), caps: vec![CAP_PICK_TERMINAL.into()], brain_dormant_since: None, terminals };
+        let s = encode(&hello);
+        assert!(s.contains(r#""terminals":{"platform":"linux""#), "{s}");
+        assert_eq!(decode_up(&s).unwrap(), hello);
+    }
+
+    #[test]
+    fn a_terminals_update_round_trips() {
+        use crate::config::NewSessionTerminal;
+        let up = Up::Terminals { terminals: crate::terminal_choice::describe("macos", NewSessionTerminal::Iterm) };
+        let s = encode(&up);
+        assert!(s.contains(r#""type":"terminals""#), "{s}");
+        assert_eq!(decode_up(&s).unwrap(), up);
+        assert_eq!(CAP_PICK_TERMINAL, "pick-terminal");
     }
 
     fn was(id: &str) -> crate::remembered::Remembered {

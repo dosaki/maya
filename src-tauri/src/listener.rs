@@ -272,7 +272,7 @@ pub(crate) fn execute_action(app: &AppHandle, action: &serde_json::Value) -> Res
             let brain = state.store.lock().unwrap().config.brain();
             let sessions = list_resumable_sessions(app.clone(), state.clone(), dir.clone(), machine.clone(), Some(brain))?;
             let latest = sessions.into_iter().find(|s| !s.running).ok_or("Nothing to resume there.")?;
-            resume_session(app.clone(), state.clone(), dir, latest.id, machine, Some(brain))?;
+            resume_session(app.clone(), state.clone(), dir, latest.id, machine, Some(brain), None)?;
             Ok("Resuming.".into())
         }
         "resume_all" => {

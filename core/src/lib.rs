@@ -37,6 +37,7 @@ pub mod resume;
 pub mod reviews;
 pub mod speech;
 pub mod state;
+pub mod terminal_choice;
 pub mod statusline;
 pub mod store;
 pub mod terminal;

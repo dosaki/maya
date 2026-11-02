@@ -37,6 +37,33 @@ thread_local! {
     static OPENED: Cell<Option<TermId>> = const { Cell::new(None) };
 }
 
+thread_local! {
+    /// The terminal picked for this thread's open, over Settings.
+    static PICK: Cell<Option<NewSessionTerminal>> = const { Cell::new(None) };
+}
+
+/// Puts the previous pick back when dropped, on return or on unwind.
+struct Restore(Option<NewSessionTerminal>);
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        PICK.set(self.0);
+    }
+}
+
+/// Runs `f` with `pick` standing in for the Settings choice of where a new
+/// session opens. It counts on this thread only, and the previous value
+/// comes back when `f` returns or unwinds.
+pub fn with_terminal<T>(pick: Option<NewSessionTerminal>, f: impl FnOnce() -> T) -> T {
+    let _restore = Restore(PICK.replace(pick));
+    f()
+}
+
+/// The terminal picked for the open running on this thread, if one is.
+pub fn picked() -> Option<NewSessionTerminal> {
+    PICK.get()
+}
+
 /// Runs `f`, and hands back with its result the Native terminal it started,
 /// if it started one: the app opens its viewer at once. An action opens on
 /// the thread that runs it, so another thread's opens never count.
@@ -242,6 +269,44 @@ mod tests {
     fn holds(file: &Path, want: &str) -> String {
         within_5s(|| std::fs::read_to_string(file).is_ok_and(|s| s == want));
         std::fs::read_to_string(file).unwrap_or_default()
+    }
+
+    /// The real choice function, as `crate::new_session_terminal` makes it,
+    /// with Terminal standing in for the saved setting.
+    fn picked_or_app() -> NewSessionTerminal {
+        picked().unwrap_or(NewSessionTerminal::Terminal)
+    }
+
+    #[test]
+    fn a_pick_counts_only_inside_its_call() {
+        assert_eq!(with_terminal(Some(NewSessionTerminal::Native), picked), Some(NewSessionTerminal::Native));
+        assert_eq!(picked(), None);
+    }
+
+    #[test]
+    fn a_pick_is_cleared_when_the_open_panics() {
+        let _ = std::panic::catch_unwind(|| with_terminal(Some(NewSessionTerminal::Native), || panic!("x")));
+        assert_eq!(picked(), None);
+    }
+
+    #[test]
+    fn a_pick_routes_the_open() {
+        let (r, inner) = route(picked_or_app);
+        let opened = with_terminal(Some(NewSessionTerminal::Native), || r.open("sleep 30", Path::new("/"), "maya-1"));
+        let roots = r.host.root_pids().len();
+        r.host.kill_all();
+        assert_eq!(opened, Ok(None));
+        assert_eq!(roots, 1, "the pick reached the host");
+        assert!(inner.calls().is_empty(), "{:?}", inner.calls());
+
+        assert_eq!(r.open("claude", Path::new("/"), "maya-1"), Ok(Some("app".into())));
+        assert_eq!(inner.calls(), ["open claude"]);
+    }
+
+    #[test]
+    fn another_thread_does_not_see_the_pick() {
+        let seen = with_terminal(Some(NewSessionTerminal::Native), || std::thread::spawn(picked).join().unwrap());
+        assert_eq!(seen, None);
     }
 
     #[test]
