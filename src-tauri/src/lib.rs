@@ -43,8 +43,22 @@ fn terminal() -> &'static dyn terminal::Terminal {
 
 /// Where Settings says new sessions open: read on each use, so a change
 /// counts at once. Terminal when there is no choice or it cannot be read.
-pub(crate) fn new_session_terminal() -> config::NewSessionTerminal {
+fn saved_new_session_terminal() -> config::NewSessionTerminal {
     config::load(&maya_core::claude_dir().join("maya/config.json")).new_session_terminal
+}
+
+/// Where a new session opens now: the terminal picked for this thread's open,
+/// else where Settings says.
+pub(crate) fn new_session_terminal() -> config::NewSessionTerminal {
+    native::route::picked().unwrap_or_else(saved_new_session_terminal)
+}
+
+/// Runs `f` (an open) in the terminal `pick` names, when it names one this
+/// machine has; refuses before anything opens when it does not. Settings is
+/// read here directly, so the check sees this machine's own choice.
+pub(crate) fn open_with_pick<T>(pick: Option<config::NewSessionTerminal>, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    maya_core::terminal_choice::check_pick(pick, &maya_core::terminal_choice::local(saved_new_session_terminal()), "this machine")?;
+    native::route::with_terminal(pick, f)
 }
 
 /// Opens an http(s) URL in the default browser.
@@ -1353,14 +1367,14 @@ fn list_resumable_sessions(app: AppHandle, state: TauriState<AppState>, dir: Str
 /// Returns the Native terminal it runs in when it runs in one, for the page
 /// to open at once.
 #[tauri::command(async)]
-fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<Option<u64>, String> {
+fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>, terminal: Option<config::NewSessionTerminal>) -> Result<Option<u64>, String> {
     let agent = agent.unwrap_or_default();
     if !is_local(&machine) {
         let machine = machine.unwrap();
         check_remote_agent(agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
         return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent, terminal: None }).map(|()| None);
     }
-    let (resumed, native_term) = native::route::opening(|| actions::resume_session(&local(&state), agent, &dir, &session_id));
+    let (resumed, native_term) = native::route::opening(|| open_with_pick(terminal, || actions::resume_session(&local(&state), agent, &dir, &session_id)));
     resumed.map(|()| native_term)
 }
 
@@ -1407,7 +1421,10 @@ fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String
         check_remote_worktree(&options, merge::worktrees_of(&boards, &machine), &machine)?;
         return route_data(&app, &machine, start_kind_for(dir, prompt, options)).map(|result| Started { result, native_term: None });
     }
-    let (started, native_term) = native::route::opening(|| actions::start_session(&local(&state), dir, prompt, options));
+    let (started, native_term) = native::route::opening(|| {
+        let pick = options.terminal;
+        open_with_pick(pick, || actions::start_session(&local(&state), dir, prompt, options))
+    });
     started.map(|result| Started { result, native_term })
 }
 
