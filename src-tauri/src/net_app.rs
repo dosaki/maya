@@ -7,7 +7,7 @@
 
 use crate::actions;
 use crate::listener::{self, Interpreted, VoiceContext};
-use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
+use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, RequestLane, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
 use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD, CAP_PICK_TERMINAL, CAP_TERMINAL, CAP_WORKTREE};
@@ -59,7 +59,11 @@ pub fn new_key_with(clear: impl FnOnce() -> Result<(), String>, store: impl FnOn
 
 /// This Maya's key pair, read once and kept for the app's life.
 pub fn identity(app: &AppHandle) -> Result<Arc<Keypair>, String> {
-    let state = app.state::<AppState>();
+    identity_of(&app.state::<AppState>())
+}
+
+/// `identity` from the state alone.
+pub fn identity_of(state: &AppState) -> Result<Arc<Keypair>, String> {
     let mut held = state.identity.lock().unwrap();
     if let Some(k) = held.as_ref() {
         return Ok(k.clone());
@@ -120,6 +124,7 @@ pub fn pair(app: &AppHandle, host: &str, port: u16, name: &str, code: &str) -> R
         c.network.name = name.trim().into();
         c.network.main_key = main_key;
         c.network.pair_again = false;
+        c.network.end_redirect();
         c.listen = false;
     })?;
     log::line("network", format!("paired with {main}"));
@@ -173,10 +178,43 @@ impl ClientNotify for TauriClientNotify {
             l.error = Some(REMOVED.into());
             l.retrying = false;
         });
+        // No longer in the group: nobody is to be sent anywhere from here.
+        // Only the redirect stops; the role and the link stay as they are.
+        let redirecting = self.app.state::<AppState>().store.lock().unwrap().config.network.redirect_port != 0;
+        if redirecting && !self.stop.load(Ordering::SeqCst) {
+            if let Err(e) = crate::update_config(&self.app, |c| c.network.end_redirect()) {
+                log::line("network", format!("could not stop the redirect: {e}"));
+            }
+        }
     }
 
     fn caps(&self) -> Vec<String> {
         vec![CAP_FOLLOW.into(), CAP_LEAD.into(), CAP_WORKTREE.into(), CAP_TERMINAL.into(), CAP_PICK_TERMINAL.into()]
+    }
+
+    /// Keeps the group the main sent. Takes no lock of its own: the save
+    /// goes through `update_config` (store, briefly), and a changed group
+    /// restarts a redirect through `network_change`.
+    fn group(&self, group: maya_core::net::group::GroupCopy, from: &str) {
+        let Ok(id) = identity(&self.app) else { return };
+        let my_key = id.public_b64();
+        // Only a group that changes the saved one is saved, and only for an
+        // assistant of the main that sent it.
+        let now = self.app.state::<AppState>().store.lock().unwrap().config.network.clone();
+        let mut probe = now;
+        if !maya_core::net::group::adopt_from_main(&mut probe, &my_key, from, &group) {
+            return;
+        }
+        let saved = crate::update_config(&self.app, |c| {
+            maya_core::net::group::adopt_from_main(&mut c.network, &my_key, from, &group);
+        });
+        if let Err(e) = saved {
+            log::line("network", format!("could not save the group: {e}"));
+        }
+    }
+
+    fn lane(&self) -> Option<Arc<RequestLane>> {
+        Some(self.app.state::<AppState>().lane.clone())
     }
 
     /// From her record: None when this Maya never ran a brain.
@@ -190,17 +228,38 @@ impl ClientNotify for TauriClientNotify {
     /// before its answer is out. The client ends by itself once it is.
     /// Nothing is saved when the server cannot start, and the server stops
     /// again when the save fails, so either way this Maya stays an assistant.
-    fn promoted(&self, list: Vec<config::PairedAssistant>, summary: Option<String>) -> Result<u16, String> {
+    fn promoted(&self, group: maya_core::net::group::GroupCopy, summary: Option<String>) -> Result<u16, String> {
         let state = self.app.state::<AppState>();
         let (mut after, path) = {
             let store = state.store.lock().unwrap();
             (store.config.clone(), store.config_path())
         };
-        let handed = list.len().saturating_sub(1);
-        promote::as_main(&mut after, list);
-        let handle = start_with(Arc::new(crate::TauriNetNotify { app: self.app.clone() }), Arc::new(Mutex::new(after.network.clone())), after.listen_port(), identity(&self.app)?)?;
+        let handed = group.members.len().saturating_sub(1);
+        promote::as_main(&mut after, group);
+        // This Maya's own redirect (it handed over once before) may hold
+        // the port it is to listen on: it stops first, and comes back if
+        // this Maya stays an assistant.
+        let redirect = state.network.lock().unwrap().redirect.take();
+        if let Some(r) = &redirect {
+            r.stop();
+        }
+        let restore = || {
+            if redirect.is_some() {
+                crate::start_redirect(&self.app);
+            }
+        };
+        let view = Arc::new(Mutex::new(after.network.clone()));
+        let started = identity(&self.app).and_then(|id| crate::bind_retrying(|| start_with(Arc::new(crate::TauriNetNotify { app: self.app.clone() }), view.clone(), after.listen_port(), id.clone())));
+        let handle = match started {
+            Ok(h) => h,
+            Err(e) => {
+                restore();
+                return Err(e);
+            }
+        };
         if let Err(e) = config::save(&path, &after) {
             handle.stop();
+            restore();
             return Err(format!("Could not save the settings: {e}"));
         }
         let port = handle.port();
@@ -463,6 +522,8 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
             crate::brain_app::brain_stop(app.clone());
             Ok(None)
         }
+        // The main's server answers this itself, before any request reaches here.
+        Request::RemoveMember { .. } => Err("The main Maya answers this itself.".into()),
         Request::ListDirs => match machine {
             Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),

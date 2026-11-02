@@ -8,8 +8,9 @@ pub mod promote;
 pub mod identity;
 pub mod secure;
 pub mod live;
+pub mod group;
 
-use crate::config::{Config, NetworkRole, PairedAssistant};
+use crate::config::{Config, NetworkConfig, NetworkRole, PairedAssistant};
 use serde::Serialize;
 
 /// What the Network section of Settings shows, sent as the `network` event.
@@ -31,6 +32,9 @@ pub struct NetworkStatus {
     pub code_used_up: bool,
     /// Protocol 1 pairings were dropped on update (`NetworkConfig::pair_again`).
     pub pair_again: bool,
+    /// Every device of the group: this one first, then the others.
+    #[serde(default)]
+    pub devices: Vec<group::DeviceRow>,
 }
 
 pub const CODE_USED_UP: &str = "Code used up after 3 wrong tries — Regenerate.";
@@ -118,11 +122,14 @@ pub enum MirrorAccess {
     Unsupported,
 }
 
-/// The running side of the network role: the main's server or the assistant's client.
+/// The running side of the network role: the main's server or the
+/// assistant's client, and an old main's redirect listener.
 #[derive(Default)]
 pub struct NetworkState {
     pub server: Option<server::ServerHandle>,
     pub client: Option<client::ClientHandle>,
+    /// After a handover, on the port this Maya listened on as main.
+    pub redirect: Option<server::ServerHandle>,
     pub status: NetworkStatus,
 }
 
@@ -135,6 +142,25 @@ pub enum NetChange {
     StartAssistant,
     StopAssistant,
     RestartAssistant,
+    /// The old main's redirect listener; started once `StopMain` frees its port.
+    StartRedirect,
+    StopRedirect,
+    RestartRedirect,
+}
+
+/// The redirect an old main keeps: its port and the main it points to.
+/// Only an assistant that handed over has one.
+pub fn redirect_of(c: &Config) -> Option<(u16, server::MoveTarget)> {
+    let n = &c.network;
+    (n.role == NetworkRole::Assistant && n.redirect_port != 0 && !n.main_key.is_empty()).then(|| (n.redirect_port, server::MoveTarget { host: n.main_host.clone(), port: c.main_port(), key: n.main_key.clone() }))
+}
+
+/// A role switched by hand ends the redirect; a handover (`network_promote`)
+/// does not come through here.
+pub fn settle_role_change(before: &NetworkConfig, after: &mut NetworkConfig) {
+    if before.role != after.role {
+        after.end_redirect();
+    }
 }
 
 /// The changes to make, stops first; empty when nothing network-related changed.
@@ -154,6 +180,16 @@ pub fn network_change(before: &Config, after: &Config) -> Vec<NetChange> {
         (true, false) => out.insert(0, NetChange::StopAssistant),
         (false, true) => out.push(NetChange::StartAssistant),
         (true, true) if link(before) != link(after) => out.push(NetChange::RestartAssistant),
+        _ => {}
+    }
+    // Stopped before anything starts, which may take its port; started
+    // after `StopMain` frees it.
+    // The group version counts too: the redirect hands out the group it
+    // was started with, so a changed group restarts it.
+    match (redirect_of(before).map(|r| (r, b.group_version)), redirect_of(after).map(|r| (r, a.group_version))) {
+        (Some(_), None) => out.insert(0, NetChange::StopRedirect),
+        (None, Some(_)) => out.push(NetChange::StartRedirect),
+        (Some(b), Some(a)) if b != a => out.push(NetChange::RestartRedirect),
         _ => {}
     }
     out
@@ -219,6 +255,23 @@ mod tests {
     }
 
     #[test]
+    fn a_group_change_restarts_a_redirect_and_only_a_redirect() {
+        use NetChange::*;
+        let redirecting = with(NetworkRole::Assistant, |c| {
+            c.network.redirect_port = 7000;
+            c.network.main_key = "k".into();
+            c.network.main_host = "h".into();
+        });
+        let mut changed = redirecting.clone();
+        changed.network.group_version += 1;
+        assert_eq!(network_change(&redirecting, &changed), vec![RestartRedirect]);
+        let plain = with(NetworkRole::Assistant, |c| c.network.main_key = "k".into());
+        let mut changed = plain.clone();
+        changed.network.group_version += 1;
+        assert_eq!(network_change(&plain, &changed), vec![]);
+    }
+
+    #[test]
     fn role_and_port_changes_start_stop_or_restart() {
         use NetChange::*;
         use NetworkRole::*;
@@ -240,9 +293,72 @@ mod tests {
         assert_eq!(network_change(&asst, &off), vec![StopAssistant]);
     }
 
+    /// The old main after it handed over to the main at 10.0.0.9:5001.
+    fn redirecting(c: &mut Config) {
+        c.network.main_host = "10.0.0.9".into();
+        c.network.main_port = 5001;
+        c.network.main_key = "a2V5".into();
+        c.network.redirect_port = 4200;
+    }
+
+    #[test]
+    fn network_change_starts_and_stops_the_redirect() {
+        use NetChange::*;
+        use NetworkRole::*;
+        let main = with(Main, |c| c.network.port = 4200);
+        let old = with(Assistant, redirecting);
+        assert_eq!(network_change(&main, &old), vec![StopMain, StartAssistant, StartRedirect], "the redirect starts once the main's port is free");
+        let later = with(Assistant, |c| {
+            redirecting(c);
+            c.network.main_host = "10.0.0.10".into();
+            c.network.main_key = "b2V5".into();
+        });
+        assert_eq!(network_change(&old, &later), vec![RestartAssistant, RestartRedirect], "a later promotion points the redirect at the newest main");
+        assert_eq!(network_change(&old, &with(Assistant, |c| {
+            redirecting(c);
+            c.network.redirect_port = 4300;
+        })), vec![RestartRedirect]);
+        let ended = with(Assistant, |c| {
+            redirecting(c);
+            c.network.redirect_port = 0;
+        });
+        assert_eq!(network_change(&old, &ended), vec![StopRedirect]);
+        assert_eq!(network_change(&old, &old.clone()), vec![]);
+        assert_eq!(network_change(&main, &with(Assistant, |c| {
+            redirecting(c);
+            c.network.main_key.clear();
+        })), vec![StopMain, StartAssistant], "no main to point to, no redirect");
+        assert_eq!(network_change(&old, &with(Main, |c| c.network.port = 4200)), vec![StopRedirect, StopAssistant, StartMain], "the redirect frees the port before the main takes it");
+    }
+
+    #[test]
+    fn a_hand_join_ends_the_redirect() {
+        let old = with(NetworkRole::Assistant, |c| {
+            redirecting(c);
+            c.network.assistants.push(PairedAssistant { id: "u".into(), name: "mini".into(), hostname: "h".into(), platform: "macos".into(), key: "dQ==".into(), address: String::new(), last_seen: None, mirror: false, generation: 1 });
+        });
+        let mut joined = old.clone();
+        group::join(&mut joined.network, "bWU=", "dQ==", "10.0.0.11", 4127).unwrap();
+        assert_eq!(joined.network.redirect_port, 0);
+        assert_eq!(network_change(&old, &joined), vec![NetChange::StopRedirect, NetChange::RestartAssistant]);
+    }
+
+    #[test]
+    fn switching_role_by_hand_ends_the_redirect() {
+        let old = with(NetworkRole::Assistant, redirecting);
+        let mut off = old.network.clone();
+        off.role = NetworkRole::Off;
+        settle_role_change(&old.network, &mut off);
+        assert_eq!(off.redirect_port, 0);
+        let mut same = old.network.clone();
+        same.name = "desk".into();
+        settle_role_change(&old.network, &mut same);
+        assert_eq!(same.redirect_port, 4200, "the same role keeps it");
+    }
+
     #[test]
     fn a_main_that_cannot_listen_says_why_and_keeps_its_paired_list() {
-        let p = |id: &str, name: &str, address: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: address.into(), last_seen: Some(42), mirror: false };
+        let p = |id: &str, name: &str, address: &str| PairedAssistant { id: id.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: address.into(), last_seen: Some(42), mirror: false, generation: 0 };
         let status = NetworkStatus { role: NetworkRole::Main, assistants: paired_offline(&[p("a1", "laptop", "10.0.0.5"), p("b2", "desk", "10.0.0.6")]), main_error: Some("Could not listen on port 4127: Address already in use".into()), ..Default::default() };
         let json = serde_json::to_value(&status).unwrap();
         assert_eq!(json["mainError"], "Could not listen on port 4127: Address already in use");

@@ -128,6 +128,8 @@ pub fn run() {
             commands::network_status,
             commands::network_pair,
             commands::network_new_key,
+            commands::network_remove_member,
+            commands::network_join,
             commands::listen_stop,
             commands::get_config,
             commands::set_config,

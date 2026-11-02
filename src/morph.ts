@@ -3,8 +3,8 @@
 // selection, focus and a CSS transition go with the node. So a repaint
 // changes the nodes already on screen wherever the fresh render matches them.
 
-/** A card's session id: keyed children are matched by it rather than by place. */
-const keyOf = (n: Node): string | null => (n instanceof Element ? n.getAttribute("data-session-id") : null);
+/** A card's session id (or a list row's `data-row`): keyed children are matched by it rather than by place. */
+const keyOf = (n: Node): string | null => (n instanceof Element ? (n.getAttribute("data-session-id") ?? n.getAttribute("data-row")) : null);
 
 const sameKind = (a: Node, b: Node): boolean =>
   a.nodeType === b.nodeType && (!(a instanceof Element) || a.tagName === (b as Element).tagName);
@@ -16,6 +16,7 @@ const sameKind = (a: Node, b: Node): boolean =>
  * board delegates its clicks): a kept node keeps its old listeners.
  */
 export function morph(old: Element, fresh: Element): void {
+  const control = controlState(fresh);
   for (const { name } of [...old.attributes]) if (!fresh.hasAttribute(name)) old.removeAttribute(name);
   for (const { name, value } of fresh.attributes) if (old.getAttribute(name) !== value) old.setAttribute(name, value);
 
@@ -37,6 +38,14 @@ export function morph(old: Element, fresh: Element): void {
     return o;
   });
   place(old, wanted);
+  if (control) {
+    if (old instanceof HTMLInputElement && old.checked !== control.checked) old.checked = control.checked;
+  }
+}
+
+/** A checkbox's state is a property the attributes do not carry: copy it over. A typed value is left alone. */
+function controlState(el: Element): { checked: boolean } | null {
+  return el instanceof HTMLInputElement ? { checked: el.checked } : null;
 }
 
 /** Makes `parent`'s children exactly `wanted`, in order, moving only what has to move. */

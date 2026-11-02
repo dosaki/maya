@@ -171,6 +171,9 @@ pub struct AppState {
     pub network: Mutex<net::NetworkState>,
     /// This Maya's network key pair, read from the key store at first use.
     pub identity: Mutex<Option<std::sync::Arc<maya_core::net::identity::Keypair>>>,
+    /// The assistant's requests to the main (Remove a device); the client
+    /// attaches its connection to it. Holds its own mutex briefly.
+    pub lane: std::sync::Arc<net::client::RequestLane>,
     /// Bumped whenever a Git setting or token changes, so a poll that began
     /// under the old settings can tell its answers are stale and drop them.
     pub git_generation: std::sync::atomic::AtomicU64,
@@ -188,6 +191,23 @@ impl TauriNetNotify {
         let mut store = state.store.lock().unwrap();
         let path = store.config_path();
         save_paired(&path, &mut store.config, f)
+    }
+}
+
+impl TauriNetNotify {
+    /// Saves the group the server holds: its members, tombstones and version.
+    fn save_group(&self, group: &net::group::GroupCopy, end_pair_again: bool) -> Result<(), String> {
+        let state = self.app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        let path = store.config_path();
+        save_network(&path, &mut store.config, |n| {
+            if end_pair_again {
+                n.pair_again = false;
+            }
+            n.assistants = group.members.clone();
+            n.removed = group.removed.clone();
+            n.group_version = group.version;
+        })
     }
 }
 
@@ -230,23 +250,15 @@ impl Notify for TauriNetNotify {
         let _ = self.app.emit("network", &status);
     }
 
-    fn paired(&self, assistant: &config::PairedAssistant) -> Result<(), String> {
-        // A machine pairing again keeps its entry, and its place in the list.
-        // A new pairing also ends "pair again": the dropped ones are being redone.
-        let state = self.app.state::<AppState>();
-        let mut store = state.store.lock().unwrap();
-        let path = store.config_path();
-        save_network(&path, &mut store.config, |n| {
-            n.pair_again = false;
-            match n.assistants.iter_mut().find(|a| a.id == assistant.id) {
-                Some(a) => *a = assistant.clone(),
-                None => n.assistants.push(assistant.clone()),
-            }
-        })
+    fn paired(&self, _assistant: &config::PairedAssistant, group: &net::group::GroupCopy) -> Result<(), String> {
+        // The group holds the pairing (a machine pairing again keeps its
+        // entry and its place). A new pairing also ends "pair again": the
+        // dropped ones are being redone.
+        self.save_group(group, true)
     }
 
-    fn paired_list_changed(&self, assistants: &[config::PairedAssistant]) -> Result<(), String> {
-        self.save_assistants(|list| *list = assistants.to_vec())
+    fn paired_list_changed(&self, group: &net::group::GroupCopy) -> Result<(), String> {
+        self.save_group(group, false)
     }
 
     fn request(&self, machine: Option<&str>, request: net::protocol::Request) -> Result<Option<serde_json::Value>, String> {
@@ -831,7 +843,14 @@ fn network_status_of(state: &AppState) -> NetworkStatus {
             NetworkStatus { role, code: None, assistants, main_error, addresses, ..stored }
         }
     };
-    status.pair_again = state.store.lock().unwrap().config.network.pair_again;
+    let network = {
+        let store = state.store.lock().unwrap();
+        status.pair_again = store.config.network.pair_again;
+        store.config.network.clone()
+    };
+    // Empty when the role is Off (status never makes a key) or the key
+    // store failed; the roles' own errors say why.
+    status.devices = if network.role == config::NetworkRole::Off { vec![] } else { net_app::identity_of(state).map(|id| net::group::device_rows(&network, &net::group::me(&network, &id.public_b64()))).unwrap_or_default() };
     status
 }
 
@@ -869,10 +888,48 @@ fn network_remove_assistant(app: AppHandle, state: TauriState<AppState>, id: Str
     match server {
         Some(s) => s.remove_assistant(&id)?,
         None => {
-            TauriNetNotify { app: app.clone() }.save_assistants(|list| list.retain(|a| a.id != id))?;
+            // Down: the removal is a tombstone in the saved group, so it
+            // still reaches the others once the server runs again.
+            let mut group = net::group::of_config(&state.store.lock().unwrap().config.network);
+            let key = group.members.iter().find(|m| m.id == id).map(|m| m.key.clone()).ok_or("That device is not in the group.")?;
+            net::group::remove(&mut group, &key);
+            TauriNetNotify { app: app.clone() }.save_group(&group, false)?;
             log::line("network", format!("{id}: removed"));
         }
     }
+    Ok(network_status_of(&state))
+}
+
+/// Removes a device from the group by its key: the main does it itself,
+/// an assistant asks the main and needs to be connected to it.
+#[tauri::command(async)]
+fn network_remove_member(state: TauriState<AppState>, key: String) -> Result<NetworkStatus, String> {
+    const NEEDS_MAIN: &str = "Connect to the main Maya to remove a device.";
+    // The handle is cloned out: no lock is held while the server or the
+    // main answers.
+    let server = state.network.lock().unwrap().server.clone();
+    let role = state.store.lock().unwrap().config.network.role;
+    match (server, role) {
+        (Some(s), _) => s.remove_member(&key)?,
+        (None, config::NetworkRole::Assistant) => {
+            state.lane.request(None, net::protocol::Request::RemoveMember { key }, net::client::REQUEST_TIMEOUT).map_err(|e| if e == net::client::NOT_CONNECTED { NEEDS_MAIN.to_string() } else { e })?;
+        }
+        _ => return Err(NEEDS_MAIN.into()),
+    }
+    Ok(network_status_of(&state))
+}
+
+/// Makes this Maya an assistant of another device of the group; the
+/// client starts through the config change. Nothing is saved when the
+/// device cannot be the main.
+#[tauri::command]
+fn network_join(app: AppHandle, state: TauriState<AppState>, key: String, host: String, port: u16) -> Result<NetworkStatus, String> {
+    let my_key = net_app::identity_of(&state)?.public_b64();
+    let mut joined = state.store.lock().unwrap().config.network.clone();
+    net::group::join(&mut joined, &my_key, &key, &host, port)?;
+    update_config(&app, |c| {
+        let _ = net::group::join(&mut c.network, &my_key, &key, &host, port);
+    })?;
     Ok(network_status_of(&state))
 }
 
@@ -905,15 +962,7 @@ fn network_new_key(app: AppHandle, state: TauriState<AppState>) -> Result<Networ
     let before = state.store.lock().unwrap().config.clone();
     let k = net_app::new_key_with(
         || {
-            update_config(&app, |c| {
-                c.network.role = config::NetworkRole::Off;
-                c.network.assistants.clear();
-                c.network.main_key.clear();
-                c.network.main_host.clear();
-                c.network.main_port = 0;
-                c.network.pair_again = false;
-            })
-            .map(|_| ())
+            update_config(&app, |c| net::group::start_afresh(&mut c.network)).map(|_| ())
         },
         |secret| {
             // Stored and cached under one lock, so two New keys at once (or
@@ -941,6 +990,7 @@ fn network_forget_main(app: AppHandle, state: TauriState<AppState>) -> Result<Ne
         c.network.main_key.clear();
         c.network.main_host.clear();
         c.network.main_port = 0;
+        c.network.end_redirect();
     })?;
     Ok(network_status_of(&state))
 }
@@ -961,6 +1011,60 @@ fn network_set_mirror(app: AppHandle, state: TauriState<AppState>, id: String, o
     Ok(network_status_of(&state))
 }
 
+/// A server just stopped lets go of its port within a tick; `start` is
+/// tried again for up to 750 ms.
+pub(crate) fn bind_retrying(mut start: impl FnMut() -> Result<net::server::ServerHandle, String>) -> Result<net::server::ServerHandle, String> {
+    let mut started = start();
+    for _ in 0..5 {
+        if started.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        started = start();
+    }
+    started
+}
+
+/// Starts the old main's redirect listener on the port it listened on as
+/// main, replacing any running one; a no-op without a redirect to keep.
+/// A port it cannot take is only logged: members it would have moved find
+/// the new main when they are moved by hand.
+pub(crate) fn start_redirect(app: &AppHandle) {
+    stop_redirect(app);
+    let (redirect, view) = {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        (net::redirect_of(&store.config), store.config.network.clone())
+    };
+    let Some((port, to)) = redirect else { return };
+    let view = std::sync::Arc::new(Mutex::new(view));
+    let wanted = Some((port, to.clone()));
+    let started = net_app::identity(app).and_then(|id| bind_retrying(|| net::server::start_redirect(view.clone(), port, id.clone(), to.clone())));
+    match started {
+        Ok(handle) => {
+            // The config may have moved on while it bound (a `StopRedirect`
+            // ran meanwhile): then this one stops at once.
+            let state = app.state::<AppState>();
+            let mut n = state.network.lock().unwrap();
+            let still = net::redirect_of(&state.store.lock().unwrap().config) == wanted;
+            let displaced = if still { n.redirect.replace(handle) } else { Some(handle) };
+            drop(n);
+            if let Some(old) = displaced {
+                old.stop();
+            }
+        }
+        Err(e) => log::line("network", format!("no redirect to the new main: {e}")),
+    }
+}
+
+/// Stops the redirect listener, if running.
+fn stop_redirect(app: &AppHandle) {
+    let redirect = app.state::<AppState>().network.lock().unwrap().redirect.take();
+    if let Some(r) = redirect {
+        r.stop();
+    }
+}
+
 /// Starts the main's server on the configured port, replacing any running
 /// one; with `show_code` (the role just turned on) it opens pairing at once.
 fn start_main(app: &AppHandle, show_code: bool) {
@@ -968,17 +1072,7 @@ fn start_main(app: &AppHandle, show_code: bool) {
     let port = app.state::<AppState>().store.lock().unwrap().config.listen_port();
     // A server just stopped lets go of the port within a tick; retry briefly.
     // The key store is read once, not at every retry.
-    let started = net_app::identity(app).and_then(|id| {
-        let mut started = net_app::start_server(app.clone(), port, id.clone());
-        for _ in 0..5 {
-            if started.is_ok() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(150));
-            started = net_app::start_server(app.clone(), port, id.clone());
-        }
-        started
-    });
+    let started = net_app::identity(app).and_then(|id| bind_retrying(|| net_app::start_server(app.clone(), port, id.clone())));
     match started {
         Ok(handle) => {
             // Another start may have finished meanwhile; the displaced server stops.
@@ -1604,6 +1698,12 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
         config.network.assistants = before.network.assistants.clone();
         config.network.main_key = before.network.main_key.clone();
         config.network.pair_again = before.network.pair_again;
+        // So do the group's tombstones and version, and the redirect a
+        // handover left; switching the role by hand ends that.
+        config.network.removed = before.network.removed.clone();
+        config.network.group_version = before.network.group_version;
+        config.network.redirect_port = before.network.redirect_port;
+        net::settle_role_change(&before.network, &mut config.network);
         // Mute belongs to the top-bar button, which may have saved it after
         // the page fetched this config.
         config.muted = before.muted;
@@ -1686,6 +1786,8 @@ fn apply_config_change(app: &AppHandle, before: &Config, config: &Config) {
                 start_assistant(app);
             }
             NetChange::StopAssistant => stop_assistant(app),
+            NetChange::StartRedirect | NetChange::RestartRedirect => start_redirect(app),
+            NetChange::StopRedirect => stop_redirect(app),
         }
     }
 }
@@ -1706,7 +1808,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), lane: std::sync::Arc::new(net::client::RequestLane::default()), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
         // Closing the window quits Maya, so it asks first too; "Quit
         // anyway" then exits the app.
@@ -1803,6 +1905,8 @@ pub fn run() {
             network_status,
             network_pairing_code,
             network_remove_assistant,
+            network_remove_member,
+            network_join,
             network_promote,
             network_set_mirror,
             network_pair,
@@ -1896,7 +2000,11 @@ pub fn run() {
                     let net_handle = app.handle().clone();
                     std::thread::spawn(move || start_main(&net_handle, false));
                 }
-                config::NetworkRole::Assistant => start_assistant(app.handle()),
+                config::NetworkRole::Assistant => {
+                    start_assistant(app.handle());
+                    let redirect_handle = app.handle().clone();
+                    std::thread::spawn(move || start_redirect(&redirect_handle));
+                }
                 config::NetworkRole::Off => {}
             }
             // The main listens for an assistant.
@@ -2039,7 +2147,7 @@ mod route_tests {
         let path = dir.join("maya/config.json");
         let mut config = Config::default();
         config.network.pair_again = true;
-        let a = config::PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false };
+        let a = config::PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false, generation: 0 };
         let saved_ok = save_network(&path, &mut config, |n| {
             n.pair_again = false;
             n.assistants.push(a);
@@ -2055,7 +2163,7 @@ mod route_tests {
     fn a_paired_list_that_cannot_be_saved_is_not_changed() {
         let dir = std::env::temp_dir().join(format!("maya-save-paired-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let p = |id: &str| config::PairedAssistant { id: id.into(), name: id.into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false };
+        let p = |id: &str| config::PairedAssistant { id: id.into(), name: id.into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false, generation: 0 };
         let mut config = Config::default();
         config.network.assistants = vec![p("a1"), p("b2")];
         // A file where the config's directory should be: the save fails.
@@ -2078,7 +2186,7 @@ mod route_tests {
         let path = dir.join("maya/config.json");
         let mut config = Config::default();
         config.network.role = config::NetworkRole::Assistant;
-        let late = config::PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false };
+        let late = config::PairedAssistant { id: "a1".into(), name: "a1".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false, generation: 0 };
         assert_eq!(save_paired(&path, &mut config, |l| *l = vec![late]), Ok(()));
         assert!(config.network.assistants.is_empty());
         assert!(!path.exists(), "nothing is written");

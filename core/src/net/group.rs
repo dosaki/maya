@@ -1,0 +1,472 @@
+//! The group of trusted devices: the rules every Maya applies to its copy.
+//! Pure functions over `NetworkConfig` and `GroupCopy`; no I/O.
+
+use super::protocol;
+use crate::config::{NetworkConfig, NetworkRole, PairedAssistant};
+use serde::{Deserialize, Serialize};
+
+/// The group as one Maya holds it: its version, the live members and the
+/// tombstones of the removed ones. Public keys and labels only.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GroupCopy {
+    pub version: u64,
+    pub members: Vec<PairedAssistant>,
+    pub removed: Vec<PairedAssistant>,
+}
+
+/// One device in the list Settings shows.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRow {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+    pub hostname: String,
+    pub platform: String,
+    pub address: String,
+    pub last_seen: Option<u64>,
+    pub is_main: bool,
+    pub is_self: bool,
+    /// The port it was last reached on: known only for the main an
+    /// assistant follows.
+    pub port: Option<u16>,
+}
+
+/// The group as `n` holds it.
+pub fn of_config(n: &NetworkConfig) -> GroupCopy {
+    GroupCopy { version: n.group_version, members: n.assistants.clone(), removed: n.removed.clone() }
+}
+
+/// Adds (or pairs again) a member: the version moves up by one and the
+/// entry takes it as its generation. A tombstone with the same key goes; a
+/// live entry with the same key is replaced, keeping its `id`.
+pub fn add(g: &mut GroupCopy, mut entry: PairedAssistant) -> PairedAssistant {
+    g.version = g.version.saturating_add(1);
+    entry.generation = g.version;
+    g.removed.retain(|r| r.key != entry.key);
+    match g.members.iter_mut().find(|m| m.key == entry.key) {
+        Some(m) => {
+            entry.id = m.id.clone();
+            *m = entry.clone();
+        }
+        None => g.members.push(entry.clone()),
+    }
+    entry
+}
+
+/// Removes the live member with `key`, leaving a tombstone one version
+/// newer than the group was. `None` when there is no such member.
+pub fn remove(g: &mut GroupCopy, key: &str) -> Option<PairedAssistant> {
+    let at = g.members.iter().position(|m| m.key == key)?;
+    let mut gone = g.members.remove(at);
+    g.version = g.version.saturating_add(1);
+    gone.generation = g.version;
+    gone.mirror = false;
+    g.removed.retain(|r| r.key != key);
+    g.removed.push(gone.clone());
+    Some(gone)
+}
+
+/// Takes the removals of another copy: a tombstone removes a live member of
+/// an older or equal generation. Members the other copy lists are never
+/// added. Nothing of theirs sets a number here: the group moves up one
+/// version and each removal taken gets that version as its generation, so
+/// a copy with a huge version or generation cannot keep a device paired
+/// again from coming back. Returns whether anything changed.
+pub fn merge_copy(g: &mut GroupCopy, theirs: &GroupCopy) -> bool {
+    let mut taken = Vec::new();
+    for t in &theirs.removed {
+        if let Some(at) = g.members.iter().position(|m| m.key == t.key && m.generation <= t.generation) {
+            taken.push(g.members.remove(at));
+        }
+    }
+    if taken.is_empty() {
+        return false;
+    }
+    g.version = g.version.saturating_add(1);
+    for mut gone in taken {
+        gone.generation = g.version;
+        gone.mirror = false;
+        g.removed.retain(|r| r.key != gone.key);
+        g.removed.push(gone);
+    }
+    true
+}
+
+/// Takes `copy` as this Maya's group, minus its own entry.
+pub fn adopt(n: &mut NetworkConfig, my_key: &str, copy: &GroupCopy) {
+    n.assistants = copy.members.iter().filter(|m| m.key != my_key).cloned().collect();
+    n.removed = copy.removed.clone();
+    n.group_version = copy.version;
+}
+
+/// `adopt` for a copy a main sent: only an assistant of that very main
+/// takes it. `from` is the key the sending connection's main proved, so a
+/// frame from an earlier connection that outlives a Join or a role change
+/// changes nothing, even when its list names the new main too. Returns
+/// whether anything changed.
+pub fn adopt_from_main(n: &mut NetworkConfig, my_key: &str, from: &str, copy: &GroupCopy) -> bool {
+    if n.role != NetworkRole::Assistant || from != n.main_key || !copy.members.iter().any(|m| m.key == from) {
+        return false;
+    }
+    let before = (n.assistants.clone(), n.removed.clone(), n.group_version);
+    adopt(n, my_key, copy);
+    before != (n.assistants.clone(), n.removed.clone(), n.group_version)
+}
+
+/// Whether `key` may be followed as the main. With the group the sender
+/// gave (`seen`), it must be a live member of that; without one, it is an
+/// older main that sends none, and any key may be followed.
+pub fn may_follow(_n: &NetworkConfig, seen: Option<&GroupCopy>, key: &str) -> bool {
+    match seen {
+        Some(s) => s.members.iter().any(|m| m.key == key) && !s.removed.iter().any(|r| r.key == key),
+        // A main of this version sends the group before any Move, so none
+        // seen means an older main, which cannot be checked.
+        None => true
+    }
+}
+
+/// Phones follow a main; they never are one.
+pub fn is_phone(p: &PairedAssistant) -> bool {
+    p.platform == "android"
+}
+
+/// Makes this Maya an assistant of the live member `key` at `host:port`.
+pub fn join(n: &mut NetworkConfig, my_key: &str, key: &str, host: &str, port: u16) -> Result<(), String> {
+    if key == my_key {
+        return Err("This is this device.".into());
+    }
+    let member = n.assistants.iter().find(|m| m.key == key).ok_or("That device is not in your group.")?;
+    if is_phone(member) {
+        return Err("A phone cannot be the main Maya.".into());
+    }
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("Type the main Maya's host name or address.".into());
+    }
+    n.role = NetworkRole::Assistant;
+    n.main_host = host.to_string();
+    n.main_port = if port == 0 { protocol::DEFAULT_PORT } else { port };
+    n.main_key = key.to_string();
+    n.pair_again = false;
+    n.end_redirect();
+    Ok(())
+}
+
+/// A new key is a new identity: no group, no main, no redirect, role Off.
+pub fn start_afresh(n: &mut NetworkConfig) {
+    n.role = NetworkRole::Off;
+    n.assistants.clear();
+    n.removed.clear();
+    n.group_version = 0;
+    n.main_key.clear();
+    n.main_host.clear();
+    n.main_port = 0;
+    n.pair_again = false;
+    n.end_redirect();
+}
+
+/// This Maya's own entry in the group.
+pub fn me(n: &NetworkConfig, key: &str) -> PairedAssistant {
+    let hostname = super::local_hostname();
+    let name = if n.name.trim().is_empty() { hostname.clone() } else { n.name.clone() };
+    PairedAssistant {
+        id: key.to_string(),
+        name,
+        hostname,
+        platform: std::env::consts::OS.to_string(),
+        key: key.to_string(),
+        address: String::new(),
+        last_seen: None,
+        mirror: false,
+        generation: 0,
+    }
+}
+
+/// The devices to show: this one first, then each live member in order.
+/// Tombstones never appear.
+pub fn device_rows(n: &NetworkConfig, me: &PairedAssistant) -> Vec<DeviceRow> {
+    let row = |p: &PairedAssistant, is_main: bool, is_self: bool, port: Option<u16>| DeviceRow {
+        id: p.id.clone(),
+        key: p.key.clone(),
+        name: p.name.clone(),
+        hostname: p.hostname.clone(),
+        platform: p.platform.clone(),
+        address: p.address.clone(),
+        last_seen: p.last_seen,
+        is_main,
+        is_self,
+        port,
+    };
+    let mut rows = vec![row(me, n.role == NetworkRole::Main, true, None)];
+    for p in &n.assistants {
+        let main = n.role == NetworkRole::Assistant && p.key == n.main_key;
+        rows.push(row(p, main, false, if main { Some(n.main_port) } else { None }));
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(key: &str, name: &str) -> PairedAssistant {
+        PairedAssistant {
+            id: format!("id-{key}-{name}"),
+            name: name.into(),
+            hostname: format!("{name}.lan"),
+            platform: "macos".into(),
+            key: key.into(),
+            address: String::new(),
+            last_seen: None,
+            mirror: true,
+            generation: 0,
+        }
+    }
+
+    fn net(members: Vec<PairedAssistant>) -> NetworkConfig {
+        NetworkConfig { assistants: members, ..Default::default() }
+    }
+
+    #[test]
+    fn adopt_from_main_takes_a_copy_only_from_the_main_of_an_assistant() {
+        let copy = GroupCopy { version: 3, members: vec![entry("M", "main"), entry("me", "mine")], removed: vec![] };
+        for role in [NetworkRole::Off, NetworkRole::Main] {
+            let mut n = NetworkConfig { role, main_key: "M".into(), ..Default::default() };
+            assert!(!adopt_from_main(&mut n, "me", "M", &copy));
+            assert_eq!(n, NetworkConfig { role, main_key: "M".into(), ..Default::default() });
+        }
+        let mut n = NetworkConfig { role: NetworkRole::Assistant, main_key: "X".into(), ..Default::default() };
+        assert!(!adopt_from_main(&mut n, "me", "X", &copy));
+        assert!(n.assistants.is_empty() && n.group_version == 0);
+        n.main_key = "M".into();
+        assert!(adopt_from_main(&mut n, "me", "M", &copy));
+        assert_eq!(n.assistants.len(), 1);
+        assert_eq!(n.group_version, 3);
+        assert!(!adopt_from_main(&mut n, "me", "M", &copy));
+    }
+
+    #[test]
+    fn adopt_from_main_ignores_a_copy_from_an_earlier_connections_main() {
+        // Joined M after following O: O's last frame lists M too, but came
+        // over O's connection, so it is not M's copy.
+        let stale = GroupCopy { version: 9, members: vec![entry("O", "old"), entry("M", "main"), entry("me", "mine")], removed: vec![] };
+        let mut n = NetworkConfig { role: NetworkRole::Assistant, main_key: "M".into(), group_version: 2, ..Default::default() };
+        assert!(!adopt_from_main(&mut n, "me", "O", &stale));
+        assert_eq!(n.group_version, 2);
+        assert!(adopt_from_main(&mut n, "me", "M", &stale));
+    }
+
+    #[test]
+    fn add_stamps_generation_and_keeps_the_id_of_a_known_key() {
+        let mut g = GroupCopy::default();
+        let first = add(&mut g, entry("A", "one"));
+        assert_eq!(first.generation, 1);
+        let again = add(&mut g, entry("A", "two"));
+        assert_eq!(g.members.len(), 1);
+        assert_eq!(again.id, first.id);
+        assert_eq!(g.members[0].name, "two");
+        assert_eq!(g.members[0].generation, 2);
+        assert_eq!(g.version, 2);
+    }
+
+    #[test]
+    fn remove_makes_a_tombstone() {
+        let mut g = GroupCopy::default();
+        add(&mut g, entry("A", "one"));
+        assert!(remove(&mut g, "A").is_some());
+        assert!(g.members.is_empty());
+        assert_eq!(g.removed[0].generation, 2);
+        assert!(!g.removed[0].mirror);
+        assert_eq!(g.version, 2);
+        assert_eq!(remove(&mut g, "nope"), None);
+    }
+
+    #[test]
+    fn a_stale_tombstone_does_not_remove_a_device_paired_again() {
+        let mut g = GroupCopy::default();
+        add(&mut g, entry("A", "one"));
+        remove(&mut g, "A");
+        add(&mut g, entry("A", "one"));
+        assert_eq!(g.members[0].generation, 3);
+        assert!(g.removed.is_empty());
+        let mut stale = entry("A", "one");
+        stale.generation = 2;
+        let theirs = GroupCopy { version: 2, members: vec![], removed: vec![stale] };
+        assert!(!merge_copy(&mut g, &theirs));
+        assert_eq!(g.members.len(), 1);
+    }
+
+    #[test]
+    fn a_newer_tombstone_removes_and_raises_the_version_above_both() {
+        let mut g = GroupCopy { version: 1, members: vec![], removed: vec![] };
+        let mut a = entry("A", "one");
+        a.generation = 1;
+        g.members.push(a);
+        let mut t = entry("A", "one");
+        t.generation = 4;
+        let theirs = GroupCopy { version: 7, members: vec![], removed: vec![t] };
+        assert!(merge_copy(&mut g, &theirs));
+        assert!(g.members.is_empty());
+        // Stamped with this group's next version, not theirs.
+        assert_eq!(g.removed[0].generation, 2);
+        assert_eq!(g.version, 2);
+    }
+
+    #[test]
+    fn a_tie_goes_to_removed() {
+        let mut g = GroupCopy::default();
+        let mut a = entry("A", "one");
+        a.generation = 3;
+        g.members.push(a);
+        let mut t = entry("A", "one");
+        t.generation = 3;
+        let theirs = GroupCopy { version: 3, members: vec![], removed: vec![t] };
+        assert!(merge_copy(&mut g, &theirs));
+        assert!(g.members.is_empty());
+    }
+
+    #[test]
+    fn members_from_a_copy_are_never_added() {
+        let mut g = GroupCopy::default();
+        let theirs = GroupCopy { version: 5, members: vec![entry("B", "two")], removed: vec![] };
+        assert!(!merge_copy(&mut g, &theirs));
+        assert!(g.members.is_empty());
+    }
+
+    #[test]
+    fn a_higher_generation_for_a_known_tombstone_changes_nothing() {
+        let mut g = GroupCopy::default();
+        add(&mut g, entry("A", "one"));
+        remove(&mut g, "A");
+        let mut t = entry("A", "one");
+        t.generation = 9;
+        let theirs = GroupCopy { version: 9, members: vec![], removed: vec![t] };
+        assert!(!merge_copy(&mut g, &theirs));
+        assert_eq!(g.removed[0].generation, 2);
+        assert_eq!(g.version, 2);
+    }
+
+    #[test]
+    fn a_forged_largest_version_cannot_keep_a_device_out() {
+        let mut g = GroupCopy::default();
+        add(&mut g, entry("A", "one"));
+        let mut tomb = entry("A", "one");
+        tomb.generation = u64::MAX;
+        let forged = GroupCopy { version: u64::MAX, members: vec![], removed: vec![tomb] };
+        assert!(merge_copy(&mut g, &forged));
+        assert!(g.members.is_empty());
+        assert_eq!(g.version, 2);
+        // Pairing again with a code brings it back, and the same copy
+        // brought again does not remove it.
+        let back = add(&mut g, entry("A", "one"));
+        assert_eq!(back.generation, 3);
+        let mut again = entry("A", "one");
+        again.generation = 2;
+        let replay = GroupCopy { version: u64::MAX, members: vec![], removed: vec![again] };
+        assert!(!merge_copy(&mut g, &replay));
+        assert_eq!(g.members.len(), 1);
+    }
+
+    #[test]
+    fn adopt_drops_my_own_entry() {
+        let mut n = NetworkConfig::default();
+        let copy = GroupCopy { version: 4, members: vec![entry("me", "mine"), entry("A", "one")], removed: vec![entry("Z", "gone")] };
+        adopt(&mut n, "me", &copy);
+        assert_eq!(n.assistants.len(), 1);
+        assert_eq!(n.assistants[0].key, "A");
+        assert_eq!(n.removed.len(), 1);
+        assert_eq!(n.group_version, 4);
+    }
+
+    #[test]
+    fn may_follow_cases() {
+        let n = net(vec![entry("A", "one")]);
+        let live = GroupCopy { version: 1, members: vec![entry("B", "two")], removed: vec![] };
+        assert!(may_follow(&n, Some(&live), "B"));
+        let gone = GroupCopy { version: 1, members: vec![entry("B", "two")], removed: vec![entry("B", "two")] };
+        assert!(!may_follow(&n, Some(&gone), "B"));
+        // No group seen: only an older main, which sends none, can be talking.
+        assert!(may_follow(&NetworkConfig::default(), None, "B"));
+        assert!(may_follow(&n, None, "B"));
+        assert!(may_follow(&n, None, "A"));
+    }
+
+    #[test]
+    fn a_copy_with_the_largest_version_does_not_panic() {
+        let mut g = GroupCopy { version: 3, members: vec![entry("A", "one")], removed: vec![] };
+        let mut tomb = entry("A", "one");
+        tomb.generation = 9;
+        let theirs = GroupCopy { version: u64::MAX, members: vec![], removed: vec![tomb] };
+        assert!(merge_copy(&mut g, &theirs));
+        assert_eq!(g.version, 4);
+        let mut full = GroupCopy { version: u64::MAX, members: vec![], removed: vec![] };
+        let added = add(&mut full, entry("B", "two"));
+        assert_eq!(added.generation, u64::MAX);
+        assert!(remove(&mut full, "B").is_some());
+    }
+
+    #[test]
+    fn join_rejects() {
+        let mut phone = entry("P", "phone");
+        phone.platform = "android".into();
+        let mut n = net(vec![entry("A", "one"), phone]);
+        assert_eq!(join(&mut n, "me", "me", "h", 1), Err("This is this device.".into()));
+        assert_eq!(join(&mut n, "me", "X", "h", 1), Err("That device is not in your group.".into()));
+        assert_eq!(join(&mut n, "me", "P", "h", 1), Err("A phone cannot be the main Maya.".into()));
+        assert_eq!(join(&mut n, "me", "A", "  ", 1), Err("Type the main Maya's host name or address.".into()));
+        assert_eq!(n.role, NetworkRole::Off);
+
+        n.redirect_port = 9000;
+        n.pair_again = true;
+        assert_eq!(join(&mut n, "me", "A", " host.lan ", 0), Ok(()));
+        assert_eq!(n.role, NetworkRole::Assistant);
+        assert_eq!(n.main_host, "host.lan");
+        assert_eq!(n.main_port, 4127);
+        assert_eq!(n.main_key, "A");
+        assert!(!n.pair_again);
+        assert_eq!(n.redirect_port, 0);
+    }
+
+    #[test]
+    fn a_new_key_starts_the_group_afresh() {
+        let mut n = net(vec![entry("A", "one")]);
+        n.removed.push(entry("B", "two"));
+        (n.role, n.group_version, n.redirect_port, n.main_key, n.main_host, n.main_port, n.pair_again) = (NetworkRole::Assistant, 7, 9000, "A".into(), "h".into(), 5001, true);
+        n.name = "desk".into();
+        start_afresh(&mut n);
+        assert_eq!(n, NetworkConfig { name: "desk".into(), ..Default::default() }, "only the name stays");
+    }
+
+    #[test]
+    fn device_rows_marks_self_and_main_and_hides_tombstones() {
+        let mut n = net(vec![entry("A", "one"), entry("B", "two")]);
+        n.removed = vec![entry("Z", "gone")];
+        n.role = NetworkRole::Assistant;
+        n.main_key = "B".into();
+        n.main_port = 5001;
+        let mine = entry("me", "mine");
+        let rows = device_rows(&n, &mine);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].is_self && !rows[0].is_main);
+        assert_eq!(rows[1].key, "A");
+        assert!(!rows[1].is_main);
+        assert!(rows[2].is_main && !rows[2].is_self);
+        // Only the main's port is known.
+        assert_eq!(rows.iter().map(|r| r.port).collect::<Vec<_>>(), vec![None, None, Some(5001)]);
+        n.role = NetworkRole::Main;
+        let rows = device_rows(&n, &mine);
+        assert!(rows[0].is_main);
+        assert!(!rows[2].is_main);
+    }
+
+    #[test]
+    fn me_uses_the_hostname_when_the_name_is_blank() {
+        let e = me(&NetworkConfig::default(), "k");
+        assert_eq!(e.id, "k");
+        assert_eq!(e.name, e.hostname);
+        let e = me(&NetworkConfig { name: "Desk".into(), ..Default::default() }, "k");
+        assert_eq!(e.name, "Desk");
+    }
+}

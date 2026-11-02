@@ -51,6 +51,22 @@ impl ClientNotify for CliNotify {
         vec![maya_core::net::protocol::CAP_FOLLOW.into(), maya_core::net::protocol::CAP_WORKTREE.into()]
     }
 
+    /// Saves the main's copy of the group, only when it changes the saved
+    /// one, and re-checked against the config as it is when saving.
+    fn group(&self, group: maya_core::net::group::GroupCopy, from: &str) {
+        use maya_core::net::{group, identity};
+        let path = self.maya_dir.join("config.json");
+        let Ok(key) = identity::load_or_create(&self.maya_dir.join(identity::FILE)) else { return };
+        let my_key = key.public_b64();
+        let mut c = maya_core::config::load(&path);
+        if !group::adopt_from_main(&mut c.network, &my_key, from, &group) {
+            return;
+        }
+        if let Err(e) = maya_core::config::save(&path, &c) {
+            log::line("cli", format!("could not save the group: {e}"));
+        }
+    }
+
     /// Rewrites the main's host and port in `config.json`; `run` reads it
     /// again for the next connection, which `reconnect` makes at once.
     fn moved(&self, host: &str, port: u16, key: &str) -> Result<(), String> {

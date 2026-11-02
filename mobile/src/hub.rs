@@ -604,10 +604,43 @@ impl Hub {
         self.with_pair_again(NetworkStatus { role: NetworkRole::Off, main_error, ..Default::default() })
     }
 
+    /// The group's devices for the page, this phone first. Only while the
+    /// config's role is not Off, so a status never makes a key.
+    fn devices(&self) -> Vec<maya_core::net::group::DeviceRow> {
+        let network = self.settings.lock().unwrap().config.network.clone();
+        if network.role == NetworkRole::Off {
+            return vec![];
+        }
+        match self.identity() {
+            Ok(id) => maya_core::net::group::device_rows(&network, &maya_core::net::group::me(&network, &id.public_b64())),
+            Err(_) => vec![],
+        }
+    }
+
+    /// Asks the main to remove a device from the group.
+    pub fn remove_member(&self, key: &str) -> Result<NetworkStatus, String> {
+        self.request(None, Request::RemoveMember { key: key.to_string() }).map_err(|e| if e == NOT_CONNECTED { "Connect to the main Maya to remove a device.".to_string() } else { e })?;
+        Ok(self.status())
+    }
+
+    /// Makes this phone an assistant of another device of the group and
+    /// listens to it. Nothing is saved when the device cannot be the main.
+    pub fn join_member(self: &Arc<Self>, key: &str, host: &str, port: u16) -> Result<NetworkStatus, String> {
+        let my_key = self.identity()?.public_b64();
+        let mut probe = self.settings.lock().unwrap().config.network.clone();
+        maya_core::net::group::join(&mut probe, &my_key, key, host, port)?;
+        self.update_config(|c| {
+            let _ = maya_core::net::group::join(&mut c.network, &my_key, key, host, port);
+        })?;
+        self.start_client();
+        Ok(self.status())
+    }
+
     /// The core never fills `pair_again`; it is the config's, so every
     /// status that reaches the page goes through here.
     fn with_pair_again(&self, mut status: NetworkStatus) -> NetworkStatus {
         status.pair_again = self.settings.lock().unwrap().config.network.pair_again;
+        status.devices = self.devices();
         status
     }
 
@@ -627,14 +660,7 @@ impl Hub {
     /// the key file are written.
     pub fn new_key(&self) -> Result<NetworkStatus, String> {
         let before = self.settings.lock().unwrap().config.clone();
-        self.update_config(|c| {
-            c.network.role = NetworkRole::Off;
-            c.network.assistants.clear();
-            c.network.main_key.clear();
-            c.network.main_host.clear();
-            c.network.main_port = 0;
-            c.network.pair_again = false;
-        })?;
+        self.update_config(|c| maya_core::net::group::start_afresh(&mut c.network))?;
         let mut held = self.identity.lock().unwrap();
         match identity::replace(&self.maya_dir.join(identity::FILE)) {
             Ok(k) => *held = Some(Arc::new(k)),
@@ -863,6 +889,26 @@ impl ClientNotify for HubClientNotify {
         });
         self.refresh();
         self.brain();
+    }
+    /// Keeps the group the main sent, only from the main this phone follows.
+    /// Nothing is saved when it changes nothing.
+    fn group(&self, group: maya_core::net::group::GroupCopy, from: &str) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(h) = self.hub.upgrade() else { return };
+        let Ok(id) = h.identity() else { return };
+        let my_key = id.public_b64();
+        let mut probe = h.settings.lock().unwrap().config.network.clone();
+        if !maya_core::net::group::adopt_from_main(&mut probe, &my_key, from, &group) {
+            return;
+        }
+        match h.update_config(|c| {
+            maya_core::net::group::adopt_from_main(&mut c.network, &my_key, from, &group);
+        }) {
+            Ok(_) => h.sink.network(&h.status()),
+            Err(e) => log::line("network", format!("could not save the group: {e}")),
+        }
     }
     fn removed(&self) {
         // A removed phone mirrors nothing: its board and Chat go, and the tab hides.
@@ -1293,7 +1339,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config::default();
         config.network.role = NetworkRole::Main;
-        config.network.assistants = vec![PairedAssistant { id: "a1".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false }];
+        config.network.assistants = vec![PairedAssistant { id: "a1".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), key: "k".into(), address: "10.0.0.5".into(), last_seen: None, mirror: false, generation: 0 }];
         config::save(&settings_path(dir.path()), &config).unwrap();
         let settings = load_settings(dir.path(), "Pixel 8");
         assert_eq!(settings.config.network.role, NetworkRole::Off);

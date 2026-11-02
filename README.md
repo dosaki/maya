@@ -241,7 +241,9 @@ With the screen off Maya keeps running behind a persistent notification
 Android may still stop it on some phones: press **Keep Maya awake** in
 Settings › Notifications to exempt it from battery optimisation. If the notification
 disappears, open Maya again and the phone reconnects on its own. If the
-main's Wi‑Fi address changes, join again with the new one.
+main's Wi‑Fi address changes, open Settings › Devices on the phone and press
+**Join** beside the main: no code, only its address and port (filled in
+from the last one seen).
 
 Each ask and each finished turn is a notification you can turn off in
 Settings › Notifications, or silence per channel in Android's settings; tapping one
@@ -393,9 +395,10 @@ quiet.
   pairing code at once, valid for five minutes ("Show pairing code" makes
   a new one). The main accepts incoming connections, so macOS asks once
   whether Maya may do so: allow it. To add an assistant, give it the
-  code; Maya lists each paired assistant with its platform and IP address
-  (and when it was last seen) and lets you remove them. If the port is
-  taken, Settings says so under the menu.
+  code; Settings › Devices lists each paired assistant with its platform
+  and IP address (and when it was last seen) and lets you remove them,
+  and holds the "Sees and controls all sessions" switch and Make main.
+  If the port is taken, Settings says so under the menu.
 - **Assistant.** Choose "Assistant to a main Maya" in the Network menu and
   enter the main's host, port, a name for this machine (its hostname when
   blank) and the pairing code. Pair once; Maya keeps the main's key and
@@ -404,6 +407,19 @@ quiet.
   <main>", "Reconnecting…" (with the last error under it) or the error.
   On macOS 15 and later, macOS asks once whether Maya may reach devices on
   the local network: allow it.
+- **Devices.** Every Maya (desktop, phone and the `maya` command) keeps
+  the whole group of devices you trust. Pair a device once with a code;
+  after that no Maya asks for a code again, whichever one is the main.
+  Settings › Devices, on the computer and on the phone, lists the devices
+  with the main marked and when each was last seen.
+  - **Remove** takes a device out of every Maya, from any Maya. The main
+    cannot be removed: make another Maya the main first.
+  - **Join** connects to a main that is already in your group, with no
+    code. It asks for the main's address and port, filled in from the last
+    ones seen. Use it when the main has changed or moved.
+  - Only pairing with a code on the main adds a device to the group. A
+    stolen device that you have removed cannot add anyone.
+  - New key also clears the device list, since a new key is a new device.
 - **Trust.** Pairing runs SPAKE2 over the six-digit code: whatever answers
   at the host you typed learns nothing about the code unless it is the Maya
   showing it, and a code allows three tries before it is used up. Each
@@ -418,8 +434,8 @@ quiet.
   `secret-tool` all hand it over). The key store only keeps it out of
   plain files, so an agent that reads your config files does not find it.
   If a machine's key leaks, the other Mayas still trust it until you take
-  that trust away: Remove the machine on the main (if the main's key
-  leaked, use Forget main on every assistant and the phone). Then use New
+  that trust away: Remove the machine in Settings › Devices (if the main's
+  key leaked, use Forget main on every assistant and the phone). Then use New
   key on the machine and pair it again. New key alone revokes nothing.
 - **Outside the LAN.** Maya does not open anything to the internet. Reach
   a main from outside through a VPN such as Tailscale or WireGuard and
@@ -435,15 +451,18 @@ quiet.
   that pairs again with the same key keeps its place in the list. A
   machine with a new key (after New key or a reset, say) is a new entry,
   even from the same address.
-- **Make main.** On the main, Settings › Network › Make main beside a
-  connected assistant hands it the role. Every connected Maya follows the
-  new main with no new pairing; an assistant that is offline at that
-  moment still knows only the old main's key, so pair it with the new main
-  when it is back. The new main's Maya picks up her own session and gets a
-  short summary of what the old main's Maya did while she was dormant; it
-  shows in her Chat. The old main's Maya goes dormant.
-- **Versions.** Run the same Maya on every machine. The main notes an
-  assistant that runs another version, or one whose board it cannot read.
+- **Make main.** On the main, Settings › Devices › Make main beside a
+  connected assistant hands it the role. Every device follows the new main
+  with no code, including one that was off or away at that moment: when
+  it is back it goes to the old main, which points it to the new one. That
+  works only while the old main can still be reached; if it cannot, press
+  Join (no code) on the device. The new main's Maya picks up her own
+  session and gets a short summary of what the old main's Maya did while
+  she was dormant; it shows in her Chat. The old main's Maya goes dormant.
+- **Versions.** Run the same Maya on every machine. An assistant from
+  0.46 lists its main straight away after it upgrades, but all Mayas
+  should run this version. The main notes an assistant that runs another
+  version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
   names and attachments (up to 20 MB), and at Make main a summary of
   Maya's Chat. Commands run on the assistant; the
@@ -515,6 +534,11 @@ too, with no desktop and no app: the `maya` command line tool.
   headless machine carry no PR badge. Do not run the app and `maya run` on
   the same Mac: they share one pairing in `~/.claude/maya/config.json`, so
   on the main each connection replaces the other.
+- **Devices.** `./maya devices` lists the group. `./maya devices join
+  <name or id> <host>[:port]` joins a main that is already in the group,
+  with no code; like `maya pair`, it refuses while `maya run` is running
+  (exit 2), so stop `maya run` first. There is no remove on the command
+  line: remove a device from a computer or the phone.
 - **Status.** `./maya status` shows whether it is paired, connected and
   running, and the projects directory; `./maya hooks status` checks the
   hook.

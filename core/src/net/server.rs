@@ -31,6 +31,7 @@
 //! with the mutex held, so none lands after its view ended; the page's sink
 //! is called only once the mutex is let go.
 
+use super::group::{self, GroupCopy};
 use super::merge::{display_names, RemoteBoard};
 use super::identity::{encode_key, Keypair};
 use super::live::{self, FrameSink, LiveTerms, TermEvent, TermFrame, TermView};
@@ -75,13 +76,20 @@ const DISCONNECTED: &str = "assistant disconnected";
 /// The `bye` reason when the main could not save a pairing; the assistant
 /// keeps nothing and says "The main could not save the pairing."
 pub(crate) const PAIRING_NOT_SAVED: &str = "could not save the pairing";
+/// Why `remove_member` refuses the main's own key.
+pub const MAIN_NOT_REMOVABLE: &str = "The main cannot be removed; make another Maya the main first.";
+/// Why `remove_member` refuses while the main role is being handed over.
+pub const HANDOVER_RUNNING: &str = "A handover is running; try again in a moment.";
+/// Why `remove_member` refuses once the server is stopping.
+pub const MAIN_STOPPING: &str = "The main Maya is stopping; try again in a moment.";
 
 /// What the server tells the app; the Tauri adapter lives in the app's `lib.rs`.
 /// `paired` and `paired_list_changed` are called with the server's mutex
 /// held (see the module docs) and must not take it; the others never are.
 /// Both saves say whether they reached the disk: a pairing or a removal
 /// that could not be saved is not made; a refresh on connect or disconnect
-/// (address, last seen) that could not be saved is only logged.
+/// (address, last seen) that could not be saved is only logged. Both get
+/// the whole group as it is stored (the main's own entry is not in it).
 pub trait Notify: Send + Sync {
     fn board_changed(&self);
     /// An assistant's first board when this run of the main holds none for
@@ -89,8 +97,8 @@ pub trait Notify: Send + Sync {
     /// boards: nothing on it is announced. Later changes are.
     fn board_seeded(&self, cards: &[crate::model::Card]);
     fn status_changed(&self, status: NetworkStatus);
-    fn paired(&self, assistant: &PairedAssistant) -> Result<(), String>;
-    fn paired_list_changed(&self, assistants: &[PairedAssistant]) -> Result<(), String>;
+    fn paired(&self, assistant: &PairedAssistant, group: &GroupCopy) -> Result<(), String>;
+    fn paired_list_changed(&self, group: &GroupCopy) -> Result<(), String>;
     /// A mirroring Maya's request, run on a worker thread with no lock held.
     /// `machine` is `None` for this main itself. The result is what this
     /// main's own page would get for the same action.
@@ -171,7 +179,14 @@ pub struct Server {
     attempts: Attempts,
     /// The last code took its three tries without a pairing.
     code_used_up: bool,
+    /// The live members of the group, this main left out.
     paired: Vec<PairedAssistant>,
+    /// The group's tombstones: removed keys, refused like unknown ones.
+    removed: Vec<PairedAssistant>,
+    /// The group's version, raised at every change of who is in it.
+    version: u64,
+    /// This main's own entry, which the group it sends carries.
+    own: PairedAssistant,
     peers: HashMap<String, Peer>,
     /// A handover to a new main is running; no second one may start.
     handover: bool,
@@ -192,6 +207,8 @@ pub struct Server {
     /// Assistants' live terminals this main relays to a viewer, by the sub
     /// the main chose with the assistant (from `next`, never reused).
     relays: HashMap<u64, Relay>,
+    /// A redirect listener's new main: members that come back are sent there.
+    redirect: Option<MoveTarget>,
 }
 
 /// An assistant's live terminal the main relays to one viewer.
@@ -243,8 +260,45 @@ struct MirrorBoard {
 }
 
 impl Server {
-    fn new(paired: Vec<PairedAssistant>, main_name: String) -> Server {
-        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, wake_word: None, main_name, terminals: false, relays: HashMap::new() }
+    fn new(group: GroupCopy, own: PairedAssistant, main_name: String) -> Server {
+        Server { boards: vec![], pairing: None, by_id: HashMap::new(), conns: HashMap::new(), pending: HashMap::new(), next_id: 0, attempts: Attempts::default(), code_used_up: false, paired: group.members, removed: group.removed, version: group.version, own, peers: HashMap::new(), handover: false, pairings_in_flight: HashSet::new(), mirror: None, mirror_serial: 0, wake_word: None, main_name, terminals: false, relays: HashMap::new(), redirect: None }
+    }
+
+    /// The group as it is saved: no entry for this main.
+    fn stored(&self) -> GroupCopy {
+        GroupCopy { version: self.version, members: self.paired.clone(), removed: self.removed.clone() }
+    }
+
+    /// The group as the members get it: with this main's own entry.
+    fn wire(&self) -> GroupCopy {
+        let mut g = self.stored();
+        g.members.push(self.own.clone());
+        g
+    }
+
+    /// Takes `g` as the group.
+    fn set_group(&mut self, g: GroupCopy) {
+        self.paired = g.members;
+        self.removed = g.removed;
+        self.version = g.version;
+    }
+
+    /// Queues the group on every connection.
+    fn send_group_to_all(&self) {
+        let down = Down::Group(self.wire());
+        for c in self.conns.values() {
+            let _ = c.tx.send(down.clone());
+        }
+    }
+
+    /// Ends the connection of a member just removed (`bye removed`) and
+    /// drops its board; the caller syncs the boards.
+    fn forget_removed(&mut self, id: &str) {
+        if let Some(c) = self.conns.remove(id) {
+            let _ = c.tx.send(Down::Bye { reason: "removed".into() });
+        }
+        self.by_id.remove(id);
+        self.peers.remove(id);
     }
 
     /// The entry `id` lets its Maya mirror.
@@ -286,36 +340,33 @@ impl Server {
         self.paired.iter().zip(display_names(&entries).into_iter().skip(1)).map(|(p, label)| (p.id.clone(), label)).collect()
     }
 
-    /// Records a pairing by the Maya with `key`. An entry with that key is
-    /// the same machine pairing again: it keeps its id, takes the names
-    /// just given, and its old board goes. Otherwise it is a new entry.
-    /// Returns the entry, and what it was before (for `undo_pairing`).
-    fn record_pairing(&mut self, key: &str, address: &str, name: &str, hostname: &str, platform: &str, mirror: bool) -> (PairedAssistant, Option<PairedAssistant>) {
-        let again = self.paired.iter().position(|p| p.key == key);
-        let Some(i) = again else {
-            let a = PairedAssistant { id: new_id(), name: name.into(), hostname: hostname.into(), platform: platform.into(), key: key.into(), address: address.into(), last_seen: None, mirror };
-            self.paired.push(a.clone());
-            self.pairings_in_flight.insert(a.id.clone());
-            return (a, None);
-        };
-        let previous = self.paired[i].clone();
-        let p = &mut self.paired[i];
-        p.name = name.into();
-        p.hostname = hostname.into();
-        p.platform = platform.into();
-        p.address = address.into();
-        p.mirror = mirror;
-        let a = p.clone();
+    /// Records a pairing by the Maya with `key`, through `group::add`. A
+    /// live entry with that key is the same machine pairing again: it keeps
+    /// its id, takes the names just given, and its old board goes.
+    /// Otherwise it is a new entry, and a tombstone with that key goes.
+    /// Returns the entry, what it was before and the tombstone it replaced
+    /// (for `undo_pairing`).
+    fn record_pairing(&mut self, key: &str, address: &str, name: &str, hostname: &str, platform: &str, mirror: bool) -> (PairedAssistant, Option<PairedAssistant>, Option<PairedAssistant>) {
+        let previous = self.paired.iter().find(|p| p.key == key).cloned();
+        let tomb = self.removed.iter().find(|r| r.key == key).cloned();
+        let base = previous.clone().unwrap_or_else(|| PairedAssistant { id: new_id(), name: String::new(), hostname: String::new(), platform: String::new(), key: key.into(), address: String::new(), last_seen: None, mirror: false, generation: 0 });
+        let entry = PairedAssistant { name: name.into(), hostname: hostname.into(), platform: platform.into(), address: address.into(), mirror, ..base };
+        let mut g = self.stored();
+        let a = group::add(&mut g, entry);
+        self.set_group(g);
         self.pairings_in_flight.insert(a.id.clone());
-        self.by_id.remove(&a.id);
-        self.peers.remove(&a.id);
-        self.sync_boards();
-        (a, Some(previous))
+        if previous.is_some() {
+            self.by_id.remove(&a.id);
+            self.peers.remove(&a.id);
+            self.sync_boards();
+        }
+        (a, previous, tomb)
     }
 
-    /// Takes back a pairing the assistant never completed: a new entry goes,
-    /// an existing one gets its old names back.
-    fn undo_pairing(&mut self, id: &str, previous: Option<PairedAssistant>) {
+    /// Takes back a pairing the assistant never completed: a new entry goes
+    /// (and the tombstone it replaced comes back), an existing one gets its
+    /// old names back. The version is left to the caller (`NewPairing::undo`).
+    fn undo_pairing(&mut self, id: &str, previous: Option<PairedAssistant>, tomb: Option<PairedAssistant>) {
         self.pairings_in_flight.remove(id);
         match previous {
             Some(p) => {
@@ -326,6 +377,10 @@ impl Server {
             None => {
                 self.paired.retain(|e| e.id != id);
                 self.by_id.remove(id);
+                if let Some(t) = tomb.filter(|t| !self.paired.iter().any(|p| p.key == t.key)) {
+                    self.removed.retain(|r| r.key != t.key);
+                    self.removed.push(t);
+                }
             }
         }
         self.peers.remove(id);
@@ -529,6 +584,9 @@ impl ServerHandle {
     pub fn open_pairing(&self, now_ms: u64) -> Result<(String, u64), String> {
         let (code, expires, status) = {
             let mut s = lock(&self.shared);
+            if s.redirect.is_some() {
+                return Err("This Maya is no longer the main.".into());
+            }
             if s.handover {
                 log::line("network", "pairing stays closed during a handover");
                 return Err("A handover is already running.".into());
@@ -544,28 +602,23 @@ impl ServerHandle {
         Ok((code, expires))
     }
 
-    /// Forgets an assistant: it is told `bye removed`, its cards go, and its
-    /// key no longer opens a connection. The shorter list is saved first;
-    /// if that fails nothing changes and the error comes back.
+    /// Forgets the assistant `id`: see `remove_member`. An id no longer
+    /// paired is already gone.
     pub fn remove_assistant(&self, id: &str) -> Result<(), String> {
-        let (label, status) = {
-            let mut s = lock(&self.shared);
-            let label = s.label(id);
-            let after: Vec<PairedAssistant> = s.paired.iter().filter(|p| p.id != id).cloned().collect();
-            self.ctx.notify.paired_list_changed(&after)?;
-            s.paired = after;
-            if let Some(c) = s.conns.remove(id) {
-                let _ = c.tx.send(Down::Bye { reason: "removed".into() });
-            }
-            s.by_id.remove(id);
-            s.peers.remove(id);
-            s.sync_boards();
-            (label, s.status(now_ms()))
-        };
-        log::line("network", format!("{label}: removed"));
-        self.ctx.notify.status_changed(status);
-        self.ctx.notify.board_changed();
-        Ok(())
+        let key = lock(&self.shared).paired.iter().find(|p| p.id == id).map(|p| p.key.clone());
+        match key {
+            Some(key) => self.remove_member(&key),
+            None => Ok(()),
+        }
+    }
+
+    /// Removes the member with `key` from the group: it is told `bye
+    /// removed`, its cards go, its key no longer opens a connection, and
+    /// every other member gets the group with its tombstone. The new group
+    /// is saved first; if that fails nothing changes and the error comes
+    /// back. The main's own key is refused.
+    pub fn remove_member(&self, key: &str) -> Result<(), String> {
+        remove_member(&self.ctx, key)
     }
 
     pub fn port(&self) -> u16 {
@@ -650,11 +703,11 @@ impl ServerHandle {
     pub fn set_mirror(&self, id: &str, on: bool) -> Result<(), String> {
         let (label, status) = {
             let mut s = lock(&self.shared);
-            let mut after = s.paired.clone();
-            let entry = after.iter_mut().find(|p| p.id == id).ok_or("That Maya is no longer paired.")?;
+            let mut after = s.stored();
+            let entry = after.members.iter_mut().find(|p| p.id == id).ok_or("That Maya is no longer paired.")?;
             entry.mirror = on;
             self.ctx.notify.paired_list_changed(&after)?;
-            s.paired = after;
+            s.set_group(after);
             if on {
                 s.bump_mirror();
             } else if let Some(c) = s.conns.get(id) {
@@ -679,9 +732,6 @@ impl ServerHandle {
     }
 }
 
-/// Binds `port` on every interface (0 picks a free one) and starts accepting.
-/// `config_view` supplies the paired assistants at start; from then on the
-/// server's own list is the truth and `Notify` reports changes to it.
 /// What assistants see as the main's name in `welcome`: the configured
 /// name, or this computer's hostname when it is blank.
 pub fn main_name_of(c: &NetworkConfig) -> String {
@@ -689,24 +739,131 @@ pub fn main_name_of(c: &NetworkConfig) -> String {
     if n.is_empty() { super::local_hostname() } else { n.to_string() }
 }
 
+/// Binds `port` on every interface (0 picks a free one) and starts accepting.
+/// `config_view` supplies the group (members, tombstones, version) at start;
+/// from then on the server's own group is the truth and `Notify` reports
+/// changes to it.
 pub fn start_with(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>>, port: u16, identity: Arc<Keypair>) -> Result<ServerHandle, String> {
+    start(notify, config_view, port, identity, None)
+}
+
+/// Where the main is now: what a redirect sends in `Move`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveTarget {
+    pub host: String,
+    pub port: u16,
+    pub key: String,
+}
+
+/// A redirect's notifier: it saves nothing and has no page to tell.
+struct Quiet;
+
+impl Notify for Quiet {
+    fn board_changed(&self) {}
+    fn board_seeded(&self, _: &[Card]) {}
+    fn status_changed(&self, _: NetworkStatus) {}
+    fn paired(&self, _: &PairedAssistant, _: &GroupCopy) -> Result<(), String> {
+        Ok(())
+    }
+    fn paired_list_changed(&self, _: &GroupCopy) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The old main's redirect listener, on the port it listened on as main:
+/// a live member of the group that comes back gets the group and a `Move`
+/// to `to`, then the connection ends. It pairs nobody, refuses unknown and
+/// removed keys as a main does, merges nothing and keeps no boards.
+pub fn start_redirect(config_view: Arc<Mutex<NetworkConfig>>, port: u16, identity: Arc<Keypair>, to: MoveTarget) -> Result<ServerHandle, String> {
+    start(Arc::new(Quiet), config_view, port, identity, Some(to))
+}
+
+fn start(notify: Arc<dyn Notify>, config_view: Arc<Mutex<NetworkConfig>>, port: u16, identity: Arc<Keypair>, redirect: Option<MoveTarget>) -> Result<ServerHandle, String> {
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| format!("Could not listen on port {port}: {e}. Choose another port."))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let (paired, main_name) = {
+    let (group, own, main_name) = {
         let c = lock(&config_view);
-        (c.assistants.clone(), main_name_of(&c))
+        (group::of_config(&c), group::me(&c, &identity.public_b64()), main_name_of(&c))
+    };
+    let what = match &redirect {
+        Some(to) => format!("redirecting on port {port} to {}:{}", to.host, to.port),
+        None => format!("listening on port {port}"),
     };
     let terms = notify.live_terms();
-    let mut server = Server::new(paired, main_name.clone());
+    let mut server = Server::new(group, own, main_name.clone());
     server.terminals = terms.is_some();
+    server.redirect = redirect;
     let shared = Arc::new(Mutex::new(server));
     let stop = Arc::new(AtomicBool::new(false));
     let ctx = Arc::new(Ctx { shared: shared.clone(), notify, stop: stop.clone(), main_name, identity, live: AtomicUsize::new(0), pre_auth: Mutex::new(HandshakeSlots::default()), terms });
     let c = ctx.clone();
     std::thread::Builder::new().name("net-accept".into()).spawn(move || accept_loop(listener, c)).map_err(|e| e.to_string())?;
-    log::line("network", format!("listening on port {port}"));
+    log::line("network", what);
     Ok(ServerHandle { shared, stop, port, ctx })
+}
+
+/// `ServerHandle::remove_member`, also run for a member's `RemoveMember`.
+fn remove_member(ctx: &Ctx, key: &str) -> Result<(), String> {
+    let (label, status) = {
+        let mut s = lock(&ctx.shared);
+        if key == s.own.key {
+            return Err(MAIN_NOT_REMOVABLE.into());
+        }
+        // The group already went to the new main, or a new server may be
+        // running: a removal now would not reach it.
+        if s.handover {
+            return Err(HANDOVER_RUNNING.into());
+        }
+        if ctx.stopped() {
+            return Err(MAIN_STOPPING.into());
+        }
+        let Some(id) = s.paired.iter().find(|p| p.key == key).map(|p| p.id.clone()) else {
+            // Already gone.
+            return Ok(());
+        };
+        let label = s.label(&id);
+        let mut after = s.stored();
+        group::remove(&mut after, key);
+        ctx.notify.paired_list_changed(&after)?;
+        s.set_group(after);
+        s.forget_removed(&id);
+        s.sync_boards();
+        s.send_group_to_all();
+        (label, s.status(now_ms()))
+    };
+    log::line("network", format!("{label}: removed"));
+    ctx.notify.status_changed(status);
+    ctx.notify.board_changed();
+    Ok(())
+}
+
+/// Takes the removals of a member's copy of the group (`group::merge_copy`:
+/// never an addition), with the server's lock held. When the group changed
+/// it is saved, the removed members' connections end and every member gets
+/// it. A copy that cannot be saved changes nothing. Whether it changed.
+fn take_removals(ctx: &Ctx, s: &mut Server, theirs: &GroupCopy) -> bool {
+    // A stopped server's group is no longer the truth.
+    if ctx.stopped() {
+        return false;
+    }
+    let mut after = s.stored();
+    if !group::merge_copy(&mut after, theirs) {
+        return false;
+    }
+    if let Err(e) = ctx.notify.paired_list_changed(&after) {
+        log::line("network", format!("could not save the removals a member's group carried: {e}"));
+        return false;
+    }
+    let gone: Vec<(String, String)> = s.paired.iter().filter(|p| !after.members.iter().any(|m| m.key == p.key)).map(|p| (p.id.clone(), s.label(&p.id))).collect();
+    s.set_group(after);
+    for (id, label) in &gone {
+        s.forget_removed(id);
+        log::line("network", format!("{label}: removed by the group a member carried"));
+    }
+    s.sync_boards();
+    s.send_group_to_all();
+    true
 }
 
 fn accept_loop(listener: TcpListener, ctx: Arc<Ctx>) {
@@ -1004,7 +1161,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             return None;
         }
     };
-    let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, terminals } = hello else {
+    let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, terminals, group: copy } = hello else {
         log::line("network", format!("{ip}: first message was not a hello"));
         bye(ch, "protocol");
         return None;
@@ -1023,22 +1180,49 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
     let streams = caps.iter().any(|c| c == CAP_TERMINAL);
     let key = encode_key(&accepted.key);
     let (id, pairing) = if accepted.paired {
+        // A redirect opens no pairing window, so no code gets this far.
+        if lock(&ctx.shared).redirect.is_some() {
+            bye(ch, secure::WRONG_CODE_REASON);
+            return None;
+        }
         let p = pair(ctx, ch, &key, &ip, &name, &hostname, &platform, wants_mirror)?;
         (p.entry.id.clone(), Some(p))
     } else {
-        let known = lock(&ctx.shared).paired.iter().find(|p| p.key == key).map(|p| p.id.clone());
+        // Only a live member's copy is read, and only for its removals,
+        // which may include the member itself. A redirect reads none: the
+        // group is no longer its to change.
+        let (known, merged, redirect) = {
+            let mut s = lock(&ctx.shared);
+            let redirect = s.redirect.clone().map(|to| (to, s.wire()));
+            match s.paired.iter().find(|p| p.key == key).map(|p| p.id.clone()) {
+                Some(id) if redirect.is_some() => (Some(id), false, redirect),
+                Some(id) => {
+                    let merged = copy.as_ref().is_some_and(|theirs| take_removals(ctx, &mut s, theirs));
+                    (s.paired.iter().any(|p| p.key == key).then_some(id), merged, None)
+                }
+                None => (None, false, None),
+            }
+        };
+        if merged {
+            ctx.announce();
+            ctx.notify.board_changed();
+        }
         let Some(id) = known else {
             // A key this main does not know: removed, or paired with another main.
             log::line("network", format!("{name}: unknown key; told it was removed"));
             bye(ch, "removed");
             return None;
         };
+        if let Some((to, wire)) = redirect {
+            send_to_new_main(ctx, ch, &name, wire, to);
+            return None;
+        }
         (id, None)
     };
     let (tx, rx) = channel();
     // `Err(None)`: no longer paired; `Err(Some(e))`: a fresh pairing that
     // could not be saved.
-    let registered: Result<(u64, String, Option<bool>), Option<String>> = {
+    let registered: Result<(u64, String, Option<bool>, GroupCopy), Option<String>> = {
         let mut s = lock(&ctx.shared);
         // Registered or refused below: either way no longer in flight.
         s.pairings_in_flight.remove(&id);
@@ -1050,16 +1234,22 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             // that cannot be saved is answered with `bye` instead, so neither
             // side keeps it. A refresh that cannot be saved is only logged,
             // and a stopped server's list is no longer the truth.
+            let stored = s.stored();
             let saved = match &pairing {
-                Some(_) => s.paired.iter().find(|p| p.id == id).map_or(Ok(()), |entry| ctx.notify.paired(entry)),
+                Some(_) => stored.members.iter().find(|p| p.id == id).map_or(Ok(()), |entry| ctx.notify.paired(entry, &stored)),
                 None if !ctx.stopped() => {
-                    let _ = ctx.notify.paired_list_changed(&s.paired);
+                    let _ = ctx.notify.paired_list_changed(&stored);
                     Ok(())
                 }
                 None => Ok(()),
             };
             match saved {
                 Ok(()) => {
+                    // The others learn of the pairing; this one gets the
+                    // group after `welcome`.
+                    if pairing.is_some() {
+                        s.send_group_to_all();
+                    }
                     let serial = s.next();
                     s.peers.insert(id.clone(), Peer { app, caps: caps.into_iter().map(|c| clean(&c)).collect(), last_seen: now, unreadable_board: false, brain_dormant_since, terminals });
                     // A newer connection replaces an older one; dropping its sender ends it.
@@ -1069,7 +1259,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
                     }
                     s.sync_boards();
                     let offer = wants_mirror.then(|| s.may_mirror(&id));
-                    Ok((serial, s.label(&id), offer))
+                    Ok((serial, s.label(&id), offer, s.wire()))
                 }
                 Err(e) => Err(Some(e)),
             }
@@ -1077,7 +1267,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             Err(None)
         }
     };
-    let (serial, label, offer) = match registered {
+    let (serial, label, offer, wire) = match registered {
         Ok(r) => r,
         Err(None) => {
             bye(ch, "removed");
@@ -1085,7 +1275,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
         }
         Err(Some(e)) => {
             if let Some(p) = pairing {
-                p.undo(ctx, &format!("could not save it: {e}"));
+                p.undo(ctx, &format!("could not save it: {e}"), false);
             }
             bye(ch, PAIRING_NOT_SAVED);
             return None;
@@ -1098,11 +1288,13 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
         c.max_message_size = Some(MAX_FRAME + MAX_FRAME / 1024);
         c.max_frame_size = Some(MAX_FRAME + MAX_FRAME / 1024);
     });
-    if let Err(e) = send_down(ch, &Down::Welcome { name: ctx.main_name.clone(), mirror: offer, caps: ctx.notify.main_caps() }) {
+    // A newer group queued meanwhile follows from the connection's queue.
+    let welcomed = send_down(ch, &Down::Welcome { name: ctx.main_name.clone(), mirror: offer, caps: ctx.notify.main_caps() }).and_then(|()| send_down(ch, &Down::Group(wire)));
+    if let Err(e) = welcomed {
         // Undone first, so the list `leave` saves no longer holds the
         // pairing it takes back.
         if let Some(p) = pairing {
-            p.undo(ctx, &e);
+            p.undo(ctx, &e, true);
         }
         leave(ctx, &link, &e);
         return None;
@@ -1113,18 +1305,56 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
     Some(link)
 }
 
+/// A redirect's answer to a returning member: `welcome`, the group (which
+/// holds the new main, so the member may follow it), then `Move`. The
+/// connection ends after it; nothing is registered.
+fn send_to_new_main(ctx: &Ctx, ch: &mut Chan, who: &str, wire: GroupCopy, to: MoveTarget) {
+    let (host, port) = (to.host.clone(), to.port);
+    let sent = send_down(ch, &Down::Welcome { name: ctx.main_name.clone(), mirror: None, caps: vec![] })
+        .and_then(|()| send_down(ch, &Down::Group(wire)))
+        .and_then(|()| send_down(ch, &Down::Move { host: to.host, port: to.port, key: to.key }));
+    match sent {
+        Ok(()) => log::line("network", format!("{who}: sent to the new main at {host}:{port}")),
+        Err(e) => log::line("network", format!("{who}: could not send it to the new main: {e}")),
+    }
+}
+
 /// A pairing recorded but not yet saved: it is saved just before `welcome`,
 /// and undone if the save fails or `welcome` cannot be sent, so a Maya that
 /// was never welcomed leaves no entry behind.
 struct NewPairing {
     entry: PairedAssistant,
     previous: Option<PairedAssistant>,
+    /// The tombstone with the same key the pairing replaced.
+    tomb: Option<PairedAssistant>,
 }
 
 impl NewPairing {
-    fn undo(self, ctx: &Ctx, why: &str) {
+    /// `saved`: the pairing reached the disk and the group went out with it.
+    /// Otherwise, unless another change saved or sent the group meanwhile
+    /// (its version moved past the one `group::add` gave the pairing),
+    /// nothing went out: the group goes back to exactly what was saved,
+    /// version included, and nothing is sent. When something did go out the
+    /// undone group is saved, one version newer, and sent only once saved.
+    fn undo(self, ctx: &Ctx, why: &str, saved: bool) {
         log::line("network", format!("{}: pairing not completed ({why}); nothing kept", self.entry.name));
-        lock(&ctx.shared).undo_pairing(&self.entry.id, self.previous);
+        {
+            let mut s = lock(&ctx.shared);
+            let went_out = saved || s.version != self.entry.generation;
+            s.undo_pairing(&self.entry.id, self.previous, self.tomb);
+            if !went_out {
+                s.version = s.version.saturating_sub(1);
+            } else if !ctx.stopped() {
+                s.version = s.version.saturating_add(1);
+                match ctx.notify.paired_list_changed(&s.stored()) {
+                    Ok(()) => s.send_group_to_all(),
+                    Err(e) => {
+                        s.version = s.version.saturating_sub(1);
+                        log::line("network", format!("could not save the group without the pairing: {e}"));
+                    }
+                }
+            }
+        }
         ctx.announce();
     }
 }
@@ -1143,13 +1373,13 @@ fn pair(ctx: &Ctx, ch: &mut Chan, key: &str, ip: &str, name: &str, hostname: &st
             Some(pairing)
         }
     };
-    let Some((entry, previous)) = outcome else {
+    let Some((entry, previous, tomb)) = outcome else {
         log::line("network", format!("{ip}: pairing refused: the code was used meanwhile"));
         bye(ch, secure::WRONG_CODE_REASON);
         return None;
     };
     log::line("network", format!("{name}: {} from {ip}", if previous.is_some() { "paired again (same key)" } else { "paired" }));
-    Some(NewPairing { entry, previous })
+    Some(NewPairing { entry, previous, tomb })
 }
 
 /// Why a connection ends when the main no longer counts it: a newer
@@ -1353,6 +1583,26 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
             link.end_term(sub);
         }
         Up::TermFrame { sub, frame } => relay_frame(ctx, link, sub, frame),
+        // Any member may remove one, mirroring or not; answered here, before
+        // the mirror gate.
+        Up::Request { id, request: Request::RemoveMember { key }, .. } => {
+            let current = {
+                let mut s = lock(&ctx.shared);
+                s.touch(&link.id);
+                s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial)
+            };
+            if !current {
+                return Err(NOT_CURRENT.into());
+            }
+            let down = match remove_member(ctx, &key) {
+                Ok(()) => Down::Response { id, ok: true, error: None, data: None },
+                Err(e) => {
+                    log::line("network", format!("{}: request {id} failed: {e}", link.label));
+                    Down::Response { id, ok: false, error: Some(e), data: None }
+                }
+            };
+            send_down(ch, &down)?;
+        }
         Up::Request { id, machine, request } => {
             let (allowed, tx) = {
                 let mut s = lock(&ctx.shared);
@@ -1640,7 +1890,7 @@ fn leave(ctx: &Ctx, link: &Link, reason: &str) {
             // Saved under the lock; a stopped server's list is no longer
             // the truth (a new one may be running).
             if !ctx.stopped() {
-                let _ = ctx.notify.paired_list_changed(&s.paired);
+                let _ = ctx.notify.paired_list_changed(&s.stored());
             }
         }
         s.fail_pending(link.serial);
@@ -1797,8 +2047,9 @@ pub struct HandoverTo {
 }
 
 impl ServerHandle {
-    /// Makes the assistant `id` the main: closes pairing, sends it the paired
-    /// list with this main's own new entry, and once
+    /// Makes the assistant `id` the main: closes pairing, sends it the group
+    /// (the paired list with this main's own entry, the tombstones and the
+    /// version), and once
     /// it answers with its port, sends `move` to every other connected
     /// assistant that can follow and waits for those connections to close.
     /// The caller then saves this Maya as an assistant of `host:port`.
@@ -1818,7 +2069,7 @@ impl ServerHandle {
     }
 
     fn promote_inner(&self, id: &str, timeout: Duration, summary: impl FnOnce(&HandoverTo) -> Option<String>) -> Result<Promotion, String> {
-        let (label, host, main_key, list, to) = {
+        let (label, host, main_key, handed, to) = {
             let mut s = lock(&self.shared);
             if s.handover {
                 return Err("A handover is already running.".into());
@@ -1843,17 +2094,18 @@ impl ServerHandle {
             }
             s.handover = true;
             s.pairing = None;
-            let me = super::promote::own_entry(&self.ctx.main_name, &self.ctx.identity.public_b64());
-            let list = super::promote::handover_list(&s.paired, id, &me);
+            // The group but the new main, with this main's own entry.
+            let group = super::promote::handover(&s.stored(), id, &s.own);
             let peer = s.peers.get(id);
             let to = HandoverTo { label: label.clone(), brain_dormant_since: peer.and_then(|p| p.brain_dormant_since) };
-            (label, entry.address, entry.key, list, to)
+            (label, entry.address, entry.key, group, to)
         };
+        let super::group::GroupCopy { version, members: list, removed } = handed;
         let _turn = HandoverTurn(&self.shared);
         self.ctx.announce();
         let summary = summary(&to);
         log::line("network", format!("{label}: handing over the main role ({} assistants{})", list.len(), if summary.is_some() { ", with a summary" } else { "" }));
-        let data = send_command_to(&self.shared, id, CommandKind::Promote { list, summary }, timeout).map_err(|e| {
+        let data = send_command_to(&self.shared, id, CommandKind::Promote { list, summary, removed, version }, timeout).map_err(|e| {
             // A dropped connection leaves the same doubt as silence: G may already be a main.
             if e.ends_with(NO_ANSWER) || e.ends_with(LEFT_BEFORE_ANSWER) {
                 format!("{label} did not answer; it may have become a main on its own. Check it before trying again.")
@@ -1919,6 +2171,8 @@ mod tests {
         pub announced: Mutex<Vec<String>>,
         /// The paired list as last saved.
         pub saved: Mutex<Vec<crate::config::PairedAssistant>>,
+        /// The group as last saved.
+        pub saved_group: Mutex<crate::net::group::GroupCopy>,
         /// Saves made without the server's lock held (there should be none).
         pub saves_outside_lock: AtomicUsize,
         /// Every save fails while set (a full disk, a read-only config).
@@ -1949,25 +2203,22 @@ mod tests {
         fn status_changed(&self, _: NetworkStatus) {
             self.statuses.fetch_add(1, Ordering::SeqCst);
         }
-        fn paired(&self, assistant: &crate::config::PairedAssistant) -> Result<(), String> {
+        fn paired(&self, assistant: &crate::config::PairedAssistant, group: &crate::net::group::GroupCopy) -> Result<(), String> {
             self.check_under_lock();
             if self.fail_saves.load(Ordering::SeqCst) {
                 return Err("disk full".into());
             }
+            assert!(group.members.iter().any(|m| m.id == assistant.id), "the group holds the pairing");
             self.paired.fetch_add(1, Ordering::SeqCst);
-            let mut saved = self.saved.lock().unwrap();
-            match saved.iter_mut().find(|a| a.id == assistant.id) {
-                Some(a) => *a = assistant.clone(),
-                None => saved.push(assistant.clone()),
-            }
+            self.save(group);
             Ok(())
         }
-        fn paired_list_changed(&self, list: &[crate::config::PairedAssistant]) -> Result<(), String> {
+        fn paired_list_changed(&self, group: &crate::net::group::GroupCopy) -> Result<(), String> {
             self.check_under_lock();
             if self.fail_saves.load(Ordering::SeqCst) {
                 return Err("disk full".into());
             }
-            *self.saved.lock().unwrap() = list.to_vec();
+            self.save(group);
             Ok(())
         }
         fn main_caps(&self) -> Vec<String> {
@@ -1989,6 +2240,11 @@ mod tests {
     }
 
     impl Counter {
+        fn save(&self, group: &crate::net::group::GroupCopy) {
+            *self.saved.lock().unwrap() = group.members.clone();
+            *self.saved_group.lock().unwrap() = group.clone();
+        }
+
         /// Saves must happen with the server's lock held, so they land in the
         /// order the list changed. A save made without it finds the lock free.
         fn check_under_lock(&self) {
@@ -2037,7 +2293,7 @@ mod tests {
     }
 
     pub(crate) fn hello_up(name: &str, caps: &[&str]) -> Up {
-        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect(), brain_dormant_since: None, terminals: None }
+        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect(), brain_dormant_since: None, terminals: None, group: None }
     }
 
     /// Pairs a new Maya (key `me`) whose `hello` carries `caps`; returns its
@@ -2070,10 +2326,15 @@ mod tests {
     /// Connects a paired Maya with its key and says `hello`; returns the
     /// channel before `welcome` is read.
     pub(crate) fn connect_as(handle: &ServerHandle, port: u16, me: &Keypair, name: &str, caps: &[&str]) -> Client {
+        connect_hello(handle, port, me, &hello_up(name, caps))
+    }
+
+    /// Connects a paired Maya with its key and says `hello`.
+    fn connect_hello(handle: &ServerHandle, port: u16, me: &Keypair, hello: &Up) -> Client {
         let mut ws = connect(port);
         let noise = secure::connect(&mut ws, me, &handle.public_key(), soon(), &|| false).unwrap();
         let mut ch = Channel::new(ws, noise);
-        send(&mut ch, &hello_up(name, caps));
+        send(&mut ch, hello);
         ch
     }
 
@@ -2096,7 +2357,7 @@ mod tests {
         let noise = secure::connect(&mut ws, &me, &handle.public_key(), soon(), &|| false).unwrap();
         let mut ch = Channel::new(ws, noise);
         let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, .. } = hello_up(name, caps) else { panic!() };
-        send(&mut ch, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, terminals });
+        send(&mut ch, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, terminals, group: None });
         assert!(matches!(recv(&mut ch), Down::Welcome { .. }));
         (ch, id)
     }
@@ -2105,7 +2366,8 @@ mod tests {
         ch.send(&encode(up)).unwrap();
     }
 
-    pub(crate) fn recv(ch: &mut Client) -> Down {
+    /// The next frame, whatever it is.
+    pub(crate) fn recv_raw(ch: &mut Client) -> Down {
         let end = soon();
         loop {
             match ch.read().unwrap() {
@@ -2113,6 +2375,26 @@ mod tests {
                 Got::Closed => panic!("closed"),
                 _ if Instant::now() > end => panic!("nothing within 5 s"),
                 _ => {}
+            }
+        }
+    }
+
+    /// The next frame that is not the group, which the main sends after
+    /// `welcome` and at every change of it.
+    pub(crate) fn recv(ch: &mut Client) -> Down {
+        loop {
+            match recv_raw(ch) {
+                Down::Group(_) => continue,
+                other => return other,
+            }
+        }
+    }
+
+    /// The next group the main sends, skipping other frames.
+    fn recv_group(ch: &mut Client) -> crate::net::group::GroupCopy {
+        loop {
+            if let Down::Group(g) = recv_raw(ch) {
+                return g;
             }
         }
     }
@@ -2338,7 +2620,7 @@ mod tests {
         assert!(matches!(recv(&mut phone), Down::Response { id: 3, ok: true, .. }));
         let seen: Vec<Option<String>> = counter.requests.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
         assert_eq!(seen, [None, None, Some("laptop".to_string())], "the main's own name means the main");
-        send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::Promote { list: vec![], summary: None }) });
+        send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::Promote { list: vec![], summary: None, removed: vec![], version: 0 }) });
         assert_eq!(recv(&mut phone), Down::Response { id: 4, ok: false, error: Some("That cannot be requested.".into()), data: None });
         handle.stop();
     }
@@ -2364,7 +2646,7 @@ mod tests {
         let noise = secure::connect(&mut ws, &me, &handle.public_key(), soon(), &|| false).unwrap();
         let mut g = Channel::new(ws, noise);
         let Up::Hello { protocol, app, name, hostname, platform, caps, .. } = hello_up("laptop", &["follow", "lead"]) else { panic!() };
-        send(&mut g, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since: Some(77), terminals: None });
+        send(&mut g, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since: Some(77), terminals: None, group: None });
         assert!(matches!(recv(&mut g), Down::Welcome { .. }));
         let h = handle.clone();
         let asked = Arc::new(Mutex::new(None));
@@ -2513,10 +2795,10 @@ mod tests {
         assert!(lock(&handle.shared).pairings_in_flight.is_empty(), "a finished pairing is no longer in flight");
         // A machine past `record_pairing` but not yet registered: it would be
         // handed over without being moved.
-        let (entry, previous) = lock(&handle.shared).record_pairing("a2V5", "10.0.0.9", "mini", "h", "macos", false);
+        let (entry, previous, tomb) = lock(&handle.shared).record_pairing("a2V5", "10.0.0.9", "mini", "h", "macos", false);
         assert_eq!(handle.promote(&g_id).unwrap_err(), "A Maya is pairing right now; try again in a moment.");
         assert!(!lock(&handle.shared).handover, "a refused handover leaves no turn behind");
-        lock(&handle.shared).undo_pairing(&entry.id, previous);
+        lock(&handle.shared).undo_pairing(&entry.id, previous, tomb);
         assert!(lock(&handle.shared).pairings_in_flight.is_empty());
         handle.stop();
     }
@@ -2763,19 +3045,19 @@ mod tests {
 
     #[test]
     fn a_pairing_finds_the_machine_by_its_key_and_an_undo_gives_the_entry_back() {
-        let mut s = Server::new(vec![], "desk".into());
-        let (first, previous) = s.record_pairing("a2V5", "192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
+        let mut s = Server::new(GroupCopy::default(), group::me(&NetworkConfig::default(), "bWFpbg=="), "desk".into());
+        let (first, previous, _) = s.record_pairing("a2V5", "192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
         assert!(previous.is_none());
         s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None, worktrees: false, terminals: false, terminal_choices: None, received_at: 0, connected: false });
         // The same key from another address: the same machine, at its new address.
-        let (second, previous) = s.record_pairing("a2V5", "192.168.55.80", "Gnowee", "TKC-0176", "macos", false);
+        let (second, previous, _) = s.record_pairing("a2V5", "192.168.55.80", "Gnowee", "TKC-0176", "macos", false);
         assert_eq!(previous.as_ref(), Some(&first));
         assert_eq!(second.id, first.id);
         assert_eq!(second.address, "192.168.55.80");
         assert_eq!(s.paired.len(), 1);
         assert!(s.by_id.is_empty(), "its old board is dropped");
         // Another key from the same address is another machine.
-        let (other, previous) = s.record_pairing("b3RoZXI=", "192.168.55.80", "Gnowee", "TKC-0199", "macos", false);
+        let (other, previous, _) = s.record_pairing("b3RoZXI=", "192.168.55.80", "Gnowee", "TKC-0199", "macos", false);
         assert!(previous.is_none());
         assert_ne!(other.id, first.id);
         let names: Vec<String> = s.status(0).assistants.into_iter().map(|a| a.name).collect();
@@ -2784,10 +3066,10 @@ mod tests {
         s.refresh_entry(&first.id, "192.168.55.81", "Gnowee", "TKC-0176", "macos", 7);
         assert_eq!((s.paired[0].address.as_str(), s.paired[0].last_seen), ("192.168.55.81", Some(7)));
         // A pairing the Maya never completed is taken back.
-        s.undo_pairing(&other.id, None);
+        s.undo_pairing(&other.id, None, None);
         assert_eq!(s.paired.len(), 1);
-        let (again, previous) = s.record_pairing("a2V5", "192.168.55.90", "Renamed", "TKC-0176", "macos", false);
-        s.undo_pairing(&again.id, previous);
+        let (again, previous, tomb) = s.record_pairing("a2V5", "192.168.55.90", "Renamed", "TKC-0176", "macos", false);
+        s.undo_pairing(&again.id, previous, tomb);
         assert_eq!((s.paired[0].name.as_str(), s.paired[0].address.as_str()), ("Gnowee", "192.168.55.81"), "an entry paired again gets its old self back");
     }
 
@@ -2977,7 +3259,7 @@ mod tests {
         let mut raw = connect(port);
         let (noise, _) = secure::pair(&mut raw, &twin_key, &code, soon(), &|| false).unwrap();
         let mut same = Channel::new(raw, noise);
-        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None, terminals: None });
+        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None, terminals: None, group: None });
         assert!(matches!(recv(&mut same), Down::Welcome { .. }));
         let twin = lock(&handle.shared).paired.iter().find(|p| p.key == crate::net::identity::encode_key(&twin_key.public)).unwrap().id.clone();
         assert_eq!(handle.status().assistants.iter().find(|a| a.id == twin).unwrap().note, None);
@@ -3092,6 +3374,7 @@ mod tests {
         key: Mutex<Option<String>>,
         errors: Mutex<Vec<String>>,
         removed: AtomicUsize,
+        groups: Mutex<Vec<super::group::GroupCopy>>,
     }
 
     impl client::ClientNotify for FakeClientNotify {
@@ -3107,6 +3390,9 @@ mod tests {
         fn removed(&self) {
             self.removed.fetch_add(1, Ordering::SeqCst);
         }
+        fn group(&self, group: super::group::GroupCopy, _from: &str) {
+            self.groups.lock().unwrap().push(group);
+        }
     }
 
     /// A client-side notifier that records `moved` and answers `promoted`.
@@ -3117,9 +3403,13 @@ mod tests {
         promoted: Mutex<Option<Vec<crate::config::PairedAssistant>>>,
         promote_result: Mutex<Option<Result<u16, String>>>,
         disconnects: Mutex<Vec<String>>,
+        groups: Mutex<Vec<super::group::GroupCopy>>,
     }
 
     impl client::ClientNotify for Leader {
+        fn group(&self, group: super::group::GroupCopy, _from: &str) {
+            self.groups.lock().unwrap().push(group);
+        }
         fn paired(&self, _: &str) {}
         fn connected(&self, _: &str) {}
         fn disconnected(&self, e: &str) {
@@ -3129,8 +3419,8 @@ mod tests {
         fn caps(&self) -> Vec<String> {
             self.caps.clone()
         }
-        fn promoted(&self, list: Vec<crate::config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
-            *self.promoted.lock().unwrap() = Some(list);
+        fn promoted(&self, group: super::group::GroupCopy, _summary: Option<String>) -> Result<u16, String> {
+            *self.promoted.lock().unwrap() = Some(group.members);
             self.promote_result.lock().unwrap().clone().unwrap_or(Ok(6000))
         }
         fn moved(&self, host: &str, port: u16, key: &str) -> Result<(), String> {
@@ -3203,7 +3493,13 @@ mod tests {
         let run = std::thread::spawn(move || client::run_once(&config, &key, Arc::new(NoSessions), n, &s, None));
         wait_until(|| handle.status().assistants[0].connected);
         let new_key = Keypair::generate().public_b64();
-        lock(&handle.shared).conns.get(&id).unwrap().tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: new_key.clone() }).unwrap();
+        // The new main is a member of the group the main sent.
+        let tx = lock(&handle.shared).conns.get(&id).unwrap().tx.clone();
+        let mut g = super::group::GroupCopy { version: 99, ..Default::default() };
+        g.members.push(a_member(&key_of_main(&handle), "main"));
+        g.members.push(a_member(&new_key, "mini"));
+        tx.send(Down::Group(g)).unwrap();
+        tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: new_key.clone() }).unwrap();
         assert_eq!(run.join().unwrap(), Err(client::MOVED.into()));
         assert_eq!(*notify.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001, new_key)));
         handle.stop();
@@ -3291,6 +3587,143 @@ mod tests {
         let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, main_key: crate::net::identity::encode_key(&Keypair::generate().public), ..Default::default() };
         let out = client::run_once(&config, &Keypair::generate(), Arc::new(FakeExec::default()), Arc::new(FakeClientNotify::default()), &AtomicBool::new(false), None);
         assert_eq!(out, Err(client::OLD_MAIN.to_string()));
+    }
+
+    fn a_member(key: &str, name: &str) -> crate::config::PairedAssistant {
+        crate::config::PairedAssistant { id: key.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), key: key.into(), address: String::new(), last_seen: None, mirror: false, generation: 0 }
+    }
+
+    /// Runs a client of `handle` on a thread; returns its notifier, stop flag, thread and the main's tx to it.
+    fn linked_client(handle: &ServerHandle, port: u16) -> (Arc<Leader>, Arc<AtomicBool>, std::thread::JoinHandle<Result<(), String>>, Sender<Down>, Keypair) {
+        let me = Keypair::generate();
+        let (ws, id, _) = pair_as(handle, port, &me, "laptop", &["follow"]);
+        drop(ws);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.connected));
+        let leader = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = assistant_config(port, handle);
+        let (l, s, k) = (leader.clone(), stop.clone(), me.clone());
+        let run = std::thread::spawn(move || client::run_once(&config, &k, Arc::new(FakeExec::default()), l, &s, None));
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        let tx = handle.shared.lock().unwrap().conns.get(&id).unwrap().tx.clone();
+        wait_until(|| !leader.groups.lock().unwrap().is_empty());
+        (leader, stop, run, tx, me)
+    }
+
+    #[test]
+    fn the_device_saves_the_group_it_is_sent() {
+        let (handle, port) = test_server();
+        let (leader, stop, run, _tx, _) = linked_client(&handle, port);
+        let groups = leader.groups.lock().unwrap().clone();
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].members.iter().any(|m| m.key == key_of_main(&handle)), "the main's own entry is in it");
+        stop.store(true, Ordering::SeqCst);
+        let _ = run.join();
+        handle.stop();
+    }
+
+    #[test]
+    fn a_group_that_removes_me_stops_the_link() {
+        let (handle, port) = test_server();
+        let (_leader, _stop, run, tx, me) = linked_client(&handle, port);
+        let mut g = super::group::GroupCopy { version: 99, ..Default::default() };
+        g.members.push(a_member(&key_of_main(&handle), "main"));
+        g.removed.push(a_member(&key_of(&me), "laptop"));
+        tx.send(Down::Group(g)).unwrap();
+        assert_eq!(run.join().unwrap(), Err(client::REMOVED.into()));
+        handle.stop();
+    }
+
+    #[test]
+    fn a_move_to_an_unknown_key_is_refused() {
+        let (handle, port) = test_server();
+        let (leader, _stop, run, tx, _) = linked_client(&handle, port);
+        tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: Keypair::generate().public_b64() }).unwrap();
+        assert_eq!(run.join().unwrap(), Err(client::NOT_IN_GROUP.into()));
+        assert!(leader.moved.lock().unwrap().is_none(), "the old main is kept");
+        handle.stop();
+    }
+
+    #[test]
+    fn a_move_to_a_member_of_the_group_is_followed() {
+        let (handle, port) = test_server();
+        let (leader, _stop, run, tx, _) = linked_client(&handle, port);
+        let new_key = Keypair::generate().public_b64();
+        let mut g = super::group::GroupCopy { version: 99, ..Default::default() };
+        g.members.push(a_member(&key_of_main(&handle), "main"));
+        g.members.push(a_member(&new_key, "mini"));
+        tx.send(Down::Group(g)).unwrap();
+        tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: new_key.clone() }).unwrap();
+        assert_eq!(run.join().unwrap(), Err(client::MOVED.into()));
+        assert_eq!(*leader.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001, new_key)));
+        handle.stop();
+    }
+
+    #[test]
+    fn reconnect_stops_on_not_in_group() {
+        let (handle, port) = test_server();
+        let me = Keypair::generate();
+        let (ws, id, _) = pair_as(&handle, port, &me, "laptop", &["follow"]);
+        drop(ws);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.connected));
+        let leader = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = assistant_config(port, &handle);
+        let (l, s) = (leader.clone(), stop.clone());
+        let run = std::thread::spawn(move || client::reconnect(&move || config.clone(), Arc::new(me), Arc::new(FakeExec::default()), l, &s));
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected) && !leader.groups.lock().unwrap().is_empty());
+        let tx = handle.shared.lock().unwrap().conns.get(&id).unwrap().tx.clone();
+        tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: Keypair::generate().public_b64() }).unwrap();
+        wait_until(|| run.is_finished());
+        run.join().unwrap();
+        assert_eq!(*leader.disconnects.lock().unwrap(), [client::NOT_IN_GROUP]);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_move_from_an_old_main_with_no_group_is_followed() {
+        struct Rec(Mutex<Option<String>>);
+        impl client::ClientNotify for Rec {
+            fn paired(&self, _: &str) {}
+            fn connected(&self, _: &str) {}
+            fn disconnected(&self, _: &str) {}
+            fn removed(&self) {}
+            fn moved(&self, _: &str, _: u16, key: &str) -> Result<(), String> {
+                *self.0.lock().unwrap() = Some(key.into());
+                Ok(())
+            }
+        }
+        let rec = Arc::new(Rec(Mutex::new(None)));
+        let (exec, notify): (Arc<dyn client::Executor>, Arc<dyn client::ClientNotify>) = (Arc::new(FakeExec::default()), rec.clone());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let key = Keypair::generate().public_b64();
+        let out = client::handle_for_test(Down::Move { host: "10.0.0.9".into(), port: 5001, key: key.clone() }, &exec, &notify, &tx, &NetworkConfig::default(), "me");
+        assert_eq!(out, Err(client::MOVED.into()));
+        assert_eq!(*rec.0.lock().unwrap(), Some(key));
+    }
+
+    #[test]
+    fn a_move_from_an_old_main_is_followed_whatever_group_is_held() {
+        struct Rec(Mutex<Option<String>>);
+        impl client::ClientNotify for Rec {
+            fn paired(&self, _: &str) {}
+            fn connected(&self, _: &str) {}
+            fn disconnected(&self, _: &str) {}
+            fn removed(&self) {}
+            fn moved(&self, _: &str, _: u16, key: &str) -> Result<(), String> {
+                *self.0.lock().unwrap() = Some(key.into());
+                Ok(())
+            }
+        }
+        let rec = Arc::new(Rec(Mutex::new(None)));
+        let (exec, notify): (Arc<dyn client::Executor>, Arc<dyn client::ClientNotify>) = (Arc::new(FakeExec::default()), rec.clone());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut config = NetworkConfig::default();
+        config.assistants.push(PairedAssistant { id: "i".into(), name: "Desk".into(), hostname: "d".into(), platform: "macos".into(), key: Keypair::generate().public_b64(), address: String::new(), last_seen: None, mirror: false, generation: 0 });
+        let key = Keypair::generate().public_b64();
+        let out = client::handle_for_test(Down::Move { host: "10.0.0.9".into(), port: 5001, key: key.clone() }, &exec, &notify, &tx, &config, "me");
+        assert_eq!(out, Err(client::MOVED.into()));
+        assert_eq!(*rec.0.lock().unwrap(), Some(key));
     }
 
     #[test]
@@ -3535,13 +3968,13 @@ mod tests {
         fn caps(&self) -> Vec<String> {
             vec!["follow".into(), "lead".into()]
         }
-        fn promoted(&self, list: Vec<crate::config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
+        fn promoted(&self, group: super::group::GroupCopy, _summary: Option<String>) -> Result<u16, String> {
             if self.port_taken {
                 return Err("Could not listen on port 4127: Address already in use. Choose another port.".into());
             }
             let mut c = crate::config::Config::default();
             c.network = self.config.lock().unwrap().clone();
-            crate::net::promote::as_main(&mut c, list);
+            crate::net::promote::as_main(&mut c, group);
             let view = Arc::new(Mutex::new(c.network.clone()));
             let handle = start_with(self.counter.clone(), view, 0, self.identity.clone())?;
             let _ = self.counter.server.set(handle.shared.clone());
@@ -4214,7 +4647,7 @@ mod tests {
     #[test]
     fn keys_for_a_relay_whose_assistant_is_being_replaced_wait_for_its_lost() {
         let (tx, rx) = channel();
-        let mut s = Server::new(vec![], "main".into());
+        let mut s = Server::new(GroupCopy::default(), group::me(&NetworkConfig::default(), "bWFpbg=="), "main".into());
         // The assistant's new connection is in; the old one, the relay's, has not left yet.
         s.conns.insert("a".into(), Conn { tx, serial: 2 });
         s.relays.insert(7, Relay { assistant: "a".into(), assistant_serial: 1, to: RelayTo::Page(Arc::new(Mutex::new(page().0))) });
@@ -4239,6 +4672,302 @@ mod tests {
         assert!(lock(&handle.shared).relays.is_empty());
         stop.store(true, Ordering::SeqCst);
         assert_eq!(run.join().unwrap(), Ok(()));
+        handle.stop();
+    }
+
+    fn key_of(k: &Keypair) -> String {
+        crate::net::identity::encode_key(&k.public)
+    }
+
+    /// The next group the main sends for which `f` holds.
+    fn group_where(ch: &mut Client, f: impl Fn(&crate::net::group::GroupCopy) -> bool) -> crate::net::group::GroupCopy {
+        loop {
+            let g = recv_group(ch);
+            if f(&g) {
+                return g;
+            }
+        }
+    }
+
+    fn hello_with_group(name: &str, copy: crate::net::group::GroupCopy) -> Up {
+        let mut hello = hello_up(name, &[]);
+        if let Up::Hello { group, .. } = &mut hello {
+            *group = Some(copy);
+        }
+        hello
+    }
+
+    fn entry_of(handle: &ServerHandle, key: &str) -> crate::config::PairedAssistant {
+        lock(&handle.shared).paired.iter().find(|p| p.key == key).cloned().expect("a live entry with this key")
+    }
+
+    #[test]
+    fn a_member_gets_the_group_after_welcome() {
+        let (handle, port) = test_server();
+        let (mut a, _, a_key) = pair_client(&handle, port, "laptop");
+        let Down::Group(g) = recv_raw(&mut a) else { panic!("expected the group right after welcome") };
+        assert!(g.members.iter().any(|m| m.key == key_of(&a_key)), "{g:?}");
+        let main = key_of_main(&handle);
+        let own = g.members.iter().find(|m| m.key == main).expect("the main's own entry");
+        assert_eq!(own.id, main, "the main's own entry has its key as its id");
+        handle.stop();
+    }
+
+    fn key_of_main(handle: &ServerHandle) -> String {
+        crate::net::identity::encode_key(&handle.public_key())
+    }
+
+    #[test]
+    fn pairing_sends_the_group_to_everyone_connected() {
+        let (handle, port) = test_server();
+        let (mut a, _, _) = pair_client(&handle, port, "laptop");
+        recv_group(&mut a);
+        let (_b, _, b_key) = pair_client(&handle, port, "mini");
+        let g = recv_group(&mut a);
+        assert!(g.members.iter().any(|m| m.key == key_of(&b_key)), "{g:?}");
+        handle.stop();
+    }
+
+    #[test]
+    fn remove_member_tombstones_and_tells_the_others() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (mut a, _, a_key) = pair_client(&handle, port, "laptop");
+        let (mut b, _, _) = pair_client(&handle, port, "mini");
+        let a_key = key_of(&a_key);
+        handle.remove_member(&a_key).unwrap();
+        assert_eq!(recv(&mut a), Down::Bye { reason: "removed".into() });
+        let g = group_where(&mut b, |g| g.removed.iter().any(|r| r.key == a_key));
+        assert!(!g.members.iter().any(|m| m.key == a_key));
+        let saved = counter.saved_group.lock().unwrap().clone();
+        assert!(saved.removed.iter().any(|r| r.key == a_key), "the tombstone is saved: {saved:?}");
+        assert!(!saved.members.iter().any(|m| m.key == a_key));
+        assert!(!handle.status().assistants.iter().any(|x| x.name == "laptop"));
+        assert_eq!(counter.saves_outside_lock.load(Ordering::SeqCst), 0);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_removed_key_is_refused_after_a_restart() {
+        let a = Keypair::generate();
+        let tomb = crate::config::PairedAssistant { id: "a1".into(), name: "laptop".into(), hostname: "h".into(), platform: "macos".into(), key: key_of(&a), address: String::new(), last_seen: None, mirror: false, generation: 2 };
+        let config = NetworkConfig { removed: vec![tomb], group_version: 2, ..Default::default() };
+        let handle = start_with(Arc::new(Counter::default()), Arc::new(Mutex::new(config)), 0, Arc::new(Keypair::generate())).unwrap();
+        let mut ch = connect_as(&handle, handle.port(), &a, "laptop", &[]);
+        assert_eq!(recv_raw(&mut ch), Down::Bye { reason: "removed".into() });
+        assert!(handle.status().assistants.is_empty());
+        handle.stop();
+    }
+
+    #[test]
+    fn a_member_removed_while_away_is_told_on_return() {
+        let (handle, port) = test_server();
+        let (a, a_id, a_kp) = pair_client(&handle, port, "laptop");
+        let a_key = key_of(&a_kp);
+        let live = entry_of(&handle, &a_key);
+        drop(a);
+        wait_until(|| !handle.status().assistants.iter().any(|x| x.id == a_id && x.connected));
+        handle.remove_member(&a_key).unwrap();
+        // It still holds itself as a live member, at the generation it paired with.
+        let stale = crate::net::group::GroupCopy { version: live.generation, members: vec![live], removed: vec![] };
+        let mut ch = connect_hello(&handle, port, &a_kp, &hello_with_group("laptop", stale));
+        assert_eq!(recv_raw(&mut ch), Down::Bye { reason: "removed".into() });
+        assert!(handle.status().assistants.is_empty(), "its copy does not bring it back");
+        handle.stop();
+    }
+
+    #[test]
+    fn a_copy_from_a_member_removes_but_never_adds() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (mut a, _, a_kp) = pair_client(&handle, port, "laptop");
+        let (b, b_id, b_kp) = pair_client(&handle, port, "mini");
+        drop(b);
+        wait_until(|| !handle.status().assistants.iter().any(|x| x.id == b_id && x.connected));
+        let a_key = key_of(&a_kp);
+        let mut tomb = entry_of(&handle, &a_key);
+        tomb.generation += 5;
+        let stranger = crate::config::PairedAssistant { id: "c1".into(), name: "stranger".into(), hostname: "h".into(), platform: "macos".into(), key: key_of(&Keypair::generate()), address: String::new(), last_seen: None, mirror: false, generation: 1 };
+        let before = lock(&handle.shared).version;
+        let copy = crate::net::group::GroupCopy { version: 50, members: vec![stranger.clone()], removed: vec![tomb] };
+        let mut b = connect_hello(&handle, port, &b_kp, &hello_with_group("mini", copy));
+        assert!(matches!(recv(&mut b), Down::Welcome { .. }));
+        assert_eq!(recv(&mut a), Down::Bye { reason: "removed".into() });
+        {
+            let s = lock(&handle.shared);
+            assert!(!s.paired.iter().any(|p| p.key == a_key), "A is removed");
+            assert!(s.removed.iter().any(|r| r.key == a_key));
+            assert!(!s.paired.iter().any(|p| p.key == stranger.key), "a member the main never had is not added");
+            assert_eq!(s.version, before + 1, "the main's own next version, never the copy's");
+        }
+        let g = recv_group(&mut b);
+        assert!(g.removed.iter().any(|r| r.key == a_key) && !g.members.iter().any(|m| m.key == stranger.key), "{g:?}");
+        assert!(counter.saved_group.lock().unwrap().removed.iter().any(|r| r.key == a_key), "the removal is saved");
+        handle.stop();
+    }
+
+    #[test]
+    fn remove_member_request_works_without_mirroring() {
+        let (handle, port) = test_server();
+        let (mut x, _, _) = pair_client(&handle, port, "laptop");
+        let (mut b, _, b_kp) = pair_client(&handle, port, "mini");
+        let b_key = key_of(&b_kp);
+        send(&mut x, &Up::Request { id: 1, machine: None, request: Request::RemoveMember { key: b_key.clone() } });
+        assert_eq!(recv(&mut x), Down::Response { id: 1, ok: true, error: None, data: None });
+        assert_eq!(recv(&mut b), Down::Bye { reason: "removed".into() });
+        assert!(!lock(&handle.shared).paired.iter().any(|p| p.key == b_key));
+        handle.stop();
+    }
+
+    #[test]
+    fn a_pairing_that_cannot_be_saved_leaves_the_group_as_it_was_saved_and_sends_nothing() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (mut a, _, _) = pair_client(&handle, port, "laptop");
+        recv_group(&mut a);
+        let before = lock(&handle.shared).version;
+        assert_eq!(counter.saved_group.lock().unwrap().version, before);
+        counter.fail_saves.store(true, Ordering::SeqCst);
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
+        let mut raw = connect(port);
+        let (noise, _) = secure::pair(&mut raw, &Keypair::generate(), &code, soon(), &|| false).unwrap();
+        let mut ws = Channel::new(raw, noise);
+        send(&mut ws, &hello_up("desk", &[]));
+        assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == PAIRING_NOT_SAVED));
+        wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 1);
+        assert_eq!(lock(&handle.shared).version, before, "the version is the one saved");
+        let end = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < end {
+            if let Ok(Got::Text(t)) = a.read() {
+                assert!(!matches!(decode_down(&t).unwrap(), Down::Group(_)), "a group that was never saved went out");
+            }
+        }
+        handle.stop();
+    }
+
+    #[test]
+    fn no_member_is_removed_during_a_handover_or_once_the_main_stops() {
+        let (handle, port) = test_server();
+        let (_a, _, a_kp) = pair_client(&handle, port, "laptop");
+        let a_key = key_of(&a_kp);
+        lock(&handle.shared).handover = true;
+        assert_eq!(handle.remove_member(&a_key), Err(HANDOVER_RUNNING.into()));
+        assert!(lock(&handle.shared).paired.iter().any(|p| p.key == a_key), "still a member");
+        lock(&handle.shared).handover = false;
+        handle.stop();
+        assert_eq!(handle.remove_member(&a_key), Err(MAIN_STOPPING.into()));
+        assert!(lock(&handle.shared).paired.iter().any(|p| p.key == a_key), "still a member");
+    }
+
+    #[test]
+    fn the_main_cannot_be_removed() {
+        let (handle, port) = test_server();
+        let (mut x, _, _) = pair_client(&handle, port, "laptop");
+        send(&mut x, &Up::Request { id: 2, machine: None, request: Request::RemoveMember { key: key_of_main(&handle) } });
+        assert_eq!(recv(&mut x), Down::Response { id: 2, ok: false, error: Some(MAIN_NOT_REMOVABLE.into()), data: None });
+        assert_eq!(handle.remove_member(&key_of_main(&handle)), Err(MAIN_NOT_REMOVABLE.into()));
+        handle.stop();
+    }
+
+    #[test]
+    fn promote_hands_over_the_tombstones_and_the_version() {
+        let (handle, port) = test_server();
+        let (mut g, g_id, _) = pair_with_caps(&handle, port, "laptop", &["follow", "lead"]);
+        let (gone, _, gone_kp) = pair_client(&handle, port, "old");
+        drop(gone);
+        handle.remove_member(&key_of(&gone_kp)).unwrap();
+        let version = lock(&handle.shared).version;
+        let h = handle.clone();
+        let t = std::thread::spawn(move || h.promote_with_timeout(&g_id, Duration::from_millis(500)));
+        let Down::Command { kind: CommandKind::Promote { list, removed, version: sent, .. }, .. } = recv(&mut g) else { panic!("expected promote") };
+        assert!(removed.iter().any(|r| r.key == key_of(&gone_kp)), "{removed:?}");
+        assert_eq!(sent, version);
+        assert_eq!(list.last().unwrap().id, key_of_main(&handle), "the old main's own entry has its key as its id");
+        let _ = t.join();
+        handle.stop();
+    }
+
+    /// The old main's redirect listener: its group holds `members` and the
+    /// tombstones `removed`, and it points to `to`.
+    fn redirect_server(members: Vec<crate::config::PairedAssistant>, removed: Vec<crate::config::PairedAssistant>, to: MoveTarget) -> (ServerHandle, u16) {
+        let view = NetworkConfig { role: NetworkRole::Assistant, assistants: members, removed, group_version: 5, ..Default::default() };
+        let handle = start_redirect(Arc::new(Mutex::new(view)), 0, Arc::new(Keypair::generate()), to).unwrap();
+        let port = handle.port();
+        (handle, port)
+    }
+
+    /// `run_once` for a client of the redirect, stopped (and failed) if it
+    /// has not ended within 5 s.
+    fn run_bounded(config: NetworkConfig, key: &Keypair, notify: Arc<Leader>) -> Result<(), String> {
+        let (stop, k) = (Arc::new(AtomicBool::new(false)), key.clone());
+        let s = stop.clone();
+        let run = std::thread::spawn(move || client::run_once(&config, &k, Arc::new(NoSessions), notify, &s, None));
+        let end = Instant::now() + Duration::from_secs(5);
+        while !run.is_finished() && Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ended = run.is_finished();
+        stop.store(true, Ordering::SeqCst);
+        let out = run.join().unwrap();
+        assert!(ended, "the client was still connected after 5 s");
+        out
+    }
+
+    fn new_main_at(key: &str) -> MoveTarget {
+        MoveTarget { host: "10.0.0.9".into(), port: 5001, key: key.into() }
+    }
+
+    #[test]
+    fn a_returning_member_is_moved_to_the_new_main() {
+        let (a, t, g) = (Keypair::generate(), Keypair::generate().public_b64(), Keypair::generate().public_b64());
+        let (handle, port) = redirect_server(vec![a_member(&a.public_b64(), "laptop"), a_member(&t, "new main"), a_member(&g, "gone")], vec![], new_main_at(&t));
+        // A pinned the old main's key, and its copy says G was removed.
+        let mut tomb = a_member(&g, "gone");
+        tomb.generation = 9;
+        let config = NetworkConfig { assistants: vec![a_member(&t, "new main"), a_member(&key_of_main(&handle), "old main")], removed: vec![tomb], ..assistant_config(port, &handle) };
+        let notify = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+        let out = run_bounded(config, &a, notify.clone());
+        assert_eq!(out, Err(client::MOVED.into()));
+        assert_eq!(*notify.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001, t.clone())));
+        let groups = notify.groups.lock().unwrap().clone();
+        assert!(groups.last().is_some_and(|g| g.members.iter().any(|m| m.key == t)), "the group came before the move");
+        let s = lock(&handle.shared);
+        assert!(s.paired.iter().any(|p| p.key == g), "a redirect merges nothing");
+        assert!(s.boards.is_empty() && s.conns.is_empty(), "and keeps no boards or connections");
+        drop(s);
+        handle.stop();
+    }
+
+    #[test]
+    fn the_redirect_hands_over_a_main_paired_after_the_device_left() {
+        let (a, t) = (Keypair::generate(), Keypair::generate().public_b64());
+        let (handle, port) = redirect_server(vec![a_member(&a.public_b64(), "laptop"), a_member(&t, "new main")], vec![], new_main_at(&t));
+        // A's own copy has never heard of T.
+        let config = NetworkConfig { assistants: vec![a_member(&key_of_main(&handle), "old main"), a_member(&Keypair::generate().public_b64(), "mini")], ..assistant_config(port, &handle) };
+        let notify = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+        let out = run_bounded(config, &a, notify.clone());
+        assert_eq!(out, Err(client::MOVED.into()));
+        assert_eq!(*notify.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001, t)));
+        handle.stop();
+    }
+
+    #[test]
+    fn a_stranger_gets_no_redirect() {
+        let (a, t, x) = (Keypair::generate(), Keypair::generate().public_b64(), Keypair::generate());
+        let (handle, port) = redirect_server(vec![a_member(&t, "new main")], vec![a_member(&a.public_b64(), "laptop")], new_main_at(&t));
+        for (who, k) in [("a tombstoned key", &a), ("an unknown key", &x)] {
+            let notify = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+            let out = run_bounded(assistant_config(port, &handle), k, notify.clone());
+            assert_eq!(out, Err(client::REMOVED.into()), "{who}");
+            assert_eq!(*notify.moved.lock().unwrap(), None, "{who}");
+            assert!(notify.groups.lock().unwrap().is_empty(), "{who} gets no group");
+        }
+        // Nor does a code pair anything.
+        assert!(handle.open_pairing(crate::store::now_ms()).is_err(), "a redirect opens no pairing");
+        let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, ..Default::default() };
+        let out = client::run_once(&config, &x, Arc::new(NoSessions), Arc::new(FakeClientNotify::default()), &AtomicBool::new(false), Some("123456"));
+        assert_eq!(out, Err(client::WRONG_CODE.into()));
+        assert!(lock(&handle.shared).paired.iter().all(|p| p.key == t), "nobody was paired");
         handle.stop();
     }
 

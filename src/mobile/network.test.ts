@@ -13,14 +13,20 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { carryEdits, groupSummary, initNetwork, renderNetwork, restoreEdits, type NetworkModel, type NetworkStatus } from "./network";
+import { morph } from "../morph";
 import { RUNNING_VERSION } from "../release-notes";
 
 const off: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, mainError: null };
-const joinedStatus: NetworkStatus = { ...off, role: "assistant", assistant: { connected: true, mainName: "laptop", error: null } };
+const devices = [
+  { id: "me", key: "pk-me", name: "Pixel 8", hostname: "pixel", platform: "android", address: "", lastSeen: null, isMain: false, isSelf: true },
+  { id: "m", key: "pk-main", name: "laptop", hostname: "laptop", platform: "macos", address: "10.0.0.2", lastSeen: 1, isMain: true, isSelf: false },
+  { id: "d", key: "pk-desk", name: "desk", hostname: "desk", platform: "linux", address: "10.0.0.3", lastSeen: 1, isMain: false, isSelf: false },
+];
+const joinedStatus: NetworkStatus = { ...off, role: "assistant", assistant: { connected: true, mainName: "laptop", error: null }, devices };
 const base: NetworkModel = { mainHost: "", mainPort: 0, status: joinedStatus, name: "Pixel 8", notifyAwaiting: true, notifyCompleted: false, speak: true, wakeWord: false, notificationsAllowed: true, busy: false, error: null };
 // The Network page, where most of these tests look.
 const net: NetworkModel = { ...base, group: "network" };
-const handlers = () => ({ onSave: vi.fn(), onSwitch: vi.fn(), onBattery: vi.fn(), onNewKeyAsk: vi.fn(), onNewKey: vi.fn(), onNewKeyCancel: vi.fn(), onStopListening: vi.fn(), onJoin: vi.fn(), onOpenGroup: vi.fn(), onBack: vi.fn() });
+const handlers = () => ({ onSave: vi.fn(), onSwitch: vi.fn(), onBattery: vi.fn(), onNewKeyAsk: vi.fn(), onNewKey: vi.fn(), onNewKeyCancel: vi.fn(), onStopListening: vi.fn(), onJoin: vi.fn(), onOpenGroup: vi.fn(), onBack: vi.fn(), devices: { onRemoveMember: vi.fn(), onJoinAsk: vi.fn(), onJoin: vi.fn(), onJoinCancel: vi.fn(), onRemoveAssistant: vi.fn(), onMakeMain: vi.fn(), onMirror: vi.fn(), onPromote: vi.fn(), onPromoteCancel: vi.fn() } });
 
 describe("renderNetwork", () => {
   it("shows Connected to with the main's address and Leave while the phone has joined a main", () => {
@@ -102,8 +108,8 @@ describe("Settings as a list of groups", () => {
   it("opens on the list of groups, each with its summary", () => {
     const el = renderNetwork(base, handlers());
     const items = [...el.querySelectorAll<HTMLElement>(".settings-list__item")];
-    expect(items.map((i) => i.querySelector(".settings-list__name")!.textContent)).toEqual(["Network", "Notifications", "Voice", "Session viewer", "Release Notes"]);
-    expect(items.map((i) => i.querySelector(".settings-list__summary")!.textContent)).toEqual(["Connected to laptop", "Awaiting decision", "Speak on, wake word off", "Chat", `Maya ${RUNNING_VERSION}`]);
+    expect(items.map((i) => i.querySelector(".settings-list__name")!.textContent)).toEqual(["Network", "Devices", "Notifications", "Voice", "Session viewer", "Release Notes"]);
+    expect(items.map((i) => i.querySelector(".settings-list__summary")!.textContent)).toEqual(["Connected to laptop", "3 devices", "Awaiting decision", "Speak on, wake word off", "Chat", `Maya ${RUNNING_VERSION}`]);
     expect(el.querySelector("input, select")).toBeNull();
   });
 
@@ -265,6 +271,85 @@ describe("initNetwork's groups", () => {
     window.dispatchEvent(new CustomEvent("maya:tab", { detail: "sessions" }));
     expect(pane.querySelector(".settings-list")).not.toBeNull();
     await settle();
+  });
+});
+
+describe("the Devices card", () => {
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  const mount = async (status: NetworkStatus = joinedStatus) => {
+    history.replaceState(null, "");
+    document.body.innerHTML = '<div id="settings"></div>';
+    tauri.replies = { get_config: { network: { name: "Pixel 8" }, notifyOnAwaiting: true, notifyOnCompleted: true }, network_status: status, notifications_allowed: true };
+    initNetwork(() => undefined);
+    await settle();
+    const pane = document.getElementById("settings")!;
+    pane.querySelector<HTMLElement>("[data-group=devices]")!.click();
+    return pane;
+  };
+
+  it("lists the group and calls network_join with the typed host", async () => {
+    const pane = await mount();
+    expect(pane.querySelector(".settings-page__title")!.textContent).toBe("Devices");
+    expect(pane.textContent).toContain("This device (Pixel 8)");
+    expect(pane.textContent).toContain("laptop");
+    // A phone is never offered Make main; the connected main has no Join or Remove.
+    expect(pane.querySelector("button[data-action=make-main]")).toBeNull();
+    expect(pane.querySelector("[data-row=pk-main] button")).toBeNull();
+    pane.querySelector<HTMLElement>("[data-row=pk-desk] button[data-action=join]")!.click();
+    const host = pane.querySelector<HTMLInputElement>("input[name=join-host]")!;
+    expect(host.value).toBe("10.0.0.3");
+    host.value = "desk.local";
+    tauri.replies.network_join = { ...joinedStatus };
+    const { invoke } = await import("@tauri-apps/api/core");
+    pane.querySelector<HTMLElement>("button[data-action=join-confirm]")!.click();
+    await settle();
+    expect(invoke).toHaveBeenCalledWith("network_join", { key: "pk-desk", host: "desk.local", port: 4127 });
+  });
+
+  it("calls network_remove_member for a member", async () => {
+    const pane = await mount();
+    tauri.replies.network_remove_member = { ...joinedStatus, devices: devices.slice(0, 2) };
+    const { invoke } = await import("@tauri-apps/api/core");
+    pane.querySelector<HTMLElement>("[data-row=pk-desk] button[data-action=remove-member]")!.click();
+    await settle();
+    expect(invoke).toHaveBeenCalledWith("network_remove_member", { key: "pk-desk" });
+    expect(pane.querySelector("[data-row=pk-desk]")).toBeNull();
+  });
+
+  it("keeps the list's root through a status repaint and still calls the handler", async () => {
+    const pane = await mount();
+    const list = pane.querySelector(".settings__devices")!;
+    const row = pane.querySelector("[data-row=pk-desk]")!;
+    tauri.listeners.network({ payload: { ...joinedStatus, devices: devices.map((d) => (d.key === "pk-desk" ? { ...d, name: "desk 2" } : d)) } });
+    await settle();
+    expect(pane.querySelector(".settings__devices")).toBe(list);
+    expect(pane.querySelector("[data-row=pk-desk]")).toBe(row);
+    expect(row.textContent).toContain("desk 2");
+    tauri.replies.network_remove_member = joinedStatus;
+    const { invoke } = await import("@tauri-apps/api/core");
+    pane.querySelector<HTMLElement>("[data-row=pk-desk] button[data-action=remove-member]")!.click();
+    await settle();
+    expect(invoke).toHaveBeenCalledWith("network_remove_member", { key: "pk-desk" });
+  });
+
+  it("keeps the list's root when an error appears and clears", () => {
+    const model: NetworkModel = { ...base, group: "devices" };
+    const root = renderNetwork(model, handlers());
+    document.body.append(root);
+    const list = root.querySelector(".settings__devices")!;
+    morph(root, renderNetwork({ ...model, error: "Could not remove" }, handlers()));
+    expect(root.querySelector(".settings__error")?.textContent).toBe("Could not remove");
+    expect(root.querySelector(".settings__devices")).toBe(list);
+    morph(root, renderNetwork(model, handlers()));
+    expect(root.querySelector(".settings__error")).toBeNull();
+    expect(root.querySelector(".settings__devices")).toBe(list);
+    root.remove();
+  });
+
+  it("says to join a main while the phone is off", async () => {
+    const pane = await mount(off);
+    expect(pane.querySelector(".settings__devices")).toBeNull();
+    expect(pane.textContent).toContain("Join a main in Settings › Network to see your devices.");
   });
 });
 
