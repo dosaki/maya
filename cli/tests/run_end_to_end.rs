@@ -11,7 +11,9 @@ use maya_core::net::protocol::CommandKind;
 use maya_core::net::identity::Keypair;
 use maya_core::net::server::{send_command_with, start_with, Notify};
 use maya_core::net::NetworkStatus;
-use maya_core::terminal::{Call, FakeTerminal};
+use maya_core::store::Store;
+use maya_core::terminal::{Call, FakeTerminal, Terminal};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,6 +38,16 @@ impl Notify for Recorder {
     fn paired_list_changed(&self, _: &[PairedAssistant]) -> Result<(), String> {
         Ok(())
     }
+}
+
+/// `maya run` over `claude_dir`, kept off this machine: its store scans no
+/// processes and reads no real agent sessions, and Claude Code is its only
+/// agent. Each scan of a busy machine's process table takes a third of a
+/// second under the store's lock, and listing the installed agents starts
+/// them all, which made this file's waits flaky.
+fn run(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<AtomicBool>) -> i32 {
+    let store = Store::new(claude_dir.to_path_buf()).with_alive(maya_core::registry::pid_alive);
+    run_cmd::run_on(store, || vec![maya_core::agents::claude()], terminal, stop)
 }
 
 fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
@@ -73,7 +85,7 @@ fn run_pairs_connects_runs_a_command_and_stops_on_a_signal() {
     let stop = Arc::new(AtomicBool::new(false));
     let runner = {
         let (claude_dir, fake, stop) = (claude_dir.clone(), fake.clone(), stop.clone());
-        std::thread::spawn(move || run_cmd::run_with(&claude_dir, fake, stop))
+        std::thread::spawn(move || run(&claude_dir, fake, stop))
     };
 
     // 3. The main sees the assistant connected, with the session on its board.
@@ -127,7 +139,7 @@ fn run_stops_with_two_when_the_config_on_disk_stops_being_an_assistants() {
     let stop = Arc::new(AtomicBool::new(false));
     let runner = {
         let claude_dir = claude_dir.clone();
-        std::thread::spawn(move || run_cmd::run_with(&claude_dir, Arc::new(FakeTerminal::default()), stop))
+        std::thread::spawn(move || run(&claude_dir, Arc::new(FakeTerminal::default()), stop))
     };
     wait_until("connected", || handle.status().assistants.iter().any(|a| a.name == "box" && a.connected));
 

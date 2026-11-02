@@ -13,6 +13,7 @@ use crate::notify::CliNotify;
 use crate::run_lock::{self, RunLock};
 use crate::status_file::{self, RunStatus};
 use crate::tmux::Tmux;
+use maya_core::agents::AgentInfo;
 use maya_core::config::{Config, NetworkConfig, NetworkRole};
 use maya_core::net::client::{self, ClientNotify};
 use maya_core::net::identity;
@@ -171,8 +172,16 @@ pub fn run(claude_dir: &Path) -> i32 {
 
 /// `run` with the terminal and the stop flag given: setting `stop` is a signal.
 pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<AtomicBool>) -> i32 {
+    run_on(Store::new(claude_dir.to_path_buf()), maya_core::agents::snapshot, terminal, stop)
+}
+
+/// `run_with` over `store`, with `agents` listing the agents this machine can
+/// start. A test passes a store that never scans the machine's processes and
+/// a fixed list, so how fast a run answers does not depend on what else runs.
+pub fn run_on(mut store: Store, agents: fn() -> Vec<AgentInfo>, terminal: Arc<dyn Terminal>, stop: Arc<AtomicBool>) -> i32 {
+    let claude_dir = store.claude_dir().to_path_buf();
+    let claude_dir = claude_dir.as_path();
     let maya_dir = claude_dir.join("maya");
-    let mut store = Store::new(claude_dir.to_path_buf());
     // Held until this function returns: a second run is refused meanwhile.
     let _lock = match preflight(&store.config, &run_lock::path(&maya_dir), status_file::read(&maya_dir).as_ref()) {
         Ok(lock) => lock,
@@ -206,7 +215,7 @@ pub fn run_with(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<Atomic
     log::line("cli", format!("{} sessions were running when maya run last stopped", offered.len()));
 
     let store = Arc::new(Mutex::new(store));
-    let exec = Arc::new(CliExecutor::new(store.clone(), terminal));
+    let exec = Arc::new(CliExecutor::new(store.clone(), terminal).with_agents(agents));
     let notify = Arc::new(CliNotify::new(maya_dir.clone(), stop.clone()));
     // Claims the status file at once, so a second run started before this
     // one connects sees it.

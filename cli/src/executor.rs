@@ -4,6 +4,7 @@
 //! command) and while `maya run` keeps a connection to the main open.
 
 use maya_core::actions;
+use maya_core::agents::AgentInfo;
 use maya_core::launch;
 use maya_core::model::Card;
 use maya_core::net::client::{self, Executor};
@@ -23,11 +24,19 @@ pub struct CliExecutor {
     pub board_due: Arc<AtomicBool>,
     /// The tty `ps` reported for each pid the registry gave none for.
     ttys: Mutex<HashMap<i32, String>>,
+    /// The agents this machine can start, for the main's New session modal.
+    agents: fn() -> Vec<AgentInfo>,
 }
 
 impl CliExecutor {
     pub fn new(store: Arc<Mutex<Store>>, terminal: Arc<dyn Terminal>) -> Self {
-        Self { store, terminal, board_due: Arc::new(AtomicBool::new(false)), ttys: Mutex::new(HashMap::new()) }
+        Self { store, terminal, board_due: Arc::new(AtomicBool::new(false)), ttys: Mutex::new(HashMap::new()), agents: maya_core::agents::snapshot }
+    }
+
+    /// Lists the agents with `agents` instead of asking the installed programs.
+    pub fn with_agents(mut self, agents: fn() -> Vec<AgentInfo>) -> Self {
+        self.agents = agents;
+        self
     }
 
     /// The session's tty: the registry's, else the one `ps` reports (cached).
@@ -108,8 +117,8 @@ impl Executor for CliExecutor {
         self.board_due.swap(false, Ordering::SeqCst)
     }
 
-    fn agents(&self) -> Option<Vec<maya_core::agents::AgentInfo>> {
-        Some(maya_core::agents::snapshot())
+    fn agents(&self) -> Option<Vec<AgentInfo>> {
+        Some((self.agents)())
     }
 
     fn remembered(&self) -> Option<Vec<maya_core::remembered::Remembered>> {
