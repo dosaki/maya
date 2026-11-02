@@ -872,6 +872,50 @@ describe("settings flow", () => {
     expect(shown[0].querySelector("[data-row=kn]")).not.toBeNull();
   });
 
+  it("never detaches the device list during a status repaint or an error banner, and the nav still switches", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "system", whisperModel: "base.en-q5_1", network: { role: "assistant", port: 0, mainHost: "desk", mainPort: 4127, name: "", mainKey: "k", assistants: [] } };
+    const row = (key: string, name: string, isMain: boolean, isSelf: boolean, lastSeen: number) => ({ id: key, key, name, hostname: name, platform: "macos", address: "192.168.1.2", lastSeen, isMain, isSelf });
+    const net = (seen: number) => ({ role: "assistant", code: null, assistants: [], devices: [row("km", "me", false, true, 0), row("kn", "nas", false, false, seen)], assistant: { connected: true, mainName: "desk", error: null }, mainError: null });
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "network_status") return Promise.resolve(net(1));
+      if (cmd === "network_remove_member") return Promise.reject(new Error("nope"));
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    const panel = document.getElementById("settings")!;
+    panel.hidden = false;
+    const list = panel.querySelector(".settings__devices")!;
+    const nasRow = panel.querySelector("[data-row=kn]")!;
+    const watch = new MutationObserver(() => undefined);
+    watch.observe(panel, { childList: true, subtree: true });
+    const detached = () => watch.takeRecords().some((r) => [...r.removedNodes].some((n) => n.contains(nasRow)));
+    const onNetwork = eventListen.mock.calls.find((c) => c[0] === "network")![1] as (e: { payload: unknown }) => void;
+    onNetwork({ payload: net(99_000) });
+    expect(detached()).toBe(false);
+    expect(nasRow.isConnected).toBe(true);
+    // The error banner is one more child in order; it does not displace the kept section.
+    panel.querySelector<HTMLButtonElement>("button[data-action=remove-member]")!.click();
+    await flush();
+    expect(detached()).toBe(false);
+    expect(panel.querySelector(".settings__content > .settings__error")?.textContent).toContain("nope");
+    expect(panel.querySelector(".settings__devices")).toBe(list);
+    for (const g of ["devices", "voice", "devices"]) {
+      panel.querySelector<HTMLButtonElement>(`.settings__nav button[data-group=${g}]`)!.click();
+      expect([...panel.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual([g]);
+    }
+    onNetwork({ payload: net(100_000) });
+    panel.querySelector<HTMLButtonElement>(".settings__nav button[data-group=network]")!.click();
+    expect([...panel.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["network"]);
+    expect(panel.querySelector("[data-row=kn]")).toBe(nasRow);
+    watch.disconnect();
+  });
+
   it("keeps focus and the caret in a field through a repaint", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: "~/dev/maya", clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "system", whisperModel: "base.en-q5_1", network: { role: "main", port: 0, mainHost: "", mainPort: 0, name: "", mainKey: "", assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", token: "t" }] } };
     const before = { role: "main", code: null, assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", address: "192.168.55.70", connected: false, lastSeen: null, note: null }], assistant: { connected: false, mainName: null, error: null }, mainError: null };

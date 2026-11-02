@@ -171,8 +171,6 @@ export interface SettingsModel {
   networkPromoting?: boolean;
   /** The device whose Join form is open, and what was typed in it. */
   devicesJoining?: string | null;
-  devicesJoinHost?: string;
-  devicesJoinPort?: number;
   /** This Maya's listening port as a main. */
   networkPort?: number;
   /** The assistant's target: the main's host/address. */
@@ -637,8 +635,10 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     b.addEventListener("click", choose);
     return b;
   });
+  // The live sections, found when the nav is used: a repaint keeps the old
+  // Devices section and drops this render's, so nothing may close over it.
   const show = (group: SettingsGroup) => {
-    for (const [key, s] of Object.entries(sections)) s.hidden = key !== group;
+    for (const s of nav.parentElement?.querySelectorAll<HTMLElement>(".settings__section") ?? []) s.hidden = s.dataset.group !== group;
     for (const b of navButtons) {
       if (b.dataset.group === group) b.setAttribute("aria-current", "true");
       else b.removeAttribute("aria-current");
@@ -1616,18 +1616,16 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const none = document.createElement("div");
     none.className = "settings__hint";
     none.dataset.for = "devices-off";
+    none.dataset.row = "devices-off";
     none.textContent = "Turn the network on in Settings › Network to see your devices.";
     devices.append(none);
   } else {
-    // The model's fields behind the view the list edits, so a half-typed
-    // host survives a repaint.
+    // The model's fields behind the view; a typed host stays in its input.
     const view: DevicesModel = {
       get joining() { return model.devicesJoining ?? null; },
       set joining(v) { model.devicesJoining = v; },
-      get joinHost() { return model.devicesJoinHost ?? ""; },
-      set joinHost(v) { model.devicesJoinHost = v; },
-      get joinPort() { return model.devicesJoinPort ?? 0; },
-      set joinPort(v) { model.devicesJoinPort = v; },
+      joinHost: "",
+      joinPort: 0,
       get promote() { return model.networkPromote ?? null; },
       set promote(v) { model.networkPromote = v; },
       get promoting() { return !!model.networkPromoting; },
@@ -1645,6 +1643,42 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     content.prepend(err);
   }
   return root;
+}
+
+/**
+ * Puts a fresh render in the panel. Everything is replaced, as its listeners
+ * close over what they were rendered with, except the Devices section: it is
+ * never detached, so a hovered row keeps its :hover (WebKit drops it on a
+ * node that is moved or replaced). Its one delegated listener reads the DOM,
+ * so the old list is safe to keep.
+ */
+export function patchPanel(panel: HTMLElement, fresh: HTMLElement): void {
+  const root = panel.firstElementChild;
+  const content = root?.querySelector<HTMLElement>(":scope > .settings__content");
+  const nav = root?.querySelector<HTMLElement>(":scope > .settings__nav");
+  const freshContent = fresh.querySelector<HTMLElement>(":scope > .settings__content");
+  const freshNav = fresh.querySelector<HTMLElement>(":scope > .settings__nav");
+  const kept = content?.querySelector<HTMLElement>(":scope > .settings__section--devices");
+  const freshKept = freshContent?.querySelector<HTMLElement>(":scope > .settings__section--devices");
+  if (panel.childElementCount !== 1 || !root || !content || !nav || !freshContent || !freshNav || !kept || !freshKept) {
+    panel.replaceChildren(fresh);
+    return;
+  }
+  morph(kept, freshKept);
+  for (const c of [...content.children]) if (c !== kept) c.remove();
+  let seen = false;
+  let cursor: Element = kept;
+  for (const c of [...freshContent.children]) {
+    if (c === freshKept) {
+      seen = true;
+    } else if (!seen) {
+      content.insertBefore(c, kept);
+    } else {
+      content.insertBefore(c, cursor.nextSibling);
+      cursor = c;
+    }
+  }
+  nav.replaceWith(freshNav);
 }
 
 export async function initSettings(): Promise<void> {
@@ -1825,18 +1859,7 @@ export async function initSettings(): Promise<void> {
   // caret back, so a status push never pulls the cursor out from under you.
   const paint = () => {
     const focused = focusedField(panel);
-    const fresh = renderSettings(model, handlers);
-    // Only the device list is patched in place, so a hovered row keeps its
-    // :hover; its one delegated listener reads the DOM, so keeping the old
-    // root is safe. Everything else is replaced, as its listeners close over
-    // what they were rendered with.
-    const oldList = panel.querySelector<HTMLElement>(".settings__devices");
-    const freshList = fresh.querySelector<HTMLElement>(".settings__devices");
-    if (oldList && freshList) {
-      morph(oldList, freshList);
-      freshList.replaceWith(oldList);
-    }
-    panel.replaceChildren(fresh);
+    patchPanel(panel, renderSettings(model, handlers));
     if (focused) restoreFocus(panel, focused);
   };
 
@@ -1973,8 +1996,6 @@ export async function initSettings(): Promise<void> {
     onRemoveMember: (key) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_member", { key }); }),
     onJoinAsk: (key) => {
       model.devicesJoining = key;
-      model.devicesJoinHost = "";
-      model.devicesJoinPort = 0;
       paint();
     },
     onJoinCancel: () => {

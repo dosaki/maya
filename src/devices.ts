@@ -223,6 +223,7 @@ function delegate(list: HTMLElement, h: DevicesHandlers): void {
 export function renderDevices(net: NetworkStatus, m: DevicesModel, h: DevicesHandlers, nowMs: number, thisDevice = "this device"): HTMLElement {
   const list = document.createElement("div");
   list.className = "settings__assistants settings__devices";
+  list.dataset.row = "devices-list";
   const devices = net.devices ?? [];
   const self = devices.find((d) => d.isSelf);
   if (self) list.append(selfRow(self));
