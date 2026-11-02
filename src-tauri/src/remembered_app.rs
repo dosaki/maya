@@ -63,7 +63,7 @@ pub(crate) fn resume_rows(app: &AppHandle, rows: &[RememberedRow]) -> Vec<Resume
             if i > 0 {
                 std::thread::sleep(Duration::from_millis(remembered::RESUME_GAP_MS));
             }
-            let kind = CommandKind::Resume { dir: e.dir.clone(), session: e.session_id.clone(), agent: e.agent };
+            let kind = CommandKind::Resume { dir: e.dir.clone(), session: e.session_id.clone(), agent: e.agent, terminal: None };
             let result = crate::net_app::send_command(app, machine, kind, ROUTE_TIMEOUT).map(|_| ());
             if result.is_ok() {
                 // The assistant's next Board would say so; until then do not list it again.

@@ -156,6 +156,9 @@ pub struct LaunchOptions {
     pub name: Option<String>,
     /// Start in a new worktree on a new branch, under the clones directory.
     pub worktree: bool,
+    /// Where to open this session's terminal; None uses the Settings choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<crate::config::NewSessionTerminal>,
 }
 
 fn chosen(v: &Option<String>) -> Option<&str> {

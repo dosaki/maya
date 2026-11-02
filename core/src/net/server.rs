@@ -35,7 +35,7 @@ use super::group::{self, GroupCopy};
 use super::merge::{display_names, RemoteBoard};
 use super::identity::{encode_key, Keypair};
 use super::live::{self, FrameSink, LiveTerms, TermEvent, TermFrame, TermView};
-use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_CHAT, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, CAP_TERMINAL, CAP_WORKTREE, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
+use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_CHAT, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, CAP_PICK_TERMINAL, CAP_TERMINAL, CAP_WORKTREE, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
 use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use super::{AssistantStatus, NetworkStatus, PairingCode};
@@ -139,6 +139,9 @@ struct Peer {
     /// When its brain went dormant, as its `hello` said; None when it never
     /// ran one (or is an older Maya). Kept in memory only.
     brain_dormant_since: Option<u64>,
+    /// The terminals it can open a session in, as its `hello` or its last
+    /// `terminals` said; None for an older Maya. Kept in memory only.
+    terminals: Option<crate::terminal_choice::TerminalChoices>,
 }
 
 pub(crate) const UNREADABLE_BOARD: &str = "sent a board this version cannot read; update Maya on both machines";
@@ -423,7 +426,7 @@ impl Server {
             .filter_map(|(p, (id, label))| {
                 self.by_id.get(&id).map(|b| {
                     let can = |cap: &str| self.peers.get(&id).is_some_and(|p| p.caps.iter().any(|c| c == cap));
-                    RemoteBoard { machine: label, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), worktrees: can(CAP_WORKTREE), terminals: self.terminals && can(CAP_TERMINAL), ..b.clone() }
+                    RemoteBoard { machine: label, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), worktrees: can(CAP_WORKTREE), terminals: self.terminals && can(CAP_TERMINAL), terminal_choices: self.peers.get(&id).and_then(|p| p.terminals.clone()).filter(|_| b.connected && can(CAP_PICK_TERMINAL)), ..b.clone() }
                 })
             })
             .collect();
@@ -1158,7 +1161,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             return None;
         }
     };
-    let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, group: copy } = hello else {
+    let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, terminals, group: copy } = hello else {
         log::line("network", format!("{ip}: first message was not a hello"));
         bye(ch, "protocol");
         return None;
@@ -1248,7 +1251,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
                         s.send_group_to_all();
                     }
                     let serial = s.next();
-                    s.peers.insert(id.clone(), Peer { app, caps: caps.into_iter().map(|c| clean(&c)).collect(), last_seen: now, unreadable_board: false, brain_dormant_since });
+                    s.peers.insert(id.clone(), Peer { app, caps: caps.into_iter().map(|c| clean(&c)).collect(), last_seen: now, unreadable_board: false, brain_dormant_since, terminals });
                     // A newer connection replaces an older one; dropping its sender ends it.
                     s.conns.insert(id.clone(), Conn { tx, serial });
                     if let Some(b) = s.by_id.get_mut(&id) {
@@ -1542,7 +1545,7 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
                 if current {
                     s.touch(&link.id);
                     // `sync_boards` fills in the label, hostname, platform and address.
-                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, agents, remembered, worktrees: false, terminals: false, received_at: now_ms(), connected: true });
+                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, agents, remembered, worktrees: false, terminals: false, terminal_choices: None, received_at: now_ms(), connected: true });
                     s.sync_boards();
                 }
                 current
@@ -1637,6 +1640,17 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
             }
         }
         Up::Hello { .. } => log::line("network", format!("{}: ignored a hello after welcome", link.label)),
+        Up::Terminals { terminals } => {
+            let mut s = lock(&ctx.shared);
+            if s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial) {
+                if let Some(p) = s.peers.get_mut(&link.id) {
+                    p.terminals = Some(terminals);
+                }
+                s.sync_boards();
+                drop(s);
+                ctx.announce();
+            }
+        }
     }
     Ok(())
 }
@@ -2279,7 +2293,7 @@ mod tests {
     }
 
     pub(crate) fn hello_up(name: &str, caps: &[&str]) -> Up {
-        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect(), brain_dormant_since: None, group: None }
+        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect(), brain_dormant_since: None, terminals: None, group: None }
     }
 
     /// Pairs a new Maya (key `me`) whose `hello` carries `caps`; returns its
@@ -2334,6 +2348,20 @@ mod tests {
         (ch, id, me)
     }
 
+    /// Pairs, then reconnects with a `hello` that carries `caps` and `terminals`.
+    fn pair_with_terminals(handle: &ServerHandle, port: u16, name: &str, caps: &[&str], terminals: Option<crate::terminal_choice::TerminalChoices>) -> (Client, String) {
+        let (ch, id, me) = pair_client(handle, port, name);
+        drop(ch);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        let mut ws = connect(port);
+        let noise = secure::connect(&mut ws, &me, &handle.public_key(), soon(), &|| false).unwrap();
+        let mut ch = Channel::new(ws, noise);
+        let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, .. } = hello_up(name, caps) else { panic!() };
+        send(&mut ch, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, terminals, group: None });
+        assert!(matches!(recv(&mut ch), Down::Welcome { .. }));
+        (ch, id)
+    }
+
     pub(crate) fn send(ch: &mut Client, up: &Up) {
         ch.send(&encode(up)).unwrap();
     }
@@ -2369,6 +2397,57 @@ mod tests {
                 return g;
             }
         }
+    }
+
+    fn empty_board() -> Up {
+        Up::Board { cards: vec![], dirs: vec![], agents: None, remembered: None }
+    }
+
+    #[test]
+    fn an_assistant_s_terminals_reach_its_board() {
+        use crate::config::NewSessionTerminal::Native;
+        let (handle, port) = test_server();
+        let choices = crate::terminal_choice::describe("linux", Native);
+        let (mut ch, _) = pair_with_terminals(&handle, port, "desk", &[CAP_PICK_TERMINAL], Some(choices.clone()));
+        send(&mut ch, &empty_board());
+        wait_until(|| super::super::merge::terminal_choices_of(&handle.boards(), "desk") == Some(choices.clone()));
+        handle.stop();
+    }
+
+    #[test]
+    fn a_terminals_update_replaces_them() {
+        use crate::config::NewSessionTerminal::{Native, Terminal};
+        let (handle, port) = test_server();
+        let (mut ch, _) = pair_with_terminals(&handle, port, "desk", &[CAP_PICK_TERMINAL], Some(crate::terminal_choice::describe("linux", Native)));
+        send(&mut ch, &empty_board());
+        wait_until(|| super::super::merge::terminal_choices_of(&handle.boards(), "desk").is_some_and(|t| t.default == Native));
+        send(&mut ch, &Up::Terminals { terminals: crate::terminal_choice::describe("linux", Terminal) });
+        wait_until(|| super::super::merge::terminal_choices_of(&handle.boards(), "desk").is_some_and(|t| t.default == Terminal));
+        handle.stop();
+    }
+
+    #[test]
+    fn an_assistant_without_the_cap_has_none() {
+        use crate::config::NewSessionTerminal::Native;
+        let (handle, port) = test_server();
+        let (mut ch, _) = pair_with_terminals(&handle, port, "desk", &[], Some(crate::terminal_choice::describe("linux", Native)));
+        send(&mut ch, &empty_board());
+        wait_until(|| handle.boards().iter().any(|b| b.machine == "desk" && b.connected));
+        assert_eq!(super::super::merge::terminal_choices_of(&handle.boards(), "desk"), None);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_disconnected_assistant_has_none() {
+        use crate::config::NewSessionTerminal::Native;
+        let (handle, port) = test_server();
+        let (mut ch, _) = pair_with_terminals(&handle, port, "desk", &[CAP_PICK_TERMINAL], Some(crate::terminal_choice::describe("linux", Native)));
+        send(&mut ch, &empty_board());
+        wait_until(|| super::super::merge::terminal_choices_of(&handle.boards(), "desk").is_some());
+        drop(ch);
+        wait_until(|| handle.boards().iter().any(|b| b.machine == "desk" && !b.connected));
+        assert_eq!(super::super::merge::terminal_choices_of(&handle.boards(), "desk"), None);
+        handle.stop();
     }
 
     #[test]
@@ -2567,7 +2646,7 @@ mod tests {
         let noise = secure::connect(&mut ws, &me, &handle.public_key(), soon(), &|| false).unwrap();
         let mut g = Channel::new(ws, noise);
         let Up::Hello { protocol, app, name, hostname, platform, caps, .. } = hello_up("laptop", &["follow", "lead"]) else { panic!() };
-        send(&mut g, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since: Some(77), group: None });
+        send(&mut g, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since: Some(77), terminals: None, group: None });
         assert!(matches!(recv(&mut g), Down::Welcome { .. }));
         let h = handle.clone();
         let asked = Arc::new(Mutex::new(None));
@@ -2969,7 +3048,7 @@ mod tests {
         let mut s = Server::new(GroupCopy::default(), group::me(&NetworkConfig::default(), "bWFpbg=="), "desk".into());
         let (first, previous, _) = s.record_pairing("a2V5", "192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
         assert!(previous.is_none());
-        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None, worktrees: false, terminals: false, received_at: 0, connected: false });
+        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None, worktrees: false, terminals: false, terminal_choices: None, received_at: 0, connected: false });
         // The same key from another address: the same machine, at its new address.
         let (second, previous, _) = s.record_pairing("a2V5", "192.168.55.80", "Gnowee", "TKC-0176", "macos", false);
         assert_eq!(previous.as_ref(), Some(&first));
@@ -3180,7 +3259,7 @@ mod tests {
         let mut raw = connect(port);
         let (noise, _) = secure::pair(&mut raw, &twin_key, &code, soon(), &|| false).unwrap();
         let mut same = Channel::new(raw, noise);
-        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None, group: None });
+        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None, terminals: None, group: None });
         assert!(matches!(recv(&mut same), Down::Welcome { .. }));
         let twin = lock(&handle.shared).paired.iter().find(|p| p.key == crate::net::identity::encode_key(&twin_key.public)).unwrap().id.clone();
         assert_eq!(handle.status().assistants.iter().find(|a| a.id == twin).unwrap().note, None);

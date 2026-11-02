@@ -230,7 +230,7 @@ impl Hub {
                 if i > 0 {
                     std::thread::sleep(Duration::from_millis(remembered::RESUME_GAP_MS));
                 }
-                let kind = CommandKind::Resume { dir: e.dir.clone(), session: e.session_id.clone(), agent: e.agent };
+                let kind = CommandKind::Resume { dir: e.dir.clone(), session: e.session_id.clone(), agent: e.agent, terminal: None };
                 out.push(ResumeOutcome::of(Some(machine), e, &self.send_to(machine, kind).map(|_| ())));
             }
         }

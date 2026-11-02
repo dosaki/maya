@@ -22,11 +22,33 @@ const base: NewSessionModel = {
   worktree: false,
   agentsLoaded: true,
   name: "",
+  terminals: null,
+  terminal: null,
 };
 const twoMachines = [{ name: "This Mac", value: "" }, { name: "laptop", value: "laptop" }];
 const defaults = { agent: "claude-code", name: "", model: "", effort: "", mode: "", worktree: false };
 
+const mac = { platform: "macos", choices: ["terminal", "iterm", "native"] as ("terminal" | "iterm" | "native")[], default: "terminal" as const };
+
 describe("renderNewSession", () => {
+  it("offers a Terminal pick between Agent and Directory only when the machine lists terminals", () => {
+    const agents = [CLAUDE_AGENT, { ...CLAUDE_AGENT, harness: "codex" as const }];
+    const withPick = renderNewSession({ ...base, agents, terminals: mac }, handlers());
+    const names = [...withPick.querySelectorAll("select")].map((s) => s.name);
+    expect(names.slice(0, 3)).toEqual(["agent", "terminal", "dir"]);
+    expect(renderNewSession({ ...base, agents, terminals: null }, handlers()).querySelector("select[name=terminal]")).toBeNull();
+  });
+
+  it("starts with the picked terminal, or the default when it is left alone", () => {
+    const h = handlers();
+    const el = renderNewSession({ ...base, prompt: "go", terminals: mac }, h);
+    el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    expect(h.onStart).toHaveBeenLastCalledWith("", null, "go", { ...defaults, terminal: "terminal" });
+    el.querySelector<HTMLSelectElement>("select[name=terminal]")!.value = "iterm";
+    el.querySelector<HTMLButtonElement>("button[data-action=start]")!.click();
+    expect(h.onStart).toHaveBeenLastCalledWith("", null, "go", { ...defaults, terminal: "iterm" });
+  });
+
   it("keeps Start disabled until the machine's agents are listed", () => {
     const h = handlers();
     const waiting = renderNewSession({ ...base, prompt: "fix the build", agentsLoaded: false }, h);

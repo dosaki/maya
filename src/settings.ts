@@ -12,6 +12,7 @@ import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
 import { morph } from "./morph";
 import { renderDevices, type DeviceRow, type DevicesHandlers, type DevicesModel } from "./devices";
+import { terminalLabel } from "./terminalpick";
 import { renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 import { updates } from "./update";
@@ -593,9 +594,9 @@ export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean 
 
 /** The places a new session can open on this platform, as [value, label]. Settings shows only on a desktop: neither Windows nor Linux is a Mac. */
 export function terminalChoices(): [NewSessionTerminal, string][] {
-  if (isWindows()) return [["terminal", "Windows Terminal"], ["native", "Native"]];
-  if (isLinux()) return [["terminal", "Terminal (tmux)"], ["native", "Native"]];
-  return [["terminal", "Terminal"], ["iterm", "iTerm2"], ["native", "Native"]];
+  const platform = isWindows() ? "windows" : isLinux() ? "linux" : "macos";
+  const values: NewSessionTerminal[] = platform === "macos" ? ["terminal", "iterm", "native"] : ["terminal", "native"];
+  return values.map((v) => [v, terminalLabel(v, platform)]);
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {
@@ -849,8 +850,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   viewerSel.addEventListener("change", () => h.onViewerTheme?.(viewerSel.value as ViewerTheme));
   viewerLabel.append(viewerSel);
   sessions.append(viewerLabel);
-  const terminalLabel = document.createElement("label");
-  terminalLabel.textContent = "New sessions open in";
+  const terminalField = document.createElement("label");
+  terminalField.textContent = "New sessions open in";
   const terminalSel = document.createElement("select");
   terminalSel.name = "newSessionTerminal";
   const choices = terminalChoices();
@@ -863,8 +864,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   const saved = model.newSessionTerminal ?? "terminal";
   terminalSel.value = choices.some(([value]) => value === saved) ? saved : "terminal";
   terminalSel.addEventListener("change", () => h.onNewSessionTerminal?.(terminalSel.value as NewSessionTerminal));
-  terminalLabel.append(terminalSel);
-  sessions.append(terminalLabel);
+  terminalField.append(terminalSel);
+  sessions.append(terminalField);
 
   const clonesLabel = document.createElement("label");
   clonesLabel.textContent = "Clones directory (for reviews and worktrees)";

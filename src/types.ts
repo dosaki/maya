@@ -335,3 +335,10 @@ export type ColorTheme = "dark" | "light";
 
 /** Where new sessions open: the macOS app that opens their windows, or Native, where Maya hosts the terminal. */
 export type NewSessionTerminal = "terminal" | "iterm" | "native";
+
+/** The places a machine can open a session, as its `list_agents` reply says; absent for a Maya too old to say. */
+export interface TerminalChoices {
+  platform: string;
+  choices: NewSessionTerminal[];
+  default: NewSessionTerminal;
+}

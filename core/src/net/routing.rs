@@ -5,7 +5,9 @@
 use super::protocol::Attachment;
 use super::NetworkStatus;
 use crate::agents::{self, AgentInfo};
+use crate::config::NewSessionTerminal;
 use crate::launch::LaunchOptions;
+use crate::terminal_choice::{check_pick, TerminalChoices};
 use crate::model::Harness;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -39,6 +41,9 @@ pub struct AgentsReply {
     /// An older main sends none: it cannot start a worktree.
     #[serde(default)]
     pub worktrees: bool,
+    /// The terminals the machine opens a session in; an older Maya sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminals: Option<TerminalChoices>,
 }
 
 /// Reads and base64-encodes local files for a remote reply's attachments;
@@ -68,13 +73,13 @@ pub fn remote_attachments(paths: &[String]) -> Result<Vec<Attachment>, String> {
 /// A remote that reports no agents runs an older Maya: it starts only
 /// Claude Code and ignores a name. Locally, `local_list` is asked and a
 /// worktree is always possible; a remote says so in `remote_worktrees`.
-pub fn agents_reply(local: bool, remote: Option<Vec<AgentInfo>>, remote_worktrees: bool, local_list: impl FnOnce() -> Vec<AgentInfo>) -> AgentsReply {
+pub fn agents_reply(local: bool, remote: Option<Vec<AgentInfo>>, remote_worktrees: bool, terminals: Option<TerminalChoices>, local_list: impl FnOnce() -> Vec<AgentInfo>) -> AgentsReply {
     if local {
-        return AgentsReply { agents: local_list(), names: true, worktrees: true };
+        return AgentsReply { agents: local_list(), names: true, worktrees: true, terminals };
     }
     match remote {
-        Some(agents) => AgentsReply { agents, names: true, worktrees: remote_worktrees },
-        None => AgentsReply { agents: vec![agents::claude()], names: false, worktrees: remote_worktrees },
+        Some(agents) => AgentsReply { agents, names: true, worktrees: remote_worktrees, terminals },
+        None => AgentsReply { agents: vec![agents::claude()], names: false, worktrees: remote_worktrees, terminals },
     }
 }
 
@@ -93,6 +98,19 @@ pub fn check_remote_worktree(options: &LaunchOptions, worktrees: bool, machine: 
         return Err(format!("{machine} runs an older Maya that cannot start a session in a worktree."));
     }
     Ok(())
+}
+
+/// An older Maya announces no terminals and opens in its own setting: refuse a pick instead.
+/// A machine that is not connected announces nothing, so say that first.
+pub fn check_remote_terminal(pick: Option<NewSessionTerminal>, remote: &Option<TerminalChoices>, connected: bool, machine: &str) -> Result<(), String> {
+    if pick.is_some() && !connected {
+        return Err(format!("{machine} is not connected"));
+    }
+    match remote {
+        None if pick.is_some() => Err(format!("{machine} runs an older Maya that cannot pick the terminal.")),
+        None => Ok(()),
+        Some(choices) => check_pick(pick, choices, machine),
+    }
 }
 
 /// The pickers' machine list from the network status: the display names
@@ -210,17 +228,17 @@ mod tests {
 
     #[test]
     fn an_older_remote_starts_claude_code_only_and_ignores_names() {
-        let reply = agents_reply(false, None, false, Vec::new);
+        let reply = agents_reply(false, None, false, None, Vec::new);
         assert_eq!(reply.agents.len(), 1);
         assert_eq!(reply.agents[0].harness, Harness::ClaudeCode);
         assert!(!reply.names);
         assert!(!reply.worktrees);
-        let reply = agents_reply(false, Some(vec![agent(Harness::Codex)]), false, Vec::new);
+        let reply = agents_reply(false, Some(vec![agent(Harness::Codex)]), false, None, Vec::new);
         assert_eq!(reply.agents[0].harness, Harness::Codex);
         assert!(reply.names);
         assert!(!reply.worktrees);
-        assert!(agents_reply(false, Some(vec![agent(Harness::Codex)]), true, Vec::new).worktrees);
-        let reply = agents_reply(true, None, false, || vec![agent(Harness::Kiro)]);
+        assert!(agents_reply(false, Some(vec![agent(Harness::Codex)]), true, None, Vec::new).worktrees);
+        let reply = agents_reply(true, None, false, None, || vec![agent(Harness::Kiro)]);
         assert_eq!(reply.agents[0].harness, Harness::Kiro);
         assert!(reply.names);
         assert!(reply.worktrees);
@@ -231,6 +249,30 @@ mod tests {
         let reply: AgentsReply = serde_json::from_str(r#"{"agents":[],"names":true}"#).unwrap();
         assert!(reply.names);
         assert!(!reply.worktrees);
+    }
+
+    #[test]
+    fn check_remote_terminal_refuses_an_older_maya_and_a_missing_terminal() {
+        use crate::config::NewSessionTerminal::{Iterm, Terminal};
+        assert_eq!(check_remote_terminal(Some(Iterm), &None, true, "laptop").unwrap_err(), "laptop runs an older Maya that cannot pick the terminal.");
+        let linux = Some(crate::terminal_choice::describe("linux", Terminal));
+        assert_eq!(check_remote_terminal(Some(Iterm), &linux, true, "laptop").unwrap_err(), "That terminal is not available on laptop.");
+        assert!(check_remote_terminal(Some(Terminal), &linux, true, "laptop").is_ok());
+        assert!(check_remote_terminal(None, &None, true, "laptop").is_ok());
+        assert_eq!(check_remote_terminal(Some(Terminal), &None, false, "laptop").unwrap_err(), "laptop is not connected");
+        assert!(check_remote_terminal(None, &None, false, "laptop").is_ok());
+    }
+
+    #[test]
+    fn an_agents_reply_from_an_older_main_decodes_without_terminals() {
+        let reply: AgentsReply = serde_json::from_str(r#"{"agents":[],"names":true}"#).unwrap();
+        assert_eq!(reply.terminals, None);
+    }
+
+    #[test]
+    fn a_local_agents_reply_carries_this_machine_s_terminals() {
+        let t = crate::terminal_choice::describe("macos", crate::config::NewSessionTerminal::Iterm);
+        assert_eq!(agents_reply(true, None, false, Some(t.clone()), Vec::new).terminals, Some(t));
     }
 
     #[test]
