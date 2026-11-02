@@ -352,6 +352,18 @@ pub fn network_new_key(hub: H) -> Result<NetworkStatus, String> {
     hub.new_key()
 }
 
+/// Asks the main to remove a device from the group.
+#[tauri::command(async)]
+pub fn network_remove_member(hub: H, key: String) -> Result<NetworkStatus, String> {
+    hub.remove_member(&key)
+}
+
+/// Makes this phone an assistant of another device of the group.
+#[tauri::command(async)]
+pub fn network_join(hub: H, key: String, host: String, port: u16) -> Result<NetworkStatus, String> {
+    hub.join_member(&key, &host, port)
+}
+
 #[tauri::command]
 pub fn local_addresses(app: AppHandle) -> Vec<String> {
     android::local_addresses(&app)

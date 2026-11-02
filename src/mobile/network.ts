@@ -11,14 +11,17 @@ import { setViewerTheme } from "../modal";
 import { renderReleaseNotes, RUNNING_VERSION } from "../release-notes";
 import { makeGroupHistory } from "./settings-history";
 import type { ViewerTheme } from "../types";
+import { morph } from "../morph";
+import { renderDevices, type DevicesHandlers, type DevicesModel } from "../devices";
 
 export type { NetworkStatus } from "../settings";
 
-export type PhoneGroup = "network" | "notifications" | "voice" | "viewer" | "releaseNotes";
+export type PhoneGroup = "network" | "devices" | "notifications" | "voice" | "viewer" | "releaseNotes";
 
 /** The list's groups, in its order. */
 export const PHONE_GROUPS: readonly (readonly [PhoneGroup, string])[] = [
   ["network", "Network"],
+  ["devices", "Devices"],
   ["notifications", "Notifications"],
   ["voice", "Voice"],
   ["viewer", "Session viewer"],
@@ -44,6 +47,8 @@ export interface NetworkModel {
   error: string | null;
   /** New key's confirmation is open. */
   newKey?: boolean;
+  /** The device whose Join form is open. */
+  devicesJoining?: string | null;
 }
 
 export interface NetworkHandlers {
@@ -56,6 +61,11 @@ export interface NetworkHandlers {
   onNewKeyCancel(): void;
   onStopListening(): void;
   onJoin(host: string, port: number, code: string): void;
+  /**
+   * The Devices list's handlers. The list keeps its first render's root
+   * across repaints, so this must be one object for the life of the page.
+   */
+  devices: DevicesHandlers;
   onOpenGroup(g: PhoneGroup): void;
   onBack(): void;
 }
@@ -200,8 +210,31 @@ function releaseNotesCards(): HTMLElement[] {
   return [notes];
 }
 
+/** The group's devices: this phone and the others. A phone is never a main, so no pairing and no Make main. */
+function devicesCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
+  const card = section("Devices");
+  if (m.status.role === "off") {
+    const none = el("p", "settings__hint", "Join a main in Settings › Network to see your devices.");
+    none.dataset.row = "devices-off";
+    card.append(none);
+    return [card];
+  }
+  // The model's fields behind the view; a typed host stays in its input.
+  const view: DevicesModel = {
+    get joining() { return m.devicesJoining ?? null; },
+    set joining(v) { m.devicesJoining = v; },
+    joinHost: "",
+    joinPort: 0,
+    promote: null,
+    promoting: false,
+  };
+  card.append(renderDevices(m.status, view, h.devices, Date.now(), "this phone"));
+  return [card];
+}
+
 const CARDS: Record<PhoneGroup, (m: NetworkModel, h: NetworkHandlers) => HTMLElement[]> = {
   network: networkCards,
+  devices: devicesCards,
   notifications: notificationCards,
   voice: voiceCards,
   viewer: viewerCards,
@@ -215,6 +248,11 @@ export function groupSummary(m: NetworkModel, g: PhoneGroup): string {
       if (m.status.role !== "assistant") return "Not joined";
       const link = m.status.assistant;
       return link.connected && link.mainName ? `Connected to ${link.mainName}` : "Reconnecting…";
+    }
+    case "devices": {
+      if (m.status.role !== "assistant") return "Not joined";
+      const n = m.status.devices?.length ?? 0;
+      return n === 1 ? "1 device" : `${n} devices`;
     }
     case "notifications": {
       if (!m.notificationsAllowed) return "Off in Android settings";
@@ -245,6 +283,7 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers): HTMLElement 
     return list;
   }
   const root = el("div", "settings__body network");
+  root.dataset.group = m.group;
   const bar = el("div", "settings-page__bar");
   const back = el("button", "settings-page__back", "←");
   back.type = "button";
@@ -329,7 +368,13 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     // A field on screen says for itself whether it still differs.
     for (const f of CARRIED) if (pane.querySelector(`input[name=${f}]`)) delete kept[f];
     kept = { ...kept, ...edits, focus: undefined };
-    pane.replaceChildren(renderNetwork(model, handlers));
+    const page = renderNetwork(model, handlers);
+    const shown = pane.firstElementChild;
+    // The Devices page is patched in place: its list is never detached, so a
+    // hovered row keeps its :hover (WebKit drops it on a replaced node). Its
+    // one delegated listener reads the DOM, and `handlers` is one object.
+    if (model.group === "devices" && pane.childElementCount === 1 && shown instanceof HTMLElement && shown.dataset.group === "devices") morph(shown, page);
+    else pane.replaceChildren(page);
     restoreEdits(pane, { ...kept, focus: edits.focus });
   };
   // The permission changes behind the page (the first run's prompt, Android's
@@ -392,7 +437,26 @@ export function initNetwork(onStatus: (s: NetworkStatus) => void): () => void {
     model.busy = false;
     paint();
   };
+  const devices: DevicesHandlers = {
+    onRemoveMember: (key) => void busy(async () => {
+      setStatus(await invoke<NetworkStatus>("network_remove_member", { key }));
+    }),
+    onJoinAsk: (key) => { model.devicesJoining = key; paint(); },
+    onJoinCancel: () => { model.devicesJoining = null; paint(); },
+    onJoin: (key, host, port) => void busy(async () => {
+      setStatus(await invoke<NetworkStatus>("network_join", { key, host, port }));
+      model.devicesJoining = null;
+      await loadConfig();
+    }),
+    // A phone is never a main: these rows are never drawn.
+    onRemoveAssistant: () => undefined,
+    onMakeMain: () => undefined,
+    onMirror: () => undefined,
+    onPromote: () => undefined,
+    onPromoteCancel: () => undefined,
+  };
   const handlers: NetworkHandlers = {
+    devices,
     onSave: (name) => void busy(async () => {
       await saveConfig((c) => {
         c.network.name = name;

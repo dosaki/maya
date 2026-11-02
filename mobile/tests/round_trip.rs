@@ -464,3 +464,60 @@ fn a_join_with_an_unreadable_key_file_fails_before_it_changes_anything() {
     assert!(main.status().assistants.is_empty(), "no pairing was attempted");
     main.stop();
 }
+
+#[test]
+fn the_phone_saves_the_group_and_lists_the_main() {
+    let (main, port, _notify) = desk();
+    let (hub, _page, _dir) = new_hub(free_port());
+    let code = main.open_pairing(maya_core::store::now_ms()).unwrap().0;
+    hub.join("127.0.0.1", port, "Pixel", &code).unwrap();
+    let main_key = hub.settings.lock().unwrap().config.network.main_key.clone();
+    wait_until("the group in the phone's config", || hub.settings.lock().unwrap().config.network.assistants.iter().any(|m| m.key == main_key));
+    let status = hub.status();
+    assert_eq!(status.devices.len(), 2, "this phone and the main");
+    assert!(status.devices[0].is_self && !status.devices[0].is_main);
+    assert_eq!(status.devices[0].platform, std::env::consts::OS);
+    let row = status.devices.iter().find(|d| d.key == main_key).unwrap();
+    assert!(row.is_main && !row.is_self);
+    hub.stop_client();
+}
+
+#[test]
+fn a_phone_that_is_off_lists_no_devices_and_makes_no_key() {
+    let (hub, _page, dir) = new_hub(free_port());
+    assert!(hub.status().devices.is_empty());
+    assert!(!dir.path().join("maya").join(maya_core::net::identity::FILE).exists(), "status never makes a key");
+}
+
+#[test]
+fn the_phone_removes_a_member_through_the_main() {
+    let (main, port, notify) = desk();
+    let (hub, _page, _dir) = new_hub(free_port());
+    let (other, _other_page, _other_dir) = new_hub(free_port());
+    hub.join("127.0.0.1", port, "Pixel", &main.open_pairing(maya_core::store::now_ms()).unwrap().0).unwrap();
+    other.join("127.0.0.1", port, "Fold", &main.open_pairing(maya_core::store::now_ms()).unwrap().0).unwrap();
+    let other_key = other.identity().unwrap().public_b64();
+    wait_until("the other member in the phone's group", || hub.status().devices.iter().any(|d| d.key == other_key));
+    wait_until("the phone connected", || hub.status().assistant.connected);
+
+    let status = hub.remove_member(&other_key).unwrap();
+    assert_eq!(status.role, NetworkRole::Assistant);
+    wait_until("the member gone from the phone's group", || hub.status().devices.iter().all(|d| d.key != other_key));
+    assert!(notify.saved.lock().unwrap().iter().all(|a| a.key != other_key), "the main saved the group without it");
+    hub.stop_client();
+    other.stop_client();
+}
+
+#[test]
+fn removing_a_member_needs_the_main() {
+    let (hub, _page, _dir) = new_hub(free_port());
+    assert_eq!(hub.remove_member("a2V5").unwrap_err(), "Connect to the main Maya to remove a device.");
+}
+
+#[test]
+fn joining_a_member_makes_the_phone_its_assistant_only_for_a_live_non_phone_member() {
+    let (hub, _page, _dir) = new_hub(free_port());
+    let err = hub.join_member("a2V5", "127.0.0.1", 4127).unwrap_err();
+    assert_eq!(err, "That device is not in your group.");
+    assert_eq!(hub.settings.lock().unwrap().config.network.role, NetworkRole::Off);
+}
