@@ -48,7 +48,13 @@ pub fn run(args: Vec<String>) -> i32 {
         }
         Ok(args::Cmd::Config(args::ConfigOp::ProjectsDir(dir))) => report(commands::set_projects_dir(&claude_dir, &dir)),
         Ok(args::Cmd::Devices(args::DevicesOp::List)) => report(commands::devices(&claude_dir)),
-        Ok(args::Cmd::Devices(args::DevicesOp::Join { device, host, port })) => report(commands::devices_join(&claude_dir, &device, &host, port)),
+        Ok(args::Cmd::Devices(args::DevicesOp::Join { device, host, port })) => match commands::devices_join(&claude_dir, &device, &host, port) {
+            Ok(m) => report(Ok(m)),
+            Err((code, e)) => {
+                eprintln!("{e}");
+                code
+            }
+        },
         Ok(args::Cmd::Run) => run_cmd::run(&claude_dir),
         Ok(args::Cmd::Start { dir, prompt, options }) => report(commands::start(&claude_dir, dir, prompt, options)),
     }

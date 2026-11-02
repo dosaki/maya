@@ -214,10 +214,20 @@ pub fn devices(claude_dir: &Path) -> Result<String, String> {
 }
 
 /// `maya devices join`: follows the member `device` (an id, or a name in
-/// any case) at `host:port` as the main. A running `maya run` reads the
-/// config again and reconnects.
-pub fn devices_join(claude_dir: &Path, device: &str, host: &str, port: u16) -> Result<String, String> {
+/// any case) at `host:port` as the main. Errors carry the exit code: 2 while
+/// a `maya run` holds the run lock (joining would swap the link under it),
+/// else 1. The lock is held while the config changes.
+pub fn devices_join(claude_dir: &Path, device: &str, host: &str, port: u16) -> Result<String, (i32, String)> {
     let maya_dir = claude_dir.join("maya");
+    let _lock = match RunLock::try_take(&run_lock::path(&maya_dir)) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Err((2, format!("stop `maya run` first{}", pid_suffix(status_file::read(&maya_dir).as_ref())))),
+        Err(e) => return Err((1, e)),
+    };
+    join_member(&maya_dir, device, host, port).map_err(|e| (1, e))
+}
+
+fn join_member(maya_dir: &Path, device: &str, host: &str, port: u16) -> Result<String, String> {
     let path = maya_dir.join("config.json");
     let key = identity::load_or_create(&maya_dir.join(identity::FILE))?.public_b64();
     let mut c = config::load(&path);
@@ -322,11 +332,23 @@ mod tests {
     }
 
     #[test]
+    fn devices_join_refuses_while_maya_run_holds_the_lock_and_leaves_the_config_alone() {
+        let dir = group_dir(NetworkRole::Main, "", vec![member("k1", "Desk", "macos")]);
+        let maya_dir = dir.path().join("maya");
+        let _run = RunLock::try_take(&run_lock::path(&maya_dir)).unwrap().unwrap();
+        assert_eq!(devices_join(dir.path(), "Desk", "h", 4127), Err((2, "stop `maya run` first".to_string())));
+        let me = std::process::id();
+        status_file::write(&maya_dir, &RunStatus { pid: me, connected: true, ..Default::default() }).unwrap();
+        assert_eq!(devices_join(dir.path(), "Desk", "h", 4127), Err((2, format!("stop `maya run` first (pid {me})"))));
+        assert_eq!(config::load(&maya_dir.join("config.json")).network.role, NetworkRole::Main);
+    }
+
+    #[test]
     fn devices_join_unknown_name_fails() {
         let dir = group_dir(NetworkRole::Main, "", vec![member("k1", "Desk", "macos"), member("k2", "desk", "linux"), member("k3", "Pixel", "android")]);
-        assert_eq!(devices_join(dir.path(), "Nope", "h", 4127).unwrap_err(), "That device is not in your group.");
-        assert_eq!(devices_join(dir.path(), "DESK", "h", 4127).unwrap_err(), "Two devices are called Desk; use its id.");
-        assert_eq!(devices_join(dir.path(), "Pixel", "h", 4127).unwrap_err(), "A phone cannot be the main Maya.");
+        assert_eq!(devices_join(dir.path(), "Nope", "h", 4127).unwrap_err().1, "That device is not in your group.");
+        assert_eq!(devices_join(dir.path(), "DESK", "h", 4127).unwrap_err().1, "Two devices are called Desk; use its id.");
+        assert_eq!(devices_join(dir.path(), "Pixel", "h", 4127).unwrap_err().1, "A phone cannot be the main Maya.");
         let n = config::load(&dir.path().join("maya/config.json")).network;
         assert_eq!(n.role, NetworkRole::Main, "a refusal changes nothing");
     }
