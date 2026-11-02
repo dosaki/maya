@@ -10,9 +10,9 @@ use crate::listener::{self, Interpreted, VoiceContext};
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
-use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD, CAP_TERMINAL, CAP_WORKTREE};
+use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD, CAP_PICK_TERMINAL, CAP_TERMINAL, CAP_WORKTREE};
 use maya_core::net::live::LiveTerms;
-use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, check_remote_worktree, target_of, Target, ROUTE_TIMEOUT};
+use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, check_remote_terminal, check_remote_worktree, target_of, Target, ROUTE_TIMEOUT};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
 use crate::net::AssistantLink;
 use crate::config::{self, NetworkRole};
@@ -176,7 +176,7 @@ impl ClientNotify for TauriClientNotify {
     }
 
     fn caps(&self) -> Vec<String> {
-        vec![CAP_FOLLOW.into(), CAP_LEAD.into(), CAP_WORKTREE.into(), CAP_TERMINAL.into()]
+        vec![CAP_FOLLOW.into(), CAP_LEAD.into(), CAP_WORKTREE.into(), CAP_TERMINAL.into(), CAP_PICK_TERMINAL.into()]
     }
 
     /// From her record: None when this Maya never ran a brain.
@@ -281,6 +281,9 @@ impl Executor for TauriExecutor {
         Some(maya_core::agents::snapshot())
     }
 
+    fn terminals(&self) -> Option<maya_core::terminal_choice::TerminalChoices> {
+        Some(maya_core::terminal_choice::local(self.app.state::<AppState>().store.lock().unwrap().config.new_session_terminal))
+    }
     fn live_terms(&self) -> Option<Arc<dyn LiveTerms>> {
         Some(self.terms.clone())
     }
@@ -467,9 +470,12 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
         Request::ListAgents => match machine {
             Some(m) => {
                 let boards = crate::remote_boards(&state);
-                to_data(agents_reply(false, merge::agents_of(&boards, m), merge::worktrees_of(&boards, m), Vec::new))
+                to_data(agents_reply(false, merge::agents_of(&boards, m), merge::worktrees_of(&boards, m), merge::terminal_choices_of(&boards, m), Vec::new))
             }
-            None => to_data(agents_reply(true, None, false, maya_core::agents::current)),
+            None => {
+                let saved = state.store.lock().unwrap().config.new_session_terminal;
+                to_data(agents_reply(true, None, false, Some(maya_core::terminal_choice::local(saved)), maya_core::agents::current))
+            }
         },
         Request::Command(kind) => match target_of(&kind) {
             Target::Session(session) => match crate::remote_machine_of(&state, &session) {
@@ -482,7 +488,12 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
                         check_remote_agent(agent, &merge::agents_of(&crate::remote_boards(&state), m), m)?;
                     }
                     if let CommandKind::Start { options, .. } = &kind {
-                        check_remote_worktree(options, merge::worktrees_of(&crate::remote_boards(&state), m), m)?;
+                        let boards = crate::remote_boards(&state);
+                        check_remote_worktree(options, merge::worktrees_of(&boards, m), m)?;
+                        check_remote_terminal(options.terminal, &merge::terminal_choices_of(&boards, m), m)?;
+                    }
+                    if let CommandKind::Resume { terminal, .. } = &kind {
+                        check_remote_terminal(*terminal, &merge::terminal_choices_of(&crate::remote_boards(&state), m), m)?;
                     }
                     if let CommandKind::Forget { sessions } = &kind {
                         // Dropped here first, so the next mirror leaves the
@@ -539,8 +550,11 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
         CommandKind::SetOption { session, setting, value } => done(actions::set_session_option(&l, &session, &setting, &value)),
         CommandKind::CycleMode { session } => done(actions::cycle_session_mode(&l, &session)),
         CommandKind::Slash { session, text } => done(actions::send_slash_command(&l, &session, &text)),
-        CommandKind::Start { dir, prompt, options } => to_data(actions::start_session(&l, dir, prompt, options)?),
-        CommandKind::Resume { dir, session, agent, .. } => done(actions::resume_relayed(&l, agent, &dir, &session)),
+        CommandKind::Start { dir, prompt, options } => {
+            let pick = options.terminal;
+            to_data(crate::open_with_pick(pick, || actions::start_session(&l, dir, prompt, options))?)
+        }
+        CommandKind::Resume { dir, session, agent, terminal } => done(crate::open_with_pick(terminal, || actions::resume_relayed(&l, agent, &dir, &session))),
         CommandKind::ListResumable { dir, agent } => to_data(actions::list_resumable_sessions(&l, agent, &dir)?),
         CommandKind::History { session } => to_data(actions::remote_history(&l, &session)?),
         CommandKind::Forget { sessions } => {

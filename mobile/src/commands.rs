@@ -7,7 +7,7 @@ use crate::hub::Hub;
 use crate::android;
 use maya_core::actions::{Route, StartResult};
 use maya_core::answer::Pick;
-use maya_core::config::Config;
+use maya_core::config::{Config, NewSessionTerminal};
 use maya_core::launch::LaunchOptions;
 use maya_core::model::{Card, Harness};
 use maya_core::net::live::TermFrame;
@@ -175,7 +175,7 @@ pub fn list_agents(hub: H, machine: Option<String>) -> AgentsReply {
     let machine = machine.filter(|m| !m.is_empty());
     hub.request(machine.as_deref(), Request::ListAgents).and_then(data).unwrap_or_else(|e| {
         log::line("network", format!("could not list the agents: {e}"));
-        agents_reply(false, None, false, Vec::new)
+        agents_reply(false, None, false, None, Vec::new)
     })
 }
 
@@ -187,10 +187,10 @@ pub fn list_resumable_sessions(hub: H, dir: String, machine: Option<String>, age
 }
 
 #[tauri::command(async)]
-pub fn resume_session(hub: H, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<(), String> {
+pub fn resume_session(hub: H, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>, terminal: Option<NewSessionTerminal>) -> Result<(), String> {
     let machine = machine_arg(machine)?;
     let agent = agent.unwrap_or_default();
-    hub.send_to(&machine, CommandKind::Resume { dir, session: session_id, agent, terminal: None }).map(|_| ())
+    hub.send_to(&machine, CommandKind::Resume { dir, session: session_id, agent, terminal }).map(|_| ())
 }
 
 #[tauri::command(async)]
