@@ -459,10 +459,10 @@ quiet.
   Join (no code) on the device. The new main's Maya picks up her own
   session and gets a short summary of what the old main's Maya did while
   she was dormant; it shows in her Chat. The old main's Maya goes dormant.
-- **Versions.** Run the same Maya on every machine; an assistant from
-  0.46 lists its main straight away, but all Mayas should run this
-  version. The main notes an
-  assistant that runs another version, or one whose board it cannot read.
+- **Versions.** Run the same Maya on every machine. An assistant from
+  0.46 lists its main straight away after it upgrades, but all Mayas
+  should run this version. The main notes an assistant that runs another
+  version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
   names and attachments (up to 20 MB), and at Make main a summary of
   Maya's Chat. Commands run on the assistant; the
@@ -536,8 +536,9 @@ too, with no desktop and no app: the `maya` command line tool.
   on the main each connection replaces the other.
 - **Devices.** `./maya devices` lists the group. `./maya devices join
   <name or id> <host>[:port]` joins a main that is already in the group,
-  with no code. There is no remove on the command line: remove a device
-  from a computer or the phone.
+  with no code; like `maya pair`, it refuses while `maya run` is running
+  (exit 2), so stop `maya run` first. There is no remove on the command
+  line: remove a device from a computer or the phone.
 - **Status.** `./maya status` shows whether it is paired, connected and
   running, and the projects directory; `./maya hooks status` checks the
   hook.
