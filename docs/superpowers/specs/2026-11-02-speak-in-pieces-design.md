@@ -65,7 +65,7 @@ made, so the gaps stay short.
 
 ## My calls (check these)
 
-- The limit is about 400 characters (roughly 25 seconds of speech), one
+- The limit is 400 bytes, about 400 characters of English (roughly 25 seconds of speech), one
   constant in `core/src/speech.rs`.
 - Only remote voices synthesise ahead; the built-in voice (`say`, SAPI,
   `spd-say`) speaks each piece in turn, since it has no synthesis step to

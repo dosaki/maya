@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- The piece limit is 400 characters: `pub const PIECE_LIMIT: usize = 400;` in `core/src/speech.rs`.
+- The piece limit is 400 bytes (`str::len`; a non-ASCII reply gets slightly shorter pieces): `pub const PIECE_LIMIT: usize = 400;` in `core/src/speech.rs`.
 - Split order for an over-long block: sentence ends (`.` `!` `?` `…` followed by a space), then `;` `:` `,`, then between words. Never inside a word.
 - `pieces(t).join(" ") == from_markdown(t)` for every input: Chat, the voice panel and history keep showing the same words as today.
 - The speech hook runs once per utterance: `Starting(<whole text>)` before the first piece, `Finished` after the last.
