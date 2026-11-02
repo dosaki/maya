@@ -3311,7 +3311,7 @@ mod tests {
         fn removed(&self) {
             self.removed.fetch_add(1, Ordering::SeqCst);
         }
-        fn group(&self, group: super::group::GroupCopy) {
+        fn group(&self, group: super::group::GroupCopy, _from: &str) {
             self.groups.lock().unwrap().push(group);
         }
     }
@@ -3328,7 +3328,7 @@ mod tests {
     }
 
     impl client::ClientNotify for Leader {
-        fn group(&self, group: super::group::GroupCopy) {
+        fn group(&self, group: super::group::GroupCopy, _from: &str) {
             self.groups.lock().unwrap().push(group);
         }
         fn paired(&self, _: &str) {}
@@ -4719,7 +4719,7 @@ mod tests {
             assert!(!s.paired.iter().any(|p| p.key == a_key), "A is removed");
             assert!(s.removed.iter().any(|r| r.key == a_key));
             assert!(!s.paired.iter().any(|p| p.key == stranger.key), "a member the main never had is not added");
-            assert!(s.version > before && s.version > 50, "the version goes above both: {}", s.version);
+            assert_eq!(s.version, before + 1, "the main's own next version, never the copy's");
         }
         let g = recv_group(&mut b);
         assert!(g.removed.iter().any(|r| r.key == a_key) && !g.members.iter().any(|m| m.key == stranger.key), "{g:?}");

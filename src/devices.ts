@@ -15,6 +15,8 @@ export interface DeviceRow {
   lastSeen: number | null;
   isMain: boolean;
   isSelf: boolean;
+  /** The port it was last reached on; known only for the main this Maya follows. */
+  port?: number | null;
 }
 
 /** What the list needs to remember between repaints. */
@@ -95,7 +97,7 @@ function joinForm(d: DeviceRow, m: DevicesModel): HTMLElement {
   port.type = "number";
   port.name = "join-port";
   port.placeholder = String(DEFAULT_PORT);
-  port.value = String(m.joinPort || DEFAULT_PORT);
+  port.value = String(m.joinPort || d.port || DEFAULT_PORT);
   form.append(host, port, button("join-confirm", "Join", { key: d.key }), button("join-cancel", "Cancel", { key: d.key }));
   return form;
 }

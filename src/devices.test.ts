@@ -83,6 +83,15 @@ describe("renderDevices", () => {
     expect(h.onJoin).toHaveBeenCalledWith("kn", "192.168.1.5", 4127);
   });
 
+  it("Join prefills the main's last port when this Maya knows it", () => {
+    const h = handlers();
+    const away = dev({ ...desk, port: 5001 });
+    const el = renderDevices(status(false, [me, away]), model({ joining: "kd" }), h, 2000);
+    expect(el.querySelector<HTMLInputElement>("input[name=join-port]")!.value).toBe("5001");
+    el.querySelector<HTMLButtonElement>("button[data-action=join-confirm]")!.click();
+    expect(h.onJoin).toHaveBeenCalledWith("kd", expect.any(String), 5001);
+  });
+
   it("on a main it lists the paired devices with Remove, Make main and the phone switch", () => {
     const h = handlers();
     const net: NetworkStatus = {

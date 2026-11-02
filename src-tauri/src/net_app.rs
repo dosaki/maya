@@ -195,18 +195,18 @@ impl ClientNotify for TauriClientNotify {
     /// Keeps the group the main sent. Takes no lock of its own: the save
     /// goes through `update_config` (store, briefly), and a changed group
     /// restarts a redirect through `network_change`.
-    fn group(&self, group: maya_core::net::group::GroupCopy) {
+    fn group(&self, group: maya_core::net::group::GroupCopy, from: &str) {
         let Ok(id) = identity(&self.app) else { return };
         let my_key = id.public_b64();
         // Only a group that changes the saved one is saved, and only for an
         // assistant of the main that sent it.
         let now = self.app.state::<AppState>().store.lock().unwrap().config.network.clone();
         let mut probe = now;
-        if !maya_core::net::group::adopt_from_main(&mut probe, &my_key, &group) {
+        if !maya_core::net::group::adopt_from_main(&mut probe, &my_key, from, &group) {
             return;
         }
         let saved = crate::update_config(&self.app, |c| {
-            maya_core::net::group::adopt_from_main(&mut c.network, &my_key, &group);
+            maya_core::net::group::adopt_from_main(&mut c.network, &my_key, from, &group);
         });
         if let Err(e) = saved {
             log::line("network", format!("could not save the group: {e}"));

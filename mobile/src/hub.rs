@@ -892,7 +892,7 @@ impl ClientNotify for HubClientNotify {
     }
     /// Keeps the group the main sent, only from the main this phone follows.
     /// Nothing is saved when it changes nothing.
-    fn group(&self, group: maya_core::net::group::GroupCopy) {
+    fn group(&self, group: maya_core::net::group::GroupCopy, from: &str) {
         if self.stop.load(Ordering::SeqCst) {
             return;
         }
@@ -900,11 +900,11 @@ impl ClientNotify for HubClientNotify {
         let Ok(id) = h.identity() else { return };
         let my_key = id.public_b64();
         let mut probe = h.settings.lock().unwrap().config.network.clone();
-        if !maya_core::net::group::adopt_from_main(&mut probe, &my_key, &group) {
+        if !maya_core::net::group::adopt_from_main(&mut probe, &my_key, from, &group) {
             return;
         }
         match h.update_config(|c| {
-            maya_core::net::group::adopt_from_main(&mut c.network, &my_key, &group);
+            maya_core::net::group::adopt_from_main(&mut c.network, &my_key, from, &group);
         }) {
             Ok(_) => h.sink.network(&h.status()),
             Err(e) => log::line("network", format!("could not save the group: {e}")),

@@ -135,9 +135,10 @@ pub trait ClientNotify: Send + Sync {
         None
     }
     /// The main's copy of the group of trusted devices, sent right after
-    /// `welcome` and on every change: the app saves it with `group::adopt`.
-    /// Runs on the connection thread.
-    fn group(&self, _group: GroupCopy) {}
+    /// `welcome` and on every change: the app saves it with
+    /// `group::adopt_from_main`. `from` is the key this connection's main
+    /// proved in the handshake. Runs on the connection thread.
+    fn group(&self, _group: GroupCopy, _from: &str) {}
     /// The main is now at `host:port` with the public key `key`: save both.
     /// Runs on the connection thread.
     fn moved(&self, _host: &str, _port: u16, _key: &str) -> Result<(), String> {
@@ -624,13 +625,15 @@ fn connection(config: &NetworkConfig, identity: &Keypair, exec: &Arc<dyn Executo
             return Err(fail_message(&f, code.is_some()));
         }
     };
+    // The key the main proved just now: a group frame counts only from it.
+    let proved = encode_key(&learned.or(main_key).expect("a main key or a pairing"));
     let mut ch = Channel::new(ws, noise);
     let out = handshake(&mut ch, config, &**notify, stop, learned, deadline).and_then(|(main, mirror, caps)| {
         log::line("network", format!("connected to {main}"));
         notify.connected(&main);
         notify.mirror_offer(mirror);
         notify.main_caps(&caps);
-        pump(&mut ch, exec, notify, stop, config, &identity.public_b64())
+        pump(&mut ch, exec, notify, stop, config, &identity.public_b64(), &proved)
     });
     finish(&mut ch.ws);
     out
@@ -664,8 +667,9 @@ fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, s
     }
 }
 
-/// Runs a welcomed connection until it drops or `stop` is set.
-fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, stop: &AtomicBool, config: &NetworkConfig, key: &str) -> Result<(), String> {
+/// Runs a welcomed connection until it drops or `stop` is set. `main` is
+/// the key the main proved in the handshake.
+fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, stop: &AtomicBool, config: &NetworkConfig, key: &str, main: &str) -> Result<(), String> {
     let (tx, rx) = channel::<Up>();
     let lane = notify.lane();
     let _attached = Attached(lane.as_ref().map(|l| (l.clone(), l.attach(tx.clone()))));
@@ -724,7 +728,7 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
             Ok(Got::Text(t)) => {
                 last_read = Instant::now();
                 match decode_down(&t) {
-                    Ok(down) => handle(down, exec, notify, &lane, &tx, &leaving, config, key, &mut seen, &mut streams)?,
+                    Ok(down) => handle(down, exec, notify, &lane, &tx, &leaving, config, key, main, &mut seen, &mut streams)?,
                     Err(e) => log::line("network", format!("main: ignored a message: {e}")),
                 }
             }
@@ -744,7 +748,7 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, tx: &Sender<Up>, leaving: &Arc<AtomicBool>, config: &NetworkConfig, key: &str, seen: &mut Option<GroupCopy>, streams: &mut Streams) -> Result<(), String> {
+fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, tx: &Sender<Up>, leaving: &Arc<AtomicBool>, config: &NetworkConfig, key: &str, main: &str, seen: &mut Option<GroupCopy>, streams: &mut Streams) -> Result<(), String> {
     match down {
         Down::Command { id, kind: CommandKind::Promote { list, summary, removed, version } } => {
             log::line("network", format!("command {id} promote"));
@@ -821,7 +825,7 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
                 return Err(REMOVED.into());
             }
             *seen = Some(g.clone());
-            notify.group(g);
+            notify.group(g, main);
         }
         Down::Chat { turn } => notify.chat_turn(turn),
         Down::Brain { status } => notify.brain_status(status),
@@ -832,7 +836,7 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
 /// `handle` for a test of one frame, with no request lane and no group seen.
 #[cfg(test)]
 pub(crate) fn handle_for_test(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, tx: &Sender<Up>, config: &NetworkConfig, key: &str) -> Result<(), String> {
-    handle(down, exec, notify, &None, tx, &Arc::new(AtomicBool::new(false)), config, key, &mut None, &mut Streams { terms: None, subs: HashMap::new() })
+    handle(down, exec, notify, &None, tx, &Arc::new(AtomicBool::new(false)), config, key, "", &mut None, &mut Streams { terms: None, subs: HashMap::new() })
 }
 
 /// The running client; `stop` ends its thread within a tick (within the
@@ -1147,7 +1151,7 @@ mod tests {
         let turn = serde_json::json!({"id": 3, "role": "assistant", "text": "Done."});
         let status = serde_json::json!({"dot": "working", "pending": null, "job": "x", "ready": true});
         for down in [Down::Chat { turn: turn.clone() }, Down::Brain { status: status.clone() }] {
-            handle(down, &exec, &notify, &None, &tx, &leaving, &NetworkConfig::default(), "me", &mut None, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
+            handle(down, &exec, &notify, &None, &tx, &leaving, &NetworkConfig::default(), "me", "", &mut None, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
         }
         assert_eq!(*recorder.0.lock().unwrap(), [("chat", turn), ("brain", status)]);
     }
@@ -1170,7 +1174,7 @@ mod tests {
         let (tx, _rx) = channel();
         let leaving = Arc::new(AtomicBool::new(false));
         let frame = TermFrame { seq: 1, event: TermEvent::Output { data: "aGk=".into() } };
-        handle(Down::TermFrame { sub: 3, frame: frame.clone() }, &exec, &notify, &None, &tx, &leaving, &NetworkConfig::default(), "me", &mut None, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
+        handle(Down::TermFrame { sub: 3, frame: frame.clone() }, &exec, &notify, &None, &tx, &leaving, &NetworkConfig::default(), "me", "", &mut None, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
         assert_eq!(*viewer.0.lock().unwrap(), [(3, frame)]);
     }
 
@@ -1254,7 +1258,7 @@ mod tests {
         let (a, m) = secure::transport_pair();
         let mut assistant = Channel::new(joiner.join().unwrap(), a);
         let (exec, notify): (Arc<dyn Executor>, Arc<dyn ClientNotify>) = (Arc::new(Hosting(terms)), Arc::new(Silent));
-        let run = std::thread::spawn(move || pump(&mut assistant, &exec, &notify, &stop, &NetworkConfig::default(), "me"));
+        let run = std::thread::spawn(move || pump(&mut assistant, &exec, &notify, &stop, &NetworkConfig::default(), "me", ""));
         (Channel::new(main, m), run)
     }
 

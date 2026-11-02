@@ -53,13 +53,13 @@ impl ClientNotify for CliNotify {
 
     /// Saves the main's copy of the group, only when it changes the saved
     /// one, and re-checked against the config as it is when saving.
-    fn group(&self, group: maya_core::net::group::GroupCopy) {
+    fn group(&self, group: maya_core::net::group::GroupCopy, from: &str) {
         use maya_core::net::{group, identity};
         let path = self.maya_dir.join("config.json");
         let Ok(key) = identity::load_or_create(&self.maya_dir.join(identity::FILE)) else { return };
         let my_key = key.public_b64();
         let mut c = maya_core::config::load(&path);
-        if !group::adopt_from_main(&mut c.network, &my_key, &group) {
+        if !group::adopt_from_main(&mut c.network, &my_key, from, &group) {
             return;
         }
         if let Err(e) = maya_core::config::save(&path, &c) {
