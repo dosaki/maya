@@ -117,7 +117,10 @@ Pairing again with a removed device's key (with a new code) clears its
 tombstone: a code is the only way back. So that a stale copy cannot remove
 it again, each entry carries a generation that the main raises when it
 adds, removes or pairs again; in a merge the entry with the higher
-generation wins, and on a tie removed wins. (My call.)
+generation wins, and on a tie removed wins. (My call.) A removal the main
+takes from a member's copy gets the main's own next version as its
+generation, so a copy with a forged, huge number cannot keep out a device
+that pairs again.
 
 ### Keeping the copies in step
 
@@ -126,8 +129,8 @@ generation wins, and on a tie removed wins. (My call.)
   current main whose version is higher than its own.
 - When a Maya connects to a main, it sends its own copy too. The main
   merges it into its list entry by entry, by generation (above). If that
-  changed anything, the merged version goes above both copies' versions,
-  and the main sends the list out. This is what keeps a removal from being
+  changed anything, the main raises its own version by one (it never
+  takes the copy's) and sends the list out. This is what keeps a removal from being
   undone by a Maya that was away. Entries the main never had are not
   added (see "Only a main's own pairing adds a member").
 - A Maya never takes a list from anyone but its current main. When the
@@ -204,8 +207,9 @@ A new Devices section in Settings, on desktop and phone:
 Settings › Network keeps the role, port, name, pairing code and status
 line, and loses the paired-assistant list, which moves to Devices.
 
-The `maya` command gets `maya devices` (list) and `maya devices remove
-<name or id>`, to match.
+The `maya` command gets `maya devices` (list) and `maya devices join
+<name or id> <host>[:port]` (no code), to match. Remove is in Settings ›
+Devices, on a computer or on the phone.
 
 ### Migration
 
@@ -247,14 +251,15 @@ On first start of the new version:
 - Every Maya, phones included, can press Remove; it goes through the main.
   No Remove on the main's row.
 - Entries carry a generation, so pairing again beats an older removal.
-- A merged version goes above both copies; a hand join makes the joined
-  main the authority.
+- A merge raises the main's own version by one and stamps the removals it
+  takes with it; a hand join makes the joined main the authority.
 - The old main's redirect sends its list with `Move`, follows only
   promotions, and stops on a hand join, a code pairing, removal or Off.
 - A main keeps refusing unknown keys before any frame, as today.
 - Join asks for host and port, prefilled from the last-known address,
   because a member's address is only a label until step 2.
-- `maya devices` for the command line.
+- `maya devices` and `maya devices join` for the command line; no remove
+  there.
 - The phone switch's place (Devices, Network or both) is left to the
   builder.
 

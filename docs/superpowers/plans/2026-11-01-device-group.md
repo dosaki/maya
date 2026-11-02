@@ -21,7 +21,7 @@
 - `Notify::paired` and `Notify::paired_list_changed` are called with the server mutex held and must not take it (`server.rs:73`). Lock order: `network`, then server mutex, then `store` (`src-tauri/src/lib.rs:156`).
 - Repaints that touch hovered rows use `morph` from `src/morph.ts`, never `replaceChildren` (CLAUDE.md lore).
 - Tests first in every task. Full checks: `cargo test --workspace`, `pnpm vitest run`, `pnpm tsc --noEmit`.
-- The PR bumps to `0.45.0` (main is `0.44.3`, this ships a `feat`) with `sh scripts/set-version.sh 0.45.0` and a `RELEASE_NOTES.md` section, in one `chore(release): 0.45.0` commit.
+- The PR bumps to `0.47.0` (main is `0.46.0`, this ships a `feat`) with `sh scripts/set-version.sh 0.47.0` and a `RELEASE_NOTES.md` section, in one `chore(release): 0.47.0` commit.
 
 ## Review Focus
 
@@ -328,6 +328,6 @@
 
 - [ ] **Step 1:** Update README to describe: the group on every Maya, pairing once, following a promoted main (also after being offline, through the old main), Join with no code, Remove from any Maya removes everywhere, the main cannot be removed (make another main first), only a code pairing on the main adds a device.
 - [ ] **Step 2:** Commit `docs: the trusted group of devices`.
-- [ ] **Step 3:** `git fetch origin && git show origin/main:package.json | grep version` → bump from that version's minor (expected `0.45.0`): `sh scripts/set-version.sh 0.45.0`; add `# 0.45.0` with `## New` bullets in plain words (Settings › Devices; pair once, no code after a new main; Join; Remove everywhere; phone Devices; `maya devices`).
+- [ ] **Step 3:** `git fetch origin && git show origin/main:package.json | grep version` → bump from that version's minor (expected `0.47.0`): `sh scripts/set-version.sh 0.47.0`; add `# 0.47.0` with `## New` bullets in plain words (Settings › Devices; pair once, no code after a new main; Join; Remove everywhere; phone Devices; `maya devices`).
 - [ ] **Step 4:** Run `cargo test --workspace`, `pnpm vitest run`, `pnpm tsc --noEmit` → PASS.
-- [ ] **Step 5:** Commit `chore(release): 0.45.0`.
+- [ ] **Step 5:** Commit `chore(release): 0.47.0`.
