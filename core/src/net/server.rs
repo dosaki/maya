@@ -1984,7 +1984,7 @@ impl ServerHandle {
     }
 
     fn promote_inner(&self, id: &str, timeout: Duration, summary: impl FnOnce(&HandoverTo) -> Option<String>) -> Result<Promotion, String> {
-        let (label, host, main_key, list, to) = {
+        let (label, host, main_key, handed, to) = {
             let mut s = lock(&self.shared);
             if s.handover {
                 return Err("A handover is already running.".into());
@@ -2010,13 +2010,12 @@ impl ServerHandle {
             s.handover = true;
             s.pairing = None;
             // The group but the new main, with this main's own entry.
-            let list = super::promote::handover_list(&s.paired, id, &s.own);
-            let (removed, version) = (s.removed.clone(), s.version);
+            let group = super::promote::handover(&s.stored(), id, &s.own);
             let peer = s.peers.get(id);
             let to = HandoverTo { label: label.clone(), brain_dormant_since: peer.and_then(|p| p.brain_dormant_since) };
-            (label, entry.address, entry.key, (list, removed, version), to)
+            (label, entry.address, entry.key, group, to)
         };
-        let (list, removed, version) = list;
+        let super::group::GroupCopy { version, members: list, removed } = handed;
         let _turn = HandoverTurn(&self.shared);
         self.ctx.announce();
         let summary = summary(&to);
@@ -3801,7 +3800,7 @@ mod tests {
             }
             let mut c = crate::config::Config::default();
             c.network = self.config.lock().unwrap().clone();
-            crate::net::promote::as_main(&mut c, group.members);
+            crate::net::promote::as_main(&mut c, group);
             let view = Arc::new(Mutex::new(c.network.clone()));
             let handle = start_with(self.counter.clone(), view, 0, self.identity.clone())?;
             let _ = self.counter.server.set(handle.shared.clone());

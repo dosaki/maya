@@ -196,9 +196,8 @@ impl ClientNotify for TauriClientNotify {
             let store = state.store.lock().unwrap();
             (store.config.clone(), store.config_path())
         };
-        let list = group.members;
-        let handed = list.len().saturating_sub(1);
-        promote::as_main(&mut after, list);
+        let handed = group.members.len().saturating_sub(1);
+        promote::as_main(&mut after, group);
         let handle = start_with(Arc::new(crate::TauriNetNotify { app: self.app.clone() }), Arc::new(Mutex::new(after.network.clone())), after.listen_port(), identity(&self.app)?)?;
         if let Err(e) = config::save(&path, &after) {
             handle.stop();
