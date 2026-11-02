@@ -13,6 +13,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { carryEdits, groupSummary, initNetwork, renderNetwork, restoreEdits, type NetworkModel, type NetworkStatus } from "./network";
+import { morph } from "../morph";
 import { RUNNING_VERSION } from "../release-notes";
 
 const off: NetworkStatus = { role: "off", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, mainError: null };
@@ -329,6 +330,20 @@ describe("the Devices card", () => {
     pane.querySelector<HTMLElement>("[data-row=pk-desk] button[data-action=remove-member]")!.click();
     await settle();
     expect(invoke).toHaveBeenCalledWith("network_remove_member", { key: "pk-desk" });
+  });
+
+  it("keeps the list's root when an error appears and clears", () => {
+    const model: NetworkModel = { ...base, group: "devices" };
+    const root = renderNetwork(model, handlers());
+    document.body.append(root);
+    const list = root.querySelector(".settings__devices")!;
+    morph(root, renderNetwork({ ...model, error: "Could not remove" }, handlers()));
+    expect(root.querySelector(".settings__error")?.textContent).toBe("Could not remove");
+    expect(root.querySelector(".settings__devices")).toBe(list);
+    morph(root, renderNetwork(model, handlers()));
+    expect(root.querySelector(".settings__error")).toBeNull();
+    expect(root.querySelector(".settings__devices")).toBe(list);
+    root.remove();
   });
 
   it("says to join a main while the phone is off", async () => {

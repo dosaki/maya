@@ -39,6 +39,17 @@ describe("renderDevices", () => {
     expect(rows[2].querySelector(".settings__badge")).toBeNull();
   });
 
+  it("adds the hostname to rows whose names clash, and only those", () => {
+    const a = dev({ id: "a", key: "ka", name: "Desk", hostname: "desk-a.lan", address: "192.168.1.2" });
+    const b = dev({ id: "b", key: "kb", name: "desk", hostname: "desk-b.lan", address: "192.168.1.3" });
+    const el = renderDevices(status(true, [me, a, b, nas]), model(), handlers(), 2000);
+    const text = [...el.querySelectorAll(".settings__assistant")].map((r) => r.textContent ?? "");
+    expect(text[1]).toContain("desk-a.lan");
+    expect(text[2]).toContain("desk-b.lan");
+    expect(text[3]).not.toContain(".lan");
+    expect(text[0]).not.toContain(".lan");
+  });
+
   it("offers Remove on other members and disables it while the main is unreachable", () => {
     const h = handlers();
     const up = renderDevices(status(true, [me, desk, nas]), model(), h, 2000);

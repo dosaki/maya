@@ -65,12 +65,18 @@ function rowEl(id: string): HTMLElement {
   return row;
 }
 
-function selfRow(d: DeviceRow): HTMLElement {
+/** The parts after a member's name: its hostname too when another device has the same name. */
+function details(d: DeviceRow, clash: Set<string>): string {
+  const host = clash.has(d.name.toLowerCase()) ? d.hostname : "";
+  return [platformLabel(d.platform), host, d.address].filter(Boolean).join(", ");
+}
+
+function selfRow(d: DeviceRow, clash: Set<string>): HTMLElement {
   const row = rowEl(`self:${d.key}`);
   row.dataset.key = d.key;
   row.classList.add("settings__device--self");
   const info = document.createElement("span");
-  info.textContent = `This device (${d.name}) — ${[platformLabel(d.platform), d.address].filter(Boolean).join(", ")}`;
+  info.textContent = `This device (${d.name}) — ${details(d, clash)}`;
   row.append(info);
   return row;
 }
@@ -94,13 +100,13 @@ function joinForm(d: DeviceRow, m: DevicesModel): HTMLElement {
   return form;
 }
 
-function memberRow(d: DeviceRow, net: NetworkStatus, m: DevicesModel, nowMs: number): HTMLElement[] {
+function memberRow(d: DeviceRow, net: NetworkStatus, m: DevicesModel, nowMs: number, clash: Set<string>): HTMLElement[] {
   const row = rowEl(d.key);
   row.dataset.key = d.key;
   const connectedMain = d.isMain && net.assistant.connected;
   const status = connectedMain ? "Connected" : d.lastSeen !== null ? `Last seen ${formatAge(d.lastSeen, nowMs)} ago` : "Never connected";
   const info = document.createElement("span");
-  info.textContent = `${d.name} (${[platformLabel(d.platform), d.address].filter(Boolean).join(", ")}) — ${status}`;
+  info.textContent = `${d.name} (${details(d, clash)}) — ${status}`;
   if (d.isMain) {
     const badge = document.createElement("span");
     badge.className = "settings__badge";
@@ -226,9 +232,16 @@ export function renderDevices(net: NetworkStatus, m: DevicesModel, h: DevicesHan
   list.dataset.row = "devices-list";
   const devices = net.devices ?? [];
   const self = devices.find((d) => d.isSelf);
-  if (self) list.append(selfRow(self));
+  const seen = new Set<string>();
+  const clash = new Set<string>();
+  for (const d of devices) {
+    const name = d.name.toLowerCase();
+    if (seen.has(name)) clash.add(name);
+    seen.add(name);
+  }
+  if (self) list.append(selfRow(self, clash));
   if (net.role === "main") list.append(...assistantRows(net, m, nowMs, thisDevice));
-  else for (const d of devices) if (!d.isSelf) list.append(...memberRow(d, net, m, nowMs));
+  else for (const d of devices) if (!d.isSelf) list.append(...memberRow(d, net, m, nowMs, clash));
   delegate(list, h);
   return list;
 }

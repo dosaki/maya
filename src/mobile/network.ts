@@ -293,7 +293,12 @@ export function renderNetwork(m: NetworkModel, h: NetworkHandlers): HTMLElement 
   bar.append(back, el("h2", "settings-page__title", PHONE_GROUPS.find(([g]) => g === m.group)?.[1] ?? ""));
   root.append(bar);
   // On the page the user is on, whichever group's save failed.
-  if (m.error) root.append(el("p", "settings__error", m.error));
+  // Keyed, so a repaint that adds or clears it leaves the cards (and the list's hover) where they are.
+  if (m.error) {
+    const err = el("p", "settings__error", m.error);
+    err.dataset.row = "error";
+    root.append(err);
+  }
   root.append(...CARDS[m.group](m, h));
   for (const b of root.querySelectorAll<HTMLButtonElement>("button:not([data-action=back])")) if (m.busy) b.disabled = true;
   return root;
