@@ -540,7 +540,7 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
         CommandKind::CycleMode { session } => done(actions::cycle_session_mode(&l, &session)),
         CommandKind::Slash { session, text } => done(actions::send_slash_command(&l, &session, &text)),
         CommandKind::Start { dir, prompt, options } => to_data(actions::start_session(&l, dir, prompt, options)?),
-        CommandKind::Resume { dir, session, agent } => done(actions::resume_relayed(&l, agent, &dir, &session)),
+        CommandKind::Resume { dir, session, agent, .. } => done(actions::resume_relayed(&l, agent, &dir, &session)),
         CommandKind::ListResumable { dir, agent } => to_data(actions::list_resumable_sessions(&l, agent, &dir)?),
         CommandKind::History { session } => to_data(actions::remote_history(&l, &session)?),
         CommandKind::Forget { sessions } => {

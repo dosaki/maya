@@ -190,7 +190,7 @@ pub fn list_resumable_sessions(hub: H, dir: String, machine: Option<String>, age
 pub fn resume_session(hub: H, dir: String, session_id: String, machine: Option<String>, agent: Option<Harness>) -> Result<(), String> {
     let machine = machine_arg(machine)?;
     let agent = agent.unwrap_or_default();
-    hub.send_to(&machine, CommandKind::Resume { dir, session: session_id, agent }).map(|_| ())
+    hub.send_to(&machine, CommandKind::Resume { dir, session: session_id, agent, terminal: None }).map(|_| ())
 }
 
 #[tauri::command(async)]

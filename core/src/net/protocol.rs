@@ -205,7 +205,15 @@ pub enum CommandKind {
     CycleMode { session: String },
     Slash { session: String, text: String },
     Start { dir: Option<String>, prompt: String, options: LaunchOptions },
-    Resume { dir: String, session: String, #[serde(default)] agent: crate::model::Harness },
+    Resume {
+        dir: String,
+        session: String,
+        #[serde(default)]
+        agent: crate::model::Harness,
+        /// Where to open it; None uses the Settings choice.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal: Option<crate::config::NewSessionTerminal>,
+    },
     ListResumable { dir: String, #[serde(default)] agent: crate::model::Harness },
     History { session: String },
     /// Forget these remembered sessions (Dismiss, Forget unticked).
@@ -399,9 +407,18 @@ mod tests {
     #[test]
     fn resume_without_an_agent_means_claude_code() {
         let k: CommandKind = serde_json::from_str(r#"{"kind":"resume","dir":"maya","session":"abc"}"#).unwrap();
-        assert_eq!(k, CommandKind::Resume { dir: "maya".into(), session: "abc".into(), agent: crate::model::Harness::ClaudeCode });
+        assert_eq!(k, CommandKind::Resume { dir: "maya".into(), session: "abc".into(), agent: crate::model::Harness::ClaudeCode, terminal: None });
         let k: CommandKind = serde_json::from_str(r#"{"kind":"list_resumable","dir":"maya","agent":"grok"}"#).unwrap();
         assert_eq!(k, CommandKind::ListResumable { dir: "maya".into(), agent: crate::model::Harness::Grok });
+    }
+
+    #[test]
+    fn a_resume_without_a_terminal_reads_as_before_and_one_with_it_round_trips() {
+        let old: CommandKind = serde_json::from_str(r#"{"kind":"resume","dir":"d","session":"s"}"#).unwrap();
+        assert!(matches!(old, CommandKind::Resume { terminal: None, .. }));
+        let new = CommandKind::Resume { dir: "d".into(), session: "s".into(), agent: Default::default(), terminal: Some(crate::config::NewSessionTerminal::Native) };
+        let back: CommandKind = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back, new);
     }
 
     #[test]

@@ -1358,7 +1358,7 @@ fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, sess
     if !is_local(&machine) {
         let machine = machine.unwrap();
         check_remote_agent(agent, &merge::agents_of(&remote_boards(&state), &machine), &machine)?;
-        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent }).map(|()| None);
+        return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent, terminal: None }).map(|()| None);
     }
     let (resumed, native_term) = native::route::opening(|| actions::resume_session(&local(&state), agent, &dir, &session_id));
     resumed.map(|()| native_term)
