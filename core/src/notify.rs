@@ -821,6 +821,7 @@ mod tests {
         answers: std::cell::RefCell<std::collections::HashMap<&'static str, Result<(), String>>>,
         fails: std::cell::RefCell<std::collections::HashMap<(&'static str, String), String>>,
         misses: std::cell::RefCell<HashSet<(&'static str, String)>>,
+        play_fails: std::cell::RefCell<HashSet<(&'static str, String)>>,
         log: std::cell::RefCell<Vec<Call>>,
         builtin: std::cell::RefCell<Vec<String>>,
     }
@@ -841,6 +842,11 @@ mod tests {
             self.misses.borrow_mut().insert((label, piece.to_string()));
         }
 
+        /// Playing `piece`, when this voice fetched it, fails.
+        fn fail_play(&self, label: &'static str, piece: &str) {
+            self.play_fails.borrow_mut().insert((label, piece.to_string()));
+        }
+
         fn answer_for(&self, v: &RemoteVoice, text: &str, reach: Reach) -> Result<PathBuf, String> {
             let key = (v.label(), text.to_string());
             if reach == Reach::CacheOnly && self.misses.borrow().contains(&key) {
@@ -851,7 +857,7 @@ mod tests {
                     return Err(e.clone());
                 }
             }
-            self.answers.borrow().get(v.label()).cloned().unwrap_or(Ok(())).map(|()| PathBuf::from(text))
+            self.answers.borrow().get(v.label()).cloned().unwrap_or(Ok(())).map(|()| PathBuf::from(format!("{}/{text}", v.label())))
         }
 
         fn speak(&self, u: &Utterance, marks: &mut DownMarks, now: Instant) -> SpeechReport {
@@ -895,7 +901,14 @@ mod tests {
         }
 
         fn play(&self, path: &Path, _volume: u8) -> Result<(), String> {
-            self.log.borrow_mut().push(Call::Play(path.display().to_string()));
+            // A fetched path is `<voice label>/<piece>`.
+            let shown = path.display().to_string();
+            let (label, text) = shown.split_once('/').expect("a path the double made");
+            if self.play_fails.borrow().iter().any(|(l, t)| *l == label && t == text) {
+                self.log.borrow_mut().push(Call::Play(format!("{text} failed")));
+                return Err("cannot play".into());
+            }
+            self.log.borrow_mut().push(Call::Play(text.to_string()));
             Ok(())
         }
 
@@ -1045,6 +1058,28 @@ mod tests {
         assert!(at("ahead ElevenLabs Network p2") < at("play p1"));
         assert!(at("play p1") < at("fetch the voice server Network p2"));
         assert!(at("fetch the voice server Network p2") < at("ahead the voice server Network p3"));
+        assert!(!log.contains(&"fetch ElevenLabs Network p2".to_string()), "the failed prefetch is not retried: {log:?}");
+    }
+
+    #[test]
+    fn a_play_error_moves_the_piece_and_the_rest_to_the_next_voice() {
+        let v = Voices::default();
+        v.fail_play(ELEVEN, "p2");
+        let mut marks = DownMarks::default();
+        let now = Instant::now();
+        let report = v.speak(&reply(3), &mut marks, now);
+        let log = v.take_log();
+        let at = |s: &str| log.iter().position(|l| l == s).unwrap_or_else(|| panic!("{s} missing from {log:?}"));
+        assert!(at("play p2 failed") < at("fetch the voice server Network p2"), "{log:?}");
+        let plays = |p: &str| log.iter().filter(|l| **l == format!("play {p}")).count();
+        assert_eq!((plays("p1"), plays("p2"), plays("p3")), (1, 1, 1), "{log:?}");
+        assert!(at("play p3") > at("fetch the voice server Network p2"), "p3 is not played from the old prefetch: {log:?}");
+        let failed = at("play p2 failed");
+        assert!(!log[failed..].iter().any(|l| l.contains(ELEVEN) && l.contains("p3")), "{log:?}");
+        assert_eq!(report.spoken_by, SERVER);
+        assert_eq!(report.failures.len(), 1, "{report:?}");
+        assert!(report.failures[0].starts_with("ElevenLabs failed:"), "{report:?}");
+        assert!(marks.is_down(eleven().fingerprint(), now));
     }
 
     #[test]
