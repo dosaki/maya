@@ -93,7 +93,7 @@ fn a_reply_with_no_prose_has_no_pieces() {
 #[test]
 fn pieces_join_back_into_what_from_markdown_says() {
     let long = "This sentence is about forty characters. ".repeat(15);
-    for t in ["## Done\n**All green**, and `main` is merged.", "Two left:\n- api-fix\n- docs, waiting?", "See [the PR](https://github.com/o/r/pull/1).", "Sure.\n\nFocusing api-fix.", long.as_str(), &format!("{long}\n\n{long}")] {
+    for t in ["## Done\n**All green**, and `main` is merged.", "Two left:\n- api-fix\n- docs, waiting?", "See [the PR](https://github.com/o/r/pull/1).", "Sure.\n\nFocusing api-fix.", long.as_str(), format!("{long}\n\n{long}").as_str()] {
         assert_eq!(pieces(t).join(" "), from_markdown(t), "{t}");
     }
 }
