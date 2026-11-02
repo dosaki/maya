@@ -193,9 +193,10 @@ pub fn play(path: &Path, volume: u8) -> Result<(), String> {
     }
 }
 
-/// Speaks `text` with a remote voice, from the cache when possible; with
-/// `Reach::CacheOnly` a line that is not cached fails.
-pub fn speak_remote(v: &RemoteVoice, text: &str, volume: u8, reach: Reach) -> Result<(), String> {
+/// The audio file for `text` in a remote voice, from the cache when it is
+/// there and otherwise synthesised into it; with `Reach::CacheOnly` a line
+/// that is not cached fails. It does not play the file.
+pub fn fetch_remote(v: &RemoteVoice, text: &str, reach: Reach) -> Result<PathBuf, String> {
     match v {
         RemoteVoice::Elevenlabs { maya_dir, key, voice_id } => {
             let path = cache_path(maya_dir, voice_id, text, "mp3");
@@ -205,7 +206,7 @@ pub fn speak_remote(v: &RemoteVoice, text: &str, volume: u8, reach: Reach) -> Re
                 }
                 synthesize(key, voice_id, text, &path)?;
             }
-            play(&path, volume)
+            Ok(path)
         }
         RemoteVoice::Server { maya_dir, base, voice, model, key } => {
             let path = server_cache_path(maya_dir, base, model, voice, text);
@@ -215,7 +216,7 @@ pub fn speak_remote(v: &RemoteVoice, text: &str, volume: u8, reach: Reach) -> Re
                 }
                 maya_core::voice_server::synthesize(base, key.as_deref(), voice, model, text, &path)?;
             }
-            play(&path, volume)
+            Ok(path)
         }
     }
 }

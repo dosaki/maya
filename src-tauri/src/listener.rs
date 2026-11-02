@@ -156,13 +156,19 @@ fn reply_aloud(app: &AppHandle, generation: u64, text: &str) -> bool {
     reply_aloud_as(app, generation, text, Via::Voice)
 }
 
+/// A reply's words for the voice panel, and the pieces they are spoken in.
+fn spoken_pieces(text: &str) -> (String, Vec<String>) {
+    let pieces = maya_core::speech::pieces(text);
+    (pieces.join(" "), pieces)
+}
+
 /// `reply_aloud`, with the line remembered as coming `via` that way.
 pub(crate) fn reply_aloud_as(app: &AppHandle, generation: u64, text: &str, via: Via) -> bool {
     if text.trim().is_empty() {
         return is_current(app, generation);
     }
     // Chat keeps her markdown; the voice and its panel get the words.
-    let words = maya_core::speech::from_markdown(text);
+    let (words, pieces) = spoken_pieces(text);
     {
         let state = app.state::<AppState>();
         let mut v = state.voice.lock().unwrap();
@@ -186,7 +192,7 @@ pub(crate) fn reply_aloud_as(app: &AppHandle, generation: u64, text: &str, via: 
     }
     let voices = voice_chain(wanted);
     // No lock is held here: the speech hook takes the voice lock.
-    let _ = notify::speak_and_wait(notify::Utterance { volume, ..notify::Utterance::new(words, voices) });
+    let _ = notify::speak_and_wait(notify::Utterance { volume, ..notify::Utterance::in_pieces(pieces, voices) });
     is_current(app, generation)
 }
 
@@ -1368,6 +1374,15 @@ pub(crate) fn spoken_for(action: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_long_reply_is_spoken_in_pieces_and_shown_whole() {
+        let para = "This sentence is about forty characters. ".repeat(8);
+        let (words, pieces) = super::spoken_pieces(&format!("{para}\n\n{para}"));
+        assert!(pieces.len() >= 2);
+        assert_eq!(words, pieces.join(" "));
+        assert_eq!(words, maya_core::speech::from_markdown(&format!("{para}\n\n{para}")));
+    }
+
     use super::*;
     use maya_core::model::{AwaitKind, Awaiting, Card, Harness, State};
 

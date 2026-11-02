@@ -1,3 +1,11 @@
+# 0.49.0
+
+## New
+
+- Maya speaks a long reply in short parts, a paragraph or a few short ones at a time, and splits a very long paragraph at the end of a sentence. A local voice server no longer garbles the end of a long reply.
+- While one part plays, Maya already makes the next, so the pauses between parts stay short.
+- If the voice fails partway through a reply, Maya speaks the rest with the next voice in your list.
+
 # 0.48.0
 
 ## New
