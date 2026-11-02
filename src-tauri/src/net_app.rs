@@ -190,12 +190,13 @@ impl ClientNotify for TauriClientNotify {
     /// before its answer is out. The client ends by itself once it is.
     /// Nothing is saved when the server cannot start, and the server stops
     /// again when the save fails, so either way this Maya stays an assistant.
-    fn promoted(&self, list: Vec<config::PairedAssistant>, summary: Option<String>) -> Result<u16, String> {
+    fn promoted(&self, group: maya_core::net::group::GroupCopy, summary: Option<String>) -> Result<u16, String> {
         let state = self.app.state::<AppState>();
         let (mut after, path) = {
             let store = state.store.lock().unwrap();
             (store.config.clone(), store.config_path())
         };
+        let list = group.members;
         let handed = list.len().saturating_sub(1);
         promote::as_main(&mut after, list);
         let handle = start_with(Arc::new(crate::TauriNetNotify { app: self.app.clone() }), Arc::new(Mutex::new(after.network.clone())), after.listen_port(), identity(&self.app)?)?;

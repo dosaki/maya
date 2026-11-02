@@ -16,6 +16,7 @@
 //! blocks or a callback. The app's adapters (`net_app`) take `network` or
 //! `store` one at a time, never one while holding the other.
 
+use super::group::{self, GroupCopy};
 use super::identity::{decode_key, encode_key, Keypair};
 use super::live::{self, FrameSink, LiveTerms, TermEvent, TermFrame, TermView};
 use super::protocol::{decode_down, encode, Attachment, CommandKind, Down, Request, Up, DEFAULT_PORT, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
@@ -62,6 +63,8 @@ pub const LOST: &str = "Lost the connection to the main Maya.";
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(40);
 
 pub const REMOVED: &str = "Removed by the main Maya; pair again.";
+/// What the user reads when the main moved to a Maya this one does not trust.
+pub const NOT_IN_GROUP: &str = "The main Maya moved to a Maya this one does not trust; pair with it.";
 /// What the user reads when the main refuses a pairing code.
 pub const WRONG_CODE: &str = "Wrong or expired pairing code.";
 pub const NOT_PAIRED: &str = "Not paired with a main Maya yet; pair in Settings.";
@@ -119,9 +122,11 @@ pub trait ClientNotify: Send + Sync {
     /// `Ok(port)` once its server listens; on `Err` nothing changed. Runs on
     /// a command thread; the client ends by itself once the answer is out,
     /// so this must not stop or join the client.
+    /// `group`: the group of trusted devices the old main held, with this
+    /// Maya's own entry among the members.
     /// `summary`: what the old main's Maya did while this one's brain was
     /// dormant; none from a phone or an older main.
-    fn promoted(&self, _assistants: Vec<crate::config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
+    fn promoted(&self, _group: GroupCopy, _summary: Option<String>) -> Result<u16, String> {
         Err(CANNOT_LEAD.into())
     }
     /// When this Maya's brain went dormant, sent in `hello`; None when it
@@ -129,6 +134,10 @@ pub trait ClientNotify: Send + Sync {
     fn brain_dormant_since(&self) -> Option<u64> {
         None
     }
+    /// The main's copy of the group of trusted devices, sent right after
+    /// `welcome` and on every change: the app saves it with `group::adopt`.
+    /// Runs on the connection thread.
+    fn group(&self, _group: GroupCopy) {}
     /// The main is now at `host:port` with the public key `key`: save both.
     /// Runs on the connection thread.
     fn moved(&self, _host: &str, _port: u16, _key: &str) -> Result<(), String> {
@@ -621,7 +630,7 @@ fn connection(config: &NetworkConfig, identity: &Keypair, exec: &Arc<dyn Executo
         notify.connected(&main);
         notify.mirror_offer(mirror);
         notify.main_caps(&caps);
-        pump(&mut ch, exec, notify, stop)
+        pump(&mut ch, exec, notify, stop, config, &identity.public_b64())
     });
     finish(&mut ch.ws);
     out
@@ -631,7 +640,7 @@ fn connection(config: &NetworkConfig, identity: &Keypair, exec: &Arc<dyn Executo
 /// `learned` is the main's key from a pairing, kept only once welcomed.
 fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, learned: Option<[u8; 32]>, deadline: Instant) -> Result<(String, Option<bool>, Vec<String>), String> {
     let hostname = super::local_hostname();
-    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps(), brain_dormant_since: notify.brain_dormant_since(), group: None };
+    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps(), brain_dormant_since: notify.brain_dormant_since(), group: Some(group::of_config(config)) };
     send_up(ch, &hello)?;
     loop {
         match read_down(ch, stop, deadline)? {
@@ -656,12 +665,14 @@ fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, s
 }
 
 /// Runs a welcomed connection until it drops or `stop` is set.
-fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, stop: &AtomicBool) -> Result<(), String> {
+fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, stop: &AtomicBool, config: &NetworkConfig, key: &str) -> Result<(), String> {
     let (tx, rx) = channel::<Up>();
     let lane = notify.lane();
     let _attached = Attached(lane.as_ref().map(|l| (l.clone(), l.attach(tx.clone()))));
     // Set once this Maya has become the main: the client ends after it has written its answer.
     let leaving = Arc::new(AtomicBool::new(false));
+    // The group this connection's main sent, if it sent one.
+    let mut seen: Option<GroupCopy> = None;
     let mut last_read = Instant::now();
     let mut last_ping = Instant::now();
     // When the last board went out, and what it said.
@@ -713,7 +724,7 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
             Ok(Got::Text(t)) => {
                 last_read = Instant::now();
                 match decode_down(&t) {
-                    Ok(down) => handle(down, exec, notify, &lane, &tx, &leaving, &mut streams)?,
+                    Ok(down) => handle(down, exec, notify, &lane, &tx, &leaving, config, key, &mut seen, &mut streams)?,
                     Err(e) => log::line("network", format!("main: ignored a message: {e}")),
                 }
             }
@@ -732,14 +743,15 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
     }
 }
 
-fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, tx: &Sender<Up>, leaving: &Arc<AtomicBool>, streams: &mut Streams) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, lane: &Option<Arc<RequestLane>>, tx: &Sender<Up>, leaving: &Arc<AtomicBool>, config: &NetworkConfig, key: &str, seen: &mut Option<GroupCopy>, streams: &mut Streams) -> Result<(), String> {
     match down {
-        Down::Command { id, kind: CommandKind::Promote { list, summary, .. } } => {
+        Down::Command { id, kind: CommandKind::Promote { list, summary, removed, version } } => {
             log::line("network", format!("command {id} promote"));
             let (notify, out, leaving) = (notify.clone(), tx.clone(), leaving.clone());
             // On its own thread, as every command: becoming the main starts a server.
             let spawned = std::thread::Builder::new().name("net-promote".into()).spawn(move || {
-                match notify.promoted(list, summary) {
+                match notify.promoted(GroupCopy { version, members: list, removed }, summary) {
                     Ok(port) => {
                         let _ = out.send(Up::Result { id, ok: true, error: None, data: Some(serde_json::json!({ "port": port })) });
                         leaving.store(true, Ordering::SeqCst);
@@ -784,6 +796,10 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
                 log::line("network", format!("the main moved to {host}:{port} with no usable key; not following"));
                 return Err(format!("Could not follow the main Maya to {host}: {}", super::identity::BAD_KEY));
             }
+            if !group::may_follow(config, seen.as_ref(), &key) {
+                log::line("network", format!("the main moved to {host}:{port} with a key outside the group; not following"));
+                return Err(NOT_IN_GROUP.into());
+            }
             log::line("network", format!("the main moved to {host}:{port}"));
             notify.moved(&host, port, &key).map_err(|e| format!("Could not follow the main Maya to {host}: {e}"))?;
             return Err(MOVED.into());
@@ -800,11 +816,23 @@ fn handle(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, 
             None => log::line("network", format!("main: response {id} with no request lane")),
         },
         Down::Welcome { .. } => log::line("network", "main: ignored a welcome after welcome"),
-        Down::Group(_) => {}
+        Down::Group(g) => {
+            if g.removed.iter().any(|r| r.key == key) {
+                return Err(REMOVED.into());
+            }
+            *seen = Some(g.clone());
+            notify.group(g);
+        }
         Down::Chat { turn } => notify.chat_turn(turn),
         Down::Brain { status } => notify.brain_status(status),
     }
     Ok(())
+}
+
+/// `handle` for a test of one frame, with no request lane and no group seen.
+#[cfg(test)]
+pub(crate) fn handle_for_test(down: Down, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>, tx: &Sender<Up>, config: &NetworkConfig, key: &str) -> Result<(), String> {
+    handle(down, exec, notify, &None, tx, &Arc::new(AtomicBool::new(false)), config, key, &mut None, &mut Streams { terms: None, subs: HashMap::new() })
 }
 
 /// The running client; `stop` ends its thread within a tick (within the
@@ -878,7 +906,7 @@ pub fn reconnect(config_of: &dyn Fn() -> NetworkConfig, identity: Arc<Keypair>, 
         let began = Instant::now();
         match run_once(&config, &identity, exec.clone(), notify.clone(), stop, None) {
             Ok(()) => break,
-            Err(e) if e == REMOVED || e == NOT_PAIRED => {
+            Err(e) if e == REMOVED || e == NOT_PAIRED || e == NOT_IN_GROUP => {
                 log::line("network", format!("{e} Not reconnecting."));
                 break;
             }
@@ -1119,7 +1147,7 @@ mod tests {
         let turn = serde_json::json!({"id": 3, "role": "assistant", "text": "Done."});
         let status = serde_json::json!({"dot": "working", "pending": null, "job": "x", "ready": true});
         for down in [Down::Chat { turn: turn.clone() }, Down::Brain { status: status.clone() }] {
-            handle(down, &exec, &notify, &None, &tx, &leaving, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
+            handle(down, &exec, &notify, &None, &tx, &leaving, &NetworkConfig::default(), "me", &mut None, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
         }
         assert_eq!(*recorder.0.lock().unwrap(), [("chat", turn), ("brain", status)]);
     }
@@ -1142,7 +1170,7 @@ mod tests {
         let (tx, _rx) = channel();
         let leaving = Arc::new(AtomicBool::new(false));
         let frame = TermFrame { seq: 1, event: TermEvent::Output { data: "aGk=".into() } };
-        handle(Down::TermFrame { sub: 3, frame: frame.clone() }, &exec, &notify, &None, &tx, &leaving, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
+        handle(Down::TermFrame { sub: 3, frame: frame.clone() }, &exec, &notify, &None, &tx, &leaving, &NetworkConfig::default(), "me", &mut None, &mut Streams { terms: None, subs: HashMap::new() }).unwrap();
         assert_eq!(*viewer.0.lock().unwrap(), [(3, frame)]);
     }
 
@@ -1226,7 +1254,7 @@ mod tests {
         let (a, m) = secure::transport_pair();
         let mut assistant = Channel::new(joiner.join().unwrap(), a);
         let (exec, notify): (Arc<dyn Executor>, Arc<dyn ClientNotify>) = (Arc::new(Hosting(terms)), Arc::new(Silent));
-        let run = std::thread::spawn(move || pump(&mut assistant, &exec, &notify, &stop));
+        let run = std::thread::spawn(move || pump(&mut assistant, &exec, &notify, &stop, &NetworkConfig::default(), "me"));
         (Channel::new(main, m), run)
     }
 

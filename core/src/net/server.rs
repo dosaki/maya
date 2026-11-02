@@ -3225,6 +3225,7 @@ mod tests {
         key: Mutex<Option<String>>,
         errors: Mutex<Vec<String>>,
         removed: AtomicUsize,
+        groups: Mutex<Vec<super::group::GroupCopy>>,
     }
 
     impl client::ClientNotify for FakeClientNotify {
@@ -3240,6 +3241,9 @@ mod tests {
         fn removed(&self) {
             self.removed.fetch_add(1, Ordering::SeqCst);
         }
+        fn group(&self, group: super::group::GroupCopy) {
+            self.groups.lock().unwrap().push(group);
+        }
     }
 
     /// A client-side notifier that records `moved` and answers `promoted`.
@@ -3250,9 +3254,13 @@ mod tests {
         promoted: Mutex<Option<Vec<crate::config::PairedAssistant>>>,
         promote_result: Mutex<Option<Result<u16, String>>>,
         disconnects: Mutex<Vec<String>>,
+        groups: Mutex<Vec<super::group::GroupCopy>>,
     }
 
     impl client::ClientNotify for Leader {
+        fn group(&self, group: super::group::GroupCopy) {
+            self.groups.lock().unwrap().push(group);
+        }
         fn paired(&self, _: &str) {}
         fn connected(&self, _: &str) {}
         fn disconnected(&self, e: &str) {
@@ -3262,8 +3270,8 @@ mod tests {
         fn caps(&self) -> Vec<String> {
             self.caps.clone()
         }
-        fn promoted(&self, list: Vec<crate::config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
-            *self.promoted.lock().unwrap() = Some(list);
+        fn promoted(&self, group: super::group::GroupCopy, _summary: Option<String>) -> Result<u16, String> {
+            *self.promoted.lock().unwrap() = Some(group.members);
             self.promote_result.lock().unwrap().clone().unwrap_or(Ok(6000))
         }
         fn moved(&self, host: &str, port: u16, key: &str) -> Result<(), String> {
@@ -3336,7 +3344,13 @@ mod tests {
         let run = std::thread::spawn(move || client::run_once(&config, &key, Arc::new(NoSessions), n, &s, None));
         wait_until(|| handle.status().assistants[0].connected);
         let new_key = Keypair::generate().public_b64();
-        lock(&handle.shared).conns.get(&id).unwrap().tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: new_key.clone() }).unwrap();
+        // The new main is a member of the group the main sent.
+        let tx = lock(&handle.shared).conns.get(&id).unwrap().tx.clone();
+        let mut g = super::group::GroupCopy { version: 99, ..Default::default() };
+        g.members.push(a_member(&key_of_main(&handle), "main"));
+        g.members.push(a_member(&new_key, "mini"));
+        tx.send(Down::Group(g)).unwrap();
+        tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: new_key.clone() }).unwrap();
         assert_eq!(run.join().unwrap(), Err(client::MOVED.into()));
         assert_eq!(*notify.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001, new_key)));
         handle.stop();
@@ -3424,6 +3438,119 @@ mod tests {
         let config = NetworkConfig { role: NetworkRole::Assistant, main_host: "127.0.0.1".into(), main_port: port, main_key: crate::net::identity::encode_key(&Keypair::generate().public), ..Default::default() };
         let out = client::run_once(&config, &Keypair::generate(), Arc::new(FakeExec::default()), Arc::new(FakeClientNotify::default()), &AtomicBool::new(false), None);
         assert_eq!(out, Err(client::OLD_MAIN.to_string()));
+    }
+
+    fn a_member(key: &str, name: &str) -> crate::config::PairedAssistant {
+        crate::config::PairedAssistant { id: key.into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), key: key.into(), address: String::new(), last_seen: None, mirror: false, generation: 0 }
+    }
+
+    /// Runs a client of `handle` on a thread; returns its notifier, stop flag, thread and the main's tx to it.
+    fn linked_client(handle: &ServerHandle, port: u16) -> (Arc<Leader>, Arc<AtomicBool>, std::thread::JoinHandle<Result<(), String>>, Sender<Down>, Keypair) {
+        let me = Keypair::generate();
+        let (ws, id, _) = pair_as(handle, port, &me, "laptop", &["follow"]);
+        drop(ws);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.connected));
+        let leader = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = assistant_config(port, handle);
+        let (l, s, k) = (leader.clone(), stop.clone(), me.clone());
+        let run = std::thread::spawn(move || client::run_once(&config, &k, Arc::new(FakeExec::default()), l, &s, None));
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected));
+        let tx = handle.shared.lock().unwrap().conns.get(&id).unwrap().tx.clone();
+        wait_until(|| !leader.groups.lock().unwrap().is_empty());
+        (leader, stop, run, tx, me)
+    }
+
+    #[test]
+    fn the_device_saves_the_group_it_is_sent() {
+        let (handle, port) = test_server();
+        let (leader, stop, run, _tx, _) = linked_client(&handle, port);
+        let groups = leader.groups.lock().unwrap().clone();
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].members.iter().any(|m| m.key == key_of_main(&handle)), "the main's own entry is in it");
+        stop.store(true, Ordering::SeqCst);
+        let _ = run.join();
+        handle.stop();
+    }
+
+    #[test]
+    fn a_group_that_removes_me_stops_the_link() {
+        let (handle, port) = test_server();
+        let (_leader, _stop, run, tx, me) = linked_client(&handle, port);
+        let mut g = super::group::GroupCopy { version: 99, ..Default::default() };
+        g.members.push(a_member(&key_of_main(&handle), "main"));
+        g.removed.push(a_member(&key_of(&me), "laptop"));
+        tx.send(Down::Group(g)).unwrap();
+        assert_eq!(run.join().unwrap(), Err(client::REMOVED.into()));
+        handle.stop();
+    }
+
+    #[test]
+    fn a_move_to_an_unknown_key_is_refused() {
+        let (handle, port) = test_server();
+        let (leader, _stop, run, tx, _) = linked_client(&handle, port);
+        tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: Keypair::generate().public_b64() }).unwrap();
+        assert_eq!(run.join().unwrap(), Err(client::NOT_IN_GROUP.into()));
+        assert!(leader.moved.lock().unwrap().is_none(), "the old main is kept");
+        handle.stop();
+    }
+
+    #[test]
+    fn a_move_to_a_member_of_the_group_is_followed() {
+        let (handle, port) = test_server();
+        let (leader, _stop, run, tx, _) = linked_client(&handle, port);
+        let new_key = Keypair::generate().public_b64();
+        let mut g = super::group::GroupCopy { version: 99, ..Default::default() };
+        g.members.push(a_member(&key_of_main(&handle), "main"));
+        g.members.push(a_member(&new_key, "mini"));
+        tx.send(Down::Group(g)).unwrap();
+        tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: new_key.clone() }).unwrap();
+        assert_eq!(run.join().unwrap(), Err(client::MOVED.into()));
+        assert_eq!(*leader.moved.lock().unwrap(), Some(("10.0.0.9".into(), 5001, new_key)));
+        handle.stop();
+    }
+
+    #[test]
+    fn reconnect_stops_on_not_in_group() {
+        let (handle, port) = test_server();
+        let me = Keypair::generate();
+        let (ws, id, _) = pair_as(&handle, port, &me, "laptop", &["follow"]);
+        drop(ws);
+        wait_until(|| !handle.status().assistants.iter().any(|a| a.connected));
+        let leader = Arc::new(Leader { caps: vec!["follow".into()], ..Default::default() });
+        let stop = Arc::new(AtomicBool::new(false));
+        let config = assistant_config(port, &handle);
+        let (l, s) = (leader.clone(), stop.clone());
+        let run = std::thread::spawn(move || client::reconnect(&move || config.clone(), Arc::new(me), Arc::new(FakeExec::default()), l, &s));
+        wait_until(|| handle.status().assistants.iter().any(|a| a.id == id && a.connected) && !leader.groups.lock().unwrap().is_empty());
+        let tx = handle.shared.lock().unwrap().conns.get(&id).unwrap().tx.clone();
+        tx.send(Down::Move { host: "10.0.0.9".into(), port: 5001, key: Keypair::generate().public_b64() }).unwrap();
+        wait_until(|| run.is_finished());
+        run.join().unwrap();
+        assert_eq!(*leader.disconnects.lock().unwrap(), [client::NOT_IN_GROUP]);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_move_from_an_old_main_with_no_group_is_followed() {
+        struct Rec(Mutex<Option<String>>);
+        impl client::ClientNotify for Rec {
+            fn paired(&self, _: &str) {}
+            fn connected(&self, _: &str) {}
+            fn disconnected(&self, _: &str) {}
+            fn removed(&self) {}
+            fn moved(&self, _: &str, _: u16, key: &str) -> Result<(), String> {
+                *self.0.lock().unwrap() = Some(key.into());
+                Ok(())
+            }
+        }
+        let rec = Arc::new(Rec(Mutex::new(None)));
+        let (exec, notify): (Arc<dyn client::Executor>, Arc<dyn client::ClientNotify>) = (Arc::new(FakeExec::default()), rec.clone());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let key = Keypair::generate().public_b64();
+        let out = client::handle_for_test(Down::Move { host: "10.0.0.9".into(), port: 5001, key: key.clone() }, &exec, &notify, &tx, &NetworkConfig::default(), "me");
+        assert_eq!(out, Err(client::MOVED.into()));
+        assert_eq!(*rec.0.lock().unwrap(), Some(key));
     }
 
     #[test]
@@ -3668,13 +3795,13 @@ mod tests {
         fn caps(&self) -> Vec<String> {
             vec!["follow".into(), "lead".into()]
         }
-        fn promoted(&self, list: Vec<crate::config::PairedAssistant>, _summary: Option<String>) -> Result<u16, String> {
+        fn promoted(&self, group: super::group::GroupCopy, _summary: Option<String>) -> Result<u16, String> {
             if self.port_taken {
                 return Err("Could not listen on port 4127: Address already in use. Choose another port.".into());
             }
             let mut c = crate::config::Config::default();
             c.network = self.config.lock().unwrap().clone();
-            crate::net::promote::as_main(&mut c, list);
+            crate::net::promote::as_main(&mut c, group.members);
             let view = Arc::new(Mutex::new(c.network.clone()));
             let handle = start_with(self.counter.clone(), view, 0, self.identity.clone())?;
             let _ = self.counter.server.set(handle.shared.clone());
