@@ -1,3 +1,13 @@
+# 0.46.0
+
+## New
+
+- You can now answer a multi-select question from a session's window. Tick one or more options with a click, a number key, or the arrow keys and Enter. Press Send to answer. Chat about this works on these questions too. On the board, a multi-select card tells you to open the session to tick several.
+
+## Fixed
+
+- An answer you type yourself for a question now always goes in as your answer. Before, Maya sometimes typed a long answer into the question as a new line and did not send it.
+
 # 0.45.0
 
 ## New

@@ -33,8 +33,9 @@ function row(num: number, label: string, description?: string): HTMLElement {
  *
  * Choosing a row fires `MENU_PICK` from it. Number keys, ↑/↓ and Enter
  * act only once the menu has focus (clicked or tabbed into), never from
- * elsewhere in the view; digits typed in the own box are text. A
- * multi-select question is shown read-only until Maya can tick its rows.
+ * elsewhere in the view; digits typed in the own box are text. On a
+ * multi-select question choosing an option ticks it, and Send, where the
+ * CLI has its Submit row, fires the ticked ones together.
  * `data-key` changes only when the ask, the question or `enabled` does,
  * so a repaint can keep the menu, its focus and a half-typed answer.
  */
@@ -52,17 +53,15 @@ export function renderMenu(card: Card, next: number, opts: { enabled: boolean; k
 
   const rows = el("div", "menu__rows");
   rows.setAttribute("role", "listbox");
+  if (q.multiSelect) rows.setAttribute("aria-multiselectable", "true");
   if (!opts.enabled) rows.setAttribute("aria-disabled", "true");
   q.options.forEach((o, i) => {
     const r = row(i + 1, o.label, o.description);
-    if (!q.multiSelect) {
-      r.dataset.action = "pick";
-      r.dataset.row = String(i);
-      r.dataset.pick = "option";
-      r.dataset.index = String(i);
-    } else {
-      r.classList.add("menu__row--readonly");
-    }
+    r.dataset.action = "pick";
+    r.dataset.row = String(i);
+    r.dataset.pick = q.multiSelect ? "tick" : "option";
+    r.dataset.index = String(i);
+    if (q.multiSelect) r.setAttribute("aria-selected", "false");
     rows.append(r);
   });
   let box: HTMLTextAreaElement | null = null;
@@ -84,9 +83,21 @@ export function renderMenu(card: Card, next: number, opts: { enabled: boolean; k
     r.querySelector(".menu__body")!.append(line);
     rows.append(r);
   }
-  if (q.chatRow !== undefined && !q.multiSelect) {
+  let submit: HTMLButtonElement | null = null;
+  if (q.multiSelect) {
+    const line = el("div", "menu__submit", "Tick one or more, then send them.");
+    submit = el("button", "card__btn menu__send", "Send");
+    submit.type = "button";
+    submit.dataset.action = "options";
+    submit.disabled = true;
+    line.append(submit);
+    rows.append(line);
+  }
+  if (q.chatRow !== undefined) {
     rows.append(el("div", "menu__divider"));
-    const r = row(q.chatRow + 1, "Chat about this", "Set the question aside and talk it over");
+    // The CLI does not number a multi-select's Submit row, so there the
+    // number is the row's index, as it shows it.
+    const r = row(q.multiSelect ? q.chatRow : q.chatRow + 1, "Chat about this", "Set the question aside and talk it over");
     r.dataset.action = "pick";
     r.dataset.row = String(q.chatRow);
     r.dataset.pick = "chat";
@@ -94,7 +105,6 @@ export function renderMenu(card: Card, next: number, opts: { enabled: boolean; k
   }
   menu.append(rows);
 
-  if (q.multiSelect) menu.append(el("div", "menu__note", "Multi-select: answer in the terminal"));
   if (aw.questions.length > 1) {
     // Maya cannot see answers given in the terminal mid-ask; its key
     // sequences assume the picker is on the question shown here.
@@ -104,7 +114,7 @@ export function renderMenu(card: Card, next: number, opts: { enabled: boolean; k
   const choosable = [...rows.querySelectorAll<HTMLElement>("[data-action=pick]")];
   if (opts.keyboardHints && choosable.length > 0) {
     const last = choosable[choosable.length - 1].querySelector(".menu__num")?.textContent;
-    foot.append(el("span", "menu__hints", `↑/↓ or 1–${last} · Enter to choose`));
+    foot.append(el("span", "menu__hints", `↑/↓ or 1–${last} · Enter to ${q.multiSelect ? "tick" : "choose"}`));
   }
   menu.append(foot);
 
@@ -114,10 +124,15 @@ export function renderMenu(card: Card, next: number, opts: { enabled: boolean; k
   const select = (r: HTMLElement) => {
     for (const c of choosable) c.classList.toggle("menu__row--sel", c === r);
   };
+  const ticked = () => choosable.filter((c) => c.classList.contains("menu__row--on")).map((c) => Number(c.dataset.index));
   const choose = (r: HTMLElement) => {
     if (rows.getAttribute("aria-disabled") === "true") return;
     select(r);
-    if (r.dataset.pick === "option") emit(r, { kind: "option", index: Number(r.dataset.index) });
+    if (r.dataset.pick === "tick") {
+      const on = r.classList.toggle("menu__row--on");
+      r.setAttribute("aria-selected", String(on));
+      if (submit) submit.disabled = !opts.enabled || ticked().length === 0;
+    } else if (r.dataset.pick === "option") emit(r, { kind: "option", index: Number(r.dataset.index) });
     else if (r.dataset.pick === "chat") emit(r, { kind: "chat" });
     else box?.focus();
   };
@@ -132,6 +147,11 @@ export function renderMenu(card: Card, next: number, opts: { enabled: boolean; k
     const send = target.closest<HTMLButtonElement>("button[data-action=own]");
     if (send) {
       sendOwn(send);
+      return;
+    }
+    const sendTicked = target.closest<HTMLButtonElement>("button[data-action=options]");
+    if (sendTicked) {
+      if (rows.getAttribute("aria-disabled") !== "true" && ticked().length > 0) emit(sendTicked, { kind: "options", indexes: ticked() });
       return;
     }
     const r = target.closest<HTMLElement>("[data-action=pick]");

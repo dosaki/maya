@@ -67,17 +67,45 @@ describe("renderMenu", () => {
     expect(renderMenu(asking, 0, on)!.querySelector(".menu__warn")).toBeNull();
   });
 
-  it("shows a multi-select question read-only, to be answered in the terminal", () => {
-    const multi = { ...db, multiSelect: true, own: undefined, chatRow: undefined };
+  it("ticks a multi-select question's rows, then sends them together", () => {
+    const multi = { ...db, multiSelect: true, own: undefined, chatRow: 4 };
     const { menu, picks } = mount({ ...asking, awaiting: { kind: "question", detail: "Q", questions: [multi] } });
-    expect(menu.querySelectorAll("[data-action=pick]")).toHaveLength(0);
-    expect([...menu.querySelectorAll(".menu__row .menu__label")].map((l) => l.textContent)).toEqual(["SQLite", "Postgres"]);
-    expect(menu.querySelector(".menu__note")?.textContent).toBe("Multi-select: answer in the terminal");
-    expect(menu.querySelector(".menu__hints")).toBeNull();
+    const rows = [...menu.querySelectorAll<HTMLElement>("[data-action=pick]")];
+    // The CLI's Submit row has no number, so Chat about this keeps the one it shows there.
+    expect(rows.map((r) => r.querySelector(".menu__num")?.textContent)).toEqual(["1", "2", "4"]);
+    expect(rows.map((r) => r.querySelector(".menu__label")?.textContent)).toEqual(["SQLite", "Postgres", "Chat about this"]);
+    expect(menu.querySelector("textarea")).toBeNull();
+    expect(menu.querySelector(".menu__hints")?.textContent).toBe("↑/↓ or 1–4 · Enter to tick");
+    const send = menu.querySelector<HTMLButtonElement>("button[data-action=options]")!;
+    expect(send.disabled).toBe(true);
+
+    rows[0].click();
     menu.focus();
-    key(menu, "1");
-    menu.querySelector<HTMLElement>(".menu__row")!.click();
+    key(menu, "2");
+    expect(rows.map((r) => r.getAttribute("aria-selected"))).toEqual(["true", "true", null]);
+    rows[0].click();
+    expect(rows[0].classList.contains("menu__row--on")).toBe(false);
     expect(picks).toEqual([]);
+    expect(send.disabled).toBe(false);
+
+    send.click();
+    expect(picks).toEqual([{ questionIndex: 0, pick: { kind: "options", indexes: [1] } }]);
+    rows[2].click();
+    expect(picks[1]).toEqual({ questionIndex: 0, pick: { kind: "chat" } });
+  });
+
+  it("Enter ticks the selected row of a multi-select question", () => {
+    const multi = { ...db, multiSelect: true, own: undefined, chatRow: 4 };
+    const { menu, picks } = mount({ ...asking, awaiting: { kind: "question", detail: "Q", questions: [multi] } });
+    menu.focus();
+    key(menu, "ArrowDown");
+    key(menu, "ArrowDown");
+    key(menu, "Enter");
+    key(menu, "Enter");
+    key(menu, "Enter");
+    expect(menu.querySelector("[data-row='1']")?.getAttribute("aria-selected")).toBe("true");
+    menu.querySelector<HTMLButtonElement>("button[data-action=options]")!.click();
+    expect(picks).toEqual([{ questionIndex: 0, pick: { kind: "options", indexes: [1] } }]);
   });
 
   it("picks an option on click, and focuses the own box on its row", () => {
