@@ -11,6 +11,7 @@ use maya_core::config::{self, NetworkRole};
 use maya_core::hook_install;
 use maya_core::launch::LaunchOptions;
 use maya_core::net::client::{self, Executor, WRONG_CODE};
+use maya_core::net::group;
 use maya_core::net::identity::{self, Keypair};
 use maya_core::registry::pid_alive;
 use maya_core::statusline;
@@ -180,6 +181,63 @@ pub fn set_projects_dir(claude_dir: &Path, dir: &str) -> Result<String, String> 
     Ok(format!("projects: {}", resolved.display()))
 }
 
+/// This machine's public key, read without making a key file: a machine
+/// that never paired has none, and lists itself under an empty key.
+fn my_key(maya_dir: &Path) -> Result<String, String> {
+    let path = maya_dir.join(identity::FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Keypair::from_secret(&text).map(|k| k.public_b64()).map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("Could not read {}: {e}", path.display())),
+    }
+}
+
+/// `maya devices`: this device and the group's live members, one per line.
+pub fn devices(claude_dir: &Path) -> Result<String, String> {
+    let maya_dir = claude_dir.join("maya");
+    let n = config::load(&maya_dir.join("config.json")).network;
+    let me = group::me(&n, &my_key(&maya_dir)?);
+    let lines: Vec<String> = group::device_rows(&n, &me)
+        .iter()
+        .map(|r| {
+            let mut line = format!("{}  {}  {}", r.name, r.platform, r.address);
+            if r.is_main {
+                line.push_str("  (main)");
+            }
+            if r.is_self {
+                line.push_str("  (this device)");
+            }
+            line.trim_end().to_string()
+        })
+        .collect();
+    Ok(lines.join("\n"))
+}
+
+/// `maya devices join`: follows the member `device` (an id, or a name in
+/// any case) at `host:port` as the main. A running `maya run` reads the
+/// config again and reconnects.
+pub fn devices_join(claude_dir: &Path, device: &str, host: &str, port: u16) -> Result<String, String> {
+    let maya_dir = claude_dir.join("maya");
+    let path = maya_dir.join("config.json");
+    let key = identity::load_or_create(&maya_dir.join(identity::FILE))?.public_b64();
+    let mut c = config::load(&path);
+    let n = &mut c.network;
+    let (target, name) = match n.assistants.iter().find(|m| m.id == device) {
+        Some(m) => (m.key.clone(), m.name.clone()),
+        None => {
+            let mut named = n.assistants.iter().filter(|m| m.name.to_lowercase() == device.to_lowercase());
+            match (named.next(), named.next()) {
+                (Some(m), None) => (m.key.clone(), m.name.clone()),
+                (Some(m), Some(_)) => return Err(format!("Two devices are called {}; use its id.", m.name)),
+                _ => return Err("That device is not in your group.".into()),
+            }
+        }
+    };
+    group::join(n, &key, &target, host, port)?;
+    config::save(&path, &c)?;
+    Ok(format!("Joined {name}."))
+}
+
 /// Opens a session in a project folder through tmux: `maya start [dir] [prompt]`.
 pub fn start(claude_dir: &Path, dir: Option<String>, prompt: Option<String>, options: LaunchOptions) -> Result<String, String> {
     start_with(claude_dir, dir, prompt, options, Arc::new(Tmux::default()))
@@ -214,6 +272,63 @@ mod tests {
         c.network.role = role;
         config::save(&dir.path().join("maya/config.json"), &c).unwrap();
         dir
+    }
+
+    fn member(key: &str, name: &str, platform: &str) -> maya_core::config::PairedAssistant {
+        maya_core::config::PairedAssistant {
+            id: format!("id-{name}"),
+            name: name.into(),
+            hostname: format!("{name}.lan"),
+            platform: platform.into(),
+            key: key.into(),
+            address: "10.0.0.2".into(),
+            last_seen: None,
+            mirror: false,
+            generation: 0,
+        }
+    }
+
+    fn group_dir(role: NetworkRole, main_key: &str, members: Vec<maya_core::config::PairedAssistant>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = Config::default();
+        c.network.role = role;
+        c.network.main_key = main_key.into();
+        c.network.assistants = members;
+        config::save(&dir.path().join("maya/config.json"), &c).unwrap();
+        dir
+    }
+
+    #[test]
+    fn devices_lists_main_and_self() {
+        let dir = group_dir(NetworkRole::Assistant, "k1", vec![member("k1", "Desk", "macos"), member("k2", "Pixel", "android")]);
+        let out = devices(dir.path()).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 3, "{out}");
+        assert!(lines[0].ends_with("(this device)"), "{out}");
+        assert_eq!(lines[1], "Desk  macos  10.0.0.2  (main)");
+        assert_eq!(lines[2], "Pixel  android  10.0.0.2");
+        assert!(!dir.path().join("maya").join(identity::FILE).exists(), "listing makes no key");
+    }
+
+    #[test]
+    fn devices_join_by_name() {
+        let dir = group_dir(NetworkRole::Main, "", vec![member("k1", "Desk", "macos")]);
+        assert_eq!(devices_join(dir.path(), "dESk", "10.0.0.9", 4200).unwrap(), "Joined Desk.");
+        let n = config::load(&dir.path().join("maya/config.json")).network;
+        assert_eq!((n.role, n.main_key.as_str(), n.main_host.as_str(), n.main_port), (NetworkRole::Assistant, "k1", "10.0.0.9", 4200));
+        // By id, too.
+        let dir = group_dir(NetworkRole::Main, "", vec![member("k1", "Desk", "macos")]);
+        assert_eq!(devices_join(dir.path(), "id-Desk", "h", 4127).unwrap(), "Joined Desk.");
+    }
+
+    #[test]
+    fn devices_join_unknown_name_fails() {
+        let dir = group_dir(NetworkRole::Main, "", vec![member("k1", "Desk", "macos"), member("k2", "desk", "linux"), member("k3", "Pixel", "android")]);
+        assert_eq!(devices_join(dir.path(), "Nope", "h", 4127).unwrap_err(), "That device is not in your group.");
+        assert_eq!(devices_join(dir.path(), "DESK", "h", 4127).unwrap_err(), "Two devices are called Desk; use its id.");
+        assert_eq!(devices_join(dir.path(), "Pixel", "h", 4127).unwrap_err(), "A phone cannot be the main Maya.");
+        let n = config::load(&dir.path().join("maya/config.json")).network;
+        assert_eq!(n.role, NetworkRole::Main, "a refusal changes nothing");
     }
 
     #[test]

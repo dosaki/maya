@@ -10,6 +10,7 @@ pub enum Cmd {
     Hooks(HooksOp),
     Statusline(StatuslineOp),
     Config(ConfigOp),
+    Devices(DevicesOp),
     Start { dir: Option<String>, prompt: Option<String>, options: LaunchOptions },
     Version,
     Help,
@@ -30,13 +31,23 @@ pub enum StatuslineOp {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum DevicesOp {
+    /// `maya devices`: the devices in the group.
+    List,
+    /// `maya devices join <name or id> <host>[:port]`: follow that device as the main.
+    Join { device: String, host: String, port: u16 },
+}
+
+#[derive(Debug, PartialEq)]
 pub enum ConfigOp {
     /// `maya config projects-dir <path>`: the folder start and resume pick projects from.
     ProjectsDir(String),
 }
 
-pub const USAGE: &str = "usage: maya <pair|run|status|hooks|statusline|config|start|--version> …
+pub const USAGE: &str = "usage: maya <pair|run|status|hooks|statusline|config|devices|start|--version> …
        maya pair <host[:port]> --code <code> [--name <name>] [--new-key]
+       maya devices
+       maya devices join <name or id> <host>[:port]
        maya start [--dir <dir>] [--prompt <prompt>] [--agent <claude-code|codex|antigravity|grok|kiro|opencode>] [--model <model>] [--effort <effort>] [--mode <mode>] [--name <name>] [--worktree]";
 
 /// The main Maya's default port when none is given after the host.
@@ -53,6 +64,7 @@ pub fn parse(args: &[String]) -> Result<Cmd, String> {
         "hooks" => parse_hooks(&args[1..]),
         "statusline" => parse_statusline(&args[1..]),
         "config" => parse_config(&args[1..]),
+        "devices" => parse_devices(&args[1..]),
         "start" => parse_start(&args[1..]),
         other => Err(format!("{USAGE}\nunknown command: {other}")),
     }
@@ -133,6 +145,19 @@ fn parse_statusline(rest: &[String]) -> Result<Cmd, String> {
     no_more(&rest[1..], Cmd::Statusline(op))
 }
 
+fn parse_devices(rest: &[String]) -> Result<Cmd, String> {
+    match rest {
+        [] => Ok(Cmd::Devices(DevicesOp::List)),
+        [op, device, host] if op == "join" => {
+            let (host, port) = split_host_port(host)?;
+            Ok(Cmd::Devices(DevicesOp::Join { device: device.clone(), host, port }))
+        }
+        [op, ..] if op == "join" && rest.len() < 3 => Err(format!("{USAGE}\ndevices join needs <name or id> <host>[:port]")),
+        [op, ..] if op == "join" => Err(format!("{USAGE}\nunexpected argument: {}", rest[3])),
+        [other, ..] => Err(format!("{USAGE}\nunexpected argument: {other}")),
+    }
+}
+
 fn parse_config(rest: &[String]) -> Result<Cmd, String> {
     match rest {
         [op, path] if op == "projects-dir" => Ok(Cmd::Config(ConfigOp::ProjectsDir(path.clone()))),
@@ -185,6 +210,17 @@ mod tests {
         assert!(parse(&a("pair 10.0.0.5")).unwrap_err().contains("--code"));
         assert!(parse(&a("pair --code 1")).unwrap_err().contains("host"));
         assert!(parse(&a("pair desk.local:0 --code 111222")).unwrap_err().contains("bad port: 0"));
+    }
+
+    #[test]
+    fn parses_devices_and_devices_join() {
+        assert_eq!(parse(&a("devices")).unwrap(), Cmd::Devices(DevicesOp::List));
+        assert_eq!(parse(&a("devices join Desk 10.0.0.5")).unwrap(), Cmd::Devices(DevicesOp::Join { device: "Desk".into(), host: "10.0.0.5".into(), port: 4127 }));
+        assert_eq!(parse(&a("devices join Desk host.lan:4200")).unwrap(), Cmd::Devices(DevicesOp::Join { device: "Desk".into(), host: "host.lan".into(), port: 4200 }));
+        assert!(parse(&a("devices join Desk")).unwrap_err().contains("devices join needs"));
+        assert!(parse(&a("devices join Desk h x")).unwrap_err().ends_with("unexpected argument: x"));
+        assert!(parse(&a("devices remove")).unwrap_err().ends_with("unexpected argument: remove"));
+        assert!(USAGE.contains("maya devices join <name or id> <host>[:port]"));
     }
 
     #[test]
