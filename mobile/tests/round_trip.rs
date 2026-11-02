@@ -181,16 +181,12 @@ impl maya_core::net::server::Notify for MainNotify {
     fn board_changed(&self) {}
     fn board_seeded(&self, _: &[Card]) {}
     fn status_changed(&self, _: NetworkStatus) {}
-    fn paired(&self, a: &maya_core::config::PairedAssistant) -> Result<(), String> {
-        let mut saved = self.saved.lock().unwrap();
-        match saved.iter_mut().find(|s| s.id == a.id) {
-            Some(s) => *s = a.clone(),
-            None => saved.push(a.clone()),
-        }
+    fn paired(&self, _: &maya_core::config::PairedAssistant, group: &maya_core::net::group::GroupCopy) -> Result<(), String> {
+        *self.saved.lock().unwrap() = group.members.clone();
         Ok(())
     }
-    fn paired_list_changed(&self, list: &[maya_core::config::PairedAssistant]) -> Result<(), String> {
-        *self.saved.lock().unwrap() = list.to_vec();
+    fn paired_list_changed(&self, group: &maya_core::net::group::GroupCopy) -> Result<(), String> {
+        *self.saved.lock().unwrap() = group.members.clone();
         Ok(())
     }
     fn request(&self, machine: Option<&str>, request: Request) -> Result<Option<Value>, String> {

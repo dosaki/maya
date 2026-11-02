@@ -460,7 +460,8 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
             crate::brain_app::brain_stop(app.clone());
             Ok(None)
         }
-        Request::RemoveMember { .. } => Ok(None),
+        // The main's server answers this itself, before any request reaches here.
+        Request::RemoveMember { .. } => Err("The main Maya answers this itself.".into()),
         Request::ListDirs => match machine {
             Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),

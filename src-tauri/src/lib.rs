@@ -177,6 +177,23 @@ impl TauriNetNotify {
     }
 }
 
+impl TauriNetNotify {
+    /// Saves the group the server holds: its members, tombstones and version.
+    fn save_group(&self, group: &net::group::GroupCopy, end_pair_again: bool) -> Result<(), String> {
+        let state = self.app.state::<AppState>();
+        let mut store = state.store.lock().unwrap();
+        let path = store.config_path();
+        save_network(&path, &mut store.config, |n| {
+            if end_pair_again {
+                n.pair_again = false;
+            }
+            n.assistants = group.members.clone();
+            n.removed = group.removed.clone();
+            n.group_version = group.version;
+        })
+    }
+}
+
 /// Changes the paired list with `f` and saves the config to `path`; the
 /// config in memory changes only once the save succeeded. An assistant has
 /// no paired list: a late save from the server this Maya just handed its
@@ -216,23 +233,15 @@ impl Notify for TauriNetNotify {
         let _ = self.app.emit("network", &status);
     }
 
-    fn paired(&self, assistant: &config::PairedAssistant) -> Result<(), String> {
-        // A machine pairing again keeps its entry, and its place in the list.
-        // A new pairing also ends "pair again": the dropped ones are being redone.
-        let state = self.app.state::<AppState>();
-        let mut store = state.store.lock().unwrap();
-        let path = store.config_path();
-        save_network(&path, &mut store.config, |n| {
-            n.pair_again = false;
-            match n.assistants.iter_mut().find(|a| a.id == assistant.id) {
-                Some(a) => *a = assistant.clone(),
-                None => n.assistants.push(assistant.clone()),
-            }
-        })
+    fn paired(&self, _assistant: &config::PairedAssistant, group: &net::group::GroupCopy) -> Result<(), String> {
+        // The group holds the pairing (a machine pairing again keeps its
+        // entry and its place). A new pairing also ends "pair again": the
+        // dropped ones are being redone.
+        self.save_group(group, true)
     }
 
-    fn paired_list_changed(&self, assistants: &[config::PairedAssistant]) -> Result<(), String> {
-        self.save_assistants(|list| *list = assistants.to_vec())
+    fn paired_list_changed(&self, group: &net::group::GroupCopy) -> Result<(), String> {
+        self.save_group(group, false)
     }
 
     fn request(&self, machine: Option<&str>, request: net::protocol::Request) -> Result<Option<serde_json::Value>, String> {

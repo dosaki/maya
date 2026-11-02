@@ -7,6 +7,7 @@
 use maya_cli::{commands, run_cmd, status_file};
 use maya_core::config::{NetworkConfig, PairedAssistant};
 use maya_core::model::Card;
+use maya_core::net::group::GroupCopy;
 use maya_core::net::protocol::CommandKind;
 use maya_core::net::identity::Keypair;
 use maya_core::net::server::{send_command_with, start_with, Notify};
@@ -29,11 +30,11 @@ impl Notify for Recorder {
     }
     fn board_seeded(&self, _: &[Card]) {}
     fn status_changed(&self, _: NetworkStatus) {}
-    fn paired(&self, _: &PairedAssistant) -> Result<(), String> {
+    fn paired(&self, _: &PairedAssistant, _: &GroupCopy) -> Result<(), String> {
         self.paired.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    fn paired_list_changed(&self, _: &[PairedAssistant]) -> Result<(), String> {
+    fn paired_list_changed(&self, _: &GroupCopy) -> Result<(), String> {
         Ok(())
     }
 }
