@@ -28,8 +28,17 @@ pub struct RemoteBoard {
     /// Whether its native cards' live terminals can be opened from here:
     /// its Maya announced `CAP_TERMINAL` and this main hosts terminals too.
     pub terminals: bool,
+    /// The terminals a new or resumed session there can open in: it is
+    /// connected and announced `CAP_PICK_TERMINAL`; `None` otherwise.
+    pub terminal_choices: Option<crate::terminal_choice::TerminalChoices>,
     pub received_at: u64,
     pub connected: bool,
+}
+
+/// The terminals the assistant shown as `machine` offers, if it is connected
+/// and announced them.
+pub fn terminal_choices_of(remotes: &[RemoteBoard], machine: &str) -> Option<crate::terminal_choice::TerminalChoices> {
+    remotes.iter().find(|b| b.machine == machine).and_then(|b| b.terminal_choices.clone())
 }
 
 /// Local cards first, then each machine's cards with `machine` set and
@@ -148,7 +157,7 @@ mod tests {
     }
 
     fn board(machine: &str, hostname: &str, ids: &[&str], received_at: u64, connected: bool) -> RemoteBoard {
-        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, remembered: None, worktrees: false, terminals: false, received_at, connected }
+        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, remembered: None, worktrees: false, terminals: false, terminal_choices: None, received_at, connected }
     }
 
     #[test]
