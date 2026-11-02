@@ -1304,6 +1304,23 @@ mod tests {
         crate::terminal_choice::describe("macos", default)
     }
 
+    /// How long a check that nothing arrives waits: three board gaps, so a
+    /// board turn surely runs inside it even on a loaded CI machine.
+    const QUIET: Duration = Duration::from_secs(3);
+
+    /// Reads the main's end until the first terminals frame, or panics after 10 s.
+    fn first_terminals(main: &mut Chan) -> TerminalChoices {
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < end, "an Up::Terminals within 10 s");
+            if let Ok(Got::Text(t)) = main.read() {
+                if let Ok(Up::Terminals { terminals }) = crate::net::protocol::decode_up(&t) {
+                    return terminals;
+                }
+            }
+        }
+    }
+
     /// Reads the main's end for `window`, returning the terminals frames seen.
     fn terminals_within(main: &mut Chan, window: Duration) -> Vec<TerminalChoices> {
         let end = Instant::now() + window;
@@ -1346,10 +1363,14 @@ mod tests {
         let exec = Arc::new(Choosing { now: Mutex::new(Some(choices(NewSessionTerminal::Terminal))), ..Default::default() });
         let stop = Arc::new(AtomicBool::new(false));
         let (mut main, run) = serving_exec(exec.clone(), true, exec.terminals(), stop.clone());
-        assert!(terminals_within(&mut main, Duration::from_millis(1500)).is_empty(), "what hello sent is not sent again");
+        exec.board.store(true, Ordering::SeqCst);
+        assert!(terminals_within(&mut main, QUIET).is_empty(), "what hello sent is not sent again");
         *exec.now.lock().unwrap() = Some(choices(NewSessionTerminal::Native));
         exec.board.store(true, Ordering::SeqCst);
-        assert_eq!(terminals_within(&mut main, Duration::from_millis(2500)), [choices(NewSessionTerminal::Native)], "once for one change");
+        assert_eq!(first_terminals(&mut main), choices(NewSessionTerminal::Native));
+        // Another board turn with nothing changed sends nothing more.
+        exec.board.store(true, Ordering::SeqCst);
+        assert!(terminals_within(&mut main, QUIET).is_empty(), "once for one change");
         stop.store(true, Ordering::SeqCst);
         assert_eq!(run.join().unwrap(), Ok(()));
     }
@@ -1359,10 +1380,10 @@ mod tests {
         let exec = Arc::new(Choosing { now: Mutex::new(Some(choices(NewSessionTerminal::Terminal))), ..Default::default() });
         let stop = Arc::new(AtomicBool::new(false));
         let (mut main, run) = serving_exec(exec.clone(), false, exec.terminals(), stop.clone());
-        assert!(terminals_within(&mut main, Duration::from_millis(1500)).is_empty());
+        assert!(terminals_within(&mut main, QUIET).is_empty());
         *exec.now.lock().unwrap() = Some(choices(NewSessionTerminal::Native));
         exec.board.store(true, Ordering::SeqCst);
-        assert!(terminals_within(&mut main, Duration::from_millis(2500)).is_empty(), "no Up::Terminals for a main without the cap");
+        assert!(terminals_within(&mut main, QUIET).is_empty(), "no Up::Terminals for a main without the cap");
         stop.store(true, Ordering::SeqCst);
         assert_eq!(run.join().unwrap(), Ok(()));
     }
