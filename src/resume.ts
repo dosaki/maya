@@ -6,7 +6,8 @@ import { hasLocalMachine, initialChoices, machineChoices, type MachineChoice, ty
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
 import { brainAgent, defaultAgent } from "./brain";
-import type { Harness } from "./types";
+import { renderTerminalPick } from "./terminalpick";
+import type { Harness, NewSessionTerminal, TerminalChoices } from "./types";
 
 export interface ResumableSession {
   id: string;
@@ -35,6 +36,10 @@ export interface ResumeModel {
   agent: Harness;
   /** Set once `loadAgents` has settled the real agent; a remembered directory waits for it before fetching sessions. */
   agentReady: boolean;
+  /** Where the machine can open a session; null when its Maya is too old to say, and then no pick is offered. */
+  terminals: TerminalChoices | null;
+  /** The pick; null until the machine's default is known. */
+  terminal: NewSessionTerminal | null;
 }
 
 export interface ResumeHandlers {
@@ -141,6 +146,15 @@ export function renderResume(m: ResumeModel, h: ResumeHandlers, nowMs: number = 
     agentSelect.addEventListener("change", () => h.onAgent(agentSelect.value as Harness));
     agentLabel.append(agentSelect);
     form.append(agentLabel);
+  }
+
+  if (m.terminals) {
+    const pick = renderTerminalPick(m.terminals, m.terminal);
+    const sel = pick.querySelector("select")!;
+    sel.addEventListener("change", () => {
+      m.terminal = sel.value as NewSessionTerminal;
+    });
+    form.append(pick);
   }
 
   if (m.noMachines) {
@@ -265,8 +279,10 @@ async function loadAgents(machine: string): Promise<void> {
   const me = current;
   if (!me) return;
   let agents: AgentInfo[];
+  let terminals: TerminalChoices | null = null;
   try {
-    const reply = await invoke<{ agents: AgentInfo[]; names: boolean }>("list_agents", { machine });
+    const reply = await invoke<{ agents: AgentInfo[]; names: boolean; terminals?: TerminalChoices }>("list_agents", { machine });
+    terminals = reply.terminals ?? null;
     // An older Maya over there resumes Claude Code only.
     agents = reply.names && reply.agents.length > 0 ? reply.agents : [CLAUDE_AGENT];
   } catch {
@@ -277,6 +293,10 @@ async function loadAgents(machine: string): Promise<void> {
   me.model.agents = agents;
   me.model.agent = defaultAgent(agents, brain);
   me.model.agentReady = true;
+  // A pick this machine has stays; one it lacks gives way to its default.
+  const picked = me.model.terminal;
+  me.model.terminals = terminals;
+  me.model.terminal = terminals ? (picked && terminals.choices.includes(picked) ? picked : terminals.default) : null;
   paint();
   if (me.model.dir) await loadSessions(me.model.dir);
 }
@@ -300,6 +320,8 @@ async function chooseMachine(machine: string): Promise<void> {
   current.model.agents = [CLAUDE_AGENT];
   current.model.agent = "claude-code";
   current.model.agentReady = false;
+  current.model.terminals = null;
+  current.model.terminal = null;
   paint();
   void loadAgents(machine);
   await loadDirs(machine);
@@ -347,8 +369,9 @@ async function resume(dir: string, sessionId: string): Promise<void> {
   const me = current;
   const machine = me.model.machine;
   const agent = me.model.agent;
+  const terminal = me.model.terminals ? me.model.terminal : null;
   try {
-    const term = await invoke<number | null>("resume_session", { dir, sessionId, machine, agent });
+    const term = await invoke<number | null>("resume_session", { dir, sessionId, machine, agent, ...(terminal ? { terminal } : {}) });
     if (current === me) closeResume();
     showToast(`Resuming in ${dir}`);
     // A session resumed in a Native terminal shows it at once.
@@ -381,6 +404,8 @@ export async function openResume(): Promise<void> {
       agents: [CLAUDE_AGENT],
       agent: "claude-code",
       agentReady: false,
+      terminals: null,
+      terminal: null,
     },
     keyHandler,
   };

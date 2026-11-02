@@ -5,7 +5,8 @@ import { composerKey, sendShortcut } from "./keys";
 import { hasLocalMachine, initialChoices, machineChoices, type MachineChoice, type MachineInfo } from "./machines";
 import { harnessLabel } from "./harness";
 import { brainAgent, defaultAgent } from "./brain";
-import type { Harness } from "./types";
+import { renderTerminalPick } from "./terminalpick";
+import type { Harness, NewSessionTerminal, TerminalChoices } from "./types";
 
 /** Choices for a new session; "" means "use the agent's default". */
 export interface SessionOptions {
@@ -36,7 +37,7 @@ export interface AgentInfo {
 }
 
 /** What Start sends: the agent, the name ("" for none), whether to use a new worktree and its options. */
-export type StartChoices = SessionOptions & { agent: Harness; name: string; worktree: boolean };
+export type StartChoices = SessionOptions & { agent: Harness; name: string; worktree: boolean; terminal?: NewSessionTerminal };
 
 /** Claude Code as Maya always knows it, before or without a listing. */
 export const CLAUDE_AGENT: AgentInfo = {
@@ -111,6 +112,10 @@ export interface NewSessionModel {
   /** The machine's agent listing has landed: until then Start waits, so a prompt cannot run under a provisional agent. */
   agentsLoaded: boolean;
   name: string;
+  /** Where the machine can open a session; null when its Maya is too old to say, and then no pick is offered. */
+  terminals: TerminalChoices | null;
+  /** The pick; null until the user (or the machine's default) sets it. */
+  terminal: NewSessionTerminal | null;
 }
 
 export interface NewSessionHandlers {
@@ -321,9 +326,12 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
     box.addEventListener("change", warn);
     warn();
   }
+  const terminalLabelEl = m.terminals ? renderTerminalPick(m.terminals, m.terminal) : null;
+  const terminalSelect = terminalLabelEl?.querySelector("select") ?? null;
   const readChoices = (): StartChoices => {
     const o: StartChoices = { agent: agent.harness, name: nameInput?.value.trim() ?? "", model: "", effort: "", mode: "", worktree: worktreeBox?.checked ?? false };
     for (const [name, sel] of optionSelects) o[name] = sel.value;
+    if (terminalSelect) o.terminal = terminalSelect.value as NewSessionTerminal;
     return o;
   };
 
@@ -350,7 +358,7 @@ export function renderNewSession(m: NewSessionModel, h: NewSessionHandlers): HTM
 
   const actions = el("div", "newsession__actions");
   actions.append(start);
-  const fields: (HTMLElement | null)[] = [agentLabel, dirLabel, optionRow, worktreeLabel, worktreeWarning, nameLabel, promptLabel, actions];
+  const fields: (HTMLElement | null)[] = [agentLabel, terminalLabelEl, dirLabel, optionRow, worktreeLabel, worktreeWarning, nameLabel, promptLabel, actions];
   form.append(...fields.filter((n): n is HTMLElement => n !== null));
   panel.append(form);
   if (m.status) panel.append(el("div", `modal__status modal__status--${m.status.ok ? "ok" : "error"}`, m.status.text));
@@ -406,6 +414,8 @@ function capture(): void {
   if (worktree) m.worktree = worktree.checked;
   const sel = host.querySelector<HTMLSelectElement>("select[name=dir]");
   if (sel) m.dir = sel.value || null;
+  const terminal = host.querySelector<HTMLSelectElement>("select[name=terminal]");
+  if (terminal) m.terminal = terminal.value as NewSessionTerminal;
   saveOptions(host, m.agent);
   m.options = optionsFor(m.agent);
 }
@@ -478,9 +488,10 @@ async function loadDirs(machine: string): Promise<void> {
 async function loadAgents(machine: string): Promise<void> {
   const me = current;
   if (!me) return;
-  let reply: { agents: AgentInfo[]; names: boolean; worktrees?: boolean };
+  type Reply = { agents: AgentInfo[]; names: boolean; worktrees?: boolean; terminals?: TerminalChoices };
+  let reply: Reply;
   try {
-    reply = await invoke<{ agents: AgentInfo[]; names: boolean; worktrees?: boolean }>("list_agents", { machine });
+    reply = await invoke<Reply>("list_agents", { machine });
   } catch {
     reply = { agents: [CLAUDE_AGENT], names: machine === "", worktrees: machine === "" };
   }
@@ -489,6 +500,10 @@ async function loadAgents(machine: string): Promise<void> {
   me.model.agents = reply.agents.length > 0 ? reply.agents : [CLAUDE_AGENT];
   me.model.names = reply.names;
   me.model.worktrees = reply.worktrees ?? false;
+  me.model.terminals = reply.terminals ?? null;
+  // A pick this machine has stays; one it lacks gives way to its default.
+  const picked = me.model.terminal;
+  me.model.terminal = reply.terminals ? (picked && reply.terminals.choices.includes(picked) ? picked : reply.terminals.default) : null;
   const wanted = defaultAgent(me.model.agents, await brainAgent());
   if (current !== me || me.model.machine !== machine) return;
   me.model.agent = wanted;
@@ -513,6 +528,9 @@ async function chooseMachine(machine: string): Promise<void> {
   m.names = machine === "";
   m.worktrees = machine === "";
   m.agentsLoaded = false;
+  // The pick belongs to the machine that offered it; `loadAgents` brings this one's.
+  m.terminals = null;
+  m.terminal = null;
   m.options = optionsFor("claude-code");
   repaint();
   void loadAgents(machine);
@@ -585,6 +603,8 @@ export async function openNewSession(): Promise<void> {
       worktree: false,
       agentsLoaded: false,
       name: draftName,
+      terminals: null,
+      terminal: null,
     },
     keyHandler,
   };

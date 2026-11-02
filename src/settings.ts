@@ -11,6 +11,7 @@ import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys,
 import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
+import { terminalLabel } from "./terminalpick";
 import { promoteLines } from "./promote";
 import { renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
@@ -582,11 +583,13 @@ export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean 
   return (model.networkRole ?? model.network?.role) === "main" && !!code && nowMs <= code.expiresAt + PAIRING_TICK_MS;
 }
 
+export { terminalLabel };
+
 /** The places a new session can open on this platform, as [value, label]. Settings shows only on a desktop: neither Windows nor Linux is a Mac. */
 export function terminalChoices(): [NewSessionTerminal, string][] {
-  if (isWindows()) return [["terminal", "Windows Terminal"], ["native", "Native"]];
-  if (isLinux()) return [["terminal", "Terminal (tmux)"], ["native", "Native"]];
-  return [["terminal", "Terminal"], ["iterm", "iTerm2"], ["native", "Native"]];
+  const platform = isWindows() ? "windows" : isLinux() ? "linux" : "macos";
+  const values: NewSessionTerminal[] = platform === "macos" ? ["terminal", "iterm", "native"] : ["terminal", "native"];
+  return values.map((v) => [v, terminalLabel(v, platform)]);
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {

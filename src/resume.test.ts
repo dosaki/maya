@@ -21,11 +21,21 @@ const base = {
   agents: [{ harness: "claude-code" as const, models: [], efforts: [], modes: [] }],
   agent: "claude-code" as const,
   agentReady: true,
+  terminals: null,
+  terminal: null,
 };
 const twoMachines = [{ name: "This Mac", value: "" }, { name: "laptop", value: "laptop" }];
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
+const linuxTerminals = { platform: "linux", choices: ["terminal" as const, "native" as const], default: "native" as const };
+
 describe("renderResume", () => {
+  it("shows the Terminal pick only when the machine lists terminals", () => {
+    const el = renderResume({ ...base, terminals: linuxTerminals, terminal: "native" }, handlers(), NOW);
+    expect([...el.querySelectorAll<HTMLOptionElement>("select[name=terminal] option")].map((o) => o.textContent)).toEqual(["Terminal (tmux)", "Native"]);
+    expect(renderResume(base, handlers(), NOW).querySelector("select[name=terminal]")).toBeNull();
+  });
+
   it("asks for a directory first, with no 'let Claude choose' entry, and reports the pick", () => {
     const h = handlers();
     const el = renderResume(base, h, NOW);
@@ -129,6 +139,38 @@ describe("resume flow", () => {
     localStorage.clear();
   });
   afterEach(() => closeResume());
+
+  it("resumes in the picked terminal, and sends none when the machine lists none", async () => {
+    const reply = (terminals?: unknown) => (cmd: string, args: { dir?: string }) => {
+      if (cmd === "list_machines") return Promise.resolve([]);
+      if (cmd === "get_config") return Promise.resolve({ agent: null });
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true, terminals });
+      if (cmd === "list_project_dirs") return Promise.resolve(["maya"]);
+      if (cmd === "list_resumable_sessions") return Promise.resolve(args.dir === "maya" ? [{ id: "a1", title: "T", lastActiveMs: 1, running: false }] : []);
+      if (cmd === "resume_session") return Promise.resolve();
+      return Promise.reject(new Error("unexpected " + cmd));
+    };
+    invoke.mockImplementation(reply(linuxTerminals));
+    await openResume();
+    await flush();
+    const dir = document.querySelector<HTMLSelectElement>("select[name=dir]")!;
+    dir.value = "maya";
+    dir.dispatchEvent(new Event("change"));
+    await flush();
+    expect(document.querySelector<HTMLSelectElement>("select[name=terminal]")!.value).toBe("native");
+    const pick = document.querySelector<HTMLSelectElement>("select[name=terminal]")!;
+    pick.value = "terminal";
+    pick.dispatchEvent(new Event("change"));
+    document.querySelector<HTMLButtonElement>("button[data-action=resume]")!.click();
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("resume_session", { dir: "maya", sessionId: "a1", machine: "", agent: "claude-code", terminal: "terminal" });
+    closeResume();
+    invoke.mockReset();
+    invoke.mockImplementation(reply(undefined));
+    await openResume();
+    await flush();
+    expect(document.querySelector("select[name=terminal]")).toBeNull();
+  });
 
   it("loads directories, then sessions for the chosen one, resumes on click and remembers the directory", async () => {
     invoke.mockImplementation((cmd: string, args: { dir?: string; machine?: string }) => {
