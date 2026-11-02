@@ -346,10 +346,13 @@ mod tests {
     #[test]
     fn devices_join_unknown_name_fails() {
         let dir = group_dir(NetworkRole::Main, "", vec![member("k1", "Desk", "macos"), member("k2", "desk", "linux"), member("k3", "Pixel", "android")]);
-        assert_eq!(devices_join(dir.path(), "Nope", "h", 4127).unwrap_err().1, "That device is not in your group.");
-        assert_eq!(devices_join(dir.path(), "DESK", "h", 4127).unwrap_err().1, "Two devices are called Desk; use its id.");
-        assert_eq!(devices_join(dir.path(), "Pixel", "h", 4127).unwrap_err().1, "A phone cannot be the main Maya.");
-        let n = config::load(&dir.path().join("maya/config.json")).network;
+        // Past the run lock, which a child another test thread is spawning
+        // can hold for a moment after each take (see `take_once_free`).
+        let maya_dir = dir.path().join("maya");
+        assert_eq!(join_member(&maya_dir, "Nope", "h", 4127).unwrap_err(), "That device is not in your group.");
+        assert_eq!(join_member(&maya_dir, "DESK", "h", 4127).unwrap_err(), "Two devices are called Desk; use its id.");
+        assert_eq!(join_member(&maya_dir, "Pixel", "h", 4127).unwrap_err(), "A phone cannot be the main Maya.");
+        let n = config::load(&maya_dir.join("config.json")).network;
         assert_eq!(n.role, NetworkRole::Main, "a refusal changes nothing");
     }
 
