@@ -490,10 +490,11 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
                     if let CommandKind::Start { options, .. } = &kind {
                         let boards = crate::remote_boards(&state);
                         check_remote_worktree(options, merge::worktrees_of(&boards, m), m)?;
-                        check_remote_terminal(options.terminal, &merge::terminal_choices_of(&boards, m), m)?;
+                        check_remote_terminal(options.terminal, &merge::terminal_choices_of(&boards, m), merge::is_connected(&boards, m), m)?;
                     }
                     if let CommandKind::Resume { terminal, .. } = &kind {
-                        check_remote_terminal(*terminal, &merge::terminal_choices_of(&crate::remote_boards(&state), m), m)?;
+                        let boards = crate::remote_boards(&state);
+                        check_remote_terminal(*terminal, &merge::terminal_choices_of(&boards, m), merge::is_connected(&boards, m), m)?;
                     }
                     if let CommandKind::Forget { sessions } = &kind {
                         // Dropped here first, so the next mirror leaves the

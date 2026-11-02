@@ -583,8 +583,6 @@ export function pairingRepaintDue(model: SettingsModel, nowMs: number): boolean 
   return (model.networkRole ?? model.network?.role) === "main" && !!code && nowMs <= code.expiresAt + PAIRING_TICK_MS;
 }
 
-export { terminalLabel };
-
 /** The places a new session can open on this platform, as [value, label]. Settings shows only on a desktop: neither Windows nor Linux is a Mac. */
 export function terminalChoices(): [NewSessionTerminal, string][] {
   const platform = isWindows() ? "windows" : isLinux() ? "linux" : "macos";
@@ -841,8 +839,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   viewerSel.addEventListener("change", () => h.onViewerTheme?.(viewerSel.value as ViewerTheme));
   viewerLabel.append(viewerSel);
   sessions.append(viewerLabel);
-  const terminalLabel = document.createElement("label");
-  terminalLabel.textContent = "New sessions open in";
+  const terminalField = document.createElement("label");
+  terminalField.textContent = "New sessions open in";
   const terminalSel = document.createElement("select");
   terminalSel.name = "newSessionTerminal";
   const choices = terminalChoices();
@@ -855,8 +853,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   const saved = model.newSessionTerminal ?? "terminal";
   terminalSel.value = choices.some(([value]) => value === saved) ? saved : "terminal";
   terminalSel.addEventListener("change", () => h.onNewSessionTerminal?.(terminalSel.value as NewSessionTerminal));
-  terminalLabel.append(terminalSel);
-  sessions.append(terminalLabel);
+  terminalField.append(terminalSel);
+  sessions.append(terminalField);
 
   const clonesLabel = document.createElement("label");
   clonesLabel.textContent = "Clones directory (for reviews and worktrees)";

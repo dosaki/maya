@@ -1374,7 +1374,7 @@ fn resume_session(app: AppHandle, state: TauriState<AppState>, dir: String, sess
         let machine = machine.unwrap();
         let boards = remote_boards(&state);
         check_remote_agent(agent, &merge::agents_of(&boards, &machine), &machine)?;
-        check_remote_terminal(terminal, &merge::terminal_choices_of(&boards, &machine), &machine)?;
+        check_remote_terminal(terminal, &merge::terminal_choices_of(&boards, &machine), merge::is_connected(&boards, &machine), &machine)?;
         return route_done(&app, &machine, CommandKind::Resume { dir, session: session_id, agent, terminal }).map(|()| None);
     }
     let (resumed, native_term) = native::route::opening(|| open_with_pick(terminal, || actions::resume_session(&local(&state), agent, &dir, &session_id)));
@@ -1423,7 +1423,7 @@ fn start_session(app: AppHandle, state: TauriState<AppState>, dir: Option<String
         let boards = remote_boards(&state);
         check_remote_agent(options.agent, &merge::agents_of(&boards, &machine), &machine)?;
         check_remote_worktree(&options, merge::worktrees_of(&boards, &machine), &machine)?;
-        check_remote_terminal(options.terminal, &merge::terminal_choices_of(&boards, &machine), &machine)?;
+        check_remote_terminal(options.terminal, &merge::terminal_choices_of(&boards, &machine), merge::is_connected(&boards, &machine), &machine)?;
         return route_data(&app, &machine, start_kind_for(dir, prompt, options)).map(|result| Started { result, native_term: None });
     }
     let (started, native_term) = native::route::opening(|| {

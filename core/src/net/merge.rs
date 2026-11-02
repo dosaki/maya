@@ -35,6 +35,11 @@ pub struct RemoteBoard {
     pub connected: bool,
 }
 
+/// Whether the assistant shown as `machine` is connected now.
+pub fn is_connected(remotes: &[RemoteBoard], machine: &str) -> bool {
+    remotes.iter().any(|b| b.machine == machine && b.connected)
+}
+
 /// The terminals the assistant shown as `machine` offers, if it is connected
 /// and announced them.
 pub fn terminal_choices_of(remotes: &[RemoteBoard], machine: &str) -> Option<crate::terminal_choice::TerminalChoices> {

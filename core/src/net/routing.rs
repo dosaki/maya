@@ -101,7 +101,11 @@ pub fn check_remote_worktree(options: &LaunchOptions, worktrees: bool, machine: 
 }
 
 /// An older Maya announces no terminals and opens in its own setting: refuse a pick instead.
-pub fn check_remote_terminal(pick: Option<NewSessionTerminal>, remote: &Option<TerminalChoices>, machine: &str) -> Result<(), String> {
+/// A machine that is not connected announces nothing, so say that first.
+pub fn check_remote_terminal(pick: Option<NewSessionTerminal>, remote: &Option<TerminalChoices>, connected: bool, machine: &str) -> Result<(), String> {
+    if pick.is_some() && !connected {
+        return Err(format!("{machine} is not connected"));
+    }
     match remote {
         None if pick.is_some() => Err(format!("{machine} runs an older Maya that cannot pick the terminal.")),
         None => Ok(()),
@@ -250,11 +254,13 @@ mod tests {
     #[test]
     fn check_remote_terminal_refuses_an_older_maya_and_a_missing_terminal() {
         use crate::config::NewSessionTerminal::{Iterm, Terminal};
-        assert_eq!(check_remote_terminal(Some(Iterm), &None, "laptop").unwrap_err(), "laptop runs an older Maya that cannot pick the terminal.");
+        assert_eq!(check_remote_terminal(Some(Iterm), &None, true, "laptop").unwrap_err(), "laptop runs an older Maya that cannot pick the terminal.");
         let linux = Some(crate::terminal_choice::describe("linux", Terminal));
-        assert_eq!(check_remote_terminal(Some(Iterm), &linux, "laptop").unwrap_err(), "That terminal is not available on laptop.");
-        assert!(check_remote_terminal(Some(Terminal), &linux, "laptop").is_ok());
-        assert!(check_remote_terminal(None, &None, "laptop").is_ok());
+        assert_eq!(check_remote_terminal(Some(Iterm), &linux, true, "laptop").unwrap_err(), "That terminal is not available on laptop.");
+        assert!(check_remote_terminal(Some(Terminal), &linux, true, "laptop").is_ok());
+        assert!(check_remote_terminal(None, &None, true, "laptop").is_ok());
+        assert_eq!(check_remote_terminal(Some(Terminal), &None, false, "laptop").unwrap_err(), "laptop is not connected");
+        assert!(check_remote_terminal(None, &None, false, "laptop").is_ok());
     }
 
     #[test]
