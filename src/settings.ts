@@ -1826,10 +1826,17 @@ export async function initSettings(): Promise<void> {
   const paint = () => {
     const focused = focusedField(panel);
     const fresh = renderSettings(model, handlers);
-    // In place, so a hovered row keeps its :hover; the first paint has nothing to patch.
-    const old = panel.firstElementChild;
-    if (old && panel.childElementCount === 1) morph(old, fresh);
-    else panel.replaceChildren(fresh);
+    // Only the device list is patched in place, so a hovered row keeps its
+    // :hover; its one delegated listener reads the DOM, so keeping the old
+    // root is safe. Everything else is replaced, as its listeners close over
+    // what they were rendered with.
+    const oldList = panel.querySelector<HTMLElement>(".settings__devices");
+    const freshList = fresh.querySelector<HTMLElement>(".settings__devices");
+    if (oldList && freshList) {
+      morph(oldList, freshList);
+      freshList.replaceWith(oldList);
+    }
+    panel.replaceChildren(fresh);
     if (focused) restoreFocus(panel, focused);
   };
 

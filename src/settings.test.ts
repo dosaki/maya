@@ -1108,7 +1108,7 @@ describe("the mirror switch", () => {
     expect(boxes[0].parentElement!.textContent).toContain("Sees and controls all sessions");
     expect(el.textContent).toContain("Pixel (Android, 192.168.1.30)");
     boxes[0].checked = false;
-    boxes[0].dispatchEvent(new Event("change"));
+    boxes[0].dispatchEvent(new Event("change", { bubbles: true }));
     expect(h.onMirror).toHaveBeenCalledWith("p", false);
   });
 });

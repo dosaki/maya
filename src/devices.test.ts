@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { morph } from "./morph";
 import { renderDevices, type DevicesHandlers, type DevicesModel, type DeviceRow } from "./devices";
 import type { NetworkStatus } from "./settings";
 
@@ -91,8 +92,57 @@ describe("renderDevices", () => {
     const box = el.querySelector<HTMLInputElement>("input[data-action=mirror]")!;
     expect(box.parentElement?.textContent).toContain("Sees and controls all sessions");
     box.checked = false;
-    box.dispatchEvent(new Event("change"));
+    box.dispatchEvent(new Event("change", { bubbles: true }));
     expect(h.onMirror).toHaveBeenCalledWith("p", false);
     expect(el.querySelector("button[data-action=join]")).toBeNull();
+  });
+});
+
+// The Settings repaint keeps the first render's list and patches it against
+// each new render, so the kept root's listener must act on the new rows.
+describe("after a repaint", () => {
+  const patch = (old: HTMLElement, fresh: HTMLElement) => morph(old, fresh);
+  const cell = (c: HTMLElement, sel: string) => c.querySelector<HTMLButtonElement>(sel)!;
+  const main = (promote: string | null, promoting = false): NetworkStatus => ({
+    role: "main",
+    code: null,
+    devices: [{ ...me, isMain: true }],
+    assistants: [
+      { id: "g", name: "g", hostname: "g", platform: "macos", connected: true, lastSeen: null, canLead: true },
+      { id: "h", name: "h", hostname: "h", platform: "macos", connected: true, lastSeen: null, canLead: true },
+    ],
+    assistant: { connected: false, mainName: null, error: null },
+    ...(promote || promoting ? {} : {}),
+  });
+
+  it("promote confirm acts on the device it was switched to", () => {
+    const h = handlers();
+    const kept = renderDevices(main("g"), model({ promote: "g" }), h, 0);
+    patch(kept, renderDevices(main("h"), model({ promote: "h" }), h, 0));
+    cell(kept, "button[data-action=promote-confirm]").click();
+    expect(h.onPromote).toHaveBeenCalledWith("h");
+    expect(h.onPromote).not.toHaveBeenCalledWith("g");
+  });
+
+  it("Join confirm uses the key and host of the row whose form is open now", () => {
+    const h = handlers();
+    const desk2 = dev({ id: "d", key: "kd", name: "desk", address: "192.168.1.2", lastSeen: 1 });
+    const net = status(true, [me, desk2, nas]);
+    const kept = renderDevices(net, model({ joining: "kn" }), h, 0);
+    patch(kept, renderDevices(net, model({ joining: "kd" }), h, 0));
+    cell(kept, "button[data-action=join-confirm]").click();
+    expect(h.onJoin).toHaveBeenCalledWith("kd", "192.168.1.2", 4127);
+  });
+
+  it("a member that becomes the main gets Join, and Join never removes it", () => {
+    const h = handlers();
+    const before = status(true, [me, { ...desk, isMain: false }]);
+    const kept = renderDevices(before, model(), h, 0);
+    expect(kept.querySelector("[data-action=remove-member]")).not.toBeNull();
+    patch(kept, renderDevices(status(false, [me, desk]), model(), h, 0));
+    expect(kept.querySelector("[data-action=remove-member]")).toBeNull();
+    cell(kept, "button[data-action=join]").click();
+    expect(h.onJoinAsk).toHaveBeenCalledWith("kd");
+    expect(h.onRemoveMember).not.toHaveBeenCalled();
   });
 });
