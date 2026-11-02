@@ -198,7 +198,17 @@ impl ClientNotify for TauriClientNotify {
     fn group(&self, group: maya_core::net::group::GroupCopy) {
         let Ok(id) = identity(&self.app) else { return };
         let my_key = id.public_b64();
-        if let Err(e) = crate::update_config(&self.app, |c| maya_core::net::group::adopt(&mut c.network, &my_key, &group)) {
+        // Only a group that changes the saved one is saved, and only for an
+        // assistant of the main that sent it.
+        let now = self.app.state::<AppState>().store.lock().unwrap().config.network.clone();
+        let mut probe = now;
+        if !maya_core::net::group::adopt_from_main(&mut probe, &my_key, &group) {
+            return;
+        }
+        let saved = crate::update_config(&self.app, |c| {
+            maya_core::net::group::adopt_from_main(&mut c.network, &my_key, &group);
+        });
+        if let Err(e) = saved {
             log::line("network", format!("could not save the group: {e}"));
         }
     }

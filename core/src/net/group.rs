@@ -96,6 +96,18 @@ pub fn adopt(n: &mut NetworkConfig, my_key: &str, copy: &GroupCopy) {
     n.group_version = copy.version;
 }
 
+/// `adopt` for a copy a main sent: only an assistant of that very main
+/// takes it (the main lists its own entry), so a frame that outlives a
+/// role or main change changes nothing. Returns whether anything changed.
+pub fn adopt_from_main(n: &mut NetworkConfig, my_key: &str, copy: &GroupCopy) -> bool {
+    if n.role != NetworkRole::Assistant || !copy.members.iter().any(|m| m.key == n.main_key) {
+        return false;
+    }
+    let before = (n.assistants.clone(), n.removed.clone(), n.group_version);
+    adopt(n, my_key, copy);
+    before != (n.assistants.clone(), n.removed.clone(), n.group_version)
+}
+
 /// Whether `key` may be followed as the main. With the group the sender
 /// gave (`seen`), it must be a live member of that; without one, of the
 /// group held here (an empty group is an older main that sends none).
@@ -207,6 +219,24 @@ mod tests {
 
     fn net(members: Vec<PairedAssistant>) -> NetworkConfig {
         NetworkConfig { assistants: members, ..Default::default() }
+    }
+
+    #[test]
+    fn adopt_from_main_takes_a_copy_only_from_the_main_of_an_assistant() {
+        let copy = GroupCopy { version: 3, members: vec![entry("M", "main"), entry("me", "mine")], removed: vec![] };
+        for role in [NetworkRole::Off, NetworkRole::Main] {
+            let mut n = NetworkConfig { role, main_key: "M".into(), ..Default::default() };
+            assert!(!adopt_from_main(&mut n, "me", &copy));
+            assert_eq!(n, NetworkConfig { role, main_key: "M".into(), ..Default::default() });
+        }
+        let mut n = NetworkConfig { role: NetworkRole::Assistant, main_key: "X".into(), ..Default::default() };
+        assert!(!adopt_from_main(&mut n, "me", &copy));
+        assert!(n.assistants.is_empty() && n.group_version == 0);
+        n.main_key = "M".into();
+        assert!(adopt_from_main(&mut n, "me", &copy));
+        assert_eq!(n.assistants.len(), 1);
+        assert_eq!(n.group_version, 3);
+        assert!(!adopt_from_main(&mut n, "me", &copy));
     }
 
     #[test]

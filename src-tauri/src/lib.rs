@@ -833,9 +833,9 @@ fn network_status_of(state: &AppState) -> NetworkStatus {
         status.pair_again = store.config.network.pair_again;
         store.config.network.clone()
     };
-    // Without a key (the key store failed) the list is empty; the roles'
-    // own errors say why.
-    status.devices = net_app::identity_of(state).map(|id| net::group::device_rows(&network, &net::group::me(&network, &id.public_b64()))).unwrap_or_default();
+    // Empty when the role is Off (status never makes a key) or the key
+    // store failed; the roles' own errors say why.
+    status.devices = if network.role == config::NetworkRole::Off { vec![] } else { net_app::identity_of(state).map(|id| net::group::device_rows(&network, &net::group::me(&network, &id.public_b64()))).unwrap_or_default() };
     status
 }
 

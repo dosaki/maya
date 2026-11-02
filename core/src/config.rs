@@ -85,7 +85,7 @@ impl NetworkConfig {
             return;
         }
         self.assistants.push(PairedAssistant {
-            id: crate::net::protocol::new_id(),
+            id: self.main_key.clone(),
             name: self.main_host.clone(),
             hostname: self.main_host.clone(),
             platform: String::new(),
@@ -715,6 +715,8 @@ mod tests {
         let twice = once.clone().migrate();
         assert_eq!(twice.network.assistants.len(), 1);
         assert_eq!(once, twice);
+        assert_eq!(once.network.assistants[0].id, "bWFpbg==", "the id is the key, as for this device");
+        assert_eq!(once, serde_json::from_str::<Config>(old).unwrap().migrate(), "deterministic");
         let no_key = r#"{"completedTimeoutMinutes":5,"network":{"role":"assistant","mainHost":"desk.local"}}"#;
         assert!(serde_json::from_str::<Config>(no_key).unwrap().migrate().network.assistants.is_empty());
     }
