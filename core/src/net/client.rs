@@ -631,7 +631,7 @@ fn connection(config: &NetworkConfig, identity: &Keypair, exec: &Arc<dyn Executo
 /// `learned` is the main's key from a pairing, kept only once welcomed.
 fn handshake(ch: &mut Chan, config: &NetworkConfig, notify: &dyn ClientNotify, stop: &AtomicBool, learned: Option<[u8; 32]>, deadline: Instant) -> Result<(String, Option<bool>, Vec<String>), String> {
     let hostname = super::local_hostname();
-    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps(), brain_dormant_since: notify.brain_dormant_since() };
+    let hello = Up::Hello { protocol: PROTOCOL, app: env!("CARGO_PKG_VERSION").into(), name: display_name(&config.name, &hostname), hostname, platform: std::env::consts::OS.into(), caps: notify.caps(), brain_dormant_since: notify.brain_dormant_since(), terminals: None };
     send_up(ch, &hello)?;
     loop {
         match read_down(ch, stop, deadline)? {

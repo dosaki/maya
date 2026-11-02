@@ -1001,7 +1001,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
             return None;
         }
     };
-    let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since } = hello else {
+    let Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since, .. } = hello else {
         log::line("network", format!("{ip}: first message was not a hello"));
         bye(ch, "protocol");
         return None;
@@ -1387,6 +1387,7 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
             }
         }
         Up::Hello { .. } => log::line("network", format!("{}: ignored a hello after welcome", link.label)),
+        Up::Terminals { .. } => {}
     }
     Ok(())
 }
@@ -2023,7 +2024,7 @@ mod tests {
     }
 
     pub(crate) fn hello_up(name: &str, caps: &[&str]) -> Up {
-        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect(), brain_dormant_since: None }
+        Up::Hello { protocol: PROTOCOL, app: "t".into(), name: name.into(), hostname: "h".into(), platform: "macos".into(), caps: caps.iter().map(|c| c.to_string()).collect(), brain_dormant_since: None, terminals: None }
     }
 
     /// Pairs a new Maya (key `me`) whose `hello` carries `caps`; returns its
@@ -2285,7 +2286,7 @@ mod tests {
         let noise = secure::connect(&mut ws, &me, &handle.public_key(), soon(), &|| false).unwrap();
         let mut g = Channel::new(ws, noise);
         let Up::Hello { protocol, app, name, hostname, platform, caps, .. } = hello_up("laptop", &["follow", "lead"]) else { panic!() };
-        send(&mut g, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since: Some(77) });
+        send(&mut g, &Up::Hello { protocol, app, name, hostname, platform, caps, brain_dormant_since: Some(77), terminals: None });
         assert!(matches!(recv(&mut g), Down::Welcome { .. }));
         let h = handle.clone();
         let asked = Arc::new(Mutex::new(None));
@@ -2898,7 +2899,7 @@ mod tests {
         let mut raw = connect(port);
         let (noise, _) = secure::pair(&mut raw, &twin_key, &code, soon(), &|| false).unwrap();
         let mut same = Channel::new(raw, noise);
-        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None });
+        send(&mut same, &Up::Hello { protocol: PROTOCOL, app: ours.into(), name: "twin".into(), hostname: "h2".into(), platform: "macos".into(), caps: vec![], brain_dormant_since: None, terminals: None });
         assert!(matches!(recv(&mut same), Down::Welcome { .. }));
         let twin = lock(&handle.shared).paired.iter().find(|p| p.key == crate::net::identity::encode_key(&twin_key.public)).unwrap().id.clone();
         assert_eq!(handle.status().assistants.iter().find(|a| a.id == twin).unwrap().note, None);
