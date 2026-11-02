@@ -78,6 +78,25 @@ impl NetworkConfig {
         self.redirect_port = 0;
     }
 
+    /// An assistant saved before the group existed knew its main only by
+    /// `main_key`: the main joins the list, so the devices show it.
+    pub fn list_main(&mut self) {
+        if self.role != NetworkRole::Assistant || self.main_key.is_empty() || self.assistants.iter().any(|a| a.key == self.main_key) {
+            return;
+        }
+        self.assistants.push(PairedAssistant {
+            id: crate::net::protocol::new_id(),
+            name: self.main_host.clone(),
+            hostname: self.main_host.clone(),
+            platform: String::new(),
+            key: self.main_key.clone(),
+            address: self.main_host.clone(),
+            last_seen: None,
+            mirror: false,
+            generation: 0,
+        });
+    }
+
     /// Protocol 1 pairings (tokens, no keys) cannot connect any more: they
     /// go, and Settings tells the user to pair again.
     pub fn drop_insecure_pairings(&mut self) {
@@ -538,6 +557,7 @@ impl Config {
             }
         }
         self.network.drop_insecure_pairings();
+        self.network.list_main();
         self
     }
 
@@ -676,6 +696,28 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_assistant_from_0_44_lists_its_main() {
+        let old = r#"{"completedTimeoutMinutes":5,"network":{"role":"assistant","mainHost":"desk.local","mainPort":7000,"mainKey":"bWFpbg=="}}"#;
+        let c = serde_json::from_str::<Config>(old).unwrap().migrate();
+        assert_eq!(c.network.assistants.len(), 1);
+        assert_eq!(c.network.assistants[0].key, "bWFpbg==");
+        assert_eq!(c.network.assistants[0].hostname, "desk.local");
+        let rows = crate::net::group::device_rows(&c.network, &crate::net::group::me(&c.network, "me"));
+        assert!(rows.iter().any(|r| r.key == "bWFpbg==" && r.is_main));
+    }
+
+    #[test]
+    fn migration_does_not_duplicate_the_main() {
+        let old = r#"{"completedTimeoutMinutes":5,"network":{"role":"assistant","mainHost":"desk.local","mainKey":"bWFpbg=="}}"#;
+        let once = serde_json::from_str::<Config>(old).unwrap().migrate();
+        let twice = once.clone().migrate();
+        assert_eq!(twice.network.assistants.len(), 1);
+        assert_eq!(once, twice);
+        let no_key = r#"{"completedTimeoutMinutes":5,"network":{"role":"assistant","mainHost":"desk.local"}}"#;
+        assert!(serde_json::from_str::<Config>(no_key).unwrap().migrate().network.assistants.is_empty());
+    }
 
     #[test]
     fn a_paired_entry_saved_before_mirroring_existed_may_not_mirror() {

@@ -184,7 +184,9 @@ pub fn network_change(before: &Config, after: &Config) -> Vec<NetChange> {
     }
     // Stopped before anything starts, which may take its port; started
     // after `StopMain` frees it.
-    match (redirect_of(before), redirect_of(after)) {
+    // The group version counts too: the redirect hands out the group it
+    // was started with, so a changed group restarts it.
+    match (redirect_of(before).map(|r| (r, b.group_version)), redirect_of(after).map(|r| (r, a.group_version))) {
         (Some(_), None) => out.insert(0, NetChange::StopRedirect),
         (None, Some(_)) => out.push(NetChange::StartRedirect),
         (Some(b), Some(a)) if b != a => out.push(NetChange::RestartRedirect),
@@ -250,6 +252,23 @@ mod tests {
         c.network.role = role;
         f(&mut c);
         c
+    }
+
+    #[test]
+    fn a_group_change_restarts_a_redirect_and_only_a_redirect() {
+        use NetChange::*;
+        let redirecting = with(NetworkRole::Assistant, |c| {
+            c.network.redirect_port = 7000;
+            c.network.main_key = "k".into();
+            c.network.main_host = "h".into();
+        });
+        let mut changed = redirecting.clone();
+        changed.network.group_version += 1;
+        assert_eq!(network_change(&redirecting, &changed), vec![RestartRedirect]);
+        let plain = with(NetworkRole::Assistant, |c| c.network.main_key = "k".into());
+        let mut changed = plain.clone();
+        changed.network.group_version += 1;
+        assert_eq!(network_change(&plain, &changed), vec![]);
     }
 
     #[test]

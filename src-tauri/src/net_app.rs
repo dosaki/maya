@@ -7,7 +7,7 @@
 
 use crate::actions;
 use crate::listener::{self, Interpreted, VoiceContext};
-use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, NOT_PAIRED, REMOVED};
+use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, RequestLane, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
 use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD, CAP_TERMINAL, CAP_WORKTREE};
@@ -59,7 +59,11 @@ pub fn new_key_with(clear: impl FnOnce() -> Result<(), String>, store: impl FnOn
 
 /// This Maya's key pair, read once and kept for the app's life.
 pub fn identity(app: &AppHandle) -> Result<Arc<Keypair>, String> {
-    let state = app.state::<AppState>();
+    identity_of(&app.state::<AppState>())
+}
+
+/// `identity` from the state alone.
+pub fn identity_of(state: &AppState) -> Result<Arc<Keypair>, String> {
     let mut held = state.identity.lock().unwrap();
     if let Some(k) = held.as_ref() {
         return Ok(k.clone());
@@ -186,6 +190,21 @@ impl ClientNotify for TauriClientNotify {
 
     fn caps(&self) -> Vec<String> {
         vec![CAP_FOLLOW.into(), CAP_LEAD.into(), CAP_WORKTREE.into(), CAP_TERMINAL.into()]
+    }
+
+    /// Keeps the group the main sent. Takes no lock of its own: the save
+    /// goes through `update_config` (store, briefly), and a changed group
+    /// restarts a redirect through `network_change`.
+    fn group(&self, group: maya_core::net::group::GroupCopy) {
+        let Ok(id) = identity(&self.app) else { return };
+        let my_key = id.public_b64();
+        if let Err(e) = crate::update_config(&self.app, |c| maya_core::net::group::adopt(&mut c.network, &my_key, &group)) {
+            log::line("network", format!("could not save the group: {e}"));
+        }
+    }
+
+    fn lane(&self) -> Option<Arc<RequestLane>> {
+        Some(self.app.state::<AppState>().lane.clone())
     }
 
     /// From her record: None when this Maya never ran a brain.

@@ -157,6 +157,9 @@ pub struct AppState {
     pub network: Mutex<net::NetworkState>,
     /// This Maya's network key pair, read from the key store at first use.
     pub identity: Mutex<Option<std::sync::Arc<maya_core::net::identity::Keypair>>>,
+    /// The assistant's requests to the main (Remove a device); the client
+    /// attaches its connection to it. Holds its own mutex briefly.
+    pub lane: std::sync::Arc<net::client::RequestLane>,
     /// Bumped whenever a Git setting or token changes, so a poll that began
     /// under the old settings can tell its answers are stale and drop them.
     pub git_generation: std::sync::atomic::AtomicU64,
@@ -825,7 +828,14 @@ fn network_status_of(state: &AppState) -> NetworkStatus {
             NetworkStatus { role, code: None, assistants, main_error, addresses, ..stored }
         }
     };
-    status.pair_again = state.store.lock().unwrap().config.network.pair_again;
+    let network = {
+        let store = state.store.lock().unwrap();
+        status.pair_again = store.config.network.pair_again;
+        store.config.network.clone()
+    };
+    // Without a key (the key store failed) the list is empty; the roles'
+    // own errors say why.
+    status.devices = net_app::identity_of(state).map(|id| net::group::device_rows(&network, &net::group::me(&network, &id.public_b64()))).unwrap_or_default();
     status
 }
 
@@ -863,10 +873,48 @@ fn network_remove_assistant(app: AppHandle, state: TauriState<AppState>, id: Str
     match server {
         Some(s) => s.remove_assistant(&id)?,
         None => {
-            TauriNetNotify { app: app.clone() }.save_assistants(|list| list.retain(|a| a.id != id))?;
+            // Down: the removal is a tombstone in the saved group, so it
+            // still reaches the others once the server runs again.
+            let mut group = net::group::of_config(&state.store.lock().unwrap().config.network);
+            let key = group.members.iter().find(|m| m.id == id).map(|m| m.key.clone()).ok_or("That device is not in the group.")?;
+            net::group::remove(&mut group, &key);
+            TauriNetNotify { app: app.clone() }.save_group(&group, false)?;
             log::line("network", format!("{id}: removed"));
         }
     }
+    Ok(network_status_of(&state))
+}
+
+/// Removes a device from the group by its key: the main does it itself,
+/// an assistant asks the main and needs to be connected to it.
+#[tauri::command(async)]
+fn network_remove_member(state: TauriState<AppState>, key: String) -> Result<NetworkStatus, String> {
+    const NEEDS_MAIN: &str = "Connect to the main Maya to remove a device.";
+    // The handle is cloned out: no lock is held while the server or the
+    // main answers.
+    let server = state.network.lock().unwrap().server.clone();
+    let role = state.store.lock().unwrap().config.network.role;
+    match (server, role) {
+        (Some(s), _) => s.remove_member(&key)?,
+        (None, config::NetworkRole::Assistant) => {
+            state.lane.request(None, net::protocol::Request::RemoveMember { key }, net::client::REQUEST_TIMEOUT).map_err(|e| if e == net::client::NOT_CONNECTED { NEEDS_MAIN.to_string() } else { e })?;
+        }
+        _ => return Err(NEEDS_MAIN.into()),
+    }
+    Ok(network_status_of(&state))
+}
+
+/// Makes this Maya an assistant of another device of the group; the
+/// client starts through the config change. Nothing is saved when the
+/// device cannot be the main.
+#[tauri::command]
+fn network_join(app: AppHandle, state: TauriState<AppState>, key: String, host: String, port: u16) -> Result<NetworkStatus, String> {
+    let my_key = net_app::identity_of(&state)?.public_b64();
+    let mut joined = state.store.lock().unwrap().config.network.clone();
+    net::group::join(&mut joined, &my_key, &key, &host, port)?;
+    update_config(&app, |c| {
+        let _ = net::group::join(&mut c.network, &my_key, &key, &host, port);
+    })?;
     Ok(network_status_of(&state))
 }
 
@@ -1738,7 +1786,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), git_generation: std::sync::atomic::AtomicU64::new(0) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), lane: std::sync::Arc::new(net::client::RequestLane::default()), git_generation: std::sync::atomic::AtomicU64::new(0) })
         .manage(updater::Pending::default())
         // Closing the window quits Maya, so it asks first too; "Quit
         // anyway" then exits the app.
@@ -1835,6 +1883,8 @@ pub fn run() {
             network_status,
             network_pairing_code,
             network_remove_assistant,
+            network_remove_member,
+            network_join,
             network_promote,
             network_set_mirror,
             network_pair,

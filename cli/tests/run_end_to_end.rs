@@ -155,6 +155,9 @@ fn pair_new_key_replaces_the_key_with_the_pairing_and_keeps_both_when_the_swap_f
     let old = maya_core::net::identity::load_or_create(&key_path).unwrap();
 
     // The key file cannot be replaced (a non-empty directory sits there): the pairing is undone.
+    // Saved once through `load`, which lists the main as a member (with a
+    // fresh id), so that the bytes compared below no longer change on load.
+    maya_core::config::save(&config_path, &maya_core::config::load(&config_path)).unwrap();
     let config_before = std::fs::read(&config_path).unwrap();
     std::fs::remove_file(&key_path).unwrap();
     std::fs::create_dir_all(key_path.join("x")).unwrap();
