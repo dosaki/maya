@@ -78,6 +78,10 @@ const handlers = () => ({
   onName: vi.fn(),
   onRegenerate: vi.fn(),
   onRemoveAssistant: vi.fn(),
+  onRemoveMember: vi.fn(),
+  onJoinAsk: vi.fn(),
+  onJoin: vi.fn(),
+  onJoinCancel: vi.fn(),
   onMakeMain: vi.fn(),
   onPromote: vi.fn(),
   onPromoteCancel: vi.fn(),
@@ -425,12 +429,12 @@ describe("renderSettings", () => {
   it("lists the groups in a sidebar, one titled section each, and shows only General at first", () => {
     const el = renderSettings(voiceBase, handlers());
     const nav = [...el.querySelectorAll<HTMLButtonElement>(".settings__nav button")];
-    expect(nav.map((b) => b.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug", "Release Notes"]);
-    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Debug", "Release Notes"]);
+    expect(nav.map((b) => b.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Devices", "Debug", "Release Notes"]);
+    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Devices", "Debug", "Release Notes"]);
     const sections = [...el.querySelectorAll<HTMLElement>(".settings__section")];
-    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "keyboard", "sessions", "git", "reviews", "notifications", "voice", "network", "debug", "releaseNotes"]);
+    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "keyboard", "sessions", "git", "reviews", "notifications", "voice", "network", "devices", "debug", "releaseNotes"]);
     expect(sections.filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["general"]);
-    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null, null, null, null]);
+    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null, null, null, null, null]);
   });
 
   it("shows the release notes, last in the sidebar", () => {
@@ -995,6 +999,23 @@ describe("Network settings", () => {
     expect(preview.querySelector<HTMLInputElement>("input[name=listen]")!.disabled).toBe(false);
     expect(preview.querySelector<HTMLInputElement>("input[name=listen]")!.checked).toBe(true);
     expect(preview.textContent).not.toContain("The main Maya notifies and listens for this machine.");
+  });
+});
+
+describe("Settings › Devices", () => {
+  it("the Devices section follows Network in the sidebar", () => {
+    const el = renderSettings(voiceBase, handlers());
+    const items = [...el.querySelectorAll<HTMLElement>(".settings__nav-item")].map((b) => b.dataset.group);
+    expect(items[items.indexOf("network") + 1]).toBe("devices");
+    expect(el.querySelector(".settings__section--devices")).not.toBeNull();
+  });
+
+  it("a main's Network section points to Devices instead of listing them", () => {
+    const assistants = [{ id: "a1", name: "Iris", hostname: "iris", platform: "macos", connected: true, lastSeen: null }];
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network: { ...voiceBase.network, role: "main", assistants } }, handlers());
+    expect(el.querySelector(".settings__section--network")!.textContent).toContain("Paired devices are in Settings › Devices.");
+    expect(el.querySelector(".settings__section--network .settings__assistant")).toBeNull();
+    expect(el.querySelector(".settings__section--devices .settings__assistant")).not.toBeNull();
   });
 });
 

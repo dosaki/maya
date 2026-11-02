@@ -111,6 +111,7 @@ body { margin: 0; background: var(--bg); }
 .settings button.settings__link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--muted); font-size: 12.5px; text-decoration: underline; cursor: pointer; }
 .settings__assistants { display: flex; flex-direction: column; }
 .settings__assistant { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: 1px solid var(--border); }
+.settings__badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; border: 1px solid currentColor; opacity: 0.7; }
 .settings__assistant-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .settings__confirm { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 8px; margin: 4px 0; border: 1px solid var(--border); border-radius: 6px; }
 .settings__confirm p { margin: 0; }

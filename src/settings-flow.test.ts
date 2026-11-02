@@ -231,7 +231,7 @@ describe("settings flow", () => {
     // The blur's save lands and repaints before the button is let go.
     dir.dispatchEvent(new Event("change"));
     await flush();
-    expect(pressed.isConnected).toBe(false);
+    expect(pressed.isConnected).toBe(true);
     expect(visible()).toEqual(["voice"]);
     expect(document.querySelector(".settings__nav button[aria-current=true]")?.textContent).toBe("Voice");
     localStorage.removeItem("maya.settingsGroup");
@@ -810,6 +810,32 @@ describe("settings flow", () => {
     expect(panel.textContent).not.toContain("Never connected");
   });
 
+  it("a status repaint keeps the same device row element, and Remove asks the main", async () => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "system", whisperModel: "base.en-q5_1", network: { role: "assistant", port: 0, mainHost: "desk", mainPort: 4127, name: "", mainKey: "k", assistants: [] } };
+    const row = (key: string, name: string, isMain: boolean, isSelf: boolean, lastSeen: number | null) => ({ id: key, key, name, hostname: name, platform: "macos", address: "192.168.1.2", lastSeen, isMain, isSelf });
+    const before = { role: "assistant", code: null, assistants: [], devices: [row("km", "me", false, true, null), row("kd", "desk", true, false, 1), row("kn", "nas", false, false, 1)], assistant: { connected: true, mainName: "desk", error: null }, mainError: null };
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "network_status") return Promise.resolve(before);
+      if (cmd === "network_remove_member") return Promise.resolve(before);
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+    await initSettings();
+    await flush();
+    document.getElementById("settings")!.hidden = false;
+    const nasRow = document.querySelector("[data-row=kn]")!;
+    const onNetwork = eventListen.mock.calls.find((c) => c[0] === "network")![1] as (e: { payload: unknown }) => void;
+    onNetwork({ payload: { ...before, devices: before.devices.map((d) => (d.key === "kn" ? { ...d, lastSeen: 99_000 } : d)) } });
+    expect(document.querySelector("[data-row=kn]")).toBe(nasRow);
+    document.querySelector<HTMLButtonElement>("button[data-action=remove-member]")!.click();
+    await flush();
+    expect(invoke).toHaveBeenCalledWith("network_remove_member", { key: "kn" });
+  });
+
   it("keeps focus and the caret in a field through a repaint", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: "~/dev/maya", clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, interpreterModel: "haiku", recognizer: "system", whisperModel: "base.en-q5_1", network: { role: "main", port: 0, mainHost: "", mainPort: 0, name: "", mainKey: "", assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", token: "t" }] } };
     const before = { role: "main", code: null, assistants: [{ id: "a1", name: "Gnowee", hostname: "TKC-0176", platform: "macos", address: "192.168.55.70", connected: false, lastSeen: null, note: null }], assistant: { connected: false, mainName: null, error: null }, mainError: null };
@@ -832,7 +858,8 @@ describe("settings flow", () => {
     const onNetwork = eventListen.mock.calls.find((c) => c[0] === "network")![1] as (e: { payload: unknown }) => void;
     onNetwork({ payload: { ...before, assistants: [{ ...before.assistants[0], connected: true, lastSeen: 1 }] } });
     const repainted = document.querySelector<HTMLInputElement>("input[name=projectsDir]")!;
-    expect(repainted).not.toBe(typing);
+    // Patched in place: the very field stays, with its focus and caret.
+    expect(repainted).toBe(typing);
     expect(document.activeElement).toBe(repainted);
     expect([repainted.selectionStart, repainted.selectionEnd]).toEqual([3, 6]);
     // A focused checkbox keeps its focus too (it has no caret).
@@ -981,7 +1008,7 @@ describe("settings flow", () => {
       const before = gl().querySelector<HTMLInputElement>(sel)!;
       before.focus();
       onNetwork({ payload: { ...net, mainError: `n${++tick}` } });
-      expect(gl().querySelector(sel)).not.toBe(before);
+      expect(gl().querySelector(sel)).toBe(before);
       expect(gl().contains(document.activeElement)).toBe(true);
       expect(document.activeElement).toBe(gl().querySelector(sel));
     }

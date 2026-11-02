@@ -1,7 +1,6 @@
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { formatAge } from "./format";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, isLinux, isWindows, recognizerOptions, secretStore, thisComputerLower } from "./platform";
 import type { ColorTheme, GitProvider, Harness, NewSessionTerminal, ViewerTheme } from "./types";
@@ -11,7 +10,8 @@ import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys,
 import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
-import { promoteLines } from "./promote";
+import { morph } from "./morph";
+import { renderDevices, type DeviceRow, type DevicesHandlers, type DevicesModel } from "./devices";
 import { renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 import { updates } from "./update";
@@ -62,6 +62,8 @@ export interface NetworkStatus {
   role: NetworkRole;
   code: PairingCode | null;
   assistants: AssistantStatus[];
+  /** The group's devices (this one first); empty while the network is Off. */
+  devices?: DeviceRow[];
   assistant: AssistantLink;
   /** Why the main's server is not running (the port is taken…). */
   mainError?: string | null;
@@ -167,6 +169,10 @@ export interface SettingsModel {
   networkPromote?: string | null;
   /** A handover is running; it can take up to 30 s. */
   networkPromoting?: boolean;
+  /** The device whose Join form is open, and what was typed in it. */
+  devicesJoining?: string | null;
+  devicesJoinHost?: string;
+  devicesJoinPort?: number;
   /** This Maya's listening port as a main. */
   networkPort?: number;
   /** The assistant's target: the main's host/address. */
@@ -268,6 +274,10 @@ export interface SettingsHandlers {
   /** Opens pairing (mints a code) or, if one is already open, regenerates it. */
   onRegenerate(): void;
   onRemoveAssistant(id: string): void;
+  onRemoveMember(key: string): void;
+  onJoinAsk(key: string): void;
+  onJoin(key: string, host: string, port: number): void;
+  onJoinCancel(): void;
   onMakeMain(id: string): void;
   onMirror(id: string, on: boolean): void;
   onPromote(id: string): void;
@@ -351,6 +361,7 @@ export const SETTINGS_GROUPS = [
   ["notifications", "Notifications"],
   ["voice", "Voice"],
   ["network", "Network"],
+  ["devices", "Devices"],
   ["debug", "Debug"],
   ["releaseNotes", "Release Notes"],
 ] as const;
@@ -636,7 +647,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   nav.append(...navButtons);
   content.append(...Object.values(sections));
   show(model.settingsGroup ?? "general");
-  const { general, keyboard, sessions, git, reviews, notifications, voice, network, debug, releaseNotes } = sections;
+  const { general, keyboard, sessions, git, reviews, notifications, voice, network, devices, debug, releaseNotes } = sections;
   const speaking = subsection("Speaking");
   const listening = subsection("Listening");
   voice.append(speaking, listening);
@@ -1456,83 +1467,11 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     regen.addEventListener("click", () => h.onRegenerate());
     network.append(regen);
 
-    const list = document.createElement("div");
-    list.className = "settings__assistants";
-    for (const a of net.assistants) {
-      const row = document.createElement("div");
-      row.className = "settings__assistant";
-      const info = document.createElement("span");
-      info.textContent = `${a.name} (${[a.platform === "android" ? "Android" : a.platform, a.address].filter(Boolean).join(", ")}) — ${a.connected ? "Connected" : a.lastSeen !== null ? `Last seen ${formatAge(a.lastSeen, nowMs)} ago` : "Never connected"}`;
-      if (a.note) {
-        const note = document.createElement("div");
-        note.className = "settings__hint";
-        note.dataset.for = "assistant-note";
-        note.textContent = a.note;
-        info.append(note);
-      }
-      const rm = document.createElement("button");
-      rm.type = "button";
-      rm.dataset.action = "remove-assistant";
-      rm.dataset.id = a.id;
-      rm.textContent = "Remove";
-      rm.disabled = !!model.networkPromoting;
-      rm.addEventListener("click", () => h.onRemoveAssistant(a.id));
-      // Name and status on one line, the buttons on their own row beneath,
-      // so a long status never squeezes them into a column.
-      const actions = document.createElement("div");
-      actions.className = "settings__assistant-actions";
-      actions.append(rm);
-      row.append(info, actions);
-      if (a.connected && a.canLead && !(a.wantsMirror || a.mirror)) {
-        const mk = document.createElement("button");
-        mk.type = "button";
-        mk.dataset.action = "make-main";
-        mk.dataset.id = a.id;
-        mk.textContent = "Make main";
-        mk.disabled = !!model.networkPromoting;
-        mk.addEventListener("click", () => h.onMakeMain(a.id));
-        actions.append(mk);
-      }
-      if (a.wantsMirror || a.mirror) {
-        const sw = document.createElement("label");
-        sw.className = "settings__switch";
-        const box = document.createElement("input");
-        box.type = "checkbox";
-        box.dataset.action = "mirror";
-        box.dataset.id = a.id;
-        box.checked = !!a.mirror;
-        box.disabled = !!model.networkPromoting;
-        box.addEventListener("change", () => h.onMirror(a.id, box.checked));
-        sw.append(box, document.createTextNode(" Sees and controls all sessions"));
-        actions.append(sw);
-      }
-      list.append(row);
-      if (model.networkPromote === a.id) {
-        const confirm = document.createElement("div");
-        confirm.className = "settings__confirm";
-        confirm.dataset.for = "promote-confirm";
-        for (const line of promoteLines(net.assistants, a.id, thisComputerLower())) {
-          const p = document.createElement("p");
-          p.textContent = line;
-          confirm.append(p);
-        }
-        const yes = document.createElement("button");
-        yes.type = "button";
-        yes.dataset.action = "promote-confirm";
-        yes.textContent = model.networkPromoting ? "Handing over…" : "Make main";
-        yes.disabled = !!model.networkPromoting;
-        yes.addEventListener("click", () => h.onPromote(a.id));
-        const no = document.createElement("button");
-        no.type = "button";
-        no.dataset.action = "promote-cancel";
-        no.textContent = "Cancel";
-        no.disabled = !!model.networkPromoting;
-        no.addEventListener("click", () => h.onPromoteCancel());
-        confirm.append(yes, no);
-        list.append(confirm);
-      }
-    }
-    network.append(list);
+    const hint = document.createElement("div");
+    hint.className = "settings__hint";
+    hint.dataset.for = "devices-hint";
+    hint.textContent = "Paired devices are in Settings › Devices.";
+    network.append(hint);
   } else if (netRole === "assistant") {
     // Values live on the model, updated on every keystroke (not just on
     // `change`), so an unrelated repaint (a `voice` or `network` event) never
@@ -1671,6 +1610,31 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       fresh.addEventListener("click", () => h.onNewKeyAsk());
       network.append(fresh);
     }
+  }
+
+  if (net.role === "off") {
+    const none = document.createElement("div");
+    none.className = "settings__hint";
+    none.dataset.for = "devices-off";
+    none.textContent = "Turn the network on in Settings › Network to see your devices.";
+    devices.append(none);
+  } else {
+    // The model's fields behind the view the list edits, so a half-typed
+    // host survives a repaint.
+    const view: DevicesModel = {
+      get joining() { return model.devicesJoining ?? null; },
+      set joining(v) { model.devicesJoining = v; },
+      get joinHost() { return model.devicesJoinHost ?? ""; },
+      set joinHost(v) { model.devicesJoinHost = v; },
+      get joinPort() { return model.devicesJoinPort ?? 0; },
+      set joinPort(v) { model.devicesJoinPort = v; },
+      get promote() { return model.networkPromote ?? null; },
+      set promote(v) { model.networkPromote = v; },
+      get promoting() { return !!model.networkPromoting; },
+      set promoting(v) { model.networkPromoting = v; },
+    };
+    const dh: DevicesHandlers = h;
+    devices.append(renderDevices(net, view, dh, nowMs, thisComputerLower()));
   }
 
   if (model.error) {
@@ -1861,7 +1825,11 @@ export async function initSettings(): Promise<void> {
   // caret back, so a status push never pulls the cursor out from under you.
   const paint = () => {
     const focused = focusedField(panel);
-    panel.replaceChildren(renderSettings(model, handlers));
+    const fresh = renderSettings(model, handlers);
+    // In place, so a hovered row keeps its :hover; the first paint has nothing to patch.
+    const old = panel.firstElementChild;
+    if (old && panel.childElementCount === 1) morph(old, fresh);
+    else panel.replaceChildren(fresh);
     if (focused) restoreFocus(panel, focused);
   };
 
@@ -1995,6 +1963,21 @@ export async function initSettings(): Promise<void> {
     onRegenerate: () => void run(async () => { model.network = await invoke<NetworkStatus>("network_pairing_code"); }),
     onMirror: (id, on) => void run(async () => { model.network = await invoke<NetworkStatus>("network_set_mirror", { id, on }); }),
     onRemoveAssistant: (id) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_assistant", { id }); }),
+    onRemoveMember: (key) => void run(async () => { model.network = await invoke<NetworkStatus>("network_remove_member", { key }); }),
+    onJoinAsk: (key) => {
+      model.devicesJoining = key;
+      model.devicesJoinHost = "";
+      model.devicesJoinPort = 0;
+      paint();
+    },
+    onJoinCancel: () => {
+      model.devicesJoining = null;
+      paint();
+    },
+    onJoin: (key, host, port) => void run(async () => {
+      model.network = await invoke<NetworkStatus>("network_join", { key, host, port });
+      model.devicesJoining = null;
+    }),
     onMakeMain: (id) => {
       model.networkPromote = id;
       paint();

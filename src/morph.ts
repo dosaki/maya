@@ -3,8 +3,8 @@
 // selection, focus and a CSS transition go with the node. So a repaint
 // changes the nodes already on screen wherever the fresh render matches them.
 
-/** A card's session id: keyed children are matched by it rather than by place. */
-const keyOf = (n: Node): string | null => (n instanceof Element ? n.getAttribute("data-session-id") : null);
+/** A card's session id (or a list row's `data-row`): keyed children are matched by it rather than by place. */
+const keyOf = (n: Node): string | null => (n instanceof Element ? (n.getAttribute("data-session-id") ?? n.getAttribute("data-row")) : null);
 
 const sameKind = (a: Node, b: Node): boolean =>
   a.nodeType === b.nodeType && (!(a instanceof Element) || a.tagName === (b as Element).tagName);
@@ -16,6 +16,8 @@ const sameKind = (a: Node, b: Node): boolean =>
  * board delegates its clicks): a kept node keeps its old listeners.
  */
 export function morph(old: Element, fresh: Element): void {
+  // Read before the children move: a select's value goes with its options.
+  const control = controlState(fresh);
   for (const { name } of [...old.attributes]) if (!fresh.hasAttribute(name)) old.removeAttribute(name);
   for (const { name, value } of fresh.attributes) if (old.getAttribute(name) !== value) old.setAttribute(name, value);
 
@@ -37,6 +39,17 @@ export function morph(old: Element, fresh: Element): void {
     return o;
   });
   place(old, wanted);
+  if (control) {
+    if (old instanceof HTMLInputElement && control.checked !== undefined && old.checked !== control.checked) old.checked = control.checked;
+    if ((old instanceof HTMLInputElement || old instanceof HTMLSelectElement || old instanceof HTMLTextAreaElement) && old.value !== control.value) old.value = control.value;
+  }
+}
+
+/** A form control's value is a property the attributes do not carry: remember it to copy it over. */
+function controlState(el: Element): { value: string; checked?: boolean } | null {
+  if (el instanceof HTMLInputElement) return { value: el.value, checked: el.checked };
+  if (el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement) return { value: el.value };
+  return null;
 }
 
 /** Makes `parent`'s children exactly `wanted`, in order, moving only what has to move. */
