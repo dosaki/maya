@@ -78,6 +78,10 @@ const DISCONNECTED: &str = "assistant disconnected";
 pub(crate) const PAIRING_NOT_SAVED: &str = "could not save the pairing";
 /// Why `remove_member` refuses the main's own key.
 pub const MAIN_NOT_REMOVABLE: &str = "The main cannot be removed; make another Maya the main first.";
+/// Why `remove_member` refuses while the main role is being handed over.
+pub const HANDOVER_RUNNING: &str = "A handover is running; try again in a moment.";
+/// Why `remove_member` refuses once the server is stopping.
+pub const MAIN_STOPPING: &str = "The main Maya is stopping; try again in a moment.";
 
 /// What the server tells the app; the Tauri adapter lives in the app's `lib.rs`.
 /// `paired` and `paired_list_changed` are called with the server's mutex
@@ -356,8 +360,7 @@ impl Server {
 
     /// Takes back a pairing the assistant never completed: a new entry goes
     /// (and the tombstone it replaced comes back), an existing one gets its
-    /// old names back. The group may have gone out with the pairing, so it
-    /// goes out again, one version newer.
+    /// old names back. The version is left to the caller (`NewPairing::undo`).
     fn undo_pairing(&mut self, id: &str, previous: Option<PairedAssistant>, tomb: Option<PairedAssistant>) {
         self.pairings_in_flight.remove(id);
         match previous {
@@ -375,10 +378,8 @@ impl Server {
                 }
             }
         }
-        self.version += 1;
         self.peers.remove(id);
         self.sync_boards();
-        self.send_group_to_all();
     }
 
     /// Brings a paired entry up to date as its machine connects: the address
@@ -760,6 +761,14 @@ fn remove_member(ctx: &Ctx, key: &str) -> Result<(), String> {
         let mut s = lock(&ctx.shared);
         if key == s.own.key {
             return Err(MAIN_NOT_REMOVABLE.into());
+        }
+        // The group already went to the new main, or a new server may be
+        // running: a removal now would not reach it.
+        if s.handover {
+            return Err(HANDOVER_RUNNING.into());
+        }
+        if ctx.stopped() {
+            return Err(MAIN_STOPPING.into());
         }
         let Some(id) = s.paired.iter().find(|p| p.key == key).map(|p| p.id.clone()) else {
             // Already gone.
@@ -1206,7 +1215,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
         }
         Err(Some(e)) => {
             if let Some(p) = pairing {
-                p.undo(ctx, &format!("could not save it: {e}"));
+                p.undo(ctx, &format!("could not save it: {e}"), false);
             }
             bye(ch, PAIRING_NOT_SAVED);
             return None;
@@ -1225,7 +1234,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
         // Undone first, so the list `leave` saves no longer holds the
         // pairing it takes back.
         if let Some(p) = pairing {
-            p.undo(ctx, &e);
+            p.undo(ctx, &e, true);
         }
         leave(ctx, &link, &e);
         return None;
@@ -1247,9 +1256,31 @@ struct NewPairing {
 }
 
 impl NewPairing {
-    fn undo(self, ctx: &Ctx, why: &str) {
+    /// `saved`: the pairing reached the disk and the group went out with it.
+    /// Otherwise, unless another change saved or sent the group meanwhile
+    /// (its version moved past the one `group::add` gave the pairing),
+    /// nothing went out: the group goes back to exactly what was saved,
+    /// version included, and nothing is sent. When something did go out the
+    /// undone group is saved, one version newer, and sent only once saved.
+    fn undo(self, ctx: &Ctx, why: &str, saved: bool) {
         log::line("network", format!("{}: pairing not completed ({why}); nothing kept", self.entry.name));
-        lock(&ctx.shared).undo_pairing(&self.entry.id, self.previous, self.tomb);
+        {
+            let mut s = lock(&ctx.shared);
+            let went_out = saved || s.version != self.entry.generation;
+            s.undo_pairing(&self.entry.id, self.previous, self.tomb);
+            if !went_out {
+                s.version -= 1;
+            } else if !ctx.stopped() {
+                s.version += 1;
+                match ctx.notify.paired_list_changed(&s.stored()) {
+                    Ok(()) => s.send_group_to_all(),
+                    Err(e) => {
+                        s.version -= 1;
+                        log::line("network", format!("could not save the group without the pairing: {e}"));
+                    }
+                }
+            }
+        }
         ctx.announce();
     }
 }
@@ -4486,6 +4517,46 @@ mod tests {
         assert_eq!(recv(&mut b), Down::Bye { reason: "removed".into() });
         assert!(!lock(&handle.shared).paired.iter().any(|p| p.key == b_key));
         handle.stop();
+    }
+
+    #[test]
+    fn a_pairing_that_cannot_be_saved_leaves_the_group_as_it_was_saved_and_sends_nothing() {
+        let counter = Arc::new(Counter::default());
+        let (handle, port) = test_server_with(counter.clone());
+        let (mut a, _, _) = pair_client(&handle, port, "laptop");
+        recv_group(&mut a);
+        let before = lock(&handle.shared).version;
+        assert_eq!(counter.saved_group.lock().unwrap().version, before);
+        counter.fail_saves.store(true, Ordering::SeqCst);
+        let (code, _) = handle.open_pairing(now_ms()).unwrap();
+        let mut raw = connect(port);
+        let (noise, _) = secure::pair(&mut raw, &Keypair::generate(), &code, soon(), &|| false).unwrap();
+        let mut ws = Channel::new(raw, noise);
+        send(&mut ws, &hello_up("desk", &[]));
+        assert!(matches!(recv(&mut ws), Down::Bye { reason } if reason == PAIRING_NOT_SAVED));
+        wait_until(|| handle.ctx.live.load(Ordering::SeqCst) == 1);
+        assert_eq!(lock(&handle.shared).version, before, "the version is the one saved");
+        let end = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < end {
+            if let Ok(Got::Text(t)) = a.read() {
+                assert!(!matches!(decode_down(&t).unwrap(), Down::Group(_)), "a group that was never saved went out");
+            }
+        }
+        handle.stop();
+    }
+
+    #[test]
+    fn no_member_is_removed_during_a_handover_or_once_the_main_stops() {
+        let (handle, port) = test_server();
+        let (_a, _, a_kp) = pair_client(&handle, port, "laptop");
+        let a_key = key_of(&a_kp);
+        lock(&handle.shared).handover = true;
+        assert_eq!(handle.remove_member(&a_key), Err(HANDOVER_RUNNING.into()));
+        assert!(lock(&handle.shared).paired.iter().any(|p| p.key == a_key), "still a member");
+        lock(&handle.shared).handover = false;
+        handle.stop();
+        assert_eq!(handle.remove_member(&a_key), Err(MAIN_STOPPING.into()));
+        assert!(lock(&handle.shared).paired.iter().any(|p| p.key == a_key), "still a member");
     }
 
     #[test]
