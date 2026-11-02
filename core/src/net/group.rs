@@ -39,7 +39,7 @@ pub fn of_config(n: &NetworkConfig) -> GroupCopy {
 /// entry takes it as its generation. A tombstone with the same key goes; a
 /// live entry with the same key is replaced, keeping its `id`.
 pub fn add(g: &mut GroupCopy, mut entry: PairedAssistant) -> PairedAssistant {
-    g.version += 1;
+    g.version = g.version.saturating_add(1);
     entry.generation = g.version;
     g.removed.retain(|r| r.key != entry.key);
     match g.members.iter_mut().find(|m| m.key == entry.key) {
@@ -57,7 +57,7 @@ pub fn add(g: &mut GroupCopy, mut entry: PairedAssistant) -> PairedAssistant {
 pub fn remove(g: &mut GroupCopy, key: &str) -> Option<PairedAssistant> {
     let at = g.members.iter().position(|m| m.key == key)?;
     let mut gone = g.members.remove(at);
-    g.version += 1;
+    g.version = g.version.saturating_add(1);
     gone.generation = g.version;
     gone.mirror = false;
     g.removed.retain(|r| r.key != key);
@@ -84,7 +84,7 @@ pub fn merge_copy(g: &mut GroupCopy, theirs: &GroupCopy) -> bool {
         }
     }
     if changed {
-        g.version = g.version.max(theirs.version) + 1;
+        g.version = g.version.max(theirs.version).saturating_add(1);
     }
     changed
 }
@@ -109,15 +109,14 @@ pub fn adopt_from_main(n: &mut NetworkConfig, my_key: &str, copy: &GroupCopy) ->
 }
 
 /// Whether `key` may be followed as the main. With the group the sender
-/// gave (`seen`), it must be a live member of that; without one, of the
-/// group held here (an empty group is an older main that sends none).
-pub fn may_follow(n: &NetworkConfig, seen: Option<&GroupCopy>, key: &str) -> bool {
+/// gave (`seen`), it must be a live member of that; without one, it is an
+/// older main that sends none, and any key may be followed.
+pub fn may_follow(_n: &NetworkConfig, seen: Option<&GroupCopy>, key: &str) -> bool {
     match seen {
         Some(s) => s.members.iter().any(|m| m.key == key) && !s.removed.iter().any(|r| r.key == key),
-        None => {
-            (n.assistants.iter().any(|m| m.key == key) && !n.removed.iter().any(|r| r.key == key))
-                || n.assistants.is_empty()
-        }
+        // A main of this version sends the group before any Move, so none
+        // seen means an older main, which cannot be checked.
+        None => true
     }
 }
 
@@ -346,9 +345,24 @@ mod tests {
         assert!(may_follow(&n, Some(&live), "B"));
         let gone = GroupCopy { version: 1, members: vec![entry("B", "two")], removed: vec![entry("B", "two")] };
         assert!(!may_follow(&n, Some(&gone), "B"));
+        // No group seen: only an older main, which sends none, can be talking.
         assert!(may_follow(&NetworkConfig::default(), None, "B"));
-        assert!(!may_follow(&n, None, "B"));
+        assert!(may_follow(&n, None, "B"));
         assert!(may_follow(&n, None, "A"));
+    }
+
+    #[test]
+    fn a_copy_with_the_largest_version_does_not_panic() {
+        let mut g = GroupCopy { version: 3, members: vec![entry("A", "one")], removed: vec![] };
+        let mut tomb = entry("A", "one");
+        tomb.generation = 9;
+        let theirs = GroupCopy { version: u64::MAX, members: vec![], removed: vec![tomb] };
+        assert!(merge_copy(&mut g, &theirs));
+        assert_eq!(g.version, u64::MAX);
+        let mut full = GroupCopy { version: u64::MAX, members: vec![], removed: vec![] };
+        let added = add(&mut full, entry("B", "two"));
+        assert_eq!(added.generation, u64::MAX);
+        assert!(remove(&mut full, "B").is_some());
     }
 
     #[test]

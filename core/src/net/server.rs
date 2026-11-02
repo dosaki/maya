@@ -1340,13 +1340,13 @@ impl NewPairing {
             let went_out = saved || s.version != self.entry.generation;
             s.undo_pairing(&self.entry.id, self.previous, self.tomb);
             if !went_out {
-                s.version -= 1;
+                s.version = s.version.saturating_sub(1);
             } else if !ctx.stopped() {
-                s.version += 1;
+                s.version = s.version.saturating_add(1);
                 match ctx.notify.paired_list_changed(&s.stored()) {
                     Ok(()) => s.send_group_to_all(),
                     Err(e) => {
-                        s.version -= 1;
+                        s.version = s.version.saturating_sub(1);
                         log::line("network", format!("could not save the group without the pairing: {e}"));
                     }
                 }
@@ -3619,6 +3619,30 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let key = Keypair::generate().public_b64();
         let out = client::handle_for_test(Down::Move { host: "10.0.0.9".into(), port: 5001, key: key.clone() }, &exec, &notify, &tx, &NetworkConfig::default(), "me");
+        assert_eq!(out, Err(client::MOVED.into()));
+        assert_eq!(*rec.0.lock().unwrap(), Some(key));
+    }
+
+    #[test]
+    fn a_move_from_an_old_main_is_followed_whatever_group_is_held() {
+        struct Rec(Mutex<Option<String>>);
+        impl client::ClientNotify for Rec {
+            fn paired(&self, _: &str) {}
+            fn connected(&self, _: &str) {}
+            fn disconnected(&self, _: &str) {}
+            fn removed(&self) {}
+            fn moved(&self, _: &str, _: u16, key: &str) -> Result<(), String> {
+                *self.0.lock().unwrap() = Some(key.into());
+                Ok(())
+            }
+        }
+        let rec = Arc::new(Rec(Mutex::new(None)));
+        let (exec, notify): (Arc<dyn client::Executor>, Arc<dyn client::ClientNotify>) = (Arc::new(FakeExec::default()), rec.clone());
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut config = NetworkConfig::default();
+        config.assistants.push(PairedAssistant { id: "i".into(), name: "Desk".into(), hostname: "d".into(), platform: "macos".into(), key: Keypair::generate().public_b64(), address: String::new(), last_seen: None, mirror: false, generation: 0 });
+        let key = Keypair::generate().public_b64();
+        let out = client::handle_for_test(Down::Move { host: "10.0.0.9".into(), port: 5001, key: key.clone() }, &exec, &notify, &tx, &config, "me");
         assert_eq!(out, Err(client::MOVED.into()));
         assert_eq!(*rec.0.lock().unwrap(), Some(key));
     }
