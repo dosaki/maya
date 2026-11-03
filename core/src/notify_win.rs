@@ -12,9 +12,19 @@ fn app_id() -> &'static str {
 }
 
 /// Shows a toast: the session's name, the project (and machine), the ask.
-pub fn show_toast(title: &str, subtitle: &str, body: &str, sound: bool) {
+/// `on_click` runs when the toast is clicked while Maya is running; a
+/// click from the Action Center after Maya quit only launches her.
+pub fn show_toast(title: &str, subtitle: &str, body: &str, sound: bool, on_click: impl Fn() + Send + 'static) {
     use tauri_winrt_notification::{Sound, Toast};
-    let toast = Toast::new(app_id()).title(title).text1(subtitle).text2(body).sound(if sound { Some(Sound::Default) } else { None });
+    let toast = Toast::new(app_id())
+        .title(title)
+        .text1(subtitle)
+        .text2(body)
+        .sound(if sound { Some(Sound::Default) } else { None })
+        .on_activated(move |_| {
+            on_click();
+            Ok(())
+        });
     if let Err(e) = toast.show() {
         crate::log::line("notify", format!("could not show a notification: {e}"));
     }

@@ -408,6 +408,22 @@ pub(crate) fn poll_deployments(app: &AppHandle) {
     let _ = app.emit("deployments", &next);
 }
 
+/// A click on one of Maya's banners: her window comes forward and, for a
+/// session's banner, the page opens that session.
+fn banner_clicked(app: &AppHandle, click: &notify::BannerClick) {
+    let (handle, click) = (app.clone(), click.clone());
+    let _ = app.run_on_main_thread(move || {
+        if let Some(window) = handle.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        if let notify::BannerClick::Session { session_id, machine } = click {
+            let _ = handle.emit("open-card", serde_json::json!({ "sessionId": session_id, "machine": machine }));
+        }
+    });
+}
+
 /// Banners (and the spoken line) for assigned PRs that were just approved
 /// or had changes requested, under the same rules as a session's ask: under
 /// a Focus mode the banner is left to macOS and nothing is said, muted it is
@@ -435,7 +451,7 @@ fn announce_pr_reviews(app: &AppHandle, decided: &[reviews::ReviewPr]) {
     for pr in decided {
         let (title, subtitle, body) = reviews::pr_banner(pr);
         log::line("app", format!("pull request {title}: {subtitle}"));
-        notify::banner(&title, &subtitle, &body, banner_sound);
+        notify::banner(&title, &subtitle, &body, banner_sound, notify::BannerClick::Maya);
         if speak {
             if let Some(line) = reviews::pr_spoken_line(pr) {
                 notify::speak(notify::Utterance { volume, ..notify::Utterance::new(line, voices.clone()) });
@@ -1936,6 +1952,8 @@ pub fn run() {
             focus::install_app_handle(app.handle().clone());
             notify::set_remote_speaker(notify::RemoteSpeaker { fetch: voice::fetch_remote, play: voice::play });
             listener::install_speech_hook(app.handle().clone());
+            let click_handle = app.handle().clone();
+            notify::install_click_hook(move |click| banner_clicked(&click_handle, click));
             native_app::tell_unseen_ends(app.handle().clone());
             #[cfg(target_os = "macos")]
             dock::set_dock_icon();
