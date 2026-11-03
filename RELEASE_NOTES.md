@@ -1,3 +1,11 @@
+# 0.49.1
+
+## Fixed
+
+- On a Mac, a click on one of Maya's notifications opened Script Editor. Now it brings Maya forward and opens the session that the notification is about. Maya now shows notifications under her own name, so macOS asks once whether to allow them. If you do not allow them, Maya shows them the old way.
+- On Windows and Linux, a click on a notification also brings Maya forward and opens its session.
+- A click on a pull request notification brings Maya forward.
+
 # 0.49.0
 
 ## New
