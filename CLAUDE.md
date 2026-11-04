@@ -52,3 +52,5 @@ file in Settings → Release Notes.
 
 - **Pitfall:** Maya's WKWebView drops `:hover` (and a tooltip, a selection) from a node that is replaced, until the pointer moves; repaint with `morph` or `keepEqualChildren` from `src/morph.ts` instead of `replaceChildren`. (2026-11-01)
 - **Tip:** Playwright's WebKit with the real `src/styles.css` reproduces WebKit layout bugs, but not the hover loss above: headless WebKit re-applies `:hover` after a node swap, so check hover in the app itself. (2026-10-30, 2026-11-01)
+- **Pitfall:** a click on a Mac banner goes to the Maya that LaunchServices has on file for `com.dosaki.maya` (the one in /Applications), so testing a bundle built under `target/` launches a second Maya; for the check, `lsregister -u /Applications/Maya.app` and `lsregister -f` the test bundle, then undo both. (2026-11-03)
+- **Tip:** a second Maya starting replaces `~/.claude/maya/maya.log`, so the first one's later lines are lost; read the log before anything can launch another Maya. (2026-11-03)
