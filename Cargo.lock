@@ -2629,7 +2629,7 @@ dependencies = [
 
 [[package]]
 name = "maya"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "base64 0.23.1",
  "block2",
@@ -2656,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "maya-cli"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "libc",
  "maya-core",
@@ -2667,13 +2667,17 @@ dependencies = [
 
 [[package]]
 name = "maya-core"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "base64 0.23.1",
+ "block2",
  "dirs 6.0.0",
  "if-addrs",
  "libc",
  "notify",
+ "objc2",
+ "objc2-foundation",
+ "objc2-user-notifications",
  "pulldown-cmark",
  "rand 0.10.3",
  "serde",
@@ -2690,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "maya-ear"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "cpal",
  "serde_json",
@@ -2699,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "maya-hook"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "dirs 6.0.0",
  "maya-core",
@@ -2708,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "maya-mobile"
-version = "0.49.0"
+version = "0.49.1"
 dependencies = [
  "maya-core",
  "serde",
@@ -3216,7 +3220,10 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
+ "bitflags 2.13.2",
+ "block2",
  "objc2",
+ "objc2-core-location",
  "objc2-foundation",
 ]
 

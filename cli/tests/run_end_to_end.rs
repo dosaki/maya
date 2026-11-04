@@ -51,10 +51,13 @@ fn run(claude_dir: &Path, terminal: Arc<dyn Terminal>, stop: Arc<AtomicBool>) ->
     run_cmd::run_on(store, || vec![maya_core::agents::claude()], terminal, stop)
 }
 
+/// Waits up to 12 s: past the watcher's 5 s tick, which is how a run sees
+/// its config change on a runner where inotify is not available (a 5 s
+/// wait raced that tick and lost on CI).
 fn wait_until(what: &str, mut f: impl FnMut() -> bool) {
-    let end = Instant::now() + Duration::from_secs(5);
+    let end = Instant::now() + Duration::from_secs(12);
     while !f() {
-        assert!(Instant::now() < end, "{what}: not within 5 s");
+        assert!(Instant::now() < end, "{what}: not within 12 s");
         std::thread::sleep(Duration::from_millis(20));
     }
 }

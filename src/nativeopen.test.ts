@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { endedText, folderName, localNativeCard, openStarted, setNativeOpener } from "./nativeopen";
+import { bannerCard, endedText, folderName, localNativeCard, openStarted, setNativeOpener } from "./nativeopen";
 import type { Card } from "./types";
 
 describe("opening a Native session the app just started", () => {
@@ -41,5 +41,23 @@ describe("the card whose live terminal a session's pid opens", () => {
     expect(localNativeCard(cards, 7)?.sessionId).toBe("here");
     expect(localNativeCard(cards, 9)).toBeUndefined();
     expect(localNativeCard([card("plain", 7), card("remote", 7, { native: true, machine: "laptop" })], 7)).toBeUndefined();
+  });
+});
+
+describe("the card a click on a session's banner opens", () => {
+  const card = (sessionId: string, more: Partial<Card> = {}): Card =>
+    ({ sessionId, pid: 1, name: sessionId, cwd: "/x", state: "awaiting", stateSince: 0, snippet: "", awaiting: null, hasInbox: false, harness: "claude-code", pr: null, context: null, ...more }) as Card;
+
+  it("is the card with that session on that machine", () => {
+    const cards = [card("s1", { machine: "laptop" }), card("s1"), card("s2", { machine: "laptop" })];
+    expect(bannerCard(cards, "s1", null)).toBe(cards[1]);
+    expect(bannerCard(cards, "s1", undefined)).toBe(cards[1]);
+    expect(bannerCard(cards, "s1", "laptop")).toBe(cards[0]);
+    expect(bannerCard(cards, "s2", "laptop")).toBe(cards[2]);
+  });
+
+  it("is none once the session has gone", () => {
+    expect(bannerCard([card("s1")], "s2", null)).toBeUndefined();
+    expect(bannerCard([card("s1", { machine: "laptop" })], "s1", "desk")).toBeUndefined();
   });
 });

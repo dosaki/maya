@@ -38,3 +38,8 @@ export function endedText(dir: string, lines: string[]): string {
 export function localNativeCard(cards: Card[], pid: number): Card | undefined {
   return cards.find((c) => c.pid === pid && !c.machine && c.native);
 }
+
+/** The card a click on a session's banner opens: that session on that machine (none for a local one); undefined once it has gone. */
+export function bannerCard(cards: Card[], sessionId: string, machine: string | null | undefined): Card | undefined {
+  return cards.find((c) => c.sessionId === sessionId && (c.machine ?? null) === (machine ?? null));
+}

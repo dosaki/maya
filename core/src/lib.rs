@@ -51,6 +51,8 @@ pub mod wake;
 pub mod watcher;
 pub mod window;
 pub mod worktree;
+#[cfg(target_os = "macos")]
+pub mod notify_mac;
 #[cfg(windows)]
 pub mod notify_win;
 #[cfg(windows)]

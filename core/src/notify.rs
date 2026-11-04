@@ -577,6 +577,80 @@ pub fn applescript_notify(title: &str, subtitle: &str, body: &str, sound: bool) 
     )
 }
 
+/// What a click on a banner opens: Maya's window, and with it the
+/// session's when the banner is about one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BannerClick {
+    Maya,
+    Session { session_id: String, machine: Option<String> },
+}
+
+type ClickHook = Box<dyn Fn(&BannerClick) + Send + Sync>;
+
+static CLICK_HOOK: OnceLock<ClickHook> = OnceLock::new();
+
+/// Installs what a click on one of Maya's banners does. Until it is
+/// installed (the headless CLI never does) a click does nothing in Maya,
+/// and on a Mac banners go through `osascript`. Once per process; a second
+/// call is ignored.
+pub fn install_click_hook(hook: impl Fn(&BannerClick) + Send + Sync + 'static) {
+    if CLICK_HOOK.set(Box::new(hook)).is_ok() {
+        #[cfg(target_os = "macos")]
+        crate::notify_mac::start();
+    }
+}
+
+/// Runs the click hook for a banner the user clicked.
+#[cfg_attr(not(any(windows, target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn clicked(click: &BannerClick) {
+    crate::log::line("notify", format!("banner clicked: {click:?}"));
+    if let Some(hook) = CLICK_HOOK.get() {
+        hook(click);
+    }
+}
+
+/// The clicks of the banners Maya posted, under the identifier a Mac hands
+/// back when one is clicked. Only the newest `CAP` are kept: an older
+/// banner's click still brings Maya forward, without the session.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Default)]
+pub(crate) struct ClickBook {
+    next: u64,
+    open: std::collections::VecDeque<(String, BannerClick)>,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl ClickBook {
+    const CAP: usize = 100;
+
+    /// Records a banner's click and returns its new identifier.
+    pub(crate) fn add(&mut self, click: BannerClick) -> String {
+        self.next += 1;
+        let id = format!("maya-banner-{}", self.next);
+        if self.open.len() == Self::CAP {
+            self.open.pop_front();
+        }
+        self.open.push_back((id.clone(), click));
+        id
+    }
+
+    /// The click recorded under `id`, forgotten once read; Maya alone
+    /// when it is unknown or too old.
+    pub(crate) fn take(&mut self, id: &str) -> BannerClick {
+        match self.open.iter().position(|(i, _)| i == id) {
+            Some(at) => self.open.remove(at).map(|(_, c)| c).unwrap_or(BannerClick::Maya),
+            None => BannerClick::Maya,
+        }
+    }
+}
+
+/// Runs the click hook for the Mac banner posted under `id`.
+#[cfg(target_os = "macos")]
+pub(crate) fn clicked_id(book: &Mutex<ClickBook>, id: &str) {
+    let click = book.lock().map(|mut b| b.take(id)).unwrap_or(BannerClick::Maya);
+    clicked(&click);
+}
+
 /// What the notification says: the ask itself, or its kind when the detail is blank.
 pub fn body_for(card: &Card) -> String {
     let Some(aw) = &card.awaiting else { return "Waiting for a decision".into() };
@@ -602,19 +676,37 @@ pub fn subtitle_for(card: &Card) -> String {
     }
 }
 
-/// A session's banner: its name, the project and what it waits on.
+/// What a click on a session's banner opens: that session.
+pub fn click_for(card: &Card) -> BannerClick {
+    BannerClick::Session { session_id: card.session_id.clone(), machine: card.machine.clone() }
+}
+
+/// A session's banner: its name, the project and what it waits on; a
+/// click opens the session in Maya.
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 pub fn notify(card: &Card, sound: bool) {
-    banner(&card.name, &subtitle_for(card), &body_for(card), sound);
+    banner(&card.name, &subtitle_for(card), &body_for(card), sound, click_for(card));
 }
 
 #[cfg(windows)]
-pub fn banner(title: &str, subtitle: &str, body: &str, sound: bool) {
-    crate::notify_win::show_toast(title, subtitle, body, sound);
+pub fn banner(title: &str, subtitle: &str, body: &str, sound: bool, click: BannerClick) {
+    crate::notify_win::show_toast(title, subtitle, body, sound, move || clicked(&click));
+}
+
+/// A Notification Center banner posted by Maya herself, so a click comes
+/// back to her; through `osascript` when she cannot post her own (no app
+/// bundle, the click hook not installed, or macOS refused), where macOS
+/// files it under Script Editor and a click opens that instead.
+#[cfg(target_os = "macos")]
+pub fn banner(title: &str, subtitle: &str, body: &str, sound: bool, click: BannerClick) {
+    if CLICK_HOOK.get().is_some() && crate::notify_mac::post(title, subtitle, body, sound, click) {
+        return;
+    }
+    banner_via_osascript(title, subtitle, body, sound);
 }
 
 #[cfg(target_os = "macos")]
-pub fn banner(title: &str, subtitle: &str, body: &str, sound: bool) {
+pub(crate) fn banner_via_osascript(title: &str, subtitle: &str, body: &str, sound: bool) {
     let _ = Command::new("osascript").arg("-e").arg(applescript_notify(title, subtitle, body, sound)).output();
 }
 
@@ -636,6 +728,30 @@ pub fn notify_send_args(icon: Option<&Path>, title: &str, subtitle: &str, body: 
     };
     a.extend(["--".to_string(), title.to_string(), text]);
     a
+}
+
+/// The same arguments with a default action, so a click on the banner
+/// makes `notify-send` print `default` and exit (libnotify 0.7.9 or later;
+/// it then waits until the banner is clicked or closed).
+#[cfg(any(test, target_os = "linux"))]
+pub fn with_click_action(mut args: Vec<String>) -> Vec<String> {
+    let at = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    args.insert(at, "--action=default=Open".to_string());
+    args
+}
+
+/// True when `notify-send`'s output says the banner itself was clicked.
+#[cfg(any(test, target_os = "linux"))]
+pub fn notify_send_clicked(stdout: &str) -> bool {
+    stdout.lines().any(|l| l.trim() == "default")
+}
+
+/// True when `notify-send` refused the arguments as unknown: a libnotify
+/// older than 0.7.9, which has no actions.
+#[cfg(any(test, target_os = "linux"))]
+pub fn notify_send_lacks_actions(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("unknown option") || s.contains("unrecognized option")
 }
 
 /// True when `gsettings get org.gnome.desktop.notifications show-banners`
@@ -769,14 +885,29 @@ fn say_builtin(line: &str, volume: u8) {
 }
 
 /// A GNOME banner through `notify-send`, with the freedesktop "message"
-/// sound unless the line is being spoken instead.
+/// sound unless the line is being spoken instead. `notify-send` waits on
+/// a thread of its own until the banner is clicked or closed, and a click
+/// opens `click` in Maya.
 #[cfg(target_os = "linux")]
-pub fn banner(title: &str, subtitle: &str, body: &str, sound: bool) {
+pub fn banner(title: &str, subtitle: &str, body: &str, sound: bool, click: BannerClick) {
     static MISSING: std::sync::Once = std::sync::Once::new();
-    let icon = app_icon_path();
-    if let Err(e) = Command::new("notify-send").args(notify_send_args(icon.as_deref(), title, subtitle, body)).stdin(Stdio::null()).output() {
-        crate::log::missing_once(&MISSING, &e, "notify", "notify-send is not installed, so no banners: install libnotify-bin");
-    }
+    static NO_ACTIONS: std::sync::Once = std::sync::Once::new();
+    let args = notify_send_args(app_icon_path().as_deref(), title, subtitle, body);
+    std::thread::spawn(move || {
+        let run = |args: &[String]| Command::new("notify-send").args(args).stdin(Stdio::null()).output();
+        match run(&with_click_action(args.clone())) {
+            Err(e) => crate::log::missing_once(&MISSING, &e, "notify", "notify-send is not installed, so no banners: install libnotify-bin"),
+            Ok(out) if !out.status.success() && notify_send_lacks_actions(&String::from_utf8_lossy(&out.stderr)) => {
+                NO_ACTIONS.call_once(|| crate::log::line("notify", "this notify-send has no actions, so a click on a banner does nothing: libnotify 0.7.9 or later has them"));
+                let _ = run(&args);
+            }
+            Ok(out) => {
+                if notify_send_clicked(&String::from_utf8_lossy(&out.stdout)) {
+                    clicked(&click);
+                }
+            }
+        }
+    });
     if sound {
         // Reaped on a thread: the sound must not hold up the watcher.
         if let Ok(mut child) = Command::new("canberra-gtk-play").args(["-i", "message"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
@@ -1392,6 +1523,53 @@ mod tests {
         assert_eq!(body_for(&bold), "Would you like me to commit?");
         let under = card("a", State::Awaiting, 1, "_Ready?_ ");
         assert_eq!(body_for(&under), "Ready?");
+    }
+
+    #[test]
+    fn a_click_book_hands_back_each_banners_click_once() {
+        let mut book = ClickBook::default();
+        let s = BannerClick::Session { session_id: "s1".into(), machine: Some("laptop".into()) };
+        let a = book.add(s.clone());
+        let b = book.add(BannerClick::Maya);
+        assert_ne!(a, b);
+        assert_eq!(book.take(&a), s);
+        // Read once: a second click (or an unknown banner) opens Maya alone.
+        assert_eq!(book.take(&a), BannerClick::Maya);
+        assert_eq!(book.take("from another run"), BannerClick::Maya);
+        assert_eq!(book.take(&b), BannerClick::Maya);
+    }
+
+    #[test]
+    fn a_click_book_forgets_its_oldest_banners_past_its_cap() {
+        let mut book = ClickBook::default();
+        let session = |n: usize| BannerClick::Session { session_id: format!("s{n}"), machine: None };
+        let ids: Vec<String> = (0..=ClickBook::CAP).map(|n| book.add(session(n))).collect();
+        assert_eq!(book.take(&ids[0]), BannerClick::Maya);
+        assert_eq!(book.take(&ids[1]), session(1));
+        assert_eq!(book.take(&ids[ClickBook::CAP]), session(ClickBook::CAP));
+    }
+
+    #[test]
+    fn a_sessions_banner_opens_that_session_on_its_machine() {
+        let mut c = card("s1", State::Awaiting, 100, "Allow Bash?");
+        assert_eq!(click_for(&c), BannerClick::Session { session_id: c.session_id.clone(), machine: None });
+        c.machine = Some("laptop".into());
+        assert_eq!(click_for(&c), BannerClick::Session { session_id: c.session_id.clone(), machine: Some("laptop".into()) });
+    }
+
+    #[test]
+    fn notify_send_gets_a_default_action_before_its_text() {
+        let args = with_click_action(notify_send_args(None, "a", "", "b"));
+        assert_eq!(args, ["--app-name", "Maya", "--action=default=Open", "--", "a", "b"].map(String::from).to_vec());
+    }
+
+    #[test]
+    fn notify_send_output_says_when_the_banner_was_clicked() {
+        assert!(notify_send_clicked("default\n"));
+        assert!(!notify_send_clicked(""));
+        assert!(!notify_send_clicked("defaults\n"));
+        assert!(notify_send_lacks_actions("Unknown option --action=default=Open"));
+        assert!(!notify_send_lacks_actions("GDBus.Error: no notification server"));
     }
 
     #[test]

@@ -5,7 +5,7 @@ import { answerGuard, stopGuard } from "./answer";
 import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { makeClickGuard } from "./clickguard";
 import { openModal, openTermViewer, refreshModal, setProgress } from "./modal";
-import { endedText, localNativeCard, openStarted, setNativeOpener } from "./nativeopen";
+import { bannerCard, endedText, localNativeCard, openStarted, setNativeOpener } from "./nativeopen";
 import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
 import { nextEnableDelay } from "./options";
@@ -363,6 +363,14 @@ async function start(): Promise<void> {
   await listen<{ term: number; dir: string; lines: string[] }>("native-ended", (e) => showToast(endedText(e.payload.dir, e.payload.lines), 10_000));
   // "Show me …" by voice for a session in a terminal Maya hosts.
   await listen<{ pid: number }>("open-session", (e) => void openNative(e.payload.pid));
+  // A click on a session's banner opens that session, if it still runs.
+  await listen<{ sessionId: string; machine: string | null }>("open-card", (e) => {
+    const card = bannerCard(cards, e.payload.sessionId, e.payload.machine);
+    if (!card) return;
+    closeNewSession();
+    closeResume();
+    void openModal(card);
+  });
   await listen<Card[]>("sessions", (e) => {
     cards = e.payload;
     for (const c of cards) if (c.state !== "awaiting") progress.reset(c.sessionId);
