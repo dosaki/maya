@@ -368,6 +368,7 @@ async function start(): Promise<void> {
     const card = bannerCard(cards, e.payload.sessionId, e.payload.machine);
     if (!card) return;
     closeNewSession();
+    closeResume();
     void openModal(card);
   });
   await listen<Card[]>("sessions", (e) => {

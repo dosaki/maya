@@ -9,9 +9,10 @@ use objc2::runtime::{Bool, ProtocolObject};
 use objc2::{define_class, msg_send, AllocAnyThread};
 use objc2_foundation::{NSBundle, NSError, NSObject, NSObjectProtocol, NSString};
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
+    UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent, UNNotification, UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse, UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
     UNUserNotificationCenterDelegate,
 };
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
@@ -95,8 +96,11 @@ pub fn start() {
 }
 
 /// Posts a banner under Maya; false when she cannot (not started from an
-/// app bundle), for the caller to use `osascript`. A banner macOS refuses
-/// later (banners not allowed) is shown through `osascript` instead.
+/// app bundle), for the caller to use `osascript`. macOS's current answer
+/// is read before each banner, since it can change in System Settings at
+/// any time: while Maya's banners are not allowed (macOS would take the
+/// request and show nothing), or when macOS refuses one, it is shown
+/// through `osascript` instead.
 pub fn post(title: &str, subtitle: &str, body: &str, sound: bool, click: BannerClick) -> bool {
     if !READY.load(Ordering::SeqCst) {
         return false;
@@ -110,14 +114,35 @@ pub fn post(title: &str, subtitle: &str, body: &str, sound: bool, click: BannerC
     }
     let id = BOOK.lock().map(|mut b| b.add(click)).unwrap_or_else(|_| "maya-banner".into());
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&NSString::from_str(&id), &content, None);
-    let (title, subtitle, body) = (title.to_string(), subtitle.to_string(), body.to_string());
-    let posted = RcBlock::new(move |err: *mut NSError| {
-        if !err.is_null() {
-            crate::log::line("notify", format!("macOS refused Maya's banner ({}): showing it through osascript", describe(err)));
-            let (title, subtitle, body) = (title.clone(), subtitle.clone(), body.clone());
-            std::thread::spawn(move || crate::notify::banner_via_osascript(&title, &subtitle, &body, sound));
+    let text = (title.to_string(), subtitle.to_string(), body.to_string());
+    let via_osascript = move |(title, subtitle, body): (String, String, String)| {
+        std::thread::spawn(move || crate::notify::banner_via_osascript(&title, &subtitle, &body, sound));
+    };
+    let settings = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+        // SAFETY: the framework hands a valid settings object.
+        let status = unsafe { settings.as_ref() }.authorizationStatus();
+        if !allowed(status) {
+            NOT_ALLOWED.call_once(|| crate::log::line("notify", "Maya's banners are not allowed in System Settings → Notifications → Maya: they go through osascript"));
+            via_osascript(text.clone());
+            return;
         }
+        let text = text.clone();
+        let posted = RcBlock::new(move |err: *mut NSError| {
+            if !err.is_null() {
+                crate::log::line("notify", format!("macOS refused Maya's banner ({}): showing it through osascript", describe(err)));
+                via_osascript(text.clone());
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, Some(&posted));
     });
-    UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&request, Some(&posted));
+    UNUserNotificationCenter::currentNotificationCenter().getNotificationSettingsWithCompletionHandler(&settings);
     true
+}
+
+static NOT_ALLOWED: std::sync::Once = std::sync::Once::new();
+
+/// True when macOS shows Maya's banners: allowed, or allowed quietly
+/// (provisional, to Notification Center only).
+fn allowed(status: UNAuthorizationStatus) -> bool {
+    matches!(status, UNAuthorizationStatus::Authorized | UNAuthorizationStatus::Provisional | UNAuthorizationStatus::Ephemeral)
 }
