@@ -72,35 +72,45 @@ return "not found""#,
     )
 }
 
-/// Brings the Terminal tab on `tty` and its window forward, then presses Esc
-/// (key code 53) through System Events once Terminal is frontmost (it answers
-/// "not front" and presses nothing if it never is): `do script` always ends with a
-/// carriage return, so it cannot send a bare Esc.
-pub fn applescript_press_escape(tty: &str) -> String {
-    format!(
-        r#"tell application "Terminal"
-  repeat with w in windows
-    repeat with t in tabs of w
-      if tty of t is "{tty}" then
-        set selected of t to true
-        set index of w to 1
-        activate
-        tell application "System Events"
-          repeat 20 times
-            if frontmost of application process "Terminal" then exit repeat
-            delay 0.05
-          end repeat
-          if not (frontmost of application process "Terminal") then return "not front"
-          key code 53
-        end tell
-        return "ok"
-      end if
-    end repeat
-  end repeat
-end tell
-return "not found""#
-    )
-}
+/// JavaScript for Automation that presses Esc (key code 53) in the Terminal
+/// tab on `argv[0]`, once Terminal is in front: `do script` always ends with
+/// a carriage return, so it cannot send a bare Esc, and a key sent to Terminal
+/// while it is in the background reaches no window. Maya brings Terminal
+/// forward first (`focus::focus_tty`); macOS then puts Terminal's last active
+/// window on top, so the script raises the tab's window again and presses Esc
+/// only once that window has had the keyboard for two checks in a row, else
+/// it answers "not front" and presses nothing: a key in another window could
+/// stop another session. Then, even when a step failed (no Accessibility
+/// permission, the window closed), the app with pid `argv[1]` (the one in
+/// front before, 0 for none) comes back.
+pub const JXA_PRESS_ESCAPE: &str = r#"ObjC.import('AppKit');
+function run(argv) {
+  const tty = argv[0], before = parseInt(argv[1], 10);
+  const term = Application('Terminal'), events = Application('System Events');
+  const win = term.windows().find(w => w.tabs().some(t => t.tty() === tty));
+  if (!win) return 'not found';
+  const inFront = () => events.processes['Terminal'].frontmost();
+  const ready = () => inFront() && win.frontmost() && win.selectedTab().tty() === tty;
+  try {
+    let steady = 0;
+    for (let i = 0; i < 40 && steady < 2; i++) {
+      if (inFront() && !win.frontmost()) win.index = 1;
+      steady = ready() ? steady + 1 : 0;
+      delay(0.05);
+    }
+    if (steady < 2) return 'not front';
+    delay(0.1);
+    if (!ready()) return 'not front';
+    events.keyCode(53);
+    delay(0.15);
+    return 'ok';
+  } finally {
+    if (before > 0) {
+      const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(before);
+      if (!app.isNil() && app.bundleIdentifier.js !== 'com.apple.Terminal') app.activateWithOptions($.NSApplicationActivateIgnoringOtherApps);
+    }
+  }
+}"#;
 
 /// What osascript says when Maya may not send keys (-1719, -25211, 1002).
 fn needs_accessibility(stderr: &str) -> bool {
@@ -207,11 +217,18 @@ impl Terminal for TerminalApp {
         type_into_tty(tty, text)
     }
     /// Only Esc: through System Events, which needs Accessibility permission.
+    /// Terminal comes forward with only the tab's window, and the app that
+    /// was in front comes back after.
     fn press_keys(&self, tty: &str, keys: &str) -> Result<(), String> {
         if keys != maya_core::answer::ESC {
             return Err("Only Esc can be pressed in Terminal.app.".into());
         }
-        let out = Command::new("osascript").arg("-e").arg(applescript_press_escape(tty)).output().map_err(|e| format!("could not run osascript: {e}"))?;
+        let before = crate::focus::frontmost_pid().unwrap_or(0);
+        crate::focus::focus_tty(tty)?;
+        let out = Command::new("osascript")
+            .args(["-l", "JavaScript", "-e", JXA_PRESS_ESCAPE, tty, &before.to_string()])
+            .output()
+            .map_err(|e| format!("could not run osascript: {e}"))?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         if !out.status.success() {
             if needs_accessibility(&stderr) {
@@ -221,7 +238,7 @@ impl Terminal for TerminalApp {
         }
         match String::from_utf8_lossy(&out.stdout).trim() {
             "ok" => Ok(()),
-            "not front" => Err("Terminal did not come to the front, so Esc was not pressed.".into()),
+            "not front" => Err("Terminal did not bring the session's window to the front, so Esc was not pressed.".into()),
             _ => Err(format!("No Terminal tab found for {tty}.")),
         }
     }
@@ -395,12 +412,22 @@ mod tests {
     }
 
     #[test]
-    fn escape_script_targets_the_tab_and_presses_key_code_53() {
-        let s = applescript_press_escape("/dev/ttys004");
-        assert!(s.contains("tty of t is \"/dev/ttys004\""), "{s}");
-        assert!(s.contains("key code 53"), "{s}");
-        assert!(!s.contains("do script"), "{s}");
-        assert!(s.find("frontmost of application process").unwrap() < s.find("key code 53").unwrap(), "{s}");
+    fn escape_is_pressed_only_in_the_tabs_window_and_without_raising_every_window() {
+        let s = JXA_PRESS_ESCAPE;
+        assert!(s.contains("t.tty() === tty"), "{s}");
+        assert!(s.contains("keyCode(53)"), "{s}");
+        assert!(!s.contains("doScript"), "{s}");
+        // AppleScript's `activate` raises every Terminal window; Maya brings
+        // Terminal forward itself, with only the tab's window.
+        assert!(!s.contains("activate()"), "{s}");
+        assert!(!s.contains("NSApplicationActivateAllWindows"), "{s}");
+        // Esc only after the check that the tab's window is in front.
+        assert!(s.find("const ready").unwrap() < s.find("keyCode(53)").unwrap(), "{s}");
+        assert!(s.find("if (!ready()) return").unwrap() < s.find("keyCode(53)").unwrap(), "{s}");
+        // The app that was in front comes back, whatever happened: even when
+        // the key press throws (no Accessibility permission).
+        let (press, finally, restore) = (s.find("keyCode(53)").unwrap(), s.find("} finally {").unwrap(), s.find("runningApplicationWithProcessIdentifier").unwrap());
+        assert!(s.find("try {").unwrap() < press && press < finally && finally < restore, "{s}");
     }
 
     #[test]

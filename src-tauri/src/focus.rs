@@ -27,6 +27,12 @@ pub fn activate_app_in_process(bundle_id: &str) -> bool {
     target.activateWithOptions(NSApplicationActivationOptions::empty())
 }
 
+/// The process id of the app in front, if any.
+pub fn frontmost_pid() -> Option<i32> {
+    use objc2_app_kit::NSWorkspace;
+    NSWorkspace::sharedWorkspace().frontmostApplication().map(|app| app.processIdentifier())
+}
+
 /// Runs the in-process activation on the main thread and waits for its answer.
 fn activate_from_main_thread(bundle_id: &str) -> Option<bool> {
     let app = APP.get()?;
