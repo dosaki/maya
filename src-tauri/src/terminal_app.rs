@@ -80,8 +80,9 @@ return "not found""#,
 /// window on top, so the script raises the tab's window again and presses Esc
 /// only once that window has had the keyboard for two checks in a row, else
 /// it answers "not front" and presses nothing: a key in another window could
-/// stop another session. Then the app with pid `argv[1]` (the one in front
-/// before, 0 for none) comes back.
+/// stop another session. Then, even when a step failed (no Accessibility
+/// permission, the window closed), the app with pid `argv[1]` (the one in
+/// front before, 0 for none) comes back.
 pub const JXA_PRESS_ESCAPE: &str = r#"ObjC.import('AppKit');
 function run(argv) {
   const tty = argv[0], before = parseInt(argv[1], 10);
@@ -90,26 +91,25 @@ function run(argv) {
   if (!win) return 'not found';
   const inFront = () => events.processes['Terminal'].frontmost();
   const ready = () => inFront() && win.frontmost() && win.selectedTab().tty() === tty;
-  let steady = 0;
-  for (let i = 0; i < 40 && steady < 2; i++) {
-    if (inFront() && !win.frontmost()) win.index = 1;
-    steady = ready() ? steady + 1 : 0;
-    delay(0.05);
-  }
-  let result = 'not front';
-  if (steady >= 2) {
+  try {
+    let steady = 0;
+    for (let i = 0; i < 40 && steady < 2; i++) {
+      if (inFront() && !win.frontmost()) win.index = 1;
+      steady = ready() ? steady + 1 : 0;
+      delay(0.05);
+    }
+    if (steady < 2) return 'not front';
     delay(0.1);
-    if (ready()) {
-      events.keyCode(53);
-      result = 'ok';
-      delay(0.15);
+    if (!ready()) return 'not front';
+    events.keyCode(53);
+    delay(0.15);
+    return 'ok';
+  } finally {
+    if (before > 0) {
+      const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(before);
+      if (!app.isNil() && app.bundleIdentifier.js !== 'com.apple.Terminal') app.activateWithOptions($.NSApplicationActivateIgnoringOtherApps);
     }
   }
-  if (before > 0) {
-    const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(before);
-    if (!app.isNil() && app.bundleIdentifier.js !== 'com.apple.Terminal') app.activateWithOptions($.NSApplicationActivateIgnoringOtherApps);
-  }
-  return result;
 }"#;
 
 /// What osascript says when Maya may not send keys (-1719, -25211, 1002).
@@ -423,9 +423,11 @@ mod tests {
         assert!(!s.contains("NSApplicationActivateAllWindows"), "{s}");
         // Esc only after the check that the tab's window is in front.
         assert!(s.find("const ready").unwrap() < s.find("keyCode(53)").unwrap(), "{s}");
-        assert!(s.find("if (ready())").unwrap() < s.find("keyCode(53)").unwrap(), "{s}");
-        // The app that was in front comes back, whatever happened.
-        assert!(s.find("keyCode(53)").unwrap() < s.find("runningApplicationWithProcessIdentifier").unwrap(), "{s}");
+        assert!(s.find("if (!ready()) return").unwrap() < s.find("keyCode(53)").unwrap(), "{s}");
+        // The app that was in front comes back, whatever happened: even when
+        // the key press throws (no Accessibility permission).
+        let (press, finally, restore) = (s.find("keyCode(53)").unwrap(), s.find("} finally {").unwrap(), s.find("runningApplicationWithProcessIdentifier").unwrap());
+        assert!(s.find("try {").unwrap() < press && press < finally && finally < restore, "{s}");
     }
 
     #[test]
