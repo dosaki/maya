@@ -1,3 +1,9 @@
+# 0.49.2
+
+## Fixed
+
+- On a Mac, Stop for a session in Terminal brought every Terminal window to the front and often pressed Esc in a different window, so the session did not stop, and another session could stop instead. Now only the session's window comes forward, Esc goes to that window only, and the app you were in comes back to the front. If Maya cannot bring the session's window to the front, she presses nothing and tells you.
+
 # 0.49.1
 
 ## Fixed
