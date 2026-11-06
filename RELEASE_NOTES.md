@@ -1,3 +1,9 @@
+# 0.49.3
+
+## Fixed
+
+- A session started in a Native terminal got no card on the board when Maya had been opened from inside a Claude Code session. When you closed its terminal window, the session seemed to end, but it kept running and you could not open it again. Now it gets its card as usual.
+
 # 0.49.2
 
 ## Fixed
