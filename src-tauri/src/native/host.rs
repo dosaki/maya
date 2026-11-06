@@ -376,6 +376,9 @@ impl NativeHost {
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        for k in maya_core::launch::nested_session_vars(std::env::vars()) {
+            cmd.env_remove(k);
+        }
         // Inside an AppImage, its variables and the entries of `PATH`,
         // `LD_LIBRARY_PATH`, `XDG_*` and the rest inside its mount go.
         #[cfg(target_os = "linux")]

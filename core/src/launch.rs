@@ -285,6 +285,19 @@ pub fn clean_env(vars: impl Iterator<Item = (String, String)>) -> Vec<(String, S
     vars.filter(|(k, _)| k != "ANTHROPIC_API_KEY" && k != "CLAUDECODE" && !k.starts_with("CLAUDE_CODE_")).collect()
 }
 
+/// The variables to drop from a session Maya starts in a terminal it hosts,
+/// when Maya itself was started inside a Claude Code session (`CLAUDECODE`
+/// set): that session's own, which mark the new one as its child, so it
+/// never registers and no card shows it. Otherwise none: the user's own
+/// Claude settings reach their sessions.
+pub fn nested_session_vars(vars: impl Iterator<Item = (String, String)>) -> Vec<String> {
+    let vars: Vec<String> = vars.map(|(k, _)| k).collect();
+    if !vars.iter().any(|k| k == "CLAUDECODE") {
+        return Vec::new();
+    }
+    vars.into_iter().filter(|k| k == "CLAUDECODE" || k == "CLAUDE_PID" || k == "CLAUDE_EFFORT" || k.starts_with("CLAUDE_CODE_")).collect()
+}
+
 /// The arguments for one non-interactive turn of `agent`: `user`, answered
 /// under `system`, with no tools, nothing persisted, one turn, and the
 /// agent's JSON envelope on stdout (see `final_text`). Codex and
@@ -952,6 +965,15 @@ mod tests {
         ];
         let kept: Vec<String> = clean_env(vars.into_iter()).into_iter().map(|(k, _)| k).collect();
         assert_eq!(kept, vec!["PATH", "HOME"]);
+    }
+
+    #[test]
+    fn a_session_started_inside_claude_drops_its_variables() {
+        let vars = |pairs: &[&str]| pairs.iter().map(|k| (k.to_string(), "v".to_string())).collect::<Vec<_>>().into_iter();
+        let inside = vars(&["PATH", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_EFFORT", "ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR"]);
+        assert_eq!(nested_session_vars(inside), ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID", "CLAUDE_EFFORT"]);
+        // Maya started the usual way: the user's own Claude settings stay.
+        assert!(nested_session_vars(vars(&["PATH", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_EFFORT"])).is_empty());
     }
 
     #[test]
