@@ -127,6 +127,7 @@ jobs:
         run: sh scripts/build-ear.sh ${{ matrix.target }}
       - name: Test
         if: inputs.test
+        timeout-minutes: 45
         run: |
           pnpm test
           sh scripts/test-ear.sh
@@ -203,8 +204,12 @@ jobs:
           workspaces: .
           # whisper-rs-sys does not rebuild when GGML_NATIVE changes, so a
           # cache from before scripts/build-ear.sh set it would keep a
-          # whisper.cpp tuned for the runner's CPU.
-          key: ggml-portable
+          # whisper.cpp tuned for the runner's CPU. "-tests": the cache main
+          # saves holds the test build too (see "Build the tests").
+          key: ggml-portable-tests
+          # Only main saves: a pull request reads main's cache, and its own
+          # (about 1 GB here) would push main's out of the 10 GB the repo gets.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       # maya-ear (whisper.cpp built in) and maya-hook, as Tauri sidecars.
@@ -212,9 +217,16 @@ jobs:
         run: sh scripts/build-ear.sh x86_64-pc-windows-msvc
       - name: Test
         if: inputs.test
+        timeout-minutes: 45
         run: |
           pnpm test
           cargo test -p maya-core -p maya-hook -p maya-ear -p maya
+      # A release does not run the tests, but builds them, so the cache it
+      # saves has them: without it every pull request compiled them from
+      # scratch here, close to 20 minutes on a Windows runner.
+      - name: Build the tests
+        if: ${{ !inputs.test }}
+        run: cargo test --no-run -p maya-core -p maya-hook -p maya-ear -p maya
       - name: Build the installers
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.sign && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
@@ -280,6 +292,7 @@ jobs:
         run: sh scripts/build-ear.sh ${{ matrix.target }}
       - name: Test
         if: inputs.test && matrix.arch == 'aarch64'
+        timeout-minutes: 45
         run: |
           pnpm test
           sh scripts/test-ear.sh
@@ -405,6 +418,7 @@ jobs:
         run: sh scripts/check-android-icons.sh
       - name: Test
         if: inputs.test
+        timeout-minutes: 45
         run: |
           pnpm test
           cargo test -p maya-mobile
