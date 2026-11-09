@@ -405,3 +405,29 @@ export interface WorkStarted {
   nativeTerm: number | null;
   notice: string | null;
 }
+
+/** Whose issues a rule picks up. */
+export type ItemAssignee = { kind: "me" } | { kind: "anyone" } | { kind: "user"; login: string };
+
+/** One rule for the Issues tab: the assignee, the labels and the repositories (empty = any). */
+export interface ItemRule {
+  assignee: ItemAssignee;
+  labels: string[];
+  repos: string[];
+}
+
+/** The Work Items settings of one service, as the config stores them. */
+export interface ForgeItems {
+  enabled: boolean;
+  rules: ItemRule[];
+  statusLabels: string[];
+  startStatus: string | null;
+  trackerRepos: string[];
+}
+
+/** `workItems` in the config; an older config lacks it. */
+export interface WorkItemsConfig {
+  github: ForgeItems;
+  gitlab: ForgeItems;
+  prompt: string;
+}

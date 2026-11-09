@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, isLinux, isWindows, recognizerOptions, secretStore, thisComputerLower } from "./platform";
-import type { ColorTheme, GitProvider, Harness, NewSessionTerminal, ViewerTheme } from "./types";
+import type { ColorTheme, ForgeItems, GitProvider, Harness, ItemRule, NewSessionTerminal, ViewerTheme, WorkItemsConfig } from "./types";
 import { setViewerTheme } from "./modal";
 import { COLOR_THEMES, applyColorTheme, asColorTheme } from "./theme";
 import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys, removeCombo, setKeyBindings, type KeyBindings } from "./keys";
@@ -156,6 +156,8 @@ export interface SettingsModel {
   settingsGroup?: SettingsGroup;
   /** GitHub then GitLab, from `gitConnections`. */
   git?: GitConnectionJson[];
+  /** The Work Items settings; the defaults when absent. */
+  workItems?: WorkItemsConfig;
   /** Whether a pasted token is stored, and the last Test's outcome. */
   gitStatus?: Record<GitProvider, { hasToken: boolean; test?: string | null }>;
   /** This install can check for updates (`update_kind` is not `off`). */
@@ -218,6 +220,11 @@ export interface SettingsHandlers {
   onColorTheme?(t: ColorTheme): void;
   onKeys?(k: KeyBindings): void;
   onNewSessionTerminal?(t: NewSessionTerminal): void;
+  /** One service's Work Items settings, read from the page, to save. */
+  onWorkItems?(forge: GitProvider, items: ForgeItems): void;
+  onWorkPrompt?(text: string): void;
+  /** Shows another Settings group. */
+  onOpenGroup?(group: SettingsGroup): void;
   onGitEnabled?(p: GitProvider, on: boolean): void;
   onGitTokenKind?(p: GitProvider, kind: "stored" | "env"): void;
   onGitEnvName?(p: GitProvider, name: string): void;
@@ -320,7 +327,24 @@ export function gitConnections(raw: GitConnectionJson[] | null | undefined): Git
   });
 }
 
+/** The Work Items settings as the Rust side defaults them: one rule for my issues. */
+export function workItemsConfig(raw: Partial<WorkItemsConfig> | null | undefined): WorkItemsConfig {
+  const forge = (f?: ForgeItems): ForgeItems => f ?? { enabled: true, rules: [{ assignee: { kind: "me" }, labels: [], repos: [] }], statusLabels: [], startStatus: null, trackerRepos: [] };
+  return { github: forge(raw?.github), gitlab: forge(raw?.gitlab), prompt: raw?.prompt ?? "" };
+}
+
+const WORK_ITEMS_HINT: Record<GitProvider, string> = {
+  github: "Start assigns the issue and sets its status: the token needs Issues: read and write (fine-grained) or repo (classic).",
+  gitlab: "Start assigns the issue and sets its status: the token needs the api scope.",
+};
+
+/** "a, b,,c" as ["a", "b", "c"]. */
+function commaList(text: string): string[] {
+  return text.split(",").map((t) => t.trim()).filter((t) => t !== "");
+}
+
 interface ConfigJson {
+  workItems?: WorkItemsConfig;
   viewerTheme?: ViewerTheme;
   colorTheme?: ColorTheme;
   keys?: KeyBindings | null;
@@ -357,6 +381,7 @@ export const SETTINGS_GROUPS = [
   ["sessions", "Sessions"],
   ["git", "Git"],
   ["reviews", "Pull requests"],
+  ["workItems", "Work Items"],
   ["notifications", "Notifications"],
   ["voice", "Voice"],
   ["network", "Network"],
@@ -648,7 +673,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   nav.append(...navButtons);
   content.append(...Object.values(sections));
   show(model.settingsGroup ?? "general");
-  const { general, keyboard, sessions, git, reviews, notifications, voice, network, devices, debug, releaseNotes } = sections;
+  const { general, keyboard, sessions, git, reviews, workItems, notifications, voice, network, devices, debug, releaseNotes } = sections;
   const speaking = subsection("Speaking");
   const listening = subsection("Listening");
   voice.append(speaking, listening);
@@ -1051,6 +1076,214 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   gitHint.className = "settings__hint";
   gitHint.textContent = "Maya reads pull requests and merge requests with these tokens. GitHub needs the repo scope; GitLab needs read_api. Reviews clone over SSH or HTTPS with your own git credentials.";
   git.append(gitHint);
+
+  const workItemsConfigNow = model.workItems ?? workItemsConfig(null);
+  const connections = model.git ?? gitConnections(null);
+  for (const forge of ["github", "gitlab"] as const) {
+    const cfg = workItemsConfigNow[forge];
+    const gitOn = connections.find((c) => c.provider === forge)?.enabled === true;
+    const box = document.createElement("div");
+    box.className = "settings__git settings__workitems";
+    box.dataset.forge = forge;
+
+    const onLabel = document.createElement("label");
+    onLabel.className = "settings__check";
+    const on = document.createElement("input");
+    on.type = "checkbox";
+    on.name = `wi-${forge}-enabled`;
+    on.checked = cfg.enabled;
+    onLabel.append(on, document.createTextNode(` ${GIT_LABEL[forge]}`));
+    box.append(onLabel);
+
+    if (!gitOn) {
+      const off = document.createElement("div");
+      off.className = "settings__hint";
+      off.append(document.createTextNode(`${GIT_LABEL[forge]} is off in Settings → Git. `));
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "settings__link";
+      open.dataset.action = "wi-open-git";
+      open.textContent = "Open Git settings";
+      open.addEventListener("click", () => h.onOpenGroup?.("git"));
+      off.append(open);
+      box.append(off);
+    }
+
+    const rulesBox = document.createElement("div");
+    rulesBox.className = "settings__rules";
+    const caption = document.createElement("div");
+    caption.className = "settings__hint";
+    caption.textContent = "Issues to pick up, by rule";
+    rulesBox.append(caption);
+
+    const statusLabel = document.createElement("label");
+    statusLabel.textContent = "Status labels (in order, comma-separated)";
+    const status = document.createElement("input");
+    status.type = "text";
+    status.name = "wi-statusLabels";
+    status.value = cfg.statusLabels.join(", ");
+    statusLabel.append(status);
+
+    const startLabel = document.createElement("label");
+    startLabel.textContent = "On Start, set status to";
+    const start = document.createElement("select");
+    start.name = "wi-startStatus";
+    const fillStart = (labels: string[], chosen: string | null) => {
+      start.replaceChildren();
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = "Leave as it is";
+      start.append(none);
+      for (const l of labels) {
+        const o = document.createElement("option");
+        o.value = l;
+        o.textContent = l;
+        start.append(o);
+      }
+      start.value = chosen !== null && labels.includes(chosen) ? chosen : "";
+    };
+    fillStart(cfg.statusLabels, cfg.startStatus);
+    startLabel.append(start);
+
+    const trackerLabel = document.createElement("label");
+    trackerLabel.textContent = "Tracker-only repositories (comma-separated)";
+    const tracker = document.createElement("input");
+    tracker.type = "text";
+    tracker.name = "wi-trackerRepos";
+    tracker.value = cfg.trackerRepos.join(", ");
+    trackerLabel.append(tracker);
+
+    /** The settings as the page shows them; a rule for someone with no login yet reads as such. */
+    const read = (): ForgeItems => ({
+      enabled: on.checked,
+      rules: [...rulesBox.querySelectorAll<HTMLElement>(".settings__rule")].map((r) => {
+        const kind = r.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!.value;
+        const login = r.querySelector<HTMLInputElement>("input[name=wi-login]")!.value.trim();
+        return {
+          assignee: kind === "user" ? { kind: "user", login } : kind === "anyone" ? { kind: "anyone" } : { kind: "me" },
+          labels: commaList(r.querySelector<HTMLInputElement>("input[name=wi-labels]")!.value),
+          repos: commaList(r.querySelector<HTMLInputElement>("input[name=wi-repos]")!.value),
+        };
+      }),
+      statusLabels: commaList(status.value),
+      startStatus: start.value === "" ? null : start.value,
+      trackerRepos: commaList(tracker.value),
+    });
+    const save = (items: ForgeItems = read()) => h.onWorkItems?.(forge, items);
+
+    const addRule = (rule: ItemRule) => {
+      const r = document.createElement("div");
+      r.className = "settings__rule";
+      const field = (text: string, control: HTMLElement) => {
+        const f = document.createElement("div");
+        f.className = "settings__rule-field";
+        const c = document.createElement("span");
+        c.className = "settings__hint";
+        c.textContent = text;
+        f.append(c, control);
+        return f;
+      };
+      const assignee = document.createElement("select");
+      assignee.name = "wi-assignee";
+      for (const [value, text] of [["me", "Me"], ["user", "Someone"], ["anyone", "Anyone"]]) {
+        const o = document.createElement("option");
+        o.value = value;
+        o.textContent = text;
+        assignee.append(o);
+      }
+      assignee.value = rule.assignee.kind;
+      const login = document.createElement("input");
+      login.type = "text";
+      login.name = "wi-login";
+      login.placeholder = "login";
+      login.setAttribute("aria-label", "Login");
+      login.value = rule.assignee.kind === "user" ? rule.assignee.login : "";
+      login.hidden = rule.assignee.kind !== "user";
+      // Someone with no login yet cannot be saved: wait for the login.
+      assignee.addEventListener("change", () => {
+        login.hidden = assignee.value !== "user";
+        if (assignee.value !== "user") save();
+      });
+      login.addEventListener("change", () => save());
+      const labels = document.createElement("input");
+      labels.type = "text";
+      labels.name = "wi-labels";
+      labels.placeholder = "bug, urgent";
+      labels.value = rule.labels.join(", ");
+      labels.addEventListener("change", () => save());
+      const repos = document.createElement("input");
+      repos.type = "text";
+      repos.name = "wi-repos";
+      repos.placeholder = "any repository";
+      repos.value = rule.repos.join(", ");
+      repos.addEventListener("change", () => save());
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "settings__link";
+      remove.dataset.action = "wi-remove-rule";
+      remove.setAttribute("aria-label", "Remove rule");
+      remove.textContent = "✕";
+      remove.addEventListener("click", () => {
+        r.remove();
+        save();
+      });
+      const who = document.createElement("div");
+      who.className = "settings__rule-who";
+      who.append(assignee, login);
+      r.append(field("Assignee", who), field("Labels", labels), field("Repositories", repos), remove);
+      rulesBox.append(r);
+    };
+    for (const rule of cfg.rules) addRule(rule);
+
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "settings__link";
+    add.dataset.action = "wi-add-rule";
+    add.textContent = "+ Add rule";
+    add.addEventListener("click", () => {
+      const items = read();
+      items.rules.push({ assignee: { kind: "me" }, labels: [], repos: [] });
+      save(items);
+    });
+    rulesBox.append(add);
+
+    on.addEventListener("change", () => save());
+    status.addEventListener("change", () => {
+      // The On Start choices follow the labels just typed.
+      fillStart(commaList(status.value), start.value);
+      save();
+    });
+    start.addEventListener("change", () => save());
+    tracker.addEventListener("change", () => save());
+
+    box.append(rulesBox, statusLabel, startLabel, trackerLabel);
+    const hint = document.createElement("div");
+    hint.className = "settings__hint";
+    hint.textContent = WORK_ITEMS_HINT[forge];
+    box.append(hint);
+
+    if (!gitOn) {
+      for (const el of box.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select, button")) {
+        if (el !== on && el.dataset.action !== "wi-open-git") el.disabled = true;
+      }
+    }
+    workItems.append(box);
+  }
+
+  const workLabel = document.createElement("label");
+  workLabel.textContent = "Work prompt (for the Start button)";
+  const workInput = document.createElement("textarea");
+  workInput.name = "workPrompt";
+  workInput.rows = 4;
+  workInput.value = workItemsConfigNow.prompt;
+  workInput.addEventListener("change", () => h.onWorkPrompt?.(workInput.value.trim()));
+  workLabel.append(workInput);
+  workItems.append(workLabel);
+  const workHint = document.createElement("div");
+  workHint.className = "settings__hint";
+  workHint.dataset.for = "workPrompt";
+  workHint.textContent = "Blank uses the built-in prompt. {id}, {title}, {url}, {description} and {repo} are filled in.";
+  workItems.append(workHint);
 
   const speakLabel = document.createElement("label");
   speakLabel.className = "settings__check";
@@ -1772,6 +2005,15 @@ export async function initSettings(): Promise<void> {
     }
   };
 
+  const saveWorkItems = (patch: (w: WorkItemsConfig) => void) =>
+    run(async () => {
+      const fresh = await invoke<ConfigJson>("get_config");
+      const workItems = workItemsConfig(fresh.workItems);
+      patch(workItems);
+      const c = await invoke<ConfigJson>("set_config", { config: { ...fresh, workItems } });
+      applyConfig(c);
+    });
+
   /** Applies `change` to one connection of the freshest config and saves the list. */
   const saveGit = (p: GitProvider, change: (c: GitConnectionJson) => void) =>
     run(async () => {
@@ -1819,6 +2061,7 @@ export async function initSettings(): Promise<void> {
     model.recognizer = c.recognizer;
     model.whisperModel = c.whisperModel;
     model.git = gitConnections(c.git);
+    model.workItems = workItemsConfig(c.workItems);
     model.viewerTheme = c.viewerTheme ?? "chat";
     setViewerTheme(model.viewerTheme);
     model.colorTheme = asColorTheme(c.colorTheme);
@@ -1875,6 +2118,9 @@ export async function initSettings(): Promise<void> {
   };
 
   const handlers: SettingsHandlers = {
+    onWorkItems: (forge, items) => void saveWorkItems((w) => { w[forge] = items; }),
+    onWorkPrompt: (text) => void saveWorkItems((w) => { w.prompt = text; }),
+    onOpenGroup: (group) => document.dispatchEvent(new CustomEvent(OPEN_SETTINGS_GROUP, { detail: group })),
     onGitEnabled: (p, on) => void saveGit(p, (c) => { c.enabled = on; }),
     onGitBaseUrl: (url) => void saveGit("gitlab", (c) => { c.baseUrl = url || null; }),
     onGitClone: (p, protocol) => void saveGit(p, (c) => { c.clone = protocol; }),
