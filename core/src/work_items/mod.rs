@@ -1,6 +1,7 @@
 //! Work items: the issues of a forge (or a custom tool), in one shape.
 
 pub mod github;
+pub mod gitlab;
 
 use crate::config::GitProvider;
 use serde::{Deserialize, Serialize};
