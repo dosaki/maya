@@ -879,52 +879,123 @@ pub fn resume_relayed(l: &Local, agent: model::Harness, dir: &str, session_id: &
 /// folder. For an agent that takes no name on its command line the review
 /// name waits in the store, as `start_session`'s does.
 pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, String> {
-    let (agent, clones, live, maya_dir, template, agents, sites) = {
+    let (agent, clones, live, template, agents, sites) = {
         let store = l.store.lock().unwrap();
-        (store.config.brain(), store.config.clones_dir_path(), store.live_cwds(), store.claude_dir().join("maya"), store.config.review_prompt.clone(), store.agents_source(), crate::forge::sites(&store.config.git_connections()))
+        (store.config.brain(), store.config.clones_dir_path(), store.live_cwds(), store.config.review_prompt.clone(), store.agents_source(), crate::forge::sites(&store.config.git_connections()))
     };
     let site = sites.into_iter().find(|s| s.provider == pr.forge).ok_or_else(|| format!("Turn on {} in Settings → Git first.", pr.forge.label()))?;
     if agent != model::Harness::ClaudeCode && !agents().iter().any(|a| a.harness == agent) {
         return Err(format!("{} is not installed on this machine.", launch::label(agent)));
     }
     let target = crate::reviews::resolve_target(&clones, &site, &pr.repo, pr.number)?;
-    // Live sessions report their folder with symlinks resolved (a linked
-    // clones directory); the plain path is kept for a folder not made yet.
-    let physical = std::fs::canonicalize(&target.dir).unwrap_or_else(|_| target.dir.clone());
-    if crate::reviews::is_busy(&target.dir, &live) || crate::reviews::is_busy(&physical, &live) {
+    if is_busy_folder(&target.dir, &live) {
         return Err(format!("A review of {} {}{} is already running.", pr.repo_name(), pr.forge.sigil(), pr.number));
     }
     // The terminal opens in the clones root, so it must exist (a terminal
     // cannot start in a missing folder).
-    std::fs::create_dir_all(&clones).map_err(|e| format!("Could not create the clones folder {}: {e}.", clones.display()))?;
-    let url = crate::forge::clone_url_for(&site, pr);
+    create_clones_dir(&clones)?;
+    let steps = crate::reviews::git_steps(&target, &crate::forge::clone_url_for(&site, pr));
+    let prompt = crate::reviews::render_prompt(&template, pr, !target.legacy);
+    launch_in_clone(l, agent, &clones, &target.dir, steps, &crate::reviews::session_name(pr.forge, &pr.repo, pr.number), &prompt)
+}
+
+/// What starting a work item needs, once every refusal known in advance has passed.
+struct WorkItemPlan {
+    agent: model::Harness,
+    clones: PathBuf,
+    template: String,
+    site: crate::forge::ForgeSite,
+    target: crate::work_items::start::WorkTarget,
+}
+
+fn work_item_plan(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::work_items::ItemRepo) -> Result<WorkItemPlan, String> {
+    use crate::work_items::start;
+    let (agent, clones, live, template, agents, sites) = {
+        let store = l.store.lock().unwrap();
+        (store.config.brain(), store.config.clones_dir_path(), store.live_cwds(), store.config.work_items.prompt.clone(), store.agents_source(), crate::forge::sites(&store.config.git_connections()))
+    };
+    let site = sites.into_iter().find(|s| s.provider == repo.forge).ok_or_else(|| format!("Turn on {} in Settings → Git first.", repo.forge.label()))?;
+    if agent != model::Harness::ClaudeCode && !agents().iter().any(|a| a.harness == agent) {
+        return Err(format!("{} is not installed on this machine.", launch::label(agent)));
+    }
+    let number = item.number.ok_or_else(|| format!("{} has no number to name its folder by.", item.id))?;
+    let target = start::resolve_target(&clones, &site, &repo.path, number, &start::branch_name(item))?;
+    if is_busy_folder(&target.dir, &live) {
+        return Err(format!("A session is already working on {}.", item.id));
+    }
+    Ok(WorkItemPlan { agent, clones, template, site, target })
+}
+
+/// The refusals `start_work_item` would give before it changes anything:
+/// the service off, the agent missing, no number, no place for the
+/// worktree, or a session already in its folder. Start asks this before it
+/// writes to the tracker.
+pub fn work_item_preflight(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::work_items::ItemRepo) -> Result<(), String> {
+    work_item_plan(l, item, repo).map(|_| ())
+}
+
+/// Opens a terminal working on `item` with Maya's agent, in a worktree of
+/// `repo`'s one clone (the one reviews use) on the item's own branch.
+/// Returns the folder. The session is named `issue <id>`.
+pub fn start_work_item(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::work_items::ItemRepo) -> Result<String, String> {
+    use crate::work_items::{start, started};
+    let WorkItemPlan { agent, clones, template, site, target } = work_item_plan(l, item, repo)?;
+    create_clones_dir(&clones)?;
+    let clone_url = match site.clone {
+        crate::config::CloneProtocol::Ssh => site.ssh_clone_url(&repo.path),
+        crate::config::CloneProtocol::Https => site.clone_url(&repo.path),
+    };
+    let steps = start::git_steps(&target, &clone_url);
+    let prompt = start::render_prompt(&template, item, &repo.path);
+    launch_in_clone(l, agent, &clones, &target.dir, steps, &started::session_name(&item.id), &prompt)
+}
+
+/// True when a live session works in `dir` or below it. Live sessions
+/// report their folder with symlinks resolved (a linked clones directory);
+/// the plain path is kept for a folder not made yet.
+fn is_busy_folder(dir: &Path, live: &[String]) -> bool {
+    let physical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    crate::reviews::is_busy(dir, live) || crate::reviews::is_busy(&physical, live)
+}
+
+fn create_clones_dir(clones: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(clones).map_err(|e| format!("Could not create the clones folder {}: {e}.", clones.display()))
+}
+
+/// Starts `agent` in `dir`, a folder the git `steps` make under the clones
+/// directory `clones` (which exists), on `prompt`, as a session named
+/// `session`. OpenCode's session is created on its server first, so the
+/// core runs the steps itself; the others get a terminal in `clones` that
+/// runs them and then the agent. For an agent that takes no name on its
+/// command line the name waits in the store. Returns `dir`.
+fn launch_in_clone(l: &Local, agent: model::Harness, clones: &Path, dir: &Path, steps: Vec<Vec<String>>, session: &str, prompt: &str) -> Result<String, String> {
+    let (maya_dir, agents) = {
+        let store = l.store.lock().unwrap();
+        (store.claude_dir().join("maya"), store.agents_source())
+    };
     if agent == model::Harness::OpenCode {
-        // OpenCode's session is created on its server first, so it needs the
-        // worktree before it starts: the core runs the git steps itself.
-        crate::reviews::run_git_steps(&crate::reviews::git_steps(&target, &url))?;
+        crate::reviews::run_git_steps(&steps)?;
         let (brain_model, info) = {
             let store = l.store.lock().unwrap();
             (store.config.brain_model().map(String::from), agents().into_iter().find(|a| a.harness == model::Harness::OpenCode).unwrap_or_else(|| crate::agents::info_for(model::Harness::OpenCode, None)))
         };
         let options = launch::LaunchOptions { agent, model: brain_model, ..Default::default() };
-        let name = crate::reviews::session_name(pr.forge, &pr.repo, pr.number);
-        start_opencode(l, &target.dir, &crate::reviews::render_prompt(&template, pr, !target.legacy), Some(&name), &options, &info)?;
-        return Ok(target.dir.to_string_lossy().into_owned());
+        start_opencode(l, dir, prompt, Some(session), &options, &info)?;
+        return Ok(dir.to_string_lossy().into_owned());
     }
-    let file = launch::write_prompt_file(&maya_dir, &crate::reviews::render_prompt(&template, pr, !target.legacy))?;
+    let file = launch::write_prompt_file(&maya_dir, prompt)?;
     let grok_id = (agent == model::Harness::Grok).then(launch::new_session_uuid);
     let known = {
         let mut store = l.store.lock().unwrap();
         store.refresh(now_ms());
         store.live_session_ids()
     };
-    let command = crate::reviews::shell_command(agent, &target, &url, &crate::reviews::session_name(pr.forge, &pr.repo, pr.number), &file, grok_id.as_deref());
-    l.terminal.open_for_folder(&command, &clones, &target.dir, &tmux_label())?;
+    let command = crate::reviews::shell_command(agent, dir, clones, &steps, session, &file, grok_id.as_deref());
+    l.terminal.open_for_folder(&command, clones, dir, &tmux_label())?;
     if agent != model::Harness::ClaudeCode {
-        let name = crate::reviews::session_name(pr.forge, &pr.repo, pr.number);
-        l.store.lock().unwrap().add_pending_name(crate::pending_names::PendingName::new(agent, &target.dir.to_string_lossy(), &name, now_ms(), known, grok_id));
+        l.store.lock().unwrap().add_pending_name(crate::pending_names::PendingName::new(agent, &dir.to_string_lossy(), session, now_ms(), known, grok_id));
     }
-    Ok(target.dir.to_string_lossy().into_owned())
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 /// Brings the terminal hosting the session forward.
@@ -1656,6 +1727,55 @@ mod tests {
         let l = Local { store: &store, terminal: &fake };
         assert_eq!(start_review(&l, &bedrock_pr()).unwrap_err(), "A review of bedrock #451 is already running.");
         assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    /// The issue `acme/api#412` and its repository, as the work item tests start it.
+    fn api_issue() -> (crate::work_items::WorkItem, crate::work_items::ItemRepo) {
+        let repo = crate::work_items::ItemRepo { forge: crate::config::GitProvider::Github, path: "acme/api".into() };
+        let item = crate::work_items::WorkItem { id: "acme/api#412".into(), number: Some(412), title: "Login times out".into(), url: "https://github.com/acme/api/issues/412".into(), repo: Some(repo.clone()), ..crate::work_items::test_item() };
+        (item, repo)
+    }
+
+    #[test]
+    fn start_work_item_refuses_a_folder_a_session_already_works_in() {
+        let (dir, store, clones) = store_reviewing_in_clones();
+        write_session(dir.path(), "w1", 4343, &clones.join("api-issue-412").to_string_lossy());
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let (item, repo) = api_issue();
+        assert_eq!(start_work_item(&l, &item, &repo).unwrap_err(), "A session is already working on acme/api#412.");
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_preflight_refuses_a_folder_a_session_already_works_in() {
+        let (dir, store, clones) = store_reviewing_in_clones();
+        write_session(dir.path(), "w1", 4343, &clones.join("api-issue-412").to_string_lossy());
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let (item, repo) = api_issue();
+        assert_eq!(work_item_preflight(&l, &item, &repo).unwrap_err(), "A session is already working on acme/api#412.");
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn start_work_item_opens_a_worktree_on_the_items_branch_and_names_the_session() {
+        let (_dir, store, clones) = store_reviewing_in_clones();
+        store.lock().unwrap().config.agent = Some(Harness::Codex);
+        let store = with_agents(store, vec![agents::claude(), crate::agents::info_for(Harness::Codex, None)]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let (item, repo) = api_issue();
+        let folder = start_work_item(&l, &item, &repo).unwrap();
+        assert_eq!(PathBuf::from(&folder), clones.join("api-issue-412"));
+        let calls = fake.calls.lock().unwrap();
+        let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
+        assert!(command.contains("git clone -- 'git@github.com:acme/api.git'"), "{command}");
+        assert!(command.contains(&format!("worktree add -b issue-412-login-times-out '{}' 'origin/HEAD' && ", clones.join("api-issue-412").display())), "{command}");
+        let file = command.split("cat '").nth(1).unwrap().split('\'').next().unwrap();
+        assert!(std::fs::read_to_string(file).unwrap().starts_with("Work on acme/api#412: Login times out (https://github.com/acme/api/issues/412)."));
+        drop(calls);
+        assert!(store.lock().unwrap().has_pending_name_for_test("issue acme/api#412"), "the name waits for the Codex session");
     }
 
     #[cfg(unix)]

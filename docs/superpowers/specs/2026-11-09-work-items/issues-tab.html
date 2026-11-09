@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Issues tab v3</title>
+<style>
+:root {
+  --bg: #0c0b09; --panel: #16140f; --text: #f1e9d8; --muted: #a39a86; --border: #2c2719;
+  --gold: #d9ab3c; --gold-bright: #f0c85a; --gold-deep: #8f6a1c;
+  --awaiting: #d97706; --working: #2563eb; --completed: #16a34a;
+  --on-gold: #1a1408;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+  font-size: 14px; color: var(--text); background: var(--bg); color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); padding: 24px; }
+h2.screen { color: var(--gold-bright); font-size: 15px; margin: 0 0 6px; }
+p.note { color: var(--muted); margin: 0 0 12px; font-size: 13px; max-width: 920px; }
+.window { border: 1px solid var(--gold-deep); border-radius: 10px; overflow: hidden; max-width: 1180px; }
+.topbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--gold-deep); background: linear-gradient(180deg, #14120d, var(--bg)); }
+.title { color: var(--gold-bright); font-weight: 600; font-size: 16px; margin-right: 12px; }
+.tab { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 5px 10px; color: var(--muted); font: inherit; }
+.tab--active { background: var(--panel); border-color: var(--gold-deep); color: var(--gold-bright); }
+.count { font-size: 11px; color: var(--muted); margin-left: 3px; }
+.pane { padding: 14px 16px 18px; }
+.bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+select, input[type=text] { padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
+.grow { flex: 1; }
+.fetched { color: var(--muted); font-size: 12px; }
+.areahead { display: flex; align-items: baseline; justify-content: space-between; padding: 4px 4px 8px; }
+.areahead h3 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.areahead .n { color: var(--muted); font-size: 12px; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.area { background: color-mix(in srgb, var(--panel) 60%, var(--bg)); border-radius: 8px; padding: 8px; }
+.area--pick { border-top: 3px solid var(--gold-deep); }
+.area--work { border-top: 3px solid var(--working); }
+.col { display: flex; flex-direction: column; gap: 8px; }
+.item { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.item--live { border-left: 3px solid var(--working); }
+.item--await { border-left: 3px solid var(--awaiting); }
+.item--done { border-left: 3px solid var(--completed); }
+.head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.name { display: inline-flex; align-items: center; gap: 7px; }
+.src { font-size: 10px; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; color: var(--muted); }
+.repo { font-weight: 600; }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.chip { padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 10px; color: var(--muted); }
+.status { padding: 1px 7px; border-radius: 4px; font-size: 10.5px; font-weight: 600; background: #2a2414; color: var(--gold-bright); }
+.ititle { font-size: 13px; }
+.foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.meta { font-size: 12px; color: var(--muted); }
+.btn { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; color: var(--text); font: inherit; font-size: 12.5px; }
+.btn--gold { background: var(--gold); border-color: var(--gold); color: var(--on-gold); font-weight: 600; }
+.live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.dot--working { background: var(--working); } .dot--awaiting { background: var(--awaiting); } .dot--done { background: var(--completed); }
+.last { font-size: 12px; color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body>
+<h2 class="screen">Issues tab: A, with To pick on the left and one column each</h2>
+<p class="note">The filters and search sit above both areas and apply to both. Each area scrolls on its own, like a board column.</p>
+<div class="window">
+  <div class="topbar">
+    <span class="title">Maya</span>
+    <button class="tab">Sessions</button><button class="tab">Pull Requests <span class="count">4</span></button>
+    <button class="tab tab--active">Issues <span class="count">7</span></button><button class="tab">Deployments</button><button class="tab">Chat</button>
+    <span class="grow"></span><button class="tab">Settings</button>
+  </div>
+  <div class="pane">
+    <div class="bar">
+      <select><option>All sources</option></select><select><option>All repositories</option></select><select><option>Any status</option></select>
+      <input type="text" placeholder="Search issues" style="width:220px"><span class="grow"></span><span class="fetched">Checked 1 min ago</span>
+    </div>
+    <div class="cols">
+      <div class="area area--pick">
+        <div class="areahead"><h3>To pick</h3><span class="n">4</span></div>
+        <div class="col">
+          <div class="item">
+            <div class="head"><span class="name"><span class="src">GH</span><span class="repo">acme/api#412</span></span><span class="chips"><span class="chip">urgent</span><span class="chip">bug</span><span class="status">Todo</span></span></div>
+            <div class="ititle">Login times out after 30 s on slow networks</div>
+            <div class="foot"><span class="meta">Unassigned · 2 h ago</span><button class="btn btn--gold">Start</button></div>
+          </div>
+          <div class="item">
+            <div class="head"><span class="name"><span class="src">GL</span><span class="repo">platform/billing#17</span></span><span class="chips"><span class="chip">backend</span><span class="status">Todo</span></span></div>
+            <div class="ititle">Invoice PDF misses the VAT number for EU customers</div>
+            <div class="foot"><span class="meta">You · yesterday</span><button class="btn btn--gold">Start</button></div>
+          </div>
+          <div class="item">
+            <div class="head"><span class="name"><span class="src">Linear</span><span class="repo">ENG-1204</span></span><span class="status">Todo</span></div>
+            <div class="ititle">Export reports as CSV from the dashboard</div>
+            <div class="foot"><span class="meta">acme/web · you · 3 d ago</span><button class="btn btn--gold">Start</button></div>
+          </div>
+          <div class="item">
+            <div class="head"><span class="name"><span class="src">Linear</span><span class="repo">ENG-1199</span></span><span class="status">Backlog</span></div>
+            <div class="ititle">Rate-limit the public search endpoint</div>
+            <div class="foot"><span class="meta" style="color:var(--awaiting)">No repo: Maya picks</span><button class="btn btn--gold">Start</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="area area--work">
+        <div class="areahead"><h3>Being worked on</h3><span class="n">3</span></div>
+        <div class="col">
+          <div class="item item--live">
+            <div class="head"><span class="name"><span class="src">GH</span><span class="repo">acme/web#88</span></span><span class="status">In progress</span></div>
+            <div class="ititle">Add dark mode to the account page</div>
+            <div class="last">“Running the snapshot tests…”</div>
+            <div class="foot"><span class="live"><span class="dot dot--working"></span>Working · 12 min</span><button class="btn">Open session</button></div>
+          </div>
+          <div class="item item--await">
+            <div class="head"><span class="name"><span class="src">GL</span><span class="repo">platform/billing#21</span></span><span class="status">Doing</span></div>
+            <div class="ititle">Retry failed card payments once after 1 hour</div>
+            <div class="last">“Should the retry also email the customer?”</div>
+            <div class="foot"><span class="live"><span class="dot dot--awaiting"></span>Awaiting decision</span><button class="btn">Open session</button></div>
+          </div>
+          <div class="item item--done">
+            <div class="head"><span class="name"><span class="src">Linear</span><span class="repo">ENG-1180</span></span><span class="status">In review</span></div>
+            <div class="ititle">Show the plan name in the invoice header</div>
+            <div class="last">“Opened PR acme/web#91.”</div>
+            <div class="foot"><span class="live"><span class="dot dot--done"></span>Completed</span><button class="btn">Open session</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

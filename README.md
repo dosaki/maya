@@ -30,6 +30,7 @@ the right terminal first.
   - Using built-in notifications, and/or a voice and/or a Dock badge
   - Keeps quiet under a Focus mode, or when you mute her from the top bar
 - Lists the pull requests that ask for your review and the ones assigned to you, filtered by state and repository, with a dot for the review (green approved, blue commented, red changes requested): yours on review requests, the reviewers' on PRs assigned to you; reviews them in one click, and tells you when a PR assigned to you is approved or needs changes
+- Lists your GitHub and GitLab issues by the rules you set in Settings → Work Items (assignee, labels, repositories), and starts one with Start: Maya assigns it to you, sets its status label, and starts her agent on it in a fresh worktree of its repository
 - Does what you tell her by voice, through the agent you choose: "Maya, tell <session> to do <thing>"
 - Resumes old sessions of any of them, and reviews pull requests with the agent you chose, in a worktree of one clone per repository, on a prompt you can edit in Settings
 - Shows the sessions of all your machines on one board.
@@ -46,7 +47,7 @@ Run the commands below, or download Maya manually from the
 Requirements:
 
 - One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity, Grok Build, [Kiro CLI](https://kiro.dev/cli) or [OpenCode](https://opencode.ai), installed and, if applicable, signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
-- Pull requests: turn on GitHub or GitLab in Settings → Git and give it a token (or the name of a variable that holds one).
+- Pull requests: turn on GitHub or GitLab in Settings → Git and give it a token (or the name of a variable that holds one). Issues: the same tokens; Start needs write access (GitHub Issues: read and write, or repo; GitLab api).
 - Deployments: turn on GitHub in Settings → Git. The token needs `repo` (classic), or Actions: read, Deployments: read and write and Metadata: read (fine-grained).
 - macOS on Apple Silicon or Intel (macOS 14 or later for voice).
 - Windows 10 or 11, 64-bit, with [Git for Windows](https://git-scm.com/download/win).

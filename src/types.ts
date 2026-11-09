@@ -342,3 +342,94 @@ export interface TerminalChoices {
   choices: NewSessionTerminal[];
   default: NewSessionTerminal;
 }
+
+/** A repository on a forge, as a work item or a repository pick names it. */
+export interface ItemRepo {
+  forge: GitProvider;
+  path: string;
+}
+
+/** An issue from the Issues tab. */
+export interface WorkItem {
+  key: string;
+  source: string;
+  id: string;
+  number: number | null;
+  title: string;
+  url: string;
+  description: string;
+  status: string | null;
+  labels: string[];
+  assignees: string[];
+  author: string;
+  updatedAt: string;
+  /** The repository the work happens in; null when Maya must pick one. */
+  repo: ItemRepo | null;
+  /** The item lives in a tracker (not a repository's issues), so it names no repository. */
+  tracker: boolean;
+}
+
+/** An item the user started: the folder its session works in. */
+export interface Started {
+  key: string;
+  item: WorkItem;
+  dir: string;
+  startedAt: number;
+}
+
+export interface WorkItemsState {
+  items: WorkItem[];
+  started: Started[];
+  errors: ForgeError[];
+  /** No Git connection is switched on. */
+  gitOff: boolean;
+  /** No source for issues is switched on. */
+  off: boolean;
+  fetchedAt: number | null;
+}
+
+/** Maya's choice of repository for an item that names none. */
+export interface RepoPick {
+  picked: ItemRepo | null;
+  why: string;
+  options: ItemRepo[];
+}
+
+/** What Start finds out before it starts. */
+export interface StartCheck {
+  takeover: string[];
+  pick: RepoPick | null;
+  branch: string;
+}
+
+export interface WorkStarted {
+  dir: string;
+  nativeTerm: number | null;
+  notice: string | null;
+}
+
+/** Whose issues a rule picks up. */
+export type ItemAssignee = { kind: "me" } | { kind: "anyone" } | { kind: "user"; login: string };
+
+/** One rule for the Issues tab: the assignee, the labels and the repositories (empty = any). */
+export interface ItemRule {
+  assignee: ItemAssignee;
+  labels: string[];
+  repos: string[];
+}
+
+/** The Work Items settings of one service, as the config stores them. */
+export interface ForgeItems {
+  enabled: boolean;
+  rules: ItemRule[];
+  statusLabels: string[];
+  startStatus: string | null;
+  trackerRepos: string[];
+}
+
+/** `workItems` in the config; an older config lacks it. */
+export interface WorkItemsConfig {
+  github: ForgeItems;
+  gitlab: ForgeItems;
+  prompt: string;
+}

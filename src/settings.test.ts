@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
 import { RUNNING_VERSION } from "./release-notes";
-import { gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { SETTINGS_GROUPS, gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -429,12 +429,12 @@ describe("renderSettings", () => {
   it("lists the groups in a sidebar, one titled section each, and shows only General at first", () => {
     const el = renderSettings(voiceBase, handlers());
     const nav = [...el.querySelectorAll<HTMLButtonElement>(".settings__nav button")];
-    expect(nav.map((b) => b.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Devices", "Debug", "Release Notes"]);
-    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Notifications", "Voice", "Network", "Devices", "Debug", "Release Notes"]);
+    expect(nav.map((b) => b.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Work Items", "Notifications", "Voice", "Network", "Devices", "Debug", "Release Notes"]);
+    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Work Items", "Notifications", "Voice", "Network", "Devices", "Debug", "Release Notes"]);
     const sections = [...el.querySelectorAll<HTMLElement>(".settings__section")];
-    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "keyboard", "sessions", "git", "reviews", "notifications", "voice", "network", "devices", "debug", "releaseNotes"]);
+    expect(sections.map((s) => s.dataset.group)).toEqual(["general", "keyboard", "sessions", "git", "reviews", "workItems", "notifications", "voice", "network", "devices", "debug", "releaseNotes"]);
     expect(sections.filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["general"]);
-    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null, null, null, null, null]);
+    expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null, null, null, null, null, null]);
   });
 
   it("shows the release notes, last in the sidebar", () => {
@@ -1434,5 +1434,112 @@ describe("session viewer", () => {
     sel.value = "terminal";
     sel.dispatchEvent(new Event("change"));
     expect(h.onViewerTheme).toHaveBeenCalledWith("terminal");
+  });
+});
+
+describe("Settings → Work Items", () => {
+  const wiModel = (over: Partial<SettingsModel> = {}): SettingsModel => ({
+    ...voiceBase,
+    settingsGroup: "workItems",
+    git: gitConnections([{ provider: "gitlab", enabled: true, token: { kind: "env", name: "GITLAB_TOKEN" } }, { provider: "github", enabled: true, token: { kind: "env", name: "GH_TOKEN" } }]),
+    ...over,
+  });
+  const box = (root: HTMLElement, f: string) => root.querySelector<HTMLElement>(`.settings__workitems[data-forge=${f}]`)!;
+  const type = (el: HTMLInputElement | HTMLSelectElement, value: string) => {
+    el.value = value;
+    el.dispatchEvent(new Event("change"));
+  };
+
+  it("lists Work Items after Pull requests", () => {
+    const keys = SETTINGS_GROUPS.map(([k]) => k) as string[];
+    expect(keys.indexOf("workItems")).toBe(keys.indexOf("reviews") + 1);
+  });
+
+  it("saves a rule typed as comma lists", () => {
+    const h = { ...handlers(), onWorkItems: vi.fn() };
+    const root = renderSettings(wiModel(), h);
+    const gh = box(root, "github");
+    expect(gh.querySelector<HTMLInputElement>("input[name=wi-github-enabled]")!.checked).toBe(true);
+    const rule = gh.querySelector<HTMLElement>(".settings__rule")!;
+    type(rule.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!, "anyone");
+    type(rule.querySelector<HTMLInputElement>("input[name=wi-labels]")!, " urgent, bug ,,");
+    type(rule.querySelector<HTMLInputElement>("input[name=wi-repos]")!, "acme/api");
+    type(gh.querySelector<HTMLInputElement>("input[name=wi-statusLabels]")!, "todo, in progress");
+    h.onWorkItems.mockClear();
+    type(gh.querySelector<HTMLSelectElement>("select[name=wi-startStatus]")!, "in progress");
+    expect(h.onWorkItems).toHaveBeenLastCalledWith("github", {
+      enabled: true,
+      rules: [{ assignee: { kind: "anyone" }, labels: ["urgent", "bug"], repos: ["acme/api"] }],
+      statusLabels: ["todo", "in progress"],
+      startStatus: "in progress",
+      trackerRepos: [],
+    });
+  });
+
+  it("saves a rule for someone with their login, and adds and removes rules", () => {
+    const h = { ...handlers(), onWorkItems: vi.fn() };
+    const root = renderSettings(wiModel(), h);
+    const gh = box(root, "github");
+    const rule = gh.querySelector<HTMLElement>(".settings__rule")!;
+    const login = rule.querySelector<HTMLInputElement>("input[name=wi-login]")!;
+    expect(login.hidden).toBe(true);
+    type(rule.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!, "user");
+    expect(login.hidden).toBe(false);
+    type(login, " alice ");
+    expect(h.onWorkItems.mock.lastCall![1].rules[0].assignee).toEqual({ kind: "user", login: "alice" });
+    gh.querySelector<HTMLButtonElement>("[data-action=wi-add-rule]")!.click();
+    expect(h.onWorkItems.mock.lastCall![1].rules).toEqual([
+      { assignee: { kind: "user", login: "alice" }, labels: [], repos: [] },
+      { assignee: { kind: "me" }, labels: [], repos: [] },
+    ]);
+    gh.querySelector<HTMLButtonElement>("[data-action=wi-remove-rule]")!.click();
+    expect(h.onWorkItems.mock.lastCall![1].rules).toEqual([]);
+  });
+
+  it("saves nothing while a rule for someone has no login", () => {
+    const h = { ...handlers(), onWorkItems: vi.fn() };
+    const root = renderSettings(wiModel(), h);
+    const gh = box(root, "github");
+    const rule = gh.querySelector<HTMLElement>(".settings__rule")!;
+    type(rule.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!, "user");
+    type(rule.querySelector<HTMLInputElement>("input[name=wi-labels]")!, "bug");
+    gh.querySelector<HTMLButtonElement>("[data-action=wi-add-rule]")!.click();
+    type(gh.querySelector<HTMLInputElement>("input[name=wi-trackerRepos]")!, "acme/x");
+    expect(h.onWorkItems).not.toHaveBeenCalled();
+    type(rule.querySelector<HTMLInputElement>("input[name=wi-login]")!, "alice");
+    expect(h.onWorkItems).toHaveBeenCalledTimes(1);
+    expect(h.onWorkItems.mock.lastCall![1].rules[0]).toEqual({ assignee: { kind: "user", login: "alice" }, labels: ["bug"], repos: [] });
+  });
+
+  it("disables a service that is off in Settings → Git and links there", () => {
+    const h = { ...handlers(), onOpenGroup: vi.fn() };
+    const root = renderSettings(wiModel({ git: gitConnections(null) }), h);
+    const gl = box(root, "gitlab");
+    expect(gl.textContent).toContain("GitLab is off in Settings → Git.");
+    const fields = [...gl.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select")].filter((e) => e.name !== "wi-gitlab-enabled");
+    expect(fields.length).toBeGreaterThan(0);
+    expect(fields.every((e) => e.disabled)).toBe(true);
+    gl.querySelector<HTMLButtonElement>("[data-action=wi-open-git]")!.click();
+    expect(h.onOpenGroup).toHaveBeenCalledWith("git");
+    expect(box(root, "github").textContent).not.toContain("is off in Settings");
+  });
+
+  it("offers only the status labels for On Start", () => {
+    const items = { enabled: true, rules: [], statusLabels: ["todo", "doing"], startStatus: "doing", trackerRepos: [] };
+    const root = renderSettings(wiModel({ workItems: { github: items, gitlab: items, prompt: "" } }), handlers());
+    const sel = box(root, "github").querySelector<HTMLSelectElement>("select[name=wi-startStatus]")!;
+    expect([...sel.options].map((o) => o.textContent)).toEqual(["Leave as it is", "todo", "doing"]);
+    expect(sel.value).toBe("doing");
+  });
+
+  it("saves the work prompt and shows the token hints", () => {
+    const h = { ...handlers(), onWorkPrompt: vi.fn() };
+    const root = renderSettings(wiModel(), h);
+    const prompt = root.querySelector<HTMLTextAreaElement>("textarea[name=workPrompt]")!;
+    prompt.value = "  Do {id}  ";
+    prompt.dispatchEvent(new Event("change"));
+    expect(h.onWorkPrompt).toHaveBeenCalledWith("Do {id}");
+    expect(box(root, "github").textContent).toContain("Issues: read and write");
+    expect(box(root, "gitlab").textContent).toContain("the api scope");
   });
 });

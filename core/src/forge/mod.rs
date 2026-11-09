@@ -195,6 +195,8 @@ pub fn encode(s: &str) -> String {
 pub trait Http: Sync {
     fn get(&self, url: &str, token: &str) -> Result<(u16, String), String>;
     fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String>;
+    /// A JSON body sent with `method` ("PATCH" or "PUT").
+    fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<(u16, String), String>;
 }
 
 const TIMEOUT: Duration = Duration::from_secs(15);
@@ -243,6 +245,22 @@ impl Http for Ureq {
                 .send(body),
         )
     }
+
+    fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+        let request = match method {
+            "PATCH" => self.agent.patch(url),
+            "PUT" => self.agent.put(url),
+            other => return Err(format!("unsupported method {other}")),
+        };
+        read(
+            request
+                .header("Authorization", &format!("Bearer {token}"))
+                .header("User-Agent", "Maya")
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .send(body),
+        )
+    }
 }
 
 /// What a call is for, so a refused token is told what it needs.
@@ -250,12 +268,17 @@ impl Http for Ureq {
 pub(crate) enum Need {
     Reviews,
     Deployments,
+    Issues,
+    IssueWrite,
 }
 
 fn scopes(p: GitProvider, need: Need) -> &'static str {
     match (p, need) {
         (GitProvider::Github, Need::Reviews) => "repo scope (fine-grained: Pull requests read)",
         (GitProvider::Github, Need::Deployments) => "repo scope (fine-grained: Actions read, Deployments read and write, Metadata read)",
+        (GitProvider::Github, Need::Issues) => "repo scope (fine-grained: Issues read)",
+        (GitProvider::Github, Need::IssueWrite) => "repo scope (fine-grained: Issues read and write)",
+        (GitProvider::Gitlab, Need::IssueWrite) => "api scope",
         (GitProvider::Gitlab, _) => "read_api scope",
     }
 }
@@ -310,6 +333,31 @@ pub(crate) fn post_json_as(http: &dyn Http, forge: &Forge, url: &str, body: &ser
     answer(forge, http.post_json(url, &forge.token, &body.to_string()), need)
 }
 
+/// A PATCH's or PUT's JSON body sent, and the reply body, where a refusal names the permissions `need` calls for.
+pub(crate) fn send_json_as(http: &dyn Http, forge: &Forge, method: &str, url: &str, body: &serde_json::Value, need: Need) -> Result<String, String> {
+    answer(forge, http.send_json(method, url, &forge.token, &body.to_string()), need)
+}
+
+/// Who the token belongs to, as issues need to assign them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Me {
+    pub login: String,
+    pub id: u64,
+}
+
+/// The user the token belongs to: their login (GitLab: username) and id.
+pub fn me(http: &dyn Http, forge: &Forge) -> Result<Me, String> {
+    let v = get_json_as(http, forge, &format!("{}/user", forge.site.api_base()), Need::Issues)?;
+    let key = match forge.site.provider {
+        GitProvider::Github => "login",
+        GitProvider::Gitlab => "username",
+    };
+    match (v[key].as_str(), v["id"].as_u64()) {
+        (Some(login), Some(id)) => Ok(Me { login: login.to_string(), id }),
+        _ => Err(format!("{} did not say who the token belongs to.", forge.site.provider.label())),
+    }
+}
+
 /// The PR or MR of `branch` in `repo`.
 pub fn current_pr(http: &dyn Http, forge: &Forge, repo: &str, branch: &str) -> Result<Option<crate::model::PullRequest>, String> {
     match forge.site.provider {
@@ -345,10 +393,10 @@ pub(crate) mod fake {
     use std::sync::Mutex;
 
     /// Answers each request with the first reply whose needle the URL
-    /// contains, else fails with "no route"; records (url, token, body).
+    /// contains, else fails with "no route"; records (url, token, body, method); a GET has no method.
     pub struct FakeHttp {
         pub replies: Vec<(&'static str, u16, String)>,
-        pub seen: Mutex<Vec<(String, String, Option<String>)>>,
+        pub seen: Mutex<Vec<(String, String, Option<String>, Option<String>)>>,
     }
 
     impl FakeHttp {
@@ -356,18 +404,21 @@ pub(crate) mod fake {
             FakeHttp { replies: replies.into_iter().map(|(n, s, b)| (n, s, b.to_string())).collect(), seen: Mutex::new(Vec::new()) }
         }
 
-        fn answer(&self, url: &str, token: &str, body: Option<&str>) -> Result<(u16, String), String> {
-            self.seen.lock().unwrap().push((url.to_string(), token.to_string(), body.map(str::to_string)));
+        fn answer(&self, url: &str, token: &str, body: Option<&str>, method: Option<&str>) -> Result<(u16, String), String> {
+            self.seen.lock().unwrap().push((url.to_string(), token.to_string(), body.map(str::to_string), method.map(str::to_string)));
             self.replies.iter().find(|(n, _, _)| url.contains(n)).map(|(_, s, b)| (*s, b.clone())).ok_or_else(|| "no route".to_string())
         }
     }
 
     impl super::Http for FakeHttp {
         fn get(&self, url: &str, token: &str) -> Result<(u16, String), String> {
-            self.answer(url, token, None)
+            self.answer(url, token, None, None)
         }
         fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
-            self.answer(url, token, Some(body))
+            self.answer(url, token, Some(body), Some("POST"))
+        }
+        fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+            self.answer(url, token, Some(body), Some(method))
         }
     }
 }
