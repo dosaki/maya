@@ -2,8 +2,10 @@
 
 pub mod github;
 pub mod gitlab;
+pub mod started;
 
-use crate::config::GitProvider;
+use crate::config::{GitProvider, WorkItemsConfig};
+use crate::forge::{Forge, ForgeError, Http};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -61,6 +63,57 @@ pub fn merge(lists: Vec<Vec<WorkItem>>) -> Vec<WorkItem> {
     out
 }
 
+/// The `source` of a forge's items: "github" or "gitlab".
+pub fn source_of(forge: GitProvider) -> &'static str {
+    match forge {
+        GitProvider::Github => "github",
+        GitProvider::Gitlab => "gitlab",
+    }
+}
+
+/// One service's answer to "which issues do the rules return".
+pub struct Fetched {
+    pub forge: GitProvider,
+    pub result: Result<Vec<WorkItem>, String>,
+}
+
+/// Asks every forge whose Work Items are on, at once.
+pub fn fetch(forges: &[Forge], cfg: &WorkItemsConfig, http: &dyn Http) -> Vec<Fetched> {
+    std::thread::scope(|s| {
+        let handles: Vec<_> = forges
+            .iter()
+            .filter(|f| cfg.for_forge(f.site.provider).enabled)
+            .map(|f| {
+                let items = cfg.for_forge(f.site.provider);
+                let ask = move || match f.site.provider {
+                    GitProvider::Github => github::list(http, f, items),
+                    GitProvider::Gitlab => gitlab::list(http, f, items),
+                };
+                (f.site.provider, s.spawn(ask))
+            })
+            .collect();
+        handles.into_iter().map(|(forge, h)| Fetched { forge, result: h.join().unwrap_or_else(|_| Err("the check stopped unexpectedly".into())) }).collect()
+    })
+}
+
+/// The new list and the error lines: a service that answered replaces its
+/// items, one that failed keeps its last ones and adds a line, and one that
+/// was not asked drops out. `errors` holds the lines for services that were
+/// not asked.
+pub fn combine(previous: &[WorkItem], fetched: Vec<Fetched>, mut errors: Vec<ForgeError>) -> (Vec<WorkItem>, Vec<ForgeError>) {
+    let mut lists = Vec::new();
+    for f in fetched {
+        match f.result {
+            Ok(items) => lists.push(items),
+            Err(e) => {
+                lists.push(previous.iter().filter(|i| i.source == source_of(f.forge)).cloned().collect());
+                errors.push(ForgeError { forge: f.forge, message: format!("{} issues check failed: {e}", f.forge.label()) });
+            }
+        }
+    }
+    (merge(lists), errors)
+}
+
 #[cfg(test)]
 pub(crate) fn test_item() -> WorkItem {
     WorkItem {
@@ -104,5 +157,15 @@ mod tests {
         let item = |key: &str, at: &str| WorkItem { key: key.into(), updated_at: at.into(), ..test_item() };
         let out = merge(vec![vec![item("github:a#1", "2026-11-01"), item("github:a#2", "2026-11-03")], vec![item("github:a#1", "2026-11-01")]]);
         assert_eq!(out.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), vec!["github:a#2", "github:a#1"]);
+    }
+
+    #[test]
+    fn a_failed_service_keeps_its_last_items_and_says_so() {
+        let gh = WorkItem { key: "github:a/b#1".into(), source: "github".into(), ..test_item() };
+        let gl = WorkItem { key: "gitlab:g/r#2".into(), source: "gitlab".into(), ..test_item() };
+        let fetched = vec![Fetched { forge: GitProvider::Github, result: Err("could not reach github.com: timeout".into()) }, Fetched { forge: GitProvider::Gitlab, result: Ok(vec![]) }];
+        let (items, errors) = combine(&[gh.clone(), gl], fetched, vec![]);
+        assert_eq!(items, vec![gh]);
+        assert_eq!(errors[0].message, "GitHub issues check failed: could not reach github.com: timeout");
     }
 }

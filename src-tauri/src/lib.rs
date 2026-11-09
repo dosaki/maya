@@ -25,6 +25,7 @@ pub mod terminal_linux;
 pub mod terminal_win;
 pub mod updater;
 mod whats_new_app;
+mod work_items_app;
 pub mod git;
 pub mod keystore;
 pub mod voice;
@@ -156,6 +157,8 @@ pub struct AppState {
     pub store: Mutex<Store>,
     pub notifier: Mutex<notify::Notifier>,
     pub reviews: Mutex<ReviewState>,
+    /// The Issues tab. Lock rule: never held across a network call, and never with another lock.
+    pub work_items: Mutex<work_items_app::WorkItemsState>,
     /// Lock rule: never held across a network call, and never with another lock.
     pub deployments: Mutex<DeploymentState>,
     pub deployment_repos: Mutex<deployments::ApprovalRepos>,
@@ -753,20 +756,26 @@ fn announcement(speak_notifications: bool, muted: bool, focus: bool) -> (bool, b
     (spoken, !spoken && !muted)
 }
 
+/// The whole board: this machine's cards, refreshed, then the assistants'.
+/// The remote cards join after the store lock is released (lock order).
+pub(crate) fn board_cards(app: &AppHandle) -> Vec<Card> {
+    let state = app.state::<AppState>();
+    let cards = local_cards(&mut state.store.lock().unwrap());
+    merge::merged(cards, &remote_boards(&state), now_ms())
+}
+
 pub(crate) fn refresh_and_emit(app: &AppHandle) {
-    let (cards, judging, wants_notify, speak, muted, wanted_voices, assistant, volume, wake_word) = {
+    // The remote cards are in, so the notifier below announces remote decisions too.
+    let mut cards = board_cards(app);
+    let (judging, wants_notify, speak, muted, wanted_voices, assistant, volume, wake_word) = {
         let state = app.state::<AppState>();
-        let mut store = state.store.lock().unwrap();
-        let cards = local_cards(&mut store);
+        let store = state.store.lock().unwrap();
         let c = &store.config;
         let chain = if c.speak_notifications && !c.muted { voices_wanted(c, store.claude_dir()) } else { vec![] };
-        (cards, store.judging_sessions(), c.notify_on_awaiting, c.speak_notifications, c.muted, chain, c.network.role == config::NetworkRole::Assistant, c.voice_loudness(), c.listen_word())
+        (store.judging_sessions(), c.notify_on_awaiting, c.speak_notifications, c.muted, chain, c.network.role == config::NetworkRole::Assistant, c.voice_loudness(), c.listen_word())
     };
     // Due names are typed into the terminals with no lock held.
     actions::run_due_renames(&local(&app.state::<AppState>()));
-    // Remote cards join after the store lock is released (lock order), so
-    // the notifier below announces remote decisions too.
-    let mut cards = merge::merged(cards, &remote_boards(&app.state::<AppState>()), now_ms());
     // Maya's own brain card is never announced, counted or mirrored: it only
     // joins the list the window gets, which shows it in debug mode.
     cards.retain(|c| !c.brain);
@@ -1752,7 +1761,13 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
         listener::emit_voice(&app);
     }
     if before.git_connections() != config.git_connections() {
+        // Polls the issues too.
         git::settings_changed(&app);
+    } else if before.work_items != config.work_items {
+        // A poll that began under the old rules drops its answers.
+        state.git_generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let handle = app.clone();
+        std::thread::spawn(move || work_items_app::poll_work_items(&handle));
     }
     refresh_and_emit(&app);
     Ok(config)
@@ -1841,7 +1856,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), lane: std::sync::Arc::new(net::client::RequestLane::default()), git_generation: std::sync::atomic::AtomicU64::new(0), config_existed })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), work_items: Mutex::new(work_items_app::WorkItemsState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), lane: std::sync::Arc::new(net::client::RequestLane::default()), git_generation: std::sync::atomic::AtomicU64::new(0), config_existed })
         .manage(updater::Pending::default())
         // Closing the window quits Maya, so it asks first too; "Quit
         // anyway" then exits the app.
@@ -1865,6 +1880,7 @@ pub fn run() {
             git::store_git_token,
             git::clear_git_token,
             git::test_git_connection,
+            work_items_app::list_work_items,
             set_muted,
             focus_visible,
             open_full_disk_access,
@@ -2017,6 +2033,11 @@ pub fn run() {
             let review_handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 poll_reviews(&review_handle);
+                std::thread::sleep(Duration::from_secs(120));
+            });
+            let work_items_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                work_items_app::poll_work_items(&work_items_handle);
                 std::thread::sleep(Duration::from_secs(120));
             });
             let deployments_handle = app.handle().clone();
