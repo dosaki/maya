@@ -1,3 +1,11 @@
+# 0.51.0
+
+## New
+
+- An Issues tab lists your GitHub and GitLab issues. Choose what shows in Settings → Work Items: rules by assignee, labels and repositories, and which labels are statuses.
+- Start on an issue assigns it to you, sets its status, and starts Maya's agent on it in a fresh worktree of its repository. If someone else has the issue, Maya asks first. If the issue does not say which repository holds the code, Maya picks one and you confirm it.
+- Issues being worked on move to their own column, with their session's state and a button to open it.
+
 # 0.50.0
 
 ## New
