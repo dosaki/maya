@@ -250,12 +250,19 @@ impl Http for Ureq {
 pub(crate) enum Need {
     Reviews,
     Deployments,
+    Issues,
+    /// Not used until issues are written to.
+    #[allow(dead_code)]
+    IssueWrite,
 }
 
 fn scopes(p: GitProvider, need: Need) -> &'static str {
     match (p, need) {
         (GitProvider::Github, Need::Reviews) => "repo scope (fine-grained: Pull requests read)",
         (GitProvider::Github, Need::Deployments) => "repo scope (fine-grained: Actions read, Deployments read and write, Metadata read)",
+        (GitProvider::Github, Need::Issues) => "repo scope (fine-grained: Issues read)",
+        (GitProvider::Github, Need::IssueWrite) => "repo scope (fine-grained: Issues read and write)",
+        (GitProvider::Gitlab, Need::IssueWrite) => "api scope",
         (GitProvider::Gitlab, _) => "read_api scope",
     }
 }
