@@ -342,21 +342,34 @@ export async function startWorkItem(
   },
 ): Promise<void> {
   const { invoke, host, toast } = deps;
+  const busy = "Close the open window first.";
+  if (host.childElementCount > 0) return toast(busy);
   try {
     const check = await invoke<StartCheck>("work_item_check", { key: item.key });
     let repo: ItemRepo | null = null;
     if (needsDialog(check)) {
+      // Something else may have opened a window while the check ran.
+      if (host.childElementCount > 0) return toast(busy);
       const chosen = await new Promise<{ repo: ItemRepo | null } | null>((resolve) => {
         const close = (v: { repo: ItemRepo | null } | null) => {
           document.removeEventListener("keydown", onKey, true);
-          host.replaceChildren();
+          gone.disconnect();
+          if (dialog.parentNode === host) host.replaceChildren();
           resolve(v);
         };
         const onKey = (e: KeyboardEvent) => {
-          if (e.key === "Escape") close(null);
+          if (e.key !== "Escape") return;
+          e.stopPropagation();
+          close(null);
         };
+        const dialog = renderStartDialog(item, check, { onStart: (r) => close({ repo: r }), onCancel: () => close(null) });
+        // Other code writes the host too: a dialog replaced under us counts as a cancel.
+        const gone = new MutationObserver(() => {
+          if (dialog.parentNode !== host) close(null);
+        });
         document.addEventListener("keydown", onKey, true);
-        host.replaceChildren(renderStartDialog(item, check, { onStart: (r) => close({ repo: r }), onCancel: () => close(null) }));
+        host.replaceChildren(dialog);
+        gone.observe(host, { childList: true });
       });
       if (!chosen) return;
       repo = chosen.repo;

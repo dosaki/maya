@@ -199,4 +199,27 @@ describe("work items", () => {
     expect(renderItemCard(item({}), 0, null, true).querySelector<HTMLButtonElement>("[data-action=start]")!.disabled).toBe(true);
     expect(renderItemCard(item({}), 0, null).querySelector<HTMLButtonElement>("[data-action=start]")!.disabled).toBe(false);
   });
+
+  it("treats a dialog replaced in the host as a cancel", async () => {
+    const host = document.createElement("div");
+    const invoke = vi.fn().mockResolvedValueOnce({ takeover: ["maria"], pick: null, branch: "b" });
+    const inFlight = new Set<string>();
+    const done = guardStart(inFlight, "k", () => startWorkItem(item({ key: "k" }), { invoke, host, toast: vi.fn(), opened: vi.fn() }));
+    await vi.waitFor(() => expect(host.querySelector("button")).not.toBeNull());
+    host.replaceChildren();
+    await done;
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(inFlight.size).toBe(0);
+  });
+
+  it("starts nothing, not even the check, while another window is open", async () => {
+    const host = document.createElement("div");
+    host.append(document.createElement("div"));
+    const invoke = vi.fn();
+    const toast = vi.fn();
+    await startWorkItem(item({}), { invoke, host, toast, opened: vi.fn() });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("Close the open window first.");
+    expect(host.childElementCount).toBe(1);
+  });
 });
