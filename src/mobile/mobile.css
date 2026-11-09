@@ -100,3 +100,17 @@
 .voicebar__error { flex-basis: 100%; color: #dc2626; font-size: 12.5px; }
 .voicebar__settings { min-height: 40px; padding: 0 16px; }
 .voicebar__note { flex-basis: 100%; color: var(--muted); font-size: 12.5px; }
+
+/* What's new: a page under the top bar like the other dialogs. Maya's head
+   and raised hand make a banner at the top, fading into the page, with the
+   title over its foot; the notes scroll; Got it sits full width below. */
+.whatsnew .whatsnew__panel { width: 100%; height: 100%; margin-left: 0; overflow: hidden; border: 0; border-radius: 0; }
+.whatsnew .whatsnew__art { display: block; position: static; flex: none; width: 100%; height: 200px; object-fit: cover; object-position: 50% 6%; filter: none; -webkit-mask-image: linear-gradient(#000 55%, transparent); mask-image: linear-gradient(#000 55%, transparent); }
+.whatsnew__close { top: 10px; right: 12px; width: 40px; height: 40px; background: color-mix(in srgb, var(--panel) 70%, transparent); }
+.whatsnew__head { position: relative; margin-top: -72px; padding: 0 16px 10px; text-align: right; text-shadow: 0 1px 8px var(--panel), 0 0 2px var(--panel); }
+.whatsnew__title { font-size: 20px; }
+.whatsnew__count { font-size: 12px; }
+.whatsnew__notes { padding: 10px 16px; }
+.whatsnew__foot { flex-direction: column-reverse; align-items: stretch; gap: 6px; padding: 10px 14px 16px; }
+.whatsnew__ok { min-height: 44px; font-size: 15px; }
+.whatsnew__where { flex: none; text-align: center; font-size: 11px; }

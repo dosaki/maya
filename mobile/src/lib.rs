@@ -97,6 +97,8 @@ pub fn run() {
         .plugin(android::voice_init())
         .invoke_handler(tauri::generate_handler![
             commands::list_sessions,
+            commands::whats_new,
+            commands::whats_new_seen,
             commands::session_history,
             commands::send_reply,
             commands::live_attach_remote,

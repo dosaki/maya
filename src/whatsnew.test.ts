@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseReleaseNotes } from "./release-notes";
-import { compareVersions, notesSince, renderWhatsNew, showWhatsNew } from "./whatsnew";
+import { closeWhatsNew, compareVersions, notesSince, renderWhatsNew, showWhatsNew } from "./whatsnew";
 
 const f = parseReleaseNotes("# 0.50.0\n\n## New\n\n- a\n\n# 0.49.3\n\n## Fixed\n\n- b\n\n# 0.49.0\n\n## New\n\n- c\n\n# 0.10.0\n\n## New\n\n- d\n");
 const versions = (n: { version: string }[]) => n.map((s) => s.version);
@@ -158,5 +158,64 @@ describe("showWhatsNew", () => {
     h.querySelector<HTMLButtonElement>(".whatsnew__ok")!.click();
     expect(h.childElementCount).toBe(0);
     expect(calls).toEqual(["whats_new", "whats_new_seen"]);
+  });
+});
+
+describe("on the phone", () => {
+  const fake = () => {
+    const calls: string[] = [];
+    const invoke = vi.fn(async (cmd: string) => {
+      calls.push(cmd);
+      return cmd === "whats_new" ? { from: "0.49.0", running: "0.50.0" } : undefined;
+    });
+    return { invoke, calls };
+  };
+  const host = () => {
+    document.body.replaceChildren();
+    const h = document.createElement("div");
+    document.body.append(h);
+    return h;
+  };
+  const fakeHistory = () => {
+    let state: unknown = null;
+    return {
+      get state() { return state; },
+      pushState: vi.fn((s: unknown) => { state = s; }),
+      back: vi.fn(() => { state = null; }),
+    } as unknown as History & { pushState: ReturnType<typeof vi.fn>; back: ReturnType<typeof vi.fn> };
+  };
+
+  it("closeWhatsNew closes it as Got it does, and does nothing when none is open", async () => {
+    const h = host();
+    const { invoke, calls } = fake();
+    await showWhatsNew(invoke, h, f);
+    closeWhatsNew();
+    closeWhatsNew();
+    expect(h.childElementCount).toBe(0);
+    expect(calls).toEqual(["whats_new", "whats_new_seen"]);
+  });
+
+  it("holds one history entry, so Back closes it and marks it seen", async () => {
+    const h = host();
+    const { invoke, calls } = fake();
+    const hist = fakeHistory();
+    await showWhatsNew(invoke, h, f, hist);
+    expect(hist.pushState).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(h.childElementCount).toBe(0);
+    expect(calls).toEqual(["whats_new", "whats_new_seen"]);
+    expect(hist.back).not.toHaveBeenCalled();
+  });
+
+  it("closing it another way pops its history entry", async () => {
+    const h = host();
+    const { invoke } = fake();
+    const hist = fakeHistory();
+    await showWhatsNew(invoke, h, f, hist);
+    h.querySelector<HTMLButtonElement>(".whatsnew__ok")!.click();
+    expect(hist.back).toHaveBeenCalledTimes(1);
+    // The popstate that back() causes closes nothing more.
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    expect(hist.back).toHaveBeenCalledTimes(1);
   });
 });

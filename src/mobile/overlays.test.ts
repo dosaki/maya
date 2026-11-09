@@ -4,10 +4,12 @@ import mobileCss from "./mobile.css?raw";
 vi.mock("../modal", () => ({ dismissModal: vi.fn() }));
 vi.mock("../newsession", () => ({ closeNewSession: vi.fn() }));
 vi.mock("../resume", () => ({ closeResume: vi.fn() }));
+vi.mock("../whatsnew", () => ({ closeWhatsNew: vi.fn() }));
 
 import { dismissModal } from "../modal";
 import { closeNewSession } from "../newsession";
 import { closeResume } from "../resume";
+import { closeWhatsNew } from "../whatsnew";
 import { makeTabs } from "../tabs";
 import { closeOverlays, closeOverlaysOnTabTaps } from "./overlays";
 
@@ -17,6 +19,7 @@ describe("closeOverlays", () => {
     expect(dismissModal).toHaveBeenCalledTimes(1);
     expect(closeNewSession).toHaveBeenCalledTimes(1);
     expect(closeResume).toHaveBeenCalledTimes(1);
+    expect(closeWhatsNew).toHaveBeenCalledTimes(1);
   });
 });
 

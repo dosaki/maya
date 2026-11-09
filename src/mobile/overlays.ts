@@ -6,12 +6,14 @@
 import { dismissModal } from "../modal";
 import { closeNewSession } from "../newsession";
 import { closeResume } from "../resume";
+import { closeWhatsNew } from "../whatsnew";
 
-/** Closes the session window, the new-session form and the resume list, whichever is open. */
+/** Closes the session window, the new-session form, the resume list and What's new, whichever is open. */
 export function closeOverlays(): void {
   dismissModal();
   closeNewSession();
   closeResume();
+  closeWhatsNew();
 }
 
 /**

@@ -91,15 +91,17 @@ export function renderWhatsNew(offer: WhatsNewOffer, notes: ReleaseNotes[], onCl
 }
 
 /** The open window's close, if one is open. */
-let closeOpen: (() => void) | null = null;
+let closeOpen: ((byBack?: boolean) => void) | null = null;
 
 /**
  * Asks the backend whether to show the window and shows it in `host`.
  * Nothing shows when the answer is null, or when `host` already holds
  * something (a card opened at start): it waits for the next start, unseen.
  * Closing it in any way empties `host` and tells the backend it was seen.
+ * With `history` (the phone), it holds one entry while open, so Back
+ * closes it instead of leaving the app.
  */
-export async function showWhatsNew(invoke: (cmd: string) => Promise<unknown>, host: HTMLElement | null, notes: ReleaseNotes[] = RELEASE_NOTES): Promise<void> {
+export async function showWhatsNew(invoke: (cmd: string) => Promise<unknown>, host: HTMLElement | null, notes: ReleaseNotes[] = RELEASE_NOTES, history?: History): Promise<void> {
   if (!host) return;
   const offer = (await invoke("whats_new")) as WhatsNewOffer | null;
   if (!offer || host.childElementCount > 0 || closeOpen) return;
@@ -112,18 +114,33 @@ export async function showWhatsNew(invoke: (cmd: string) => Promise<unknown>, ho
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Escape") close();
   };
-  const close = () => {
+  const onBack = () => close(true);
+  const close = (byBack = false) => {
     if (closeOpen !== close) return;
     closeOpen = null;
     document.removeEventListener("keydown", onKey);
+    if (history) {
+      window.removeEventListener("popstate", onBack);
+      // Closed some other way: its entry goes, so Back is never needed twice.
+      if (!byBack && (history.state as { whatsNew?: unknown } | null)?.whatsNew) history.back();
+    }
     // A card that took its place keeps the host, and the window was not
     // read: it shows again at the next start.
     if (!root.isConnected) return;
     host.replaceChildren();
     seen();
   };
-  const root = renderWhatsNew(offer, shown, close);
+  const root = renderWhatsNew(offer, shown, () => close());
   closeOpen = close;
   host.replaceChildren(root);
   document.addEventListener("keydown", onKey);
+  if (history) {
+    history.pushState({ whatsNew: true }, "");
+    window.addEventListener("popstate", onBack);
+  }
+}
+
+/** Closes the window, if open, as Got it does: a tab tap on the phone. */
+export function closeWhatsNew(): void {
+  closeOpen?.();
 }

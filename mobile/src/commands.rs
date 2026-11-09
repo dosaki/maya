@@ -245,6 +245,27 @@ pub fn listen_stop(hub: H) -> Result<NetworkStatus, String> {
     hub.stop_listening()
 }
 
+/// What's new at start, if anything (`maya_core::whats_new` decides). A
+/// brand-new install shows none and saves the version it started on.
+#[tauri::command]
+pub fn whats_new(hub: H) -> Result<Option<maya_core::whats_new::Offer>, String> {
+    let (saved, existed) = {
+        let s = hub.settings.lock().unwrap();
+        (s.config.last_shown_version.clone(), s.existed)
+    };
+    let (offer, save) = maya_core::whats_new::at_start(saved.as_deref(), env!("CARGO_PKG_VERSION"), existed);
+    if let Some(v) = save {
+        hub.update_config(|c| c.last_shown_version = Some(v))?;
+    }
+    Ok(offer)
+}
+
+/// The What's new window was closed: this version's notes have been shown.
+#[tauri::command]
+pub fn whats_new_seen(hub: H) -> Result<(), String> {
+    hub.update_config(|c| c.last_shown_version = Some(env!("CARGO_PKG_VERSION").into())).map(|_| ())
+}
+
 #[tauri::command]
 pub fn get_config(hub: H) -> Config {
     hub.settings.lock().unwrap().config.clone()
@@ -398,6 +419,13 @@ const TAP_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_leave_the_last_version_shown_alone() {
+        let mut c = Config { last_shown_version: Some("0.50.0".into()), ..Config::default() };
+        apply_settings(&mut c, &Config::default());
+        assert_eq!(c.last_shown_version.as_deref(), Some("0.50.0"));
+    }
 
     #[test]
     fn settings_carry_the_viewer_look() {

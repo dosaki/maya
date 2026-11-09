@@ -44,6 +44,9 @@ pub trait Sink: Send + Sync {
 pub struct Settings {
     pub path: PathBuf,
     pub config: Config,
+    /// Whether the file existed when the app started, before anything
+    /// could save it: a brand-new install shows no What's new.
+    pub existed: bool,
 }
 
 /// Where the config lives under the app's data directory.
@@ -57,6 +60,7 @@ pub fn settings_path(maya_dir: &Path) -> PathBuf {
 /// joins a main.
 pub fn load_settings(maya_dir: &Path, model: &str) -> Settings {
     let path = settings_path(maya_dir);
+    let existed = path.exists();
     let mut config = config::load(&path);
     if config.network.role == NetworkRole::Main {
         config.network.role = NetworkRole::Off;
@@ -69,7 +73,7 @@ pub fn load_settings(maya_dir: &Path, model: &str) -> Settings {
     if config.network.name.trim().is_empty() {
         config.network.name = alerts::default_name(model);
     }
-    Settings { path, config }
+    Settings { path, config, existed }
 }
 
 /// The main's board while this phone has joined it.
@@ -1087,6 +1091,19 @@ impl ClientNotify for HubClientNotify {
 mod tests {
     use super::*;
     use maya_core::config::PairedAssistant;
+
+    #[test]
+    fn load_settings_says_whether_the_file_existed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!load_settings(dir.path(), "Pixel").existed, "a brand-new install");
+        config::save(&settings_path(dir.path()), &Config::default()).unwrap();
+        assert!(load_settings(dir.path(), "Pixel").existed);
+        let main = tempfile::tempdir().unwrap();
+        let mut c = Config::default();
+        c.network.role = NetworkRole::Main;
+        config::save(&settings_path(main.path()), &c).unwrap();
+        assert!(load_settings(main.path(), "Pixel").existed, "a phone saved as a main, which load rewrites");
+    }
     use maya_core::net::client::Executor;
     use maya_core::store::now_ms;
 
@@ -1113,7 +1130,7 @@ mod tests {
         // Numbered too: two tests may start in the same millisecond, and one that starts the client writes its key there.
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!("maya-hub-test-{}-{}-{}", std::process::id(), now_ms(), NEXT.fetch_add(1, Ordering::SeqCst)));
-        let settings = Settings { path: settings_path(&dir), config: Config::default() };
+        let settings = Settings { path: settings_path(&dir), config: Config::default(), existed: true };
         Hub::new(dir, settings, Arc::new(NoAlerts), sink)
     }
 
@@ -1196,7 +1213,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("maya-hub-voice-test-{}-{}-{speak}", std::process::id(), now_ms()));
         let config = Config { speak_notifications: speak, ..Config::default() };
         let posts = Arc::new(Posts::default());
-        let hub = Hub::new(dir.clone(), Settings { path: settings_path(&dir), config }, posts.clone(), Arc::new(NoSink));
+        let hub = Hub::new(dir.clone(), Settings { path: settings_path(&dir), config, existed: true }, posts.clone(), Arc::new(NoSink));
         hub.set_link_for_test(AssistantLink { connected: true, main_name: Some("Yhi".into()), mirror: Some(MirrorAccess::Allowed), voice: true, ..Default::default() }, true);
         let said = Arc::new(Said::default());
         let ask: crate::voice::Ask = Arc::new(|_| Err("not asked".into()));
