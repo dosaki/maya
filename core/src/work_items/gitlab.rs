@@ -105,6 +105,12 @@ pub fn take(http: &dyn Http, forge: &Forge, repo: &str, number: u64, me: &Me, as
     let url = issue_url(forge, repo, number);
     let reply = send_json_as(http, forge, "PUT", &url, &body, Need::IssueWrite)?;
     let kept = assignees_of_reply(&reply)?;
+    // GitLab answers 200 even when it leaves the labels alone.
+    if let Some(status) = &cfg.start_status {
+        if !labels_of_reply(&reply)?.iter().any(|l| l.eq_ignore_ascii_case(status)) {
+            return Err("The issue was assigned to you, but its status was not set.".into());
+        }
+    }
     if kept.contains(&me.id) {
         return Ok(());
     }
@@ -134,8 +140,15 @@ fn statuses_to_remove(status_labels: &[String], start: &str, all_labels: &[Strin
 }
 
 fn assignees_of_reply(reply: &str) -> Result<Vec<u64>, String> {
-    let v: Value = serde_json::from_str(reply).map_err(|e| format!("GitLab's reply was not JSON: {e}"))?;
-    Ok(assignee_ids(&v))
+    Ok(assignee_ids(&reply_json(reply)?))
+}
+
+fn labels_of_reply(reply: &str) -> Result<Vec<String>, String> {
+    Ok(label_names(&reply_json(reply)?))
+}
+
+fn reply_json(reply: &str) -> Result<Value, String> {
+    serde_json::from_str(reply).map_err(|e| format!("GitLab's reply was not JSON: {e}"))
 }
 
 #[cfg(test)]
@@ -182,7 +195,7 @@ mod tests {
 
     #[test]
     fn take_replaces_the_assignee_when_the_tier_allows_only_one() {
-        let http = Seq::new(&[(200, r#"{"assignees":[{"id":5}]}"#), (200, r#"{"assignees":[{"id":9}]}"#)]);
+        let http = Seq::new(&[(200, r#"{"assignees":[{"id":5}],"labels":["status::doing","backend"]}"#), (200, r#"{"assignees":[{"id":9}]}"#)]);
         take(&http, &gitlab_forge(), "grp/r", 17, &Me { login: "tiago".into(), id: 9 }, &[5], &["status::todo".to_string(), "backend".to_string()], &doing_cfg()).unwrap();
         let seen = http.seen.lock().unwrap();
         assert_eq!(seen.len(), 2, "the first PUT kept only the old assignee, so a second one replaces it");
@@ -194,9 +207,17 @@ mod tests {
 
     #[test]
     fn take_errors_when_the_second_put_still_leaves_me_out() {
-        let http = Seq::new(&[(200, r#"{"assignees":[{"id":5}]}"#), (200, r#"{"assignees":[{"id":5}]}"#)]);
+        let http = Seq::new(&[(200, r#"{"assignees":[{"id":5}],"labels":["status::doing"]}"#), (200, r#"{"assignees":[{"id":5}]}"#)]);
         let e = take(&http, &gitlab_forge(), "grp/r", 17, &Me { login: "t".into(), id: 9 }, &[5], &[], &doing_cfg()).unwrap_err();
         assert_eq!(e, "The issue was not assigned to you.");
+    }
+
+    #[test]
+    fn take_errors_when_gitlab_leaves_the_status_unset() {
+        let http = Seq::new(&[(200, r#"{"assignees":[{"id":9}],"labels":["status::todo"]}"#)]);
+        let e = take(&http, &gitlab_forge(), "grp/r", 17, &Me { login: "t".into(), id: 9 }, &[], &["status::todo".to_string()], &doing_cfg()).unwrap_err();
+        assert_eq!(e, "The issue was assigned to you, but its status was not set.");
+        assert_eq!(http.seen.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -206,7 +227,7 @@ mod tests {
         let e = take(&http, &gitlab_forge(), "grp/r", 1, &me, &[5], &[], &doing_cfg()).unwrap_err();
         assert!(e.starts_with("GitLab's reply was not JSON"), "{e}");
         assert_eq!(http.seen.lock().unwrap().len(), 1);
-        let http = Seq::new(&[(200, r#"{"assignees":[{"id":5},{"id":6}]}"#)]);
+        let http = Seq::new(&[(200, r#"{"assignees":[{"id":5},{"id":6}],"labels":["status::doing"]}"#)]);
         let e = take(&http, &gitlab_forge(), "grp/r", 1, &me, &[5, 6], &[], &doing_cfg()).unwrap_err();
         assert_eq!(e, "The issue was not assigned to you.");
         assert_eq!(http.seen.lock().unwrap().len(), 1, "a second PUT would drop two assignees");
@@ -214,7 +235,7 @@ mod tests {
 
     #[test]
     fn every_other_status_label_goes_not_just_the_one_the_issue_shows() {
-        let http = Seq::new(&[(200, r#"{"assignees":[{"id":9}]}"#)]);
+        let http = Seq::new(&[(200, r#"{"assignees":[{"id":9}],"labels":["Status::Doing"]}"#)]);
         let cfg = ForgeItems { status_labels: vec!["status::todo".into(), "status::review".into(), "status::doing".into()], start_status: Some("status::doing".into()), ..WorkItemsConfig::default().gitlab };
         take(&http, &gitlab_forge(), "grp/r", 1, &Me { login: "t".into(), id: 9 }, &[], &["Status::Todo".to_string()], &cfg).unwrap();
         let first: Value = serde_json::from_str(&http.seen.lock().unwrap()[0].1).unwrap();
@@ -223,7 +244,7 @@ mod tests {
 
     #[test]
     fn take_makes_one_call_when_me_is_among_the_assignees_and_no_label_is_removed() {
-        let http = FakeHttp::new(vec![("/issues/3", 200, r#"{"assignees":[{"id":5},{"id":9}]}"#)]);
+        let http = FakeHttp::new(vec![("/issues/3", 200, r#"{"assignees":[{"id":5},{"id":9}],"labels":["doing"]}"#)]);
         let cfg = ForgeItems { status_labels: vec!["doing".into()], start_status: Some("doing".into()), ..WorkItemsConfig::default().gitlab };
         take(&http, &gitlab_forge(), "grp/r", 3, &Me { login: "tiago".into(), id: 9 }, &[5], &[], &cfg).unwrap();
         let seen = http.seen.lock().unwrap();

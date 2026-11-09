@@ -302,18 +302,18 @@ fn pick_repo(app: &AppHandle, item: &WorkItem, items: &[WorkItem]) -> RepoPick {
 }
 
 /// Why Start refuses the user's answer to the takeover question, if it does:
-/// the issue is someone else's and the user did not agree to take it over,
-/// or someone the check did not name (`checked` held its assignees) has
-/// been assigned since.
-fn takeover_refusal(checked: &[String], fresh: &[String], me: &str, take_over: bool) -> Option<&'static str> {
+/// the issue is someone else's and the user agreed to take it over from
+/// nobody, or it is assigned to someone outside `agreed` (the names the
+/// question showed and the user said yes to).
+fn takeover_refusal(agreed: &[String], fresh: &[String], me: &str) -> Option<&'static str> {
     let now = others(fresh, me);
     if now.is_empty() {
         return None;
     }
-    if !take_over {
+    if agreed.is_empty() {
         return Some("This issue is assigned to someone else.");
     }
-    let named = others(checked, me);
+    let named = others(agreed, me);
     let new = now.iter().any(|n| !named.iter().any(|c| c.eq_ignore_ascii_case(n)));
     new.then_some("Someone else was assigned since you checked; check again.")
 }
@@ -386,13 +386,14 @@ pub(crate) fn work_item_check(app: AppHandle, key: String) -> Result<StartCheck,
 
 /// Starts the listed item `key` in `repo` (the item's own when it needs no
 /// pick): once the issue is still open, not someone else's unless
-/// `take_over` covers them, and nothing known in advance refuses the
+/// `take_over` (the names the user agreed to take it over from) covers
+/// them, and nothing known in advance refuses the
 /// start, assigns it to the user and sets its start status, then opens its
 /// session. A failed write-back is a notice (also a line above the areas),
 /// not a failure. A Start under a minute old whose session has not shown
 /// up yet refuses a second one.
 #[tauri::command(async)]
-pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo>, take_over: bool) -> Result<WorkStarted, String> {
+pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo>, take_over: Vec<String>) -> Result<WorkStarted, String> {
     let state = app.state::<AppState>();
     let generation = state.git_generation.load(Ordering::SeqCst);
     let (listed_item, _) = listed(&state, &key)?;
@@ -405,7 +406,7 @@ pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo
     let item = match read_fresh(&state, &listed_item, generation)? {
         Some(f) => {
             let fresh = &f.issue.item;
-            if let Some(why) = takeover_refusal(&listed_item.assignees, &fresh.assignees, &f.me.login, take_over) {
+            if let Some(why) = takeover_refusal(&take_over, &fresh.assignees, &f.me.login) {
                 // So the page's next check names whoever it is.
                 show_fresh(&app, fresh);
                 return Err(why.into());
@@ -479,12 +480,11 @@ mod tests {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let (me, gone) = ("tiago", "This issue is assigned to someone else.");
         let new = "Someone else was assigned since you checked; check again.";
-        assert_eq!(takeover_refusal(&s(&[]), &s(&["Tiago"]), me, false), None, "mine alone asks nothing");
-        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["maria"]), me, false), Some(gone));
-        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["Maria", "tiago"]), me, true), None, "the name the check showed");
-        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["maria", "john"]), me, true), Some(new));
-        assert_eq!(takeover_refusal(&s(&[]), &s(&["john"]), me, true), Some(new));
-        assert_eq!(takeover_refusal(&s(&["maria", "john"]), &s(&["john"]), me, true), None, "one fewer is still covered");
+        assert_eq!(takeover_refusal(&s(&[]), &s(&["Tiago"]), me), None, "mine alone asks nothing");
+        assert_eq!(takeover_refusal(&s(&[]), &s(&["maria"]), me), Some(gone), "agreed to nobody");
+        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["Maria", "tiago"]), me), None, "the name the question showed");
+        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["maria", "john"]), me), Some(new), "john was never shown, whatever the list holds now");
+        assert_eq!(takeover_refusal(&s(&["maria", "john"]), &s(&["john"]), me), None, "one fewer is still covered");
     }
 
     #[test]

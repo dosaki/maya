@@ -28,6 +28,9 @@ describe("work items", () => {
     expect(sessionFor(a, started, [card({ name: "x", cwd: "/c/b-issue-1" })])).not.toBeNull();
     expect(sessionFor(a, started, [card({ name: "x", cwd: "/c/b-issue-1/src" })])).not.toBeNull();
     expect(sessionFor(a, started, [card({ name: "x", cwd: "/c/b-issue-10" })])).toBeNull();
+    const win = [{ key: "k", item: a, dir: "C:\\c\\b-issue-1", startedAt: 0 }];
+    expect(sessionFor(a, win, [card({ name: "x", cwd: "C:\\c\\b-issue-1\\src" })])).not.toBeNull();
+    expect(sessionFor(a, win, [card({ name: "x", cwd: "C:\\c\\b-issue-10" })])).toBeNull();
   });
 
   it("takes the most recently changed session", () => {
@@ -161,7 +164,7 @@ describe("work items", () => {
     const toast = vi.fn();
     const opened = vi.fn();
     await startWorkItem(item({ key: "k" }), { invoke, host: document.createElement("div"), toast, opened });
-    expect(invoke).toHaveBeenNthCalledWith(2, "work_item_start", { key: "k", repo: null, takeOver: false });
+    expect(invoke).toHaveBeenNthCalledWith(2, "work_item_start", { key: "k", repo: null, takeOver: [] });
     // The notice shows in the line above the areas, not in a second toast.
     expect(toast.mock.calls).toEqual([["Working on a/b#1 in api-issue-1"]]);
     expect(opened).toHaveBeenCalledWith(4, "/c/api-issue-1");
@@ -175,7 +178,7 @@ describe("work items", () => {
     await vi.waitFor(() => expect(host.querySelector(".card__btn--primary")).not.toBeNull());
     host.querySelector<HTMLButtonElement>(".card__btn--primary")!.click();
     await done;
-    expect(invoke).toHaveBeenNthCalledWith(2, "work_item_start", { key: "k", repo: api, takeOver: true });
+    expect(invoke).toHaveBeenNthCalledWith(2, "work_item_start", { key: "k", repo: api, takeOver: ["maria"] });
     expect(host.children).toHaveLength(0);
   });
 

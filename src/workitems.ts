@@ -31,8 +31,16 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
  * recently changed match wins.
  */
 export function sessionFor(item: WorkItem, started: Started[], cards: Card[]): Card | null {
-  const dir = started.find((s) => s.key === item.key)?.dir.replace(/\/+$/, "") ?? null;
-  const matches = cards.filter((c) => c.name === `issue ${item.id}` || (dir !== null && (c.cwd === dir || c.cwd.startsWith(`${dir}/`))));
+  // Windows folders use `\`: compare both sides with `/`.
+  const slashes = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const found = started.find((s) => s.key === item.key)?.dir;
+  const dir = found === undefined ? null : slashes(found);
+  const matches = cards.filter((c) => {
+    if (c.name === `issue ${item.id}`) return true;
+    if (!dir) return false;
+    const cwd = slashes(c.cwd);
+    return cwd === dir || cwd.startsWith(`${dir}/`);
+  });
   if (matches.length === 0) return null;
   return matches.sort((a, b) => b.stateSince - a.stateSince)[0];
 }
@@ -387,7 +395,7 @@ export async function startWorkItem(
       if (!chosen) return;
       repo = chosen.repo;
     }
-    const r = await invoke<WorkStarted>("work_item_start", { key: item.key, repo, takeOver: check.takeover.length > 0 });
+    const r = await invoke<WorkStarted>("work_item_start", { key: item.key, repo, takeOver: check.takeover });
     // A notice (the issue not updated, say) shows in the line above the areas.
     toast(`Working on ${item.id} in ${r.dir.split("/").filter(Boolean).pop() ?? r.dir}`);
     deps.opened(r.nativeTerm, r.dir);
