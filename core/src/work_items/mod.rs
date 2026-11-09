@@ -2,6 +2,7 @@
 
 pub mod github;
 pub mod gitlab;
+pub mod pick;
 pub mod start;
 pub mod started;
 

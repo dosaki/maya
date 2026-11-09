@@ -639,8 +639,15 @@ pub fn agent_binary(name: &str) -> Option<PathBuf> {
 /// timeout or any error.
 pub fn classify(agent: Harness, binary: &Path, model: Option<&str>, root: &Path, user_prompt: &str, dirs: &[String], cwd: &Path, timeout: Duration) -> Option<String> {
     let _ = root; // the folders are in the prompt; the run itself happens in `cwd` (Maya's data folder)
+    let text = oneshot_text(agent, binary, model, &classifier_prompt(user_prompt, dirs), cwd, timeout)?;
+    pick_dir(&text, dirs)
+}
+
+/// One non-interactive turn of `agent` on `prompt`, run in `cwd`: its reply
+/// text; None on a failed start, a timeout, a failing exit or an unreadable reply.
+pub fn oneshot_text(agent: Harness, binary: &Path, model: Option<&str>, prompt: &str, cwd: &Path, timeout: Duration) -> Option<String> {
     let mut child = crate::command(binary)
-        .args(oneshot_args(agent, model, None, &classifier_prompt(user_prompt, dirs)))
+        .args(oneshot_args(agent, model, None, prompt))
         .current_dir(cwd)
         .env_clear()
         .envs(clean_env(std::env::vars()))
@@ -665,8 +672,7 @@ pub fn classify(agent: Harness, binary: &Path, model: Option<&str>, root: &Path,
     if !out.status.success() {
         return None;
     }
-    let text = final_text(agent, &String::from_utf8_lossy(&out.stdout)).ok()?;
-    pick_dir(&text, dirs)
+    final_text(agent, &String::from_utf8_lossy(&out.stdout)).ok()
 }
 
 /// Prompt files older than this are removed whenever a new one is written.
