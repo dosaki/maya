@@ -1729,8 +1729,10 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
         }
     }
     config::validate_git(config.git.as_deref().unwrap_or(&[]))?;
+    config::validate_work_items(&config.work_items)?;
     let mut config = config.for_this_platform();
     config.normalize_git();
+    config.normalize_work_items();
     // The main notifies and listens for an assistant.
     if config.network.role == config::NetworkRole::Assistant {
         config.listen = false;

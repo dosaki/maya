@@ -221,6 +221,9 @@ pub struct Config {
     pub keys: Option<KeyBindings>,
     #[serde(default)]
     pub network: NetworkConfig,
+    /// The Issues tab: which issues to list and how to mark a started one.
+    #[serde(default)]
+    pub work_items: WorkItemsConfig,
 }
 
 /// The key combinations of each message-box action, as the page records
@@ -369,6 +372,105 @@ pub struct GitConnection {
     pub clone: CloneProtocol,
 }
 
+/// Whose issues a rule picks up.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Assignee {
+    Me,
+    Anyone,
+    User { login: String },
+}
+
+/// One search over a service's issues: the assignee, the labels the issue
+/// must carry, and the repositories it may be in.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemRule {
+    pub assignee: Assignee,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Empty is any repository.
+    #[serde(default)]
+    pub repos: Vec<String>,
+}
+
+/// The work items of one service: switched on or off, the rules that pick
+/// the issues, and the labels that stand for a status.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeItems {
+    pub enabled: bool,
+    pub rules: Vec<ItemRule>,
+    #[serde(default)]
+    pub status_labels: Vec<String>,
+    /// The status label a started issue gets; one of `status_labels`.
+    #[serde(default)]
+    pub start_status: Option<String>,
+    #[serde(default)]
+    pub tracker_repos: Vec<String>,
+}
+
+impl Default for ForgeItems {
+    fn default() -> Self {
+        ForgeItems {
+            enabled: true,
+            rules: vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![] }],
+            status_labels: vec![],
+            start_status: None,
+            tracker_repos: vec![],
+        }
+    }
+}
+
+/// The Issues tab's settings.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkItemsConfig {
+    pub github: ForgeItems,
+    pub gitlab: ForgeItems,
+    #[serde(default)]
+    pub prompt: String,
+}
+
+impl WorkItemsConfig {
+    pub fn for_forge(&self, p: GitProvider) -> &ForgeItems {
+        match p {
+            GitProvider::Github => &self.github,
+            GitProvider::Gitlab => &self.gitlab,
+        }
+    }
+}
+
+/// Why the work items settings cannot be saved, if they cannot.
+pub fn validate_work_items(w: &WorkItemsConfig) -> Result<(), String> {
+    for f in [&w.github, &w.gitlab] {
+        for r in &f.rules {
+            match &r.assignee {
+                Assignee::Anyone if r.repos.iter().all(|x| x.trim().is_empty()) => {
+                    return Err("A rule for anyone's issues must name its repositories.".into());
+                }
+                Assignee::User { login } if login.trim().is_empty() => {
+                    return Err("A rule for someone else's issues needs their login.".into());
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A repository as typed: trimmed, without a pasted `https://<host>/` or a
+/// trailing `.git`.
+fn clean_repo(r: &str) -> String {
+    let r = r.trim();
+    let r = r.strip_prefix("https://").or_else(|| r.strip_prefix("http://")).map_or(r, |rest| rest.split_once('/').map_or("", |(_, path)| path));
+    r.trim_end_matches('/').trim_end_matches(".git").to_string()
+}
+
+fn clean_all(list: &mut Vec<String>, f: impl Fn(&str) -> String) {
+    *list = list.iter().map(|s| f(s)).filter(|s| !s.is_empty()).collect();
+}
+
 impl GitConnection {
     /// GitHub on, GitLab off, each reading its default variable.
     pub fn default_for(provider: GitProvider) -> Self {
@@ -513,6 +615,7 @@ impl Default for Config {
             new_session_terminal: NewSessionTerminal::Terminal,
             keys: None,
             network: NetworkConfig::default(),
+            work_items: WorkItemsConfig::default(),
         }
     }
 }
@@ -615,6 +718,26 @@ impl Config {
             }
         }
     }
+
+    /// Trims the work items settings as typed: every string, dropping the
+    /// blank labels and repositories, and a repository pasted as a URL.
+    /// A start status that is not a status label is cleared.
+    pub fn normalize_work_items(&mut self) {
+        let w = &mut self.work_items;
+        w.prompt = w.prompt.trim().to_string();
+        for f in [&mut w.github, &mut w.gitlab] {
+            for r in &mut f.rules {
+                if let Assignee::User { login } = &mut r.assignee {
+                    *login = login.trim().to_string();
+                }
+                clean_all(&mut r.labels, |s| s.trim().to_string());
+                clean_all(&mut r.repos, clean_repo);
+            }
+            clean_all(&mut f.status_labels, |s| s.trim().to_string());
+            clean_all(&mut f.tracker_repos, clean_repo);
+            f.start_status = f.start_status.as_deref().map(str::trim).filter(|s| f.status_labels.iter().any(|l| l == s)).map(String::from);
+        }
+    }
 }
 
 /// Expands a leading `~` or `~/` to the home directory.
@@ -702,6 +825,57 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_items_default_to_my_issues_anywhere_on_both_services() {
+        let w = Config::default().work_items;
+        for f in [&w.github, &w.gitlab] {
+            assert!(f.enabled);
+            assert_eq!(f.rules, vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![] }]);
+            assert!(f.status_labels.is_empty() && f.start_status.is_none() && f.tracker_repos.is_empty());
+        }
+        let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":5}"#).unwrap();
+        assert_eq!(older.work_items, WorkItemsConfig::default(), "a file from before 0.51 reads as the defaults");
+    }
+
+    #[test]
+    fn work_items_round_trip_in_camel_case() {
+        let mut c = Config::default();
+        c.work_items.github.rules.push(ItemRule { assignee: Assignee::User { login: "maria".into() }, labels: vec!["in progress".into()], repos: vec!["acme/api".into()] });
+        c.work_items.github.status_labels = vec!["todo".into(), "in progress".into()];
+        c.work_items.github.start_status = Some("in progress".into());
+        let text = serde_json::to_string(&c).unwrap();
+        assert!(text.contains(r#""workItems":{"github":{"enabled":true,"rules":[{"assignee":{"kind":"me"},"#), "{text}");
+        assert!(text.contains(r#"{"assignee":{"kind":"user","login":"maria"},"labels":["in progress"],"repos":["acme/api"]}"#), "{text}");
+        assert!(text.contains(r#""statusLabels":["todo","in progress"],"startStatus":"in progress""#), "{text}");
+        assert_eq!(serde_json::from_str::<Config>(&text).unwrap(), c);
+    }
+
+    #[test]
+    fn a_rule_for_anyone_must_name_its_repositories() {
+        let mut w = WorkItemsConfig::default();
+        w.gitlab.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec!["urgent".into()], repos: vec![] });
+        assert_eq!(validate_work_items(&w).unwrap_err(), "A rule for anyone's issues must name its repositories.");
+        w.gitlab.rules[1].repos = vec!["grp/r".into()];
+        assert!(validate_work_items(&w).is_ok());
+        w.github.rules.push(ItemRule { assignee: Assignee::User { login: " ".into() }, labels: vec![], repos: vec![] });
+        assert_eq!(validate_work_items(&w).unwrap_err(), "A rule for someone else's issues needs their login.");
+    }
+
+    #[test]
+    fn normalize_trims_and_drops_what_is_not_a_status() {
+        let mut c = Config::default();
+        c.work_items.github.rules[0].labels = vec![" bug ".into(), "".into()];
+        c.work_items.github.rules[0].repos = vec!["https://github.com/acme/api.git".into(), " acme/web ".into()];
+        c.work_items.github.status_labels = vec![" todo ".into(), "".into()];
+        c.work_items.github.start_status = Some("doing".into());
+        c.normalize_work_items();
+        let g = &c.work_items.github;
+        assert_eq!(g.rules[0].labels, vec!["bug"]);
+        assert_eq!(g.rules[0].repos, vec!["acme/api", "acme/web"]);
+        assert_eq!(g.status_labels, vec!["todo"]);
+        assert_eq!(g.start_status, None, "not one of the status labels");
+    }
 
     #[test]
     fn last_shown_version_round_trips_and_defaults_to_none() {
