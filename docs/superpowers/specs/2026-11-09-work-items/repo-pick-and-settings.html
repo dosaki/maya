@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Issues mockup</title>
+<style>
+:root {
+  --bg: #0c0b09; --panel: #16140f; --text: #f1e9d8; --muted: #a39a86; --border: #2c2719;
+  --gold: #d9ab3c; --gold-bright: #f0c85a; --gold-deep: #8f6a1c;
+  --awaiting: #d97706; --working: #2563eb; --completed: #16a34a; --idle: #9ca3af;
+  --on-gold: #1a1408;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+  font-size: 14px; color: var(--text); background: var(--bg); color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); padding: 24px; }
+h2.screen { color: var(--gold-bright); font-size: 15px; letter-spacing: .02em; margin: 32px 0 6px; }
+h2.screen:first-child { margin-top: 0; }
+p.note { color: var(--muted); margin: 0 0 12px; font-size: 13px; max-width: 900px; }
+.window { border: 1px solid var(--gold-deep); border-radius: 10px; overflow: hidden; max-width: 1180px; }
+.topbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--gold-deep); background: linear-gradient(180deg, #14120d, var(--bg)); }
+.title { color: var(--gold-bright); font-weight: 600; font-size: 16px; margin-right: 12px; }
+.tab { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 5px 10px; color: var(--muted); font: inherit; }
+.tab--active { background: var(--panel); border-color: var(--gold-deep); color: var(--gold-bright); }
+.count { font-size: 11px; color: var(--muted); margin-left: 3px; }
+.pane { padding: 14px 16px 18px; }
+.bar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+select, input[type=text] { padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
+.grow { flex: 1; }
+.fetched { color: var(--muted); font-size: 12px; }
+.error { color: #e5484d; font-size: 13px; padding: 0 0 12px; }
+.error a { color: inherit; }
+.list { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 10px; }
+.item { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.name { display: inline-flex; align-items: center; gap: 7px; }
+.src { font-size: 10px; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; color: var(--muted); }
+.repo { font-weight: 600; }
+.chips { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.chip { padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.chip--urgent { border-color: #e5484d; color: #e5484d; }
+.ititle { font-size: 13px; }
+.foot { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.meta { font-size: 12px; color: var(--muted); }
+.btn { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; }
+.btn--gold { background: var(--gold); border-color: var(--gold); color: var(--on-gold); font-weight: 600; }
+.btn--ghost { background: none; }
+.live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.dot--working { background: var(--working); }
+.dot--awaiting { background: var(--awaiting); }
+.norepo { font-size: 12px; color: var(--awaiting); }
+/* Modal */
+.modalwrap { background: rgba(0,0,0,.55); padding: 40px; display: flex; justify-content: center; border-radius: 10px; max-width: 1180px; border: 1px solid var(--border); }
+.modal { width: 520px; background: var(--panel); border: 1px solid var(--gold-deep); border-radius: 10px; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+.modal h3 { margin: 0; font-size: 15px; }
+.modal .why { font-size: 13px; color: var(--muted); }
+.row { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13px; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; }
+/* Settings */
+.settings { display: flex; gap: 20px; padding: 14px 16px 18px; }
+.nav { display: flex; flex-direction: column; gap: 2px; flex: 0 0 170px; }
+.nav div { padding: 7px 12px; color: var(--muted); border: 1px solid transparent; border-radius: 6px; }
+.nav .cur { background: var(--panel); border-color: var(--gold-deep); color: var(--gold-bright); }
+.body { flex: 1; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.group { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; background: color-mix(in srgb, var(--panel) 60%, var(--bg)); }
+.ghead { display: flex; justify-content: space-between; align-items: center; }
+.ghead h4 { margin: 0; font-size: 14px; }
+.sub { font-size: 12px; color: var(--muted); }
+.rule { display: grid; grid-template-columns: 70px 1fr; gap: 6px 10px; align-items: center; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 13px; background: var(--bg); position: relative; }
+.rule .x { position: absolute; top: 6px; right: 8px; color: var(--muted); font-size: 12px; }
+.rule label { color: var(--muted); font-size: 12px; }
+.tag { display: inline-block; padding: 1px 7px; border: 1px solid var(--gold-deep); border-radius: 999px; font-size: 11.5px; margin-right: 4px; color: var(--gold-bright); }
+.check { display: flex; gap: 8px; align-items: center; font-size: 13px; }
+.mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.link { color: var(--muted); font-size: 12.5px; text-decoration: underline; }
+.switch { width: 30px; height: 16px; border-radius: 999px; background: var(--gold); position: relative; display: inline-block; }
+.switch::after { content: ""; position: absolute; right: 2px; top: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--on-gold); }
+.split2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+</style>
+</head>
+<body>
+
+<h2 class="screen">1 · The Issues tab</h2>
+<p class="note">A new tab next to Pull Requests. One combined list from every switched-on source. Each issue shows where it came from, its labels and who has it. An issue a session is already working on shows that session instead of the button. A custom tool's item with no repo says Maya will pick one.</p>
+<div class="window">
+  <div class="topbar">
+    <span class="title">Maya</span>
+    <button class="tab">Sessions</button>
+    <button class="tab">Pull Requests <span class="count">4</span></button>
+    <button class="tab tab--active">Issues <span class="count">6</span></button>
+    <button class="tab">Deployments</button>
+    <button class="tab">Chat</button>
+    <span class="grow"></span>
+    <button class="tab">Settings</button>
+  </div>
+  <div class="pane">
+    <div class="bar">
+      <select><option>All sources</option><option>GitHub</option><option>GitLab</option><option>Linear</option></select>
+      <select><option>All repositories</option></select>
+      <select><option>Any label</option></select>
+      <input type="text" placeholder="Search issues" style="width:220px">
+      <span class="grow"></span>
+      <span class="fetched">Checked 1 min ago</span>
+      <button class="btn btn--ghost">Refresh</button>
+    </div>
+    <div class="error">Linear (mine-only): the command exited with status 1: “LINEAR_API_KEY is not set”. <a href="#">Settings → Work Items</a></div>
+    <div class="list">
+
+      <div class="item">
+        <div class="head">
+          <span class="name"><span class="src">GH</span><span class="repo">acme/api#412</span></span>
+          <span class="chips"><span class="chip chip--urgent">urgent</span><span class="chip">bug</span></span>
+        </div>
+        <div class="ititle">Login times out after 30 s on slow networks</div>
+        <div class="foot">
+          <span class="meta">Unassigned · updated 2 h ago</span>
+          <button class="btn btn--gold">Start</button>
+        </div>
+      </div>
+
+      <div class="item">
+        <div class="head">
+          <span class="name"><span class="src">GH</span><span class="repo">acme/web#88</span></span>
+          <span class="chips"><span class="chip">enhancement</span></span>
+        </div>
+        <div class="ititle">Add dark mode to the account page</div>
+        <div class="foot">
+          <span class="live"><span class="dot dot--working"></span>Working · issue acme/web#88</span>
+          <button class="btn">Open session</button>
+        </div>
+      </div>
+
+      <div class="item">
+        <div class="head">
+          <span class="name"><span class="src">GL</span><span class="repo">platform/billing#17</span></span>
+          <span class="chips"><span class="chip">status::todo</span><span class="chip">backend</span></span>
+        </div>
+        <div class="ititle">Invoice PDF misses the VAT number for EU customers</div>
+        <div class="foot">
+          <span class="meta">Assigned to you · updated yesterday</span>
+          <button class="btn btn--gold">Start</button>
+        </div>
+      </div>
+
+      <div class="item">
+        <div class="head">
+          <span class="name"><span class="src">GL</span><span class="repo">platform/billing#21</span></span>
+          <span class="chips"><span class="chip">status::doing</span></span>
+        </div>
+        <div class="ititle">Retry failed card payments once after 1 hour</div>
+        <div class="foot">
+          <span class="live"><span class="dot dot--awaiting"></span>Awaiting decision · issue billing#21</span>
+          <button class="btn">Open session</button>
+        </div>
+      </div>
+
+      <div class="item">
+        <div class="head">
+          <span class="name"><span class="src">Linear</span><span class="repo">ENG-1204</span></span>
+          <span class="chips"><span class="chip">Todo</span></span>
+        </div>
+        <div class="ititle">Export reports as CSV from the dashboard</div>
+        <div class="foot">
+          <span class="meta">acme/web · assigned to you · 3 d ago</span>
+          <button class="btn btn--gold">Start</button>
+        </div>
+      </div>
+
+      <div class="item">
+        <div class="head">
+          <span class="name"><span class="src">Linear</span><span class="repo">ENG-1199</span></span>
+          <span class="chips"><span class="chip">Backlog</span></span>
+        </div>
+        <div class="ititle">Rate-limit the public search endpoint</div>
+        <div class="foot">
+          <span class="norepo">No repository given: Maya picks one</span>
+          <button class="btn btn--gold">Start</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<h2 class="screen">2 · When Maya has to pick the repository</h2>
+<p class="note">Only for an item with no repo (a custom tool) or from a tracker-only repo. Maya's brain picks from the repos she knows. You confirm or change the pick before anything starts. When the repo is plain, “Start” starts at once with no dialog.</p>
+<div class="modalwrap">
+  <div class="modal">
+    <h3>Do ENG-1199: Rate-limit the public search endpoint</h3>
+    <div class="why">Maya picked <b style="color:var(--text)">acme/api</b>: the search endpoint lives in <span class="mono">src/routes/search.rs</span> there, and two recent sessions worked on it.</div>
+    <div class="row"><span>Repository</span><select style="width:240px"><option>acme/api (GitHub)</option><option>acme/web (GitHub)</option><option>platform/billing (GitLab)</option></select></div>
+    <div class="row"><span>Branch</span><span class="mono">issue-eng-1199-rate-limit-the-public</span></div>
+    <div class="actions"><button class="btn">Cancel</button><button class="btn btn--gold">Start session</button></div>
+  </div>
+</div>
+
+<h2 class="screen">3 · Settings → Work Items</h2>
+<p class="note">GitHub and GitLab reuse the connection from Settings → Git and add only their rules and the “on Start” changes. A custom tool is a name plus a command, with an optional on-start command.</p>
+<div class="window">
+  <div class="topbar"><span class="title">Maya</span><span class="grow"></span><button class="tab tab--active">Settings</button></div>
+  <div class="settings">
+    <div class="nav"><div>General</div><div>Sessions</div><div>Git</div><div class="cur">Work Items</div><div>Voice</div><div>Keyboard</div></div>
+    <div class="body">
+
+      <div class="group">
+        <div class="ghead"><h4>GitHub</h4><span class="switch"></span></div>
+        <div class="sub">Uses the GitHub connection in Settings → Git. Assigning and labelling need Issues: read and write (fine-grained) or repo (classic).</div>
+        <div class="split2">
+          <div class="rule"><span class="x">✕</span>
+            <label>Assignee</label><span>Me</span>
+            <label>Labels</label><span class="sub">any</span>
+            <label>Where</label><span>Any repository</span>
+          </div>
+          <div class="rule"><span class="x">✕</span>
+            <label>Assignee</label><span>Anyone</span>
+            <label>Labels</label><span><span class="tag">urgent</span></span>
+            <label>Where</label><span><span class="tag">acme/api</span></span>
+          </div>
+        </div>
+        <span class="link">+ Add rule</span>
+        <div class="sub" style="margin-top:4px">On “Start”: assign it to me, then</div>
+        <div class="row" style="justify-content:flex-start;gap:16px"><span class="sub">Add labels</span><span><span class="tag">in progress</span></span><span class="sub">Remove labels</span><span><span class="tag">todo</span></span></div>
+        <div class="check"><input type="checkbox"> Tracker-only repositories (Maya picks the code repo): <span class="sub">none</span></div>
+      </div>
+
+      <div class="group">
+        <div class="ghead"><h4>GitLab</h4><span class="switch"></span></div>
+        <div class="sub">Uses the GitLab connection in Settings → Git (gitlab.acme.io). Assigning needs the api scope.</div>
+        <div class="split2">
+          <div class="rule"><span class="x">✕</span>
+            <label>Assignee</label><span>Me</span>
+            <label>Labels</label><span class="sub">any</span>
+            <label>Where</label><span><span class="tag">platform/billing</span><span class="tag">platform/ledger</span></span>
+          </div>
+        </div>
+        <span class="link">+ Add rule</span>
+        <div class="row" style="justify-content:flex-start;gap:16px"><span class="sub">On “Start”: assign me · add</span><span><span class="tag">status::doing</span></span></div>
+      </div>
+
+      <div class="group">
+        <div class="ghead"><h4>Linear (mine-only)</h4><span class="switch"></span></div>
+        <div class="row"><span class="sub">List command</span><input type="text" class="mono" style="width:440px" value="~/bin/linear-items --assignee me"></div>
+        <div class="row"><span class="sub">On-start command (optional)</span><input type="text" class="mono" style="width:440px" value="~/bin/linear-start"></div>
+        <span class="link">Show the output format and an example script</span>
+      </div>
+
+      <button class="btn" style="align-self:flex-start">+ Add New</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
