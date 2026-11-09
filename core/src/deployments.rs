@@ -513,7 +513,7 @@ mod tests {
     const CANNOT: &str = r#"[{"environment":{"id":1,"name":"production"},"current_user_can_approve":false}]"#;
 
     fn asked(http: &FakeHttp, needle: &str) -> usize {
-        http.seen.lock().unwrap().iter().filter(|(u, _, _)| u.contains(needle)).count()
+        http.seen.lock().unwrap().iter().filter(|(u, _, _, _)| u.contains(needle)).count()
     }
 
     #[test]
@@ -692,6 +692,9 @@ mod tests {
         fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
             self.0.post_json(url, token, body)
         }
+        fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+            self.0.send_json(method, url, token, body)
+        }
     }
 
     struct PanicOnB(FakeHttp);
@@ -703,6 +706,9 @@ mod tests {
         }
         fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
             self.0.post_json(url, token, body)
+        }
+        fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+            self.0.send_json(method, url, token, body)
         }
     }
 

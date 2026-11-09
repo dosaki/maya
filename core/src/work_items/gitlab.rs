@@ -2,7 +2,7 @@
 
 use super::{merge, status_of, ItemRepo, WorkItem};
 use crate::config::{Assignee, ForgeItems, GitProvider, ItemRule};
-use crate::forge::{encode, get_json_as, Forge, Http, Need};
+use crate::forge::{encode, get_json_as, send_json_as, Forge, Http, Me, Need};
 use serde_json::Value;
 
 /// The calls for a rule: open issues, one per project, or one across GitLab when it names none.
@@ -63,12 +63,102 @@ pub fn list(http: &dyn Http, forge: &Forge, cfg: &ForgeItems) -> Result<Vec<Work
     Ok(merge(lists))
 }
 
+/// The open issue `number` of `repo` and its assignees' ids; None when it is closed.
+pub fn get(http: &dyn Http, forge: &Forge, repo: &str, number: u64, cfg: &ForgeItems) -> Result<Option<(WorkItem, Vec<u64>)>, String> {
+    let v = get_json_as(http, forge, &issue_url(forge, repo, number), Need::Issues)?;
+    if v["state"].as_str() == Some("closed") {
+        return Ok(None);
+    }
+    let item = parse_issue(&v, cfg).ok_or("GitLab's reply was not an issue.")?;
+    Ok(Some((item, assignee_ids(&v))))
+}
+
+fn issue_url(forge: &Forge, repo: &str, number: u64) -> String {
+    format!("{}/projects/{}/issues/{number}", forge.site.api_base(), encode(repo))
+}
+
+fn assignee_ids(v: &Value) -> Vec<u64> {
+    v["assignees"].as_array().map(|a| a.iter().filter_map(|x| x["id"].as_u64()).collect()).unwrap_or_default()
+}
+
+/// Assigns the issue to `me` beside `assignee_ids` and sets the start status
+/// (if any). A tier with one assignee keeps only one of them, so when `me`
+/// is missing from the reply a second call makes `me` the assignee.
+#[allow(clippy::too_many_arguments)]
+pub fn take(http: &dyn Http, forge: &Forge, repo: &str, number: u64, me: &Me, assignee_ids_now: &[u64], all_labels: &[String], cfg: &ForgeItems) -> Result<(), String> {
+    let mut ids = assignee_ids_now.to_vec();
+    if !ids.contains(&me.id) {
+        ids.push(me.id);
+    }
+    let mut body = serde_json::json!({ "assignee_ids": ids });
+    if let Some(status) = &cfg.start_status {
+        body["add_labels"] = serde_json::json!(status);
+        let others: Vec<&str> = all_labels.iter().filter(|l| cfg.status_labels.iter().any(|s| l.eq_ignore_ascii_case(s)) && !l.eq_ignore_ascii_case(status)).map(String::as_str).collect();
+        if !others.is_empty() {
+            body["remove_labels"] = serde_json::json!(others.join(","));
+        }
+    }
+    let url = issue_url(forge, repo, number);
+    let reply = send_json_as(http, forge, "PUT", &url, &body, Need::IssueWrite)?;
+    let kept: Vec<u64> = serde_json::from_str::<Value>(&reply).map(|v| assignee_ids(&v)).unwrap_or_default();
+    if !kept.contains(&me.id) {
+        send_json_as(http, forge, "PUT", &url, &serde_json::json!({ "assignee_ids": [me.id] }), Need::IssueWrite)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{GitConnection, WorkItemsConfig};
     use crate::forge::fake::FakeHttp;
     use crate::forge::ForgeSite;
+
+    fn gitlab_forge() -> Forge {
+        let c = GitConnection { enabled: true, base_url: Some("https://gitlab.acme.io".into()), ..GitConnection::default_for(GitProvider::Gitlab) };
+        Forge { site: ForgeSite::of(&c), token: "glpat".into() }
+    }
+
+    #[test]
+    fn take_replaces_the_assignee_when_the_tier_allows_only_one() {
+        let http = FakeHttp::new(vec![("/issues/17", 200, r#"{"assignees":[{"id":5}]}"#)]);
+        let cfg = ForgeItems { status_labels: vec!["status::todo".into(), "status::doing".into()], start_status: Some("status::doing".into()), ..WorkItemsConfig::default().gitlab };
+        take(&http, &gitlab_forge(), "grp/r", 17, &Me { login: "tiago".into(), id: 9 }, &[5], &["status::todo".to_string(), "backend".to_string()], &cfg).unwrap();
+        let seen = http.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "the first PUT kept only the old assignee, so a second one replaces it");
+        let first: Value = serde_json::from_str(seen[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(first, serde_json::json!({"assignee_ids": [5, 9], "add_labels": "status::doing", "remove_labels": "status::todo"}));
+        assert_eq!(seen[1].2.as_deref(), Some(r#"{"assignee_ids":[9]}"#));
+        assert!(seen[0].0.ends_with("/projects/grp%2Fr/issues/17") && seen[0].3.as_deref() == Some("PUT"));
+    }
+
+    #[test]
+    fn take_makes_one_call_when_me_is_among_the_assignees_and_no_label_is_removed() {
+        let http = FakeHttp::new(vec![("/issues/3", 200, r#"{"assignees":[{"id":5},{"id":9}]}"#)]);
+        let cfg = ForgeItems { status_labels: vec!["doing".into()], start_status: Some("doing".into()), ..WorkItemsConfig::default().gitlab };
+        take(&http, &gitlab_forge(), "grp/r", 3, &Me { login: "tiago".into(), id: 9 }, &[5], &[], &cfg).unwrap();
+        let seen = http.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let body: Value = serde_json::from_str(seen[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"assignee_ids": [5, 9], "add_labels": "doing"}), "no remove_labels key");
+    }
+
+    #[test]
+    fn a_read_only_gitlab_token_is_told_it_needs_api() {
+        let http = FakeHttp::new(vec![("/issues/1", 403, "{}")]);
+        let e = take(&http, &gitlab_forge(), "a/b", 1, &Me { login: "t".into(), id: 1 }, &[], &[], &WorkItemsConfig::default().gitlab).unwrap_err();
+        assert_eq!(e, "the token was refused (403). It needs the api scope.");
+    }
+
+    #[test]
+    fn get_says_none_for_a_closed_issue_and_lists_assignee_ids_for_an_open_one() {
+        let body = |state: &str| format!(r#"{{"iid":4,"state":"{state}","title":"t","web_url":"u","references":{{"full":"grp/r#4"}},"labels":[],"assignees":[{{"id":5,"username":"m"}}],"author":{{"username":"a"}}}}"#);
+        let closed = FakeHttp::new(vec![("/projects/grp%2Fr/issues/4", 200, &body("closed"))]);
+        assert_eq!(get(&closed, &gitlab_forge(), "grp/r", 4, &WorkItemsConfig::default().gitlab).unwrap(), None);
+        let open = FakeHttp::new(vec![("/projects/grp%2Fr/issues/4", 200, &body("opened"))]);
+        let (item, ids) = get(&open, &gitlab_forge(), "grp/r", 4, &WorkItemsConfig::default().gitlab).unwrap().unwrap();
+        assert_eq!((item.id.as_str(), ids), ("grp/r#4", vec![5]));
+    }
 
     #[test]
     fn a_rule_becomes_one_call_per_project_with_encoded_paths() {

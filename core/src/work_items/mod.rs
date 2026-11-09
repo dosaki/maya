@@ -46,6 +46,13 @@ pub fn status_of(labels: &[String], status_labels: &[String]) -> (Option<String>
     (status, rest)
 }
 
+/// The labels without any status label, plus the new status.
+pub fn labels_after_status(current: &[String], status_labels: &[String], new: &str) -> Vec<String> {
+    let mut out: Vec<String> = current.iter().filter(|l| !status_labels.iter().any(|s| l.eq_ignore_ascii_case(s))).cloned().collect();
+    out.push(new.to_string());
+    out
+}
+
 /// The lists as one, one item per key (the first seen), newest `updated_at` first.
 pub fn merge(lists: Vec<Vec<WorkItem>>) -> Vec<WorkItem> {
     let mut seen = std::collections::HashSet::new();
@@ -84,6 +91,12 @@ mod tests {
         assert_eq!(status_of(&s(&["bug", "In Progress", "todo"]), &s(&["todo", "in progress"])), (Some("todo".into()), s(&["bug"])));
         assert_eq!(status_of(&s(&["bug"]), &s(&["todo"])), (None, s(&["bug"])));
         assert_eq!(status_of(&s(&["status::doing"]), &s(&[])), (None, s(&["status::doing"])), "only listed labels are statuses");
+    }
+
+    #[test]
+    fn a_new_status_replaces_every_other_status_and_keeps_the_rest() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(labels_after_status(&s(&["bug", "todo", "In Review"]), &s(&["todo", "in progress", "in review"]), "in progress"), s(&["bug", "in progress"]));
     }
 
     #[test]

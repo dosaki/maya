@@ -1,8 +1,8 @@
 //! GitHub's issues: one search per rule.
 
-use super::{merge, status_of, ItemRepo, WorkItem};
+use super::{labels_after_status, merge, status_of, ItemRepo, WorkItem};
 use crate::config::{Assignee, ForgeItems, GitProvider, ItemRule};
-use crate::forge::{encode, get_json_as, Forge, Http, Need};
+use crate::forge::{encode, get_json_as, send_json_as, Forge, Http, Me, Need};
 use serde_json::Value;
 
 /// The search for a rule: open issues, by assignee, labels and repos.
@@ -60,12 +60,88 @@ pub fn list(http: &dyn Http, forge: &Forge, cfg: &ForgeItems) -> Result<Vec<Work
     Ok(merge(lists))
 }
 
+/// The open issue `number` of `repo` and its assignees' ids; None when it is closed.
+pub fn get(http: &dyn Http, forge: &Forge, repo: &str, number: u64, cfg: &ForgeItems) -> Result<Option<(WorkItem, Vec<u64>)>, String> {
+    let v = get_json_as(http, forge, &format!("{}/repos/{repo}/issues/{number}", forge.site.api_base()), Need::Issues)?;
+    if v.get("pull_request").is_some() {
+        return Err("That is a pull request, not an issue.".into());
+    }
+    if v["state"].as_str() == Some("closed") {
+        return Ok(None);
+    }
+    let item = parse_issue(&v, cfg).ok_or("GitHub's reply was not an issue.")?;
+    let ids = v["assignees"].as_array().map(|a| a.iter().filter_map(|x| x["id"].as_u64()).collect()).unwrap_or_default();
+    Ok(Some((item, ids)))
+}
+
+/// Assigns the issue to `me` beside `assignee_logins`, and sets the start
+/// status (if any) in place of the other status labels, in one call.
+#[allow(clippy::too_many_arguments)]
+pub fn take(http: &dyn Http, forge: &Forge, repo: &str, number: u64, me: &Me, assignee_logins: &[String], all_labels: &[String], cfg: &ForgeItems) -> Result<(), String> {
+    let mut assignees: Vec<&str> = assignee_logins.iter().map(String::as_str).collect();
+    if !assignees.contains(&me.login.as_str()) {
+        assignees.push(&me.login);
+    }
+    let mut body = serde_json::json!({ "assignees": assignees });
+    if let Some(status) = &cfg.start_status {
+        body["labels"] = serde_json::json!(labels_after_status(all_labels, &cfg.status_labels, status));
+    }
+    let url = format!("{}/repos/{repo}/issues/{number}", forge.site.api_base());
+    send_json_as(http, forge, "PATCH", &url, &body, Need::IssueWrite).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{GitConnection, WorkItemsConfig};
     use crate::forge::fake::FakeHttp;
     use crate::forge::ForgeSite;
+
+    fn github_forge() -> Forge {
+        Forge { site: ForgeSite::of(&GitConnection::default_for(GitProvider::Github)), token: "ghp_x".into() }
+    }
+
+    #[test]
+    fn take_adds_me_beside_the_others_and_sets_the_status_in_one_call() {
+        let f = github_forge();
+        let http = FakeHttp::new(vec![("/issues/412", 200, "{}")]);
+        let cfg = ForgeItems { status_labels: vec!["todo".into(), "in progress".into()], start_status: Some("in progress".into()), ..WorkItemsConfig::default().github };
+        take(&http, &f, "acme/api", 412, &Me { login: "tiago".into(), id: 1 }, &["maria".to_string()], &["bug".to_string(), "todo".to_string()], &cfg).unwrap();
+        let seen = http.seen.lock().unwrap();
+        assert_eq!((seen[0].0.as_str(), seen[0].3.as_deref()), ("https://api.github.com/repos/acme/api/issues/412", Some("PATCH")));
+        let body: Value = serde_json::from_str(seen[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"assignees": ["maria", "tiago"], "labels": ["bug", "in progress"]}));
+    }
+
+    #[test]
+    fn take_without_a_start_status_leaves_the_labels_alone() {
+        let http = FakeHttp::new(vec![("/issues/5", 200, "{}")]);
+        take(&http, &github_forge(), "a/b", 5, &Me { login: "tiago".into(), id: 1 }, &["tiago".to_string()], &[], &WorkItemsConfig::default().github).unwrap();
+        let body: Value = serde_json::from_str(http.seen.lock().unwrap()[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"assignees": ["tiago"]}), "no labels key, and me is not listed twice");
+    }
+
+    #[test]
+    fn a_read_only_token_is_told_it_needs_write() {
+        let http = FakeHttp::new(vec![("/issues/1", 403, "{}")]);
+        let e = take(&http, &github_forge(), "a/b", 1, &Me { login: "t".into(), id: 1 }, &[], &[], &WorkItemsConfig::default().github).unwrap_err();
+        assert_eq!(e, "the token was refused (403). It needs the repo scope (fine-grained: Issues read and write).");
+    }
+
+    #[test]
+    fn get_says_none_for_a_closed_issue() {
+        let http = FakeHttp::new(vec![("/issues/9", 200, r#"{"number":9,"state":"closed","title":"t","html_url":"u","repository_url":"https://api.github.com/repos/a/b","labels":[],"assignees":[],"user":{"login":"x"}}"#)]);
+        assert_eq!(get(&http, &github_forge(), "a/b", 9, &WorkItemsConfig::default().github).unwrap(), None);
+    }
+
+    #[test]
+    fn get_returns_an_open_issue_with_its_assignee_ids_and_refuses_a_pull_request() {
+        let open = r#"{"number":9,"state":"open","title":"t","html_url":"u","repository_url":"https://api.github.com/repos/a/b","labels":[],"assignees":[{"login":"m","id":4},{"login":"n","id":6}],"user":{"login":"x"}}"#;
+        let http = FakeHttp::new(vec![("/issues/9", 200, open), ("/issues/10", 200, r#"{"number":10,"state":"open","pull_request":{}}"#)]);
+        let (item, ids) = get(&http, &github_forge(), "a/b", 9, &WorkItemsConfig::default().github).unwrap().unwrap();
+        assert_eq!((item.id.as_str(), ids), ("a/b#9", vec![4, 6]));
+        assert_eq!(get(&http, &github_forge(), "a/b", 10, &WorkItemsConfig::default().github).unwrap_err(), "That is a pull request, not an issue.");
+    }
 
     #[test]
     fn a_rule_becomes_one_search_with_quoted_terms() {
