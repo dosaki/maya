@@ -446,7 +446,7 @@ pub fn validate_work_items(w: &WorkItemsConfig) -> Result<(), String> {
     for f in [&w.github, &w.gitlab] {
         for r in &f.rules {
             match &r.assignee {
-                Assignee::Anyone if r.repos.iter().all(|x| x.trim().is_empty()) => {
+                Assignee::Anyone if r.repos.iter().all(|x| clean_repo(x).is_empty()) => {
                     return Err("A rule for anyone's issues must name its repositories.".into());
                 }
                 Assignee::User { login } if login.trim().is_empty() => {
@@ -860,6 +860,15 @@ mod tests {
         assert!(validate_work_items(&w).is_ok());
         w.github.rules.push(ItemRule { assignee: Assignee::User { login: " ".into() }, labels: vec![], repos: vec![] });
         assert_eq!(validate_work_items(&w).unwrap_err(), "A rule for someone else's issues needs their login.");
+    }
+
+    #[test]
+    fn a_rule_for_anyone_whose_repositories_clean_to_nothing_is_refused() {
+        for blank in ["https://github.com/", ".git", "/", " "] {
+            let mut w = WorkItemsConfig::default();
+            w.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec![blank.into()] });
+            assert!(validate_work_items(&w).is_err(), "{blank}");
+        }
     }
 
     #[test]
