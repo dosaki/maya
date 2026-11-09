@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
@@ -15,10 +15,26 @@ import { initSettings } from "./settings";
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("settings flow", () => {
+  // initSettings listens on document and window for the app's lifetime. Each
+  // test makes a new one, so drop its listeners afterwards: left in place,
+  // every later event repaints all the earlier tests' panels too.
+  let added: Array<() => void> = [];
   beforeEach(() => {
     document.body.innerHTML = '<div id="settings" class="settings pane" hidden></div>';
     invoke.mockReset();
     eventListen.mockClear();
+    for (const target of [document, window] as EventTarget[]) {
+      const add = target.addEventListener.bind(target);
+      const spy = vi.spyOn(target, "addEventListener").mockImplementation((type, listener, options) => {
+        add(type, listener, options);
+        added.push(() => target.removeEventListener(type, listener, options));
+      });
+      added.push(() => spy.mockRestore());
+    }
+  });
+  afterEach(() => {
+    for (const remove of added) remove();
+    added = [];
   });
 
   it("shows the app version Tauri reports under Maya, and nothing when it cannot", async () => {
@@ -1056,7 +1072,6 @@ describe("settings flow", () => {
     localStorage.removeItem("maya.settingsGroup");
   });
 
-  // Three full repaints take 3–4 s on the Windows runner, too near the 5 s default.
   it("keeps focus inside the same provider block through a repaint", async () => {
     const both = [
       { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" } },
@@ -1092,5 +1107,5 @@ describe("settings flow", () => {
       expect(document.activeElement).toBe(gl().querySelector(sel));
     }
     localStorage.removeItem("maya.settingsGroup");
-  }, 15_000);
+  });
 });
