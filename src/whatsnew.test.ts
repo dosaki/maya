@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseReleaseNotes } from "./release-notes";
-import { compareVersions, notesSince, renderWhatsNew } from "./whatsnew";
+import { compareVersions, notesSince, renderWhatsNew, showWhatsNew } from "./whatsnew";
 
 const f = parseReleaseNotes("# 0.50.0\n\n## New\n\n- a\n\n# 0.49.3\n\n## Fixed\n\n- b\n\n# 0.49.0\n\n## New\n\n- c\n\n# 0.10.0\n\n## New\n\n- d\n");
 const versions = (n: { version: string }[]) => n.map((s) => s.version);
@@ -79,5 +79,84 @@ describe("renderWhatsNew", () => {
     el.querySelector<HTMLElement>(".whatsnew__close")!.click();
     el.querySelector<HTMLElement>(".modal__backdrop")!.click();
     expect(onClose).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("showWhatsNew", () => {
+  const fake = (offer: unknown) => {
+    const calls: string[] = [];
+    const invoke = vi.fn(async (cmd: string) => {
+      calls.push(cmd);
+      return cmd === "whats_new" ? offer : undefined;
+    });
+    return { invoke, calls };
+  };
+  const host = () => {
+    document.body.replaceChildren();
+    const h = document.createElement("div");
+    h.id = "modal-host";
+    document.body.append(h);
+    return h;
+  };
+  it("shows nothing when there is nothing new", async () => {
+    const h = host();
+    const { invoke, calls } = fake(null);
+    await showWhatsNew(invoke, h);
+    expect(h.childElementCount).toBe(0);
+    expect(calls).toEqual(["whats_new"]);
+  });
+
+  it("waits for the next start when something already holds the host", async () => {
+    const h = host();
+    h.append(document.createElement("div"));
+    const { invoke, calls } = fake({ from: "0.0.1", running: "99.0.0" });
+    await showWhatsNew(invoke, h, f);
+    expect(h.childElementCount).toBe(1);
+    expect(h.querySelector(".whatsnew")).toBeNull();
+    expect(calls).not.toContain("whats_new_seen");
+  });
+
+  it("marks it seen and shows nothing when the notes have nothing for the offer", async () => {
+    const h = host();
+    const { invoke, calls } = fake({ from: null, running: "0.51.0" });
+    await showWhatsNew(invoke, h, f);
+    expect(h.childElementCount).toBe(0);
+    expect(calls).toEqual(["whats_new", "whats_new_seen"]);
+  });
+
+  it("shows the notes; Escape closes it and marks it seen once", async () => {
+    const h = host();
+    const { invoke, calls } = fake({ from: "0.49.0", running: "0.50.0" });
+    await showWhatsNew(invoke, h, f);
+    expect(h.querySelector(".whatsnew")).not.toBeNull();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(h.childElementCount).toBe(0);
+    expect(calls).toEqual(["whats_new", "whats_new_seen"]);
+  });
+
+  it("leaves alone a card that took its place, and is not marked seen", async () => {
+    const h = host();
+    const { invoke, calls } = fake({ from: "0.49.0", running: "0.50.0" });
+    await showWhatsNew(invoke, h, f);
+    const card = document.createElement("div");
+    h.replaceChildren(card);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(h.firstChild).toBe(card);
+    expect(calls).toEqual(["whats_new"]);
+    // And a later start can show it again.
+    h.replaceChildren();
+    await showWhatsNew(invoke, h, f);
+    expect(h.querySelector(".whatsnew")).not.toBeNull();
+    h.querySelector<HTMLButtonElement>(".whatsnew__ok")!.click();
+  });
+
+  it("Got it closes it and marks it seen", async () => {
+    const h = host();
+    const { invoke, calls } = fake({ from: "0.49.0", running: "0.50.0" });
+    await showWhatsNew(invoke, h, f);
+    h.querySelector<HTMLButtonElement>(".whatsnew__ok")!.click();
+    expect(h.childElementCount).toBe(0);
+    expect(calls).toEqual(["whats_new", "whats_new_seen"]);
   });
 });

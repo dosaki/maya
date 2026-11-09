@@ -89,3 +89,41 @@ export function renderWhatsNew(offer: WhatsNewOffer, notes: ReleaseNotes[], onCl
   root.append(backdrop, panel);
   return root;
 }
+
+/** The open window's close, if one is open. */
+let closeOpen: (() => void) | null = null;
+
+/**
+ * Asks the backend whether to show the window and shows it in `host`.
+ * Nothing shows when the answer is null, or when `host` already holds
+ * something (a card opened at start): it waits for the next start, unseen.
+ * Closing it in any way empties `host` and tells the backend it was seen.
+ */
+export async function showWhatsNew(invoke: (cmd: string) => Promise<unknown>, host: HTMLElement | null, notes: ReleaseNotes[] = RELEASE_NOTES): Promise<void> {
+  if (!host) return;
+  const offer = (await invoke("whats_new")) as WhatsNewOffer | null;
+  if (!offer || host.childElementCount > 0 || closeOpen) return;
+  const seen = () => void invoke("whats_new_seen").catch((e) => console.warn("could not save that What's new was seen:", e));
+  const shown = notesSince(offer, notes);
+  if (shown.length === 0) {
+    seen();
+    return;
+  }
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") close();
+  };
+  const close = () => {
+    if (closeOpen !== close) return;
+    closeOpen = null;
+    document.removeEventListener("keydown", onKey);
+    // A card that took its place keeps the host, and the window was not
+    // read: it shows again at the next start.
+    if (!root.isConnected) return;
+    host.replaceChildren();
+    seen();
+  };
+  const root = renderWhatsNew(offer, shown, close);
+  closeOpen = close;
+  host.replaceChildren(root);
+  document.addEventListener("keydown", onKey);
+}
