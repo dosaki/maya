@@ -32,9 +32,9 @@ pub struct WorkItemsState {
 pub(crate) fn poll_work_items(app: &AppHandle) {
     let state = app.state::<AppState>();
     let generation = state.git_generation.load(Ordering::SeqCst);
-    let (conns, cfg, path) = {
+    let (conns, cfg) = {
         let store = state.store.lock().unwrap();
-        (store.config.git_connections(), store.config.work_items.clone(), started::path(&store.claude_dir().join("maya")))
+        (store.config.git_connections(), store.config.work_items.clone())
     };
     // Only the services with Work Items on are asked, or named when they have no token.
     let conns: Vec<_> = conns.into_iter().filter(|c| cfg.for_forge(c.provider).enabled).collect();
@@ -48,15 +48,11 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
     }
     let returned: HashMap<&str, &WorkItem> = fetched.iter().filter_map(|f| f.result.as_ref().ok()).flatten().map(|i| (i.key.as_str(), i)).collect();
 
-    // A started item a rule returned takes that copy; the others are asked for one by one.
-    let loaded = started::load(&path);
-    let mut kept = loaded.clone();
+    // On a snapshot, with no lock held: a started item a rule returned takes
+    // that copy; the others are asked for one by one.
+    let mut latest: Vec<WorkItem> = returned.values().map(|i| (*i).clone()).collect();
     let mut closed = Vec::new();
-    for s in kept.iter_mut() {
-        if let Some(item) = returned.get(s.key.as_str()) {
-            s.item = (*item).clone();
-            continue;
-        }
+    for s in started::load(&started_path(app)).into_iter().filter(|s| !returned.contains_key(s.key.as_str())) {
         let Some(repo) = &s.item.repo else { continue };
         let Some(forge) = forges.iter().find(|f| f.site.provider == repo.forge) else { continue };
         let Some(number) = s.item.number else { continue };
@@ -66,17 +62,15 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
             GitProvider::Gitlab => gitlab::get(git::http(), forge, &repo.path, number, items),
         };
         match got {
-            Ok(Some((item, _))) => s.item = item,
+            Ok(Some((item, _))) => latest.push(item),
             Ok(None) => closed.push(s.key.clone()),
             Err(e) => log::line("app", format!("issues: {}: {e}", s.item.id)),
         }
     }
-    let kept = started::prune(kept, &closed, &crate::board_cards(app), now_ms());
-    if kept != loaded {
-        if let Err(e) = started::save(&path, &kept) {
-            log::line("app", format!("issues: could not save the started issues: {e}"));
-        }
-    }
+    let cards = crate::board_cards(app);
+    let now = now_ms();
+    // On the file as it is now, so an entry started meanwhile is kept.
+    let kept = update_started(app, |list| *list = started::refresh(std::mem::take(list), &latest, &closed, &cards, now));
 
     let snapshot = {
         let mut w = state.work_items.lock().unwrap();
@@ -97,6 +91,28 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
         w.clone()
     };
     let _ = app.emit("work-items", &snapshot);
+}
+
+fn started_path(app: &AppHandle) -> std::path::PathBuf {
+    started::path(&app.state::<AppState>().store.lock().unwrap().claude_dir().join("maya"))
+}
+
+/// Changes the started file with `f`, one writer at a time: loads it fresh,
+/// saves it only when `f` changed it, and returns the new list. Call it with
+/// no lock held, and never make a network call inside `f`.
+pub(crate) fn update_started(app: &AppHandle, f: impl FnOnce(&mut Vec<Started>)) -> Vec<Started> {
+    let path = started_path(app);
+    let state = app.state::<AppState>();
+    let _writer = state.started_file.lock().unwrap();
+    let before = started::load(&path);
+    let mut after = before.clone();
+    f(&mut after);
+    if after != before {
+        if let Err(e) = started::save(&path, &after) {
+            log::line("app", format!("issues: could not save the started issues: {e}"));
+        }
+    }
+    after
 }
 
 #[tauri::command(async)]

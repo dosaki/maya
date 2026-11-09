@@ -61,6 +61,22 @@ pub fn prune(started: Vec<Started>, closed: &[String], cards: &[Card], now_ms: u
         .collect()
 }
 
+/// The poll's answers applied to the list as it is now: each entry takes
+/// its copy in `latest` (if any), then `prune` runs. An entry the poll never
+/// saw (started meanwhile) stays unless it is pruned.
+pub fn refresh(started: Vec<Started>, latest: &[WorkItem], closed: &[String], cards: &[Card], now_ms: u64) -> Vec<Started> {
+    let started = started
+        .into_iter()
+        .map(|mut s| {
+            if let Some(item) = latest.iter().find(|i| i.key == s.key) {
+                s.item = item.clone();
+            }
+            s
+        })
+        .collect();
+    prune(started, closed, cards, now_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,6 +98,14 @@ mod tests {
         let now = GRACE_MS * 3;
         let kept = prune(vec![s("closed", now), s("young", now - 1000), s("old", 0)], &["closed".into()], &[], now);
         assert_eq!(kept.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(), vec!["young"]);
+    }
+
+    #[test]
+    fn refresh_takes_the_latest_copies_and_keeps_an_entry_the_poll_never_saw() {
+        let s = |key: &str, title: &str| Started { key: key.into(), item: WorkItem { key: key.into(), title: title.into(), ..test_item() }, dir: format!("/c/{key}"), started_at: GRACE_MS };
+        let latest = vec![WorkItem { key: "a".into(), title: "new".into(), ..test_item() }];
+        let out = refresh(vec![s("a", "old"), s("closed", "x"), s("added meanwhile", "y")], &latest, &["closed".into()], &[], GRACE_MS + 1);
+        assert_eq!(out.iter().map(|s| (s.key.as_str(), s.item.title.as_str())).collect::<Vec<_>>(), vec![("a", "new"), ("added meanwhile", "y")]);
     }
 
     #[test]

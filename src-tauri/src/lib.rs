@@ -159,6 +159,10 @@ pub struct AppState {
     pub reviews: Mutex<ReviewState>,
     /// The Issues tab. Lock rule: never held across a network call, and never with another lock.
     pub work_items: Mutex<work_items_app::WorkItemsState>,
+    /// Held while the started issues' file is read, changed and written, so
+    /// there is one writer at a time (see `work_items_app::update_started`).
+    /// Lock rule: never held across a network call, and never with another lock.
+    pub started_file: Mutex<()>,
     /// Lock rule: never held across a network call, and never with another lock.
     pub deployments: Mutex<DeploymentState>,
     pub deployment_repos: Mutex<deployments::ApprovalRepos>,
@@ -1856,7 +1860,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), work_items: Mutex::new(work_items_app::WorkItemsState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), lane: std::sync::Arc::new(net::client::RequestLane::default()), git_generation: std::sync::atomic::AtomicU64::new(0), config_existed })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), work_items: Mutex::new(work_items_app::WorkItemsState::default()), started_file: Mutex::new(()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), lane: std::sync::Arc::new(net::client::RequestLane::default()), git_generation: std::sync::atomic::AtomicU64::new(0), config_existed })
         .manage(updater::Pending::default())
         // Closing the window quits Maya, so it asks first too; "Quit
         // anyway" then exits the app.
