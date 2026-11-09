@@ -17,7 +17,7 @@ describe("work items", () => {
     const a = item({ key: "github:a/b#1", id: "a/b#1" });
     const b = item({ key: "github:a/b#2", id: "a/b#2" });
     const s = card({ name: "issue a/b#1", state: "working" });
-    const { toPick, working } = areas({ items: [a, b], started: [], errors: [], off: false, fetchedAt: 1 }, [s]);
+    const { toPick, working } = areas({ items: [a, b], started: [], errors: [], gitOff: false, off: false, fetchedAt: 1 }, [s]);
     expect(toPick.map((i) => i.key)).toEqual(["github:a/b#2"]);
     expect(working).toEqual([{ item: a, card: s }]);
   });
@@ -68,23 +68,38 @@ describe("work items", () => {
     expect(workItemActionFor(w.querySelector("[data-action=session]")!)).toEqual({ kind: "session", key: "github:a/b#1", pid: 7 });
     const off = document.createElement("button");
     off.dataset.action = "settings";
-    expect(workItemActionFor(off)).toEqual({ kind: "settings" });
+    off.dataset.group = "git";
+    expect(workItemActionFor(off)).toEqual({ kind: "settings", group: "git" });
     el.remove();
   });
 
-  it("says issues are off", () => {
+  it("says issues are off and opens Settings → Git when no Git connection is on", () => {
     const host = document.createElement("div");
-    makeWorkItemsView(host).update({ items: [], started: [], errors: [], off: true, fetchedAt: null }, [], Date.now());
+    makeWorkItemsView(host).update({ items: [], started: [], errors: [], gitOff: true, off: true, fetchedAt: null }, [], Date.now());
     expect(host.textContent).toContain("Issues are off. Turn on GitHub or GitLab in Settings → Git.");
-    expect(host.querySelector("[data-action=settings]")).not.toBeNull();
+    expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "git" });
+  });
+
+  it("says issues are off and opens Settings → Work Items when Git is on but both services are off there", () => {
+    const host = document.createElement("div");
+    makeWorkItemsView(host).update({ items: [], started: [], errors: [], gitOff: false, off: true, fetchedAt: null }, [], Date.now());
+    expect(host.textContent).toContain("Issues are off. Turn on GitHub or GitLab in Settings → Work Items.");
+    expect(host.textContent).not.toContain("Settings → Git.");
+    expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "workItems" });
+  });
+
+  it("says when no issue matches the rules", () => {
+    const host = document.createElement("div");
+    makeWorkItemsView(host).update({ items: [], started: [], errors: [], gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
+    expect(host.querySelector(".issues__area--pick")?.textContent).toContain("No issues match your rules.");
   });
 
   it("keeps the filter dropdowns across repaints", () => {
     const host = document.createElement("div");
     const view = makeWorkItemsView(host);
-    view.update({ items: [item({})], started: [], errors: [], off: false, fetchedAt: 1 }, [], Date.now());
+    view.update({ items: [item({})], started: [], errors: [], gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
     const sel = host.querySelector("select");
-    view.update({ items: [item({}), item({ key: "2" })], started: [], errors: [], off: false, fetchedAt: 2 }, [], Date.now());
+    view.update({ items: [item({}), item({ key: "2" })], started: [], errors: [], gitOff: false, off: false, fetchedAt: 2 }, [], Date.now());
     expect(host.querySelector("select")).toBe(sel);
     expect(host.querySelector(".issues__area--pick .issues__count")?.textContent).toBe("2");
   });
@@ -125,6 +140,16 @@ describe("work items", () => {
     expect(on.onStart).toHaveBeenCalledWith(api);
   });
 
+  it("says Maya knows no repositories and offers only Cancel when there is none to pick", () => {
+    const on = { onStart: vi.fn(), onCancel: vi.fn() };
+    const el = renderStartDialog(item({}), { takeover: [], pick: { picked: null, why: "", options: [] }, branch: "b" }, on);
+    expect(el.textContent).toContain("Maya knows no repositories yet. Name one in a rule in Settings → Work Items, or clone it into the clones folder first.");
+    expect(el.querySelector("select")).toBeNull();
+    expect([...el.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Cancel"]);
+    el.querySelector("button")!.click();
+    expect(on.onCancel).toHaveBeenCalled();
+  });
+
   it("needs a dialog only for a takeover or a pick", () => {
     expect(needsDialog({ takeover: [], pick: null, branch: "b" })).toBe(false);
     expect(needsDialog({ takeover: ["x"], pick: null, branch: "b" })).toBe(true);
@@ -137,8 +162,8 @@ describe("work items", () => {
     const opened = vi.fn();
     await startWorkItem(item({ key: "k" }), { invoke, host: document.createElement("div"), toast, opened });
     expect(invoke).toHaveBeenNthCalledWith(2, "work_item_start", { key: "k", repo: null, takeOver: false });
-    expect(toast).toHaveBeenNthCalledWith(1, "Working on a/b#1 in api-issue-1");
-    expect(toast).toHaveBeenNthCalledWith(2, "Heads up.");
+    // The notice shows in the line above the areas, not in a second toast.
+    expect(toast.mock.calls).toEqual([["Working on a/b#1 in api-issue-1"]]);
     expect(opened).toHaveBeenCalledWith(4, "/c/api-issue-1");
   });
 

@@ -14,7 +14,7 @@ export interface WorkFilters {
 export type WorkItemAction =
   | { kind: "open-item" | "start"; key: string }
   | { kind: "session"; key: string; pid: number }
-  | { kind: "settings" };
+  | { kind: "settings"; group: "git" | "workItems" };
 
 const repoKey = (i: WorkItem) => (i.repo ? `${i.repo.forge}:${i.repo.path}` : null);
 
@@ -146,7 +146,7 @@ const SOURCE_LABEL: Record<string, string> = { github: "GitHub", gitlab: "GitLab
 export function makeWorkItemsView(host: HTMLElement) {
   let starting: ReadonlySet<string> = new Set();
   const filters: WorkFilters = { source: null, repo: null, status: null, search: "" };
-  let state: WorkItemsState = { items: [], started: [], errors: [], off: false, fetchedAt: null };
+  let state: WorkItemsState = { items: [], started: [], errors: [], gitOff: false, off: false, fetchedAt: null };
   let cards: Card[] = [];
   let nowMs = Date.now();
   let optionsKey: string | null = null;
@@ -182,8 +182,12 @@ export function makeWorkItemsView(host: HTMLElement) {
   function paint(): void {
     if (state.off) {
       bar.hidden = true;
-      const off = el("div", "reviews__off", "Issues are off. Turn on GitHub or GitLab in Settings → Git. ");
-      off.append(button("Open Settings", "settings"));
+      // Git off entirely, or on with both services off in Work Items.
+      const group = state.gitOff ? "git" : "workItems";
+      const off = el("div", "reviews__off", `Issues are off. Turn on GitHub or GitLab in Settings → ${state.gitOff ? "Git" : "Work Items"}. `);
+      const open = button("Open Settings", "settings");
+      open.dataset.group = group;
+      off.append(open);
       const fresh = el("div", "issues__body");
       fresh.append(off);
       morph(body, fresh);
@@ -215,7 +219,7 @@ export function makeWorkItemsView(host: HTMLElement) {
     const fresh = el("div", "issues__body");
     for (const e of state.errors) fresh.append(el("div", "reviews__error issues__error", e.message));
     const cols = el("div", "issues__cols");
-    const emptyPick = state.fetchedAt === null ? "Checking…" : state.items.length === 0 ? "Nothing assigned to you." : "No issues match these filters.";
+    const emptyPick = state.fetchedAt === null ? "Checking…" : state.items.length === 0 ? "No issues match your rules." : "No issues match these filters.";
     cols.append(
       area("pick", "To pick", shownPick.map((i) => renderItemCard(i, nowMs, null, starting.has(i.key))), emptyPick),
       area("working", "Being worked on", shownWorking.map((w) => renderItemCard(w.item, nowMs, w.card)), "Nothing started yet."),
@@ -239,7 +243,7 @@ export function makeWorkItemsView(host: HTMLElement) {
 export function workItemActionFor(target: Element): WorkItemAction | null {
   const btn = target.closest<HTMLElement>("button[data-action]");
   if (!btn) return null;
-  if (btn.dataset.action === "settings") return { kind: "settings" };
+  if (btn.dataset.action === "settings") return { kind: "settings", group: btn.dataset.group === "git" ? "git" : "workItems" };
   const key = btn.closest<HTMLElement>(".item")?.dataset.key;
   if (!key) return null;
   const kind = btn.dataset.action;
@@ -268,6 +272,19 @@ export function renderStartDialog(item: WorkItem, check: StartCheck, h: { onStar
   titles.append(el("h2", "modal__title", `Start ${item.id}: ${item.title}`));
   head.append(titles);
   const body = el("div", "modal__setup");
+  const cancel = el("button", "card__btn", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => h.onCancel());
+  const buttons = el("div", "startdialog__buttons");
+  if (check.pick && check.pick.options.length === 0) {
+    // Nothing to choose from, so nothing to start.
+    body.append(el("p", "", "Maya knows no repositories yet. Name one in a rule in Settings → Work Items, or clone it into the clones folder first."));
+    buttons.append(cancel);
+    body.append(buttons);
+    panel.append(head, body);
+    root.append(panel);
+    return root;
+  }
   if (check.takeover.length > 0) {
     body.append(el("p", "", `This issue is already assigned to ${check.takeover.join(", ")}. Are you sure you want to take over?`));
   }
@@ -300,14 +317,10 @@ export function renderStartDialog(item: WorkItem, check: StartCheck, h: { onStar
     body.append(sel);
   }
   body.append(el("p", "startdialog__branch", `Branch: ${check.branch}`));
-  const cancel = el("button", "card__btn", "Cancel");
-  cancel.type = "button";
-  cancel.addEventListener("click", () => h.onCancel());
   start.addEventListener("click", () => {
     if (!repoSel) return h.onStart(null);
     h.onStart(options.find((r) => repoValue(r) === repoSel!.value) ?? null);
   });
-  const buttons = el("div", "startdialog__buttons");
   buttons.append(cancel, start);
   body.append(buttons);
   panel.append(head, body);
@@ -331,7 +344,7 @@ export async function guardStart(inFlight: Set<string>, key: string, run: () => 
   }
 }
 
-/** Checks, asks when needed, starts; toasts the outcome (and any error) and reports the opened folder. */
+/** Checks, asks when needed, starts; toasts the outcome (or the error) and reports the opened folder. */
 export async function startWorkItem(
   item: WorkItem,
   deps: {
@@ -375,8 +388,8 @@ export async function startWorkItem(
       repo = chosen.repo;
     }
     const r = await invoke<WorkStarted>("work_item_start", { key: item.key, repo, takeOver: check.takeover.length > 0 });
+    // A notice (the issue not updated, say) shows in the line above the areas.
     toast(`Working on ${item.id} in ${r.dir.split("/").filter(Boolean).pop() ?? r.dir}`);
-    if (r.notice) toast(r.notice);
     deps.opened(r.nativeTerm, r.dir);
   } catch (e) {
     toast(String(e));

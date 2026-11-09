@@ -610,6 +610,7 @@ body { margin: 0; background: var(--bg); }
 :root[data-theme="light"] .card__btn--stop { color: #b91c1c; }
 :root[data-theme="light"] .reviews__error, :root[data-theme="light"] .deploy__error, :root[data-theme="light"] .voice--error, :root[data-theme="light"] .voice__error { color: #c0262c; }
 :root[data-theme="light"] .debug__line--speech .debug__source { color: #7e22ce; }
+:root[data-theme="light"] .item__status { background: #f3e6c4; color: var(--gold-bright); }
 /* Both looks of the viewer. */
 :root[data-theme="light"] .modal__status--warn { color: #a85a05; }
 :root[data-theme="light"] .newsession__warning { color: #a85a05; }

@@ -452,6 +452,10 @@ pub fn validate_work_items(w: &WorkItemsConfig) -> Result<(), String> {
                 Assignee::User { login } if login.trim().is_empty() => {
                     return Err("A rule for someone else's issues needs their login.".into());
                 }
+                // GitHub's `assignee:<login>` would turn the rest into free text.
+                Assignee::User { login } if login.trim().contains(char::is_whitespace) => {
+                    return Err("A login cannot contain spaces.".into());
+                }
                 _ => {}
             }
         }
@@ -860,6 +864,15 @@ mod tests {
         assert!(validate_work_items(&w).is_ok());
         w.github.rules.push(ItemRule { assignee: Assignee::User { login: " ".into() }, labels: vec![], repos: vec![] });
         assert_eq!(validate_work_items(&w).unwrap_err(), "A rule for someone else's issues needs their login.");
+    }
+
+    #[test]
+    fn a_login_with_a_space_is_refused() {
+        let mut w = WorkItemsConfig::default();
+        w.github.rules.push(ItemRule { assignee: Assignee::User { login: "maria silva".into() }, labels: vec![], repos: vec![] });
+        assert_eq!(validate_work_items(&w).unwrap_err(), "A login cannot contain spaces.");
+        w.github.rules[1].assignee = Assignee::User { login: " maria\t".into() };
+        assert!(validate_work_items(&w).is_ok(), "the spaces around it are trimmed when saved");
     }
 
     #[test]

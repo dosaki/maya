@@ -14,6 +14,7 @@ use maya_core::work_items::{self, github, gitlab, pick, start, Issue, ItemRepo, 
 use maya_core::{actions, launch, log};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 
@@ -26,6 +27,8 @@ pub struct WorkItemsState {
     pub started: Vec<Started>,
     /// One line per service whose last check failed or that has no token.
     pub errors: Vec<ForgeError>,
+    /// No Git connection is switched on.
+    pub git_off: bool,
     /// No switched-on Git connection has Work Items on.
     pub off: bool,
     pub fetched_at: Option<u64>,
@@ -38,6 +41,7 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
         let store = state.store.lock().unwrap();
         (store.config.git_connections(), store.config.work_items.clone())
     };
+    let git_off = !conns.iter().any(|c| c.enabled);
     // Only the services with Work Items on are asked, or named when they have no token.
     let conns: Vec<_> = conns.into_iter().filter(|c| cfg.for_forge(c.provider).enabled).collect();
     let (forges, missing) = git::forges(&conns);
@@ -98,6 +102,7 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
         w.items = items;
         w.started = kept;
         w.errors = errors;
+        w.git_off = git_off;
         w.off = off;
         w.fetched_at = Some(now_ms());
         w.clone()
@@ -214,6 +219,14 @@ fn repo_to_start(item: &WorkItem, chosen: Option<ItemRepo>) -> Result<ItemRepo, 
     item.repo.clone().ok_or_else(|| "Choose a repository first.".to_string())
 }
 
+/// How long after a Start a second one of the same item waits for its session.
+const STARTING_MS: u64 = 60 * 1000;
+
+/// `key` was started under a minute ago and its session is not on the board yet.
+fn still_starting(started: &[Started], key: &str, cards: &[maya_core::model::Card], now_ms: u64) -> bool {
+    started.iter().any(|s| s.key == key && now_ms.saturating_sub(s.started_at) < STARTING_MS && !started::has_session(s, cards))
+}
+
 /// Puts `entry` in the started list in place of an earlier start of its item.
 fn record(list: &mut Vec<Started>, entry: Started) {
     list.retain(|s| s.key != entry.key);
@@ -251,14 +264,24 @@ fn me_for(state: &AppState, forge: &Forge, generation: u64) -> Result<Me, String
     Ok(me)
 }
 
-/// Maya's brain picks the code's repository for `item` from the ones she knows.
-fn pick_repo(state: &AppState, item: &WorkItem, items: &[WorkItem]) -> RepoPick {
+/// Maya's brain picks the code's repository for `item` from the ones she
+/// knows: the rules', the listed items', the clones' and those of the
+/// sessions on the board or started from an issue.
+fn pick_repo(app: &AppHandle, item: &WorkItem, items: &[WorkItem]) -> RepoPick {
+    let state = app.state::<AppState>();
     let (cfg, clones_root, sites, brain, model, maya_dir) = {
         let store = state.store.lock().unwrap();
         let c = &store.config;
         (c.work_items.clone(), c.clones_dir_path(), forge::sites(&c.git_connections()), c.brain(), c.brain_model().map(String::from), store.claude_dir().join("maya"))
     };
-    let options = pick::candidates(&cfg, items, &pick::clone_repos(&clones_root, &sites));
+    let mut folders: Vec<PathBuf> = crate::board_cards(app).into_iter().filter(|c| !c.brain && !c.cwd.is_empty()).map(|c| PathBuf::from(c.cwd)).collect();
+    folders.extend(started::load(&started_path(app)).into_iter().filter(|s| !s.dir.is_empty()).map(|s| PathBuf::from(s.dir)));
+    folders.sort();
+    folders.dedup();
+    // Git runs with no lock held.
+    let mut known = pick::clone_repos(&clones_root, &sites);
+    known.extend(pick::repos_of_folders(&folders, &sites));
+    let options = pick::candidates(&cfg, items, &known);
     let answer = if options.is_empty() {
         None
     } else {
@@ -357,7 +380,7 @@ pub(crate) fn work_item_check(app: AppHandle, key: String) -> Result<StartCheck,
         }
         None => (listed_item, Vec::new()),
     };
-    let pick = needs_pick(&item).then(|| pick_repo(&state, &item, &items));
+    let pick = needs_pick(&item).then(|| pick_repo(&app, &item, &items));
     Ok(StartCheck { takeover, pick, branch: start::branch_name(&item) })
 }
 
@@ -365,12 +388,18 @@ pub(crate) fn work_item_check(app: AppHandle, key: String) -> Result<StartCheck,
 /// pick): once the issue is still open, not someone else's unless
 /// `take_over` covers them, and nothing known in advance refuses the
 /// start, assigns it to the user and sets its start status, then opens its
-/// session. A failed write-back is a notice, not a failure.
+/// session. A failed write-back is a notice (also a line above the areas),
+/// not a failure. A Start under a minute old whose session has not shown
+/// up yet refuses a second one.
 #[tauri::command(async)]
 pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo>, take_over: bool) -> Result<WorkStarted, String> {
     let state = app.state::<AppState>();
     let generation = state.git_generation.load(Ordering::SeqCst);
     let (listed_item, _) = listed(&state, &key)?;
+    let started_list = state.work_items.lock().unwrap().started.clone();
+    if still_starting(&started_list, &key, &crate::board_cards(&app), now_ms()) {
+        return Err(format!("Maya is still starting {}.", listed_item.id));
+    }
     let repo = repo_to_start(&listed_item, repo)?;
     let mut notices = Vec::new();
     let item = match read_fresh(&state, &listed_item, generation)? {
@@ -404,19 +433,25 @@ pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo
         log::line("app", format!("issues: could not save the started issues: {e}"));
         notices.push(format!("Started, but Maya could not remember it: {e}"));
     }
-    let snapshot = {
+    let (snapshot, notice) = {
         let mut w = state.work_items.lock().unwrap();
         match saved {
             Ok(list) => w.started = list,
             Err(_) => record(&mut w.started, entry),
         }
+        let notice = (!notices.is_empty()).then(|| notices.join(" "));
+        // Shown above the areas until the next check replaces the lines.
+        if let Some(message) = &notice {
+            let forge = item.repo.as_ref().map_or(repo.forge, |r| r.forge);
+            w.errors.push(ForgeError { forge, message: message.clone() });
+        }
         if let Some(listed) = w.items.iter_mut().find(|i| i.key == item.key) {
             *listed = item;
         }
-        w.clone()
+        (w.clone(), notice)
     };
     let _ = app.emit("work-items", &snapshot);
-    Ok(WorkStarted { dir, native_term, notice: (!notices.is_empty()).then(|| notices.join(" ")) })
+    Ok(WorkStarted { dir, native_term, notice })
 }
 
 /// Opens a listed item in the browser; the URL comes from the fetched list,
@@ -504,6 +539,23 @@ mod tests {
         c.put(1, GitProvider::Gitlab, me("stale"));
         assert_eq!(c.get(2, GitProvider::Gitlab), None, "an answer from before the change is dropped");
         assert_eq!(c.get(2, GitProvider::Github), Some(me("new")));
+    }
+
+    #[test]
+    fn a_start_under_a_minute_old_without_its_session_is_still_starting() {
+        use maya_core::model::{Card, Harness, State};
+        let entry = |key: &str, at: u64| Started { key: key.into(), item: WorkItem { key: key.into(), ..item(Some("acme/api"), false) }, dir: "/c/api-issue-7".into(), started_at: at };
+        let now = 1_000_000;
+        let young = [entry("github:acme/api#7", now - 59_000)];
+        assert!(still_starting(&young, "github:acme/api#7", &[], now));
+        assert!(!still_starting(&young, "github:acme/api#8", &[], now), "another item");
+        assert!(!still_starting(&[entry("github:acme/api#7", now - 61_000)], "github:acme/api#7", &[], now), "over a minute old");
+        let session = Card {
+            session_id: "s".into(), pid: 1, name: "issue acme/api#7".into(), cwd: "/c/api-issue-7".into(), state: State::Working, state_since: 0, snippet: String::new(),
+            awaiting: None, has_inbox: false, harness: Harness::ClaudeCode, pr: None, context: None, machine: None, machine_address: None, machine_platform: None,
+            terminal: None, stale: false, model: None, branch: None, brain: false, native: false, shell: false, usage: None, limits: None, status_line: None, live: false,
+        };
+        assert!(!still_starting(&young, "github:acme/api#7", &[session], now), "its session is on the board");
     }
 
     #[test]

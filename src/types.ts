@@ -381,6 +381,8 @@ export interface WorkItemsState {
   items: WorkItem[];
   started: Started[];
   errors: ForgeError[];
+  /** No Git connection is switched on. */
+  gitOff: boolean;
   /** No source for issues is switched on. */
   off: boolean;
   fetchedAt: number | null;
