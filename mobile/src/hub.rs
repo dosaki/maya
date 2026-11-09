@@ -62,6 +62,7 @@ pub fn load_settings(maya_dir: &Path, model: &str) -> Settings {
     let path = settings_path(maya_dir);
     let existed = path.exists();
     let mut config = config::load(&path);
+    maya_core::whats_new::mark_new_install(&mut config, existed, env!("CARGO_PKG_VERSION"));
     if config.network.role == NetworkRole::Main {
         config.network.role = NetworkRole::Off;
         config.network.assistants.clear();
@@ -1095,7 +1096,9 @@ mod tests {
     #[test]
     fn load_settings_says_whether_the_file_existed() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!load_settings(dir.path(), "Pixel").existed, "a brand-new install");
+        let fresh = load_settings(dir.path(), "Pixel");
+        assert!(!fresh.existed, "a brand-new install");
+        assert_eq!(fresh.config.last_shown_version.as_deref(), Some(env!("CARGO_PKG_VERSION")), "marked shown, whatever saves first");
         config::save(&settings_path(dir.path()), &Config::default()).unwrap();
         assert!(load_settings(dir.path(), "Pixel").existed);
         let main = tempfile::tempdir().unwrap();

@@ -24,6 +24,16 @@ pub fn newer(a: &str, b: &str) -> Option<bool> {
     Some(parse(a)? > parse(b)?)
 }
 
+/// Marks a brand-new install (`existed` false: no settings file at start)
+/// as having shown `running`, in memory, so that whatever saves the
+/// settings first writes it: a start that ends before the page asks (the
+/// first-run question) must not make the next start look like an update.
+pub fn mark_new_install(config: &mut crate::config::Config, existed: bool, running: &str) {
+    if !existed && config.last_shown_version.is_none() {
+        config.last_shown_version = Some(running.into());
+    }
+}
+
 /// What a device shows when it starts on `running`, given the version it
 /// last showed (`saved`) and whether its settings file existed at start:
 /// the window to show, and a version to save now without showing one (a
@@ -48,6 +58,18 @@ pub fn at_start(saved: Option<&str>, running: &str, existed: bool) -> (Option<Of
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_brand_new_install_is_marked_shown_as_it_loads() {
+        let mut c = crate::config::Config::default();
+        mark_new_install(&mut c, false, "0.50.0");
+        assert_eq!(c.last_shown_version.as_deref(), Some("0.50.0"));
+        // So whatever saves first writes it, and the next start offers nothing.
+        assert_eq!(at_start(c.last_shown_version.as_deref(), "0.50.0", true), (None, None));
+        let mut existing = crate::config::Config::default();
+        mark_new_install(&mut existing, true, "0.50.0");
+        assert_eq!(existing.last_shown_version, None, "an existing install is left as it is");
+    }
 
     #[test]
     fn a_brand_new_install_shows_nothing_and_saves_the_running_version() {

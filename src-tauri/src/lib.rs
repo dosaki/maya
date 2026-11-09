@@ -1829,6 +1829,7 @@ pub fn run() {
     let dir = claude_dir();
     let config_existed = dir.join("maya/config.json").exists();
     let mut store = Store::new(dir.clone());
+    maya_core::whats_new::mark_new_install(&mut store.config, config_existed, env!("CARGO_PKG_VERSION"));
     store.judge_asks = true;
     store.set_native_roots(Box::new(|| native::HOST.root_pids()));
     store.set_native_seen(Box::new(|roots| native::HOST.mark_carded(roots)));
