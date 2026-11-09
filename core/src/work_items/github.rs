@@ -18,6 +18,11 @@ pub fn search_query(rule: &ItemRule) -> String {
     terms.join(" ")
 }
 
+/// The `field` of each object in `v[key]`: `names(v, "labels", "name")`.
+fn names(v: &Value, key: &str, field: &str) -> Vec<String> {
+    v[key].as_array().map(|a| a.iter().filter_map(|x| x[field].as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
 /// An issue of a search reply; None for a pull request or a malformed node.
 pub fn parse_issue(v: &Value, cfg: &ForgeItems) -> Option<WorkItem> {
     if v.get("pull_request").is_some() {
@@ -26,8 +31,7 @@ pub fn parse_issue(v: &Value, cfg: &ForgeItems) -> Option<WorkItem> {
     let number = v["number"].as_u64()?;
     let path = v["repository_url"].as_str()?.split("/repos/").nth(1)?.to_string();
     let id = format!("{path}#{number}");
-    let names = |key: &str, field: &str| -> Vec<String> { v[key].as_array().map(|a| a.iter().filter_map(|x| x[field].as_str().map(str::to_string)).collect()).unwrap_or_default() };
-    let (status, labels) = status_of(&names("labels", "name"), &cfg.status_labels);
+    let (status, labels) = status_of(&names(v, "labels", "name"), &cfg.status_labels);
     Some(WorkItem {
         key: format!("github:{id}"),
         source: "github".into(),
@@ -37,7 +41,7 @@ pub fn parse_issue(v: &Value, cfg: &ForgeItems) -> Option<WorkItem> {
         description: v["body"].as_str().unwrap_or_default().to_string(),
         status,
         labels,
-        assignees: names("assignees", "login"),
+        assignees: names(v, "assignees", "login"),
         author: v["user"]["login"].as_str().unwrap_or_default().to_string(),
         updated_at: v["updated_at"].as_str().unwrap_or_default().to_string(),
         tracker: cfg.tracker_repos.iter().any(|r| r.eq_ignore_ascii_case(&path)),
@@ -71,7 +75,7 @@ pub fn get(http: &dyn Http, forge: &Forge, repo: &str, number: u64, cfg: &ForgeI
     }
     let item = parse_issue(&v, cfg).ok_or("GitHub's reply was not an issue.")?;
     let assignee_ids = v["assignees"].as_array().map(|a| a.iter().filter_map(|x| x["id"].as_u64()).collect()).unwrap_or_default();
-    let labels = v["labels"].as_array().map(|a| a.iter().filter_map(|x| x["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let labels = names(&v, "labels", "name");
     Ok(Some(Issue { item, assignee_ids, labels }))
 }
 
@@ -88,7 +92,19 @@ pub fn take(http: &dyn Http, forge: &Forge, repo: &str, number: u64, me: &Me, as
         body["labels"] = serde_json::json!(labels_after_status(all_labels, &cfg.status_labels, status));
     }
     let url = format!("{}/repos/{repo}/issues/{number}", forge.site.api_base());
-    send_json_as(http, forge, "PATCH", &url, &body, Need::IssueWrite).map(|_| ())
+    let reply = send_json_as(http, forge, "PATCH", &url, &body, Need::IssueWrite)?;
+    // GitHub answers 200 and silently drops the assignees and labels a user
+    // without triage rights may not set, so the reply is what counts.
+    let v: Value = serde_json::from_str(&reply).map_err(|e| format!("GitHub's reply was not JSON: {e}"))?;
+    if !names(&v, "assignees", "login").iter().any(|l| l.eq_ignore_ascii_case(&me.login)) {
+        return Err("The issue was not assigned to you.".into());
+    }
+    if let Some(status) = &cfg.start_status {
+        if !names(&v, "labels", "name").iter().any(|l| l.eq_ignore_ascii_case(status)) {
+            return Err("The issue was assigned to you, but its status was not set.".into());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -105,7 +121,7 @@ mod tests {
     #[test]
     fn take_adds_me_beside_the_others_and_sets_the_status_in_one_call() {
         let f = github_forge();
-        let http = FakeHttp::new(vec![("/issues/412", 200, "{}")]);
+        let http = FakeHttp::new(vec![("/issues/412", 200, r#"{"assignees":[{"login":"maria"},{"login":"Tiago"}],"labels":[{"name":"bug"},{"name":"In Progress"}]}"#)]);
         let cfg = ForgeItems { status_labels: vec!["todo".into(), "in progress".into()], start_status: Some("in progress".into()), ..WorkItemsConfig::default().github };
         take(&http, &f, "acme/api", 412, &Me { login: "tiago".into(), id: 1 }, &["maria".to_string()], &["bug".to_string(), "todo".to_string()], &cfg).unwrap();
         let seen = http.seen.lock().unwrap();
@@ -116,10 +132,33 @@ mod tests {
 
     #[test]
     fn take_without_a_start_status_leaves_the_labels_alone() {
-        let http = FakeHttp::new(vec![("/issues/5", 200, "{}")]);
+        let http = FakeHttp::new(vec![("/issues/5", 200, r#"{"assignees":[{"login":"tiago"}],"labels":[]}"#)]);
         take(&http, &github_forge(), "a/b", 5, &Me { login: "tiago".into(), id: 1 }, &["tiago".to_string()], &[], &WorkItemsConfig::default().github).unwrap();
         let body: Value = serde_json::from_str(http.seen.lock().unwrap()[0].2.as_deref().unwrap()).unwrap();
         assert_eq!(body, serde_json::json!({"assignees": ["tiago"]}), "no labels key, and me is not listed twice");
+    }
+
+    #[test]
+    fn take_errors_when_the_reply_leaves_me_out() {
+        // GitHub answers 200 and drops what the user may not set.
+        let http = FakeHttp::new(vec![("/issues/5", 200, r#"{"assignees":[{"login":"maria"}],"labels":[]}"#)]);
+        let e = take(&http, &github_forge(), "a/b", 5, &Me { login: "tiago".into(), id: 1 }, &["maria".to_string()], &[], &WorkItemsConfig::default().github).unwrap_err();
+        assert_eq!(e, "The issue was not assigned to you.");
+    }
+
+    #[test]
+    fn take_errors_when_the_reply_lacks_the_start_status() {
+        let http = FakeHttp::new(vec![("/issues/5", 200, r#"{"assignees":[{"login":"tiago"}],"labels":[{"name":"todo"}]}"#)]);
+        let cfg = ForgeItems { status_labels: vec!["todo".into(), "in progress".into()], start_status: Some("in progress".into()), ..WorkItemsConfig::default().github };
+        let e = take(&http, &github_forge(), "a/b", 5, &Me { login: "tiago".into(), id: 1 }, &[], &["todo".to_string()], &cfg).unwrap_err();
+        assert_eq!(e, "The issue was assigned to you, but its status was not set.");
+    }
+
+    #[test]
+    fn take_errors_on_a_reply_that_is_not_json() {
+        let http = FakeHttp::new(vec![("/issues/5", 200, "<html>")]);
+        let e = take(&http, &github_forge(), "a/b", 5, &Me { login: "tiago".into(), id: 1 }, &[], &[], &WorkItemsConfig::default().github).unwrap_err();
+        assert!(e.starts_with("GitHub's reply was not JSON: "), "{e}");
     }
 
     #[test]
