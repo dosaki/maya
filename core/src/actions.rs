@@ -1737,7 +1737,7 @@ mod tests {
         let calls = fake.calls.lock().unwrap();
         let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
         assert!(command.contains("git clone -- 'git@github.com:acme/api.git'"), "{command}");
-        assert!(command.contains(&format!("worktree add -b issue-acme-api-412-login-times-out '{}' 'origin/HEAD' && ", clones.join("api-issue-412").display())), "{command}");
+        assert!(command.contains(&format!("worktree add -b issue-412-login-times-out '{}' 'origin/HEAD' && ", clones.join("api-issue-412").display())), "{command}");
         let file = command.split("cat '").nth(1).unwrap().split('\'').next().unwrap();
         assert!(std::fs::read_to_string(file).unwrap().starts_with("Work on acme/api#412: Login times out (https://github.com/acme/api/issues/412)."));
         drop(calls);

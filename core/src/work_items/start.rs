@@ -27,13 +27,18 @@ pub struct WorkTarget {
 /// The most characters a branch name has, `issue-` included.
 const BRANCH_MAX: usize = 40;
 
-/// `issue-<id and title as a slug>`, at most 40 characters.
+/// `issue-<number>-<title as a slug>`, at most 40 characters: only the
+/// title is cut, so items of one repository never share a branch however
+/// long its path. With no number the id's slug stands in for it; a title
+/// with nothing to slug leaves `issue-<number>`.
 pub fn branch_name(item: &WorkItem) -> String {
-    let slug = crate::worktree::branch_slug(None, &format!("{} {}", item.id, item.title));
-    let prefix = "issue-";
-    // The slug is ASCII, so cutting at a byte is cutting at a character.
-    let slug = slug[..slug.len().min(BRANCH_MAX - prefix.len())].trim_end_matches('-');
-    format!("{prefix}{slug}")
+    use crate::worktree::branch_slug;
+    let number = item.number.map_or_else(|| branch_slug(None, &item.id), |n| n.to_string());
+    let head = format!("issue-{number}");
+    let has_title = item.title.chars().any(|c| c.is_ascii_alphanumeric());
+    let name = if has_title { format!("{head}-{}", branch_slug(None, &item.title)) } else { head };
+    // Everything is ASCII, so cutting at a byte is cutting at a character.
+    name[..name.len().min(BRANCH_MAX)].trim_end_matches('-').to_string()
 }
 
 /// True when the clone at `clone_dir` has the local branch `branch`.
@@ -125,10 +130,23 @@ mod tests {
 
     #[test]
     fn the_branch_names_the_item_and_stays_short() {
-        let i = WorkItem { id: "acme/api#412".into(), title: "Login times out after 30 s on slow networks".into(), ..test_item() };
+        let i = WorkItem { id: "acme/api#412".into(), number: Some(412), title: "Login times out after 30 s on slow networks".into(), ..test_item() };
         let b = branch_name(&i);
-        assert!(b.starts_with("issue-acme-api-412-login"), "{b}");
-        assert!(b.len() <= 40, "{b}");
+        assert!(b.starts_with("issue-412-login"), "{b}");
+        assert!(b.len() <= 40 && !b.ends_with('-'), "{b}");
+        assert_eq!(branch_name(&WorkItem { title: "!!!".into(), ..i.clone() }), "issue-412", "a title with nothing to slug");
+        assert_eq!(branch_name(&WorkItem { number: None, title: "Login".into(), ..i }), "issue-acme-api-412-login", "the id stands in for a missing number");
+    }
+
+    #[test]
+    fn items_of_a_repository_with_a_long_path_get_their_own_branches() {
+        let item = |id: &str, n: u64, title: &str| WorkItem { id: id.into(), number: Some(n), title: title.into(), ..test_item() };
+        let a = branch_name(&item("TheKeyholdingCompany/coral-boards#123", 123, "Fix login when the session cookie expires overnight"));
+        let b = branch_name(&item("TheKeyholdingCompany/coral-boards#456", 456, "Add export of the whole board to a spreadsheet file"));
+        assert_ne!(a, b);
+        for (name, n) in [(&a, "123"), (&b, "456")] {
+            assert!(name.len() <= 40 && name.contains(n), "{name}");
+        }
     }
 
     #[test]
