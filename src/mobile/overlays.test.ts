@@ -51,6 +51,12 @@ describe("the phone's card layer", () => {
   const lines = mobileCss.split("\n");
   const rule = (start: string) => lines.find((l) => l.startsWith(start));
 
+  it("keeps What's new under the first-run setup screen, so it waits until the phone has joined", () => {
+    const z = (start: string) => Number(/z-index:\s*(\w+)/.exec(rule(start) ?? "")?.[1]);
+    expect(rule(".whatsnew {")).toContain("z-index: auto;");
+    expect(z("#setup {")).toBeGreaterThan(0);
+  });
+
   it("is a pane under the top bar that takes the space left, while it holds something", () => {
     const host = rule("#modal-host:not(:empty) {");
     expect(host).toContain("flex: 1;");

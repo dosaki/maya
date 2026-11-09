@@ -21,6 +21,15 @@ describe("makeCardHistory", () => {
     back.mockRestore();
   });
 
+  it("takes over What's new's entry instead of stacking on it", () => {
+    const cards = makeCardHistory();
+    history.pushState({ whatsNew: true }, "");
+    const before = history.length;
+    cards.opened("s1");
+    expect(history.length).toBe(before);
+    expect(history.state).toEqual({ card: "s1" });
+  });
+
   it("pops nothing when Back already took the card's entry", () => {
     const back = vi.spyOn(history, "back").mockImplementation(() => undefined);
     makeCardHistory().dismissed();
