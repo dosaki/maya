@@ -120,7 +120,7 @@ fn new_hub_recording(port: u16) -> (Arc<Hub>, Arc<Page>, Arc<Recording>, tempfil
     let mut config = Config::default();
     config.network.port = port;
     config.network.name = "Pixel".into();
-    let settings = Settings { path: maya_dir.join("config.json"), config };
+    let settings = Settings { path: maya_dir.join("config.json"), config, existed: true };
     let page = Arc::new(Page::default());
     let alerts = Arc::new(Recording::default());
     let hub = Hub::new(maya_dir, settings, alerts.clone(), page.clone());

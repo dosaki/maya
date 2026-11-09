@@ -11,8 +11,9 @@ export interface CardHistory {
 export function makeCardHistory(h: History = window.history): CardHistory {
   const holding = () => typeof (h.state as { card?: unknown } | null)?.card === "string";
   // A Settings group's entry (settings-history.ts), as when a notification
-  // is tapped with a group open, is taken over rather than stacked on.
-  const settings = () => typeof (h.state as { settings?: unknown } | null)?.settings === "string";
+  // is tapped with a group open, is taken over rather than stacked on; so is
+  // What's new's (whatsnew.ts), which the card replaces.
+  const settings = () => typeof (h.state as { settings?: unknown } | null)?.settings === "string" || (h.state as { whatsNew?: unknown } | null)?.whatsNew === true;
   return {
     opened(sessionId) {
       if (holding() || settings()) h.replaceState({ card: sessionId }, "");

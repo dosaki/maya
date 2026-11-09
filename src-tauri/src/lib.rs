@@ -24,6 +24,7 @@ pub mod terminal_linux;
 #[cfg(windows)]
 pub mod terminal_win;
 pub mod updater;
+mod whats_new_app;
 pub mod git;
 pub mod keystore;
 pub mod voice;
@@ -177,6 +178,9 @@ pub struct AppState {
     /// Bumped whenever a Git setting or token changes, so a poll that began
     /// under the old settings can tell its answers are stale and drop them.
     pub git_generation: std::sync::atomic::AtomicU64,
+    /// Whether `maya/config.json` existed when Maya started, before anything
+    /// could save it: a brand-new install shows no What's new.
+    pub config_existed: bool,
 }
 
 /// The server's line to the app: repaints the board, tells the page about
@@ -1689,6 +1693,31 @@ fn get_config(state: TauriState<AppState>) -> Config {
     state.store.lock().unwrap().config.clone()
 }
 
+/// Copies into a config a page sent the fields that are not the page's to
+/// change, from the config as it is now: a page holding an older one must
+/// not undo them.
+fn keep_backend_owned(before: &Config, config: &mut Config) {
+    // The paired list belongs to the server and the main's key and
+    // "pair again" to pairing.
+    config.network.assistants = before.network.assistants.clone();
+    config.network.main_key = before.network.main_key.clone();
+    config.network.pair_again = before.network.pair_again;
+    // So do the group's tombstones and version, and the redirect a
+    // handover left; switching the role by hand ends that.
+    config.network.removed = before.network.removed.clone();
+    config.network.group_version = before.network.group_version;
+    config.network.redirect_port = before.network.redirect_port;
+    // Mute belongs to the top-bar button, which may have saved it after
+    // the page fetched this config.
+    config.muted = before.muted;
+    // A page holding a config from before the first-start import must not undo it.
+    if config.git.is_none() {
+        config.git = before.git.clone();
+    }
+    // What's new saves the last version it showed.
+    config.last_shown_version = before.last_shown_version.clone();
+}
+
 #[tauri::command(async)]
 fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Result<Config, String> {
     if config.completed_timeout_minutes == 0 {
@@ -1709,24 +1738,8 @@ fn set_config(app: AppHandle, state: TauriState<AppState>, config: Config) -> Re
     let before = {
         let mut store = state.store.lock().unwrap();
         let before = store.config.clone();
-        // The paired list belongs to the server and the main's key and
-        // "pair again" to pairing; a page holding an older config must not undo them.
-        config.network.assistants = before.network.assistants.clone();
-        config.network.main_key = before.network.main_key.clone();
-        config.network.pair_again = before.network.pair_again;
-        // So do the group's tombstones and version, and the redirect a
-        // handover left; switching the role by hand ends that.
-        config.network.removed = before.network.removed.clone();
-        config.network.group_version = before.network.group_version;
-        config.network.redirect_port = before.network.redirect_port;
+        keep_backend_owned(&before, &mut config);
         net::settle_role_change(&before.network, &mut config.network);
-        // Mute belongs to the top-bar button, which may have saved it after
-        // the page fetched this config.
-        config.muted = before.muted;
-        // A page holding a config from before the first-start import must not undo it.
-        if config.git.is_none() {
-            config.git = before.git.clone();
-        }
         config::save(&store.config_path(), &config)?;
         store.config = config.clone();
         before
@@ -1814,7 +1827,9 @@ const PR_POLL: Duration = Duration::from_secs(10);
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let dir = claude_dir();
+    let config_existed = dir.join("maya/config.json").exists();
     let mut store = Store::new(dir.clone());
+    maya_core::whats_new::mark_new_install(&mut store.config, config_existed, env!("CARGO_PKG_VERSION"));
     store.judge_asks = true;
     store.set_native_roots(Box::new(|| native::HOST.root_pids()));
     store.set_native_seen(Box::new(|roots| native::HOST.mark_carded(roots)));
@@ -1824,7 +1839,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), lane: std::sync::Arc::new(net::client::RequestLane::default()), git_generation: std::sync::atomic::AtomicU64::new(0) })
+        .manage(AppState { store: Mutex::new(store), notifier: Mutex::new(notify::Notifier::default()), reviews: Mutex::new(ReviewState::default()), deployments: Mutex::new(DeploymentState::default()), deployment_repos: Mutex::new(deployments::ApprovalRepos::default()), pr_notifier: Mutex::new(reviews::PrNotifier::default()), voice: Mutex::new(VoiceState::default()), chat: Mutex::new(chat), window: Mutex::new(maya_core::window::Window::default()), brain: Mutex::new(brain), network: Mutex::new(net::NetworkState::default()), identity: Mutex::new(None), lane: std::sync::Arc::new(net::client::RequestLane::default()), git_generation: std::sync::atomic::AtomicU64::new(0), config_existed })
         .manage(updater::Pending::default())
         // Closing the window quits Maya, so it asks first too; "Quit
         // anyway" then exits the app.
@@ -1930,6 +1945,8 @@ pub fn run() {
             network_forget_main,
             list_machines,
             updater::update_kind,
+            whats_new_app::whats_new,
+            whats_new_app::whats_new_seen,
             updater::update_check,
             updater::update_install,
             quit_guard::native_working,
@@ -2156,6 +2173,16 @@ mod route_tests {
         assert_eq!(pr_link(&card("file:///Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
         assert_eq!(pr_link(&card("/Applications/Calculator.app")).unwrap_err(), "That pull request's link is not a web address.");
         assert_eq!(pr_link(&Card { pr: None, ..card("") }).unwrap_err(), "No pull request is known for this session yet.");
+    }
+
+    #[test]
+    fn a_settings_save_keeps_the_last_version_shown() {
+        let mut before = Config { last_shown_version: Some("0.50.0".into()), ..Config::default() };
+        before.network.group_version = 7;
+        let mut config = Config::default();
+        keep_backend_owned(&before, &mut config);
+        assert_eq!(config.last_shown_version.as_deref(), Some("0.50.0"));
+        assert_eq!(config.network.group_version, 7);
     }
 
     #[test]

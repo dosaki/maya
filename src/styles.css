@@ -107,6 +107,28 @@ body { margin: 0; background: var(--bg); }
 .release-notes .md h3 { margin: 8px 0 4px; font-size: 13px; color: var(--muted); }
 .release-notes .md ul { margin: 0; padding-left: 20px; }
 .release-notes .md li + li { margin-top: 4px; }
+
+/* What's new after an update: Maya stands outside the window's left edge,
+   her open hand toward the notes. The group (art and panel) is centred, so
+   the panel sits right of centre; a narrow window drops the art. */
+.whatsnew .whatsnew__panel { width: min(700px, 92vw); height: min(560px, 84vh); min-width: 0; min-height: 0; margin-left: 410px; overflow: visible; border-color: var(--border); border-radius: 14px; }
+.whatsnew__art { position: absolute; right: calc(100% - 24px); top: -48px; height: calc(100% + 96px); width: auto; pointer-events: none; user-select: none; filter: drop-shadow(0 0 28px rgba(217,171,60,.22)); }
+.whatsnew__close { position: absolute; top: 10px; right: 12px; width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 8px; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.whatsnew__close:hover { color: var(--text); border-color: var(--muted); }
+.whatsnew__head { padding: 22px 52px 12px 26px; }
+.whatsnew__kicker { color: var(--gold); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+.whatsnew__title { margin: 4px 0 2px; font-size: 22px; }
+.whatsnew__count { margin: 0; color: var(--muted); }
+.whatsnew__notes { flex: 1; min-height: 0; overflow: auto; padding: 14px 26px 10px; border-top: 1px solid var(--border); }
+.whatsnew__chip { margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: var(--gold); color: var(--on-gold); font-size: 10px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; vertical-align: 2px; }
+.whatsnew__foot { display: flex; align-items: center; gap: 10px; padding: 12px 26px; border-top: 1px solid var(--border); }
+.whatsnew__where { flex: 1; color: var(--muted); font-size: 12px; }
+.whatsnew__ok { font: inherit; font-weight: 600; padding: 7px 16px; border-radius: 8px; border: 1px solid var(--gold); background: var(--gold); color: var(--on-gold); cursor: pointer; }
+.whatsnew__ok:hover { background: var(--gold-bright); border-color: var(--gold-bright); }
+@media (max-width: 1180px) {
+  .whatsnew__art { display: none; }
+  .whatsnew .whatsnew__panel { margin-left: 0; }
+}
 .settings__code { font: 600 22px ui-monospace, monospace; letter-spacing: .15em; color: var(--gold-bright); }
 .settings button.settings__link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--muted); font-size: 12.5px; text-decoration: underline; cursor: pointer; }
 .settings__assistants { display: flex; flex-direction: column; }

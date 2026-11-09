@@ -4,10 +4,12 @@ import mobileCss from "./mobile.css?raw";
 vi.mock("../modal", () => ({ dismissModal: vi.fn() }));
 vi.mock("../newsession", () => ({ closeNewSession: vi.fn() }));
 vi.mock("../resume", () => ({ closeResume: vi.fn() }));
+vi.mock("../whatsnew", () => ({ closeWhatsNew: vi.fn() }));
 
 import { dismissModal } from "../modal";
 import { closeNewSession } from "../newsession";
 import { closeResume } from "../resume";
+import { closeWhatsNew } from "../whatsnew";
 import { makeTabs } from "../tabs";
 import { closeOverlays, closeOverlaysOnTabTaps } from "./overlays";
 
@@ -17,6 +19,7 @@ describe("closeOverlays", () => {
     expect(dismissModal).toHaveBeenCalledTimes(1);
     expect(closeNewSession).toHaveBeenCalledTimes(1);
     expect(closeResume).toHaveBeenCalledTimes(1);
+    expect(closeWhatsNew).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -47,6 +50,12 @@ describe("closeOverlaysOnTabTaps", () => {
 describe("the phone's card layer", () => {
   const lines = mobileCss.split("\n");
   const rule = (start: string) => lines.find((l) => l.startsWith(start));
+
+  it("keeps What's new under the first-run setup screen, so it waits until the phone has joined", () => {
+    const z = (start: string) => Number(/z-index:\s*(\w+)/.exec(rule(start) ?? "")?.[1]);
+    expect(rule(".whatsnew {")).toContain("z-index: auto;");
+    expect(z("#setup {")).toBeGreaterThan(0);
+  });
 
   it("is a pane under the top bar that takes the space left, while it holds something", () => {
     const host = rule("#modal-host:not(:empty) {");

@@ -199,6 +199,11 @@ pub struct Config {
     /// one): the first start fills it in after importing `gh`'s token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<Vec<GitConnection>>,
+    /// The last version whose What's new this device showed (or, on a
+    /// brand-new install, the version it started on); `whats_new` decides
+    /// from it. The backend owns it: a page saving Settings keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_shown_version: Option<String>,
     /// The session viewer's look; the phone keeps its own.
     #[serde(default)]
     pub viewer_theme: ViewerTheme,
@@ -502,6 +507,7 @@ impl Default for Config {
             recognizer: if cfg!(any(windows, target_os = "linux")) { Recognizer::Builtin } else { Recognizer::System },
             whisper_model: DEFAULT_MODEL.into(),
             git: None,
+            last_shown_version: None,
             viewer_theme: ViewerTheme::Chat,
             color_theme: ColorTheme::Dark,
             new_session_terminal: NewSessionTerminal::Terminal,
@@ -696,6 +702,18 @@ pub fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_shown_version_round_trips_and_defaults_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let c = Config { last_shown_version: Some("0.48.0".into()), ..Config::default() };
+        save(&path, &c).unwrap();
+        assert_eq!(load(&path).last_shown_version.as_deref(), Some("0.48.0"));
+        let old = serde_json::from_str::<Config>(r#"{"completedTimeoutMinutes":5}"#).unwrap();
+        assert_eq!(old.last_shown_version, None);
+        assert!(!serde_json::to_string(&Config::default()).unwrap().contains("lastShownVersion"), "none is not written");
+    }
 
     #[test]
     fn an_assistant_from_0_44_lists_its_main() {

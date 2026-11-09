@@ -23,6 +23,7 @@ import { initVoice } from "./voice";
 import { initChat } from "./chat";
 import { initDebug } from "./debug";
 import { maybeShowFirstRun } from "./firstrun";
+import { showWhatsNew } from "./whatsnew";
 import { maybeShowKeysNotice } from "./notice";
 import { updates } from "./update";
 import { askQuit } from "./quitguard";
@@ -272,7 +273,8 @@ async function start(): Promise<void> {
   void initVoice();
   initChat();
   void initDebug();
-  void maybeShowFirstRun();
+  // After the first-run dialog, so it never covers it.
+  void maybeShowFirstRun().then(() => showWhatsNew(invoke, document.getElementById("modal-host")));
   void maybeShowKeysNotice(() => {
     document.dispatchEvent(new CustomEvent(OPEN_SETTINGS_GROUP, { detail: "keyboard" }));
     tabs?.show("settings");

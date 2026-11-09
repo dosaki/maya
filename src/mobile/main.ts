@@ -28,6 +28,7 @@ import { closeOverlaysOnTabTaps } from "./overlays";
 import { initNetwork } from "./network";
 import { watchTaps } from "./notify-tap";
 import { initSetup } from "./setup";
+import { showWhatsNew } from "../whatsnew";
 import { activeColumn, columnWidth, columnsFor, openingColumn, renderStrip, scrollLeftFor, visibleColumns } from "./strip";
 
 setLocalMachine(false);
@@ -242,6 +243,8 @@ async function start(): Promise<void> {
   });
   cards = (await invoke<Card[]>("list_sessions")).filter((c) => !c.brain);
   paint();
+  // After the first board: a page under the top bar, which Back closes.
+  void showWhatsNew(invoke, document.getElementById("modal-host"), undefined, window.history);
   void watchTaps(openFromTap);
   setInterval(paint, 10_000);
 }

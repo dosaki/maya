@@ -49,6 +49,7 @@ pub mod update;
 pub mod voice_server;
 pub mod wake;
 pub mod watcher;
+pub mod whats_new;
 pub mod window;
 pub mod worktree;
 #[cfg(target_os = "macos")]
