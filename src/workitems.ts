@@ -1,7 +1,7 @@
 import { formatAge } from "./format";
 import { iconElement } from "./icons";
 import { morph } from "./morph";
-import { STATE_LABEL, type Card, type Started, type WorkItem, type WorkItemsState } from "./types";
+import { STATE_LABEL, type Card, type ItemRepo, type StartCheck, type Started, type WorkItem, type WorkItemsState, type WorkStarted } from "./types";
 
 export interface WorkFilters {
   source: string | null;
@@ -67,7 +67,7 @@ function button(label: string, action: string, className = "card__btn"): HTMLBut
   return b;
 }
 
-export function renderItemCard(item: WorkItem, nowMs: number, card: Card | null): HTMLElement {
+export function renderItemCard(item: WorkItem, nowMs: number, card: Card | null, starting = false): HTMLElement {
   const root = el("article", card ? `item item--${card.state}` : "item");
   root.dataset.key = item.key;
   root.dataset.row = item.key;
@@ -106,7 +106,9 @@ export function renderItemCard(item: WorkItem, nowMs: number, card: Card | null)
       item.repo === null || item.tracker
         ? el("span", "item__meta item__meta--pick", "No repo: Maya picks")
         : el("span", "item__meta", `${item.assignees.length > 0 ? item.assignees.join(", ") : "Unassigned"} · ${age}`);
-    foot.append(meta, button("Start", "start", "card__btn card__btn--primary"));
+    const start = button("Start", "start", "card__btn card__btn--primary");
+    start.disabled = starting;
+    foot.append(meta, start);
   }
   root.append(foot);
   return root;
@@ -142,6 +144,7 @@ const SOURCE_LABEL: Record<string, string> = { github: "GitHub", gitlab: "GitLab
  * in place.
  */
 export function makeWorkItemsView(host: HTMLElement) {
+  let starting: ReadonlySet<string> = new Set();
   const filters: WorkFilters = { source: null, repo: null, status: null, search: "" };
   let state: WorkItemsState = { items: [], started: [], errors: [], off: false, fetchedAt: null };
   let cards: Card[] = [];
@@ -214,7 +217,7 @@ export function makeWorkItemsView(host: HTMLElement) {
     const cols = el("div", "issues__cols");
     const emptyPick = state.fetchedAt === null ? "Checking…" : state.items.length === 0 ? "Nothing assigned to you." : "No issues match these filters.";
     cols.append(
-      area("pick", "To pick", shownPick.map((i) => renderItemCard(i, nowMs, null)), emptyPick),
+      area("pick", "To pick", shownPick.map((i) => renderItemCard(i, nowMs, null, starting.has(i.key))), emptyPick),
       area("working", "Being worked on", shownWorking.map((w) => renderItemCard(w.item, nowMs, w.card)), "Nothing started yet."),
     );
     fresh.append(cols);
@@ -222,8 +225,9 @@ export function makeWorkItemsView(host: HTMLElement) {
   }
 
   return {
-    update(next: WorkItemsState, nextCards: Card[], now: number): void {
+    update(next: WorkItemsState, nextCards: Card[], now: number, startingKeys: ReadonlySet<string> = new Set()): void {
       state = next;
+      starting = startingKeys;
       cards = nextCards;
       nowMs = now;
       paint();
@@ -242,4 +246,126 @@ export function workItemActionFor(target: Element): WorkItemAction | null {
   if (kind === "session") return { kind, key, pid: Number(btn.dataset.pid) };
   if (kind === "open-item" || kind === "start") return { kind, key };
   return null;
+}
+
+const repoValue = (r: ItemRepo) => `${r.forge}:${r.path}`;
+const repoLabel = (r: ItemRepo) => `${r.path} (${r.forge === "gitlab" ? "GitLab" : "GitHub"})`;
+
+/** True when Start has something to ask: a takeover to confirm or a repository to pick. */
+export function needsDialog(check: StartCheck): boolean {
+  return check.takeover.length > 0 || check.pick !== null;
+}
+
+/** The question before a Start: confirm a takeover and/or confirm or change Maya's repository pick. */
+export function renderStartDialog(item: WorkItem, check: StartCheck, h: { onStart(repo: ItemRepo | null): void; onCancel(): void }): HTMLElement {
+  const root = el("div", "modal");
+  root.append(el("div", "modal__backdrop"));
+  const panel = el("section", "modal__panel modal__panel--compact");
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  const head = el("header", "modal__head");
+  const titles = el("div", "modal__titles");
+  titles.append(el("h2", "modal__title", `Start ${item.id}: ${item.title}`));
+  head.append(titles);
+  const body = el("div", "modal__setup");
+  if (check.takeover.length > 0) {
+    body.append(el("p", "", `This issue is already assigned to ${check.takeover.join(", ")}. Are you sure you want to take over?`));
+  }
+  const start = el("button", "card__btn card__btn--primary", check.takeover.length > 0 ? "Yes, take over and start" : "Start session");
+  start.type = "button";
+  let repoSel: HTMLSelectElement | null = null;
+  const options = check.pick?.options ?? [];
+  if (check.pick) {
+    const { picked, why } = check.pick;
+    body.append(el("p", "", picked ? `Maya picked ${picked.path} — ${why}` : "Maya could not tell which repository; choose one."));
+    const sel = el("select", "startdialog__repo");
+    sel.name = "repo";
+    sel.setAttribute("aria-label", "Repository");
+    if (!picked) {
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = "Choose a repository";
+      sel.append(none);
+    }
+    for (const r of options) {
+      const o = document.createElement("option");
+      o.value = repoValue(r);
+      o.textContent = repoLabel(r);
+      sel.append(o);
+    }
+    sel.value = picked ? repoValue(picked) : "";
+    sel.addEventListener("change", () => (start.disabled = sel.value === ""));
+    start.disabled = sel.value === "";
+    repoSel = sel;
+    body.append(sel);
+  }
+  body.append(el("p", "startdialog__branch", `Branch: ${check.branch}`));
+  const cancel = el("button", "card__btn", "Cancel");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => h.onCancel());
+  start.addEventListener("click", () => {
+    if (!repoSel) return h.onStart(null);
+    h.onStart(options.find((r) => repoValue(r) === repoSel!.value) ?? null);
+  });
+  const buttons = el("div", "startdialog__buttons");
+  buttons.append(cancel, start);
+  body.append(buttons);
+  panel.append(head, body);
+  root.append(panel);
+  return root;
+}
+
+/**
+ * Runs `run` for `key` unless a Start for it is already in flight; the key
+ * stays in `inFlight` until `run` settles, and `changed` fires on each edit.
+ */
+export async function guardStart(inFlight: Set<string>, key: string, run: () => Promise<void>, changed: () => void = () => {}): Promise<void> {
+  if (inFlight.has(key)) return;
+  inFlight.add(key);
+  changed();
+  try {
+    await run();
+  } finally {
+    inFlight.delete(key);
+    changed();
+  }
+}
+
+/** Checks, asks when needed, starts; toasts the outcome (and any error) and reports the opened folder. */
+export async function startWorkItem(
+  item: WorkItem,
+  deps: {
+    invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+    host: HTMLElement;
+    toast(s: string): void;
+    opened(nativeTerm: number | null, dir: string): void;
+  },
+): Promise<void> {
+  const { invoke, host, toast } = deps;
+  try {
+    const check = await invoke<StartCheck>("work_item_check", { key: item.key });
+    let repo: ItemRepo | null = null;
+    if (needsDialog(check)) {
+      const chosen = await new Promise<{ repo: ItemRepo | null } | null>((resolve) => {
+        const close = (v: { repo: ItemRepo | null } | null) => {
+          document.removeEventListener("keydown", onKey, true);
+          host.replaceChildren();
+          resolve(v);
+        };
+        const onKey = (e: KeyboardEvent) => {
+          if (e.key === "Escape") close(null);
+        };
+        document.addEventListener("keydown", onKey, true);
+        host.replaceChildren(renderStartDialog(item, check, { onStart: (r) => close({ repo: r }), onCancel: () => close(null) }));
+      });
+      if (!chosen) return;
+      repo = chosen.repo;
+    }
+    const r = await invoke<WorkStarted>("work_item_start", { key: item.key, repo, takeOver: check.takeover.length > 0 });
+    toast(`Working on ${item.id} in ${r.dir.split("/").filter(Boolean).pop() ?? r.dir}`);
+    if (r.notice) toast(r.notice);
+    deps.opened(r.nativeTerm, r.dir);
+  } catch (e) {
+    toast(String(e));
+  }
 }

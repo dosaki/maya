@@ -17,7 +17,7 @@ import { initRemembered } from "./remembered";
 import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
-import { areas, makeWorkItemsView, workItemActionFor } from "./workitems";
+import { areas, guardStart, makeWorkItemsView, startWorkItem, workItemActionFor } from "./workitems";
 import { prRef, remoteTerminalToast, type Card, type DeploymentState, type ReviewState, type WorkItemsState } from "./types";
 import { initMute } from "./mute";
 import { initVoice } from "./voice";
@@ -59,13 +59,21 @@ function paintWorkItems(): void {
   const host = document.getElementById("issues");
   if (!host) return;
   workItemsView ??= makeWorkItemsView(host);
-  workItemsView.update(workItems, cards, Date.now());
+  workItemsView.update(workItems, cards, Date.now(), startingItems);
   tabs?.setIssueCount(areas(workItems, cards).toPick.length);
 }
 
-/** Task 10 replaces this with the Start dialog. */
-async function startItem(_key: string): Promise<void> {
-  showToast("Start comes next.");
+const startingItems = new Set<string>();
+
+async function startItem(key: string): Promise<void> {
+  const item = workItems.items.find((i) => i.key === key);
+  const host = document.getElementById("modal-host");
+  if (!host) return;
+  if (!item) {
+    showToast("That issue is no longer on the list.");
+    return;
+  }
+  await guardStart(startingItems, key, () => startWorkItem(item, { invoke, host, toast: showToast, opened: openStarted }), paintWorkItems);
 }
 
 async function workItemAction(target: Element): Promise<void> {

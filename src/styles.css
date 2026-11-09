@@ -629,3 +629,6 @@ body { margin: 0; background: var(--bg); }
 :root[data-theme="light"] .modal--terminal .usage__pct { color: var(--text); }
 :root[data-theme="light"] .modal--terminal .usage__amount { color: var(--text); }
 :root[data-theme="light"] .modal--terminal .usage__bar { background: color-mix(in srgb, var(--border) 60%, transparent); }
+.startdialog__repo { width: 100%; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
+.startdialog__branch { font-family: ui-monospace, monospace; font-size: 12px; }
+.startdialog__buttons { display: flex; gap: 8px; align-self: flex-end; }
