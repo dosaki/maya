@@ -1,3 +1,9 @@
+# 0.50.0
+
+## New
+
+- After Maya updates, the first time it opens it shows what changed since the version you last used, on the computer and on the phone. Close it with Got it; all release notes stay in Settings › Release Notes.
+
 # 0.49.3
 
 ## Fixed
