@@ -2,6 +2,7 @@
 
 pub mod github;
 pub mod gitlab;
+pub mod start;
 pub mod started;
 
 use crate::config::{GitProvider, WorkItemsConfig};

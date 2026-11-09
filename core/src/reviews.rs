@@ -277,7 +277,7 @@ pub fn pr_spoken_line(pr: &ReviewPr) -> Option<String> {
     }
 }
 
-fn is_checkout_of(dir: &Path, site: &ForgeSite, repo: &str) -> bool {
+pub(crate) fn is_checkout_of(dir: &Path, site: &ForgeSite, repo: &str) -> bool {
     crate::forge::origin_of(dir).and_then(|o| crate::forge::route(&o, std::slice::from_ref(site)).map(|(_, p)| p)).is_some_and(|p| p.eq_ignore_ascii_case(repo))
 }
 
@@ -311,7 +311,7 @@ pub struct ReviewTarget {
 
 /// True when `dir` is a worktree of the clone at `clone_dir`: its `.git`
 /// is a file and git's common folder for it is the clone's `.git`.
-fn is_worktree_of(dir: &Path, clone_dir: &Path) -> bool {
+pub(crate) fn is_worktree_of(dir: &Path, clone_dir: &Path) -> bool {
     if !dir.join(".git").is_file() {
         return false;
     }
@@ -323,6 +323,21 @@ fn is_worktree_of(dir: &Path, clone_dir: &Path) -> bool {
     out.status.success() && !common.is_empty() && matches!((std::fs::canonicalize(dir.join(common)), std::fs::canonicalize(clone_dir.join(".git"))), (Ok(a), Ok(b)) if a == b)
 }
 
+/// The name and folder of `repo`'s one clone under `clones_root`:
+/// `<repo name>`, or the full path with `/` as `-` when that folder is
+/// another repository's. A folder of the full path's name that is another
+/// repository's too is refused.
+pub(crate) fn clone_of(clones_root: &Path, site: &ForgeSite, repo: &str) -> Result<(String, PathBuf), String> {
+    let repo_name = repo.rsplit('/').next().unwrap_or(repo);
+    let ours = |d: &Path| !d.exists() || is_checkout_of(d, site, repo);
+    let base = if ours(&clones_root.join(repo_name)) { repo_name.to_string() } else { repo.replace('/', "-") };
+    let clone_dir = clones_root.join(&base);
+    if !ours(&clone_dir) {
+        return Err(format!("{} is not a clone of {repo}; move it or change the clones directory.", clone_dir.display()));
+    }
+    Ok((base, clone_dir))
+}
+
 /// The review of `repo`'s PR `number` under `clones_root`. The marker
 /// `mr` on GitLab keeps `!12` from reusing GitHub's `#12`. When `<repo>`
 /// is another repository's clone, the clone and its worktrees are named
@@ -331,13 +346,7 @@ fn is_worktree_of(dir: &Path, clone_dir: &Path) -> bool {
 /// folder that is neither a worktree of the clone nor an old full clone
 /// of the repository.
 pub fn resolve_target(clones_root: &Path, site: &ForgeSite, repo: &str, number: u64) -> Result<ReviewTarget, String> {
-    let repo_name = repo.rsplit('/').next().unwrap_or(repo);
-    let ours = |d: &Path| !d.exists() || is_checkout_of(d, site, repo);
-    let base = if ours(&clones_root.join(repo_name)) { repo_name.to_string() } else { repo.replace('/', "-") };
-    let clone_dir = clones_root.join(&base);
-    if !ours(&clone_dir) {
-        return Err(format!("{} is not a clone of {repo}; move it or change the clones directory.", clone_dir.display()));
-    }
+    let (base, clone_dir) = clone_of(clones_root, site, repo)?;
     let (marker, pr_ref) = match site.provider {
         GitProvider::Gitlab => ("mr", format!("merge-requests/{number}/head")),
         GitProvider::Github => ("", format!("pull/{number}/head")),
@@ -434,22 +443,22 @@ pub fn render_prompt(template: &str, pr: &ReviewPr, checked_out: bool) -> String
     }
 }
 
-/// The shell line the review terminal runs: `git_steps` first, with the
-/// user's own git credentials, then the agent in the folder on the prompt
-/// file, as a new session named `review <repo> #<number>` (`-n` for Claude
-/// Code; the others get the name typed later, as `actions::start_session`
-/// does).
-pub fn shell_command(agent: Harness, target: &ReviewTarget, clone_url: &str, session: &str, prompt_file: &Path, grok_id: Option<&str>) -> String {
+/// The shell line a terminal in the clones directory runs: the git `steps`
+/// first (made under `clones_root`), with the user's own git credentials,
+/// then the agent in `dir` on the prompt file, as a new session named
+/// `session` (`-n` for Claude Code; the others get the name typed later, as
+/// `actions::start_session` does). With no steps (an old full clone) it is
+/// the agent alone.
+pub fn shell_command(agent: Harness, dir: &Path, clones_root: &Path, steps: &[Vec<String>], session: &str, prompt_file: &Path, grok_id: Option<&str>) -> String {
     let opts = LaunchOptions { agent, name: Some(session.to_string()), ..Default::default() };
-    let start = crate::launch::session_command(&target.dir, prompt_file, &opts, grok_id);
-    if target.legacy {
+    let start = crate::launch::session_command(dir, prompt_file, &opts, grok_id);
+    if steps.is_empty() {
         return start;
     }
     // A plain word reads better bare; anything else (paths, URLs, refs) is quoted.
     let word = |a: &String| if !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { a.clone() } else { shell_single_quote(a) };
-    let root = target.clone_dir.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut line = vec![format!("mkdir -p {}", shell_single_quote(&root))];
-    line.extend(git_steps(target, clone_url).iter().map(|args| format!("git {}", args.iter().map(word).collect::<Vec<_>>().join(" "))));
+    let mut line = vec![format!("mkdir -p {}", shell_single_quote(&clones_root.to_string_lossy()))];
+    line.extend(steps.iter().map(|args| format!("git {}", args.iter().map(word).collect::<Vec<_>>().join(" "))));
     line.push(start);
     line.join(" && ")
 }
@@ -717,6 +726,11 @@ mod tests {
         assert_eq!(err, format!("{} is not a review of Org/bedrock; move it or change the clones directory.", wt.display()));
     }
 
+    /// `shell_command` for a review of `target`, as `actions::start_review` builds it.
+    fn review_shell(agent: Harness, target: &ReviewTarget, clone_url: &str, session: &str, prompt_file: &Path, grok_id: Option<&str>) -> String {
+        shell_command(agent, &target.dir, target.clone_dir.parent().unwrap(), &git_steps(target, clone_url), session, prompt_file, grok_id)
+    }
+
     fn target(clone: bool, worktree_exists: bool, legacy: bool) -> ReviewTarget {
         ReviewTarget {
             clone_dir: PathBuf::from("/c/bedrock"),
@@ -750,7 +764,7 @@ mod tests {
         let clones = t.path().join("my reviews").join("it's");
         let target = resolve_target(&clones, &github_site(), "Org/bedrock", 451).unwrap();
         let file = Path::new("/Users/x/.claude/maya/prompts/1.txt");
-        let s = shell_command(crate::model::Harness::ClaudeCode, &target, "git@github.com:Org/bedrock.git", "review bedrock #451", file, None);
+        let s = review_shell(crate::model::Harness::ClaudeCode, &target, "git@github.com:Org/bedrock.git", "review bedrock #451", file, None);
         let q = |p: &Path| shell_single_quote(&p.to_string_lossy());
         assert!(s.starts_with(&format!("mkdir -p {} && git clone -- 'git@github.com:Org/bedrock.git' {} && ", q(&clones), q(&clones.join("bedrock")))), "{s}");
         assert!(s.contains(&format!("git -C {} fetch origin '+pull/451/head:refs/maya/review/451' && ", q(&clones.join("bedrock")))), "{s}");
@@ -973,16 +987,16 @@ mod tests {
     fn the_review_shell_line_runs_the_agent_on_the_prompt_file_with_the_review_name() {
         let file = Path::new("/Users/x/.claude/maya/prompts/1.txt");
         let old = ReviewTarget { dir: PathBuf::from("/Users/x/reviews/bedrock-451"), ..target(false, false, true) };
-        let s = shell_command(crate::model::Harness::ClaudeCode, &old, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
+        let s = review_shell(crate::model::Harness::ClaudeCode, &old, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
         assert_eq!(s, "cd '/Users/x/reviews/bedrock-451' && p=\"$(cat '/Users/x/.claude/maya/prompts/1.txt')\" && rm -f '/Users/x/.claude/maya/prompts/1.txt' && claude -n 'review bedrock #451' -- \"$p\"", "an old full clone runs the agent alone");
         let fresh = target(true, false, false);
-        let s = shell_command(crate::model::Harness::Codex, &fresh, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
+        let s = review_shell(crate::model::Harness::Codex, &fresh, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
         assert!(s.starts_with("mkdir -p '/c' && git clone -- 'https://github.com/Org/bedrock.git' '/c/bedrock' && git -C '/c/bedrock' fetch origin && "), "{s}");
         assert!(s.contains(" && git -C '/c/bedrock' worktree prune && git -C '/c/bedrock' worktree add --detach '/c/bedrock-451' 'refs/maya/review/451' && cd '/c/bedrock-451' && "), "{s}");
         assert!(s.ends_with("&& codex -- \"$p\""), "no -n for Codex: the name waits as a pending name: {s}");
-        let s = shell_command(crate::model::Harness::Grok, &old, "https://github.com/Org/bedrock.git", "review bedrock #451", file, Some("1111-2222"));
+        let s = review_shell(crate::model::Harness::Grok, &old, "https://github.com/Org/bedrock.git", "review bedrock #451", file, Some("1111-2222"));
         assert!(s.ends_with("&& grok --session-id '1111-2222' -- \"$p\""), "{s}");
-        let s = shell_command(crate::model::Harness::Antigravity, &old, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
+        let s = review_shell(crate::model::Harness::Antigravity, &old, "https://github.com/Org/bedrock.git", "review bedrock #451", file, None);
         assert!(s.ends_with("&& agy --prompt-interactive=\"$p\""), "{s}");
     }
 }
