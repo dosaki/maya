@@ -17,7 +17,8 @@ import { initRemembered } from "./remembered";
 import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
-import { prRef, remoteTerminalToast, type Card, type DeploymentState, type ReviewState } from "./types";
+import { areas, makeWorkItemsView, workItemActionFor } from "./workitems";
+import { prRef, remoteTerminalToast, type Card, type DeploymentState, type ReviewState, type WorkItemsState } from "./types";
 import { initMute } from "./mute";
 import { initVoice } from "./voice";
 import { initChat } from "./chat";
@@ -37,11 +38,13 @@ let enableTimer: ReturnType<typeof setTimeout> | undefined;
 let known = new Set<string>();
 let pointer: { x: number; y: number } | null = null;
 let reviews: ReviewState = { prs: [], errors: [], off: false, fetchedAt: null };
+let workItems: WorkItemsState = { items: [], started: [], errors: [], off: false, fetchedAt: null };
 let deployments: DeploymentState = { runs: [], error: null, off: false, assistant: false, fetchedAt: null };
 const deployUi: RowUi = { busy: new Set(), errors: new Map() };
 let clonesDir: string | null = null;
 let tabs: ReturnType<typeof makeTabs> | null = null;
 let reviewsView: ReturnType<typeof makeReviewsView> | null = null;
+let workItemsView: ReturnType<typeof makeWorkItemsView> | null = null;
 let search: ReturnType<typeof makeSessionSearch> | null = null;
 
 function paintReviews(): void {
@@ -50,6 +53,38 @@ function paintReviews(): void {
   reviewsView ??= makeReviewsView(host);
   reviewsView.update(reviews, Date.now(), { cards, clonesDir });
   tabs?.setCount(waitingCount(reviews.prs));
+}
+
+function paintWorkItems(): void {
+  const host = document.getElementById("issues");
+  if (!host) return;
+  workItemsView ??= makeWorkItemsView(host);
+  workItemsView.update(workItems, cards, Date.now());
+  tabs?.setIssueCount(areas(workItems, cards).toPick.length);
+}
+
+/** Task 10 replaces this with the Start dialog. */
+async function startItem(_key: string): Promise<void> {
+  showToast("Start comes next.");
+}
+
+async function workItemAction(target: Element): Promise<void> {
+  const action = workItemActionFor(target);
+  if (!action) return;
+  try {
+    if (action.kind === "settings") {
+      document.dispatchEvent(new CustomEvent(OPEN_SETTINGS_GROUP, { detail: "workItems" }));
+      tabs?.show("settings");
+    } else if (action.kind === "session") {
+      await focus(action.pid);
+    } else if (action.kind === "open-item") {
+      await invoke("open_work_item", { key: action.key });
+    } else {
+      await startItem(action.key);
+    }
+  } catch (e) {
+    showToast(String(e));
+  }
 }
 
 function paintDeployments(): void {
@@ -303,6 +338,16 @@ async function start(): Promise<void> {
     paintReviews();
   });
   paintReviews();
+  document.getElementById("issues")?.addEventListener("click", (ev) => void workItemAction(ev.target as Element));
+  await listen<WorkItemsState>("work-items", (e) => {
+    workItems = e.payload;
+    paintWorkItems();
+  });
+  paintWorkItems();
+  void invoke<WorkItemsState>("list_work_items").then((w) => {
+    workItems = w;
+    paintWorkItems();
+  }).catch((e) => showToast(String(e)));
   document.getElementById("deployments")?.addEventListener("click", (ev) => void deploymentAction(ev.target as Element));
   await listen<DeploymentState>("deployments", (e) => {
     deployments = e.payload;
@@ -380,11 +425,12 @@ async function start(): Promise<void> {
     known = new Set(cards.map((c) => c.sessionId));
     paint();
     paintReviews();
+    paintWorkItems();
     refreshModal(cards);
   });
   cards = await invoke<Card[]>("list_sessions");
   paint();
-  setInterval(() => { paint(); paintReviews(); paintDeployments(); }, 10_000); // refresh the age labels
+  setInterval(() => { paint(); paintReviews(); paintWorkItems(); paintDeployments(); }, 10_000); // refresh the age labels
 }
 
 void start();
