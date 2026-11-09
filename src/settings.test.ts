@@ -1496,6 +1496,21 @@ describe("Settings → Work Items", () => {
     expect(h.onWorkItems.mock.lastCall![1].rules).toEqual([]);
   });
 
+  it("saves nothing while a rule for someone has no login", () => {
+    const h = { ...handlers(), onWorkItems: vi.fn() };
+    const root = renderSettings(wiModel(), h);
+    const gh = box(root, "github");
+    const rule = gh.querySelector<HTMLElement>(".settings__rule")!;
+    type(rule.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!, "user");
+    type(rule.querySelector<HTMLInputElement>("input[name=wi-labels]")!, "bug");
+    gh.querySelector<HTMLButtonElement>("[data-action=wi-add-rule]")!.click();
+    type(gh.querySelector<HTMLInputElement>("input[name=wi-trackerRepos]")!, "acme/x");
+    expect(h.onWorkItems).not.toHaveBeenCalled();
+    type(rule.querySelector<HTMLInputElement>("input[name=wi-login]")!, "alice");
+    expect(h.onWorkItems).toHaveBeenCalledTimes(1);
+    expect(h.onWorkItems.mock.lastCall![1].rules[0]).toEqual({ assignee: { kind: "user", login: "alice" }, labels: ["bug"], repos: [] });
+  });
+
   it("disables a service that is off in Settings → Git and links there", () => {
     const h = { ...handlers(), onOpenGroup: vi.fn() };
     const root = renderSettings(wiModel({ git: gitConnections(null) }), h);

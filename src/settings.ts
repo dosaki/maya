@@ -1169,7 +1169,12 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       startStatus: start.value === "" ? null : start.value,
       trackerRepos: commaList(tracker.value),
     });
-    const save = (items: ForgeItems = read()) => h.onWorkItems?.(forge, items);
+    // A rule for someone with no login yet would make the backend refuse the
+    // whole box: nothing is saved until the login is typed (or the rule goes).
+    const save = (items: ForgeItems = read()) => {
+      if (items.rules.some((r) => r.assignee.kind === "user" && r.assignee.login === "")) return;
+      h.onWorkItems?.(forge, items);
+    };
 
     const addRule = (rule: ItemRule) => {
       const r = document.createElement("div");
@@ -1271,7 +1276,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
 
   const workLabel = document.createElement("label");
-  workLabel.textContent = "Work prompt (for the Start button)";
+  workLabel.textContent = "Work prompt";
   const workInput = document.createElement("textarea");
   workInput.name = "workPrompt";
   workInput.rows = 4;
