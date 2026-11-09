@@ -9,7 +9,8 @@ use maya_core::config::GitProvider;
 use maya_core::forge::{self, Forge, ForgeError, Me};
 use maya_core::store::now_ms;
 use maya_core::work_items::started::{self, Started};
-use maya_core::work_items::{self, github, gitlab, pick, start, ItemRepo, WorkItem};
+use maya_core::config::ForgeItems;
+use maya_core::work_items::{self, github, gitlab, pick, start, Issue, ItemRepo, WorkItem};
 use maya_core::{actions, launch, log};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -63,7 +64,7 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
             GitProvider::Gitlab => gitlab::get(git::http(), forge, &repo.path, number, items),
         };
         match got {
-            Ok(Some((item, _))) => latest.push(item),
+            Ok(Some(issue)) => latest.push(issue.item),
             Ok(None) => closed.push(s.key.clone()),
             Err(e) => log::line("app", format!("issues: {}: {e}", s.item.id)),
         }
@@ -277,27 +278,94 @@ fn pick_repo(state: &AppState, item: &WorkItem, items: &[WorkItem]) -> RepoPick 
     RepoPick { picked, why, options }
 }
 
-/// What Start asks before it starts the listed item `key`.
+/// Why Start refuses the user's answer to the takeover question, if it does:
+/// the issue is someone else's and the user did not agree to take it over,
+/// or someone the check did not name (`checked` held its assignees) has
+/// been assigned since.
+fn takeover_refusal(checked: &[String], fresh: &[String], me: &str, take_over: bool) -> Option<&'static str> {
+    let now = others(fresh, me);
+    if now.is_empty() {
+        return None;
+    }
+    if !take_over {
+        return Some("This issue is assigned to someone else.");
+    }
+    let named = others(checked, me);
+    let new = now.iter().any(|n| !named.iter().any(|c| c.eq_ignore_ascii_case(n)));
+    new.then_some("Someone else was assigned since you checked; check again.")
+}
+
+/// `url` when it is a web address: nothing else goes to the system's opener.
+fn web_link(url: &str) -> Result<&str, String> {
+    if maya_core::attachments::is_web_url(url) {
+        Ok(url)
+    } else {
+        Err("That issue's link is not a web address.".into())
+    }
+}
+
+/// The listed item's issue, read afresh, with the service and the user it
+/// was read as.
+struct Fresh {
+    forge: Forge,
+    me: Me,
+    cfg: ForgeItems,
+    repo: String,
+    number: u64,
+    issue: Issue,
+}
+
+/// Reads `item`'s issue again; None for an item with no issue to read.
+/// A closed issue is an error. Call it with no lock held.
+fn read_fresh(state: &AppState, item: &WorkItem, generation: u64) -> Result<Option<Fresh>, String> {
+    let (Some(repo), Some(number)) = (&item.repo, item.number) else { return Ok(None) };
+    let forge = forge_for(state, repo.forge)?;
+    let me = me_for(state, &forge, generation)?;
+    let cfg = state.store.lock().unwrap().config.work_items.for_forge(repo.forge).clone();
+    let got = match repo.forge {
+        GitProvider::Github => github::get(git::http(), &forge, &repo.path, number, &cfg),
+        GitProvider::Gitlab => gitlab::get(git::http(), &forge, &repo.path, number, &cfg),
+    };
+    let issue = got.map_err(|e| format!("{}: {e}", repo.forge.label()))?.ok_or("That issue was closed.")?;
+    Ok(Some(Fresh { forge, me, cfg, repo: repo.path.clone(), number, issue }))
+}
+
+/// Puts `item` in the list in place of its older copy and tells the page.
+fn show_fresh(app: &AppHandle, item: &WorkItem) {
+    let snapshot = {
+        let state = app.state::<AppState>();
+        let mut w = state.work_items.lock().unwrap();
+        let Some(listed) = w.items.iter_mut().find(|i| i.key == item.key) else { return };
+        *listed = item.clone();
+        w.clone()
+    };
+    let _ = app.emit("work-items", &snapshot);
+}
+
+/// What Start asks before it starts the listed item `key`, from the issue
+/// as it is now (the list shows that copy from then on).
 #[tauri::command(async)]
 pub(crate) fn work_item_check(app: AppHandle, key: String) -> Result<StartCheck, String> {
     let state = app.state::<AppState>();
     let generation = state.git_generation.load(Ordering::SeqCst);
-    let (item, items) = listed(&state, &key)?;
-    let takeover = match &item.repo {
-        Some(repo) => {
-            let forge = forge_for(&state, repo.forge)?;
-            others(&item.assignees, &me_for(&state, &forge, generation)?.login)
+    let (listed_item, items) = listed(&state, &key)?;
+    let (item, takeover) = match read_fresh(&state, &listed_item, generation)? {
+        Some(f) => {
+            show_fresh(&app, &f.issue.item);
+            let takeover = others(&f.issue.item.assignees, &f.me.login);
+            (f.issue.item, takeover)
         }
-        None => Vec::new(),
+        None => (listed_item, Vec::new()),
     };
     let pick = needs_pick(&item).then(|| pick_repo(&state, &item, &items));
     Ok(StartCheck { takeover, pick, branch: start::branch_name(&item) })
 }
 
 /// Starts the listed item `key` in `repo` (the item's own when it needs no
-/// pick): once the issue is still open and not someone else's unless
-/// `take_over`, assigns it to the user and sets its start status, then opens
-/// its session. A failed write-back is a notice, not a failure.
+/// pick): once the issue is still open, not someone else's unless
+/// `take_over` covers them, and nothing known in advance refuses the
+/// start, assigns it to the user and sets its start status, then opens its
+/// session. A failed write-back is a notice, not a failure.
 #[tauri::command(async)]
 pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo>, take_over: bool) -> Result<WorkStarted, String> {
     let state = app.state::<AppState>();
@@ -305,31 +373,26 @@ pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo
     let (listed_item, _) = listed(&state, &key)?;
     let repo = repo_to_start(&listed_item, repo)?;
     let mut notices = Vec::new();
-    let item = match (&listed_item.repo, listed_item.number) {
-        (Some(issue_repo), Some(number)) => {
-            let forge = forge_for(&state, issue_repo.forge)?;
-            let me = me_for(&state, &forge, generation)?;
-            let cfg = state.store.lock().unwrap().config.work_items.for_forge(issue_repo.forge).clone();
-            let got = match issue_repo.forge {
-                GitProvider::Github => github::get(git::http(), &forge, &issue_repo.path, number, &cfg),
-                GitProvider::Gitlab => gitlab::get(git::http(), &forge, &issue_repo.path, number, &cfg),
-            };
-            let (fresh, ids) = got.map_err(|e| format!("{}: {e}", issue_repo.forge.label()))?.ok_or("That issue was closed.")?;
-            if !take_over && !others(&fresh.assignees, &me.login).is_empty() {
-                return Err("This issue is assigned to someone else.".into());
+    let item = match read_fresh(&state, &listed_item, generation)? {
+        Some(f) => {
+            let fresh = &f.issue.item;
+            if let Some(why) = takeover_refusal(&listed_item.assignees, &fresh.assignees, &f.me.login, take_over) {
+                // So the page's next check names whoever it is.
+                show_fresh(&app, fresh);
+                return Err(why.into());
             }
-            let all_labels: Vec<String> = fresh.labels.iter().cloned().chain(fresh.status.clone()).collect();
-            let taken = match issue_repo.forge {
-                GitProvider::Github => github::take(git::http(), &forge, &issue_repo.path, number, &me, &fresh.assignees, &all_labels, &cfg),
-                GitProvider::Gitlab => gitlab::take(git::http(), &forge, &issue_repo.path, number, &me, &ids, &all_labels, &cfg),
+            actions::work_item_preflight(&crate::local(&state), fresh, &repo)?;
+            let taken = match f.forge.site.provider {
+                GitProvider::Github => github::take(git::http(), &f.forge, &f.repo, f.number, &f.me, &fresh.assignees, &f.issue.labels, &f.cfg),
+                GitProvider::Gitlab => gitlab::take(git::http(), &f.forge, &f.repo, f.number, &f.me, &f.issue.assignee_ids, &f.issue.labels, &f.cfg),
             };
             if let Err(e) = taken {
                 log::line("app", format!("issues: {} was not updated: {e}", fresh.id));
                 notices.push(format!("Started, but {} was not updated: {e}", fresh.id));
             }
-            fresh
+            f.issue.item
         }
-        _ => listed_item,
+        None => listed_item,
     };
 
     let (dir, native_term) = native::route::opening(|| actions::start_work_item(&crate::local(&state), &item, &repo));
@@ -356,11 +419,12 @@ pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo
     Ok(WorkStarted { dir, native_term, notice: (!notices.is_empty()).then(|| notices.join(" ")) })
 }
 
-/// Opens a listed item in the browser; the URL comes from the fetched list.
+/// Opens a listed item in the browser; the URL comes from the fetched list,
+/// and only a web address is opened.
 #[tauri::command(async)]
 pub(crate) fn open_work_item(state: TauriState<AppState>, key: String) -> Result<(), String> {
     let url = state.work_items.lock().unwrap().items.iter().find(|i| i.key == key).map(|i| i.url.clone()).ok_or(GONE)?;
-    crate::open_in_browser(&url)
+    crate::open_in_browser(web_link(&url)?)
 }
 
 #[cfg(test)]
@@ -373,6 +437,28 @@ mod tests {
         assert_eq!(others(&s(&["Tiago", "maria"]), "tiago"), s(&["maria"]));
         assert!(others(&s(&["tiago"]), "TIAGO").is_empty());
         assert!(others(&[], "tiago").is_empty());
+    }
+
+    #[test]
+    fn a_takeover_covers_only_the_names_the_check_showed() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let (me, gone) = ("tiago", "This issue is assigned to someone else.");
+        let new = "Someone else was assigned since you checked; check again.";
+        assert_eq!(takeover_refusal(&s(&[]), &s(&["Tiago"]), me, false), None, "mine alone asks nothing");
+        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["maria"]), me, false), Some(gone));
+        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["Maria", "tiago"]), me, true), None, "the name the check showed");
+        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["maria", "john"]), me, true), Some(new));
+        assert_eq!(takeover_refusal(&s(&[]), &s(&["john"]), me, true), Some(new));
+        assert_eq!(takeover_refusal(&s(&["maria", "john"]), &s(&["john"]), me, true), None, "one fewer is still covered");
+    }
+
+    #[test]
+    fn only_a_web_link_is_opened() {
+        assert_eq!(web_link("https://github.com/acme/api/issues/7"), Ok("https://github.com/acme/api/issues/7"));
+        assert_eq!(web_link("http://gitlab.local/g/r/-/issues/1"), Ok("http://gitlab.local/g/r/-/issues/1"));
+        for bad in ["file:///etc/passwd", "/Applications/Calculator.app", "javascript:alert(1)", ""] {
+            assert_eq!(web_link(bad), Err("That issue's link is not a web address.".to_string()), "{bad}");
+        }
     }
 
     fn item(repo: Option<&str>, tracker: bool) -> WorkItem {

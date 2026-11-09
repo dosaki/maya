@@ -41,6 +41,15 @@ pub struct WorkItem {
     pub tracker: bool,
 }
 
+/// One issue as read on its own for Start: the item, its assignees' ids
+/// and every label name as the issue spells it, status labels included.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Issue {
+    pub item: WorkItem,
+    pub assignee_ids: Vec<u64>,
+    pub labels: Vec<String>,
+}
+
 /// The status (as spelled in `status_labels`: the first listed one the labels
 /// carry, ignoring case) and the labels that are not a status label.
 pub fn status_of(labels: &[String], status_labels: &[String]) -> (Option<String>, Vec<String>) {

@@ -899,11 +899,17 @@ pub fn start_review(l: &Local, pr: &crate::reviews::ReviewPr) -> Result<String, 
     launch_in_clone(l, agent, &clones, &target.dir, steps, &crate::reviews::session_name(pr.forge, &pr.repo, pr.number), &prompt)
 }
 
-/// Opens a terminal working on `item` with Maya's agent, in a worktree of
-/// `repo`'s one clone (the one reviews use) on the item's own branch.
-/// Returns the folder. The session is named `issue <id>`.
-pub fn start_work_item(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::work_items::ItemRepo) -> Result<String, String> {
-    use crate::work_items::{start, started};
+/// What starting a work item needs, once every refusal known in advance has passed.
+struct WorkItemPlan {
+    agent: model::Harness,
+    clones: PathBuf,
+    template: String,
+    site: crate::forge::ForgeSite,
+    target: crate::work_items::start::WorkTarget,
+}
+
+fn work_item_plan(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::work_items::ItemRepo) -> Result<WorkItemPlan, String> {
+    use crate::work_items::start;
     let (agent, clones, live, template, agents, sites) = {
         let store = l.store.lock().unwrap();
         (store.config.brain(), store.config.clones_dir_path(), store.live_cwds(), store.config.work_items.prompt.clone(), store.agents_source(), crate::forge::sites(&store.config.git_connections()))
@@ -917,6 +923,23 @@ pub fn start_work_item(l: &Local, item: &crate::work_items::WorkItem, repo: &cra
     if is_busy_folder(&target.dir, &live) {
         return Err(format!("A session is already working on {}.", item.id));
     }
+    Ok(WorkItemPlan { agent, clones, template, site, target })
+}
+
+/// The refusals `start_work_item` would give before it changes anything:
+/// the service off, the agent missing, no number, no place for the
+/// worktree, or a session already in its folder. Start asks this before it
+/// writes to the tracker.
+pub fn work_item_preflight(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::work_items::ItemRepo) -> Result<(), String> {
+    work_item_plan(l, item, repo).map(|_| ())
+}
+
+/// Opens a terminal working on `item` with Maya's agent, in a worktree of
+/// `repo`'s one clone (the one reviews use) on the item's own branch.
+/// Returns the folder. The session is named `issue <id>`.
+pub fn start_work_item(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::work_items::ItemRepo) -> Result<String, String> {
+    use crate::work_items::{start, started};
+    let WorkItemPlan { agent, clones, template, site, target } = work_item_plan(l, item, repo)?;
     create_clones_dir(&clones)?;
     let clone_url = match site.clone {
         crate::config::CloneProtocol::Ssh => site.ssh_clone_url(&repo.path),
@@ -1721,6 +1744,17 @@ mod tests {
         let l = Local { store: &store, terminal: &fake };
         let (item, repo) = api_issue();
         assert_eq!(start_work_item(&l, &item, &repo).unwrap_err(), "A session is already working on acme/api#412.");
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_preflight_refuses_a_folder_a_session_already_works_in() {
+        let (dir, store, clones) = store_reviewing_in_clones();
+        write_session(dir.path(), "w1", 4343, &clones.join("api-issue-412").to_string_lossy());
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let (item, repo) = api_issue();
+        assert_eq!(work_item_preflight(&l, &item, &repo).unwrap_err(), "A session is already working on acme/api#412.");
         assert!(fake.calls.lock().unwrap().is_empty());
     }
 

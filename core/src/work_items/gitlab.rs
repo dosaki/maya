@@ -1,6 +1,6 @@
 //! GitLab's issues: one call per rule and project.
 
-use super::{merge, status_of, ItemRepo, WorkItem};
+use super::{merge, status_of, Issue, ItemRepo, WorkItem};
 use crate::config::{Assignee, ForgeItems, GitProvider, ItemRule};
 use crate::forge::{encode, get_json_as, send_json_as, Forge, Http, Me, Need};
 use serde_json::Value;
@@ -31,8 +31,7 @@ pub fn parse_issue(v: &Value, cfg: &ForgeItems) -> Option<WorkItem> {
     let id = v["references"]["full"].as_str()?.to_string();
     let path = id.rsplit_once('#')?.0.to_string();
     let names = |key: &str, field: &str| -> Vec<String> { v[key].as_array().map(|a| a.iter().filter_map(|x| x[field].as_str().map(str::to_string)).collect()).unwrap_or_default() };
-    let all_labels: Vec<String> = v["labels"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
-    let (status, labels) = status_of(&all_labels, &cfg.status_labels);
+    let (status, labels) = status_of(&label_names(v), &cfg.status_labels);
     Some(WorkItem {
         key: format!("gitlab:{id}"),
         source: "gitlab".into(),
@@ -63,18 +62,23 @@ pub fn list(http: &dyn Http, forge: &Forge, cfg: &ForgeItems) -> Result<Vec<Work
     Ok(merge(lists))
 }
 
-/// The open issue `number` of `repo` and its assignees' ids; None when it is closed.
-pub fn get(http: &dyn Http, forge: &Forge, repo: &str, number: u64, cfg: &ForgeItems) -> Result<Option<(WorkItem, Vec<u64>)>, String> {
+/// The open issue `number` of `repo`; None when it is closed.
+pub fn get(http: &dyn Http, forge: &Forge, repo: &str, number: u64, cfg: &ForgeItems) -> Result<Option<Issue>, String> {
     let v = get_json_as(http, forge, &issue_url(forge, repo, number), Need::Issues)?;
     if v["state"].as_str() == Some("closed") {
         return Ok(None);
     }
     let item = parse_issue(&v, cfg).ok_or("GitLab's reply was not an issue.")?;
-    Ok(Some((item, assignee_ids(&v))))
+    Ok(Some(Issue { item, assignee_ids: assignee_ids(&v), labels: label_names(&v) }))
 }
 
 fn issue_url(forge: &Forge, repo: &str, number: u64) -> String {
     format!("{}/projects/{}/issues/{number}", forge.site.api_base(), encode(repo))
+}
+
+/// Every label name, as the issue spells it.
+fn label_names(v: &Value) -> Vec<String> {
+    v["labels"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }
 
 fn assignee_ids(v: &Value) -> Vec<u64> {
@@ -241,8 +245,18 @@ mod tests {
         let closed = FakeHttp::new(vec![("/projects/grp%2Fr/issues/4", 200, &body("closed"))]);
         assert_eq!(get(&closed, &gitlab_forge(), "grp/r", 4, &WorkItemsConfig::default().gitlab).unwrap(), None);
         let open = FakeHttp::new(vec![("/projects/grp%2Fr/issues/4", 200, &body("opened"))]);
-        let (item, ids) = get(&open, &gitlab_forge(), "grp/r", 4, &WorkItemsConfig::default().gitlab).unwrap().unwrap();
-        assert_eq!((item.id.as_str(), ids), ("grp/r#4", vec![5]));
+        let issue = get(&open, &gitlab_forge(), "grp/r", 4, &WorkItemsConfig::default().gitlab).unwrap().unwrap();
+        assert_eq!((issue.item.id.as_str(), issue.assignee_ids), ("grp/r#4", vec![5]));
+    }
+
+    #[test]
+    fn get_returns_the_issues_own_labels_status_ones_included() {
+        let body = r#"{"iid":4,"state":"opened","title":"t","web_url":"u","references":{"full":"grp/r#4"},"labels":["bug","Todo","In Progress"],"assignees":[],"author":{"username":"a"}}"#;
+        let http = FakeHttp::new(vec![("/projects/grp%2Fr/issues/4", 200, body)]);
+        let cfg = ForgeItems { status_labels: vec!["todo".into(), "in progress".into()], ..WorkItemsConfig::default().gitlab };
+        let issue = get(&http, &gitlab_forge(), "grp/r", 4, &cfg).unwrap().unwrap();
+        assert_eq!(issue.labels, vec!["bug", "Todo", "In Progress"], "as the issue spells them");
+        assert_eq!((issue.item.status.as_deref(), issue.item.labels.clone()), (Some("todo"), vec!["bug".to_string()]));
     }
 
     #[test]

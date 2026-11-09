@@ -1,6 +1,6 @@
 //! GitHub's issues: one search per rule.
 
-use super::{labels_after_status, merge, status_of, ItemRepo, WorkItem};
+use super::{labels_after_status, merge, status_of, Issue, ItemRepo, WorkItem};
 use crate::config::{Assignee, ForgeItems, GitProvider, ItemRule};
 use crate::forge::{encode, get_json_as, send_json_as, Forge, Http, Me, Need};
 use serde_json::Value;
@@ -60,8 +60,8 @@ pub fn list(http: &dyn Http, forge: &Forge, cfg: &ForgeItems) -> Result<Vec<Work
     Ok(merge(lists))
 }
 
-/// The open issue `number` of `repo` and its assignees' ids; None when it is closed.
-pub fn get(http: &dyn Http, forge: &Forge, repo: &str, number: u64, cfg: &ForgeItems) -> Result<Option<(WorkItem, Vec<u64>)>, String> {
+/// The open issue `number` of `repo`; None when it is closed.
+pub fn get(http: &dyn Http, forge: &Forge, repo: &str, number: u64, cfg: &ForgeItems) -> Result<Option<Issue>, String> {
     let v = get_json_as(http, forge, &format!("{}/repos/{repo}/issues/{number}", forge.site.api_base()), Need::Issues)?;
     if v.get("pull_request").is_some() {
         return Err("That is a pull request, not an issue.".into());
@@ -70,8 +70,9 @@ pub fn get(http: &dyn Http, forge: &Forge, repo: &str, number: u64, cfg: &ForgeI
         return Ok(None);
     }
     let item = parse_issue(&v, cfg).ok_or("GitHub's reply was not an issue.")?;
-    let ids = v["assignees"].as_array().map(|a| a.iter().filter_map(|x| x["id"].as_u64()).collect()).unwrap_or_default();
-    Ok(Some((item, ids)))
+    let assignee_ids = v["assignees"].as_array().map(|a| a.iter().filter_map(|x| x["id"].as_u64()).collect()).unwrap_or_default();
+    let labels = v["labels"].as_array().map(|a| a.iter().filter_map(|x| x["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    Ok(Some(Issue { item, assignee_ids, labels }))
 }
 
 /// Assigns the issue to `me` beside `assignee_logins`, and sets the start
@@ -136,10 +137,11 @@ mod tests {
 
     #[test]
     fn get_returns_an_open_issue_with_its_assignee_ids_and_refuses_a_pull_request() {
-        let open = r#"{"number":9,"state":"open","title":"t","html_url":"u","repository_url":"https://api.github.com/repos/a/b","labels":[],"assignees":[{"login":"m","id":4},{"login":"n","id":6}],"user":{"login":"x"}}"#;
+        let open = r#"{"number":9,"state":"open","title":"t","html_url":"u","repository_url":"https://api.github.com/repos/a/b","labels":[{"name":"bug"},{"name":"Todo"}],"assignees":[{"login":"m","id":4},{"login":"n","id":6}],"user":{"login":"x"}}"#;
         let http = FakeHttp::new(vec![("/issues/9", 200, open), ("/issues/10", 200, r#"{"number":10,"state":"open","pull_request":{}}"#)]);
-        let (item, ids) = get(&http, &github_forge(), "a/b", 9, &WorkItemsConfig::default().github).unwrap().unwrap();
-        assert_eq!((item.id.as_str(), ids), ("a/b#9", vec![4, 6]));
+        let issue = get(&http, &github_forge(), "a/b", 9, &WorkItemsConfig::default().github).unwrap().unwrap();
+        assert_eq!((issue.item.id.as_str(), issue.assignee_ids), ("a/b#9", vec![4, 6]));
+        assert_eq!(issue.labels, vec!["bug", "Todo"]);
         assert_eq!(get(&http, &github_forge(), "a/b", 10, &WorkItemsConfig::default().github).unwrap_err(), "That is a pull request, not an issue.");
     }
 
