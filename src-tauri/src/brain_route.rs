@@ -182,16 +182,15 @@ pub(crate) fn plan_ask(action: &Value, targets: &[AskTarget]) -> Result<AskPlan,
     Ok(plan)
 }
 
-/// Whether the turn being delivered is restricted: the notes it takes
-/// carry another machine's answers and the user did not ask for it,
-/// whatever woke her (a fired watch too). A user's request never is; Maya's
-/// own follow-up to a restricted turn stays restricted (`before`: whether
-/// the turn delivered before it was).
+/// Whether the turn being delivered is restricted (`before`: whether the
+/// turn delivered before it was). An answer stays in her conversation, so
+/// only the user speaking again lifts it: a user's request never is; any
+/// other turn (a follow-up, a wake, a fired watch) is once the notes it
+/// takes carry answers, and stays so until then.
 pub(crate) fn turn_restricted(before: bool, request: Option<&Request>, notes_carry_answers: bool) -> bool {
     match request {
         Some(r) if r.from_user() => false,
-        Some(r) if r.internal => before || notes_carry_answers,
-        _ => notes_carry_answers,
+        _ => before || notes_carry_answers,
     }
 }
 
@@ -200,15 +199,24 @@ pub(crate) const ANSWERS_CANNOT_ACT: &str = "Answers from another machine cannot
 
 /// A reply to a restricted turn (`turn_restricted`) runs no board action,
 /// no watch or unwatch and no ask: an answer is data, never instructions.
-/// They are taken out of `s`, and the one note returned tells her so; it
-/// is not a refusal to fix, so it invites no retry.
-pub(crate) fn hold_for_answers(s: &mut Sorted, restricted: bool) -> Option<String> {
+/// They are taken out of `s`, its refusals out of `refused`, and the one
+/// note returned tells her so. Nothing is left to send back, so a
+/// restricted reply gets no follow-up and no retry.
+pub(crate) fn hold_for_answers(s: &mut Sorted, refused: &mut Vec<String>, restricted: bool) -> Option<String> {
     if !restricted {
         return None;
     }
     let mut kinds: Vec<String> = s.announce.drain(..).chain(s.run_now.drain(..)).chain(s.watch.drain(..)).chain(s.ask.drain(..)).map(|a| a["kind"].as_str().unwrap_or("action").to_string()).collect();
     kinds.extend(s.unwatch.drain(..).map(|_| "unwatch".to_string()));
-    (!kinds.is_empty()).then(|| format!("Not run: {}. {ANSWERS_CANNOT_ACT}", kinds.join(", ")))
+    let refusals: Vec<String> = refused.drain(..).chain(s.refused.drain(..)).collect();
+    let mut parts = vec![];
+    if !kinds.is_empty() {
+        parts.push(format!("Not run: {}.", kinds.join(", ")));
+    }
+    if !refusals.is_empty() {
+        parts.push(format!("Refused: {}.", refusals.join("; ")));
+    }
+    (!parts.is_empty()).then(|| format!("{} {ANSWERS_CANNOT_ACT}", parts.join(" ")))
 }
 
 /// Whether the answers to an ask made at stop count `asked_epoch` wake her:
@@ -1038,15 +1046,16 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_whose_notes_carry_answers_is_restricted_unless_the_user_asked() {
-        // Answers noted after a stop, then a watch fires: its turn takes them.
-        assert!(turn_restricted(false, None, true), "a wake (a watch or the answers) with answer notes");
-        assert!(!turn_restricted(true, None, false), "a wake without them");
-        assert!(!turn_restricted(true, Some(&Request::new("what did the laptop say?", Via::Chat)), true), "a user's request carrying them");
+    fn a_restriction_lasts_until_the_user_speaks() {
+        let user = Request::new("what did the laptop say?", Via::Chat);
         let follow = follow_up(Via::Maya, "<Maya> These actions were refused: x.");
-        assert!(turn_restricted(true, Some(&follow), false), "Maya's follow-up to a restricted turn");
-        assert!(!turn_restricted(false, Some(&follow), false));
+        assert!(!turn_restricted(false, None, false), "a wake without answers");
+        assert!(turn_restricted(false, None, true), "a wake (a watch or the answers) taking answer notes");
+        assert!(turn_restricted(true, None, false), "a later watch wake with no answers stays restricted");
+        assert!(turn_restricted(true, Some(&follow), false), "Maya's follow-up stays restricted");
+        assert!(turn_restricted(false, Some(&follow), true));
         assert!(turn_restricted(false, Some(&Request::new("primer", Via::Maya)), true), "her own request with answer notes");
+        assert!(!turn_restricted(true, Some(&user), true), "the user speaks: lifted, even with answer notes");
     }
 
     #[test]
@@ -1059,15 +1068,27 @@ mod tests {
             json!({"kind":"unwatch","id":3}),
         ];
         let mut s = sort_actions(&actions, check);
-        let note = hold_for_answers(&mut s, true).expect("a note");
+        let mut refused = vec![];
+        let note = hold_for_answers(&mut s, &mut refused, true).expect("a note");
         assert_eq!(s, Sorted::default(), "nothing runs, and nothing is refused");
         assert_eq!(note, format!("Not run: reply, focus, watch, ask, unwatch. {ANSWERS_CANNOT_ACT}"));
         assert!(!note.contains("Fix them"));
-        assert_eq!(refusal_feedback(&s.refused, 1), None, "no follow-up; the streak resets as for any reply without refusals");
+        assert_eq!(refusal_feedback(&refused, 1), None, "no follow-up");
 
         let mut s = sort_actions(&actions, check);
-        assert_eq!(hold_for_answers(&mut s, false), None);
+        assert_eq!(hold_for_answers(&mut s, &mut refused, false), None);
         assert_eq!((s.announce.len(), s.run_now.len(), s.ask.len(), s.watch.len(), s.unwatch.len()), (1, 1, 1, 1, 1));
-        assert_eq!(hold_for_answers(&mut Sorted::default(), true), None, "nothing tried, nothing to say");
+        assert_eq!(hold_for_answers(&mut Sorted::default(), &mut vec![], true), None, "nothing tried, nothing to say");
+    }
+
+    #[test]
+    fn a_restricted_reply_folds_its_refusals_into_the_one_note() {
+        let mut s = sort_actions(&[json!({"kind":"focus","session":"api-fix"}), json!({"kind":"reply","session":"ghost","text":"hi"})], check);
+        let mut refused = vec!["a block was not JSON".to_string()];
+        let note = hold_for_answers(&mut s, &mut refused, true).expect("a note");
+        assert_eq!(note, format!("Not run: focus. Refused: a block was not JSON; I couldn't find a session called ghost. {ANSWERS_CANNOT_ACT}"));
+        assert!(refused.is_empty() && s.refused.is_empty());
+        assert_eq!(refusal_feedback(&refused, 0), None, "neither Ask nor GiveUp");
+        assert_eq!(refusal_feedback(&refused, MAX_REFUSAL_ROUNDS), None);
     }
 }
