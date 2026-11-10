@@ -90,6 +90,7 @@ impl Executor for CliExecutor {
             }
             // The client opens a handover itself (`client::handle`); it never reaches an executor.
             CommandKind::Promote { .. } => Err(maya_core::net::client::CANNOT_LEAD.into()),
+            CommandKind::AskBrain { .. } => Err("This Maya has no brain to ask.".into()),
         }
     }
 

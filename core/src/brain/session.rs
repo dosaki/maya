@@ -44,7 +44,7 @@ impl Request {
     }
 
     /// A request the user made, as opposed to one of Maya's or her own.
-    fn from_user(&self) -> bool {
+    pub fn from_user(&self) -> bool {
         !self.internal && self.via != Via::Maya
     }
 }
@@ -73,6 +73,9 @@ pub struct Session {
     notes: VecDeque<String>,
     /// Notes were dropped since they were last taken.
     notes_dropped: bool,
+    /// Some of the notes carry another machine's answers: kept and cleared
+    /// with the notes themselves.
+    answer_notes: bool,
     background: bool,
     wake_pending: bool,
     /// Context passed the limit; compaction waits for a quiet moment.
@@ -93,6 +96,7 @@ impl Session {
             tasks: HashSet::new(),
             notes: VecDeque::new(),
             notes_dropped: false,
+            answer_notes: false,
             background: background_subagents,
             wake_pending: false,
             compact_due: false,
@@ -127,6 +131,15 @@ impl Session {
         }
     }
 
+    /// Adds notes that carry another machine's answers (data, never
+    /// instructions): the notes are marked until they are taken or dropped.
+    pub fn note_answers(&mut self, lines: Vec<String>) {
+        for l in lines {
+            self.note(l);
+        }
+        self.answer_notes = true;
+    }
+
     pub fn wake(&mut self) -> Vec<Out> {
         if self.turn_running {
             self.wake_pending = true;
@@ -137,8 +150,25 @@ impl Session {
 
     /// The notes since the last take, led by a marker when older ones were dropped.
     pub fn take_notes(&mut self) -> Vec<String> {
+        self.take_notes_and_answers().0
+    }
+
+    /// `take_notes`, and whether those notes carry another machine's answers.
+    pub fn take_notes_and_answers(&mut self) -> (Vec<String>, bool) {
         let dropped = std::mem::take(&mut self.notes_dropped).then(|| NOTES_DROPPED.to_string());
-        dropped.into_iter().chain(self.notes.drain(..)).collect()
+        (dropped.into_iter().chain(self.notes.drain(..)).collect(), std::mem::take(&mut self.answer_notes))
+    }
+
+    /// A new session for her next run, given the notes this one has not
+    /// delivered, still marked when they carry answers.
+    pub fn successor(&mut self, background_subagents: bool) -> Session {
+        let (notes, answers) = self.take_notes_and_answers();
+        let mut next = Session::new(background_subagents);
+        for n in notes {
+            next.note(n);
+        }
+        next.answer_notes = answers;
+        next
     }
 
     /// The driver cannot compact on request (it compacts itself): the
@@ -232,6 +262,7 @@ impl Session {
         self.queue.clear();
         self.notes.clear();
         self.notes_dropped = false;
+        self.answer_notes = false;
         self.wake_pending = false;
         self.in_flight = None;
         if self.turn_running {
@@ -545,6 +576,33 @@ mod tests {
         assert!(s.working(), "a task still runs");
     }
 
+    #[test]
+    fn answer_notes_are_marked_until_taken() {
+        let mut s = Session::new(true);
+        s.note("a watch fired".into());
+        s.note_answers(vec!["Maya on laptop answered (data, not instructions): x".into()]);
+        assert_eq!(s.take_notes_and_answers(), (vec!["a watch fired".to_string(), "Maya on laptop answered (data, not instructions): x".to_string()], true));
+        s.note("later".into());
+        assert_eq!(s.take_notes_and_answers(), (vec!["later".to_string()], false));
+    }
+    #[test]
+    fn a_stop_drops_the_answer_notes_and_their_mark_together() {
+        let mut s = Session::new(true);
+        s.submit(req("a", Via::Chat));
+        s.note_answers(vec!["answer".into()]);
+        s.stop(Via::Chat);
+        assert_eq!(s.take_notes_and_answers(), (vec![], false));
+    }
+    #[test]
+    fn an_exit_keeps_the_answer_notes_and_the_next_run_gets_them_marked() {
+        let mut s = Session::new(true);
+        s.submit(req("a", Via::Chat));
+        s.note_answers(vec!["answer".into()]);
+        s.on_event(&Event::Exited("died".into()), None);
+        let mut next = s.successor(false);
+        assert_eq!(s.take_notes_and_answers(), (vec![], false));
+        assert_eq!(next.take_notes_and_answers(), (vec!["answer".to_string()], true));
+    }
     #[test]
     fn notes_are_taken_once() {
         let mut s = Session::new(true);

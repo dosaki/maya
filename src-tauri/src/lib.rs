@@ -12,6 +12,7 @@ pub mod native;
 mod quit_guard;
 pub mod net_app;
 mod brain_app;
+mod brain_ask;
 mod brain_route;
 mod native_app;
 mod remembered_app;
@@ -859,7 +860,7 @@ fn list_sessions(state: TauriState<AppState>) -> Vec<Card> {
 }
 
 /// What the Network section of Settings shows.
-fn network_status_of(state: &AppState) -> NetworkStatus {
+pub(crate) fn network_status_of(state: &AppState) -> NetworkStatus {
     let (server, stored) = {
         let n = state.network.lock().unwrap();
         (n.server.clone(), n.status.clone())

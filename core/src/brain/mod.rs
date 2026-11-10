@@ -2,6 +2,7 @@
 
 pub mod acp;
 pub mod agy;
+pub mod ask;
 pub mod chat;
 pub mod claude;
 pub mod codex_drv;
