@@ -1,3 +1,9 @@
+# 0.52.0
+
+## New
+
+- Maya can ask your other machines. When you ask about something she has no record of, or tell her to ("ask the laptop what I noted about the deploy"), she asks the Maya on your other connected computers, and each one answers from its own Chat and notes. She says who she is asking first, and tells you when a machine is offline, too old to ask, or does not know. An answer from another machine never makes Maya act by herself: she tells you, and waits until you speak to her again.
+
 # 0.51.0
 
 ## New
