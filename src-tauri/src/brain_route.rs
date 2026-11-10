@@ -134,7 +134,7 @@ pub(crate) fn ask_targets(status: &NetworkStatus) -> Vec<AskTarget> {
     if status.role != NetworkRole::Main {
         return vec![];
     }
-    status.assistants.iter().filter(|a| a.platform != "android").map(|a| AskTarget { name: a.name.clone(), connected: a.connected, can_ask: a.can_ask }).collect()
+    status.assistants.iter().filter(|a| !maya_core::net::group::is_phone_platform(&a.platform)).map(|a| AskTarget { name: a.name.clone(), connected: a.connected, can_ask: a.can_ask }).collect()
 }
 
 /// One `ask` of hers made ready: the question, the machines to send it to,
@@ -164,7 +164,7 @@ pub(crate) fn plan_ask(action: &Value, targets: &[AskTarget]) -> Result<AskPlan,
             return Err(format!("{} is offline", t.name));
         }
         if !t.can_ask {
-            return Err(format!("{} runs an older Maya that cannot be asked", t.name));
+            return Err(format!("{} cannot be asked (an older Maya, or one with no brain)", t.name));
         }
         return Ok(AskPlan { question, ask: vec![t.name.clone()], notes: vec![] });
     }
@@ -1006,7 +1006,7 @@ mod tests {
     fn asking_one_machine_is_refused_when_it_cannot_answer() {
         let targets = [t("laptop", false, true), t("studio", true, false)];
         assert_eq!(plan_ask(&json!({"kind":"ask","machine":"laptop","question":"q"}), &targets).unwrap_err(), "laptop is offline");
-        assert_eq!(plan_ask(&json!({"kind":"ask","machine":"studio","question":"q"}), &targets).unwrap_err(), "studio runs an older Maya that cannot be asked");
+        assert_eq!(plan_ask(&json!({"kind":"ask","machine":"studio","question":"q"}), &targets).unwrap_err(), "studio cannot be asked (an older Maya, or one with no brain)");
         assert_eq!(plan_ask(&json!({"kind":"ask","machine":"nas","question":"q"}), &targets).unwrap_err(), "There is no machine called nas");
         assert_eq!(plan_ask(&json!({"kind":"ask","machine":"studio","question":"  "}), &targets).unwrap_err(), "ask needs a question");
     }
@@ -1016,7 +1016,7 @@ mod tests {
         let targets = [t("laptop", true, true), t("studio", false, true), t("old", true, false)];
         let p = plan_ask(&json!({"kind":"ask","question":"q"}), &targets).unwrap();
         assert_eq!(p.ask, vec!["laptop".to_string()]);
-        assert_eq!(p.notes, vec!["studio is offline, so it was not asked.".to_string(), "old runs an older Maya that cannot be asked.".to_string()]);
+        assert_eq!(p.notes, vec!["studio is offline, so it was not asked.".to_string(), "old cannot be asked (an older Maya, or one with no brain).".to_string()]);
         assert_eq!(plan_ask(&json!({"kind":"ask","question":"q"}), &[t("studio", false, true)]).unwrap_err(), "No other machine can be asked now");
     }
 

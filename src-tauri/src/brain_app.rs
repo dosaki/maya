@@ -81,10 +81,11 @@ pub(crate) struct BrainState {
     swallow_reply: bool,
     /// A watch fired while her session was down: wake her once it is back.
     wake_when_ready: bool,
-    /// The turn delivered last took notes carrying another machine's
-    /// answers and was not the user's request (`turn_restricted`); its
-    /// reply starts nothing. `reply_restricted` is that for the turn being
-    /// replied to.
+    /// Set once a turn takes notes carrying another machine's answers
+    /// without a user request (`turn_restricted`), and kept until a direct
+    /// user request: every reply in between starts nothing.
+    /// `reply_restricted` is that for the turn being replied to. A restart
+    /// of the app clears it (accepted: it lives in memory only).
     restricted: bool,
     reply_restricted: bool,
     phones: PhoneWaiters,
@@ -1031,8 +1032,9 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
             interpreter::validate(a, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs)
         }
     });
-    // Another machine's answers are data: a turn they reach without the
-    // user's request starts nothing.
+    // Another machine's answers are data: once a turn takes notes carrying
+    // them without a user request, her replies start nothing until the
+    // user next speaks to her.
     // Her refusals go into its note too: a restricted reply gets no
     // follow-up, so no later turn can take it unrestricted.
     let mut refused = errors;

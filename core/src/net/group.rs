@@ -129,7 +129,12 @@ pub fn may_follow(_n: &NetworkConfig, seen: Option<&GroupCopy>, key: &str) -> bo
 
 /// Phones follow a main; they never are one.
 pub fn is_phone(p: &PairedAssistant) -> bool {
-    p.platform == "android"
+    is_phone_platform(&p.platform)
+}
+
+/// Whether a device of this platform is a phone.
+pub fn is_phone_platform(platform: &str) -> bool {
+    platform == "android"
 }
 
 /// Makes this Maya an assistant of the live member `key` at `host:port`.

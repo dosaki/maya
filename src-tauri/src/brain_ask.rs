@@ -2,7 +2,7 @@
 
 use crate::brain_app::brain_dir;
 use crate::AppState;
-use maya_core::brain::ask::{answer_with, cut, gather, memory_dir, to_data, ANSWER_TIMEOUT, NOTES_CHARS, QUESTION_CHARS};
+use maya_core::brain::ask::{answer_with, cut, gather, memory_dir, notes_cap, to_data, ANSWER_TIMEOUT, QUESTION_CHARS};
 use maya_core::config::NetworkRole;
 use maya_core::{launch, log};
 use serde_json::Value;
@@ -24,7 +24,7 @@ pub(crate) fn answer(app: &AppHandle, question: &str) -> Result<Option<Value>, S
         return Err("Only an assistant answers a brain question.".into());
     }
     let dir = brain_dir(&claude_dir);
-    let notes = gather(&dir, &memory_dir(&claude_dir, &dir), NOTES_CHARS);
+    let notes = gather(&dir, &memory_dir(&claude_dir, &dir), notes_cap());
     let binary = launch::find_binary(brain);
     if binary.is_err() && !notes.trim().is_empty() {
         log::line("brain", format!("asked \"{}\": failed, its agent is not installed", cut(question, 80)));
