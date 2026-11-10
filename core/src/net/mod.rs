@@ -89,6 +89,9 @@ pub struct AssistantStatus {
     pub mirror: bool,
     /// Connected and asked to mirror (`CAP_MIRROR`): the main shows its switch.
     pub wants_mirror: bool,
+    /// Connected and answers `ask_brain` (`CAP_ASK_BRAIN`).
+    #[serde(default)]
+    pub can_ask: bool,
 }
 
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
@@ -202,7 +205,7 @@ pub fn paired_offline(paired: &[PairedAssistant]) -> Vec<AssistantStatus> {
     paired
         .iter()
         .zip(merge::display_names(&entries))
-        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: false, last_seen: p.last_seen, note: None, can_lead: false, can_follow: false, mirror: p.mirror, wants_mirror: false })
+        .map(|(p, name)| AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected: false, last_seen: p.last_seen, note: None, can_lead: false, can_follow: false, mirror: p.mirror, wants_mirror: false, can_ask: false })
         .collect()
 }
 

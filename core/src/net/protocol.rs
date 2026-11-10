@@ -39,6 +39,8 @@ pub const CAP_TERMINAL: &str = "terminal";
 /// From an assistant in `hello`: it honours a terminal pick in Start and Resume.
 /// From a main in `welcome.caps`: it reads `Up::Terminals`.
 pub const CAP_PICK_TERMINAL: &str = "pick-terminal";
+/// From an assistant in `hello`: it answers `ask_brain`.
+pub const CAP_ASK_BRAIN: &str = "ask-brain";
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -247,6 +249,8 @@ pub enum CommandKind {
         #[serde(default)]
         version: u64,
     },
+    /// Answer this question from this machine's brain notes.
+    AskBrain { question: String },
 }
 
 pub fn encode<T: Serialize>(m: &T) -> String {
@@ -682,5 +686,14 @@ mod tests {
         let m = Down::Mirror { allowed: true, cards: vec![], machines: vec![], remembered: rows, wake_word: None };
         assert_eq!(decode_down(&encode(&m)).unwrap(), m);
         assert!(!encode(&Down::Mirror { allowed: false, cards: vec![], machines: vec![], remembered: vec![], wake_word: None }).contains("remembered"));
+    }
+
+    #[test]
+    fn ask_brain_round_trips() {
+        let d = Down::Command { id: 9, kind: CommandKind::AskBrain { question: "Where is the deploy key?".into() } };
+        let s = encode(&d);
+        assert!(s.contains(r#""kind":"ask_brain""#) && s.contains(r#""question":"Where is the deploy key?""#), "{s}");
+        assert_eq!(decode_down(&s).unwrap(), d);
+        assert_eq!(CAP_ASK_BRAIN, "ask-brain");
     }
 }

@@ -132,7 +132,7 @@ pub fn target_of(kind: &super::protocol::CommandKind) -> Target {
     use super::protocol::CommandKind::*;
     match kind {
         Reply { session, .. } | Answer { session, .. } | Stop { session } | Pick { session, .. } | Compact { session } | Close { session } | Rename { session, .. } | SetOption { session, .. } | CycleMode { session } | Slash { session, .. } | History { session } => Target::Session(session.clone()),
-        Start { .. } | Resume { .. } | ListResumable { .. } | Promote { .. } | Forget { .. } => Target::Machine,
+        Start { .. } | Resume { .. } | ListResumable { .. } | Promote { .. } | Forget { .. } | AskBrain { .. } => Target::Machine,
     }
 }
 
@@ -296,8 +296,8 @@ mod tests {
     fn machines_of_keeps_the_status_display_names() {
         let status = NetworkStatus {
             assistants: vec![
-                AssistantStatus { id: "a".into(), name: "laptop (10.0.0.2)".into(), hostname: "laptop".into(), platform: "macos".into(), address: "10.0.0.2".into(), connected: true, last_seen: None, note: None, can_lead: false, can_follow: false, mirror: false, wants_mirror: false },
-                AssistantStatus { id: "b".into(), name: "laptop (10.0.0.3)".into(), hostname: "laptop".into(), platform: "linux".into(), address: "10.0.0.3".into(), connected: false, last_seen: Some(1), note: None, can_lead: false, can_follow: false, mirror: false, wants_mirror: false },
+                AssistantStatus { id: "a".into(), name: "laptop (10.0.0.2)".into(), hostname: "laptop".into(), platform: "macos".into(), address: "10.0.0.2".into(), connected: true, last_seen: None, note: None, can_lead: false, can_follow: false, mirror: false, wants_mirror: false, can_ask: false },
+                AssistantStatus { id: "b".into(), name: "laptop (10.0.0.3)".into(), hostname: "laptop".into(), platform: "linux".into(), address: "10.0.0.3".into(), connected: false, last_seen: Some(1), note: None, can_lead: false, can_follow: false, mirror: false, wants_mirror: false, can_ask: false },
             ],
             ..Default::default()
         };

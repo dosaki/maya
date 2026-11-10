@@ -35,7 +35,7 @@ use super::group::{self, GroupCopy};
 use super::merge::{display_names, RemoteBoard};
 use super::identity::{encode_key, Keypair};
 use super::live::{self, FrameSink, LiveTerms, TermEvent, TermFrame, TermView};
-use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_CHAT, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, CAP_PICK_TERMINAL, CAP_TERMINAL, CAP_WORKTREE, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
+use super::protocol::{decode_up, encode, new_id, Attempts, CommandKind, Down, PairingWindow, Request, Up, CAP_ASK_BRAIN, CAP_CHAT, CAP_FOLLOW, CAP_LEAD, CAP_MIRROR, CAP_PICK_TERMINAL, CAP_TERMINAL, CAP_WORKTREE, MAX_FRAME, PRE_AUTH_FRAME, PROTOCOL};
 use super::secure::{self, Channel, ChannelError, Fail, Got};
 use super::routing::MachineInfo;
 use super::{AssistantStatus, NetworkStatus, PairingCode};
@@ -498,7 +498,7 @@ impl Server {
                 let peer = self.peers.get(&p.id);
                 let connected = self.conns.contains_key(&p.id);
                 let can = |cap: &str| connected && peer.is_some_and(|x| x.caps.iter().any(|c| c == cap));
-                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected, last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note), can_lead: can(CAP_LEAD), can_follow: can(CAP_FOLLOW), mirror: p.mirror, wants_mirror: can(CAP_MIRROR) }
+                AssistantStatus { id: p.id.clone(), name, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), connected, last_seen: peer.map(|x| x.last_seen).or(p.last_seen), note: peer.and_then(Peer::note), can_lead: can(CAP_LEAD), can_follow: can(CAP_FOLLOW), mirror: p.mirror, wants_mirror: can(CAP_MIRROR), can_ask: can(CAP_ASK_BRAIN) }
             })
             .collect();
         NetworkStatus { role: NetworkRole::Main, code, assistants, addresses: super::local_addresses(), code_used_up: self.code_used_up, ..Default::default() }
@@ -1613,7 +1613,7 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
             let Some(tx) = tx else { return Err(NOT_CURRENT.into()) };
             let refusal = if !allowed {
                 Some(format!("{} has not allowed this Maya to control its sessions.", ctx.main_name))
-            } else if matches!(request, Request::Command(CommandKind::Promote { .. })) {
+            } else if matches!(request, Request::Command(CommandKind::Promote { .. } | CommandKind::AskBrain { .. })) {
                 Some("That cannot be requested.".to_string())
             } else {
                 None
@@ -1925,6 +1925,7 @@ pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::ListResumable { .. } => "list_resumable",
         CommandKind::History { .. } => "history",
         CommandKind::Promote { .. } => "promote",
+        CommandKind::AskBrain { .. } => "ask_brain",
     }
 }
 
@@ -2622,6 +2623,27 @@ mod tests {
         assert_eq!(seen, [None, None, Some("laptop".to_string())], "the main's own name means the main");
         send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::Promote { list: vec![], summary: None, removed: vec![], version: 0 }) });
         assert_eq!(recv(&mut phone), Down::Response { id: 4, ok: false, error: Some("That cannot be requested.".into()), data: None });
+        handle.stop();
+    }
+
+    #[test]
+    fn a_phone_cannot_request_ask_brain() {
+        let (handle, port) = test_server();
+        let (mut phone, _, _, _) = pair_client_caps(&handle, port, "Pixel", &["mirror"]);
+        send(&mut phone, &Up::Request { id: 4, machine: None, request: Request::Command(CommandKind::AskBrain { question: "q".into() }) });
+        assert_eq!(recv(&mut phone), Down::Response { id: 4, ok: false, error: Some("That cannot be requested.".into()), data: None });
+        handle.stop();
+    }
+
+    #[test]
+    fn status_says_which_assistants_can_be_asked() {
+        let (handle, port) = test_server();
+        let (_a, ida, _) = pair_with_caps(&handle, port, "laptop", &[CAP_ASK_BRAIN]);
+        let (_b, idb, _) = pair_with_caps(&handle, port, "nas", &[]);
+        wait_until(|| handle.status().assistants.iter().filter(|a| a.connected).count() == 2);
+        let st = handle.status().assistants;
+        assert!(st.iter().find(|a| a.id == ida).unwrap().can_ask);
+        assert!(!st.iter().find(|a| a.id == idb).unwrap().can_ask);
         handle.stop();
     }
 
