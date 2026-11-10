@@ -19,17 +19,19 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, may_act, one_line, phone_dropped_note, refusal_feedback, sort_actions, speaks, spoken, stop_line, Feedback, Outage, PhoneReply, PhoneWaiters, SummarySource, SummaryWait, Waiter, Wake};
+use crate::brain_route::{self, announcement, background_subagents, batch_notes, context_percent, failed_resume, follow_up, may_act, one_line, phone_dropped_note, plan_ask, refusal_feedback, sort_actions, speaks, spoken, stop_line, wakes_after_ask, AskPlan, Feedback, Outage, PhoneReply, PhoneWaiters, SummarySource, SummaryWait, Waiter, Wake};
 pub(crate) use crate::brain_route::{brain_card, handoff};
 use crate::listener::{self, Interpreted};
 use crate::store::now_ms;
 use crate::{interpreter, launch, log, AppState};
+use maya_core::brain::ask::{self, Outcome};
 use maya_core::brain::chat::Dot;
 use maya_core::brain::driver::{self, Driver, Event, Launch};
 use maya_core::brain::record::{self, Record, Start};
 use maya_core::brain::session::{Out, Request, Session};
 use maya_core::brain::watch::Watches;
 use maya_core::brain::{handover, notes, prompt};
+use maya_core::net::protocol::CommandKind;
 use maya_core::net::server::HandoverTo;
 use maya_core::model::{Card, Harness};
 use maya_core::window::Via;
@@ -946,7 +948,8 @@ fn with_driver(app: &AppHandle, what: &str, f: impl FnOnce(&mut dyn Driver) -> R
 }
 
 /// Sends her the next turn: the request (none when a watch woke her), the
-/// board as it is now, the pull requests and the notes since her last turn.
+/// board as it is now, the pull requests, the notes since her last turn and
+/// the machines she can ask.
 /// The primer of a fresh session goes as it is.
 fn deliver(app: &AppHandle, r: Option<Request>) {
     let (primer, notes) = {
@@ -974,8 +977,9 @@ fn deliver(app: &AppHandle, r: Option<Request>) {
             let state = app.state::<AppState>();
             let cards = crate::merged_cards(&state);
             let prs = state.reviews.lock().unwrap().prs.clone();
+            let askable: Vec<String> = brain_route::ask_targets(&crate::network_status_of(&state)).into_iter().filter(|t| t.connected && t.can_ask).map(|t| t.name).collect();
             // Maya's follow-ups are labelled as hers, not as the user's words.
-            prompt::turn(r.as_ref().map(|r| (r.text.as_str(), if r.internal { Via::Maya } else { r.via })), &interpreter::board_summary(&cards, now_ms()), &interpreter::pr_summary(&prs), &notes)
+            prompt::turn(r.as_ref().map(|r| (r.text.as_str(), if r.internal { Via::Maya } else { r.via })), &interpreter::board_summary(&cards, now_ms()), &interpreter::pr_summary(&prs), &notes, &askable)
         }
     };
     let _ = with_driver(app, "send her a message", |d| d.send(&text));
@@ -1014,7 +1018,9 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
     });
     let mut refused = errors;
     refused.extend(std::mem::take(&mut sorted.refused));
-    let (feedback, waiter) = {
+    // Read before the brain lock: never two locks at once.
+    let targets = brain_route::ask_targets(&crate::network_status_of(&app.state::<AppState>()));
+    let (feedback, waiter, asks, ask_epoch) = {
         let state = app.state::<AppState>();
         let mut b = state.brain.lock().unwrap();
         // The user said stop since this turn began: none of it runs.
@@ -1024,6 +1030,7 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
             sorted.run_now.clear();
             sorted.watch.clear();
             sorted.unwatch.clear();
+            sorted.ask.clear();
             refused.clear();
         }
         for w in &sorted.watch {
@@ -1039,11 +1046,19 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
                 refused.push(format!("There is no watch {id}"));
             }
         }
+        let mut asks = vec![];
+        for a in &sorted.ask {
+            match plan_ask(a, &targets) {
+                Ok(plan) => asks.push(plan),
+                Err(e) => refused.push(e),
+            }
+        }
         let feedback = refusal_feedback(&refused, b.refusal_streak);
         b.refusal_streak = if refused.is_empty() { 0 } else { b.refusal_streak + 1 };
         let waiter = (via == Via::Phone).then(|| b.phones.pop());
-        (feedback, waiter)
+        (feedback, waiter, asks, b.stop_epoch)
     };
+    run_asks(app, asks, ask_epoch);
     match waiter {
         // The phone announces, waits out the window and runs them itself.
         Some(waiter) => {
@@ -1115,6 +1130,58 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
         }
         Some(Feedback::GiveUp(m)) => post(app, &m, Via::Maya),
         None => {}
+    }
+}
+
+/// Sends each of her asks to its machines, all at once and off this
+/// thread. Once every machine of an ask has answered (or failed), what came
+/// of it becomes her notes and wakes her, as a fired watch does; after a
+/// stop since the ask, the notes wait for her next turn.
+fn run_asks(app: &AppHandle, plans: Vec<AskPlan>, epoch: u64) {
+    for plan in plans {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let asking: Vec<_> = plan
+                .ask
+                .iter()
+                .map(|m| {
+                    log::line("brain", format!("asking {m}"));
+                    let (app, machine, question) = (app.clone(), m.clone(), plan.question.clone());
+                    (m.clone(), std::thread::spawn(move || ask::outcome(crate::net_app::send_command(&app, &machine, CommandKind::AskBrain { question }, ask::ASK_WAIT))))
+                })
+                .collect();
+            let mut notes = plan.notes;
+            for (m, h) in asking {
+                let o = h.join().unwrap_or_else(|_| Outcome::Failed("the ask stopped unexpectedly".into()));
+                let what = match &o {
+                    Outcome::Answered(_) => format!("{m} answered"),
+                    o => ask::note(&m, o),
+                };
+                log::line("brain", format!("ask: {what}"));
+                notes.push(ask::note(&m, &o));
+            }
+            let outs = {
+                let state = app.state::<AppState>();
+                let mut b = state.brain.lock().unwrap();
+                if !b.active {
+                    return;
+                }
+                for n in notes {
+                    b.session.note(n);
+                }
+                if !wakes_after_ask(epoch, b.stop_epoch) {
+                    log::line("brain", "a stop came since the ask; its answers wait for her next turn");
+                    return;
+                }
+                if b.ready {
+                    b.session.wake()
+                } else {
+                    b.wake_when_ready = true;
+                    vec![]
+                }
+            };
+            act(&app, outs);
+        });
     }
 }
 

@@ -5,9 +5,11 @@
 use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
 
+use maya_core::brain::ask::{self, Outcome};
 use maya_core::brain::session::{Request, Session};
 use maya_core::config::{Config, NetworkRole};
 use maya_core::interpreter;
+use maya_core::net::NetworkStatus;
 use maya_core::model::{Card, Harness, State};
 use maya_core::window::Via;
 use serde_json::Value;
@@ -89,11 +91,13 @@ pub(crate) struct Sorted {
     pub watch: Vec<Value>,
     /// Watch ids to remove.
     pub unwatch: Vec<u64>,
+    /// `ask` actions, planned by `plan_ask`.
+    pub ask: Vec<Value>,
     /// Why each refused action was refused, in order.
     pub refused: Vec<String>,
 }
 
-/// Validates each of her actions with `validate` (watch and unwatch skip it)
+/// Validates each of her actions with `validate` (watch, unwatch and ask skip it)
 /// and sorts them by how they run. A report needs nothing.
 pub(crate) fn sort_actions(actions: &[Value], validate: impl Fn(&Value) -> Result<Value, String>) -> Sorted {
     let mut s = Sorted::default();
@@ -101,6 +105,7 @@ pub(crate) fn sort_actions(actions: &[Value], validate: impl Fn(&Value) -> Resul
         match a["kind"].as_str().unwrap_or("") {
             "report" => {}
             "watch" => s.watch.push(a.clone()),
+            "ask" => s.ask.push(a.clone()),
             "unwatch" => match a["id"].as_u64() {
                 Some(id) => s.unwatch.push(id),
                 None => s.refused.push("unwatch needs the watch's number".into()),
@@ -113,6 +118,74 @@ pub(crate) fn sort_actions(actions: &[Value], validate: impl Fn(&Value) -> Resul
         }
     }
     s
+}
+
+/// A machine her brain could ask: a non-phone assistant of this main.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AskTarget {
+    pub name: String,
+    pub connected: bool,
+    pub can_ask: bool,
+}
+
+/// The machines her brain could ask: none unless this Maya is the main;
+/// phones have no brain to ask.
+pub(crate) fn ask_targets(status: &NetworkStatus) -> Vec<AskTarget> {
+    if status.role != NetworkRole::Main {
+        return vec![];
+    }
+    status.assistants.iter().filter(|a| a.platform != "android").map(|a| AskTarget { name: a.name.clone(), connected: a.connected, can_ask: a.can_ask }).collect()
+}
+
+/// One `ask` of hers made ready: the question, the machines to send it to,
+/// and the notes about those that cannot be asked.
+#[derive(Debug, PartialEq)]
+pub(crate) struct AskPlan {
+    pub question: String,
+    pub ask: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+/// Plans her `ask` action against `targets`: one named machine (any case),
+/// or, with no machine, every one that can be asked. Err: why it is refused.
+pub(crate) fn plan_ask(action: &Value, targets: &[AskTarget]) -> Result<AskPlan, String> {
+    let question = action["question"].as_str().unwrap_or("");
+    if question.trim().is_empty() {
+        return Err("ask needs a question.".into());
+    }
+    let question = ask::cut(question, ask::QUESTION_CHARS);
+    let machine = action["machine"].as_str().map(str::trim).unwrap_or("");
+    if !machine.is_empty() {
+        let wanted = machine.to_lowercase();
+        let Some(t) = targets.iter().find(|t| t.name.trim().to_lowercase() == wanted) else {
+            return Err(format!("There is no machine called {machine}."));
+        };
+        if !t.connected {
+            return Err(format!("{} is offline.", t.name));
+        }
+        if !t.can_ask {
+            return Err(ask::note(&t.name, &Outcome::Older));
+        }
+        return Ok(AskPlan { question, ask: vec![t.name.clone()], notes: vec![] });
+    }
+    let mut plan = AskPlan { question, ask: vec![], notes: vec![] };
+    for t in targets {
+        match (t.connected, t.can_ask) {
+            (true, true) => plan.ask.push(t.name.clone()),
+            (false, _) => plan.notes.push(ask::note(&t.name, &Outcome::Offline)),
+            (true, false) => plan.notes.push(ask::note(&t.name, &Outcome::Older)),
+        }
+    }
+    if plan.ask.is_empty() {
+        return Err("No other machine can be asked now.".into());
+    }
+    Ok(plan)
+}
+
+/// Whether the answers to an ask made at stop count `asked_epoch` wake her:
+/// not after a stop since (the same rule as `may_act`); they are still noted.
+pub(crate) fn wakes_after_ask(asked_epoch: u64, stop_epoch: u64) -> bool {
+    may_act(asked_epoch, stop_epoch)
 }
 
 /// What Maya says to announce validated actions, built from the actions alone.
@@ -873,5 +946,65 @@ mod tests {
         let i = brain_card("u", Harness::ClaudeCode, "/x", false, None, &"x".repeat(300), 7);
         assert_eq!(i.snippet.chars().count(), 200);
         assert_eq!(i.state, State::Idle);
+    }
+
+    fn t(name: &str, connected: bool, can_ask: bool) -> AskTarget {
+        AskTarget { name: name.into(), connected, can_ask }
+    }
+
+    #[test]
+    fn ask_is_sorted_apart_and_not_validated_as_a_board_action() {
+        let s = sort_actions(&[json!({"kind":"ask","machine":"laptop","question":"q"})], |_| panic!("not validated here"));
+        assert_eq!(s.ask.len(), 1);
+    }
+
+    #[test]
+    fn asking_one_machine_finds_it_in_any_case() {
+        let targets = [t("Laptop (192.168.1.20)", true, true), t("studio", true, true)];
+        let p = plan_ask(&json!({"kind":"ask","machine":"laptop (192.168.1.20)","question":"  where?  "}), &targets).unwrap();
+        assert_eq!((p.question.as_str(), p.ask.clone(), p.notes.clone()), ("where?", vec!["Laptop (192.168.1.20)".to_string()], vec![]));
+    }
+
+    #[test]
+    fn asking_one_machine_is_refused_when_it_cannot_answer() {
+        let targets = [t("laptop", false, true), t("studio", true, false)];
+        assert_eq!(plan_ask(&json!({"kind":"ask","machine":"laptop","question":"q"}), &targets).unwrap_err(), "laptop is offline.");
+        assert_eq!(plan_ask(&json!({"kind":"ask","machine":"studio","question":"q"}), &targets).unwrap_err(), "studio runs an older Maya that cannot be asked.");
+        assert_eq!(plan_ask(&json!({"kind":"ask","machine":"nas","question":"q"}), &targets).unwrap_err(), "There is no machine called nas.");
+        assert_eq!(plan_ask(&json!({"kind":"ask","machine":"studio","question":"  "}), &targets).unwrap_err(), "ask needs a question.");
+    }
+
+    #[test]
+    fn asking_everyone_asks_who_can_and_notes_the_rest() {
+        let targets = [t("laptop", true, true), t("studio", false, true), t("old", true, false)];
+        let p = plan_ask(&json!({"kind":"ask","question":"q"}), &targets).unwrap();
+        assert_eq!(p.ask, vec!["laptop".to_string()]);
+        assert_eq!(p.notes, vec!["studio is offline, so it was not asked.".to_string(), "old runs an older Maya that cannot be asked.".to_string()]);
+        assert_eq!(plan_ask(&json!({"kind":"ask","question":"q"}), &[t("studio", false, true)]).unwrap_err(), "No other machine can be asked now.");
+    }
+
+    #[test]
+    fn a_long_question_is_cut() {
+        let p = plan_ask(&json!({"kind":"ask","machine":"laptop","question":"😀".repeat(3_000)}), &[t("laptop", true, true)]).unwrap();
+        assert_eq!(p.question.chars().count(), 2_000);
+    }
+
+    #[test]
+    fn targets_leave_out_phones_and_exist_only_on_a_main() {
+        use maya_core::net::{AssistantStatus, NetworkStatus};
+        let assistants = vec![
+            AssistantStatus { name: "laptop".into(), platform: "macos".into(), connected: true, can_ask: true, ..Default::default() },
+            AssistantStatus { name: "phone".into(), platform: "android".into(), connected: true, ..Default::default() },
+        ];
+        let main = NetworkStatus { role: NetworkRole::Main, assistants: assistants.clone(), ..Default::default() };
+        assert_eq!(ask_targets(&main), vec![t("laptop", true, true)]);
+        let assistant = NetworkStatus { role: NetworkRole::Assistant, assistants, ..Default::default() };
+        assert_eq!(ask_targets(&assistant), vec![]);
+    }
+
+    #[test]
+    fn a_stop_since_the_ask_keeps_the_answers_quiet() {
+        assert!(wakes_after_ask(3, 3));
+        assert!(!wakes_after_ask(3, 4));
     }
 }

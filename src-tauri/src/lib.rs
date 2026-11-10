@@ -860,7 +860,7 @@ fn list_sessions(state: TauriState<AppState>) -> Vec<Card> {
 }
 
 /// What the Network section of Settings shows.
-fn network_status_of(state: &AppState) -> NetworkStatus {
+pub(crate) fn network_status_of(state: &AppState) -> NetworkStatus {
     let (server, stored) = {
         let n = state.network.lock().unwrap();
         (n.server.clone(), n.status.clone())
