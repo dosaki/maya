@@ -360,6 +360,15 @@ live in `maya/brain/` inside your Claude directory. The quick one-shot
 interpreter is only the fallback, when her session is down or on a machine
 in the assistant role.
 
+On the main, Maya can also ask the Mayas on your other machines, when you
+ask her to or when you ask about something she has no record of. She says
+so first, and each one answers from its own brain (Chat and notes) with one
+quick call, without waking that brain. It needs that machine connected,
+running this version, and with its brain's agent installed. An answer from
+another machine never makes Maya act by herself: after the answers arrive
+she runs no session action, sets no watch and asks no further machine until
+you next speak to her. She tells you instead.
+
 What differs between brains:
 
 - Codex and Kiro have no background subagents. During a long job she says
@@ -466,7 +475,8 @@ quiet.
   version, or one whose board it cannot read.
 - **What travels.** Session ids, conversation text, option numbers, folder
   names and attachments (up to 20 MB), and at Make main a summary of
-  Maya's Chat. Commands run on the assistant; the
+  Maya's Chat. A question to another machine's Maya, and her short answer
+  travel too. Commands run on the assistant; the
   main never touches the assistant's files.
 - **Remote cards.** On the main, an assistant's sessions sit in the same
   columns as local ones, with a remote glyph (its tooltip names the
