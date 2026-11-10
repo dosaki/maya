@@ -157,7 +157,7 @@ impl BrainState {
 }
 
 /// Her working folder, which also holds her record, chat and watches.
-fn brain_dir(claude_dir: &Path) -> PathBuf {
+pub(crate) fn brain_dir(claude_dir: &Path) -> PathBuf {
     claude_dir.join("maya").join("brain")
 }
 

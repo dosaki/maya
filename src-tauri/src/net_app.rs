@@ -10,7 +10,7 @@ use crate::listener::{self, Interpreted, VoiceContext};
 use crate::net::client::{pair_with, reconnect, reply_with_attachments, ClientHandle, ClientNotify, Executor, RequestLane, NOT_PAIRED, REMOVED};
 use crate::net::promote;
 use crate::net::merge;
-use crate::net::protocol::{CommandKind, Down, Request, CAP_FOLLOW, CAP_LEAD, CAP_PICK_TERMINAL, CAP_TERMINAL, CAP_WORKTREE};
+use crate::net::protocol::{CommandKind, Down, Request, CAP_ASK_BRAIN, CAP_FOLLOW, CAP_LEAD, CAP_PICK_TERMINAL, CAP_TERMINAL, CAP_WORKTREE};
 use maya_core::net::live::LiveTerms;
 use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, check_remote_terminal, check_remote_worktree, target_of, Target, ROUTE_TIMEOUT};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
@@ -189,7 +189,7 @@ impl ClientNotify for TauriClientNotify {
     }
 
     fn caps(&self) -> Vec<String> {
-        vec![CAP_FOLLOW.into(), CAP_LEAD.into(), CAP_WORKTREE.into(), CAP_TERMINAL.into(), CAP_PICK_TERMINAL.into()]
+        caps_list()
     }
 
     /// Keeps the group the main sent. Takes no lock of its own: the save
@@ -627,14 +627,24 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
         }
         // The client opens a handover itself (`client::handle`); it never reaches an executor.
         CommandKind::Promote { .. } => Err(maya_core::net::client::CANNOT_LEAD.into()),
-        CommandKind::AskBrain { .. } => Err("This Maya has no brain to ask.".into()),
+        CommandKind::AskBrain { question } => crate::brain_ask::answer(app, &question),
     }
+}
+
+/// What an assistant offers the main to ask of it.
+fn caps_list() -> Vec<String> {
+    vec![CAP_FOLLOW.into(), CAP_LEAD.into(), CAP_WORKTREE.into(), CAP_TERMINAL.into(), CAP_PICK_TERMINAL.into(), CAP_ASK_BRAIN.into()]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn an_assistant_offers_to_be_asked() {
+        assert!(caps_list().contains(&CAP_ASK_BRAIN.to_string()));
+    }
 
     use crate::model::{AwaitKind, Awaiting, Choice, Harness, Question, State};
 

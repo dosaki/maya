@@ -12,6 +12,7 @@ pub mod native;
 mod quit_guard;
 pub mod net_app;
 mod brain_app;
+mod brain_ask;
 mod brain_route;
 mod native_app;
 mod remembered_app;
