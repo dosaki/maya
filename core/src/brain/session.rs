@@ -44,7 +44,7 @@ impl Request {
     }
 
     /// A request the user made, as opposed to one of Maya's or her own.
-    fn from_user(&self) -> bool {
+    pub fn from_user(&self) -> bool {
         !self.internal && self.via != Via::Maya
     }
 }

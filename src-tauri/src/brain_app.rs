@@ -81,6 +81,15 @@ pub(crate) struct BrainState {
     swallow_reply: bool,
     /// A watch fired while her session was down: wake her once it is back.
     wake_when_ready: bool,
+    /// A fired watch woke her, and another machine's answers woke her, for
+    /// a turn not delivered yet; taken by `deliver`.
+    watch_woke: bool,
+    ask_woke: bool,
+    /// The turns delivered since the last user request or fired watch are
+    /// driven by another machine's answers alone (`answers_only_after`);
+    /// `reply_answers_only` is that for the turn being replied to.
+    answers_only: bool,
+    reply_answers_only: bool,
     phones: PhoneWaiters,
     /// Replies in a row with refused actions.
     refusal_streak: u32,
@@ -139,6 +148,10 @@ impl BrainState {
             primer: None,
             swallow_reply: false,
             wake_when_ready: false,
+            watch_woke: false,
+            ask_woke: false,
+            answers_only: false,
+            reply_answers_only: false,
             phones: PhoneWaiters::default(),
             refusal_streak: 0,
             last_say: String::new(),
@@ -530,6 +543,7 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
         }
         if matches!(e, Event::TurnEnded { .. } | Event::TurnFailed { .. }) {
             b.reply_epoch = b.turn_epoch;
+            b.reply_answers_only = b.answers_only;
         }
         let was_working = b.session.working();
         match &e {
@@ -563,6 +577,9 @@ fn on_event(app: &AppHandle, generation: u64, e: Event) -> bool {
             Event::Exited(why) => {
                 log::line("brain", format!("her session ended: {why}"));
                 b.session.on_event(&e, None);
+                // Her pending wake went with the session.
+                b.watch_woke = false;
+                b.ask_woke = false;
                 let now = now_ms();
                 let failed = failed_resume(b.resumed, b.turn_seen, now.saturating_sub(b.spawned_at), b.first_sent_at.map(|t| now.saturating_sub(t)));
                 let (restart_after, say_stopped) = if failed { (Duration::ZERO, false) } else { b.outage.exited() };
@@ -718,6 +735,9 @@ pub(crate) fn stop(app: &AppHandle, via: Via) {
             b.swallow_reply = false;
             // What to say is decided below, with the batch.
             let outs: Vec<Out> = b.session.stop(via).into_iter().filter(|o| !matches!(o, Out::Said { .. })).collect();
+            // The stop dropped her pending wake.
+            b.watch_woke = false;
+            b.ask_woke = false;
             let phones = if outs.contains(&Out::Interrupt) { b.phones.drain() } else { vec![] };
             (outs, phones, true)
         }
@@ -751,14 +771,20 @@ pub(crate) fn board_changed(app: &AppHandle, after: &[Card]) {
         for f in fired {
             b.session.note(f);
         }
-        if b.ready {
-            b.session.wake()
-        } else {
-            b.wake_when_ready = true;
-            vec![]
-        }
+        b.watch_woke = true;
+        wake(&mut b)
     };
     act(app, outs);
+}
+
+/// Wakes her for her notes now, or once her session is back.
+fn wake(b: &mut BrainState) -> Vec<Out> {
+    if b.ready {
+        b.session.wake()
+    } else {
+        b.wake_when_ready = true;
+        vec![]
+    }
 }
 
 /// A batch has run: each action's outcome becomes a note for her next message.
@@ -865,6 +891,8 @@ fn shutdown(app: &AppHandle) {
         b.primer = None;
         b.swallow_reply = false;
         b.wake_when_ready = false;
+        b.watch_woke = false;
+        b.ask_woke = false;
         b.handover = None;
         (b.driver.take(), handoff(&mut b.session), b.phones.drain())
     };
@@ -969,6 +997,8 @@ fn deliver(app: &AppHandle, r: Option<Request>) {
         b.first_sent_at.get_or_insert_with(now_ms);
         b.last_heard = now_ms();
         b.turn_epoch = b.stop_epoch;
+        let (watch_woke, ask_woke) = (std::mem::take(&mut b.watch_woke), std::mem::take(&mut b.ask_woke));
+        b.answers_only = brain_route::answers_only_after(b.answers_only, r.as_ref().is_some_and(Request::from_user), watch_woke, ask_woke);
         (primer, notes)
     };
     let text = match primer {
@@ -989,7 +1019,7 @@ fn deliver(app: &AppHandle, r: Option<Request>) {
 /// then announced, run or handed to the waiting phone, and refused ones
 /// sent back to her.
 fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<String>) {
-    {
+    let answers_only = {
         let state = app.state::<AppState>();
         let mut b = state.brain.lock().unwrap();
         if via == Via::Maya && std::mem::take(&mut b.swallow_reply) {
@@ -1007,7 +1037,8 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
         if let Some(s) = spoken(say) {
             b.last_say = s;
         }
-    }
+        b.reply_answers_only
+    };
     let ctx = listener::voice_context(app);
     let mut sorted = sort_actions(actions, |a| {
         if a["kind"] == "resume_all" {
@@ -1016,10 +1047,12 @@ fn reply(app: &AppHandle, via: Via, say: &str, actions: &[Value], errors: Vec<St
             interpreter::validate(a, &ctx.cards, &ctx.dirs, &ctx.machines, &ctx.prs)
         }
     });
+    // Another machine's answers are data: alone, they start nothing.
+    brain_route::hold_for_answers(&mut sorted, answers_only);
     let mut refused = errors;
     refused.extend(std::mem::take(&mut sorted.refused));
     // Read before the brain lock: never two locks at once.
-    let targets = brain_route::ask_targets(&crate::network_status_of(&app.state::<AppState>()));
+    let targets = if sorted.ask.is_empty() { vec![] } else { brain_route::ask_targets(&crate::network_status_of(&app.state::<AppState>())) };
     let (feedback, waiter, asks, ask_epoch) = {
         let state = app.state::<AppState>();
         let mut b = state.brain.lock().unwrap();
@@ -1160,29 +1193,28 @@ fn run_asks(app: &AppHandle, plans: Vec<AskPlan>, epoch: u64) {
                 log::line("brain", format!("ask: {what}"));
                 notes.push(ask::note(&m, &o));
             }
-            let outs = {
-                let state = app.state::<AppState>();
-                let mut b = state.brain.lock().unwrap();
-                if !b.active {
-                    return;
-                }
-                for n in notes {
-                    b.session.note(n);
-                }
-                if !wakes_after_ask(epoch, b.stop_epoch) {
-                    log::line("brain", "a stop came since the ask; its answers wait for her next turn");
-                    return;
-                }
-                if b.ready {
-                    b.session.wake()
-                } else {
-                    b.wake_when_ready = true;
-                    vec![]
-                }
-            };
+            let outs = answers_arrived(&mut app.state::<AppState>().brain.lock().unwrap(), notes, epoch);
             act(&app, outs);
         });
     }
+}
+
+/// What came of an ask made at stop count `epoch`: her notes, and a wake
+/// (marked as the answers') unless a stop came since, when the notes wait
+/// for her next turn. Nothing while her brain does not run here.
+fn answers_arrived(b: &mut BrainState, notes: Vec<String>, epoch: u64) -> Vec<Out> {
+    if !b.active {
+        return vec![];
+    }
+    for n in notes {
+        b.session.note(n);
+    }
+    if !wakes_after_ask(epoch, b.stop_epoch) {
+        log::line("brain", "a stop came since the ask; its answers wait for her next turn");
+        return vec![];
+    }
+    b.ask_woke = true;
+    wake(b)
 }
 
 /// Her line, back the way the request came: spoken for a spoken request (or
@@ -1306,6 +1338,40 @@ mod tests {
         assert!(c.awaiting.is_none());
         assert_eq!(brain_card("u", Harness::ClaudeCode, "/x", true, Some("refactor"), "", 5).state, State::Working);
     }
+    fn brain() -> BrainState {
+        let mut b = BrainState::new(Path::new("/nonexistent/maya-test/.claude"));
+        b.active = true;
+        b.ready = true;
+        b
+    }
+
+    #[test]
+    fn answers_are_noted_and_wake_her_marked_as_the_answers() {
+        let mut b = brain();
+        assert_eq!(answers_arrived(&mut b, vec!["Maya on laptop does not know.".into()], 0), vec![Out::Deliver(None)]);
+        assert!(b.ask_woke);
+        assert_eq!(b.session.take_notes(), vec!["Maya on laptop does not know.".to_string()]);
+    }
+
+    #[test]
+    fn answers_wait_for_her_session_and_stay_quiet_after_a_stop() {
+        let mut b = brain();
+        b.ready = false;
+        assert!(answers_arrived(&mut b, vec!["n1".into()], 0).is_empty());
+        assert!(b.wake_when_ready && b.ask_woke);
+
+        let mut b = brain();
+        b.stop_epoch = 1;
+        assert!(answers_arrived(&mut b, vec!["n2".into()], 0).is_empty());
+        assert!(!b.ask_woke && !b.wake_when_ready);
+        assert_eq!(b.session.take_notes(), vec!["n2".to_string()], "noted for her next turn");
+
+        let mut b = brain();
+        b.active = false;
+        assert!(answers_arrived(&mut b, vec!["n3".into()], 0).is_empty());
+        assert!(b.session.take_notes().is_empty());
+    }
+
     #[test]
     fn an_exited_brain_hands_its_queue_back() {
         let mut s = Session::new(true);
