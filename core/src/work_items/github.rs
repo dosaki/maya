@@ -5,9 +5,9 @@ use crate::config::{Assignee, ForgeItems, GitProvider, ItemRule};
 use crate::forge::{encode, get_json_as, send_json_as, Forge, Http, Me, Need};
 use serde_json::Value;
 
-/// The search for a rule: open issues, by assignee, labels and repos.
+/// The search for a rule: open issues outside archived repos, by assignee, labels and repos.
 pub fn search_query(rule: &ItemRule) -> String {
-    let mut terms = vec!["is:issue".to_string(), "is:open".to_string()];
+    let mut terms = vec!["is:issue".to_string(), "is:open".to_string(), "archived:false".to_string()];
     match &rule.assignee {
         Assignee::Me => terms.push("assignee:@me".into()),
         Assignee::Anyone => {}
@@ -187,12 +187,12 @@ mod tests {
     #[test]
     fn a_rule_becomes_one_search_with_quoted_terms() {
         let r = |assignee, labels: &[&str], repos: &[&str]| ItemRule { assignee, labels: labels.iter().map(|s| s.to_string()).collect(), repos: repos.iter().map(|s| s.to_string()).collect() };
-        assert_eq!(search_query(&r(Assignee::Me, &[], &[])), "is:issue is:open assignee:@me");
+        assert_eq!(search_query(&r(Assignee::Me, &[], &[])), "is:issue is:open archived:false assignee:@me");
         assert_eq!(
             search_query(&r(Assignee::Anyone, &["in progress", "bug"], &["acme/api", "acme/web"])),
-            r#"is:issue is:open label:"in progress" label:"bug" repo:acme/api repo:acme/web"#
+            r#"is:issue is:open archived:false label:"in progress" label:"bug" repo:acme/api repo:acme/web"#
         );
-        assert_eq!(search_query(&r(Assignee::User { login: "maria".into() }, &[r#"say "hi""#], &[])), r#"is:issue is:open assignee:maria label:"say hi""#, "a quote inside is dropped");
+        assert_eq!(search_query(&r(Assignee::User { login: "maria".into() }, &[r#"say "hi""#], &[])), r#"is:issue is:open archived:false assignee:maria label:"say hi""#, "a quote inside is dropped");
     }
 
     #[test]
@@ -226,7 +226,7 @@ mod tests {
         assert!(list(&http, &f, &cfg).unwrap().is_empty());
         let seen = http.seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
-        assert!(seen[1].0.starts_with("https://api.github.com/search/issues?q=is%3Aissue%20is%3Aopen%20repo%3Aacme%2Fapi&sort=updated"), "{}", seen[1].0);
+        assert!(seen[1].0.starts_with("https://api.github.com/search/issues?q=is%3Aissue%20is%3Aopen%20archived%3Afalse%20repo%3Aacme%2Fapi&sort=updated"), "{}", seen[1].0);
         let refused = FakeHttp::new(vec![("/search/issues", 403, "{}")]);
         assert_eq!(list(&refused, &f, &cfg).unwrap_err(), "the token was refused (403). It needs the repo scope (fine-grained: Issues read).");
     }

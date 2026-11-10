@@ -5,7 +5,8 @@ use crate::config::{Assignee, ForgeItems, GitProvider, ItemRule};
 use crate::forge::{encode, get_json_as, send_json_as, Forge, Http, Me, Need};
 use serde_json::Value;
 
-/// The calls for a rule: open issues, one per project, or one across GitLab when it names none.
+/// The calls for a rule: open issues, one per project, or one across GitLab
+/// (archived projects left out) when it names none.
 pub fn list_urls(api_base: &str, rule: &ItemRule) -> Vec<String> {
     let query = "state=opened&order_by=updated_at&sort=desc&per_page=50";
     let labels = if rule.labels.is_empty() { String::new() } else { format!("&labels={}", rule.labels.iter().map(|l| encode(l)).collect::<Vec<_>>().join(",")) };
@@ -15,7 +16,7 @@ pub fn list_urls(api_base: &str, rule: &ItemRule) -> Vec<String> {
             Assignee::User { login } => format!("&scope=all&assignee_username={}", encode(login)),
             Assignee::Anyone => String::new(),
         };
-        return vec![format!("{api_base}/issues?{query}{who}{labels}")];
+        return vec![format!("{api_base}/issues?{query}&non_archived=true{who}{labels}")];
     }
     let who = match &rule.assignee {
         Assignee::Me => "&scope=assigned_to_me".to_string(),
@@ -51,15 +52,41 @@ pub fn parse_issue(v: &Value, cfg: &ForgeItems) -> Option<WorkItem> {
 }
 
 /// The issues of every rule, merged; the first failure is the service's.
+/// A project a rule names is left out when it is archived.
 pub fn list(http: &dyn Http, forge: &Forge, cfg: &ForgeItems) -> Result<Vec<WorkItem>, String> {
     let mut lists = Vec::new();
+    let mut archived: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
     for rule in &cfg.rules {
-        for url in list_urls(&forge.site.api_base(), rule) {
+        let mut live = Vec::new();
+        for repo in &rule.repos {
+            let is = match archived.get(repo) {
+                Some(is) => *is,
+                None => {
+                    let is = is_archived(http, forge, repo)?;
+                    archived.insert(repo.clone(), is);
+                    is
+                }
+            };
+            if !is {
+                live.push(repo.clone());
+            }
+        }
+        if !rule.repos.is_empty() && live.is_empty() {
+            continue; // every project it names is archived: not a search across GitLab
+        }
+        let rule = ItemRule { repos: live, ..rule.clone() };
+        for url in list_urls(&forge.site.api_base(), &rule) {
             let reply = get_json_as(http, forge, &url, Need::Issues)?;
             lists.push(reply.as_array().map(|a| a.iter().filter_map(|i| parse_issue(i, cfg)).collect()).unwrap_or_default());
         }
     }
     Ok(merge(lists))
+}
+
+/// Whether GitLab says the project is archived.
+fn is_archived(http: &dyn Http, forge: &Forge, repo: &str) -> Result<bool, String> {
+    let v = get_json_as(http, forge, &format!("{}/projects/{}", forge.site.api_base(), encode(repo)), Need::Issues)?;
+    Ok(v["archived"].as_bool() == Some(true))
 }
 
 /// The open issue `number` of `repo`; None when it is closed.
@@ -284,14 +311,14 @@ mod tests {
     fn a_rule_becomes_one_call_per_project_with_encoded_paths() {
         let api = "https://gitlab.acme.io/api/v4";
         let me = ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![] };
-        assert_eq!(list_urls(api, &me), vec![format!("{api}/issues?state=opened&order_by=updated_at&sort=desc&per_page=50&scope=assigned_to_me")]);
+        assert_eq!(list_urls(api, &me), vec![format!("{api}/issues?state=opened&order_by=updated_at&sort=desc&per_page=50&non_archived=true&scope=assigned_to_me")]);
         let anyone = ItemRule { assignee: Assignee::Anyone, labels: vec!["status::todo".into(), "a b".into()], repos: vec!["grp/sub/r".into(), "grp/x".into()] };
         assert_eq!(list_urls(api, &anyone), vec![
             format!("{api}/projects/grp%2Fsub%2Fr/issues?state=opened&order_by=updated_at&sort=desc&per_page=50&labels=status%3A%3Atodo,a%20b"),
             format!("{api}/projects/grp%2Fx/issues?state=opened&order_by=updated_at&sort=desc&per_page=50&labels=status%3A%3Atodo,a%20b"),
         ]);
         let maria = ItemRule { assignee: Assignee::User { login: "maria".into() }, labels: vec![], repos: vec![] };
-        assert_eq!(list_urls(api, &maria), vec![format!("{api}/issues?state=opened&order_by=updated_at&sort=desc&per_page=50&scope=all&assignee_username=maria")]);
+        assert_eq!(list_urls(api, &maria), vec![format!("{api}/issues?state=opened&order_by=updated_at&sort=desc&per_page=50&non_archived=true&scope=all&assignee_username=maria")]);
     }
 
     #[test]
@@ -313,5 +340,31 @@ mod tests {
         let cfg = ForgeItems { rules: vec![ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["grp/a".into(), "grp/b".into()] }], ..WorkItemsConfig::default().gitlab };
         let http = FakeHttp::new(vec![("grp%2Fa", 200, "[]"), ("grp%2Fb", 404, r#"{"message":"404 Project Not Found"}"#)]);
         assert_eq!(list(&http, &f, &cfg).unwrap_err(), "404: 404 Project Not Found");
+    }
+
+    #[test]
+    fn an_archived_project_a_rule_names_is_left_out_and_asked_about_once() {
+        let named = |repos: &[&str]| ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: repos.iter().map(|s| s.to_string()).collect() };
+        let cfg = ForgeItems { rules: vec![named(&["grp/old", "grp/new"]), named(&["grp/old"])], ..WorkItemsConfig::default().gitlab };
+        let issue = r#"[{"iid":1,"title":"t","web_url":"u","references":{"full":"grp/new#1"},"labels":[],"assignees":[],"author":{"username":"a"}}]"#;
+        let http = FakeHttp::new(vec![
+            ("/projects/grp%2Fold/issues", 200, r#"[{"iid":2,"title":"t","web_url":"u","references":{"full":"grp/old#2"}}]"#),
+            ("/projects/grp%2Fnew/issues", 200, issue),
+            ("/projects/grp%2Fold", 200, r#"{"archived":true}"#),
+            ("/projects/grp%2Fnew", 200, r#"{"archived":false}"#),
+        ]);
+        let items = list(&http, &gitlab_forge(), &cfg).unwrap();
+        assert_eq!(items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), vec!["grp/new#1"]);
+        let seen: Vec<String> = http.seen.lock().unwrap().iter().map(|s| s.0.clone()).collect();
+        assert!(!seen.iter().any(|u| u.contains("grp%2Fold/issues")), "{seen:?}");
+        assert_eq!(seen.iter().filter(|u| u.ends_with("/projects/grp%2Fold")).count(), 1, "{seen:?}");
+    }
+
+    #[test]
+    fn a_rule_whose_projects_are_all_archived_asks_for_nothing_more() {
+        let cfg = ForgeItems { rules: vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec!["grp/old".into()] }], ..WorkItemsConfig::default().gitlab };
+        let http = FakeHttp::new(vec![("/projects/grp%2Fold", 200, r#"{"archived":true}"#), ("/issues", 200, r#"[{"iid":9,"title":"t","web_url":"u","references":{"full":"x/y#9"}}]"#)]);
+        assert!(list(&http, &gitlab_forge(), &cfg).unwrap().is_empty());
+        assert_eq!(http.seen.lock().unwrap().len(), 1, "not a search across GitLab");
     }
 }

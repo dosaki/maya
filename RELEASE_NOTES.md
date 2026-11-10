@@ -1,3 +1,9 @@
+# 0.52.1
+
+## Fixed
+
+- The Issues tab no longer shows issues from archived GitHub repositories or GitLab projects, including ones a rule names.
+
 # 0.52.0
 
 ## New
