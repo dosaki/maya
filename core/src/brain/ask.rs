@@ -158,8 +158,8 @@ pub enum Outcome {
 pub fn outcome(result: Result<Option<Value>, String>) -> Outcome {
     match result {
         Ok(data) => match data.as_ref().and_then(|d| d.get("answer")).and_then(Value::as_str) {
-            Some(a) => Outcome::Answered(a.to_string()),
-            None => Outcome::DontKnow,
+            Some(a) if !a.trim().is_empty() => Outcome::Answered(cut(a, ANSWER_CHARS)),
+            _ => Outcome::DontKnow,
         },
         Err(e) if e.ends_with(NO_ANSWER) => Outcome::TimedOut,
         Err(e) if e.contains("is not connected") || e.contains("disconnected before answering") => Outcome::Offline,
@@ -269,6 +269,9 @@ mod tests {
         assert_eq!(outcome(Ok(Some(serde_json::json!({"answer": "yes"})))), Outcome::Answered("yes".into()));
         assert_eq!(outcome(Ok(Some(serde_json::json!({"answer": null})))), Outcome::DontKnow);
         assert_eq!(outcome(Ok(None)), Outcome::DontKnow);
+        assert_eq!(outcome(Ok(Some(serde_json::json!({"answer": "   "})))), Outcome::DontKnow);
+        let Outcome::Answered(long) = outcome(Ok(Some(serde_json::json!({"answer": "a".repeat(2_000)})))) else { panic!("answered") };
+        assert!(long.chars().count() == ANSWER_CHARS && long.ends_with('…'));
         assert_eq!(outcome(Err("laptop did not answer in time".into())), Outcome::TimedOut);
         assert_eq!(outcome(Err("laptop is not connected".into())), Outcome::Offline);
         assert_eq!(outcome(Err("laptop disconnected before answering.".into())), Outcome::Offline);
