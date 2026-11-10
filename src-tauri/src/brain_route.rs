@@ -154,7 +154,12 @@ pub(crate) fn plan_ask(action: &Value, targets: &[AskTarget]) -> Result<AskPlan,
         return Err("ask needs a question".into());
     }
     let question = ask::cut(question, ask::QUESTION_CHARS);
-    let machine = action["machine"].as_str().map(str::trim).unwrap_or("");
+    // Anything but a name (or none) is refused, never read as "ask everyone".
+    let machine = match &action["machine"] {
+        Value::Null => "",
+        Value::String(m) => m.trim(),
+        _ => return Err("machine must be a machine's name".into()),
+    };
     if !machine.is_empty() {
         let wanted = machine.to_lowercase();
         let Some(t) = targets.iter().find(|t| t.name.trim().to_lowercase() == wanted) else {
@@ -177,7 +182,11 @@ pub(crate) fn plan_ask(action: &Value, targets: &[AskTarget]) -> Result<AskPlan,
         }
     }
     if plan.ask.is_empty() {
-        return Err("No other machine can be asked now".into());
+        // Say which ones and why, so the user hears what was not checked.
+        return Err(match plan.notes.is_empty() {
+            true => "No other machine can be asked now".into(),
+            false => format!("No other machine can be asked now: {}", plan.notes.join(" ")),
+        });
     }
     Ok(plan)
 }
@@ -1017,7 +1026,20 @@ mod tests {
         let p = plan_ask(&json!({"kind":"ask","question":"q"}), &targets).unwrap();
         assert_eq!(p.ask, vec!["laptop".to_string()]);
         assert_eq!(p.notes, vec!["studio is offline, so it was not asked.".to_string(), "old cannot be asked (an older Maya, or one with no brain).".to_string()]);
-        assert_eq!(plan_ask(&json!({"kind":"ask","question":"q"}), &[t("studio", false, true)]).unwrap_err(), "No other machine can be asked now");
+        assert_eq!(
+            plan_ask(&json!({"kind":"ask","question":"q"}), &[t("studio", false, true), t("old", true, false)]).unwrap_err(),
+            "No other machine can be asked now: studio is offline, so it was not asked. old cannot be asked (an older Maya, or one with no brain)."
+        );
+        assert_eq!(plan_ask(&json!({"kind":"ask","question":"q"}), &[]).unwrap_err(), "No other machine can be asked now");
+    }
+
+    #[test]
+    fn a_machine_that_is_not_a_name_is_refused_not_read_as_everyone() {
+        let targets = [t("laptop", true, true), t("studio", true, true)];
+        for m in [json!(123), json!(true), json!(["laptop"]), json!({"name":"laptop"})] {
+            assert_eq!(plan_ask(&json!({"kind":"ask","machine":m,"question":"q"}), &targets).unwrap_err(), "machine must be a machine's name");
+        }
+        assert_eq!(plan_ask(&json!({"kind":"ask","machine":null,"question":"q"}), &targets).unwrap().ask.len(), 2);
     }
 
     #[test]
