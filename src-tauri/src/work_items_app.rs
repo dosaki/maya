@@ -5,15 +5,15 @@
 //! call or the one-shot agent.
 
 use crate::{git, native, AppState};
-use maya_core::config::GitProvider;
-use maya_core::forge::{self, Forge, ForgeError, Me};
+use maya_core::config::{CustomTool, GitProvider};
+use maya_core::forge::{self, Forge, Me};
 use maya_core::store::now_ms;
 use maya_core::work_items::started::{self, Started};
 use maya_core::config::ForgeItems;
-use maya_core::work_items::{self, github, gitlab, pick, start, Issue, ItemRepo, WorkItem};
+use maya_core::work_items::{self, custom, github, gitlab, pick, source_of, start, Issue, ItemRepo, SourceError, WorkItem};
 use maya_core::{actions, launch, log};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
@@ -26,10 +26,12 @@ pub struct WorkItemsState {
     pub items: Vec<WorkItem>,
     pub started: Vec<Started>,
     /// One line per service whose last check failed or that has no token.
-    pub errors: Vec<ForgeError>,
+    pub errors: Vec<SourceError>,
+    /// Each configured custom tool's id and label, for naming a started item's source.
+    pub source_labels: BTreeMap<String, String>,
     /// No Git connection is switched on.
     pub git_off: bool,
-    /// No switched-on Git connection has Work Items on.
+    /// Nothing is asked: no switched-on Git connection has Work Items on and no custom tool is ready.
     pub off: bool,
     pub fetched_at: Option<u64>,
 }
@@ -43,13 +45,18 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
     };
     let git_off = !conns.iter().any(|c| c.enabled);
     // Only the services with Work Items on are asked, or named when they have no token.
-    let conns: Vec<_> = conns.into_iter().filter(|c| cfg.for_forge(c.provider).enabled).collect();
-    let (forges, missing) = git::forges(&conns);
-    let off = forges.is_empty() && missing.is_empty();
-    let fetched = work_items::fetch(&forges, &cfg, git::http());
+    // A custom item's repo may be on a forge whose Work Items are off, so the sites are of every enabled one.
+    let sites = forge::sites(&conns);
+    let asked: Vec<_> = conns.into_iter().filter(|c| cfg.for_forge(c.provider).enabled).collect();
+    let (forges, missing) = git::forges(&asked);
+    let tool_asked = cfg.custom.iter().any(|t| t.enabled && !t.list_command.trim().is_empty());
+    let off = forges.is_empty() && missing.is_empty() && !tool_asked;
+    let missing: Vec<SourceError> = missing.into_iter().map(|e| SourceError { source: source_of(e.forge).to_string(), message: e.message }).collect();
+    let source_labels: BTreeMap<String, String> = cfg.custom.iter().map(|t| (t.id.clone(), t.label().to_string())).collect();
+    let fetched = work_items::fetch(&forges, &cfg, git::http(), &sites, &custom::list);
     for f in &fetched {
         if let Err(e) = &f.result {
-            log::line("app", format!("issues: {}: {e}", f.forge.label()));
+            log::line("app", format!("issues: {}: {e}", f.label));
         }
     }
     let returned: HashMap<&str, &WorkItem> = fetched.iter().filter_map(|f| f.result.as_ref().ok()).flatten().map(|i| (i.key.as_str(), i)).collect();
@@ -102,6 +109,7 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
         w.items = items;
         w.started = kept;
         w.errors = errors;
+        w.source_labels = source_labels;
         w.git_off = git_off;
         w.off = off;
         w.fetched_at = Some(now_ms());
@@ -203,6 +211,18 @@ impl MeCache {
 /// The assignees that are not `me`, ignoring case.
 fn others(assignees: &[String], me: &str) -> Vec<String> {
     assignees.iter().filter(|a| !a.eq_ignore_ascii_case(me)).cloned().collect()
+}
+
+/// The takeover names for a custom item: its assignees other than `tool.me`;
+/// none when `me` is blank.
+fn custom_takeover(tool: &CustomTool, assignees: &[String]) -> Vec<String> {
+    let me = tool.me.trim();
+    if me.is_empty() { Vec::new() } else { others(assignees, me) }
+}
+
+/// The custom tool that listed `item`, found by its `source`, never by name.
+fn tool_of(state: &AppState, item: &WorkItem) -> Option<CustomTool> {
+    state.store.lock().unwrap().config.work_items.tool(&item.source).cloned()
 }
 
 /// The item has no repository of its own, or its repository only tracks issues.
@@ -378,7 +398,10 @@ pub(crate) fn work_item_check(app: AppHandle, key: String) -> Result<StartCheck,
             let takeover = others(&f.issue.item.assignees, &f.me.login);
             (f.issue.item, takeover)
         }
-        None => (listed_item, Vec::new()),
+        None => {
+            let takeover = tool_of(&state, &listed_item).map(|t| custom_takeover(&t, &listed_item.assignees)).unwrap_or_default();
+            (listed_item, takeover)
+        }
     };
     let pick = needs_pick(&item).then(|| pick_repo(&app, &item, &items));
     Ok(StartCheck { takeover, pick, branch: start::branch_name(&item) })
@@ -389,8 +412,10 @@ pub(crate) fn work_item_check(app: AppHandle, key: String) -> Result<StartCheck,
 /// `take_over` (the names the user agreed to take it over from) covers
 /// them, and nothing known in advance refuses the
 /// start, assigns it to the user and sets its start status, then opens its
-/// session. A failed write-back is a notice (also a line above the areas),
-/// not a failure. A Start under a minute old whose session has not shown
+/// session. A custom tool's item is checked against the tool's `me` and runs
+/// the tool's on-start command (when the tool is on) in place of the
+/// write-back. A failed write-back or command is a notice (also a line above
+/// the areas), not a failure. A Start under a minute old whose session has not shown
 /// up yet refuses a second one.
 #[tauri::command(async)]
 pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo>, take_over: Vec<String>) -> Result<WorkStarted, String> {
@@ -422,7 +447,26 @@ pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo
             }
             f.issue.item
         }
-        None => listed_item,
+        None => {
+            let tool = tool_of(&state, &listed_item);
+            if let Some(t) = &tool {
+                let me = t.me.trim();
+                if !me.is_empty() {
+                    if let Some(why) = takeover_refusal(&take_over, &listed_item.assignees, me) {
+                        return Err(why.into());
+                    }
+                }
+            }
+            actions::work_item_preflight(&crate::local(&state), &listed_item, &repo)?;
+            // The command runs with no lock held.
+            if let Some(t) = tool.filter(|t| t.enabled) {
+                if let Err(e) = custom::on_start(&t, &listed_item) {
+                    log::line("app", format!("issues: on-start for {}: {e}", listed_item.id));
+                    notices.push(format!("Started, but the on-start command for {} failed: {e}", listed_item.id));
+                }
+            }
+            listed_item
+        }
     };
 
     let (dir, native_term) = native::route::opening(|| actions::start_work_item(&crate::local(&state), &item, &repo));
@@ -443,8 +487,7 @@ pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo
         let notice = (!notices.is_empty()).then(|| notices.join(" "));
         // Shown above the areas until the next check replaces the lines.
         if let Some(message) = &notice {
-            let forge = item.repo.as_ref().map_or(repo.forge, |r| r.forge);
-            w.errors.push(ForgeError { forge, message: message.clone() });
+            w.errors.push(SourceError { source: item.source.clone(), message: message.clone() });
         }
         if let Some(listed) = w.items.iter_mut().find(|i| i.key == item.key) {
             *listed = item;
@@ -485,6 +528,24 @@ mod tests {
         assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["Maria", "tiago"]), me), None, "the name the question showed");
         assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["maria", "john"]), me), Some(new), "john was never shown, whatever the list holds now");
         assert_eq!(takeover_refusal(&s(&["maria", "john"]), &s(&["john"]), me), None, "one fewer is still covered");
+    }
+
+    #[test]
+    fn a_custom_takeover_asks_only_when_my_name_is_set() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let tool = |me: &str| CustomTool { id: "custom-1".into(), me: me.into(), ..CustomTool::default() };
+        assert!(custom_takeover(&tool(""), &s(&["maria"])).is_empty(), "no name, no question");
+        assert!(custom_takeover(&tool("  "), &s(&["maria"])).is_empty(), "a blank name is no name");
+        assert_eq!(custom_takeover(&tool("Tiago"), &s(&["tiago", "maria"])), s(&["maria"]));
+    }
+
+    #[test]
+    fn an_item_of_a_removed_tool_runs_no_command() {
+        let mut config = maya_core::config::WorkItemsConfig::default();
+        config.custom.push(CustomTool { id: "custom-1".into(), name: "custom-9".into(), start_command: "touch started".into(), ..CustomTool::default() });
+        let removed = WorkItem { source: "custom-9".into(), ..item(Some("acme/api"), false) };
+        assert!(config.tool(&removed.source).is_none(), "a tool is found by its id, never by its name");
+        assert_eq!(config.tool("custom-1").map(|t| t.id.as_str()), Some("custom-1"));
     }
 
     #[test]

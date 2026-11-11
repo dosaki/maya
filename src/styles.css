@@ -639,3 +639,4 @@ body { margin: 0; background: var(--bg); }
 .startdialog__repo { width: 100%; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
 .startdialog__branch { font-family: ui-monospace, monospace; font-size: 12px; }
 .startdialog__buttons { display: flex; gap: 8px; align-self: flex-end; }
+.settings__custom pre { white-space: pre-wrap; margin: 0; font-size: 12px; }

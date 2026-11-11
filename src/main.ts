@@ -38,7 +38,7 @@ let enableTimer: ReturnType<typeof setTimeout> | undefined;
 let known = new Set<string>();
 let pointer: { x: number; y: number } | null = null;
 let reviews: ReviewState = { prs: [], errors: [], off: false, fetchedAt: null };
-let workItems: WorkItemsState = { items: [], started: [], errors: [], gitOff: false, off: false, fetchedAt: null };
+let workItems: WorkItemsState = { items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: false, fetchedAt: null };
 let deployments: DeploymentState = { runs: [], error: null, off: false, assistant: false, fetchedAt: null };
 const deployUi: RowUi = { busy: new Set(), errors: new Map() };
 let clonesDir: string | null = null;

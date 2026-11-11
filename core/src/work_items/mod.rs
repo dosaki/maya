@@ -1,13 +1,14 @@
 //! Work items: the issues of a forge (or a custom tool), in one shape.
 
+pub mod custom;
 pub mod github;
 pub mod gitlab;
 pub mod pick;
 pub mod start;
 pub mod started;
 
-use crate::config::{GitProvider, WorkItemsConfig};
-use crate::forge::{Forge, ForgeError, Http};
+use crate::config::{CustomTool, GitProvider, WorkItemsConfig};
+use crate::forge::{Forge, ForgeSite, Http};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -82,43 +83,57 @@ pub fn source_of(forge: GitProvider) -> &'static str {
     }
 }
 
-/// One service's answer to "which issues do the rules return".
+/// One line above the Issues tab's areas.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceError {
+    pub source: String,
+    pub message: String,
+}
+
+/// One source's answer to "which issues do the rules return": a forge or a custom tool.
 pub struct Fetched {
-    pub forge: GitProvider,
+    pub source: String,
+    pub label: String,
     pub result: Result<Vec<WorkItem>, String>,
 }
 
-/// Asks every forge whose Work Items are on, at once.
-pub fn fetch(forges: &[Forge], cfg: &WorkItemsConfig, http: &dyn Http) -> Vec<Fetched> {
+/// Asks every forge whose Work Items are on and every enabled tool with a
+/// list command, at once. The app passes `&custom::list` as `list_tool`.
+pub fn fetch(forges: &[Forge], cfg: &WorkItemsConfig, http: &dyn Http, sites: &[ForgeSite], list_tool: &(dyn Fn(&CustomTool, &[ForgeSite]) -> Result<Vec<WorkItem>, String> + Sync)) -> Vec<Fetched> {
     std::thread::scope(|s| {
-        let handles: Vec<_> = forges
-            .iter()
-            .filter(|f| cfg.for_forge(f.site.provider).enabled)
-            .map(|f| {
-                let items = cfg.for_forge(f.site.provider);
-                let ask = move || match f.site.provider {
-                    GitProvider::Github => github::list(http, f, items),
-                    GitProvider::Gitlab => gitlab::list(http, f, items),
-                };
-                (f.site.provider, s.spawn(ask))
-            })
-            .collect();
-        handles.into_iter().map(|(forge, h)| Fetched { forge, result: h.join().unwrap_or_else(|_| Err("the check stopped unexpectedly".into())) }).collect()
+        let mut handles: Vec<(String, String, _)> = Vec::new();
+        for f in forges.iter().filter(|f| cfg.for_forge(f.site.provider).enabled) {
+            let items = cfg.for_forge(f.site.provider);
+            let ask = move || match f.site.provider {
+                GitProvider::Github => github::list(http, f, items),
+                GitProvider::Gitlab => gitlab::list(http, f, items),
+            };
+            handles.push((source_of(f.site.provider).to_string(), f.site.provider.label().to_string(), s.spawn(ask)));
+        }
+        for t in cfg.custom.iter().filter(|t| t.enabled && !t.list_command.trim().is_empty()) {
+            handles.push((t.id.clone(), t.label().to_string(), s.spawn(move || list_tool(t, sites))));
+        }
+        handles
+            .into_iter()
+            .map(|(source, label, h)| Fetched { source, label, result: h.join().unwrap_or_else(|_| Err("the check stopped unexpectedly".into())) })
+            .collect()
     })
 }
 
-/// The new list and the error lines: a service that answered replaces its
+/// The new list and the error lines: a source that answered replaces its
 /// items, one that failed keeps its last ones and adds a line, and one that
 /// was not asked drops out. `errors` holds the lines for services that were
 /// not asked.
-pub fn combine(previous: &[WorkItem], fetched: Vec<Fetched>, mut errors: Vec<ForgeError>) -> (Vec<WorkItem>, Vec<ForgeError>) {
+pub fn combine(previous: &[WorkItem], fetched: Vec<Fetched>, mut errors: Vec<SourceError>) -> (Vec<WorkItem>, Vec<SourceError>) {
     let mut lists = Vec::new();
     for f in fetched {
         match f.result {
             Ok(items) => lists.push(items),
             Err(e) => {
-                lists.push(previous.iter().filter(|i| i.source == source_of(f.forge)).cloned().collect());
-                errors.push(ForgeError { forge: f.forge, message: format!("{} issues check failed: {e}", f.forge.label()) });
+                lists.push(previous.iter().filter(|i| i.source == f.source).cloned().collect());
+                let message = if f.source == "github" || f.source == "gitlab" { format!("{} issues check failed: {e}", f.label) } else { format!("{}: {e}", f.label) };
+                errors.push(SourceError { source: f.source, message });
             }
         }
     }
@@ -174,9 +189,50 @@ mod tests {
     fn a_failed_service_keeps_its_last_items_and_says_so() {
         let gh = WorkItem { key: "github:a/b#1".into(), source: "github".into(), ..test_item() };
         let gl = WorkItem { key: "gitlab:g/r#2".into(), source: "gitlab".into(), ..test_item() };
-        let fetched = vec![Fetched { forge: GitProvider::Github, result: Err("could not reach github.com: timeout".into()) }, Fetched { forge: GitProvider::Gitlab, result: Ok(vec![]) }];
+        let fetched = vec![
+            Fetched { source: "github".into(), label: "GitHub".into(), result: Err("could not reach github.com: timeout".into()) },
+            Fetched { source: "gitlab".into(), label: "GitLab".into(), result: Ok(vec![]) },
+        ];
         let (items, errors) = combine(&[gh.clone(), gl], fetched, vec![]);
         assert_eq!(items, vec![gh]);
         assert_eq!(errors[0].message, "GitHub issues check failed: could not reach github.com: timeout");
+    }
+
+    #[test]
+    fn a_failed_tool_keeps_its_last_items_and_names_itself() {
+        let old = WorkItem { key: "custom-1:ENG-1".into(), source: "custom-1".into(), ..test_item() };
+        let fetched = vec![Fetched { source: "custom-1".into(), label: "Linear (mine-only)".into(), result: Err("the command exited with status 1".into()) }];
+        let (items, errors) = combine(&[old.clone()], fetched, vec![]);
+        assert_eq!(items, vec![old]);
+        assert_eq!(errors, vec![SourceError { source: "custom-1".into(), message: "Linear (mine-only): the command exited with status 1".into() }]);
+    }
+
+    #[test]
+    fn two_tools_with_the_same_ids_keep_their_own_items() {
+        let item = |key: &str, source: &str| WorkItem { key: key.into(), source: source.into(), ..test_item() };
+        let out = merge(vec![vec![item("custom-1:ENG-1", "custom-1")], vec![item("custom-2:ENG-1", "custom-2")]]);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fetch_asks_the_enabled_tools_with_a_command() {
+        use crate::forge::fake::FakeHttp;
+        let tool = |id: &str, enabled: bool, cmd: &str| CustomTool { id: id.into(), name: id.into(), enabled, list_command: cmd.into(), ..Default::default() };
+        let cfg = WorkItemsConfig {
+            custom: vec![
+                tool("custom-1", true, r#"echo '{"items":[{"id":"A-1","title":"t","url":"https://x.test/1"}]}'"#),
+                tool("custom-2", false, "echo nope"),
+                tool("custom-3", true, "  "),
+            ],
+            ..Default::default()
+        };
+        let http = FakeHttp::new(vec![]);
+        let fetched = fetch(&[], &cfg, &http, &[], &|t, s| custom::list_with(t, s, &|c| vec!["sh".into(), "-c".into(), c.into()]));
+        assert_eq!(fetched.len(), 1);
+        assert_eq!(fetched[0].source, "custom-1");
+        let items = fetched[0].result.as_ref().unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].id.contains("A-1") || items[0].key.contains("A-1"), "{:?}", items[0]);
     }
 }

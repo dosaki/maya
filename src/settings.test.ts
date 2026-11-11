@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
 import { RUNNING_VERSION } from "./release-notes";
-import { SETTINGS_GROUPS, gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { SETTINGS_GROUPS, gitConnections, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -1526,7 +1526,7 @@ describe("Settings → Work Items", () => {
 
   it("offers only the status labels for On Start", () => {
     const items = { enabled: true, rules: [], statusLabels: ["todo", "doing"], startStatus: "doing", trackerRepos: [] };
-    const root = renderSettings(wiModel({ workItems: { github: items, gitlab: items, prompt: "" } }), handlers());
+    const root = renderSettings(wiModel({ workItems: { github: items, gitlab: items, prompt: "", custom: [] } }), handlers());
     const sel = box(root, "github").querySelector<HTMLSelectElement>("select[name=wi-startStatus]")!;
     expect([...sel.options].map((o) => o.textContent)).toEqual(["Leave as it is", "todo", "doing"]);
     expect(sel.value).toBe("doing");
@@ -1541,5 +1541,84 @@ describe("Settings → Work Items", () => {
     expect(h.onWorkPrompt).toHaveBeenCalledWith("Do {id}");
     expect(box(root, "github").textContent).toContain("Issues: read and write");
     expect(box(root, "gitlab").textContent).toContain("the api scope");
+  });
+});
+
+describe("Settings → Work Items custom tools", () => {
+  const items = { enabled: false, rules: [], statusLabels: [], startStatus: "", trackerRepos: [] };
+  const t1 = { id: "custom-1", name: "Linear", enabled: true, listCommand: "linear-items", startCommand: "linear-start", me: "tiago" };
+  const t2 = { id: "custom-2", name: "Jira", enabled: false, listCommand: "jira-items", startCommand: "", me: "" };
+  const model = (): SettingsModel => ({ ...voiceBase, settingsGroup: "workItems", workItems: { github: items, gitlab: items, prompt: "", custom: [t1, t2] } });
+  const boxes = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>(".settings__custom")];
+  const input = (root: HTMLElement, n: string) => root.querySelector<HTMLInputElement>(`input[name=${n}]`)!;
+
+  it("shows each custom tool with its commands and an example", () => {
+    const root = renderSettings(model(), handlers());
+    const b = boxes(root);
+    expect(b.map((x) => x.dataset.tool)).toEqual(["custom-1", "custom-2"]);
+    expect(input(root, "ct-0-enabled").checked).toBe(true);
+    expect(input(root, "ct-1-enabled").checked).toBe(false);
+    expect(input(root, "ct-0-name").value).toBe("Linear");
+    expect(input(root, "ct-0-name").placeholder).toBe("Linear (mine-only)");
+    expect(input(root, "ct-0-list").value).toBe("linear-items");
+    expect(input(root, "ct-0-start").value).toBe("linear-start");
+    expect(input(root, "ct-0-me").value).toBe("tiago");
+    expect(input(root, "ct-1-list").value).toBe("jira-items");
+    expect(b[0].textContent).toContain("Start asks before taking over an item assigned to someone else. Blank: it never asks.");
+    expect(b[0].querySelector("details > summary")!.textContent).toBe("Show the output format and an example script");
+    expect(b[0].querySelectorAll("details pre").length).toBe(2);
+    expect(b[0].querySelector("details")!.textContent).toContain("must finish within 30 seconds");
+    expect(b[0].querySelectorAll("details .settings__hint")[1].textContent).toBe("The on-start command runs when you press Start, with the item's JSON on its input, to assign or move it in your tool. On macOS and Linux, anything a command leaves running is stopped when it ends.");
+    expect(input(root, "ct-0-enabled").getAttribute("aria-label")).toBe("Use this tool");
+    expect(input(root, "ct-0-name").getAttribute("aria-label")).toBe("Tool name");
+  });
+
+  it("adds, edits and removes custom tools", () => {
+    const h = { ...handlers(), onCustomTools: vi.fn() };
+    const root = renderSettings(model(), h);
+    root.querySelector<HTMLButtonElement>("[data-action=ct-add]")!.click();
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([t1, t2, { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]);
+    const list = input(root, "ct-0-list");
+    list.value = " linear-items2 ";
+    list.dispatchEvent(new Event("change"));
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([{ ...t1, listCommand: "linear-items2" }, t2]);
+    expect(list.value).toBe("linear-items2");
+    const on = input(root, "ct-1-enabled");
+    on.checked = true;
+    on.dispatchEvent(new Event("change"));
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([{ ...t1, listCommand: "linear-items2" }, { ...t2, enabled: true }]);
+    boxes(root)[0].querySelector<HTMLButtonElement>("[data-action=ct-remove]")!.click();
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([{ ...t2, enabled: true }]);
+  });
+
+  it("builds each save from what the page shows, not from the last drawing", () => {
+    const h = { ...handlers(), onCustomTools: vi.fn() };
+    const root = renderSettings(model(), h);
+    const list = input(root, "ct-1-list");
+    list.value = " jira-2 ";
+    list.dispatchEvent(new Event("change"));
+    const on = input(root, "ct-1-enabled");
+    on.checked = true;
+    on.dispatchEvent(new Event("change"));
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([t1, { ...t2, listCommand: "jira-2", enabled: true }]);
+    boxes(root)[0].querySelector<HTMLButtonElement>("[data-action=ct-remove]")!.click();
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([{ ...t2, listCommand: "jira-2", enabled: true }]);
+    root.querySelector<HTMLButtonElement>("[data-action=ct-add]")!.click();
+    expect(h.onCustomTools.mock.lastCall![0]).toEqual([t1, { ...t2, listCommand: "jira-2", enabled: true }, { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]);
+  });
+
+  it("keeps the custom boxes enabled when Git is off", () => {
+    const root = renderSettings({ ...model(), git: gitConnections(null) }, handlers());
+    const fields = [...root.querySelectorAll<HTMLInputElement | HTMLButtonElement>(".settings__custom input, .settings__custom button, [data-action=ct-add]")];
+    expect(fields.length).toBeGreaterThan(10);
+    expect(fields.every((f) => !f.disabled)).toBe(true);
+  });
+});
+
+describe("workItemsConfig custom tools", () => {
+  it("defaults to none and keeps the ones given", () => {
+    expect(workItemsConfig(null).custom).toEqual([]);
+    const t = { id: "custom-1", name: "Jira", enabled: true, listCommand: "ls", startCommand: "", me: "" };
+    expect(workItemsConfig({ custom: [t] }).custom).toEqual([t]);
   });
 });

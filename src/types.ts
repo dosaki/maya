@@ -377,10 +377,18 @@ export interface Started {
   startedAt: number;
 }
 
+/** One line above the Issues tab's areas. */
+export interface SourceError {
+  source: string;
+  message: string;
+}
+
 export interface WorkItemsState {
   items: WorkItem[];
   started: Started[];
-  errors: ForgeError[];
+  errors: SourceError[];
+  /** Each configured custom tool's id and label. */
+  sourceLabels: Record<string, string>;
   /** No Git connection is switched on. */
   gitOff: boolean;
   /** No source for issues is switched on. */
@@ -427,9 +435,20 @@ export interface ForgeItems {
   trackerRepos: string[];
 }
 
+/** A user's own script that lists work items. */
+export interface CustomTool {
+  id: string;
+  name: string;
+  enabled: boolean;
+  listCommand: string;
+  startCommand: string;
+  me: string;
+}
+
 /** `workItems` in the config; an older config lacks it. */
 export interface WorkItemsConfig {
   github: ForgeItems;
   gitlab: ForgeItems;
   prompt: string;
+  custom: CustomTool[];
 }
