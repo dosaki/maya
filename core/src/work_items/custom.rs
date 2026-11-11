@@ -56,6 +56,7 @@ fn kill_all(child: &mut std::process::Child) {
 }
 
 /// Runs `argv` with `stdin` (None: closed) and returns its stdout, or the error line.
+/// Anything the command leaves running is stopped when it exits.
 pub fn run(argv: &[String], stdin: Option<&str>, timeout: Duration) -> Result<String, String> {
     let (program, args) = argv.split_first().ok_or("the command could not run: no command")?;
     let mut cmd = crate::command(program);
@@ -73,7 +74,11 @@ pub fn run(argv: &[String], stdin: Option<&str>, timeout: Duration) -> Result<St
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+        // A session of its own: no controlling terminal for an interactive shell to
+        // stop on, and its group id is the pid, so one kill reaches everything.
+        unsafe {
+            cmd.pre_exec(|| if libc::setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+        }
     }
     crate::launch::scrub_appimage_env(&mut cmd);
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -118,13 +123,17 @@ pub fn run(argv: &[String], stdin: Option<&str>, timeout: Duration) -> Result<St
             }
         }
     };
-    // A grandchild may still hold the pipes open: wait for them only until the deadline.
-    let wait = || deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(100));
-    let (stdout, overflow) = out_rx.recv_timeout(wait()).unwrap_or_default();
+    // Stop what the command left running, so its pipes close.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let timed_out = || format!("the command did not finish within {} s", TIMEOUT.as_secs());
+    let (stdout, overflow) = out_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).map_err(|_| timed_out())?;
     if overflow {
         return Err("the command printed more than 4 MB".into());
     }
-    let stderr = err_rx.recv_timeout(Duration::from_millis(100)).unwrap_or_default();
+    let stderr = err_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())).map_err(|_| timed_out())?;
     match status.code() {
         Some(0) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
         Some(code) => {
@@ -172,6 +181,34 @@ mod tests {
         let start = Instant::now();
         assert_eq!(run(&sh("sleep 30 & sleep 30"), None, Duration::from_millis(300)), Err("the command did not finish within 30 s".to_string()));
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_background_job_does_not_hold_up_or_empty_the_answer() {
+        let start = Instant::now();
+        assert_eq!(run(&sh("echo '{\"items\":[]}'; sleep 30 &"), None, TIMEOUT), Ok("{\"items\":[]}\n".to_string()));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timeout_really_stops_the_children() {
+        let dir = std::env::temp_dir().join(format!("maya-custom-kill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = format!("cd '{}' && sleep 30 & echo $! > '{}/pid'; sleep 30", dir.display(), dir.display());
+        assert!(run(&sh(&script), None, Duration::from_millis(500)).is_err());
+        let pid: i32 = std::fs::read_to_string(dir.join("pid")).unwrap().trim().parse().unwrap();
+        let mut gone = false;
+        for _ in 0..20 {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone, "the background job is still alive");
     }
 
     #[cfg(unix)]
