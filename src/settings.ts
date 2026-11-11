@@ -1287,12 +1287,25 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
 
   const customTools = workItemsConfigNow.custom ?? [];
+  /** The custom tools as the page shows them now, not as they were when it was drawn. */
+  const readCustom = (): CustomTool[] =>
+    [...workItems.querySelectorAll<HTMLElement>(".settings__custom")].map((b) => {
+      const v = (suffix: string) => (b.querySelector<HTMLInputElement>(`input[name$="-${suffix}"]`)?.value ?? "").trim();
+      return {
+        id: b.dataset.tool ?? "",
+        name: v("name"),
+        enabled: b.querySelector<HTMLInputElement>('input[name$="-enabled"]')?.checked ?? true,
+        listCommand: v("list"),
+        startCommand: v("start"),
+        me: v("me"),
+      };
+    });
   const sendCustom = (tools: CustomTool[]) => h.onCustomTools?.(tools);
   customTools.forEach((tool, i) => {
     const box = document.createElement("div");
     box.className = "settings__git settings__custom";
     box.dataset.tool = tool.id;
-    const change = (patch: Partial<CustomTool>) => sendCustom(customTools.map((t, j) => (j === i ? { ...t, ...patch } : t)));
+    const change = () => sendCustom(readCustom());
 
     const head = document.createElement("div");
     head.className = "settings__check";
@@ -1300,7 +1313,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     on.type = "checkbox";
     on.name = `ct-${i}-enabled`;
     on.checked = tool.enabled;
-    on.addEventListener("change", () => change({ enabled: on.checked }));
+    on.addEventListener("change", change);
     const name = document.createElement("input");
     name.type = "text";
     name.name = `ct-${i}-name`;
@@ -1308,7 +1321,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     name.value = tool.name;
     name.addEventListener("change", () => {
       name.value = name.value.trim();
-      change({ name: name.value });
+      change();
     });
     const remove = document.createElement("button");
     remove.type = "button";
@@ -1316,7 +1329,10 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     remove.dataset.action = "ct-remove";
     remove.setAttribute("aria-label", "Remove custom tool");
     remove.textContent = "✕";
-    remove.addEventListener("click", () => sendCustom(customTools.filter((_, j) => j !== i)));
+    remove.addEventListener("click", () => {
+      const at = [...workItems.querySelectorAll(".settings__custom")].indexOf(box);
+      sendCustom(readCustom().filter((_, j) => j !== at));
+    });
     head.append(on, name, remove);
     box.append(head);
 
@@ -1329,7 +1345,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       el.value = tool[key];
       el.addEventListener("change", () => {
         el.value = el.value.trim();
-        change({ [key]: el.value });
+        change();
       });
       l.append(el);
       box.append(l);
@@ -1364,7 +1380,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   addTool.className = "settings__link";
   addTool.dataset.action = "ct-add";
   addTool.textContent = "+ Add New";
-  addTool.addEventListener("click", () => sendCustom([...customTools, { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]));
+  addTool.addEventListener("click", () => sendCustom([...readCustom(), { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]));
   workItems.append(addTool);
 
   const workLabel = document.createElement("label");

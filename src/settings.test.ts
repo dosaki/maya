@@ -1583,9 +1583,32 @@ describe("Settings → Work Items custom tools", () => {
     const on = input(root, "ct-1-enabled");
     on.checked = true;
     on.dispatchEvent(new Event("change"));
-    expect(h.onCustomTools).toHaveBeenLastCalledWith([t1, { ...t2, enabled: true }]);
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([{ ...t1, listCommand: "linear-items2" }, { ...t2, enabled: true }]);
     boxes(root)[0].querySelector<HTMLButtonElement>("[data-action=ct-remove]")!.click();
-    expect(h.onCustomTools).toHaveBeenLastCalledWith([t2]);
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([{ ...t2, enabled: true }]);
+  });
+
+  it("builds each save from what the page shows, not from the last drawing", () => {
+    const h = { ...handlers(), onCustomTools: vi.fn() };
+    const root = renderSettings(model(), h);
+    const list = input(root, "ct-1-list");
+    list.value = " jira-2 ";
+    list.dispatchEvent(new Event("change"));
+    const on = input(root, "ct-1-enabled");
+    on.checked = true;
+    on.dispatchEvent(new Event("change"));
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([t1, { ...t2, listCommand: "jira-2", enabled: true }]);
+    boxes(root)[0].querySelector<HTMLButtonElement>("[data-action=ct-remove]")!.click();
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([{ ...t2, listCommand: "jira-2", enabled: true }]);
+    root.querySelector<HTMLButtonElement>("[data-action=ct-add]")!.click();
+    expect(h.onCustomTools.mock.lastCall![0]).toEqual([t1, { ...t2, listCommand: "jira-2", enabled: true }, { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]);
+  });
+
+  it("keeps the custom boxes enabled when Git is off", () => {
+    const root = renderSettings({ ...model(), git: gitConnections(null) }, handlers());
+    const fields = [...root.querySelectorAll<HTMLInputElement | HTMLButtonElement>(".settings__custom input, .settings__custom button, [data-action=ct-add]")];
+    expect(fields.length).toBeGreaterThan(10);
+    expect(fields.every((f) => !f.disabled)).toBe(true);
   });
 });
 
