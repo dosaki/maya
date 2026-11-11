@@ -1568,7 +1568,7 @@ describe("Settings → Work Items custom tools", () => {
     expect(b[0].querySelector("details > summary")!.textContent).toBe("Show the output format and an example script");
     expect(b[0].querySelectorAll("details pre").length).toBe(2);
     expect(b[0].querySelector("details")!.textContent).toContain("must finish within 30 seconds");
-    expect(b[0].querySelectorAll("details .settings__hint")[1].textContent).toBe("The on-start command runs when you press Start, with the item's JSON on its input, to assign or move it in your tool. Anything a command leaves running is stopped when it ends.");
+    expect(b[0].querySelectorAll("details .settings__hint")[1].textContent).toBe("The on-start command runs when you press Start, with the item's JSON on its input, to assign or move it in your tool. On macOS and Linux, anything a command leaves running is stopped when it ends.");
     expect(input(root, "ct-0-enabled").getAttribute("aria-label")).toBe("Use this tool");
     expect(input(root, "ct-0-name").getAttribute("aria-label")).toBe("Tool name");
   });

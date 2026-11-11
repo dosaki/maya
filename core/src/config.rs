@@ -498,6 +498,28 @@ pub fn validate_work_items(w: &WorkItemsConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Gives each custom tool a unique `custom-<n>` id: a valid id is kept (its
+/// first holder only), and every other tool gets a new one numbered from
+/// the clock, never below a kept one, so a new tool never takes the id of a
+/// removed tool whose started items are still on file.
+fn assign_tool_ids(tools: &mut [CustomTool], now_ms: u64) {
+    let valid = |id: &str| id.strip_prefix("custom-").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    let mut used: Vec<String> = Vec::new();
+    for t in tools.iter_mut() {
+        if valid(&t.id) && !used.contains(&t.id) {
+            used.push(t.id.clone());
+        } else {
+            t.id.clear();
+        }
+    }
+    let kept = used.iter().filter_map(|id| id["custom-".len()..].parse::<u64>().ok()).max().unwrap_or(0);
+    let mut n = kept.max(now_ms.saturating_sub(1));
+    for t in tools.iter_mut().filter(|t| t.id.is_empty()) {
+        n += 1;
+        t.id = format!("custom-{n}");
+    }
+}
+
 /// A repository as typed: trimmed, without a pasted `https://<host>/` or a
 /// trailing `.git`.
 fn clean_repo(r: &str) -> String {
@@ -776,23 +798,8 @@ impl Config {
             clean_all(&mut f.tracker_repos, clean_repo);
             f.start_status = f.start_status.as_deref().map(str::trim).filter(|s| f.status_labels.iter().any(|l| l == s)).map(String::from);
         }
-        let valid = |id: &str| id.strip_prefix("custom-").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
-        let mut used: Vec<String> = Vec::new();
+        assign_tool_ids(&mut w.custom, crate::now_ms());
         for t in &mut w.custom {
-            if valid(&t.id) && !used.contains(&t.id) {
-                used.push(t.id.clone());
-            } else {
-                t.id.clear();
-            }
-        }
-        // A new id comes after every kept one, so a new tool never takes a
-        // removed tool's id (its started items would show under the new one).
-        let mut n = used.iter().filter_map(|id| id["custom-".len()..].parse::<u64>().ok()).max().unwrap_or(0);
-        for t in &mut w.custom {
-            if t.id.is_empty() {
-                n += 1;
-                t.id = format!("custom-{n}");
-            }
             for f in [&mut t.name, &mut t.list_command, &mut t.start_command, &mut t.me] {
                 *f = f.trim().to_string();
             }
@@ -915,19 +922,28 @@ mod tests {
         c.work_items.custom = ["", "custom-2", "custom-2", "Bad Id!"].iter().map(|id| CustomTool { id: id.to_string(), name: " N ".into(), list_command: " ls ".into(), start_command: " go ".into(), me: " me ".into(), ..Default::default() }).collect();
         c.normalize_work_items();
         let ids: Vec<&str> = c.work_items.custom.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, ["custom-3", "custom-2", "custom-4", "custom-5"]);
+        assert_eq!(ids[1], "custom-2", "a valid id is kept");
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 4, "{ids:?}");
+        assert!(ids.iter().all(|id| id.strip_prefix("custom-").is_some_and(|n| n.parse::<u64>().is_ok())), "{ids:?}");
         let t = &c.work_items.custom[0];
         assert_eq!((t.name.as_str(), t.list_command.as_str(), t.start_command.as_str(), t.me.as_str()), ("N", "ls", "go", "me"));
-        c.work_items.custom[0].id = "custom-".into();
-        c.work_items.custom[1].id = "custom-x".into();
-        c.normalize_work_items();
-        assert_eq!(c.work_items.custom[0].id, "custom-6");
-        // A new tool never takes a removed tool's id: ids only grow.
-        for (given, got) in [(["custom-1", ""], ["custom-1", "custom-2"]), (["", "custom-7"], ["custom-8", "custom-7"])] {
-            c.work_items.custom = given.iter().map(|id| CustomTool { id: id.to_string(), ..Default::default() }).collect();
-            c.normalize_work_items();
-            assert_eq!(c.work_items.custom.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), got);
-        }
+    }
+
+    #[test]
+    fn a_new_tool_never_takes_an_id_used_before() {
+        let ids = |given: &[&str], now: u64| {
+            let mut tools: Vec<CustomTool> = given.iter().map(|id| CustomTool { id: id.to_string(), ..Default::default() }).collect();
+            assign_tool_ids(&mut tools, now);
+            tools.into_iter().map(|t| t.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&["", "custom-2", "custom-2", "Bad Id!"], 1000), ["custom-1000", "custom-2", "custom-1001", "custom-1002"]);
+        // custom-2 was removed and custom-1 kept: the new tool is numbered by the clock, not custom-2.
+        assert_eq!(ids(&["custom-1", ""], 1000), ["custom-1", "custom-1000"]);
+        assert_eq!(ids(&["", "custom-7"], 5), ["custom-8", "custom-7"], "never below a kept id");
+        assert_eq!(ids(&["custom-", "custom-x"], 1000), ["custom-1000", "custom-1001"]);
     }
 
     #[test]

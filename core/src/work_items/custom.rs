@@ -232,10 +232,14 @@ pub fn parse_list(stdout: &str, tool: &CustomTool, sites: &[ForgeSite]) -> Resul
 }
 
 /// A repo path without a trailing `.git` and surrounding slashes or spaces; None when empty.
+/// The repository path without `.git` and outer slashes; None when a part of
+/// it could step outside the clones folder (`.`, `..`, an empty part, a
+/// backslash or a control character): a tracker's data is not trusted.
 fn clean_path(path: &str) -> Option<String> {
     let p = path.trim().trim_matches('/');
     let p = p.strip_suffix(".git").unwrap_or(p).trim_matches('/');
-    (!p.is_empty()).then(|| p.to_string())
+    let safe = |part: &str| !part.is_empty() && part != "." && part != ".." && !part.chars().any(|c| c == '\\' || c.is_control());
+    (!p.is_empty() && p.split('/').all(safe)).then(|| p.to_string())
 }
 
 /// Where `repo` (as the script spelled it) lives, among the switched-on sites; None when Maya cannot place it.
@@ -457,6 +461,15 @@ mod tests {
         assert_eq!(items[0].labels, ["a"]);
         assert!(items[0].assignees.is_empty());
         assert_eq!(items[0].updated_at, "");
+    }
+
+    #[test]
+    fn a_repo_that_could_leave_the_clones_folder_is_not_placed() {
+        let s = both();
+        for bad in ["acme/..", "../acme", "github:acme/..", "github:acme/./web", "acme//web", "gitlab:grp\\..\\x", "acme\\..\\..\\x", "acme/we\u{0}b", "git@github.com:acme/...git", "https://github.com/acme/../x.git"] {
+            assert_eq!(repo_of(bad, &s), None, "{bad}");
+        }
+        assert_eq!(repo_of("github:acme/web.app", &s), Some(ItemRepo { forge: GitProvider::Github, path: "acme/web.app".into() }), "a dot inside a name is fine");
     }
 
     #[test]
