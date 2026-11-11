@@ -330,7 +330,7 @@ export function gitConnections(raw: GitConnectionJson[] | null | undefined): Git
 /** The Work Items settings as the Rust side defaults them: one rule for my issues. */
 export function workItemsConfig(raw: Partial<WorkItemsConfig> | null | undefined): WorkItemsConfig {
   const forge = (f?: ForgeItems): ForgeItems => f ?? { enabled: true, rules: [{ assignee: { kind: "me" }, labels: [], repos: [] }], statusLabels: [], startStatus: null, trackerRepos: [] };
-  return { github: forge(raw?.github), gitlab: forge(raw?.gitlab), prompt: raw?.prompt ?? "" };
+  return { github: forge(raw?.github), gitlab: forge(raw?.gitlab), prompt: raw?.prompt ?? "", custom: raw?.custom ?? [] };
 }
 
 const WORK_ITEMS_HINT: Record<GitProvider, string> = {

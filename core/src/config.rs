@@ -422,6 +422,34 @@ impl Default for ForgeItems {
     }
 }
 
+/// A user's own script that lists work items.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomTool {
+    /// `custom-<n>`: the items' `source` and the first part of their key.
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub list_command: String,
+    /// Blank: Start runs nothing.
+    #[serde(default)]
+    pub start_command: String,
+    /// The user's name in this tool; blank asks no takeover question.
+    #[serde(default)]
+    pub me: String,
+}
+
+impl CustomTool {
+    /// The name, or "Custom tool" when it is blank.
+    pub fn label(&self) -> &str {
+        if self.name.is_empty() { "Custom tool" } else { &self.name }
+    }
+}
+
 /// The Issues tab's settings.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -430,9 +458,16 @@ pub struct WorkItemsConfig {
     pub gitlab: ForgeItems,
     #[serde(default)]
     pub prompt: String,
+    #[serde(default)]
+    pub custom: Vec<CustomTool>,
 }
 
 impl WorkItemsConfig {
+    /// The custom tool with this id, if there is one.
+    pub fn tool(&self, source: &str) -> Option<&CustomTool> {
+        self.custom.iter().find(|t| t.id == source)
+    }
+
     pub fn for_forge(&self, p: GitProvider) -> &ForgeItems {
         match p {
             GitProvider::Github => &self.github,
@@ -741,6 +776,28 @@ impl Config {
             clean_all(&mut f.tracker_repos, clean_repo);
             f.start_status = f.start_status.as_deref().map(str::trim).filter(|s| f.status_labels.iter().any(|l| l == s)).map(String::from);
         }
+        let valid = |id: &str| id.strip_prefix("custom-").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        let mut used: Vec<String> = Vec::new();
+        for t in &mut w.custom {
+            if valid(&t.id) && !used.contains(&t.id) {
+                used.push(t.id.clone());
+            } else {
+                t.id.clear();
+            }
+        }
+        let mut n = 1;
+        for t in &mut w.custom {
+            if t.id.is_empty() {
+                while used.contains(&format!("custom-{n}")) {
+                    n += 1;
+                }
+                t.id = format!("custom-{n}");
+                used.push(t.id.clone());
+            }
+            for f in [&mut t.name, &mut t.list_command, &mut t.start_command, &mut t.me] {
+                *f = f.trim().to_string();
+            }
+        }
     }
 }
 
@@ -840,6 +897,43 @@ mod tests {
         }
         let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":5}"#).unwrap();
         assert_eq!(older.work_items, WorkItemsConfig::default(), "a file from before 0.51 reads as the defaults");
+    }
+
+    #[test]
+    fn custom_tools_default_to_none_and_round_trip_in_camel_case() {
+        assert!(Config::default().work_items.custom.is_empty());
+        let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":5,"workItems":{"github":{"enabled":true,"rules":[]},"gitlab":{"enabled":true,"rules":[]}}}"#).unwrap();
+        assert!(older.work_items.custom.is_empty(), "a file from before 0.53 has no custom tools");
+        let t = CustomTool { id: "custom-1".into(), name: "Jira".into(), enabled: true, list_command: "jira-list".into(), start_command: "jira-start".into(), me: "maria".into() };
+        let text = serde_json::to_string(&t).unwrap();
+        assert!(text.contains(r#""listCommand":"jira-list""#) && text.contains(r#""startCommand":"jira-start""#) && text.contains(r#""me":"maria""#), "{text}");
+        assert_eq!(serde_json::from_str::<CustomTool>(&text).unwrap(), t);
+    }
+
+    #[test]
+    fn normalize_gives_each_tool_a_unique_id_and_trims() {
+        let mut c = Config::default();
+        c.work_items.custom = ["", "custom-2", "custom-2", "Bad Id!"].iter().map(|id| CustomTool { id: id.to_string(), name: " N ".into(), list_command: " ls ".into(), start_command: " go ".into(), me: " me ".into(), ..Default::default() }).collect();
+        c.normalize_work_items();
+        let ids: Vec<&str> = c.work_items.custom.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["custom-1", "custom-2", "custom-3", "custom-4"]);
+        let t = &c.work_items.custom[0];
+        assert_eq!((t.name.as_str(), t.list_command.as_str(), t.start_command.as_str(), t.me.as_str()), ("N", "ls", "go", "me"));
+        c.work_items.custom[0].id = "custom-".into();
+        c.work_items.custom[1].id = "custom-x".into();
+        c.normalize_work_items();
+        assert_eq!(c.work_items.custom[0].id, "custom-1");
+    }
+
+    #[test]
+    fn a_tool_is_found_by_its_id_and_labelled_by_its_name() {
+        let mut w = WorkItemsConfig::default();
+        w.custom.push(CustomTool { id: "custom-1".into(), ..Default::default() });
+        assert_eq!(w.tool("custom-1").map(|t| t.id.as_str()), Some("custom-1"));
+        assert!(w.tool("github").is_none());
+        assert_eq!(w.custom[0].label(), "Custom tool");
+        w.custom[0].name = "Jira".into();
+        assert_eq!(w.custom[0].label(), "Jira");
     }
 
     #[test]

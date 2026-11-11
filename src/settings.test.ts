@@ -1526,7 +1526,7 @@ describe("Settings → Work Items", () => {
 
   it("offers only the status labels for On Start", () => {
     const items = { enabled: true, rules: [], statusLabels: ["todo", "doing"], startStatus: "doing", trackerRepos: [] };
-    const root = renderSettings(wiModel({ workItems: { github: items, gitlab: items, prompt: "" } }), handlers());
+    const root = renderSettings(wiModel({ workItems: { github: items, gitlab: items, prompt: "", custom: [] } }), handlers());
     const sel = box(root, "github").querySelector<HTMLSelectElement>("select[name=wi-startStatus]")!;
     expect([...sel.options].map((o) => o.textContent)).toEqual(["Leave as it is", "todo", "doing"]);
     expect(sel.value).toBe("doing");

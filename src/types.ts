@@ -428,8 +428,19 @@ export interface ForgeItems {
 }
 
 /** `workItems` in the config; an older config lacks it. */
+/** A user's own script that lists work items. */
+export interface CustomTool {
+  id: string;
+  name: string;
+  enabled: boolean;
+  listCommand: string;
+  startCommand: string;
+  me: string;
+}
+
 export interface WorkItemsConfig {
   github: ForgeItems;
   gitlab: ForgeItems;
   prompt: string;
+  custom: CustomTool[];
 }
