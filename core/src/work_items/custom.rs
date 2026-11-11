@@ -233,12 +233,14 @@ pub fn parse_list(stdout: &str, tool: &CustomTool, sites: &[ForgeSite]) -> Resul
 
 /// A repo path without a trailing `.git` and surrounding slashes or spaces; None when empty.
 /// The repository path without `.git` and outer slashes; None when a part of
-/// it could step outside the clones folder (`.`, `..`, an empty part, a
-/// backslash or a control character): a tracker's data is not trusted.
+/// it is not a plain repository or group name (letters, digits, `.`, `_`,
+/// `-`; never `.` or `..` alone), since a tracker's data is not trusted and
+/// the last part names a folder under the clones directory (`C:` or `..`
+/// there would leave it).
 fn clean_path(path: &str) -> Option<String> {
     let p = path.trim().trim_matches('/');
     let p = p.strip_suffix(".git").unwrap_or(p).trim_matches('/');
-    let safe = |part: &str| !part.is_empty() && part != "." && part != ".." && !part.chars().any(|c| c == '\\' || c.is_control());
+    let safe = |part: &str| !part.is_empty() && part != "." && part != ".." && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
     (!p.is_empty() && p.split('/').all(safe)).then(|| p.to_string())
 }
 
@@ -466,10 +468,11 @@ mod tests {
     #[test]
     fn a_repo_that_could_leave_the_clones_folder_is_not_placed() {
         let s = both();
-        for bad in ["acme/..", "../acme", "github:acme/..", "github:acme/./web", "acme//web", "gitlab:grp\\..\\x", "acme\\..\\..\\x", "acme/we\u{0}b", "git@github.com:acme/...git", "https://github.com/acme/../x.git"] {
+        for bad in ["acme/..", "../acme", "github:acme/..", "github:acme/./web", "acme//web", "gitlab:grp\\..\\x", "acme\\..\\..\\x", "acme/we\u{0}b", "acme/C:", "github:acme/C:x", "acme/we b", "acme/web%2F..", "git@github.com:acme/...git", "https://github.com/acme/../x.git"] {
             assert_eq!(repo_of(bad, &s), None, "{bad}");
         }
         assert_eq!(repo_of("github:acme/web.app", &s), Some(ItemRepo { forge: GitProvider::Github, path: "acme/web.app".into() }), "a dot inside a name is fine");
+        assert_eq!(repo_of("gitlab:grp/sub_group/my-repo.js", &s), Some(ItemRepo { forge: GitProvider::Gitlab, path: "grp/sub_group/my-repo.js".into() }), "subgroups, _ and - are fine");
     }
 
     #[test]
