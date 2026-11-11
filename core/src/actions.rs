@@ -918,8 +918,7 @@ fn work_item_plan(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::w
     if agent != model::Harness::ClaudeCode && !agents().iter().any(|a| a.harness == agent) {
         return Err(format!("{} is not installed on this machine.", launch::label(agent)));
     }
-    let number = item.number.ok_or_else(|| format!("{} has no number to name its folder by.", item.id))?;
-    let target = start::resolve_target(&clones, &site, &repo.path, number, &start::branch_name(item))?;
+    let target = start::resolve_target(&clones, &site, &repo.path, &start::item_tag(item), &start::branch_name(item))?;
     if is_busy_folder(&target.dir, &live) {
         return Err(format!("A session is already working on {}.", item.id));
     }
@@ -927,7 +926,7 @@ fn work_item_plan(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::w
 }
 
 /// The refusals `start_work_item` would give before it changes anything:
-/// the service off, the agent missing, no number, no place for the
+/// the service off, the agent missing, no place for the
 /// worktree, or a session already in its folder. Start asks this before it
 /// writes to the tracker.
 pub fn work_item_preflight(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::work_items::ItemRepo) -> Result<(), String> {
@@ -1776,6 +1775,24 @@ mod tests {
         assert!(std::fs::read_to_string(file).unwrap().starts_with("Work on acme/api#412: Login times out (https://github.com/acme/api/issues/412)."));
         drop(calls);
         assert!(store.lock().unwrap().has_pending_name_for_test("issue acme/api#412"), "the name waits for the Codex session");
+    }
+
+    #[test]
+    fn start_work_item_opens_a_custom_item_by_its_id() {
+        let (_dir, store, clones) = store_reviewing_in_clones();
+        store.lock().unwrap().config.agent = Some(Harness::Codex);
+        let store = with_agents(store, vec![agents::claude(), crate::agents::info_for(Harness::Codex, None)]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let (issue, repo) = api_issue();
+        let item = crate::work_items::WorkItem { key: "custom-1:ENG-1204".into(), source: "custom-1".into(), id: "ENG-1204".into(), number: None, url: "https://tracker.example/ENG-1204".into(), ..issue };
+        let folder = start_work_item(&l, &item, &repo).unwrap();
+        assert_eq!(PathBuf::from(&folder), clones.join("api-issue-eng-1204"));
+        let calls = fake.calls.lock().unwrap();
+        let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
+        assert!(command.contains(&format!("worktree add -b issue-eng-1204-login-times-out '{}' 'origin/HEAD' && ", clones.join("api-issue-eng-1204").display())), "{command}");
+        drop(calls);
+        assert!(store.lock().unwrap().has_pending_name_for_test("issue ENG-1204"), "the session is named by the item's id");
     }
 
     #[cfg(unix)]

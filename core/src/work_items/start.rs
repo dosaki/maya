@@ -13,7 +13,7 @@ use std::process::Stdio;
 pub struct WorkTarget {
     /// The one clone of the repository, shared with reviews.
     pub clone_dir: PathBuf,
-    /// Where the session works: `<clone folder name>-issue-<number>`.
+    /// Where the session works: `<clone folder name>-issue-<tag>`.
     pub dir: PathBuf,
     pub branch: String,
     /// `clone_dir` does not exist yet.
@@ -27,14 +27,19 @@ pub struct WorkTarget {
 /// The most characters a branch name has, `issue-` included.
 const BRANCH_MAX: usize = 40;
 
-/// `issue-<number>-<title as a slug>`, at most 40 characters: only the
+/// The folder's and branch's tag for an item: its number, else its id as a
+/// slug (`worktree::branch_slug(None, id)`).
+pub fn item_tag(item: &WorkItem) -> String {
+    item.number.map_or_else(|| crate::worktree::branch_slug(None, &item.id), |n| n.to_string())
+}
+
+/// `issue-<tag>-<title as a slug>`, at most 40 characters: only the
 /// title is cut, so items of one repository never share a branch however
-/// long its path. With no number the id's slug stands in for it; a title
-/// with nothing to slug leaves `issue-<number>`.
+/// long its path. The tag is the item's number, or its id's slug when it
+/// has none; a title with nothing to slug leaves `issue-<tag>`.
 pub fn branch_name(item: &WorkItem) -> String {
     use crate::worktree::branch_slug;
-    let number = item.number.map_or_else(|| branch_slug(None, &item.id), |n| n.to_string());
-    let head = format!("issue-{number}");
+    let head = format!("issue-{}", item_tag(item));
     let has_title = item.title.chars().any(|c| c.is_ascii_alphanumeric());
     let name = if has_title { format!("{head}-{}", branch_slug(None, &item.title)) } else { head };
     // Everything is ASCII, so cutting at a byte is cutting at a character.
@@ -55,12 +60,12 @@ fn has_branch(clone_dir: &Path, branch: &str) -> bool {
             .is_ok_and(|s| s.success())
 }
 
-/// Where `repo`'s item `number` is worked on under `clones_root`: the clone
-/// reviews use, and `<clone folder name>-issue-<number>` beside it. A folder
-/// of that name that is not a worktree of the clone is refused.
-pub fn resolve_target(clones_root: &Path, site: &ForgeSite, repo: &str, number: u64, branch: &str) -> Result<WorkTarget, String> {
+/// Where `repo`'s item tagged `tag` (see `item_tag`) is worked on under
+/// `clones_root`: the clone reviews use, and `<clone folder name>-issue-<tag>`
+/// beside it. A folder of that name that is not a worktree of the clone is refused.
+pub fn resolve_target(clones_root: &Path, site: &ForgeSite, repo: &str, tag: &str, branch: &str) -> Result<WorkTarget, String> {
     let (base, clone_dir) = clone_of(clones_root, site, repo)?;
-    let dir = clones_root.join(format!("{base}-issue-{number}"));
+    let dir = clones_root.join(format!("{base}-issue-{tag}"));
     let worktree_exists = is_worktree_of(&dir, &clone_dir);
     if dir.exists() && !worktree_exists {
         return Err(format!("{} is not a worktree of {repo}; move it or change the clones directory.", dir.display()));
@@ -139,6 +144,20 @@ mod tests {
     }
 
     #[test]
+    fn an_item_without_a_number_is_tagged_by_its_id() {
+        let numbered = WorkItem { id: "acme/api#412".into(), number: Some(412), ..test_item() };
+        assert_eq!(item_tag(&numbered), "412");
+        let custom = WorkItem { id: "ENG-1204".into(), number: None, title: "Export the board".into(), ..test_item() };
+        assert_eq!(item_tag(&custom), "eng-1204");
+        let b = branch_name(&custom);
+        assert!(b.starts_with("issue-eng-1204-"), "{b}");
+        let root = tempfile::tempdir().unwrap();
+        let site = ForgeSite::of(&GitConnection::default_for(GitProvider::Github));
+        let t = resolve_target(root.path(), &site, "acme/api", "eng-1204", &b).unwrap();
+        assert_eq!(t.dir, root.path().join("api-issue-eng-1204"));
+    }
+
+    #[test]
     fn items_of_a_repository_with_a_long_path_get_their_own_branches() {
         let item = |id: &str, n: u64, title: &str| WorkItem { id: id.into(), number: Some(n), title: title.into(), ..test_item() };
         let a = branch_name(&item("TheKeyholdingCompany/coral-boards#123", 123, "Fix login when the session cookie expires overnight"));
@@ -177,7 +196,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("api-issue-412")).unwrap();
         let site = ForgeSite::of(&GitConnection::default_for(GitProvider::Github));
-        let e = resolve_target(root.path(), &site, "acme/api", 412, "issue-x").unwrap_err();
+        let e = resolve_target(root.path(), &site, "acme/api", "412", "issue-x").unwrap_err();
         assert!(e.ends_with("is not a worktree of acme/api; move it or change the clones directory."), "{e}");
     }
 
@@ -190,7 +209,7 @@ mod tests {
     fn the_target_shares_the_reviews_clone_and_sees_an_old_branch() {
         let root = tempfile::tempdir().unwrap();
         let site = ForgeSite::of(&GitConnection::default_for(GitProvider::Github));
-        let fresh = resolve_target(root.path(), &site, "acme/api", 412, "issue-x").unwrap();
+        let fresh = resolve_target(root.path(), &site, "acme/api", "412", "issue-x").unwrap();
         assert_eq!((fresh.clone_dir.clone(), fresh.dir.clone()), (root.path().join("api"), root.path().join("api-issue-412")));
         assert!(fresh.clone && !fresh.worktree_exists && !fresh.branch_exists, "{fresh:?}");
         let clone = root.path().join("api");
@@ -198,8 +217,8 @@ mod tests {
         for args in [&["init", "-q"][..], &["remote", "add", "origin", "git@github.com:acme/api.git"], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.hooksPath", "/dev/null"], &["commit", "-q", "--allow-empty", "-m", "a"], &["branch", "issue-x"]] {
             git(&clone, args);
         }
-        let again = resolve_target(root.path(), &site, "acme/api", 412, "issue-x").unwrap();
+        let again = resolve_target(root.path(), &site, "acme/api", "412", "issue-x").unwrap();
         assert!(!again.clone && again.branch_exists, "{again:?}");
-        assert!(!resolve_target(root.path(), &site, "acme/api", 412, "issue-y").unwrap().branch_exists);
+        assert!(!resolve_target(root.path(), &site, "acme/api", "412", "issue-y").unwrap().branch_exists);
     }
 }
