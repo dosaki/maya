@@ -5,9 +5,12 @@
 pub mod env;
 pub mod github;
 pub mod gitlab;
+pub mod limits;
 
 use crate::config::{CloneProtocol, GitConnection, GitProvider, TokenSource};
 use crate::reviews::ReviewPr;
+pub use limits::Reply;
+use limits::{Etags, Pauses};
 use serde::Serialize;
 use std::time::Duration;
 
@@ -191,28 +194,57 @@ pub fn encode(s: &str) -> String {
         .collect()
 }
 
-/// HTTP as the forges need it: a status and a body, or why there was none.
+/// HTTP as the forges need it: a reply, or why there was none.
 pub trait Http: Sync {
-    fn get(&self, url: &str, token: &str) -> Result<(u16, String), String>;
-    fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String>;
+    fn get(&self, url: &str, token: &str) -> Result<Reply, String>;
+    fn post_json(&self, url: &str, token: &str, body: &str) -> Result<Reply, String>;
     /// A JSON body sent with `method` ("PATCH" or "PUT").
-    fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<(u16, String), String>;
+    fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<Reply, String>;
 }
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// `Http` over `ureq`, every status handed back rather than raised. It
 /// trusts the certificates the OS trusts, so an internal CA or a
-/// TLS-inspecting proxy works as it does for `git` and `gh`.
+/// TLS-inspecting proxy works as it does for `git` and `gh`. A quota that
+/// is used up is not asked again until it resets, and a GET goes with the
+/// ETag of its last answer, so an unchanged one costs no quota.
 pub struct Ureq {
     agent: ureq::Agent,
+    pauses: Pauses,
+    etags: Etags,
 }
 
 impl Ureq {
     pub fn new() -> Self {
         let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
         let config = ureq::Agent::config_builder().timeout_global(Some(TIMEOUT)).http_status_as_error(false).tls_config(tls).build();
-        Ureq { agent: ureq::Agent::new_with_config(config) }
+        Ureq { agent: ureq::Agent::new_with_config(config), pauses: Pauses::default(), etags: Etags::default() }
+    }
+
+    /// Forgets the pauses and the kept answers: the token may have changed.
+    pub fn forget(&self) {
+        self.pauses.clear();
+        self.etags.clear();
+    }
+
+    /// The reply, noting a used-up quota; and the reply's ETag.
+    fn read(&self, url: &str, r: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<(Reply, Option<String>), String> {
+        let mut resp = r.map_err(|e| e.to_string())?;
+        let status = resp.status().as_u16();
+        let body = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
+        let headers = resp.headers();
+        let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let reset_at = self.pauses.note(url, status, &body, &header, crate::now_ms()).filter(|_| !(200..300).contains(&status));
+        Ok((Reply { status, body, reset_at }, header("etag")))
+    }
+
+    /// The reply, unless the quota `url` draws on is used up.
+    fn send(&self, url: &str, call: impl FnOnce() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<Reply, String> {
+        if let Some(until) = self.pauses.until(url, crate::now_ms()) {
+            return Ok(Reply::waiting(until));
+        }
+        self.read(url, call()).map(|(reply, _)| reply)
     }
 }
 
@@ -222,44 +254,60 @@ impl Default for Ureq {
     }
 }
 
-fn read(r: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<(u16, String), String> {
-    let mut resp = r.map_err(|e| e.to_string())?;
-    let status = resp.status().as_u16();
-    let body = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
-    Ok((status, body))
-}
-
 impl Http for Ureq {
-    fn get(&self, url: &str, token: &str) -> Result<(u16, String), String> {
-        read(self.agent.get(url).header("Authorization", &format!("Bearer {token}")).header("User-Agent", "Maya").header("Accept", "application/json").call())
+    fn get(&self, url: &str, token: &str) -> Result<Reply, String> {
+        if let Some(until) = self.pauses.until(url, crate::now_ms()) {
+            return Ok(Reply::waiting(until));
+        }
+        let mut request = self.agent.get(url).header("Authorization", &format!("Bearer {token}")).header("User-Agent", "Maya").header("Accept", "application/json");
+        let kept = self.etags.tag(token, url);
+        if let Some(tag) = &kept {
+            request = request.header("If-None-Match", tag);
+        }
+        let (mut reply, tag) = self.read(url, request.call())?;
+        match reply.status {
+            304 => {
+                if let Some(body) = kept.and_then(|_| self.etags.body(token, url)) {
+                    reply.status = 200;
+                    reply.body = body;
+                }
+            }
+            200 => {
+                if let Some(tag) = tag {
+                    self.etags.store(token, url, &tag, &reply.body);
+                }
+            }
+            _ => {}
+        }
+        Ok(reply)
     }
 
-    fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
-        read(
+    fn post_json(&self, url: &str, token: &str, body: &str) -> Result<Reply, String> {
+        self.send(url, || {
             self.agent
                 .post(url)
                 .header("Authorization", &format!("Bearer {token}"))
                 .header("User-Agent", "Maya")
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")
-                .send(body),
-        )
+                .send(body)
+        })
     }
 
-    fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+    fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<Reply, String> {
         let request = match method {
             "PATCH" => self.agent.patch(url),
             "PUT" => self.agent.put(url),
             other => return Err(format!("unsupported method {other}")),
         };
-        read(
+        self.send(url, || {
             request
                 .header("Authorization", &format!("Bearer {token}"))
                 .header("User-Agent", "Maya")
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")
-                .send(body),
-        )
+                .send(body)
+        })
     }
 }
 
@@ -288,11 +336,28 @@ pub fn is_refusal(e: &str) -> bool {
     e.starts_with("the token was refused")
 }
 
+const USED_UP: &str = "'s rate limit is used up";
+
+/// Whether `e` says the forge's rate limit is used up.
+pub fn is_rate_limit(e: &str) -> bool {
+    e.contains(USED_UP)
+}
+
+/// Why nothing more is asked of the forge for now, and until when.
+pub fn rate_limit_message(p: GitProvider, reset_at: Option<u64>) -> String {
+    match reset_at {
+        Some(at) => format!("{}{USED_UP} until {}; Maya asks again then.", p.label(), &crate::log::clock(at)[..5]),
+        None => format!("{}{USED_UP}; Maya asks again later.", p.label()),
+    }
+}
+
 /// The body of a 2xx reply, else why not. An error body is scrubbed of
 /// `token` before it is cut, so no part of the token survives the cut.
-fn check(p: GitProvider, status: u16, body: String, token: &str, need: Need) -> Result<String, String> {
+fn check(p: GitProvider, reply: Reply, token: &str, need: Need) -> Result<String, String> {
+    let Reply { status, body, reset_at } = reply;
     match status {
         200..=299 => Ok(body),
+        403 | 429 if status == 429 || reset_at.is_some() || limits::says_rate_limit(&body) => Err(rate_limit_message(p, reset_at)),
         401 | 403 => Err(format!("the token was refused ({status}). It needs the {}.", scopes(p, need))),
         _ => {
             let body = scrub(&body, token);
@@ -303,9 +368,9 @@ fn check(p: GitProvider, status: u16, body: String, token: &str, need: Need) -> 
     }
 }
 
-fn answer(forge: &Forge, r: Result<(u16, String), String>, need: Need) -> Result<String, String> {
+fn answer(forge: &Forge, r: Result<Reply, String>, need: Need) -> Result<String, String> {
     let out = match r {
-        Ok((status, body)) => check(forge.site.provider, status, body, &forge.token, need),
+        Ok(reply) => check(forge.site.provider, reply, &forge.token, need),
         Err(e) => Err(format!("could not reach {}: {e}", forge.site.host())),
     };
     out.map_err(|e| scrub(&e, &forge.token))
@@ -404,20 +469,20 @@ pub(crate) mod fake {
             FakeHttp { replies: replies.into_iter().map(|(n, s, b)| (n, s, b.to_string())).collect(), seen: Mutex::new(Vec::new()) }
         }
 
-        fn answer(&self, url: &str, token: &str, body: Option<&str>, method: Option<&str>) -> Result<(u16, String), String> {
+        fn answer(&self, url: &str, token: &str, body: Option<&str>, method: Option<&str>) -> Result<super::Reply, String> {
             self.seen.lock().unwrap().push((url.to_string(), token.to_string(), body.map(str::to_string), method.map(str::to_string)));
-            self.replies.iter().find(|(n, _, _)| url.contains(n)).map(|(_, s, b)| (*s, b.clone())).ok_or_else(|| "no route".to_string())
+            self.replies.iter().find(|(n, _, _)| url.contains(n)).map(|(_, s, b)| (*s, b.clone()).into()).ok_or_else(|| "no route".to_string())
         }
     }
 
     impl super::Http for FakeHttp {
-        fn get(&self, url: &str, token: &str) -> Result<(u16, String), String> {
+        fn get(&self, url: &str, token: &str) -> Result<super::Reply, String> {
             self.answer(url, token, None, None)
         }
-        fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+        fn post_json(&self, url: &str, token: &str, body: &str) -> Result<super::Reply, String> {
             self.answer(url, token, Some(body), Some("POST"))
         }
-        fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+        fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<super::Reply, String> {
             self.answer(url, token, Some(body), Some(method))
         }
     }
@@ -576,6 +641,97 @@ mod tests {
         let http = fake::FakeHttp::new(vec![("/y", 200, "ok")]);
         assert_eq!(post_json_as(&http, &f, "https://api.github.com/y", &serde_json::json!({"a": 1}), Need::Deployments).unwrap(), "ok");
         assert_eq!(http.seen.lock().unwrap()[0].2.as_deref(), Some(r#"{"a":1}"#));
+    }
+
+    #[test]
+    fn a_used_up_rate_limit_is_not_a_refused_token() {
+        let f = Forge { site: github(), token: "ghp_x".into() };
+        let http = fake::FakeHttp::new(vec![
+            ("/primary", 403, r#"{"message":"API rate limit exceeded for user ID 1957450."}"#),
+            ("/secondary", 403, r#"{"message":"You have exceeded a secondary rate limit."}"#),
+            ("/many", 429, "{}"),
+        ]);
+        for path in ["primary", "secondary", "many"] {
+            let e = get_json_as(&http, &f, &format!("https://api.github.com/{path}"), Need::Deployments).unwrap_err();
+            assert_eq!(e, "GitHub's rate limit is used up; Maya asks again later.");
+            assert!(is_rate_limit(&e) && !is_refusal(&e), "{e}");
+        }
+        assert!(!is_rate_limit("the token was refused (403). It needs the read_api scope."));
+    }
+
+    #[test]
+    fn the_rate_limit_message_says_when_it_resets() {
+        let at = 1_800_000_000_000;
+        let hhmm = crate::log::clock(at)[..5].to_string();
+        assert_eq!(rate_limit_message(GitProvider::Github, Some(at)), format!("GitHub's rate limit is used up until {hhmm}; Maya asks again then."));
+        let f = Forge { site: github(), token: "ghp_x".into() };
+        let r = answer(&f, Ok(Reply::waiting(at)), Need::Reviews).unwrap_err();
+        assert_eq!(r, format!("GitHub's rate limit is used up until {hhmm}; Maya asks again then."));
+    }
+
+    /// A one-request-per-connection HTTP server on localhost: each request
+    /// gets the next canned reply, and its head is kept for the test.
+    fn serve(replies: Vec<String>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let Ok((mut stream, _)) = listener.accept() else { return };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).map_or(false, |n| n == 1) {
+                    head.push(byte[0]);
+                }
+                kept.lock().unwrap().push(String::from_utf8_lossy(&head).to_lowercase());
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        (base, seen)
+    }
+
+    fn http_reply(status: &str, headers: &[&str], body: &str) -> String {
+        let extra: String = headers.iter().map(|h| format!("{h}\r\n")).collect();
+        format!("HTTP/1.1 {status}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    #[test]
+    fn an_unchanged_answer_is_asked_with_its_etag_and_a_304_gives_the_kept_body() {
+        let (base, seen) = serve(vec![
+            http_reply("200 OK", &["ETag: W/\"abc\""], "[1]"),
+            http_reply("304 Not Modified", &[], ""),
+            http_reply("200 OK", &["ETag: W/\"def\""], "[2]"),
+        ]);
+        let http = Ureq::new();
+        let url = format!("{base}/repos/O/r/pulls");
+        assert_eq!(http.get(&url, "ghp_x").unwrap(), Reply { status: 200, body: "[1]".into(), reset_at: None });
+        assert_eq!(http.get(&url, "ghp_x").unwrap(), Reply { status: 200, body: "[1]".into(), reset_at: None }, "the 304 gives the kept body");
+        assert_eq!(http.get(&url, "ghp_x").unwrap().body, "[2]");
+        let seen = seen.lock().unwrap();
+        assert!(!seen[0].contains("if-none-match"), "{}", seen[0]);
+        assert!(seen[1].contains("if-none-match: w/\"abc\""), "{}", seen[1]);
+        assert!(seen[2].contains("if-none-match: w/\"abc\""), "{}", seen[2]);
+    }
+
+    #[test]
+    fn a_used_up_quota_is_not_asked_again_until_it_resets() {
+        let reset = crate::now_ms() / 1000 + 3600;
+        let (base, seen) = serve(vec![
+            http_reply("403 Forbidden", &["X-RateLimit-Remaining: 0", &format!("X-RateLimit-Reset: {reset}")], r#"{"message":"API rate limit exceeded for user ID 1."}"#),
+            http_reply("200 OK", &[], r#"{"data":{}}"#),
+        ]);
+        let http = Ureq::new();
+        let first = http.get(&format!("{base}/repos/O/r/pulls"), "ghp_x").unwrap();
+        assert_eq!((first.status, first.reset_at), (403, Some(reset * 1000)));
+        let second = http.get(&format!("{base}/user/repos"), "ghp_x").unwrap();
+        assert_eq!(second, Reply::waiting(reset * 1000), "answered without asking");
+        assert_eq!(http.send_json("PATCH", &format!("{base}/repos/O/r/issues/1"), "ghp_x", "{}").unwrap(), Reply::waiting(reset * 1000));
+        assert_eq!(http.post_json(&format!("{base}/graphql"), "ghp_x", "{}").unwrap().status, 200, "GraphQL's quota is its own");
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        http.forget();
+        assert_eq!(http.pauses.until(&format!("{base}/user/repos"), crate::now_ms()), None);
     }
 
     #[test]

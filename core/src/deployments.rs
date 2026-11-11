@@ -1,5 +1,5 @@
 use crate::forge::github::{active_repos, pending_deployments, repo_needs_approval, runs};
-use crate::forge::{is_refusal, Forge, Http};
+use crate::forge::{is_rate_limit, is_refusal, Forge, Http};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -345,7 +345,8 @@ fn check_one(http: &dyn Http, forge: &Forge, cache: &ApprovalRepos, repo: &str, 
 }
 
 /// Every row across the user's active repos, ordered. Fails when the repo
-/// list fails, or when every repo the check tried refused the token.
+/// list fails, when the rate limit ran out (the rows would be partial), or
+/// when every repo the check tried refused the token.
 pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: u64) -> Result<Vec<DeploymentRun>, String> {
     let repos = active_repos(http, forge, now_ms)?;
     let next = AtomicUsize::new(0);
@@ -370,7 +371,7 @@ pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: 
     });
     let mut outcomes: Vec<(usize, Outcome)> = joined?.into_iter().flatten().collect();
     outcomes.sort_by_key(|(i, _)| *i);
-    let (mut rows, mut attempted, mut refused, mut first_refusal) = (Vec::new(), 0, 0, None);
+    let (mut rows, mut attempted, mut refused, mut first_refusal, mut used_up) = (Vec::new(), 0, 0, None, None);
     for (i, out) in outcomes {
         let repo = &repos[i];
         if let Some(answer) = out.asked {
@@ -378,6 +379,11 @@ pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: 
         }
         attempted += usize::from(out.attempted);
         if let Some(e) = out.error {
+            if is_rate_limit(&e) {
+                // Said once, by the caller, rather than once per repo.
+                used_up.get_or_insert(e);
+                continue;
+            }
             if !out.cached {
                 crate::log::line("app", format!("deployments: {repo}: {e}"));
             }
@@ -387,6 +393,9 @@ pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: 
             }
         }
         rows.extend(out.rows);
+    }
+    if let Some(e) = used_up {
+        return Err(e);
     }
     match first_refusal {
         Some(e) if attempted > 0 && refused == attempted => Err(e),
@@ -484,7 +493,7 @@ mod tests {
     }
 
     use crate::config::{GitConnection, GitProvider};
-    use crate::forge::{fake::FakeHttp, is_refusal, Forge, ForgeSite};
+    use crate::forge::{fake::FakeHttp, is_refusal, Forge, ForgeSite, Reply};
 
     fn forge() -> Forge {
         Forge { site: ForgeSite::of(&GitConnection::default_for(GitProvider::Github)), token: "ghp_x".into() }
@@ -685,14 +694,14 @@ mod tests {
     struct PanicOnAll(FakeHttp);
 
     impl Http for PanicOnAll {
-        fn get(&self, url: &str, token: &str) -> Result<(u16, String), String> {
+        fn get(&self, url: &str, token: &str) -> Result<Reply, String> {
             assert!(url.contains("/user/repos"), "boom");
             self.0.get(url, token)
         }
-        fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+        fn post_json(&self, url: &str, token: &str, body: &str) -> Result<Reply, String> {
             self.0.post_json(url, token, body)
         }
-        fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+        fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<Reply, String> {
             self.0.send_json(method, url, token, body)
         }
     }
@@ -700,14 +709,14 @@ mod tests {
     struct PanicOnB(FakeHttp);
 
     impl Http for PanicOnB {
-        fn get(&self, url: &str, token: &str) -> Result<(u16, String), String> {
+        fn get(&self, url: &str, token: &str) -> Result<Reply, String> {
             assert!(!url.contains("/repos/O/b/"), "boom");
             self.0.get(url, token)
         }
-        fn post_json(&self, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+        fn post_json(&self, url: &str, token: &str, body: &str) -> Result<Reply, String> {
             self.0.post_json(url, token, body)
         }
-        fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<(u16, String), String> {
+        fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<Reply, String> {
             self.0.send_json(method, url, token, body)
         }
     }
@@ -718,6 +727,20 @@ mod tests {
         let mut cache = ApprovalRepos::default();
         assert_eq!(fetch(&http, &forge(), &mut cache, now()), Err("the check stopped unexpectedly".to_string()));
         assert_eq!(cache.fresh("O/a", now()), None);
+    }
+
+    #[test]
+    fn a_used_up_rate_limit_fails_the_check_and_is_not_remembered_as_a_refusal() {
+        let http = FakeHttp::new(vec![
+            ("/user/repos", 200, REPOS_AB),
+            ("/repos/O/a/environments", 403, r#"{"message":"API rate limit exceeded for user ID 1."}"#),
+            ("/repos/O/b/environments", 200, r#"{"environments":[]}"#),
+        ]);
+        let mut cache = ApprovalRepos::default();
+        let e = fetch(&http, &forge(), &mut cache, now()).unwrap_err();
+        assert!(crate::forge::is_rate_limit(&e), "{e}");
+        assert_eq!(cache.fresh("O/a", now()), None, "asked again once the limit resets");
+        assert_eq!(cache.fresh("O/b", now()), Some(Answer::NoNeed));
     }
 
     #[test]

@@ -1304,15 +1304,27 @@ pub(crate) fn poll_pull_requests(app: &AppHandle) {
     }
     let generation = app.state::<AppState>().git_generation.load(std::sync::atomic::Ordering::SeqCst);
     let (forges, _) = git::forges(&conns);
+    let mut said_used_up = false;
     for dir in due {
         // The status line's branch comes from this poll too, forge or not.
         let branch = pr::branch_of(std::path::Path::new(&dir));
-        let pr = pr::lookup(std::path::Path::new(&dir), &forges, git::http()).unwrap_or_else(|e| {
-            log::line("app", format!("pull request for {dir}: {e}"));
-            None
-        });
+        let looked_up = pr::lookup(std::path::Path::new(&dir), &forges, git::http());
         let state = app.state::<AppState>();
         let mut store = state.store.lock().unwrap();
+        let pr = match looked_up {
+            Ok(pr) => pr,
+            // A used-up rate limit says nothing about the PR: the badge stays, and the log hears it once.
+            Err(e) if maya_core::forge::is_rate_limit(&e) => {
+                if !std::mem::replace(&mut said_used_up, true) {
+                    log::line("app", format!("pull requests: {e}"));
+                }
+                store.pr_of(&dir)
+            }
+            Err(e) => {
+                log::line("app", format!("pull request for {dir}: {e}"));
+                None
+            }
+        };
         if state.git_generation.load(std::sync::atomic::Ordering::SeqCst) != generation {
             log::line("app", "pull requests: the Git settings changed during the lookup; its answers are dropped");
             return;
