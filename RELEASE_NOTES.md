@@ -1,3 +1,12 @@
+# 0.53.0
+
+## New
+
+- The Issues tab takes items from any project management tool. In Settings → Work Items, add a custom tool with a name and a command that prints your items as JSON. Its items show on the Issues tab under the tool's name, and you can filter by it. If the command fails, Maya shows its error above the lists, and your other issues still show.
+- Start works on a custom tool's items too. A tool can have a second command that Start runs, so Maya can assign or move the item there; it gets the item as JSON on its input. When the item names no repository, Maya suggests one and you confirm it.
+- Set "your name there" for a tool, and Start asks before it takes over an item that is assigned to someone else.
+- Start no longer reuses a worktree that holds the work of another item. It tells you so instead.
+
 # 0.52.2
 
 ## Fixed
