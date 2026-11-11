@@ -79,16 +79,32 @@ describe("work items", () => {
   it("says issues are off and opens Settings → Git when no Git connection is on", () => {
     const host = document.createElement("div");
     makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: true, off: true, fetchedAt: null }, [], Date.now());
-    expect(host.textContent).toContain("Issues are off. Turn on GitHub or GitLab in Settings → Git.");
+    expect(host.textContent).toContain("Issues are off. Turn on GitHub or GitLab in Settings → Git, or add a custom tool in Settings → Work Items.");
     expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "git" });
   });
 
   it("says issues are off and opens Settings → Work Items when Git is on but both services are off there", () => {
     const host = document.createElement("div");
     makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: true, fetchedAt: null }, [], Date.now());
-    expect(host.textContent).toContain("Issues are off. Turn on GitHub or GitLab in Settings → Work Items.");
+    expect(host.textContent).toContain("Issues are off. Turn on GitHub, GitLab or a custom tool in Settings → Work Items.");
     expect(host.textContent).not.toContain("Settings → Git.");
     expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "workItems" });
+  });
+
+  it("shows a custom tool's item by the tool's name", () => {
+    const host = document.createElement("div");
+    const it1 = item({ key: "custom-1:ENG-1", source: "custom-1", id: "ENG-1", repo: null });
+    makeWorkItemsView(host).update({ items: [it1], started: [], errors: [], sourceLabels: { "custom-1": "Linear" }, gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
+    expect(host.querySelector(".item__src")?.textContent).toBe("Linear");
+    const opts = [...host.querySelectorAll<HTMLOptionElement>("select[name=source] option")].map((o) => o.textContent);
+    expect(opts).toContain("Linear");
+  });
+
+  it("shows a tool's error above the areas", () => {
+    const host = document.createElement("div");
+    const message = "Linear: the command exited with status 1";
+    makeWorkItemsView(host).update({ items: [], started: [], errors: [{ source: "custom-1", message }], sourceLabels: {}, gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
+    expect(host.querySelector(".issues__error")?.textContent).toBe(message);
   });
 
   it("says when no issue matches the rules", () => {

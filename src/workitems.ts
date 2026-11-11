@@ -75,7 +75,7 @@ function button(label: string, action: string, className = "card__btn"): HTMLBut
   return b;
 }
 
-export function renderItemCard(item: WorkItem, nowMs: number, card: Card | null, starting = false): HTMLElement {
+export function renderItemCard(item: WorkItem, nowMs: number, card: Card | null, starting = false, sourceLabel = "Custom tool"): HTMLElement {
   const root = el("article", card ? `item item--${card.state}` : "item");
   root.dataset.key = item.key;
   root.dataset.row = item.key;
@@ -89,7 +89,7 @@ export function renderItemCard(item: WorkItem, nowMs: number, card: Card | null,
     mark.setAttribute("aria-label", item.source === "gitlab" ? "GitLab" : "GitHub");
     name.append(mark);
   } else {
-    name.append(el("span", "item__src", item.source));
+    name.append(el("span", "item__src", sourceLabel));
   }
   const id = button(item.id, "open-item", "item__id");
   id.title = item.url;
@@ -187,12 +187,17 @@ export function makeWorkItemsView(host: HTMLElement) {
   const body = el("div", "issues__body");
   host.replaceChildren(bar, body);
 
+  const sourceLabelOf = (s: string): string => SOURCE_LABEL[s] ?? state.sourceLabels[s] ?? "Custom tool";
+
   function paint(): void {
     if (state.off) {
       bar.hidden = true;
       // Git off entirely, or on with both services off in Work Items.
       const group = state.gitOff ? "git" : "workItems";
-      const off = el("div", "reviews__off", `Issues are off. Turn on GitHub or GitLab in Settings → ${state.gitOff ? "Git" : "Work Items"}. `);
+      const message = state.gitOff
+        ? "Issues are off. Turn on GitHub or GitLab in Settings → Git, or add a custom tool in Settings → Work Items. "
+        : "Issues are off. Turn on GitHub, GitLab or a custom tool in Settings → Work Items. ";
+      const off = el("div", "reviews__off", message);
       const open = button("Open Settings", "settings");
       open.dataset.group = group;
       off.append(open);
@@ -208,9 +213,9 @@ export function makeWorkItemsView(host: HTMLElement) {
     if (filters.source !== null && !sources.includes(filters.source)) filters.source = null;
     if (filters.repo !== null && !repos.some(([k]) => k === filters.repo)) filters.repo = null;
     if (filters.status !== null && !statuses.includes(filters.status)) filters.status = null;
-    const key = JSON.stringify([sources, repos, statuses]);
+    const key = JSON.stringify([sources.map((s) => [s, sourceLabelOf(s)]), repos, statuses]);
     if (key !== optionsKey) {
-      fillSelect(sourceSel, [{ value: "", label: "All Sources" }, ...sources.map((s) => ({ value: s, label: SOURCE_LABEL[s] ?? s }))]);
+      fillSelect(sourceSel, [{ value: "", label: "All Sources" }, ...sources.map((s) => ({ value: s, label: sourceLabelOf(s) }))]);
       fillSelect(repoSel, [{ value: "", label: "All Repositories" }, ...repos.map(([value, label]) => ({ value, label }))]);
       fillSelect(statusSel, [{ value: "", label: "Any Status" }, ...statuses.map((s) => ({ value: s, label: s }))]);
       optionsKey = key;
@@ -229,8 +234,8 @@ export function makeWorkItemsView(host: HTMLElement) {
     const cols = el("div", "issues__cols");
     const emptyPick = state.fetchedAt === null ? "Checking…" : state.items.length === 0 ? "No issues match your rules." : "No issues match these filters.";
     cols.append(
-      area("pick", "To pick", shownPick.map((i) => renderItemCard(i, nowMs, null, starting.has(i.key))), emptyPick),
-      area("working", "Being worked on", shownWorking.map((w) => renderItemCard(w.item, nowMs, w.card)), "Nothing started yet."),
+      area("pick", "To pick", shownPick.map((i) => renderItemCard(i, nowMs, null, starting.has(i.key), sourceLabelOf(i.source))), emptyPick),
+      area("working", "Being worked on", shownWorking.map((w) => renderItemCard(w.item, nowMs, w.card, false, sourceLabelOf(w.item.source))), "Nothing started yet."),
     );
     fresh.append(cols);
     morph(body, fresh);
