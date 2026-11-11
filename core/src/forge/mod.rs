@@ -229,22 +229,22 @@ impl Ureq {
     }
 
     /// The reply, noting a used-up quota; and the reply's ETag.
-    fn read(&self, url: &str, r: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<(Reply, Option<String>), String> {
+    fn read(&self, token: &str, url: &str, r: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<(Reply, Option<String>), String> {
         let mut resp = r.map_err(|e| e.to_string())?;
         let status = resp.status().as_u16();
         let body = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
         let headers = resp.headers();
         let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
-        let reset_at = self.pauses.note(url, status, &body, &header, crate::now_ms()).filter(|_| !(200..300).contains(&status));
+        let reset_at = self.pauses.note(token, url, status, &body, &header, crate::now_ms()).filter(|_| !(200..300).contains(&status));
         Ok((Reply { status, body, reset_at }, header("etag")))
     }
 
     /// The reply, unless the quota `url` draws on is used up.
-    fn send(&self, url: &str, call: impl FnOnce() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<Reply, String> {
-        if let Some(until) = self.pauses.until(url, crate::now_ms()) {
+    fn send(&self, token: &str, url: &str, call: impl FnOnce() -> Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<Reply, String> {
+        if let Some(until) = self.pauses.until(token, url, crate::now_ms()) {
             return Ok(Reply::waiting(until));
         }
-        self.read(url, call()).map(|(reply, _)| reply)
+        self.read(token, url, call()).map(|(reply, _)| reply)
     }
 }
 
@@ -256,7 +256,7 @@ impl Default for Ureq {
 
 impl Http for Ureq {
     fn get(&self, url: &str, token: &str) -> Result<Reply, String> {
-        if let Some(until) = self.pauses.until(url, crate::now_ms()) {
+        if let Some(until) = self.pauses.until(token, url, crate::now_ms()) {
             return Ok(Reply::waiting(until));
         }
         let mut request = self.agent.get(url).header("Authorization", &format!("Bearer {token}")).header("User-Agent", "Maya").header("Accept", "application/json");
@@ -264,7 +264,7 @@ impl Http for Ureq {
         if let Some(tag) = &kept {
             request = request.header("If-None-Match", tag);
         }
-        let (mut reply, tag) = self.read(url, request.call())?;
+        let (mut reply, tag) = self.read(token, url, request.call())?;
         match reply.status {
             304 => {
                 if let Some(body) = kept.and_then(|_| self.etags.body(token, url)) {
@@ -283,7 +283,7 @@ impl Http for Ureq {
     }
 
     fn post_json(&self, url: &str, token: &str, body: &str) -> Result<Reply, String> {
-        self.send(url, || {
+        self.send(token, url, || {
             self.agent
                 .post(url)
                 .header("Authorization", &format!("Bearer {token}"))
@@ -300,7 +300,7 @@ impl Http for Ureq {
             "PUT" => self.agent.put(url),
             other => return Err(format!("unsupported method {other}")),
         };
-        self.send(url, || {
+        self.send(token, url, || {
             request
                 .header("Authorization", &format!("Bearer {token}"))
                 .header("User-Agent", "Maya")
@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(http.post_json(&format!("{base}/graphql"), "ghp_x", "{}").unwrap().status, 200, "GraphQL's quota is its own");
         assert_eq!(seen.lock().unwrap().len(), 2);
         http.forget();
-        assert_eq!(http.pauses.until(&format!("{base}/user/repos"), crate::now_ms()), None);
+        assert_eq!(http.pauses.until("ghp_x", &format!("{base}/user/repos"), crate::now_ms()), None);
     }
 
     #[test]

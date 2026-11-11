@@ -75,15 +75,16 @@ pub fn bucket(url: &str) -> String {
     format!("{}|{kind}", host.to_ascii_lowercase())
 }
 
-/// The quotas that are used up, and when each resets.
+/// The quotas that are used up, and when each resets, by token: a reply to
+/// an old token that lands after the token changed pauses only the old one.
 #[derive(Default)]
-pub struct Pauses(Mutex<HashMap<String, u64>>);
+pub struct Pauses(Mutex<HashMap<(u64, String), u64>>);
 
 impl Pauses {
-    /// When the quota `url` draws on resets, while it is used up.
-    pub fn until(&self, url: &str, now_ms: u64) -> Option<u64> {
+    /// When the quota `url` draws on with `token` resets, while it is used up.
+    pub fn until(&self, token: &str, url: &str, now_ms: u64) -> Option<u64> {
         let mut m = self.0.lock().unwrap();
-        let key = bucket(url);
+        let key = (token_key(token), bucket(url));
         match m.get(&key) {
             Some(&at) if at > now_ms => Some(at),
             Some(_) => {
@@ -96,16 +97,18 @@ impl Pauses {
 
     /// Notes a reply: a rate-limited one, or a success that spent the last
     /// request, pauses its quota until it resets. Returns when, if it did.
-    pub fn note(&self, url: &str, status: u16, body: &str, header: &dyn Fn(&str) -> Option<String>, now_ms: u64) -> Option<u64> {
+    /// A pause only grows: replies racing in from other polls cannot end it early.
+    pub fn note(&self, token: &str, url: &str, status: u16, body: &str, header: &dyn Fn(&str) -> Option<String>, now_ms: u64) -> Option<u64> {
         let remaining = header("x-ratelimit-remaining").or_else(|| header("ratelimit-remaining"));
         let limited = is_rate_limited(status, body, remaining.as_deref());
         let spent = (200..300).contains(&status) && remaining.as_deref().map(str::trim) == Some("0");
         if !limited && !spent {
             return None;
         }
-        let at = resume_at(header, now_ms);
-        self.0.lock().unwrap().insert(bucket(url), at);
-        Some(at)
+        let mut m = self.0.lock().unwrap();
+        let until = m.entry((token_key(token), bucket(url))).or_insert(0);
+        *until = (*until).max(resume_at(header, now_ms));
+        Some(*until)
     }
 
     /// Forgets every pause: the token may be another account's now.
@@ -195,23 +198,34 @@ mod tests {
         let p = Pauses::default();
         let now = 1_000_000_000;
         let limited = headers(&[("X-RateLimit-Remaining", "0"), ("X-RateLimit-Reset", "1003600")]);
-        assert_eq!(p.note("https://api.github.com/repos/O/r/pulls", 403, "{}", &limited, now), Some(1_003_600_000));
-        assert_eq!(p.until("https://api.github.com/user/repos", now + 1), Some(1_003_600_000));
-        assert_eq!(p.until("https://api.github.com/graphql", now + 1), None, "GraphQL has its own quota");
-        assert_eq!(p.until("https://api.github.com/user/repos", 1_003_600_000), None, "over at the reset");
-        assert_eq!(p.until("https://api.github.com/user/repos", now + 1), None, "and forgotten");
+        assert_eq!(p.note("t", "https://api.github.com/repos/O/r/pulls", 403, "{}", &limited, now), Some(1_003_600_000));
+        assert_eq!(p.until("t", "https://api.github.com/user/repos", now + 1), Some(1_003_600_000));
+        assert_eq!(p.until("t", "https://api.github.com/graphql", now + 1), None, "GraphQL has its own quota");
+        assert_eq!(p.until("other", "https://api.github.com/user/repos", now + 1), None, "another token is not paused");
+        assert_eq!(p.until("t", "https://api.github.com/user/repos", 1_003_600_000), None, "over at the reset");
+        assert_eq!(p.until("t", "https://api.github.com/user/repos", now + 1), None, "and forgotten");
+    }
+
+    #[test]
+    fn a_shorter_wait_racing_in_does_not_end_a_pause_early() {
+        let p = Pauses::default();
+        let now = 1_000_000_000;
+        let reset = headers(&[("X-RateLimit-Remaining", "0"), ("X-RateLimit-Reset", "1003600")]);
+        assert_eq!(p.note("t", "https://api.github.com/a", 403, "{}", &reset, now), Some(1_003_600_000));
+        assert_eq!(p.note("t", "https://api.github.com/b", 429, "", &headers(&[("Retry-After", "5")]), now), Some(1_003_600_000));
+        assert_eq!(p.until("t", "https://api.github.com/c", now + 10_000), Some(1_003_600_000));
     }
 
     #[test]
     fn a_success_that_spent_the_last_request_pauses_too_and_others_do_not() {
         let p = Pauses::default();
         let now = 1_000_000_000;
-        assert_eq!(p.note("https://api.github.com/x", 200, "[]", &headers(&[("X-RateLimit-Remaining", "12")]), now), None);
-        assert_eq!(p.note("https://api.github.com/x", 403, "{}", &headers(&[("X-RateLimit-Remaining", "12")]), now), None, "a refusal");
-        assert_eq!(p.until("https://api.github.com/x", now), None);
-        assert_eq!(p.note("https://api.github.com/x", 200, "[]", &headers(&[("X-RateLimit-Remaining", "0"), ("X-RateLimit-Reset", "1000500")]), now), Some(1_000_500_000));
+        assert_eq!(p.note("t", "https://api.github.com/x", 200, "[]", &headers(&[("X-RateLimit-Remaining", "12")]), now), None);
+        assert_eq!(p.note("t", "https://api.github.com/x", 403, "{}", &headers(&[("X-RateLimit-Remaining", "12")]), now), None, "a refusal");
+        assert_eq!(p.until("t", "https://api.github.com/x", now), None);
+        assert_eq!(p.note("t", "https://api.github.com/x", 200, "[]", &headers(&[("X-RateLimit-Remaining", "0"), ("X-RateLimit-Reset", "1000500")]), now), Some(1_000_500_000));
         p.clear();
-        assert_eq!(p.until("https://api.github.com/x", now), None, "cleared");
+        assert_eq!(p.until("t", "https://api.github.com/x", now), None, "cleared");
     }
 
     #[test]
