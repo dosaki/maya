@@ -1,3 +1,10 @@
+# 0.52.2
+
+## Fixed
+
+- When GitHub's hourly request limit runs out, Maya now says so, with the time it resets ("GitHub's rate limit is used up until 08:58"), instead of saying your token was refused. She waits for the reset instead of asking again, and a pull request's badge stays on its card meanwhile.
+- Maya uses far less of GitHub's limit, which your account shares with `gh` and other apps: she asks GitHub only for what changed since she last looked, and those answers do not count against the limit.
+
 # 0.52.1
 
 ## Fixed

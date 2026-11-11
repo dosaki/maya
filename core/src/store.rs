@@ -562,6 +562,11 @@ impl Store {
         self.prs.set_branch(dir, branch);
     }
 
+    /// The PR last looked up for `dir`, if any.
+    pub fn pr_of(&self, dir: &str) -> Option<PullRequest> {
+        self.prs.get(dir)
+    }
+
     pub fn set_pr(&mut self, dir: &str, pr: Option<PullRequest>, now_ms: u64) {
         self.prs.set(dir, pr, now_ms);
     }

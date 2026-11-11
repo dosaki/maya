@@ -183,7 +183,7 @@ mod tests {
     use super::*;
     use crate::config::{GitConnection, WorkItemsConfig};
     use crate::forge::fake::FakeHttp;
-    use crate::forge::ForgeSite;
+    use crate::forge::{ForgeSite, Reply};
     use std::sync::Mutex;
 
     fn gitlab_forge() -> Forge {
@@ -204,15 +204,15 @@ mod tests {
     }
 
     impl Http for Seq {
-        fn get(&self, _: &str, _: &str) -> Result<(u16, String), String> {
+        fn get(&self, _: &str, _: &str) -> Result<Reply, String> {
             Err("no get".into())
         }
-        fn post_json(&self, _: &str, _: &str, _: &str) -> Result<(u16, String), String> {
+        fn post_json(&self, _: &str, _: &str, _: &str) -> Result<Reply, String> {
             Err("no post".into())
         }
-        fn send_json(&self, method: &str, url: &str, _: &str, body: &str) -> Result<(u16, String), String> {
+        fn send_json(&self, method: &str, url: &str, _: &str, body: &str) -> Result<Reply, String> {
             self.seen.lock().unwrap().push((url.into(), body.into(), method.into()));
-            self.replies.lock().unwrap().pop().ok_or_else(|| "no reply".to_string())
+            self.replies.lock().unwrap().pop().map(Reply::from).ok_or_else(|| "no reply".to_string())
         }
     }
 
