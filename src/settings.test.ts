@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
 import { RUNNING_VERSION } from "./release-notes";
-import { SETTINGS_GROUPS, gitConnections, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { SETTINGS_GROUPS, gitConnections, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -1541,5 +1541,13 @@ describe("Settings → Work Items", () => {
     expect(h.onWorkPrompt).toHaveBeenCalledWith("Do {id}");
     expect(box(root, "github").textContent).toContain("Issues: read and write");
     expect(box(root, "gitlab").textContent).toContain("the api scope");
+  });
+});
+
+describe("workItemsConfig custom tools", () => {
+  it("defaults to none and keeps the ones given", () => {
+    expect(workItemsConfig(null).custom).toEqual([]);
+    const t = { id: "custom-1", name: "Jira", enabled: true, listCommand: "ls", startCommand: "", me: "" };
+    expect(workItemsConfig({ custom: [t] }).custom).toEqual([t]);
   });
 });
