@@ -1795,6 +1795,26 @@ mod tests {
         assert!(store.lock().unwrap().has_pending_name_for_test("issue ENG-1204"), "the session is named by the item's id");
     }
 
+    #[test]
+    fn the_preflight_refuses_a_folder_that_holds_another_items_worktree() {
+        let (_dir, store, clones) = store_reviewing_in_clones();
+        let clone = clones.join("api");
+        repo_with_origin(&clone, "git@github.com:acme/api.git");
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&clone).args(args).status().unwrap().success(), "git {args:?}");
+        for args in [&["config", "user.email", "t@example.com"][..], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.hooksPath", "/dev/null"], &["commit", "-q", "--allow-empty", "-m", "a"]] {
+            git(args);
+        }
+        // Another tool's ENG-1204 left its worktree in the folder this one slugs to.
+        let dir = clones.join("api-issue-eng-1204");
+        git(&["worktree", "add", "-q", "-b", "issue-eng-1204-other-work", &dir.to_string_lossy()]);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let (issue, repo) = api_issue();
+        let item = crate::work_items::WorkItem { key: "custom-2:ENG-1204".into(), source: "custom-2".into(), id: "ENG-1204".into(), number: None, ..issue };
+        assert_eq!(work_item_preflight(&l, &item, &repo).unwrap_err(), format!("{} holds the work of another item (branch issue-eng-1204-other-work); finish or move it first.", dir.display()));
+        assert!(fake.calls.lock().unwrap().is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_review_running_through_a_linked_clones_directory_is_refused() {
