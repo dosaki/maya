@@ -33,12 +33,19 @@ pub fn shell_argv(command: &str, shell: Option<&str>) -> Vec<String> {
     vec![shell.into(), "-lic".into(), command.into()]
 }
 
+/// True for what an interactive shell prints with no terminal: the job
+/// control warnings, and the `exit` it echoes as it leaves.
+fn is_shell_noise(line: &str) -> bool {
+    line.contains("no job control in this shell") || line.contains("cannot set terminal process group") || line.trim() == "exit"
+}
+
 /// Reads `r` to its end, keeping at most `cap` bytes. True when there was more.
 fn read_capped(mut r: impl Read, cap: usize, flag: Option<&AtomicBool>) -> (Vec<u8>, bool) {
     let mut out = Vec::new();
     let mut buf = [0u8; 16 * 1024];
     loop {
         match r.read(&mut buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Ok(0) | Err(_) => return (out, false),
             Ok(n) => {
                 let room = cap - out.len();
@@ -147,7 +154,7 @@ pub fn run(argv: &[String], stdin: Option<&str>, timeout: Duration) -> Result<St
     match status.code() {
         Some(0) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
         Some(code) => {
-            let lines: Vec<String> = String::from_utf8_lossy(&stderr).lines().filter(|l| !l.trim().is_empty()).take(3).map(|l| l.chars().take(200).collect()).collect();
+            let lines: Vec<String> = String::from_utf8_lossy(&stderr).lines().filter(|l| !l.trim().is_empty() && !is_shell_noise(l)).take(3).map(|l| l.chars().take(200).collect()).collect();
             Err(if lines.is_empty() { format!("the command exited with status {code}") } else { format!("the command exited with status {code}: “{}”", lines.join(" / ")) })
         }
         None => Err("the command was stopped by a signal".into()),
@@ -330,6 +337,13 @@ mod tests {
     #[test]
     fn a_failure_says_its_status_and_first_stderr_lines() {
         assert_eq!(run(&sh("echo one >&2; echo two >&2; echo three >&2; echo four >&2; exit 3"), None, TIMEOUT), Err("the command exited with status 3: “one / two / three”".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shells_own_noise_is_left_out_of_a_failure() {
+        let script = r"printf 'bash: cannot set terminal process group (1): Inappropriate ioctl for device\nbash: no job control in this shell\nboom\nexit\n' >&2; exit 2";
+        assert_eq!(run(&sh(script), None, TIMEOUT), Err("the command exited with status 2: “boom”".to_string()));
     }
 
     #[cfg(unix)]

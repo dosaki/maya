@@ -785,14 +785,13 @@ impl Config {
                 t.id.clear();
             }
         }
-        let mut n = 1;
+        // A new id comes after every kept one, so a new tool never takes a
+        // removed tool's id (its started items would show under the new one).
+        let mut n = used.iter().filter_map(|id| id["custom-".len()..].parse::<u64>().ok()).max().unwrap_or(0);
         for t in &mut w.custom {
             if t.id.is_empty() {
-                while used.contains(&format!("custom-{n}")) {
-                    n += 1;
-                }
+                n += 1;
                 t.id = format!("custom-{n}");
-                used.push(t.id.clone());
             }
             for f in [&mut t.name, &mut t.list_command, &mut t.start_command, &mut t.me] {
                 *f = f.trim().to_string();
@@ -916,13 +915,19 @@ mod tests {
         c.work_items.custom = ["", "custom-2", "custom-2", "Bad Id!"].iter().map(|id| CustomTool { id: id.to_string(), name: " N ".into(), list_command: " ls ".into(), start_command: " go ".into(), me: " me ".into(), ..Default::default() }).collect();
         c.normalize_work_items();
         let ids: Vec<&str> = c.work_items.custom.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, ["custom-1", "custom-2", "custom-3", "custom-4"]);
+        assert_eq!(ids, ["custom-3", "custom-2", "custom-4", "custom-5"]);
         let t = &c.work_items.custom[0];
         assert_eq!((t.name.as_str(), t.list_command.as_str(), t.start_command.as_str(), t.me.as_str()), ("N", "ls", "go", "me"));
         c.work_items.custom[0].id = "custom-".into();
         c.work_items.custom[1].id = "custom-x".into();
         c.normalize_work_items();
-        assert_eq!(c.work_items.custom[0].id, "custom-1");
+        assert_eq!(c.work_items.custom[0].id, "custom-6");
+        // A new tool never takes a removed tool's id: ids only grow.
+        for (given, got) in [(["custom-1", ""], ["custom-1", "custom-2"]), (["", "custom-7"], ["custom-8", "custom-7"])] {
+            c.work_items.custom = given.iter().map(|id| CustomTool { id: id.to_string(), ..Default::default() }).collect();
+            c.normalize_work_items();
+            assert_eq!(c.work_items.custom.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), got);
+        }
     }
 
     #[test]

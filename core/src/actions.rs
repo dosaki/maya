@@ -910,9 +910,9 @@ struct WorkItemPlan {
 
 fn work_item_plan(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::work_items::ItemRepo) -> Result<WorkItemPlan, String> {
     use crate::work_items::start;
-    let (agent, clones, live, template, agents, sites) = {
+    let (agent, clones, live, template, agents, sites, maya_dir) = {
         let store = l.store.lock().unwrap();
-        (store.config.brain(), store.config.clones_dir_path(), store.live_cwds(), store.config.work_items.prompt.clone(), store.agents_source(), crate::forge::sites(&store.config.git_connections()))
+        (store.config.brain(), store.config.clones_dir_path(), store.live_cwds(), store.config.work_items.prompt.clone(), store.agents_source(), crate::forge::sites(&store.config.git_connections()), store.claude_dir().join("maya"))
     };
     let site = sites.into_iter().find(|s| s.provider == repo.forge).ok_or_else(|| format!("Turn on {} in Settings → Git first.", repo.forge.label()))?;
     if agent != model::Harness::ClaudeCode && !agents().iter().any(|a| a.harness == agent) {
@@ -922,12 +922,18 @@ fn work_item_plan(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::w
     if is_busy_folder(&target.dir, &live) {
         return Err(format!("A session is already working on {}.", item.id));
     }
+    // Items whose tags slug alike share the folder; one never takes over the other's.
+    let started = crate::work_items::started::load(&crate::work_items::started::path(&maya_dir));
+    if let Some(other) = started.iter().find(|s| s.key != item.key && target.dir == Path::new(&s.dir)) {
+        return Err(format!("{} holds the work of {}; finish or move it first.", target.dir.display(), other.item.id));
+    }
     Ok(WorkItemPlan { agent, clones, template, site, target })
 }
 
 /// The refusals `start_work_item` would give before it changes anything:
 /// the service off, the agent missing, no place for the
-/// worktree, or a session already in its folder. Start asks this before it
+/// worktree, a session already in its folder, or another started item's
+/// work in it. Start asks this before it
 /// writes to the tracker.
 pub fn work_item_preflight(l: &Local, item: &crate::work_items::WorkItem, repo: &crate::work_items::ItemRepo) -> Result<(), String> {
     work_item_plan(l, item, repo).map(|_| ())
@@ -1796,22 +1802,21 @@ mod tests {
     }
 
     #[test]
-    fn the_preflight_refuses_a_folder_that_holds_another_items_worktree() {
+    fn the_preflight_refuses_a_folder_another_started_item_holds() {
         let (_dir, store, clones) = store_reviewing_in_clones();
-        let clone = clones.join("api");
-        repo_with_origin(&clone, "git@github.com:acme/api.git");
-        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&clone).args(args).status().unwrap().success(), "git {args:?}");
-        for args in [&["config", "user.email", "t@example.com"][..], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.hooksPath", "/dev/null"], &["commit", "-q", "--allow-empty", "-m", "a"]] {
-            git(args);
-        }
-        // Another tool's ENG-1204 left its worktree in the folder this one slugs to.
-        let dir = clones.join("api-issue-eng-1204");
-        git(&["worktree", "add", "-q", "-b", "issue-eng-1204-other-work", &dir.to_string_lossy()]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
         let (issue, repo) = api_issue();
-        let item = crate::work_items::WorkItem { key: "custom-2:ENG-1204".into(), source: "custom-2".into(), id: "ENG-1204".into(), number: None, ..issue };
-        assert_eq!(work_item_preflight(&l, &item, &repo).unwrap_err(), format!("{} holds the work of another item (branch issue-eng-1204-other-work); finish or move it first.", dir.display()));
+        let item = crate::work_items::WorkItem { key: "custom-1:ENG-1204".into(), source: "custom-1".into(), id: "ENG-1204".into(), number: None, ..issue };
+        let dir = clones.join("api-issue-eng-1204");
+        let started_file = crate::work_items::started::path(&store.lock().unwrap().claude_dir().join("maya"));
+        let entry = |key: &str| crate::work_items::started::Started { key: key.into(), item: crate::work_items::WorkItem { key: key.into(), ..item.clone() }, dir: dir.to_string_lossy().into_owned(), started_at: 1 };
+        // Another tool's ENG-1204 works in the folder this one slugs to.
+        crate::work_items::started::save(&started_file, &[entry("custom-2:ENG-1204")]).unwrap();
+        assert_eq!(work_item_preflight(&l, &item, &repo).unwrap_err(), format!("{} holds the work of ENG-1204; finish or move it first.", dir.display()));
+        // The item's own entry does not stop it.
+        crate::work_items::started::save(&started_file, &[entry("custom-1:ENG-1204")]).unwrap();
+        work_item_preflight(&l, &item, &repo).unwrap();
         assert!(fake.calls.lock().unwrap().is_empty());
     }
 

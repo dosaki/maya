@@ -1312,11 +1312,13 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const on = document.createElement("input");
     on.type = "checkbox";
     on.name = `ct-${i}-enabled`;
+    on.setAttribute("aria-label", "Use this tool");
     on.checked = tool.enabled;
     on.addEventListener("change", change);
     const name = document.createElement("input");
     name.type = "text";
     name.name = `ct-${i}-name`;
+    name.setAttribute("aria-label", "Tool name");
     name.placeholder = "Linear (mine-only)";
     name.value = tool.name;
     name.addEventListener("change", () => {
@@ -1366,7 +1368,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     listHint.textContent = "The list command runs every 2 minutes through your shell and must finish within 30 seconds. It prints JSON like the example; id, title and url are required. repo is owner/name, github:owner/name, gitlab:group/name or a clone URL; without one, Maya picks the repository when you start.";
     const startHint = document.createElement("div");
     startHint.className = "settings__hint";
-    startHint.textContent = "The on-start command runs when you press Start, with the item's JSON on its input, to assign or move it in your tool.";
+    startHint.textContent = "The on-start command runs when you press Start, with the item's JSON on its input, to assign or move it in your tool. Anything a command leaves running is stopped when it ends.";
     const format = document.createElement("pre");
     format.textContent = CUSTOM_TOOL_FORMAT;
     const script = document.createElement("pre");

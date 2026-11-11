@@ -62,22 +62,13 @@ fn has_branch(clone_dir: &Path, branch: &str) -> bool {
 
 /// Where `repo`'s item tagged `tag` (see `item_tag`) is worked on under
 /// `clones_root`: the clone reviews use, and `<clone folder name>-issue-<tag>`
-/// beside it. A folder of that name that is not a worktree of the clone is
-/// refused, and so is a worktree on another branch: items whose tags slug
-/// alike share the folder, and one never works on the other's branch.
+/// beside it. A folder of that name that is not a worktree of the clone is refused.
 pub fn resolve_target(clones_root: &Path, site: &ForgeSite, repo: &str, tag: &str, branch: &str) -> Result<WorkTarget, String> {
     let (base, clone_dir) = clone_of(clones_root, site, repo)?;
     let dir = clones_root.join(format!("{base}-issue-{tag}"));
     let worktree_exists = is_worktree_of(&dir, &clone_dir);
     if dir.exists() && !worktree_exists {
         return Err(format!("{} is not a worktree of {repo}; move it or change the clones directory.", dir.display()));
-    }
-    if worktree_exists {
-        match crate::pr::branch_of(&dir) {
-            Some(b) if b == branch => {}
-            Some(other) => return Err(format!("{} holds the work of another item (branch {other}); finish or move it first.", dir.display())),
-            None => return Err(format!("{} holds the work of another item; finish or move it first.", dir.display())),
-        }
     }
     Ok(WorkTarget { clone: !clone_dir.exists(), branch_exists: has_branch(&clone_dir, branch), branch: branch.to_string(), worktree_exists, clone_dir, dir })
 }
@@ -232,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_is_reused_only_for_its_own_item() {
+    fn a_worktree_on_another_branch_is_still_reused() {
         let root = tempfile::tempdir().unwrap();
         let site = ForgeSite::of(&GitConnection::default_for(GitProvider::Github));
         let clone = root.path().join("api");
@@ -240,15 +231,10 @@ mod tests {
         for args in [&["init", "-q"][..], &["remote", "add", "origin", "git@github.com:acme/api.git"], &["config", "user.email", "t@example.com"], &["config", "user.name", "T"], &["config", "commit.gpgsign", "false"], &["config", "core.hooksPath", "/dev/null"], &["commit", "-q", "--allow-empty", "-m", "a"]] {
             git(&clone, args);
         }
+        // The item's title changed since its worktree was made.
         let dir = root.path().join("api-issue-412");
         git(&clone, &["worktree", "add", "-q", "-b", "issue-412-login", &dir.to_string_lossy()]);
-        let own = resolve_target(root.path(), &site, "acme/api", "412", "issue-412-login").unwrap();
-        assert!(own.worktree_exists && own.branch_exists, "{own:?}");
-        let e = resolve_target(root.path(), &site, "acme/api", "412", "issue-412-export").unwrap_err();
-        assert_eq!(e, format!("{} holds the work of another item (branch issue-412-login); finish or move it first.", dir.display()));
-        let detached = root.path().join("api-issue-eng-1204");
-        git(&clone, &["worktree", "add", "-q", "--detach", &detached.to_string_lossy()]);
-        let e = resolve_target(root.path(), &site, "acme/api", "eng-1204", "issue-eng-1204-x").unwrap_err();
-        assert_eq!(e, format!("{} holds the work of another item; finish or move it first.", detached.display()));
+        let target = resolve_target(root.path(), &site, "acme/api", "412", "issue-412-login-times-out").unwrap();
+        assert!(target.worktree_exists && target.dir == dir, "{target:?}");
     }
 }

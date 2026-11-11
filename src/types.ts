@@ -435,7 +435,6 @@ export interface ForgeItems {
   trackerRepos: string[];
 }
 
-/** `workItems` in the config; an older config lacks it. */
 /** A user's own script that lists work items. */
 export interface CustomTool {
   id: string;
@@ -446,6 +445,7 @@ export interface CustomTool {
   me: string;
 }
 
+/** `workItems` in the config; an older config lacks it. */
 export interface WorkItemsConfig {
   github: ForgeItems;
   gitlab: ForgeItems;
