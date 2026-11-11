@@ -377,10 +377,18 @@ export interface Started {
   startedAt: number;
 }
 
+/** One line above the Issues tab's areas. */
+export interface SourceError {
+  source: string;
+  message: string;
+}
+
 export interface WorkItemsState {
   items: WorkItem[];
   started: Started[];
-  errors: ForgeError[];
+  errors: SourceError[];
+  /** Each configured custom tool's id and label. */
+  sourceLabels: Record<string, string>;
   /** No Git connection is switched on. */
   gitOff: boolean;
   /** No source for issues is switched on. */

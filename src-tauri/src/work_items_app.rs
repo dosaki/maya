@@ -6,14 +6,14 @@
 
 use crate::{git, native, AppState};
 use maya_core::config::GitProvider;
-use maya_core::forge::{self, Forge, ForgeError, Me};
+use maya_core::forge::{self, Forge, Me};
 use maya_core::store::now_ms;
 use maya_core::work_items::started::{self, Started};
 use maya_core::config::ForgeItems;
-use maya_core::work_items::{self, github, gitlab, pick, start, Issue, ItemRepo, WorkItem};
+use maya_core::work_items::{self, custom, github, gitlab, pick, source_of, start, Issue, ItemRepo, SourceError, WorkItem};
 use maya_core::{actions, launch, log};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
@@ -26,10 +26,12 @@ pub struct WorkItemsState {
     pub items: Vec<WorkItem>,
     pub started: Vec<Started>,
     /// One line per service whose last check failed or that has no token.
-    pub errors: Vec<ForgeError>,
+    pub errors: Vec<SourceError>,
+    /// Each configured custom tool's id and label, for naming a started item's source.
+    pub source_labels: BTreeMap<String, String>,
     /// No Git connection is switched on.
     pub git_off: bool,
-    /// No switched-on Git connection has Work Items on.
+    /// Nothing is asked: no switched-on Git connection has Work Items on and no custom tool is ready.
     pub off: bool,
     pub fetched_at: Option<u64>,
 }
@@ -43,13 +45,18 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
     };
     let git_off = !conns.iter().any(|c| c.enabled);
     // Only the services with Work Items on are asked, or named when they have no token.
-    let conns: Vec<_> = conns.into_iter().filter(|c| cfg.for_forge(c.provider).enabled).collect();
-    let (forges, missing) = git::forges(&conns);
-    let off = forges.is_empty() && missing.is_empty();
-    let fetched = work_items::fetch(&forges, &cfg, git::http());
+    // A custom item's repo may be on a forge whose Work Items are off, so the sites are of every enabled one.
+    let sites = forge::sites(&conns);
+    let asked: Vec<_> = conns.into_iter().filter(|c| cfg.for_forge(c.provider).enabled).collect();
+    let (forges, missing) = git::forges(&asked);
+    let tool_asked = cfg.custom.iter().any(|t| t.enabled && !t.list_command.trim().is_empty());
+    let off = forges.is_empty() && missing.is_empty() && !tool_asked;
+    let missing: Vec<SourceError> = missing.into_iter().map(|e| SourceError { source: source_of(e.forge).to_string(), message: e.message }).collect();
+    let source_labels: BTreeMap<String, String> = cfg.custom.iter().map(|t| (t.id.clone(), t.label().to_string())).collect();
+    let fetched = work_items::fetch(&forges, &cfg, git::http(), &sites, &custom::list);
     for f in &fetched {
         if let Err(e) = &f.result {
-            log::line("app", format!("issues: {}: {e}", f.forge.label()));
+            log::line("app", format!("issues: {}: {e}", f.label));
         }
     }
     let returned: HashMap<&str, &WorkItem> = fetched.iter().filter_map(|f| f.result.as_ref().ok()).flatten().map(|i| (i.key.as_str(), i)).collect();
@@ -102,6 +109,7 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
         w.items = items;
         w.started = kept;
         w.errors = errors;
+        w.source_labels = source_labels;
         w.git_off = git_off;
         w.off = off;
         w.fetched_at = Some(now_ms());
@@ -443,8 +451,7 @@ pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo
         let notice = (!notices.is_empty()).then(|| notices.join(" "));
         // Shown above the areas until the next check replaces the lines.
         if let Some(message) = &notice {
-            let forge = item.repo.as_ref().map_or(repo.forge, |r| r.forge);
-            w.errors.push(ForgeError { forge, message: message.clone() });
+            w.errors.push(SourceError { source: item.source.clone(), message: message.clone() });
         }
         if let Some(listed) = w.items.iter_mut().find(|i| i.key == item.key) {
             *listed = item;

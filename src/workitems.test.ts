@@ -17,7 +17,7 @@ describe("work items", () => {
     const a = item({ key: "github:a/b#1", id: "a/b#1" });
     const b = item({ key: "github:a/b#2", id: "a/b#2" });
     const s = card({ name: "issue a/b#1", state: "working" });
-    const { toPick, working } = areas({ items: [a, b], started: [], errors: [], gitOff: false, off: false, fetchedAt: 1 }, [s]);
+    const { toPick, working } = areas({ items: [a, b], started: [], errors: [], sourceLabels: {}, gitOff: false, off: false, fetchedAt: 1 }, [s]);
     expect(toPick.map((i) => i.key)).toEqual(["github:a/b#2"]);
     expect(working).toEqual([{ item: a, card: s }]);
   });
@@ -78,14 +78,14 @@ describe("work items", () => {
 
   it("says issues are off and opens Settings → Git when no Git connection is on", () => {
     const host = document.createElement("div");
-    makeWorkItemsView(host).update({ items: [], started: [], errors: [], gitOff: true, off: true, fetchedAt: null }, [], Date.now());
+    makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: true, off: true, fetchedAt: null }, [], Date.now());
     expect(host.textContent).toContain("Issues are off. Turn on GitHub or GitLab in Settings → Git.");
     expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "git" });
   });
 
   it("says issues are off and opens Settings → Work Items when Git is on but both services are off there", () => {
     const host = document.createElement("div");
-    makeWorkItemsView(host).update({ items: [], started: [], errors: [], gitOff: false, off: true, fetchedAt: null }, [], Date.now());
+    makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: true, fetchedAt: null }, [], Date.now());
     expect(host.textContent).toContain("Issues are off. Turn on GitHub or GitLab in Settings → Work Items.");
     expect(host.textContent).not.toContain("Settings → Git.");
     expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "workItems" });
@@ -93,16 +93,16 @@ describe("work items", () => {
 
   it("says when no issue matches the rules", () => {
     const host = document.createElement("div");
-    makeWorkItemsView(host).update({ items: [], started: [], errors: [], gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
+    makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
     expect(host.querySelector(".issues__area--pick")?.textContent).toContain("No issues match your rules.");
   });
 
   it("keeps the filter dropdowns across repaints", () => {
     const host = document.createElement("div");
     const view = makeWorkItemsView(host);
-    view.update({ items: [item({})], started: [], errors: [], gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
+    view.update({ items: [item({})], started: [], errors: [], sourceLabels: {}, gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
     const sel = host.querySelector("select");
-    view.update({ items: [item({}), item({ key: "2" })], started: [], errors: [], gitOff: false, off: false, fetchedAt: 2 }, [], Date.now());
+    view.update({ items: [item({}), item({ key: "2" })], started: [], errors: [], sourceLabels: {}, gitOff: false, off: false, fetchedAt: 2 }, [], Date.now());
     expect(host.querySelector("select")).toBe(sel);
     expect(host.querySelector(".issues__area--pick .issues__count")?.textContent).toBe("2");
   });

@@ -154,7 +154,7 @@ const SOURCE_LABEL: Record<string, string> = { github: "GitHub", gitlab: "GitLab
 export function makeWorkItemsView(host: HTMLElement) {
   let starting: ReadonlySet<string> = new Set();
   const filters: WorkFilters = { source: null, repo: null, status: null, search: "" };
-  let state: WorkItemsState = { items: [], started: [], errors: [], gitOff: false, off: false, fetchedAt: null };
+  let state: WorkItemsState = { items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: false, fetchedAt: null };
   let cards: Card[] = [];
   let nowMs = Date.now();
   let optionsKey: string | null = null;
