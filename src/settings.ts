@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, isLinux, isWindows, recognizerOptions, secretStore, thisComputerLower } from "./platform";
-import type { ColorTheme, ForgeItems, GitProvider, Harness, ItemRule, NewSessionTerminal, ViewerTheme, WorkItemsConfig } from "./types";
+import type { ColorTheme, CustomTool, ForgeItems, GitProvider, Harness, ItemRule, NewSessionTerminal, ViewerTheme, WorkItemsConfig } from "./types";
 import { setViewerTheme } from "./modal";
 import { COLOR_THEMES, applyColorTheme, asColorTheme } from "./theme";
 import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys, removeCombo, setKeyBindings, type KeyBindings } from "./keys";
@@ -223,6 +223,7 @@ export interface SettingsHandlers {
   /** One service's Work Items settings, read from the page, to save. */
   onWorkItems?(forge: GitProvider, items: ForgeItems): void;
   onWorkPrompt?(text: string): void;
+  onCustomTools?(tools: CustomTool[]): void;
   /** Shows another Settings group. */
   onOpenGroup?(group: SettingsGroup): void;
   onGitEnabled?(p: GitProvider, on: boolean): void;
@@ -326,6 +327,16 @@ export function gitConnections(raw: GitConnectionJson[] | null | undefined): Git
     return found ? { ...found, baseUrl: found.baseUrl ?? null, clone: found.clone ?? "ssh" } : { provider, enabled: provider === "github", baseUrl: null, token: { kind: "env", name: GIT_DEFAULT_ENV[provider] }, clone: "ssh" };
   });
 }
+
+const CUSTOM_TOOL_FORMAT = `{"items": [{"id": "ENG-1204", "title": "Export reports as CSV",
+  "url": "https://linear.app/acme/issue/ENG-1204", "status": "Todo",
+  "labels": ["frontend"], "assignees": ["tiago"], "repo": "acme/web"}]}`;
+
+const CUSTOM_TOOL_SCRIPT = `#!/bin/sh
+# My open tickets as Maya's work items (needs curl and jq).
+curl -s -H "Authorization: Bearer $TRACKER_TOKEN" https://tracker.example.com/api/my-tickets |
+  jq '{items: [.[] | {id: .key, title: .summary, url: .link, status: .state, repo: .repository}]}'
+`;
 
 /** The Work Items settings as the Rust side defaults them: one rule for my issues. */
 export function workItemsConfig(raw: Partial<WorkItemsConfig> | null | undefined): WorkItemsConfig {
@@ -1275,6 +1286,87 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     workItems.append(box);
   }
 
+  const customTools = workItemsConfigNow.custom ?? [];
+  const sendCustom = (tools: CustomTool[]) => h.onCustomTools?.(tools);
+  customTools.forEach((tool, i) => {
+    const box = document.createElement("div");
+    box.className = "settings__git settings__custom";
+    box.dataset.tool = tool.id;
+    const change = (patch: Partial<CustomTool>) => sendCustom(customTools.map((t, j) => (j === i ? { ...t, ...patch } : t)));
+
+    const head = document.createElement("div");
+    head.className = "settings__check";
+    const on = document.createElement("input");
+    on.type = "checkbox";
+    on.name = `ct-${i}-enabled`;
+    on.checked = tool.enabled;
+    on.addEventListener("change", () => change({ enabled: on.checked }));
+    const name = document.createElement("input");
+    name.type = "text";
+    name.name = `ct-${i}-name`;
+    name.placeholder = "Linear (mine-only)";
+    name.value = tool.name;
+    name.addEventListener("change", () => {
+      name.value = name.value.trim();
+      change({ name: name.value });
+    });
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "settings__link";
+    remove.dataset.action = "ct-remove";
+    remove.setAttribute("aria-label", "Remove custom tool");
+    remove.textContent = "✕";
+    remove.addEventListener("click", () => sendCustom(customTools.filter((_, j) => j !== i)));
+    head.append(on, name, remove);
+    box.append(head);
+
+    const text = (label: string, key: "listCommand" | "startCommand" | "me", suffix: string) => {
+      const l = document.createElement("label");
+      l.append(document.createTextNode(label));
+      const el = document.createElement("input");
+      el.type = "text";
+      el.name = `ct-${i}-${suffix}`;
+      el.value = tool[key];
+      el.addEventListener("change", () => {
+        el.value = el.value.trim();
+        change({ [key]: el.value });
+      });
+      l.append(el);
+      box.append(l);
+    };
+    text("List command", "listCommand", "list");
+    text("On-start command (optional)", "startCommand", "start");
+    text("Your name there (optional)", "me", "me");
+    const meHint = document.createElement("div");
+    meHint.className = "settings__hint";
+    meHint.textContent = "Start asks before taking over an item assigned to someone else. Blank: it never asks.";
+    box.append(meHint);
+
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Show the output format and an example script";
+    const listHint = document.createElement("div");
+    listHint.className = "settings__hint";
+    listHint.textContent = "The list command runs every 2 minutes through your shell and must finish within 30 seconds. It prints JSON like the example; id, title and url are required. repo is owner/name, github:owner/name, gitlab:group/name or a clone URL; without one, Maya picks the repository when you start.";
+    const startHint = document.createElement("div");
+    startHint.className = "settings__hint";
+    startHint.textContent = "The on-start command runs when you press Start, with the item's JSON on its input, to assign or move it in your tool.";
+    const format = document.createElement("pre");
+    format.textContent = CUSTOM_TOOL_FORMAT;
+    const script = document.createElement("pre");
+    script.textContent = CUSTOM_TOOL_SCRIPT;
+    details.append(summary, listHint, startHint, format, script);
+    box.append(details);
+    workItems.append(box);
+  });
+  const addTool = document.createElement("button");
+  addTool.type = "button";
+  addTool.className = "settings__link";
+  addTool.dataset.action = "ct-add";
+  addTool.textContent = "+ Add New";
+  addTool.addEventListener("click", () => sendCustom([...customTools, { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]));
+  workItems.append(addTool);
+
   const workLabel = document.createElement("label");
   workLabel.textContent = "Work prompt";
   const workInput = document.createElement("textarea");
@@ -2125,6 +2217,7 @@ export async function initSettings(): Promise<void> {
   const handlers: SettingsHandlers = {
     onWorkItems: (forge, items) => void saveWorkItems((w) => { w[forge] = items; }),
     onWorkPrompt: (text) => void saveWorkItems((w) => { w.prompt = text; }),
+    onCustomTools: (tools) => void saveWorkItems((w) => { w.custom = tools; }),
     onOpenGroup: (group) => document.dispatchEvent(new CustomEvent(OPEN_SETTINGS_GROUP, { detail: group })),
     onGitEnabled: (p, on) => void saveGit(p, (c) => { c.enabled = on; }),
     onGitBaseUrl: (url) => void saveGit("gitlab", (c) => { c.baseUrl = url || null; }),

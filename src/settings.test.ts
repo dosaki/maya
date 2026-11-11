@@ -1544,6 +1544,51 @@ describe("Settings → Work Items", () => {
   });
 });
 
+describe("Settings → Work Items custom tools", () => {
+  const items = { enabled: false, rules: [], statusLabels: [], startStatus: "", trackerRepos: [] };
+  const t1 = { id: "custom-1", name: "Linear", enabled: true, listCommand: "linear-items", startCommand: "linear-start", me: "tiago" };
+  const t2 = { id: "custom-2", name: "Jira", enabled: false, listCommand: "jira-items", startCommand: "", me: "" };
+  const model = (): SettingsModel => ({ ...voiceBase, settingsGroup: "workItems", workItems: { github: items, gitlab: items, prompt: "", custom: [t1, t2] } });
+  const boxes = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>(".settings__custom")];
+  const input = (root: HTMLElement, n: string) => root.querySelector<HTMLInputElement>(`input[name=${n}]`)!;
+
+  it("shows each custom tool with its commands and an example", () => {
+    const root = renderSettings(model(), handlers());
+    const b = boxes(root);
+    expect(b.map((x) => x.dataset.tool)).toEqual(["custom-1", "custom-2"]);
+    expect(input(root, "ct-0-enabled").checked).toBe(true);
+    expect(input(root, "ct-1-enabled").checked).toBe(false);
+    expect(input(root, "ct-0-name").value).toBe("Linear");
+    expect(input(root, "ct-0-name").placeholder).toBe("Linear (mine-only)");
+    expect(input(root, "ct-0-list").value).toBe("linear-items");
+    expect(input(root, "ct-0-start").value).toBe("linear-start");
+    expect(input(root, "ct-0-me").value).toBe("tiago");
+    expect(input(root, "ct-1-list").value).toBe("jira-items");
+    expect(b[0].textContent).toContain("Start asks before taking over an item assigned to someone else. Blank: it never asks.");
+    expect(b[0].querySelector("details > summary")!.textContent).toBe("Show the output format and an example script");
+    expect(b[0].querySelectorAll("details pre").length).toBe(2);
+    expect(b[0].querySelector("details")!.textContent).toContain("must finish within 30 seconds");
+  });
+
+  it("adds, edits and removes custom tools", () => {
+    const h = { ...handlers(), onCustomTools: vi.fn() };
+    const root = renderSettings(model(), h);
+    root.querySelector<HTMLButtonElement>("[data-action=ct-add]")!.click();
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([t1, t2, { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]);
+    const list = input(root, "ct-0-list");
+    list.value = " linear-items2 ";
+    list.dispatchEvent(new Event("change"));
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([{ ...t1, listCommand: "linear-items2" }, t2]);
+    expect(list.value).toBe("linear-items2");
+    const on = input(root, "ct-1-enabled");
+    on.checked = true;
+    on.dispatchEvent(new Event("change"));
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([t1, { ...t2, enabled: true }]);
+    boxes(root)[0].querySelector<HTMLButtonElement>("[data-action=ct-remove]")!.click();
+    expect(h.onCustomTools).toHaveBeenLastCalledWith([t2]);
+  });
+});
+
 describe("workItemsConfig custom tools", () => {
   it("defaults to none and keeps the ones given", () => {
     expect(workItemsConfig(null).custom).toEqual([]);
