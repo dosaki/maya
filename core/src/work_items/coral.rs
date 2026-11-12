@@ -2,13 +2,13 @@
 //! every Coral request goes through. The token never appears in an error.
 
 use crate::config::{CoralItems, TokenSource};
-use crate::forge::{scrub, Http, Reply};
+use crate::forge::{answer_with, scrub, status_message, Http, Reply};
 use serde_json::Value;
 
 /// A Coral address with its token. No `Debug`: it would show the token.
 #[derive(Clone)]
 pub struct Coral {
-    /// Without a trailing `/`.
+    /// `scheme://host[:port]` only.
     pub base: String,
     pub token: String,
 }
@@ -20,11 +20,20 @@ pub fn resolve(c: &CoralItems, stored: impl Fn() -> Option<String>, env: impl Fn
         TokenSource::Env { .. } => env(&c.env_name().unwrap_or_default()),
     };
     match token.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) {
-        Some(token) => Ok(Coral { base: c.base_url.trim().trim_end_matches('/').to_string(), token }),
+        Some(token) => Ok(Coral { base: origin(&c.base_url), token }),
         None => Err(match &c.token {
             TokenSource::Stored => "No Coral token: paste one in Settings → Work Items.".to_string(),
             TokenSource::Env { .. } => format!("No Coral token: set {} or paste a token in Settings → Work Items.", c.env_name().unwrap_or_default()),
         }),
+    }
+}
+
+/// The address's `scheme://host[:port]`: any path, query or slash is dropped.
+pub fn origin(url: &str) -> String {
+    let url = url.trim();
+    match url.split_once("://") {
+        Some((scheme, rest)) => format!("{scheme}://{}", rest.split(['/', '?', '#']).next().unwrap_or("")),
+        None => url.trim_end_matches('/').to_string(),
     }
 }
 
@@ -47,25 +56,15 @@ impl Coral {
 
 /// The body of a 2xx reply, else why not.
 fn check(reply: Reply, token: &str) -> Result<String, String> {
-    let Reply { status, body, .. } = reply;
-    match status {
-        200..=299 => Ok(body),
+    match reply.status {
+        200..=299 => Ok(reply.body),
         401 | 403 => Err("Coral refused the token: paste a new one in Settings → Work Items.".into()),
-        _ => {
-            let body = scrub(&body, token);
-            let v: Value = serde_json::from_str(&body).unwrap_or_default();
-            let message = v["message"].as_str().or_else(|| v["error"].as_str()).map(str::to_string).unwrap_or_else(|| body.chars().take(200).collect());
-            Err(format!("{status}: {message}"))
-        }
+        status => Err(status_message(status, &reply.body, token)),
     }
 }
 
 fn answer(c: &Coral, r: Result<Reply, String>) -> Result<String, String> {
-    let out = match r {
-        Ok(reply) => check(reply, &c.token),
-        Err(e) => Err(format!("could not reach {}: {e}", c.host())),
-    };
-    out.map_err(|e| scrub(&e, &c.token))
+    answer_with(c.host(), &c.token, r, |reply| check(reply, &c.token))
 }
 
 /// A GET's JSON reply.
@@ -114,6 +113,10 @@ mod tests {
         let c = CoralItems { base_url: "https://coral.test/ ".into(), ..Default::default() };
         let r = resolve(&c, || Some("cbp_x".into()), |_| None).unwrap();
         assert_eq!(r.api("/users/me"), "https://coral.test/api/v1/users/me");
+        for pasted in ["https://coral.test/items/AB-1", "https://coral.test/", "https://coral.test/a/b?x=1#y"] {
+            let c = CoralItems { base_url: pasted.into(), ..Default::default() };
+            assert_eq!(resolve(&c, || Some("cbp_x".into()), |_| None).unwrap().api("/users/me"), "https://coral.test/api/v1/users/me", "{pasted}");
+        }
         assert_eq!(r.web("AB-1"), "https://coral.test/items/AB-1");
     }
 

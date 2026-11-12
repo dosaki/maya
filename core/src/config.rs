@@ -858,7 +858,7 @@ impl Config {
             clean_all(&mut f.tracker_repos, clean_repo);
             f.start_status = f.start_status.as_deref().map(str::trim).filter(|s| f.status_labels.iter().any(|l| l == s)).map(String::from);
         }
-        w.coral.base_url = w.coral.base_url.trim().trim_end_matches('/').to_string();
+        w.coral.base_url = crate::work_items::coral::origin(&w.coral.base_url);
         if let TokenSource::Env { name } = &mut w.coral.token {
             *name = name.trim().to_string();
         }
@@ -1100,6 +1100,9 @@ mod tests {
     fn normalize_trims_the_coral_address() {
         let mut c = Config::default();
         c.work_items.coral.base_url = " https://coral.test/ ".into();
+        c.normalize_work_items();
+        assert_eq!(c.work_items.coral.base_url, "https://coral.test");
+        c.work_items.coral.base_url = "https://coral.test/items/AB-1".into();
         c.normalize_work_items();
         assert_eq!(c.work_items.coral.base_url, "https://coral.test");
     }
