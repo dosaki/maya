@@ -16,7 +16,7 @@ import { terminalLabel } from "./terminalpick";
 import { renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 import { updates } from "./update";
-import { btn as settingsBtn, card, group, notice, row, screenHead, state, toggle } from "./settings-ui";
+import { btn as settingsBtn, card, cardHead, choice, footRow, group, notice, row, screenHead, state, toggle } from "./settings-ui";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -959,131 +959,82 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
 
   releaseNotes.append(renderReleaseNotes());
 
+  const gitCards: HTMLElement[] = [];
   for (const conn of model.git ?? gitConnections(null)) {
     const p = conn.provider;
     const status = model.gitStatus?.[p] ?? { hasToken: false };
-    const box = document.createElement("div");
-    box.className = "settings__git";
-    box.dataset.provider = p;
-
-    const onLabel = document.createElement("label");
-    onLabel.className = "settings__check";
-    const on = document.createElement("input");
-    on.type = "checkbox";
-    on.name = `gitEnabled-${p}`;
-    on.checked = conn.enabled;
-    on.addEventListener("change", () => h.onGitEnabled?.(p, on.checked));
-    onLabel.append(on, document.createTextNode(` ${GIT_LABEL[p]}`));
-    box.append(onLabel);
+    const off = !conn.enabled;
+    const rows: HTMLElement[] = [
+      cardHead({
+        label: GIT_LABEL[p],
+        control: toggle(`gitEnabled-${p}`, conn.enabled, (on) => h.onGitEnabled?.(p, on), `Use ${GIT_LABEL[p]}`),
+      }),
+    ];
 
     if (p === "gitlab") {
-      const urlLabel = document.createElement("label");
-      urlLabel.textContent = "URL";
       const url = document.createElement("input");
       url.type = "text";
+      url.className = "mono";
       url.name = "gitBaseUrl-gitlab";
       url.placeholder = "https://gitlab.com";
       url.value = conn.baseUrl ?? "";
-      url.disabled = !conn.enabled;
+      url.disabled = off;
       url.addEventListener("change", () => h.onGitBaseUrl?.(url.value.trim()));
-      urlLabel.append(url);
-      box.append(urlLabel);
+      rows.push(row({ label: "URL", control: url }));
     }
 
-    const kinds = document.createElement("div");
-    kinds.className = "settings__git-kinds";
-    for (const [kind, text] of [["stored", "Paste a token"], ["env", "From env var"]] as const) {
-      const l = document.createElement("label");
-      l.className = "settings__check";
-      const r = document.createElement("input");
-      r.type = "radio";
-      r.name = `gitTokenKind-${p}`;
-      r.value = kind;
-      r.checked = conn.token.kind === kind;
-      r.disabled = !conn.enabled;
-      r.addEventListener("change", () => h.onGitTokenKind?.(p, kind));
-      l.append(r, document.createTextNode(` ${text}`));
-      kinds.append(l);
-    }
-    box.append(kinds);
-
-    const clones = document.createElement("div");
-    clones.className = "settings__git-kinds";
-    clones.append(document.createTextNode("Clone with "));
-    for (const [protocol, text] of [["ssh", "SSH"], ["https", "HTTPS"]] as const) {
-      const l = document.createElement("label");
-      l.className = "settings__check";
-      const r = document.createElement("input");
-      r.type = "radio";
-      r.name = `gitClone-${p}`;
-      r.value = protocol;
-      r.checked = (conn.clone ?? "ssh") === protocol;
-      r.disabled = !conn.enabled;
-      r.addEventListener("change", () => h.onGitClone?.(p, protocol));
-      l.append(r, document.createTextNode(` ${text}`));
-      clones.append(l);
-    }
-    box.append(clones);
+    rows.push(row({
+      label: "Token",
+      help: p === "github" ? "Needs the repo scope." : "Needs read_api.",
+      control: choice(`gitTokenKind-${p}`, [["stored", "Paste a token"], ["env", "From env var"]] as const, conn.token.kind, (kind) => h.onGitTokenKind?.(p, kind), off),
+      tag: "div",
+    }));
 
     if (conn.token.kind === "stored") {
-      const tokLabel = document.createElement("label");
-      tokLabel.textContent = `${GIT_LABEL[p]} token`;
       const tok = document.createElement("input");
       tok.type = "password";
       tok.name = `gitToken-${p}`;
       tok.autocomplete = "off";
-      tok.disabled = !conn.enabled;
-      tok.placeholder = status.hasToken ? `saved in ${secretStore()}; paste to replace` : "paste your token";
+      tok.disabled = off;
+      tok.placeholder = status.hasToken ? "paste to replace" : "paste your token";
       tok.addEventListener("change", () => {
         const t = tok.value.trim();
         tok.value = "";
         if (t) h.onGitToken?.(p, t);
       });
-      tokLabel.append(tok);
-      box.append(tokLabel);
-      if (status.hasToken) {
-        const clear = document.createElement("button");
-        clear.type = "button";
-        clear.className = "settings__link";
-        clear.dataset.action = "git-clear";
-        clear.textContent = "Clear";
-        clear.addEventListener("click", () => h.onGitClearToken?.(p));
-        box.append(clear);
-      }
+      const controls: HTMLElement[] = [tok];
+      if (status.hasToken) controls.push(settingsBtn("Clear", { action: "git-clear", kind: "quiet" }, () => h.onGitClearToken?.(p)));
+      rows.push(row({ label: `${GIT_LABEL[p]} token`, help: status.hasToken ? `Saved in ${secretStore()}.` : null, control: controls }));
     } else {
-      const envLabel = document.createElement("label");
-      envLabel.textContent = "Variable";
       const env = document.createElement("input");
       env.type = "text";
+      env.className = "mono";
       env.name = `gitEnvName-${p}`;
       env.placeholder = GIT_DEFAULT_ENV[p];
       env.value = conn.token.name;
-      env.disabled = !conn.enabled;
+      env.disabled = off;
       env.addEventListener("change", () => h.onGitEnvName?.(p, env.value.trim()));
-      envLabel.append(env);
-      box.append(envLabel);
+      rows.push(row({ label: "Variable", control: env }));
     }
 
-    const test = document.createElement("button");
-    test.type = "button";
-    test.className = "settings__link";
-    test.dataset.action = "git-test";
-    test.textContent = "Test";
-    test.disabled = !conn.enabled;
-    test.addEventListener("click", () => h.onGitTest?.(p));
-    box.append(test);
-    if (status.test) {
-      const out = document.createElement("div");
-      out.className = "settings__hint settings__git-test";
-      out.textContent = status.test;
-      box.append(out);
-    }
-    git.append(box);
+    rows.push(row({
+      label: "Clone with",
+      control: choice(`gitClone-${p}`, [["ssh", "SSH"], ["https", "HTTPS"]] as const, conn.clone ?? "ssh", (protocol) => h.onGitClone?.(p, protocol), off),
+      tag: "div",
+    }));
+
+    const outcome = document.createElement("span");
+    outcome.className = "settings__git-test";
+    outcome.textContent = status.test ?? "";
+    rows.push(footRow(status.test ? outcome : document.createElement("span"), settingsBtn("Test", { action: "git-test", disabled: off }, () => h.onGitTest?.(p))));
+
+    const c = card(...rows);
+    c.classList.add("settings__git");
+    if (off) c.classList.add("settings__card--off");
+    c.dataset.provider = p;
+    gitCards.push(c);
   }
-  const gitHint = document.createElement("div");
-  gitHint.className = "settings__hint";
-  gitHint.textContent = "Maya reads pull requests and merge requests with these tokens. GitHub needs the repo scope; GitLab needs read_api. Reviews clone over SSH or HTTPS with your own git credentials.";
-  git.append(gitHint);
+  git.append(group({}, ...gitCards));
 
   const workItemsConfigNow = model.workItems ?? workItemsConfig(null);
   const connections = model.git ?? gitConnections(null);

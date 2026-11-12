@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
 import { RUNNING_VERSION } from "./release-notes";
 import { SETTINGS_GROUPS, SETTINGS_LEDES, SETTINGS_NAV, gitConnections, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { secretStore } from "./platform";
 
 const voiceBase = {
   hookInstalled: true,
@@ -1315,7 +1316,7 @@ describe("Settings → Git", () => {
     gitStatus: { github: { hasToken: false }, gitlab: { hasToken: false } },
     ...over,
   });
-  const block = (root: HTMLElement, p: string) => root.querySelector<HTMLElement>(`.settings__git[data-provider=${p}]`)!;
+  const block = (root: HTMLElement, p: string) => root.querySelector<HTMLElement>(`.settings__card.settings__git[data-provider=${p}]`)!;
 
   it("defaults to GitHub on reading GH_TOKEN and GitLab off reading GITLAB_TOKEN", () => {
     expect(gitConnections(undefined)).toEqual([
@@ -1383,7 +1384,9 @@ describe("Settings → Git", () => {
     env.value = " MY_TOKEN ";
     env.dispatchEvent(new Event("change"));
     expect(h.onGitEnvName).toHaveBeenCalledWith("gitlab", "MY_TOKEN");
-    gl.querySelector<HTMLInputElement>("input[name=gitTokenKind-gitlab][value=stored]")!.dispatchEvent(new Event("change"));
+    const storedKind = gl.querySelector<HTMLInputElement>("input[name=gitTokenKind-gitlab][value=stored]")!;
+    storedKind.checked = true;
+    storedKind.dispatchEvent(new Event("change"));
     expect(h.onGitTokenKind).toHaveBeenCalledWith("gitlab", "stored");
     const gh = block(root, "github");
     const tok = gh.querySelector<HTMLInputElement>("input[name=gitToken-github]")!;
@@ -1400,6 +1403,62 @@ describe("Settings → Git", () => {
   it("shows the last test's outcome", () => {
     const root = renderSettings(gitModel({ gitStatus: { github: { hasToken: false, test: "Connected as @tiago" }, gitlab: { hasToken: false } } }), handlers());
     expect(block(root, "github").querySelector(".settings__git-test")?.textContent).toBe("Connected as @tiago");
+  });
+  it("heads each forge's card with its name and switch, and dims a card that is off", () => {
+    const root = renderSettings(gitModel(), handlers());
+    expect(root.querySelectorAll(".settings__card.settings__git[data-provider]")).toHaveLength(2);
+    const gh = block(root, "github");
+    expect(gh.querySelector(".settings__row--head .settings__label")?.textContent).toBe("GitHub");
+    expect(gh.querySelector(".settings__row--head input[name=gitEnabled-github].settings__toggle")).not.toBeNull();
+    expect(block(root, "gitlab").querySelector(".settings__row--head .settings__label")?.textContent).toBe("GitLab");
+    expect(gh.classList.contains("settings__card--off")).toBe(false);
+    expect(block(root, "gitlab").classList.contains("settings__card--off")).toBe(true);
+  });
+
+  it("offers the token kind and the clone protocol as segmented choices", () => {
+    const h = { ...handlers(), onGitTokenKind: vi.fn(), onGitClone: vi.fn() };
+    const root = renderSettings(gitModel(), h);
+    const gh = block(root, "github");
+    for (const name of ["gitTokenKind-github", "gitClone-github"]) {
+      const seg = gh.querySelector(`.settings__seg:has(input[name=${name}])`);
+      expect(seg).not.toBeNull();
+    }
+    expect([...gh.querySelectorAll<HTMLInputElement>("input[name=gitTokenKind-github]")].map((r) => r.value)).toEqual(["stored", "env"]);
+    expect([...gh.querySelectorAll<HTMLInputElement>("input[name=gitClone-github]")].map((r) => r.value)).toEqual(["ssh", "https"]);
+    const stored = gh.querySelector<HTMLInputElement>("input[name=gitTokenKind-github][value=stored]")!;
+    stored.checked = true;
+    stored.dispatchEvent(new Event("change"));
+    expect(h.onGitTokenKind).toHaveBeenCalledWith("github", "stored");
+    const https = gh.querySelector<HTMLInputElement>("input[name=gitClone-github][value=https]")!;
+    https.checked = true;
+    https.dispatchEvent(new Event("change"));
+    expect(h.onGitClone).toHaveBeenCalledWith("github", "https");
+  });
+
+  it("says which scope each Token needs, and drops the old hint paragraph", () => {
+    const root = renderSettings(gitModel(), handlers());
+    const help = (p: string) => [...block(root, p).querySelectorAll(".settings__row")].find((r) => r.querySelector(".settings__label")?.textContent === "Token")?.querySelector(".settings__help")?.textContent;
+    expect(help("github")).toBe("Needs the repo scope.");
+    expect(help("gitlab")).toBe("Needs read_api.");
+    const section = root.querySelector(".settings__section--git")!;
+    expect(section.textContent).not.toContain("GitHub needs the repo scope; GitLab");
+    expect(section.querySelector(":scope > .settings__hint")).toBeNull();
+  });
+
+  it("names the secret store in the stored token's help, with a quiet Clear", () => {
+    const stored = gitConnections([{ provider: "github", enabled: true, token: { kind: "stored" } }]);
+    const root = renderSettings(gitModel({ git: stored, gitStatus: { github: { hasToken: true }, gitlab: { hasToken: false } } }), handlers());
+    const tokenRow = block(root, "github").querySelector("input[name=gitToken-github]")!.closest(".settings__row")!;
+    expect(tokenRow.querySelector(".settings__help")?.textContent).toBe(`Saved in ${secretStore()}.`);
+    expect(tokenRow.querySelector("button[data-action=git-clear].settings__btn--quiet")).not.toBeNull();
+  });
+
+  it("puts the Test button and its outcome in the foot row", () => {
+    const root = renderSettings(gitModel({ gitStatus: { github: { hasToken: false, test: "Connected as @tiago" }, gitlab: { hasToken: false } } }), handlers());
+    const foot = block(root, "github").querySelector(".settings__row--foot")!;
+    expect(foot.querySelector("button[data-action=git-test]")).not.toBeNull();
+    expect(foot.querySelector(".settings__git-test")?.textContent).toBe("Connected as @tiago");
+    expect(block(root, "gitlab").querySelector(".settings__row--foot .settings__git-test")).toBeNull();
   });
 });
 

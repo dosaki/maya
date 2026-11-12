@@ -573,7 +573,7 @@ body { margin: 0; background: var(--bg); }
 .voice__empty, .voice__error { color: var(--muted); font-size: 13px; }
 .voice__error { color: #e5484d; }
 
-.settings__git { display: flex; flex-direction: column; gap: 6px; padding: 8px 0 12px; border-bottom: 1px solid var(--border); }
+.settings__git:not(.settings__card) { display: flex; flex-direction: column; gap: 6px; padding: 8px 0 12px; border-bottom: 1px solid var(--border); }
 .settings__git-kinds { display: flex; gap: 12px; flex-wrap: wrap; }
 .settings__rules { display: flex; flex-direction: column; gap: 8px; }
 .settings__rule { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
