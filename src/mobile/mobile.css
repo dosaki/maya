@@ -62,30 +62,56 @@
 .setup__error { color: #f87171; }
 .setup__card--stopped { width: calc(100% - 24px); margin: 24px auto; box-sizing: border-box; }
 
-.network__confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
-.network__confirm p { flex-basis: 100%; margin: 0; font-size: 13px; }
-.network__listening { margin: 0; font-weight: 600; }
+/* Settings on the phone: the desktop's cards and rows (styles.css, scoped to
+   `.settings.pane`) at thumb size. Tap targets are 40px or more, rows 56px,
+   fields 44px at 15px, switches 44x26 and bar buttons 46px. */
+.settings.pane .settings__body { display: block; padding: 16px 16px 48px; }
+.settings.pane .settings__title { font-size: 26px; }
+.settings.pane .settings__head { margin: 4px 0 24px; }
+.settings.pane .settings__lede { margin-top: 6px; }
+.settings.pane .settings__group { margin: 0 0 28px; }
+.settings.pane .settings__group-title { margin-top: 0; }
+.settings.pane .settings__row { gap: 16px; padding: 14px 16px 14px 18px; min-height: 56px; }
+.settings.pane .settings__row--stack { gap: 8px; padding-bottom: 16px; }
+.settings.pane .settings__row--stack .settings__label { color: var(--muted); font-weight: 400; font-size: 13.5px; }
+.settings.pane .settings__row--stack > .settings__control { justify-content: stretch; }
+.settings.pane .settings__card input:is([type=text], [type=password], [type=number], [type=search], [type=url]), .settings.pane .settings__card select { height: 44px; font-size: 15px; }
+.settings.pane .settings__card input[type=number] { width: 100%; flex: 1; text-align: left; }
+.settings.pane .settings__row--split { align-items: flex-start; gap: 12px; padding-bottom: 16px; }
+.settings.pane .settings__field { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+.settings.pane .settings__field:first-child { flex: 0 0 100px; }
+.settings.pane .settings__field .settings__label { color: var(--muted); font-weight: 400; font-size: 13.5px; }
+.settings.pane .settings__toggle { width: 44px; height: 26px; }
+.settings.pane .settings__toggle::after { width: 20px; height: 20px; }
+.settings.pane .settings__toggle:checked::after { transform: translateX(18px); }
+.settings.pane .settings__seg span { padding: 9px 16px; font-size: 14px; min-height: 40px; box-sizing: border-box; display: flex; align-items: center; }
+.settings.pane .settings__btn { min-height: 40px; padding: 8px 16px; font-size: 14px; }
+.settings.pane .settings__bar { display: flex; gap: 10px; padding: 12px 16px 16px; border-top: 1px solid var(--rule); }
+.settings.pane .settings__bar .settings__btn { flex: 1; min-height: 46px; font-size: 15px; }
+.settings.pane .settings__row--foot { padding: 14px 16px 14px 18px; }
+.settings.pane .settings__addr { color: var(--muted); font-size: 13px; }
+.settings.pane .settings__group > .settings__notice { margin-top: 12px; }
+.settings.pane .settings__body > .settings__notice { margin-bottom: 16px; }
+.settings.pane .settings__device { padding: 14px 16px; }
 
-/* A Settings page fits a 320 px screen: one column below the desktop's
-   380 px minimum, and each field's label above a full-width input. */
-.settings.pane .settings__body.network { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 16px; align-items: start; }
-.network .settings__section { min-width: 0; }
-.network .settings__section > label:not(.settings__switch) { flex-direction: column; align-items: stretch; gap: 4px; }
-.network .settings__section > label:not(.settings__switch) > input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 8px 10px; }
+/* Settings opens on a list of groups, as Android's own does: cards of rows,
+   each the group's name over what is set under it, tapping into its page. */
+.settings.pane .settings-list .settings__card + .settings__card { margin-top: 16px; }
+.settings.pane .settings-list__item { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 3px; position: relative; width: 100%; min-height: 64px; padding: 12px 40px 12px 18px; border: 0; border-radius: 0; background: transparent; color: var(--text); text-align: left; font: inherit; cursor: pointer; }
+.settings.pane .settings-list__item + .settings-list__item { border-top: 1px solid var(--rule); }
+.settings.pane .settings-list__item::after { content: ""; position: absolute; right: 18px; top: 50%; width: 9px; height: 9px; margin-top: -5px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); }
+.settings-list__name { font-weight: 500; }
+.settings-list__summary { color: var(--muted); font-size: 13.5px; }
+/* A group's page: a gold back link over its title. */
+.settings.pane .settings-page__back { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 40px; margin: 0 0 6px -6px; padding: 8px 6px; border: 0; background: none; color: var(--gold-bright); font: inherit; }
+.settings.pane .settings-page__back::before { content: ""; width: 9px; height: 9px; margin: 0 2px 0 4px; border-left: 2px solid var(--gold-bright); border-bottom: 2px solid var(--gold-bright); transform: rotate(45deg); }
 
-/* Settings opens on a list of groups, as Android's own does: each row the
-   group's name over what is set under it, tapping into the group's page. */
-.settings .settings-list { gap: 0; }
-.settings .settings-list__item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; position: relative; width: 100%; min-height: 56px; padding: 10px 36px 10px 16px; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: transparent; color: var(--text); text-align: left; font: inherit; }
-.settings .settings-list__item::after { content: "›"; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 20px; }
-.settings-list__name { font-size: 15px; }
-.settings-list__summary { color: var(--muted); font-size: 13px; }
-/* A group's page: the back arrow and its name, and its error, across every column. */
-.settings-page__bar, .settings__body.network > .settings__error { grid-column: 1 / -1; }
-.settings-page__bar { display: flex; align-items: center; gap: 8px; }
-.settings .settings-page__back { min-width: 40px; border: 0; background: transparent; font-size: 20px; }
-.settings-page__title { margin: 0; font-size: 16px; font-weight: 600; }
-
+/* Release Notes: Maya from the waist up, as the What's new window shows her
+   (.whatsnew__art, .whatsnew__head), the back link over her top left. */
+.settings.pane .settings__rn-banner { display: block; width: calc(100% + 32px); height: 200px; margin: -46px -16px 0; object-fit: cover; object-position: 50% 6%; -webkit-mask-image: linear-gradient(#000 55%, transparent); mask-image: linear-gradient(#000 55%, transparent); pointer-events: none; user-select: none; }
+.settings.pane .settings__rn-head { position: relative; margin: -72px 0 20px; text-align: right; text-shadow: 0 1px 8px var(--panel), 0 0 2px var(--panel); }
+.settings.pane .settings__rn-head .settings__title { margin: 0 0 4px; }
+.settings.pane .settings__rn-head .settings__lede { margin: 0 0 0 auto; }
 
 /* The mic bar under the column strip: the mic, what was heard and said, Yes and No.
    Not `.voice`: styles.css, loaded first, uses that for the desktop's 28 px button. */

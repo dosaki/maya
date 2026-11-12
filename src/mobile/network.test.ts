@@ -12,7 +12,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   }),
 }));
 
-import { carryEdits, groupSummary, initNetwork, renderNetwork, restoreEdits, type NetworkModel, type NetworkStatus } from "./network";
+import { carryEdits, groupSummary, initNetwork, PHONE_LEDES, PHONE_LIST, renderNetwork, restoreEdits, type NetworkModel, type NetworkStatus } from "./network";
 import { morph } from "../morph";
 import { RUNNING_VERSION } from "../release-notes";
 
@@ -75,7 +75,7 @@ describe("renderNetwork", () => {
   it("shows why the phone could not reconnect at start-up, in the Join section", () => {
     const down: NetworkModel = { ...net, status: { ...off, mainError: "could not read this phone's key" } };
     const el = renderNetwork(down, handlers());
-    const join = [...el.querySelectorAll("section")].find((s) => s.textContent?.includes("Join a main"))!;
+    const join = [...el.querySelectorAll<HTMLElement>(".settings__group")].find((g) => g.querySelector(".settings__group-title")?.textContent === "Join a main")!;
     expect(join.querySelector(".settings__error")!.textContent).toBe("could not read this phone's key");
   });
 
@@ -93,7 +93,7 @@ describe("renderNetwork", () => {
     expect(h.onSwitch).toHaveBeenCalledWith("completed", true);
     el.querySelector<HTMLButtonElement>("button[data-action=battery]")!.click();
     expect(h.onBattery).toHaveBeenCalled();
-    expect(el.textContent).toContain("Android may otherwise stop Maya with the screen off.");
+    expect(el.textContent).toContain("Android may otherwise stop Maya with the screen off, and her notifications with her.");
   });
 
   it("says when Android has notifications off for Maya", () => {
@@ -104,11 +104,85 @@ describe("renderNetwork", () => {
 
 });
 
+describe("the phone's pages in the new design", () => {
+  const page = (m: Partial<NetworkModel>) => renderNetwork({ ...base, ...m }, handlers());
+
+  it("heads a page with a Settings back link, the title and the lede", () => {
+    const el = page({ group: "voice" });
+    expect(el.querySelector(".settings-page__back")!.textContent).toBe("Settings");
+    expect(el.querySelector(".settings__title")!.textContent).toBe("Voice");
+    expect(el.querySelector(".settings__lede")!.textContent).toBe(PHONE_LEDES.voice);
+    expect(PHONE_LEDES).toMatchObject({
+      network: "This phone joins the Maya on your computer.",
+      devices: "The computers and phones in your group.",
+      notifications: "When the phone tells you a session needs you.",
+      voice: "While Maya is on screen. She never listens with the app closed.",
+    });
+  });
+
+  it("states the running version in Release Notes, under a banner", () => {
+    const el = page({ group: "releaseNotes" });
+    const banner = el.querySelector<HTMLImageElement>("img.settings__rn-banner[alt='']")!;
+    const head = el.querySelector(".settings__rn-head")!;
+    expect(banner.compareDocumentPosition(head) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(head.querySelector(".settings__title")!.textContent).toBe("Release Notes");
+    expect(head.querySelector(".settings__lede")!.textContent).toBe(`You're running Maya ${RUNNING_VERSION}.`);
+  });
+
+  it("Join a main: the note, split port and code, a gold Join", () => {
+    const el = page({ group: "network", status: off });
+    expect(el.querySelector(".settings__group-note")!.textContent).toBe("Open Settings → Network on the main, choose Show pairing code, and type the code it shows.");
+    const split = el.querySelector(".settings__row--split")!;
+    expect(split.querySelector("input[name=joinPort]")).not.toBeNull();
+    expect(split.querySelector("input[name=code]")).not.toBeNull();
+    expect(split.querySelector("input[name=host]")).toBeNull();
+    expect(el.querySelector("button[data-action=join]")!.classList.contains("settings__btn--gold")).toBe(true);
+  });
+
+  it("joined: Connected is a state, Save name and Leave share a bar, Leave is danger", () => {
+    const el = page({ group: "network", mainHost: "10.0.0.2", mainPort: 4127 });
+    expect(el.querySelector(".settings__state--on")!.textContent).toBe("Connected to laptop");
+    const bar = el.querySelector(".settings__bar")!;
+    expect([...bar.querySelectorAll("button")].map((b) => b.dataset.action)).toEqual(["save", "leave"]);
+    expect(bar.querySelector("button[data-action=leave]")!.classList.contains("settings__btn--danger")).toBe(true);
+    expect(el.textContent).toContain("Drops every pairing, so each device must pair again.");
+    expect(el.querySelector("button[data-action=new-key]")!.classList.contains("settings__btn--danger")).toBe(true);
+  });
+
+  it("notifications: toggles, and the Android notice after the card", () => {
+    const el = page({ group: "notifications", notificationsAllowed: false });
+    expect(el.querySelector("input[name=notifyAwaiting]")!.classList.contains("settings__toggle")).toBe(true);
+    expect(el.querySelector("input[name=notifyCompleted]")!.classList.contains("settings__toggle")).toBe(true);
+    const notice = el.querySelector(".settings__notice.settings__error")!;
+    expect(notice.textContent).toBe("Notifications are off for Maya in Android settings.");
+    const card = el.querySelector(".settings__card")!;
+    expect(card.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("voice: toggles with help lines and the foot", () => {
+    const el = page({ group: "voice" });
+    expect(el.querySelector("input[name=speak]")!.classList.contains("settings__toggle")).toBe(true);
+    expect(el.querySelector("input[name=wakeWord]")!.classList.contains("settings__toggle")).toBe(true);
+    expect(el.textContent).toContain("Reads out sessions that need you.");
+    expect(el.querySelector(".settings__group-foot")!.textContent).toBe("Voice needs a desktop main.");
+  });
+
+  it("devices: the state goes under the name", () => {
+    const el = page({ group: "devices" });
+    expect(el.querySelector(".settings__device-meta .settings__state")).not.toBeNull();
+  });
+});
+
 describe("Settings as a list of groups", () => {
   it("opens on the list of groups, each with its summary", () => {
     const el = renderNetwork(base, handlers());
     const items = [...el.querySelectorAll<HTMLElement>(".settings-list__item")];
+    expect(el.querySelector(".settings__title")!.textContent).toBe("Settings");
+    expect([...el.querySelectorAll(".settings__card")].map((c) => c.querySelectorAll(".settings-list__item").length)).toEqual([2, 2, 1, 1]);
+    expect(PHONE_LIST).toEqual([["network", "devices"], ["notifications", "voice"], ["viewer"], ["releaseNotes"]]);
     expect(items.map((i) => i.querySelector(".settings-list__name")!.textContent)).toEqual(["Network", "Devices", "Notifications", "Voice", "Session viewer", "Release Notes"]);
+    expect(items[0]!.querySelector(".settings__state--on")).not.toBeNull();
+    expect(items[1]!.querySelector(".settings__state--on")).toBeNull();
     expect(items.map((i) => i.querySelector(".settings-list__summary")!.textContent)).toEqual(["Connected to laptop", "3 devices", "Awaiting decision", "Speak on, wake word off", "Chat", `Maya ${RUNNING_VERSION}`]);
     expect(el.querySelector("input, select")).toBeNull();
   });
@@ -128,7 +202,7 @@ describe("Settings as a list of groups", () => {
     renderNetwork(base, h).querySelector<HTMLElement>("[data-group=voice]")!.click();
     expect(h.onOpenGroup).toHaveBeenCalledWith("voice");
     const page = renderNetwork({ ...base, group: "voice" }, h);
-    expect(page.querySelector(".settings-page__title")!.textContent).toBe("Voice");
+    expect(page.querySelector(".settings__title")!.textContent).toBe("Voice");
     expect(page.querySelector("input[name=speak]")).not.toBeNull();
     expect(page.querySelector("input[name=notifyAwaiting]")).toBeNull();
     page.querySelector<HTMLElement>("button[data-action=back]")!.click();
@@ -165,7 +239,7 @@ describe("initNetwork's groups", () => {
   it("opens a group's page with a history entry, and Android's Back returns to the list", async () => {
     const pane = await mount();
     open(pane, "voice");
-    expect(pane.querySelector(".settings-page__title")!.textContent).toBe("Voice");
+    expect(pane.querySelector(".settings__title")!.textContent).toBe("Voice");
     expect((history.state as { settings?: string } | null)?.settings).toBe("voice");
     const back = popped();
     history.back();
@@ -189,7 +263,7 @@ describe("initNetwork's groups", () => {
     open(pane, "voice");
     tauri.listeners.network({ payload: joinedStatus });
     await settle();
-    expect(pane.querySelector(".settings-page__title")!.textContent).toBe("Voice");
+    expect(pane.querySelector(".settings__title")!.textContent).toBe("Voice");
   });
 
   it("leaves the entry to a card that took it over, so a tapped notification's card stays open", async () => {
@@ -289,7 +363,7 @@ describe("the Devices card", () => {
 
   it("lists the group and calls network_join with the typed host", async () => {
     const pane = await mount();
-    expect(pane.querySelector(".settings-page__title")!.textContent).toBe("Devices");
+    expect(pane.querySelector(".settings__title")!.textContent).toBe("Devices");
     expect(pane.querySelector(".settings__device-name .settings__badge")?.textContent).toBe("This phone");
     expect(pane.textContent).toContain("laptop");
     // A phone is never offered Make main; the connected main has no Join or Remove.
@@ -434,7 +508,7 @@ describe("the Voice card", () => {
     wake.checked = true;
     wake.dispatchEvent(new Event("change"));
     expect(h.onSwitch).toHaveBeenCalledWith("wakeWord", true);
-    expect(el.textContent).toContain("experimental");
+    expect(el.textContent).toContain("Experimental");
   });
   it("names the main's wake word, and Maya until the main says", () => {
     const h = handlers();
@@ -442,16 +516,18 @@ describe("the Voice card", () => {
     const joined: NetworkModel = { ...base, group: "voice", status: { ...base.status, assistant: { connected: true, mainName: "desk", error: null, wakeWord: "Jarvis" } } };
     const el = renderNetwork(joined, h);
     expect(el.textContent).toContain('Wake word "Jarvis"');
-    expect(el.textContent).toContain('listens for "Jarvis"');
+    expect(el.textContent).toContain("Experimental. The word is set on your computer.");
   });
   it("offers the viewer's look and saves the choice", () => {
     const h = { ...handlers(), onViewerTheme: vi.fn() };
     const el = renderNetwork({ ...base, group: "viewer", viewerTheme: "terminal" }, h);
     expect(el.textContent).toContain("Session viewer");
-    const sel = el.querySelector<HTMLSelectElement>("select[name=viewerTheme]")!;
-    expect(sel.value).toBe("terminal");
-    sel.value = "chat";
-    sel.dispatchEvent(new Event("change"));
+    expect(el.querySelector(".settings__seg")).not.toBeNull();
+    const radios = [...el.querySelectorAll<HTMLInputElement>("input[type=radio][name=viewerTheme]")];
+    expect(radios.map((r) => r.value)).toEqual(["chat", "terminal"]);
+    expect(radios.find((r) => r.checked)!.value).toBe("terminal");
+    radios[0]!.checked = true;
+    radios[0]!.dispatchEvent(new Event("change"));
     expect(h.onViewerTheme).toHaveBeenCalledWith("chat");
   });
 });

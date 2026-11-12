@@ -13,20 +13,32 @@ import { makeGroupHistory } from "./settings-history";
 import type { ViewerTheme } from "../types";
 import { morph } from "../morph";
 import { renderDevices, type DevicesHandlers, type DevicesModel } from "../devices";
+import { btn, card, choice, footRow, group, notice, row, screenHead, state, toggle } from "../settings-ui";
+import art from "../assets/maya-full-body.png";
 
 export type { NetworkStatus } from "../settings";
 
 export type PhoneGroup = "network" | "devices" | "notifications" | "voice" | "viewer" | "releaseNotes";
 
-/** The list's groups, in its order. */
-export const PHONE_GROUPS: readonly (readonly [PhoneGroup, string])[] = [
-  ["network", "Network"],
-  ["devices", "Devices"],
-  ["notifications", "Notifications"],
-  ["voice", "Voice"],
-  ["viewer", "Session viewer"],
-  ["releaseNotes", "Release Notes"],
-];
+/** The list's cards of groups, in its order. */
+export const PHONE_LIST: readonly (readonly PhoneGroup[])[] = [["network", "devices"], ["notifications", "voice"], ["viewer"], ["releaseNotes"]];
+
+const PHONE_NAMES: Record<PhoneGroup, string> = {
+  network: "Network",
+  devices: "Devices",
+  notifications: "Notifications",
+  voice: "Voice",
+  viewer: "Session viewer",
+  releaseNotes: "Release Notes",
+};
+
+/** The line under a page's title. Release Notes' names the running version, so it is built with the page. */
+export const PHONE_LEDES: Partial<Record<PhoneGroup, string>> = {
+  network: "This phone joins the Maya on your computer.",
+  devices: "The computers and phones in your group.",
+  notifications: "When the phone tells you a session needs you.",
+  voice: "While Maya is on screen. She never listens with the app closed.",
+};
 
 export interface NetworkModel {
   /** The group whose page is open; the list when absent or null. */
@@ -77,147 +89,134 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, te
   return e;
 }
 
-function section(title: string): HTMLElement {
-  const s = el("section", "settings__section");
-  s.append(el("h2", "settings__heading", title));
-  return s;
-}
+const JOIN_HINT = "Open Settings → Network on the main, choose Show pairing code, and type the code it shows.";
 
-function button(label: string, action: string, onClick: () => void, primary = false): HTMLButtonElement {
-  const b = el("button", primary ? "card__btn card__btn--primary" : "card__btn", label);
-  b.type = "button";
-  b.dataset.action = action;
-  b.addEventListener("click", onClick);
+/** The actions at the foot of a card, side by side or one full-width. */
+function bar(...buttons: HTMLButtonElement[]): HTMLElement {
+  const b = el("div", "settings__bar");
+  b.append(...buttons);
   return b;
 }
 
-const JOIN_HINT = "Open Settings → Network on the main, choose Show pairing code, and type the code it shows.";
+/** A field under its label. */
+function field(label: string, name: string, value: string, type = "text"): { row: HTMLElement; input: HTMLInputElement } {
+  const input = el("input", "");
+  input.name = name;
+  input.type = type;
+  input.value = value;
+  return { row: row({ label, control: input, stack: true }), input };
+}
 
-function input(label: string, name: string, value: string, type = "text"): { label: HTMLLabelElement; input: HTMLInputElement } {
-  const l = el("label", "", `${label} `);
+/** Two fields in one row, each under its label. */
+function splitFields(...fields: { label: string; input: HTMLInputElement }[]): HTMLElement {
+  const r = el("div", "settings__row settings__row--split");
+  for (const f of fields) {
+    const l = el("label", "settings__field");
+    l.append(el("span", "settings__label", f.label), f.input);
+    r.append(l);
+  }
+  return r;
+}
+
+function plainInput(name: string, value: string, type = "text"): HTMLInputElement {
   const i = el("input", "");
   i.name = name;
   i.type = type;
   i.value = value;
-  l.append(i);
-  return { label: l, input: i };
+  return i;
 }
 
 /** Join a main; `error` is why the phone could not reconnect at start-up, if it could not. */
-function joinSection(h: NetworkHandlers, error: string | null): HTMLElement {
-  const join = section("Join a main");
-  const host = input("Host", "host", "");
-  const port = input("Port", "joinPort", "4127", "number");
-  const code = input("Pairing code", "code", "");
-  code.input.inputMode = "numeric";
-  join.append(host.label, port.label, code.label, el("p", "settings__hint", JOIN_HINT));
-  join.append(button("Join", "join", () => h.onJoin(host.input.value, Number(port.input.value) || 0, code.input.value), true));
-  if (error) join.append(el("p", "settings__error", error));
-  return join;
+function joinGroup(h: NetworkHandlers, error: string | null): HTMLElement {
+  const host = field("Host", "host", "");
+  const port = plainInput("joinPort", "4127", "number");
+  const code = plainInput("code", "");
+  code.inputMode = "numeric";
+  const join = btn("Join", { action: "join", kind: "gold" }, () => h.onJoin(host.input.value, Number(port.value) || 0, code.value));
+  const g = group({ title: "Join a main", note: JOIN_HINT }, card(host.row, splitFields({ label: "Port", input: port }, { label: "Pairing code", input: code }), bar(join)));
+  if (error) g.append(notice(error, "error"));
+  return g;
 }
 
 /** This phone, then Join a main (or Key, once joined). */
 function networkCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
   const joined = m.status.role === "assistant";
-  const phone = section("This phone");
-  const name = el("label", "", "Name ");
-  const nameInput = el("input", "");
-  nameInput.name = "name";
-  nameInput.value = m.name;
-  name.append(nameInput);
-  const row = el("div", "network__row");
-  row.append(button("Save", "save", () => h.onSave(nameInput.value)));
-  phone.append(name, row);
-  if (joined) {
-    const link = m.status.assistant;
-    phone.append(el("p", "network__listening", link.connected && link.mainName ? `Connected to ${link.mainName}` : "Reconnecting…"));
-    if (m.mainHost) phone.append(el("p", "settings__hint", `${m.mainHost}:${m.mainPort || 4127}`));
-    if (!link.connected && link.error) phone.append(el("p", "settings__hint", link.error));
-    phone.append(button("Leave", "leave", h.onStopListening));
+  const name = field("Name", "name", m.name);
+  const save = btn("Save name", { action: "save" }, () => h.onSave(name.input.value));
+  const out: HTMLElement[] = [];
+  if (m.status.pairAgain) out.push(notice("This Maya was updated to secure pairing — pair again.", "info"));
+  if (!joined) {
+    out.push(joinGroup(h, m.status.mainError ?? null), group({ title: "This phone" }, card(name.row, bar(save))));
+    return out;
   }
-  if (m.status.pairAgain) phone.append(el("p", "settings__hint", "This Maya was updated to secure pairing — pair again."));
-  if (!joined) return [phone, joinSection(h, m.status.mainError ?? null)];
+  const link = m.status.assistant;
+  const rows: Node[] = [name.row];
+  const where = m.mainHost ? el("span", "settings__addr mono", `${m.mainHost}:${m.mainPort || 4127}`) : undefined;
+  rows.push(footRow(link.connected && link.mainName ? state(`Connected to ${link.mainName}`, "on") : state("Reconnecting…", "off"), where));
+  if (!link.connected && link.error) rows.push(row({ help: link.error }));
+  rows.push(bar(save, btn("Leave", { action: "leave", kind: "danger" }, h.onStopListening)));
+  out.push(group({ title: "This phone" }, card(...rows)));
 
-  const key = section("Key");
+  const keyRows: Node[] = [];
   if (m.newKey) {
-    const c = el("div", "network__confirm");
-    c.append(el("p", "", "Drop every pairing and make a new key?"));
-    c.append(button(m.busy ? "Working…" : "Drop and make a new key", "new-key-confirm", h.onNewKey, true), button("Cancel", "new-key-cancel", h.onNewKeyCancel));
-    key.append(c);
+    keyRows.push(
+      row({ label: "Drop every pairing and make a new key?" }),
+      bar(btn(m.busy ? "Working…" : "Drop and make a new key", { action: "new-key-confirm", kind: "danger" }, h.onNewKey), btn("Cancel", { action: "new-key-cancel" }, h.onNewKeyCancel)),
+    );
   } else {
-    key.append(button("New key", "new-key", h.onNewKeyAsk));
+    keyRows.push(row({ label: "New key", help: "Drops every pairing, so each device must pair again." }), bar(btn("New key", { action: "new-key", kind: "danger" }, h.onNewKeyAsk)));
   }
-  return [phone, key];
+  out.push(group({ title: "Key" }, card(...keyRows)));
+  return out;
 }
 
 /** The notification switches, then Battery, which keeps them coming with the screen off. */
 function notificationCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
-  const notifications = section("Notifications");
-  for (const [which, label, on, nameAttr] of [["awaiting", "Notify on Awaiting Decision", m.notifyAwaiting, "notifyAwaiting"], ["completed", "Notify on Completed", m.notifyCompleted, "notifyCompleted"]] as const) {
-    const l = el("label", "settings__switch");
-    const box = el("input", "");
-    box.type = "checkbox";
-    box.name = nameAttr;
-    box.checked = on;
-    box.addEventListener("change", () => h.onSwitch(which, box.checked));
-    l.append(box, document.createTextNode(` ${label}`));
-    notifications.append(l);
-  }
-  if (!m.notificationsAllowed) notifications.append(el("p", "settings__error", "Notifications are off for Maya in Android settings."));
-
-  const battery = section("Battery");
-  battery.append(button("Keep Maya awake", "battery", h.onBattery));
-  battery.append(el("p", "settings__hint", "Android may otherwise stop Maya with the screen off."));
+  const switches = card(
+    row({ label: "Awaiting Decision", control: toggle("notifyAwaiting", m.notifyAwaiting, (on) => h.onSwitch("awaiting", on)) }),
+    row({ label: "Completed", control: toggle("notifyCompleted", m.notifyCompleted, (on) => h.onSwitch("completed", on)) }),
+  );
+  const notifications = group({}, switches);
+  if (!m.notificationsAllowed) notifications.append(notice("Notifications are off for Maya in Android settings.", "error"));
+  const battery = group(
+    { title: "Battery" },
+    card(
+      row({ help: "Android may otherwise stop Maya with the screen off, and her notifications with her." }),
+      bar(btn("Keep Maya awake", { action: "battery" }, h.onBattery)),
+    ),
+  );
   return [notifications, battery];
 }
 
 function voiceCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
-  const voice = section("Voice");
   // The phone answers to its main's word; "Maya" until the main says.
   const word = m.status.assistant.wakeWord?.trim() || "Maya";
-  for (const [which, label, on] of [["speak", "Speak", m.speak], ["wakeWord", `Wake word "${word}" (experimental)`, m.wakeWord]] as const) {
-    const l = el("label", "settings__switch");
-    const box = el("input", "");
-    box.type = "checkbox";
-    box.name = which;
-    box.checked = on;
-    box.addEventListener("change", () => h.onSwitch(which, box.checked));
-    l.append(box, document.createTextNode(` ${label}`));
-    voice.append(l);
-  }
-  voice.append(el("p", "settings__hint", `While Maya is on screen she reads out sessions that need you, and with the wake word on she listens for "${word}", the word set on the desktop main. She never listens with the app closed. Voice needs a desktop main.`));
-  return [voice];
+  return [
+    group(
+      { foot: "Voice needs a desktop main." },
+      card(
+        row({ label: "Speak", help: "Reads out sessions that need you.", control: toggle("speak", m.speak, (on) => h.onSwitch("speak", on)) }),
+        row({ label: `Wake word "${word}"`, help: "Experimental. The word is set on your computer.", control: toggle("wakeWord", m.wakeWord, (on) => h.onSwitch("wakeWord", on)) }),
+      ),
+    ),
+  ];
 }
 
 function viewerCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
-  const viewer = section("Session viewer");
-  const viewerSel = el("select", "");
-  viewerSel.name = "viewerTheme";
-  for (const [value, text] of [["chat", "Chat"], ["terminal", "Terminal"]] as const) {
-    const o = el("option", "", text);
-    o.value = value;
-    viewerSel.append(o);
-  }
-  viewerSel.value = m.viewerTheme ?? "chat";
-  viewerSel.addEventListener("change", () => h.onViewerTheme?.(viewerSel.value as ViewerTheme));
-  viewer.append(viewerSel);
-  return [viewer];
+  const options = [["chat", "Chat"], ["terminal", "Terminal"]] as const;
+  return [group({}, card(row({ label: "Show sessions as", control: choice<ViewerTheme>("viewerTheme", options, m.viewerTheme ?? "chat", (t) => h.onViewerTheme?.(t)) })))];
 }
 
 function releaseNotesCards(): HTMLElement[] {
-  const notes = el("section", "settings__section");
-  notes.append(renderReleaseNotes());
-  return [notes];
+  return [group({}, renderReleaseNotes())];
 }
 
 /** The group's devices: this phone and the others. A phone is never a main, so no pairing and no Make main. */
 function devicesCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
-  const card = section("Devices");
   if (m.status.role === "off") {
-    const none = el("p", "settings__hint", "Join a main in Settings › Network to see your devices.");
+    const none = el("p", "settings__group-note", "Join a main in Settings › Network to see your devices.");
     none.dataset.row = "devices-off";
-    card.append(none);
-    return [card];
+    return [group({}, none)];
   }
   // The model's fields behind the view; a typed host stays in its input.
   const view: DevicesModel = {
@@ -228,8 +227,7 @@ function devicesCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
     promote: null,
     promoting: false,
   };
-  card.append(renderDevices(m.status, view, h.devices, Date.now(), "this phone"));
-  return [card];
+  return [group({}, renderDevices(m.status, view, h.devices, Date.now(), "this phone", { stateUnderName: true }))];
 }
 
 const CARDS: Record<PhoneGroup, (m: NetworkModel, h: NetworkHandlers) => HTMLElement[]> = {
@@ -268,34 +266,52 @@ export function groupSummary(m: NetworkModel, g: PhoneGroup): string {
   }
 }
 
-/** The list of groups, or the open group's page: a back arrow and its name, the error if any, then its cards. */
+/** The list of groups, or the open group's page: a back link, its title and lede, the error if any, then its cards. */
 export function renderNetwork(m: NetworkModel, h: NetworkHandlers): HTMLElement {
   if (!m.group) {
     const list = el("div", "settings__body settings-list");
-    for (const [g, title] of PHONE_GROUPS) {
-      const item = el("button", "settings-list__item");
-      item.type = "button";
-      item.dataset.group = g;
-      item.append(el("span", "settings-list__name", title), el("span", "settings-list__summary", groupSummary(m, g)));
-      item.addEventListener("click", () => h.onOpenGroup(g));
-      list.append(item);
+    const head = el("div", "settings__head");
+    head.append(el("h2", "settings__title", "Settings"));
+    list.append(head);
+    for (const names of PHONE_LIST) {
+      const rows = names.map((g) => {
+        const item = el("button", "settings-list__item");
+        item.type = "button";
+        item.dataset.group = g;
+        const summary = el("span", "settings-list__summary");
+        const text = groupSummary(m, g);
+        summary.append(g === "network" && m.status.role === "assistant" && m.status.assistant.connected && m.status.assistant.mainName ? state(text, "on") : text);
+        item.append(el("span", "settings-list__name", PHONE_NAMES[g]), summary);
+        item.addEventListener("click", () => h.onOpenGroup(g));
+        return item;
+      });
+      list.append(card(...rows));
     }
     return list;
   }
   const root = el("div", "settings__body network");
   root.dataset.group = m.group;
-  const bar = el("div", "settings-page__bar");
-  const back = el("button", "settings-page__back", "←");
+  const back = el("button", "settings-page__back", "Settings");
   back.type = "button";
   back.dataset.action = "back";
-  back.setAttribute("aria-label", "Back");
   back.addEventListener("click", h.onBack);
-  bar.append(back, el("h2", "settings-page__title", PHONE_GROUPS.find(([g]) => g === m.group)?.[1] ?? ""));
-  root.append(bar);
+  root.append(back);
+  const title = PHONE_NAMES[m.group];
+  const lede = m.group === "releaseNotes" ? `You're running Maya ${RUNNING_VERSION}.` : PHONE_LEDES[m.group];
+  const head = screenHead(title, lede ?? "");
+  if (!lede) head.querySelector(".settings__lede")?.remove();
+  if (m.group === "releaseNotes") {
+    const banner = el("img", "settings__rn-banner");
+    banner.src = art;
+    banner.alt = "";
+    head.classList.add("settings__rn-head");
+    root.append(banner);
+  }
+  root.append(head);
   // On the page the user is on, whichever group's save failed.
   // Keyed, so a repaint that adds or clears it leaves the cards (and the list's hover) where they are.
   if (m.error) {
-    const err = el("p", "settings__error", m.error);
+    const err = notice(m.error, "error");
     err.dataset.row = "error";
     root.append(err);
   }
