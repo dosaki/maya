@@ -349,7 +349,7 @@ export interface ItemRepo {
   path: string;
 }
 
-/** An issue from the Issues tab. */
+/** A work item from the Work Items tab. */
 export interface WorkItem {
   key: string;
   source: string;
@@ -377,7 +377,7 @@ export interface Started {
   startedAt: number;
 }
 
-/** One line above the Issues tab's areas. */
+/** One line above the Work Items tab's areas. */
 export interface SourceError {
   source: string;
   message: string;
@@ -391,7 +391,7 @@ export interface WorkItemsState {
   sourceLabels: Record<string, string>;
   /** No Git connection is switched on. */
   gitOff: boolean;
-  /** No source for issues is switched on. */
+  /** No source for work items is switched on. */
   off: boolean;
   fetchedAt: number | null;
 }
@@ -408,6 +408,8 @@ export interface StartCheck {
   takeover: string[];
   pick: RepoPick | null;
   branch: string;
+  /** The repository Start uses without asking: a Coral item's product's only one. */
+  repo: ItemRepo | null;
 }
 
 export interface WorkStarted {
@@ -419,7 +421,7 @@ export interface WorkStarted {
 /** Whose issues a rule picks up. */
 export type ItemAssignee = { kind: "me" } | { kind: "anyone" } | { kind: "user"; login: string };
 
-/** One rule for the Issues tab: the assignee, the labels and the repositories (empty = any). */
+/** One rule for the Work Items tab: the assignee, the labels and the repositories (empty = any). */
 export interface ItemRule {
   assignee: ItemAssignee;
   labels: string[];
@@ -433,6 +435,25 @@ export interface ForgeItems {
   statusLabels: string[];
   startStatus: string | null;
   trackerRepos: string[];
+}
+
+/** Coral Boards as a source: tags go in a rule's `labels`, product codes in its `repos`, an email in a user's `login`. */
+export interface CoralItems {
+  enabled: boolean;
+  baseUrl: string;
+  token: { kind: "stored" } | { kind: "env"; name: string };
+  rules: ItemRule[];
+  /** A Coral status id. */
+  startStatus: string | null;
+}
+
+/** A status of Coral's global vocabulary; `sub` is true where a defect may take it. */
+export interface CoralStatus {
+  id: string;
+  name: string;
+  category: string;
+  sub: boolean;
+  position: number;
 }
 
 /** A user's own script that lists work items. */
@@ -449,6 +470,7 @@ export interface CustomTool {
 export interface WorkItemsConfig {
   github: ForgeItems;
   gitlab: ForgeItems;
+  coral: CoralItems;
   prompt: string;
   custom: CustomTool[];
 }

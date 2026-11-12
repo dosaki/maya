@@ -202,6 +202,28 @@ pub trait Http: Sync {
     fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<Reply, String>;
 }
 
+/// The header a token goes in: Coral's personal and agent tokens (`cbp_`,
+/// `cba_`) in `x-api-token` (Coral reads a Bearer as a Keycloak token), every
+/// other in `Authorization: Bearer`.
+pub fn auth_header(token: &str) -> (&'static str, String) {
+    if token.starts_with("cbp_") || token.starts_with("cba_") {
+        ("x-api-token", token.to_string())
+    } else {
+        ("Authorization", format!("Bearer {token}"))
+    }
+}
+
+/// ureq drops only `Authorization` when it follows a redirect, so a request
+/// carrying the custom `x-api-token` must not follow one: the 3xx comes back
+/// as a plain status, and the token goes nowhere else.
+fn no_redirects_with_custom_token<B>(header: &str, request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+    if header == "Authorization" {
+        request
+    } else {
+        request.config().max_redirects(0).build()
+    }
+}
+
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// `Http` over `ureq`, every status handed back rather than raised. It
@@ -236,7 +258,7 @@ impl Ureq {
         let headers = resp.headers();
         let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
         let reset_at = self.pauses.note(token, url, status, &body, &header, crate::now_ms()).filter(|_| !(200..300).contains(&status));
-        Ok((Reply { status, body, reset_at }, header("etag")))
+        Ok((Reply { status, body, reset_at, location: header("location") }, header("etag")))
     }
 
     /// The reply, unless the quota `url` draws on is used up.
@@ -259,7 +281,8 @@ impl Http for Ureq {
         if let Some(until) = self.pauses.until(token, url, crate::now_ms()) {
             return Ok(Reply::waiting(until));
         }
-        let mut request = self.agent.get(url).header("Authorization", &format!("Bearer {token}")).header("User-Agent", "Maya").header("Accept", "application/json");
+        let (name, value) = auth_header(token);
+        let mut request = no_redirects_with_custom_token(name, self.agent.get(url).header(name, &value).header("User-Agent", "Maya").header("Accept", "application/json"));
         let kept = self.etags.tag(token, url);
         if let Some(tag) = &kept {
             request = request.header("If-None-Match", tag);
@@ -283,14 +306,13 @@ impl Http for Ureq {
     }
 
     fn post_json(&self, url: &str, token: &str, body: &str) -> Result<Reply, String> {
+        let (name, value) = auth_header(token);
         self.send(token, url, || {
-            self.agent
-                .post(url)
-                .header("Authorization", &format!("Bearer {token}"))
-                .header("User-Agent", "Maya")
-                .header("Accept", "application/json")
-                .header("Content-Type", "application/json")
-                .send(body)
+            no_redirects_with_custom_token(
+                name,
+                self.agent.post(url).header(name, &value).header("User-Agent", "Maya").header("Accept", "application/json").header("Content-Type", "application/json"),
+            )
+            .send(body)
         })
     }
 
@@ -300,13 +322,9 @@ impl Http for Ureq {
             "PUT" => self.agent.put(url),
             other => return Err(format!("unsupported method {other}")),
         };
+        let (name, value) = auth_header(token);
         self.send(token, url, || {
-            request
-                .header("Authorization", &format!("Bearer {token}"))
-                .header("User-Agent", "Maya")
-                .header("Accept", "application/json")
-                .header("Content-Type", "application/json")
-                .send(body)
+            no_redirects_with_custom_token(name, request.header(name, &value).header("User-Agent", "Maya").header("Accept", "application/json").header("Content-Type", "application/json")).send(body)
         })
     }
 }
@@ -354,26 +372,37 @@ pub fn rate_limit_message(p: GitProvider, reset_at: Option<u64>) -> String {
 /// The body of a 2xx reply, else why not. An error body is scrubbed of
 /// `token` before it is cut, so no part of the token survives the cut.
 fn check(p: GitProvider, reply: Reply, token: &str, need: Need) -> Result<String, String> {
-    let Reply { status, body, reset_at } = reply;
+    let Reply { status, body, reset_at, .. } = reply;
     match status {
         200..=299 => Ok(body),
         403 | 429 if status == 429 || reset_at.is_some() || limits::says_rate_limit(&body) => Err(rate_limit_message(p, reset_at)),
         401 | 403 => Err(format!("the token was refused ({status}). It needs the {}.", scopes(p, need))),
-        _ => {
-            let body = scrub(&body, token);
-            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            let message = v["message"].as_str().or_else(|| v["error"].as_str()).map(str::to_string).unwrap_or_else(|| body.chars().take(200).collect());
-            Err(format!("{status}: {message}"))
-        }
+        _ => Err(status_message(status, &body, token)),
     }
 }
 
-fn answer(forge: &Forge, r: Result<Reply, String>, need: Need) -> Result<String, String> {
+/// `"<status>: <message>"` for a non-2xx reply: the body's `message` or
+/// `error`, else its first 200 characters. The body is scrubbed of `token`
+/// before it is cut, so no part of the token survives the cut.
+pub(crate) fn status_message(status: u16, body: &str, token: &str) -> String {
+    let body = scrub(body, token);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let message = v["message"].as_str().or_else(|| v["error"].as_str()).map(str::to_string).unwrap_or_else(|| body.chars().take(200).collect());
+    format!("{status}: {message}")
+}
+
+/// A reply as the caller's `check` reads it, or "could not reach <host>"
+/// when there was none; the result never holds `token`.
+pub(crate) fn answer_with(host: &str, token: &str, r: Result<Reply, String>, check: impl FnOnce(Reply) -> Result<String, String>) -> Result<String, String> {
     let out = match r {
-        Ok(reply) => check(forge.site.provider, reply, &forge.token, need),
-        Err(e) => Err(format!("could not reach {}: {e}", forge.site.host())),
+        Ok(reply) => check(reply),
+        Err(e) => Err(format!("could not reach {host}: {e}")),
     };
-    out.map_err(|e| scrub(&e, &forge.token))
+    out.map_err(|e| scrub(&e, token))
+}
+
+fn answer(forge: &Forge, r: Result<Reply, String>, need: Need) -> Result<String, String> {
+    answer_with(&forge.site.host(), &forge.token, r, |reply| check(forge.site.provider, reply, &forge.token, need))
 }
 
 /// A GET's JSON reply.
@@ -462,16 +491,27 @@ pub(crate) mod fake {
     pub struct FakeHttp {
         pub replies: Vec<(&'static str, u16, String)>,
         pub seen: Mutex<Vec<(String, String, Option<String>, Option<String>)>>,
+        /// A `Location` header for the replies to URLs containing the needle.
+        pub locations: Vec<(&'static str, String)>,
     }
 
     impl FakeHttp {
         pub fn new(replies: Vec<(&'static str, u16, &str)>) -> Self {
-            FakeHttp { replies: replies.into_iter().map(|(n, s, b)| (n, s, b.to_string())).collect(), seen: Mutex::new(Vec::new()) }
+            FakeHttp { replies: replies.into_iter().map(|(n, s, b)| (n, s, b.to_string())).collect(), seen: Mutex::new(Vec::new()), locations: Vec::new() }
+        }
+
+        pub fn with_location(mut self, needle: &'static str, location: &str) -> Self {
+            self.locations.push((needle, location.to_string()));
+            self
         }
 
         fn answer(&self, url: &str, token: &str, body: Option<&str>, method: Option<&str>) -> Result<super::Reply, String> {
             self.seen.lock().unwrap().push((url.to_string(), token.to_string(), body.map(str::to_string), method.map(str::to_string)));
-            self.replies.iter().find(|(n, _, _)| url.contains(n)).map(|(_, s, b)| (*s, b.clone()).into()).ok_or_else(|| "no route".to_string())
+            self.replies.iter().find(|(n, _, _)| url.contains(n)).map(|(_, s, b)| {
+                let mut reply: super::Reply = (*s, b.clone()).into();
+                reply.location = self.locations.iter().find(|(n, _)| url.contains(n)).map(|(_, l)| l.clone());
+                reply
+            }).ok_or_else(|| "no route".to_string())
         }
     }
 
@@ -492,6 +532,37 @@ pub(crate) mod fake {
 mod tests {
     use super::*;
     use crate::config::{GitConnection, GitProvider, TokenSource};
+
+    #[test]
+    fn coral_tokens_go_in_x_api_token() {
+        assert_eq!(auth_header("cbp_ab"), ("x-api-token", "cbp_ab".to_string()));
+        assert_eq!(auth_header("cba_ab"), ("x-api-token", "cba_ab".to_string()));
+        assert_eq!(auth_header("ghp_x"), ("Authorization", "Bearer ghp_x".to_string()));
+    }
+
+    #[test]
+    fn a_coral_request_does_not_follow_a_redirect() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        // `other` stands for the host a 3xx points at: it must never be asked.
+        let other = TcpListener::bind("127.0.0.1:0").unwrap();
+        other.set_nonblocking(true).unwrap();
+        let first = TcpListener::bind("127.0.0.1:0").unwrap();
+        let location = format!("http://{}/steal", other.local_addr().unwrap());
+        let url = format!("http://{}/api/v1/users/me", first.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = first.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = s.read(&mut buf).unwrap();
+            let seen = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            s.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).unwrap();
+            seen
+        });
+        let reply = Ureq::new().get(&url, "cbp_secret").unwrap();
+        assert_eq!(reply.status, 302);
+        assert!(server.join().unwrap().contains("x-api-token: cbp_secret"));
+        assert!(other.accept().is_err(), "the redirect target was never contacted");
+    }
 
     #[test]
     fn the_forges_trust_the_systems_certificates() {
@@ -706,8 +777,8 @@ mod tests {
         ]);
         let http = Ureq::new();
         let url = format!("{base}/repos/O/r/pulls");
-        assert_eq!(http.get(&url, "ghp_x").unwrap(), Reply { status: 200, body: "[1]".into(), reset_at: None });
-        assert_eq!(http.get(&url, "ghp_x").unwrap(), Reply { status: 200, body: "[1]".into(), reset_at: None }, "the 304 gives the kept body");
+        assert_eq!(http.get(&url, "ghp_x").unwrap(), Reply { status: 200, body: "[1]".into(), reset_at: None, location: None });
+        assert_eq!(http.get(&url, "ghp_x").unwrap(), Reply { status: 200, body: "[1]".into(), reset_at: None, location: None }, "the 304 gives the kept body");
         assert_eq!(http.get(&url, "ghp_x").unwrap().body, "[2]");
         let seen = seen.lock().unwrap();
         assert!(!seen[0].contains("if-none-match"), "{}", seen[0]);

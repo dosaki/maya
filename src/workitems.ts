@@ -110,8 +110,9 @@ export function renderItemCard(item: WorkItem, nowMs: number, card: Card | null,
   } else {
     const updated = Date.parse(item.updatedAt);
     const age = Number.isFinite(updated) ? `${formatAge(updated, nowMs)} ago` : "?";
+    // A Coral item never has a repository of its own: Start finds its product's.
     const meta =
-      item.repo === null || item.tracker
+      item.source !== "coral" && (item.repo === null || item.tracker)
         ? el("span", "item__meta item__meta--pick", "No repo: Maya picks")
         : el("span", "item__meta", `${item.assignees.length > 0 ? item.assignees.join(", ") : "Unassigned"} · ${age}`);
     const start = button("Start", "start", "card__btn card__btn--primary");
@@ -144,10 +145,10 @@ function fillSelect(sel: HTMLSelectElement, options: { value: string; label: str
   );
 }
 
-const SOURCE_LABEL: Record<string, string> = { github: "GitHub", gitlab: "GitLab" };
+const SOURCE_LABEL: Record<string, string> = { github: "GitHub", gitlab: "GitLab", coral: "Coral" };
 
 /**
- * The Issues pane in `host`: the filters and search, built once so an open
+ * The Work Items pane in `host`: the filters and search, built once so an open
  * dropdown survives the repaints, over the two areas that `update` repaints
  * in place.
  */
@@ -175,8 +176,8 @@ export function makeWorkItemsView(host: HTMLElement) {
   const search = el("input", "issues__search");
   search.type = "text";
   search.name = "search";
-  search.placeholder = "Search issues";
-  search.setAttribute("aria-label", "Search issues");
+  search.placeholder = "Search work items";
+  search.setAttribute("aria-label", "Search work items");
   search.addEventListener("input", () => {
     filters.search = search.value;
     paint();
@@ -195,8 +196,8 @@ export function makeWorkItemsView(host: HTMLElement) {
       // Git off entirely, or on with both services off in Work Items.
       const group = state.gitOff ? "git" : "workItems";
       const message = state.gitOff
-        ? "Issues are off. Turn on GitHub or GitLab in Settings → Git, or add a custom tool in Settings → Work Items. "
-        : "Issues are off. Turn on GitHub, GitLab or a custom tool in Settings → Work Items. ";
+        ? "Work items are off. Turn on GitHub or GitLab in Settings → Git, or turn on Coral or a custom tool in Settings → Work Items. "
+        : "Work items are off. Turn on GitHub, GitLab, Coral or a custom tool in Settings → Work Items. ";
       const off = el("div", "reviews__off", message);
       const open = button("Open Settings", "settings");
       open.dataset.group = group;
@@ -232,7 +233,7 @@ export function makeWorkItemsView(host: HTMLElement) {
     const fresh = el("div", "issues__body");
     for (const e of state.errors) fresh.append(el("div", "reviews__error issues__error", e.message));
     const cols = el("div", "issues__cols");
-    const emptyPick = state.fetchedAt === null ? "Checking…" : state.items.length === 0 ? "No issues match your rules." : "No issues match these filters.";
+    const emptyPick = state.fetchedAt === null ? "Checking…" : state.items.length === 0 ? "No work items match your rules." : "No work items match these filters.";
     cols.append(
       area("pick", "To pick", shownPick.map((i) => renderItemCard(i, nowMs, null, starting.has(i.key), sourceLabelOf(i.source))), emptyPick),
       area("working", "Being worked on", shownWorking.map((w) => renderItemCard(w.item, nowMs, w.card, false, sourceLabelOf(w.item.source))), "Nothing started yet."),
@@ -252,7 +253,7 @@ export function makeWorkItemsView(host: HTMLElement) {
   };
 }
 
-/** What a click in the Issues pane means: one of the buttons, or nothing. */
+/** What a click in the Work Items pane means: one of the buttons, or nothing. */
 export function workItemActionFor(target: Element): WorkItemAction | null {
   const btn = target.closest<HTMLElement>("button[data-action]");
   if (!btn) return null;
@@ -289,9 +290,13 @@ export function renderStartDialog(item: WorkItem, check: StartCheck, h: { onStar
   cancel.type = "button";
   cancel.addEventListener("click", () => h.onCancel());
   const buttons = el("div", "startdialog__buttons");
+  const coral = item.source === "coral";
   if (check.pick && check.pick.options.length === 0) {
-    // Nothing to choose from, so nothing to start.
-    body.append(el("p", "", "Maya knows no repositories yet. Name one in a rule in Settings → Work Items, or clone it into the clones folder first."));
+    // Nothing to choose from, so nothing to start. A Coral rule names products, not repositories.
+    const none = coral
+      ? `Maya knows no repositories for ${item.id} yet. Link one to its product in Coral, or clone it into the clones folder first.`
+      : "Maya knows no repositories yet. Name one in a rule in Settings → Work Items, or clone it into the clones folder first.";
+    body.append(el("p", "", none));
     buttons.append(cancel);
     body.append(buttons);
     panel.append(head, body);
@@ -299,7 +304,7 @@ export function renderStartDialog(item: WorkItem, check: StartCheck, h: { onStar
     return root;
   }
   if (check.takeover.length > 0) {
-    body.append(el("p", "", `This issue is already assigned to ${check.takeover.join(", ")}. Are you sure you want to take over?`));
+    body.append(el("p", "", `This ${coral ? "work item" : "issue"} is already assigned to ${check.takeover.join(", ")}. Are you sure you want to take over?`));
   }
   const start = el("button", "card__btn card__btn--primary", check.takeover.length > 0 ? "Yes, take over and start" : "Start session");
   start.type = "button";
@@ -372,11 +377,11 @@ export async function startWorkItem(
   if (host.childElementCount > 0) return toast(busy);
   try {
     const check = await invoke<StartCheck>("work_item_check", { key: item.key });
-    let repo: ItemRepo | null = null;
+    let chosen: { repo: ItemRepo | null } | null = null;
     if (needsDialog(check)) {
       // Something else may have opened a window while the check ran.
       if (host.childElementCount > 0) return toast(busy);
-      const chosen = await new Promise<{ repo: ItemRepo | null } | null>((resolve) => {
+      chosen = await new Promise<{ repo: ItemRepo | null } | null>((resolve) => {
         const close = (v: { repo: ItemRepo | null } | null) => {
           document.removeEventListener("keydown", onKey, true);
           gone.disconnect();
@@ -398,8 +403,9 @@ export async function startWorkItem(
         gone.observe(host, { childList: true });
       });
       if (!chosen) return;
-      repo = chosen.repo;
     }
+    // A repository the check found (a Coral product's only one, already known) needs no dialog.
+    const repo = chosen?.repo ?? check.repo;
     const r = await invoke<WorkStarted>("work_item_start", { key: item.key, repo, takeOver: check.takeover });
     // A notice (the issue not updated, say) shows in the line above the areas.
     toast(`Working on ${item.id} in ${r.dir.split("/").filter(Boolean).pop() ?? r.dir}`);

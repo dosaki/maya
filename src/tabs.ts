@@ -18,7 +18,7 @@ function stored(): Tab {
 }
 
 /**
- * Seven panes, one visible: Sessions, Pull Requests, Issues, Deployments and Chat on the left, Debug and
+ * Seven panes, one visible: Sessions, Pull Requests, Work Items, Deployments and Chat on the left, Debug and
  * Settings on the right. Sessions is the default; the choice is remembered
  * per browser. Switching only toggles `hidden`, so the board keeps its
  * scroll positions and the session watcher keeps running underneath.

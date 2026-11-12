@@ -181,6 +181,19 @@ steps itself, with no terminal, before the session starts
 (`reviews::run_git_steps`, with `GIT_TERMINAL_PROMPT=0`): a credential
 that needs a prompt fails there, and git's message shows in Maya.
 
+The Work Items tab lists issues from GitHub and GitLab, work items and
+defects from Coral Boards, and items from custom tools
+(`core/src/work_items/`: `github.rs`, `gitlab.rs`, `coral.rs`,
+`custom.rs`; the poll, Start and the commands are in
+`src-tauri/src/work_items_app.rs`). Coral is asked over its REST API
+(`<address>/api/v1`) with a token from Settings → Work Items: a pasted
+one, kept in the OS key store (`maya-coral`), or a variable read from the
+login shell (`CORAL_TOKEN` unless named otherwise). The token never
+reaches `config.json`, a log line or a message: every Coral error goes
+through the forge clients' scrub (`forge::status_message`), and a
+redirect is followed only to Coral's own address. Tests use
+`https://coral.test`.
+
 The Deployments tab lists GitHub Actions runs that wait for the user's
 approval, with Approve and Reject buttons, and deployment runs queued
 behind another run's deployment ("Waiting on <sha> <title>"). When Maya

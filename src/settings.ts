@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, isLinux, isWindows, recognizerOptions, secretStore, thisComputerLower } from "./platform";
-import type { ColorTheme, CustomTool, ForgeItems, GitProvider, Harness, ItemRule, NewSessionTerminal, ViewerTheme, WorkItemsConfig } from "./types";
+import type { ColorTheme, CoralItems, CoralStatus, CustomTool, ForgeItems, GitProvider, Harness, ItemRule, NewSessionTerminal, ViewerTheme, WorkItemsConfig } from "./types";
 import { setViewerTheme } from "./modal";
 import { COLOR_THEMES, applyColorTheme, asColorTheme } from "./theme";
 import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys, removeCombo, setKeyBindings, type KeyBindings } from "./keys";
@@ -162,6 +162,12 @@ export interface SettingsModel {
   workItems?: WorkItemsConfig;
   /** Which Work Items sources are open, by `github`, `gitlab` or a custom tool's id; folded when absent. */
   sourcesOpen?: Record<string, boolean>;
+  /** Whether a Coral token is stored. */
+  coralHasToken?: boolean;
+  /** Coral's statuses, once listed; null until they are. */
+  coralStatuses?: CoralStatus[] | null;
+  /** What the last Coral Test said. */
+  coralTest?: string | null;
   /** Which custom tools have their "Output format" details open, by tool id. */
   customDetailsOpen?: Record<string, boolean>;
   /** Whether a pasted token is stored, and the last Test's outcome. */
@@ -227,7 +233,13 @@ export interface SettingsHandlers {
   onKeys?(k: KeyBindings): void;
   onNewSessionTerminal?(t: NewSessionTerminal): void;
   /** One service's Work Items settings, read from the page, to save. */
-  onWorkItems?(forge: GitProvider, items: ForgeItems): void;
+  onWorkItems?(source: GitProvider, items: ForgeItems): void;
+  onWorkItems?(source: "coral", items: CoralItems): void;
+  onCoralToken?(token: string): void;
+  onCoralClearToken?(): void;
+  /** Resolves to "Connected as <name>"; rejects with why not. */
+  onCoralTest?(): Promise<string>;
+  onCoralStatuses?(): Promise<CoralStatus[]>;
   onWorkPrompt?(text: string): void;
   onCustomTools?(tools: CustomTool[]): void;
   /** Shows another Settings group. */
@@ -324,6 +336,7 @@ export interface GitConnectionJson {
 }
 
 const GIT_DEFAULT_ENV: Record<GitProvider, string> = { github: "GH_TOKEN", gitlab: "GITLAB_TOKEN" };
+const CORAL_DEFAULT_ENV = "CORAL_TOKEN";
 const GIT_LABEL: Record<GitProvider, string> = { github: "GitHub", gitlab: "GitLab" };
 
 /** One GitHub and one GitLab connection, in that order, as the Rust side defaults them. */
@@ -347,7 +360,8 @@ curl -s -H "Authorization: Bearer $TRACKER_TOKEN" https://tracker.example.com/ap
 /** The Work Items settings as the Rust side defaults them: one rule for my issues. */
 export function workItemsConfig(raw: Partial<WorkItemsConfig> | null | undefined): WorkItemsConfig {
   const forge = (f?: ForgeItems): ForgeItems => f ?? { enabled: true, rules: [{ assignee: { kind: "me" }, labels: [], repos: [] }], statusLabels: [], startStatus: null, trackerRepos: [] };
-  return { github: forge(raw?.github), gitlab: forge(raw?.gitlab), prompt: raw?.prompt ?? "", custom: raw?.custom ?? [] };
+  const coral: CoralItems = raw?.coral ?? { enabled: false, baseUrl: "", token: { kind: "stored" }, rules: [{ assignee: { kind: "me" }, labels: [], repos: [] }], startStatus: null };
+  return { github: forge(raw?.github), gitlab: forge(raw?.gitlab), coral, prompt: raw?.prompt ?? "", custom: raw?.custom ?? [] };
 }
 
 /** "a", "a or b", "a, b or c". */
@@ -369,6 +383,14 @@ export function forgeSummary(items: ForgeItems): string {
   const n = items.rules.length;
   const rules = `${n} rule${n === 1 ? "" : "s"}`;
   return items.startStatus ? `${rules}; Start sets status to ${items.startStatus}` : rules;
+}
+
+/** Coral's settings in a line, for its folded head: "2 rules; Start sets a status". */
+export function coralSummary(items: CoralItems): string {
+  if (!items.enabled) return "Off";
+  const n = items.rules.length;
+  const rules = `${n} rule${n === 1 ? "" : "s"}`;
+  return items.startStatus ? `${rules}; Start sets a status` : rules;
 }
 
 export const SOURCES_OPEN_KEY = "maya.settingsSources";
@@ -468,7 +490,7 @@ export const SETTINGS_LEDES: Record<SettingsGroup, string> = {
   sessions: "How Maya follows your sessions, and where new ones start.",
   git: "The accounts Maya reads pull requests and merge requests with. Reviews clone with your own git credentials.",
   reviews: "Where reviews are checked out, what the Review button asks the agent, and when Maya tells you about your own pull requests.",
-  workItems: "Where the Issues tab finds your work, and what Start does with an item.",
+  workItems: "Where the Work Items tab finds your work, and what Start does with an item.",
   notifications: "How Maya tells you a session needs you.",
   voice: "How Maya speaks to you, and how she hears you.",
   network: "Join your other computers and your phone to this Maya.",
@@ -700,6 +722,331 @@ export function terminalChoices(): [NewSessionTerminal, string][] {
   const platform = isWindows() ? "windows" : isLinux() ? "linux" : "macos";
   const values: NewSessionTerminal[] = platform === "macos" ? ["terminal", "iterm", "native"] : ["terminal", "native"];
   return values.map((v) => [v, terminalLabel(v, platform)]);
+}
+
+/**
+ * Whether Coral may have a token to ask with: a stored one, or a variable
+ * (which may be unset: a failed ask just leaves the help text).
+ */
+function coralCanAsk(hasToken: boolean | undefined, cfg: CoralItems): boolean {
+  return cfg.token.kind === "env" || hasToken === true;
+}
+
+/** The Coral card in the Sources group: address, token, rules and what Start sets. */
+function coralSource(
+  model: SettingsModel,
+  h: SettingsHandlers,
+  cfg: CoralItems,
+  nextRuleId: () => number,
+  remember: (key: string, open: boolean) => void,
+): HTMLElement {
+  const hasToken = model.coralHasToken === true;
+  let tokenKind = cfg.token.kind;
+  // A Test result says who a token was at an address, and the statuses came
+  // from that Coral: another address or token makes both stale.
+  const forgetTest = () => {
+    model.coralTest = null;
+    model.coralStatuses = null;
+  };
+
+  const on = toggle("wi-coral-enabled", cfg.enabled, () => save(), "Use Coral");
+
+  const url = document.createElement("input");
+  url.type = "text";
+  url.className = "mono";
+  url.name = "wi-coral-baseUrl";
+  url.placeholder = "https://coral.example.com";
+  url.value = cfg.baseUrl;
+
+  const env = document.createElement("input");
+  env.type = "text";
+  env.className = "mono";
+  env.name = "wi-coral-envName";
+  env.placeholder = CORAL_DEFAULT_ENV;
+  env.value = cfg.token.kind === "env" ? cfg.token.name : "";
+
+  const start = document.createElement("select");
+  start.name = "wi-coral-startStatus";
+  const fillStart = (statuses: CoralStatus[] | null, chosen: string | null) => {
+    start.replaceChildren();
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "Leave as it is";
+    start.append(none);
+    for (const st of statuses ?? []) {
+      const o = document.createElement("option");
+      o.value = st.id;
+      o.textContent = st.name;
+      start.append(o);
+    }
+    // A saved status that is not in the list (yet) stays, so a save does not drop it.
+    if (chosen !== null && !(statuses ?? []).some((st) => st.id === chosen)) {
+      const o = document.createElement("option");
+      o.value = chosen;
+      o.textContent = "Saved status";
+      start.append(o);
+    }
+    start.value = chosen ?? "";
+  };
+  fillStart(model.coralStatuses ?? null, cfg.startStatus);
+  const loadStatuses = () => {
+    const chosen = start.value === "" ? null : start.value;
+    h.onCoralStatuses?.().then((list) => fillStart(list, chosen), () => { /* the help already says how to list them */ });
+  };
+
+  const editor = rulesEditor({
+    idPrefix: "wi-coral-rule",
+    nextId: nextRuleId,
+    rules: cfg.rules,
+    words: CORAL_RULE_WORDS,
+    onChange: () => save(),
+    onAdd: () => {
+      const items = read();
+      items.rules.push({ assignee: { kind: "me" }, labels: [], repos: [] });
+      save(items);
+    },
+  });
+
+  /** The settings as the page shows them. */
+  const read = (): CoralItems => ({
+    enabled: on.checked,
+    baseUrl: url.value.trim(),
+    token: tokenKind === "env" ? { kind: "env", name: env.value.trim() || CORAL_DEFAULT_ENV } : { kind: "stored" },
+    rules: editor.read(),
+    startStatus: start.value === "" ? null : start.value,
+  });
+  // A rule for someone with no email yet would make the backend refuse the
+  // whole box: nothing is saved until it is typed (or the rule goes).
+  const save = (items: CoralItems = read()) => {
+    if (items.rules.some((r) => r.assignee.kind === "user" && r.assignee.login === "")) return;
+    if (items.baseUrl !== cfg.baseUrl || JSON.stringify(items.token) !== JSON.stringify(cfg.token)) forgetTest();
+    h.onWorkItems?.("coral", items);
+  };
+  url.addEventListener("change", () => {
+    url.value = url.value.trim();
+    save();
+  });
+  env.addEventListener("change", () => save());
+  start.addEventListener("change", () => save());
+
+  const kind = choice("wi-coral-tokenKind", [["stored", "Paste a token"], ["env", "From variable"]] as const, tokenKind, (k) => {
+    tokenKind = k;
+    save();
+  });
+
+  const controls: HTMLElement[] = [];
+  if (tokenKind === "stored") {
+    const tok = document.createElement("input");
+    tok.type = "password";
+    tok.name = "wi-coral-token";
+    tok.autocomplete = "off";
+    tok.placeholder = hasToken ? "paste to replace" : "paste your token";
+    tok.addEventListener("change", () => {
+      const t = tok.value.trim();
+      tok.value = "";
+      if (!t) return;
+      forgetTest();
+      h.onCoralToken?.(t);
+    });
+    controls.push(tok);
+    if (hasToken)
+      controls.push(
+        settingsBtn("Clear", { action: "coral-clear", kind: "quiet" }, () => {
+          forgetTest();
+          h.onCoralClearToken?.();
+        }),
+      );
+  } else {
+    controls.push(env);
+  }
+  const resting = tokenKind === "env" ? "Maya reads the token from this variable." : hasToken ? `Saved in ${secretStore()}.` : "Paste a token from your Coral account.";
+  const tokenRow = row({ label: tokenKind === "env" ? "Variable" : "Coral token", help: model.coralTest ?? resting, control: controls });
+  const result = tokenRow.querySelector<HTMLElement>(".settings__help")!;
+  const test = settingsBtn("Test", { action: "coral-test" }, () => {
+    const running = h.onCoralTest?.();
+    if (!running) return;
+    result.textContent = "Testing…";
+    running.then(
+      (text) => {
+        result.textContent = text;
+        loadStatuses();
+      },
+      (e) => { result.textContent = String(e); },
+    );
+  });
+  tokenRow.querySelector(".settings__control")!.append(test);
+
+  const startHelp = (model.coralStatuses ? "" : "Test the connection to list Coral's statuses. ") + "A defect gets the first allowed status of the same kind when this one is not allowed for defects.";
+
+  const hint = document.createElement("span");
+  hint.className = "settings__help";
+  hint.textContent = "The token acts as you in Coral: Start assigns the item to you and sets its status.";
+  const box = source({
+    key: "coral",
+    name: "Coral",
+    summary: coralSummary(cfg),
+    stateText: cfg.enabled ? "On" : "Off",
+    stateOn: cfg.enabled,
+    open: (model.sourcesOpen ?? {}).coral === true,
+    onToggle: (open) => {
+      remember("coral", open);
+      if (open && coralCanAsk(model.coralHasToken, cfg) && model.coralStatuses == null) loadStatuses();
+    },
+    control: on,
+    body: [
+      row({ label: "Address", help: "Where your Coral is, starting with https://.", control: url }),
+      row({ label: "Token", control: kind, tag: "div" }),
+      tokenRow,
+      row({ label: "Work items to pick up", help: "A work item shows when it matches any one of these rules.", control: editor.box, stack: true }),
+      row({ label: "On Start, set status to", help: startHelp, control: start }),
+      footRow(hint),
+    ],
+  });
+  box.classList.add("settings__git", "settings__workitems");
+  box.dataset.forge = "coral";
+  return box;
+}
+
+/** The words a rules editor uses for what a rule can match on, and the hint in its someone field. */
+interface RuleWords {
+  labels: string;
+  labelsPlaceholder: string;
+  repos: string;
+  reposPlaceholder: string;
+  loginPlaceholder: string;
+  loginLabel: string;
+}
+
+const FORGE_RULE_WORDS: RuleWords = {
+  labels: "Labels",
+  labelsPlaceholder: "bug, urgent",
+  repos: "Repositories",
+  reposPlaceholder: "any repository",
+  loginPlaceholder: "login",
+  loginLabel: "Login",
+};
+
+const CORAL_RULE_WORDS: RuleWords = {
+  labels: "Tags",
+  labelsPlaceholder: "team: api, urgent",
+  repos: "Products",
+  reposPlaceholder: "any product",
+  loginPlaceholder: "their email",
+  loginLabel: "Email",
+};
+
+/**
+ * The boxes of rules a source picks up work items by, with "+ Add rule" last.
+ * `onChange` runs when a field changes (a rule for someone with no name yet
+ * is the caller's to hold back); `onAdd` when the add button is pressed.
+ */
+function rulesEditor(opts: {
+  idPrefix: string;
+  nextId: () => number;
+  rules: ItemRule[];
+  words: RuleWords;
+  onChange: () => void;
+  onAdd: () => void;
+}): { box: HTMLElement; read: () => ItemRule[] } {
+  const { words } = opts;
+  const box = document.createElement("div");
+  box.className = "settings__rules";
+  const add = addButton("+ Add rule", "wi-add-rule", opts.onAdd);
+
+  /** One rule as its box shows it; someone with no login yet reads as such. */
+  const readRule = (r: HTMLElement): ItemRule => {
+    const kind = r.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!.value;
+    const login = r.querySelector<HTMLInputElement>("input[name=wi-login]")!.value.trim();
+    return {
+      assignee: kind === "user" ? { kind: "user", login } : kind === "anyone" ? { kind: "anyone" } : { kind: "me" },
+      labels: commaList(r.querySelector<HTMLInputElement>("input[name=wi-labels]")!.value),
+      repos: commaList(r.querySelector<HTMLInputElement>("input[name=wi-repos]")!.value),
+    };
+  };
+
+  const addRule = (rule: ItemRule) => {
+    const id = `${opts.idPrefix}-${opts.nextId()}`;
+    const r = document.createElement("div");
+    r.className = "settings__rule";
+    const fieldLabel = (text: string, forId: string) => {
+      const l = document.createElement("label");
+      l.htmlFor = forId;
+      l.textContent = text;
+      return l;
+    };
+    const assignee = document.createElement("select");
+    assignee.name = "wi-assignee";
+    assignee.id = `${id}-assignee`;
+    for (const [value, text] of [["me", "Me"], ["user", "Someone"], ["anyone", "Anyone"]]) {
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = text;
+      assignee.append(o);
+    }
+    assignee.value = rule.assignee.kind;
+    const login = document.createElement("input");
+    login.type = "text";
+    login.name = "wi-login";
+    login.placeholder = words.loginPlaceholder;
+    login.setAttribute("aria-label", words.loginLabel);
+    login.value = rule.assignee.kind === "user" ? rule.assignee.login : "";
+    login.hidden = rule.assignee.kind !== "user";
+    // Someone with no login yet cannot be saved: wait for the login.
+    assignee.addEventListener("change", () => {
+      login.hidden = assignee.value !== "user";
+      if (assignee.value !== "user") opts.onChange();
+    });
+    login.addEventListener("change", () => opts.onChange());
+    const labels = document.createElement("input");
+    labels.type = "text";
+    labels.name = "wi-labels";
+    labels.id = `${id}-labels`;
+    labels.placeholder = words.labelsPlaceholder;
+    labels.value = rule.labels.join(", ");
+    labels.addEventListener("change", () => opts.onChange());
+    const repos = document.createElement("input");
+    repos.type = "text";
+    repos.name = "wi-repos";
+    repos.id = `${id}-repos`;
+    repos.className = "mono";
+    repos.placeholder = words.reposPlaceholder;
+    repos.value = rule.repos.join(", ");
+    repos.addEventListener("change", () => opts.onChange());
+    const remove = settingsBtn("Remove", { action: "wi-remove-rule", kind: "quiet" }, () => {
+      r.remove();
+      opts.onChange();
+    });
+    remove.classList.add("settings__btn--danger");
+    remove.setAttribute("aria-label", "Remove rule");
+
+    const head = document.createElement("div");
+    head.className = "settings__rule-head";
+    const sum = document.createElement("span");
+    sum.className = "settings__rule-sum";
+    sum.textContent = ruleSummary(rule);
+    head.append(sum, remove);
+    // The head follows the fields as they are typed, before any save.
+    const sumUp = () => { sum.textContent = ruleSummary(readRule(r)); };
+    r.addEventListener("input", sumUp);
+    r.addEventListener("change", sumUp);
+
+    const who = document.createElement("div");
+    who.className = "settings__rule-who";
+    who.append(assignee, login);
+    const body = document.createElement("div");
+    body.className = "settings__rule-body";
+    body.append(
+      fieldLabel("Assignee", assignee.id), who,
+      fieldLabel(words.labels, labels.id), labels,
+      fieldLabel(words.repos, repos.id), repos,
+    );
+    r.append(head, body);
+    box.insertBefore(r, add);
+  };
+  box.append(add);
+  for (const rule of opts.rules) addRule(rule);
+
+  return { box, read: () => [...box.querySelectorAll<HTMLElement>(".settings__rule")].map(readRule) };
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {
@@ -1121,9 +1468,6 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const gitOffText = `${label} is off in Settings → Git.`;
     const on = toggle(`wi-${forge}-enabled`, cfg.enabled, () => save(), `Use ${label}`);
 
-    const rulesBox = document.createElement("div");
-    rulesBox.className = "settings__rules";
-
     const status = document.createElement("input");
     status.type = "text";
     status.name = "wi-statusLabels";
@@ -1153,20 +1497,10 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     tracker.className = "mono";
     tracker.value = cfg.trackerRepos.join(", ");
 
-    /** One rule as its box shows it; someone with no login yet reads as such. */
-    const readRule = (r: HTMLElement): ItemRule => {
-      const kind = r.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!.value;
-      const login = r.querySelector<HTMLInputElement>("input[name=wi-login]")!.value.trim();
-      return {
-        assignee: kind === "user" ? { kind: "user", login } : kind === "anyone" ? { kind: "anyone" } : { kind: "me" },
-        labels: commaList(r.querySelector<HTMLInputElement>("input[name=wi-labels]")!.value),
-        repos: commaList(r.querySelector<HTMLInputElement>("input[name=wi-repos]")!.value),
-      };
-    };
     /** The settings as the page shows them. */
     const read = (): ForgeItems => ({
       enabled: on.checked,
-      rules: [...rulesBox.querySelectorAll<HTMLElement>(".settings__rule")].map(readRule),
+      rules: editor.read(),
       statusLabels: commaList(status.value),
       startStatus: start.value === "" ? null : start.value,
       trackerRepos: commaList(tracker.value),
@@ -1178,93 +1512,19 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       h.onWorkItems?.(forge, items);
     };
 
-    const add = addButton("+ Add rule", "wi-add-rule", () => {
-      const items = read();
-      items.rules.push({ assignee: { kind: "me" }, labels: [], repos: [] });
-      save(items);
+    const editor = rulesEditor({
+      idPrefix: `wi-${forge}-rule`,
+      nextId: () => ruleIds++,
+      rules: cfg.rules,
+      words: FORGE_RULE_WORDS,
+      onChange: () => save(),
+      onAdd: () => {
+        const items = read();
+        items.rules.push({ assignee: { kind: "me" }, labels: [], repos: [] });
+        save(items);
+      },
     });
-
-    const addRule = (rule: ItemRule) => {
-      const id = `wi-${forge}-rule-${ruleIds++}`;
-      const r = document.createElement("div");
-      r.className = "settings__rule";
-      const fieldLabel = (text: string, forId: string) => {
-        const l = document.createElement("label");
-        l.htmlFor = forId;
-        l.textContent = text;
-        return l;
-      };
-      const assignee = document.createElement("select");
-      assignee.name = "wi-assignee";
-      assignee.id = `${id}-assignee`;
-      for (const [value, text] of [["me", "Me"], ["user", "Someone"], ["anyone", "Anyone"]]) {
-        const o = document.createElement("option");
-        o.value = value;
-        o.textContent = text;
-        assignee.append(o);
-      }
-      assignee.value = rule.assignee.kind;
-      const login = document.createElement("input");
-      login.type = "text";
-      login.name = "wi-login";
-      login.placeholder = "login";
-      login.setAttribute("aria-label", "Login");
-      login.value = rule.assignee.kind === "user" ? rule.assignee.login : "";
-      login.hidden = rule.assignee.kind !== "user";
-      // Someone with no login yet cannot be saved: wait for the login.
-      assignee.addEventListener("change", () => {
-        login.hidden = assignee.value !== "user";
-        if (assignee.value !== "user") save();
-      });
-      login.addEventListener("change", () => save());
-      const labels = document.createElement("input");
-      labels.type = "text";
-      labels.name = "wi-labels";
-      labels.id = `${id}-labels`;
-      labels.placeholder = "bug, urgent";
-      labels.value = rule.labels.join(", ");
-      labels.addEventListener("change", () => save());
-      const repos = document.createElement("input");
-      repos.type = "text";
-      repos.name = "wi-repos";
-      repos.id = `${id}-repos`;
-      repos.className = "mono";
-      repos.placeholder = "any repository";
-      repos.value = rule.repos.join(", ");
-      repos.addEventListener("change", () => save());
-      const remove = settingsBtn("Remove", { action: "wi-remove-rule", kind: "quiet" }, () => {
-        r.remove();
-        save();
-      });
-      remove.classList.add("settings__btn--danger");
-      remove.setAttribute("aria-label", "Remove rule");
-
-      const head = document.createElement("div");
-      head.className = "settings__rule-head";
-      const sum = document.createElement("span");
-      sum.className = "settings__rule-sum";
-      sum.textContent = ruleSummary(rule);
-      head.append(sum, remove);
-      // The head follows the fields as they are typed, before any save.
-      const sumUp = () => { sum.textContent = ruleSummary(readRule(r)); };
-      r.addEventListener("input", sumUp);
-      r.addEventListener("change", sumUp);
-
-      const who = document.createElement("div");
-      who.className = "settings__rule-who";
-      who.append(assignee, login);
-      const body = document.createElement("div");
-      body.className = "settings__rule-body";
-      body.append(
-        fieldLabel("Assignee", assignee.id), who,
-        fieldLabel("Labels", labels.id), labels,
-        fieldLabel("Repositories", repos.id), repos,
-      );
-      r.append(head, body);
-      rulesBox.insertBefore(r, add);
-    };
-    rulesBox.append(add);
-    for (const rule of cfg.rules) addRule(rule);
+    const rulesBox = editor.box;
 
     status.addEventListener("change", () => {
       // The On Start choices follow the labels just typed.
@@ -1288,7 +1548,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     hint.className = "settings__help";
     hint.textContent = WORK_ITEMS_HINT[forge];
     body.push(
-      row({ label: "Issues to pick up", help: "An issue shows when it matches any one of these rules.", control: rulesBox, stack: true }),
+      row({ label: "Work items to pick up", help: "A work item shows when it matches any one of these rules.", control: rulesBox, stack: true }),
       row({ label: "Status labels", help: "In order, comma-separated.", control: status, idScope: forge }),
       row({ label: "On Start, set status to", control: start }),
       row({ label: "Tracker-only repositories", help: "Comma-separated.", control: tracker, idScope: forge }),
@@ -1317,6 +1577,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     box.dataset.forge = forge;
     sources.push(box);
   }
+
+  sources.push(coralSource(model, h, workItemsConfigNow.coral, () => ruleIds++, rememberSource));
 
   const customTools = workItemsConfigNow.custom ?? [];
   /** The custom tools as the page shows them now, not as they were when it was drawn. */
@@ -1400,7 +1662,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       onToggle: (open) => rememberSource(tool.id, open),
       control: on,
       body: [
-        row({ label: "Name", help: "How its items are labelled on the Issues tab.", control: name }),
+        row({ label: "Name", help: "How its items are labelled on the Work Items tab.", control: name }),
         row({ label: "List command", help: "Runs every 2 minutes through your shell, and must finish within 30 seconds.", control: text("listCommand", "list", true), stack: true }),
         row({ label: optional("On-start command"), help: "Runs when you press Start, with the item's JSON on its input, to assign or move it in your tool.", control: text("startCommand", "start", true), stack: true }),
         row({ label: optional("Your name there"), help: "Start asks before taking over an item assigned to someone else. Blank: it never asks.", control: text("me", "me", false) }),
@@ -1424,7 +1686,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   workInput.addEventListener("change", () => h.onWorkPrompt?.(workInput.value.trim()));
 
   workItems.append(
-    group({ title: "Sources", note: "Open one to change what the Issues tab picks up from it." }, ...sources, addTool),
+    group({ title: "Sources", note: "Open one to change what the Work Items tab picks up from it." }, ...sources, addTool),
     group({ title: "Work prompt" }, card(row({
       help: "What Start tells the agent. Blank uses the built-in prompt. {id}, {title}, {url}, {description} and {repo} are filled in.",
       control: workInput,
@@ -2067,6 +2329,22 @@ export async function initSettings(): Promise<void> {
     }
   };
 
+  const loadCoralStatus = async () => {
+    try {
+      model.coralHasToken = (await invoke<{ hasToken: boolean }>("get_coral_status")).hasToken;
+    } catch {
+      model.coralHasToken ??= false;
+    }
+  };
+
+  /** Lists Coral's statuses, for the card to offer; a card left open lists them on its own. */
+  const loadCoralStatuses = async (): Promise<CoralStatus[]> => {
+    const list = await invoke<CoralStatus[]>("coral_statuses");
+    model.coralStatuses = list;
+    if (!panel.hidden) paint();
+    return list;
+  };
+
   const saveWorkItems = (patch: (w: WorkItemsConfig) => void, saved?: () => void) =>
     run(async () => {
       const fresh = await invoke<ConfigJson>("get_config");
@@ -2181,7 +2459,11 @@ export async function initSettings(): Promise<void> {
   };
 
   const handlers: SettingsHandlers = {
-    onWorkItems: (forge, items) => void saveWorkItems((w) => { w[forge] = items; }),
+    onWorkItems: (source: GitProvider | "coral", items: ForgeItems | CoralItems) =>
+      void saveWorkItems((w) => {
+        if (source === "coral") w.coral = items as CoralItems;
+        else w[source] = items as ForgeItems;
+      }),
     onWorkPrompt: (text) => void saveWorkItems((w) => { w.prompt = text; }),
     onCustomTools: (tools) => {
       // A tool just added has no id until the backend names it: open
@@ -2198,6 +2480,20 @@ export async function initSettings(): Promise<void> {
     onGitEnabled: (p, on) => void saveGit(p, (c) => { c.enabled = on; }),
     onGitBaseUrl: (url) => void saveGit("gitlab", (c) => { c.baseUrl = url || null; }),
     onGitClone: (p, protocol) => void saveGit(p, (c) => { c.clone = protocol; }),
+    onCoralToken: (token) => void run(async () => { await invoke("store_coral_token", { token }); model.coralStatuses = null; model.coralTest = null; await loadCoralStatus(); }),
+    onCoralClearToken: () => void run(async () => { await invoke("clear_coral_token"); model.coralStatuses = null; model.coralTest = null; await loadCoralStatus(); }),
+    onCoralTest: async () => {
+      try {
+        model.coralTest = await invoke<string>("test_coral_connection");
+      } catch (e) {
+        model.coralTest = String(e);
+        throw model.coralTest;
+      } finally {
+        if (!panel.hidden) paint();
+      }
+      return model.coralTest;
+    },
+    onCoralStatuses: loadCoralStatuses,
     onGitTokenKind: (p, kind) => void saveGit(p, (c) => { c.token = kind === "stored" ? { kind: "stored" } : { kind: "env", name: GIT_DEFAULT_ENV[p] }; }),
     onGitEnvName: (p, name) => void saveGit(p, (c) => { c.token = { kind: "env", name }; }),
     onGitToken: (p, token) => void run(async () => { await invoke("store_git_token", { provider: p, token }); await loadGitStatus(); }),
@@ -2512,6 +2808,8 @@ export async function initSettings(): Promise<void> {
     applyConfig(config);
     await loadVoices();
     await loadGitStatus();
+    await loadCoralStatus();
+    if (model.workItems && coralCanAsk(model.coralHasToken, model.workItems.coral) && model.sourcesOpen?.coral) void loadCoralStatuses().catch(() => { /* the card says to Test */ });
     await loadModels();
     try {
       const raw = await invoke<string>("voice_selftest");

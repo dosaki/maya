@@ -13,10 +13,11 @@ fn spelled(r: &ItemRepo) -> String {
     format!("{}:{}", word(r.forge), r.path)
 }
 
-/// The repositories Maya may pick from: every rule's named repos, every
-/// listed item's repo and `clones`, minus the trackers, once each (ignoring
-/// case), sorted by `<forge>:<path>`.
-pub fn candidates(cfg: &WorkItemsConfig, items: &[WorkItem], clones: &[ItemRepo]) -> Vec<ItemRepo> {
+/// The repositories Maya may pick from: `first` (a Coral product's, say) in
+/// its order, then every rule's named repos, every listed item's repo and
+/// `clones` sorted by `<forge>:<path>`; minus the trackers, once each
+/// (ignoring case).
+pub fn candidates(cfg: &WorkItemsConfig, items: &[WorkItem], clones: &[ItemRepo], first: &[ItemRepo]) -> Vec<ItemRepo> {
     let mut out: Vec<ItemRepo> = Vec::new();
     for (forge, items_cfg) in [(GitProvider::Github, &cfg.github), (GitProvider::Gitlab, &cfg.gitlab)] {
         out.extend(items_cfg.rules.iter().flat_map(|r| r.repos.iter()).map(|p| ItemRepo { forge, path: p.clone() }));
@@ -30,11 +31,12 @@ pub fn candidates(cfg: &WorkItemsConfig, items: &[WorkItem], clones: &[ItemRepo]
         };
         trackers.iter().any(|t| t.eq_ignore_ascii_case(&r.path))
     };
-    out.retain(|r| !is_tracker(r));
-    // Paths ignore case, as the forges do; the first spelling seen is kept.
     out.sort_by_key(|r| spelled(r).to_lowercase());
-    out.dedup_by(|a, b| a.forge == b.forge && a.path.eq_ignore_ascii_case(&b.path));
-    out
+    let mut all: Vec<ItemRepo> = first.iter().cloned().chain(out).filter(|r| !is_tracker(r)).collect();
+    // Paths ignore case, as the forges do; the first spelling seen is kept.
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|r| seen.insert(spelled(r).to_lowercase()));
+    all
 }
 
 /// The question for the agent: the item, and the candidates one per line.
@@ -96,7 +98,7 @@ mod tests {
         cfg.github.tracker_repos = vec!["acme/issues".into()];
         cfg.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/api".into(), "acme/issues".into()] });
         let item = |f, p: &str| WorkItem { repo: Some(ItemRepo { forge: f, path: p.into() }), ..test_item() };
-        let c = candidates(&cfg, &[item(GitProvider::Github, "acme/web"), item(GitProvider::Github, "acme/api")], &[ItemRepo { forge: GitProvider::Gitlab, path: "grp/r".into() }]);
+        let c = candidates(&cfg, &[item(GitProvider::Github, "acme/web"), item(GitProvider::Github, "acme/api")], &[ItemRepo { forge: GitProvider::Gitlab, path: "grp/r".into() }], &[]);
         assert_eq!(c.iter().map(|r| format!("{:?}:{}", r.forge, r.path)).collect::<Vec<_>>(), vec!["Github:acme/api", "Github:acme/web", "Gitlab:grp/r"]);
     }
 
@@ -105,9 +107,20 @@ mod tests {
         let mut cfg = WorkItemsConfig::default();
         cfg.github.tracker_repos = vec!["Acme/Issues".into()];
         cfg.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/issues".into(), "Acme/API".into()] });
-        let c = candidates(&cfg, &[], &[ItemRepo { forge: GitProvider::Github, path: "acme/api".into() }]);
+        let c = candidates(&cfg, &[], &[ItemRepo { forge: GitProvider::Github, path: "acme/api".into() }], &[]);
         assert_eq!(c.len(), 1, "{c:?}");
         assert!(c[0].path.eq_ignore_ascii_case("acme/api"));
+    }
+
+    #[test]
+    fn the_first_repos_come_first() {
+        let mut cfg = WorkItemsConfig::default();
+        cfg.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/api".into()] });
+        let gl = ItemRepo { forge: GitProvider::Gitlab, path: "g/r".into() };
+        let c = candidates(&cfg, &[], &[ItemRepo { forge: GitProvider::Gitlab, path: "G/R".into() }], &[gl.clone()]);
+        assert_eq!(c[0], gl);
+        assert_eq!(c.len(), 2, "{c:?}");
+        assert_eq!(c[1].path, "acme/api");
     }
 
     #[test]

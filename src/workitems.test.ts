@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { applyWorkFilters, areas, guardStart, makeWorkItemsView, needsDialog, renderItemCard, renderStartDialog, sessionFor, startWorkItem, workItemActionFor } from "./workitems";
+import indexHtml from "../index.html?raw";
 import type { Card, WorkItem } from "./types";
 
 const item = (over: Partial<WorkItem> = {}): WorkItem => ({
@@ -76,17 +77,22 @@ describe("work items", () => {
     el.remove();
   });
 
-  it("says issues are off and opens Settings → Git when no Git connection is on", () => {
+  it("the tab button says Work Items", () => {
+    const doc = new DOMParser().parseFromString(indexHtml, "text/html");
+    expect(doc.querySelector("[data-tab=issues]")!.textContent!.trim().startsWith("Work Items")).toBe(true);
+  });
+
+  it("says work items are off and opens Settings → Git when no Git connection is on", () => {
     const host = document.createElement("div");
     makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: true, off: true, fetchedAt: null }, [], Date.now());
-    expect(host.textContent).toContain("Issues are off. Turn on GitHub or GitLab in Settings → Git, or add a custom tool in Settings → Work Items.");
+    expect(host.textContent).toContain("Work items are off. Turn on GitHub or GitLab in Settings → Git, or turn on Coral or a custom tool in Settings → Work Items.");
     expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "git" });
   });
 
-  it("says issues are off and opens Settings → Work Items when Git is on but both services are off there", () => {
+  it("says work items are off and opens Settings → Work Items when Git is on but both services are off there", () => {
     const host = document.createElement("div");
     makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: true, fetchedAt: null }, [], Date.now());
-    expect(host.textContent).toContain("Issues are off. Turn on GitHub, GitLab or a custom tool in Settings → Work Items.");
+    expect(host.textContent).toContain("Work items are off. Turn on GitHub, GitLab, Coral or a custom tool in Settings → Work Items.");
     expect(host.textContent).not.toContain("Settings → Git.");
     expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "workItems" });
   });
@@ -110,7 +116,7 @@ describe("work items", () => {
   it("says when no issue matches the rules", () => {
     const host = document.createElement("div");
     makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
-    expect(host.querySelector(".issues__area--pick")?.textContent).toContain("No issues match your rules.");
+    expect(host.querySelector(".issues__area--pick")?.textContent).toContain("No work items match your rules.");
   });
 
   it("keeps the filter dropdowns across repaints", () => {
@@ -124,7 +130,7 @@ describe("work items", () => {
   });
 
   it("asks before taking over someone else's issue", () => {
-    const el = renderStartDialog(item({ id: "a/b#1", title: "T" }), { takeover: ["maria", "joe"], pick: null, branch: "issue-a-b-1-t" }, { onStart: vi.fn(), onCancel: vi.fn() });
+    const el = renderStartDialog(item({ id: "a/b#1", title: "T" }), { takeover: ["maria", "joe"], pick: null, branch: "issue-a-b-1-t", repo: null }, { onStart: vi.fn(), onCancel: vi.fn() });
     expect(el.textContent).toContain("This issue is already assigned to maria, joe. Are you sure you want to take over?");
     expect(el.querySelector<HTMLButtonElement>(".card__btn--primary")?.textContent).toBe("Yes, take over and start");
     expect(el.textContent).toContain("Start a/b#1: T");
@@ -134,7 +140,7 @@ describe("work items", () => {
     const api = { forge: "github", path: "acme/api" } as const;
     const web = { forge: "gitlab", path: "acme/web" } as const;
     const on = { onStart: vi.fn(), onCancel: vi.fn() };
-    const el = renderStartDialog(item({}), { takeover: [], pick: { picked: api, why: "The endpoint lives there.", options: [api, web] }, branch: "b" }, on);
+    const el = renderStartDialog(item({}), { takeover: [], pick: { picked: api, why: "The endpoint lives there.", options: [api, web] }, branch: "b", repo: null }, on);
     const sel = el.querySelector<HTMLSelectElement>("select[name=repo]")!;
     expect(sel.value).toBe("github:acme/api");
     expect([...sel.options].map((o) => o.textContent)).toEqual(["acme/api (GitHub)", "acme/web (GitLab)"]);
@@ -146,7 +152,7 @@ describe("work items", () => {
   it("waits for a choice when Maya could not tell", () => {
     const api = { forge: "github", path: "acme/api" } as const;
     const on = { onStart: vi.fn(), onCancel: vi.fn() };
-    const el = renderStartDialog(item({}), { takeover: [], pick: { picked: null, why: "", options: [api] }, branch: "b" }, on);
+    const el = renderStartDialog(item({}), { takeover: [], pick: { picked: null, why: "", options: [api] }, branch: "b", repo: null }, on);
     const go = el.querySelector<HTMLButtonElement>(".card__btn--primary")!;
     expect(el.textContent).toContain("Maya could not tell which repository; choose one.");
     expect(go.textContent).toBe("Start session");
@@ -161,7 +167,7 @@ describe("work items", () => {
 
   it("says Maya knows no repositories and offers only Cancel when there is none to pick", () => {
     const on = { onStart: vi.fn(), onCancel: vi.fn() };
-    const el = renderStartDialog(item({}), { takeover: [], pick: { picked: null, why: "", options: [] }, branch: "b" }, on);
+    const el = renderStartDialog(item({}), { takeover: [], pick: { picked: null, why: "", options: [] }, branch: "b", repo: null }, on);
     expect(el.textContent).toContain("Maya knows no repositories yet. Name one in a rule in Settings → Work Items, or clone it into the clones folder first.");
     expect(el.querySelector("select")).toBeNull();
     expect([...el.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Cancel"]);
@@ -170,13 +176,13 @@ describe("work items", () => {
   });
 
   it("needs a dialog only for a takeover or a pick", () => {
-    expect(needsDialog({ takeover: [], pick: null, branch: "b" })).toBe(false);
-    expect(needsDialog({ takeover: ["x"], pick: null, branch: "b" })).toBe(true);
-    expect(needsDialog({ takeover: [], pick: { picked: null, why: "", options: [] }, branch: "b" })).toBe(true);
+    expect(needsDialog({ takeover: [], pick: null, branch: "b", repo: null })).toBe(false);
+    expect(needsDialog({ takeover: ["x"], pick: null, branch: "b", repo: null })).toBe(true);
+    expect(needsDialog({ takeover: [], pick: { picked: null, why: "", options: [] }, branch: "b", repo: null })).toBe(true);
   });
 
   it("starts at once when nothing needs asking", async () => {
-    const invoke = vi.fn().mockResolvedValueOnce({ takeover: [], pick: null, branch: "b" }).mockResolvedValueOnce({ dir: "/c/api-issue-1", nativeTerm: 4, notice: "Heads up." });
+    const invoke = vi.fn().mockResolvedValueOnce({ takeover: [], pick: null, branch: "b", repo: null }).mockResolvedValueOnce({ dir: "/c/api-issue-1", nativeTerm: 4, notice: "Heads up." });
     const toast = vi.fn();
     const opened = vi.fn();
     await startWorkItem(item({ key: "k" }), { invoke, host: document.createElement("div"), toast, opened });
@@ -189,7 +195,7 @@ describe("work items", () => {
   it("starts with the chosen repository and the takeover after the dialog", async () => {
     const api = { forge: "github", path: "acme/api" } as const;
     const host = document.createElement("div");
-    const invoke = vi.fn().mockResolvedValueOnce({ takeover: ["maria"], pick: { picked: api, why: "w", options: [api] }, branch: "b" }).mockResolvedValueOnce({ dir: "/c/x", nativeTerm: null, notice: null });
+    const invoke = vi.fn().mockResolvedValueOnce({ takeover: ["maria"], pick: { picked: api, why: "w", options: [api] }, branch: "b", repo: null }).mockResolvedValueOnce({ dir: "/c/x", nativeTerm: null, notice: null });
     const done = startWorkItem(item({ key: "k" }), { invoke, host, toast: vi.fn(), opened: vi.fn() });
     await vi.waitFor(() => expect(host.querySelector(".card__btn--primary")).not.toBeNull());
     host.querySelector<HTMLButtonElement>(".card__btn--primary")!.click();
@@ -198,9 +204,65 @@ describe("work items", () => {
     expect(host.children).toHaveLength(0);
   });
 
+  it("starts in the repository the check found when no dialog is needed", async () => {
+    const api = { forge: "github", path: "acme/api" } as const;
+    const host = document.createElement("div");
+    const check = { takeover: [], pick: null, branch: "issue-bed-0021-x", repo: api };
+    const invoke = vi.fn().mockResolvedValueOnce(check).mockResolvedValueOnce({ dir: "/c/api-issue-bed-0021-x", nativeTerm: null, notice: null });
+    const coral = item({ key: "coral:u-1", source: "coral", id: "BED-0021", number: null, repo: null, tracker: true });
+    await startWorkItem(coral, { invoke, host, toast: vi.fn(), opened: vi.fn() });
+    expect(host.children).toHaveLength(0);
+    expect(invoke).toHaveBeenNthCalledWith(2, "work_item_start", { key: "coral:u-1", repo: api, takeOver: [] });
+  });
+
+  it("names Coral items' source Coral", () => {
+    const coral = item({ key: "coral:u-1", source: "coral", id: "BED-0021", repo: null, tracker: true });
+    expect(renderItemCard(coral, 0, null, false, "Coral").querySelector(".item__src")?.textContent).toBe("Coral");
+    const host = document.createElement("div");
+    makeWorkItemsView(host).update({ items: [coral], started: [], errors: [], sourceLabels: {}, gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
+    expect(host.querySelector(".item__src")?.textContent).toBe("Coral");
+    expect([...host.querySelectorAll<HTMLOptionElement>("select[name=source] option")].map((o) => o.textContent)).toContain("Coral");
+  });
+
+  it("shows a Coral item's assignees and age, as a forge item's", () => {
+    const now = Date.parse("2026-09-29T10:00:00Z");
+    const coral = item({ key: "coral:u-1", source: "coral", id: "BED-0021", number: null, repo: null, tracker: true, assignees: ["Ana"], updatedAt: "2026-09-29T08:00:00Z" });
+    const meta = renderItemCard(coral, now, null, false, "Coral").querySelector(".item__meta")!;
+    expect(meta.textContent).toBe("Ana · 2h ago");
+    expect(meta.classList.contains("item__meta--pick")).toBe(false);
+    expect(renderItemCard({ ...coral, assignees: [] }, now, null, false, "Coral").querySelector(".item__meta")!.textContent).toBe("Unassigned · 2h ago");
+  });
+
+  it("calls a Coral item a work item when asking to take it over", () => {
+    const coral = item({ key: "coral:u-1", source: "coral", id: "BED-0021", repo: null, tracker: true });
+    const el = renderStartDialog(coral, { takeover: ["Ana"], pick: null, branch: "b", repo: null }, { onStart: vi.fn(), onCancel: vi.fn() });
+    expect(el.textContent).toContain("This work item is already assigned to Ana. Are you sure you want to take over?");
+  });
+
+  it("tells a Coral user to link a repository to the product when Maya knows none", () => {
+    const coral = item({ key: "coral:u-1", source: "coral", id: "BED-0021", repo: null, tracker: true });
+    const el = renderStartDialog(coral, { takeover: [], pick: { picked: null, why: "", options: [] }, branch: "b", repo: null }, { onStart: vi.fn(), onCancel: vi.fn() });
+    expect(el.textContent).toContain("Maya knows no repositories for BED-0021 yet. Link one to its product in Coral, or clone it into the clones folder first.");
+    expect(el.textContent).not.toContain("rule");
+  });
+
+  it("starts a Coral item in the repository the check found after a takeover question", async () => {
+    const api = { forge: "github", path: "acme/api" } as const;
+    const host = document.createElement("div");
+    const check = { takeover: ["Ana"], pick: null, branch: "issue-bed-0021-x", repo: api };
+    const invoke = vi.fn().mockResolvedValueOnce(check).mockResolvedValueOnce({ dir: "/c/api-issue-bed-0021-x", nativeTerm: null, notice: null });
+    const coral = item({ key: "coral:u-1", source: "coral", id: "BED-0021", number: null, repo: null, tracker: true });
+    const done = startWorkItem(coral, { invoke, host, toast: vi.fn(), opened: vi.fn() });
+    await vi.waitFor(() => expect(host.querySelector(".card__btn--primary")).not.toBeNull());
+    expect(host.querySelector("select[name=repo]")).toBeNull();
+    host.querySelector<HTMLButtonElement>(".card__btn--primary")!.click();
+    await done;
+    expect(invoke).toHaveBeenNthCalledWith(2, "work_item_start", { key: "coral:u-1", repo: api, takeOver: ["Ana"] });
+  });
+
   it("cancel starts nothing", async () => {
     const host = document.createElement("div");
-    const invoke = vi.fn().mockResolvedValueOnce({ takeover: ["maria"], pick: null, branch: "b" });
+    const invoke = vi.fn().mockResolvedValueOnce({ takeover: ["maria"], pick: null, branch: "b", repo: null });
     const done = startWorkItem(item({ key: "k" }), { invoke, host, toast: vi.fn(), opened: vi.fn() });
     await vi.waitFor(() => expect(host.querySelector("button")).not.toBeNull());
     [...host.querySelectorAll("button")].find((b) => b.textContent === "Cancel")!.click();
@@ -211,7 +273,7 @@ describe("work items", () => {
 
   it("Escape starts nothing", async () => {
     const host = document.createElement("div");
-    const invoke = vi.fn().mockResolvedValueOnce({ takeover: ["maria"], pick: null, branch: "b" });
+    const invoke = vi.fn().mockResolvedValueOnce({ takeover: ["maria"], pick: null, branch: "b", repo: null });
     const done = startWorkItem(item({ key: "k" }), { invoke, host, toast: vi.fn(), opened: vi.fn() });
     await vi.waitFor(() => expect(host.querySelector("button")).not.toBeNull());
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
@@ -246,7 +308,7 @@ describe("work items", () => {
 
   it("treats a dialog replaced in the host as a cancel", async () => {
     const host = document.createElement("div");
-    const invoke = vi.fn().mockResolvedValueOnce({ takeover: ["maria"], pick: null, branch: "b" });
+    const invoke = vi.fn().mockResolvedValueOnce({ takeover: ["maria"], pick: null, branch: "b", repo: null });
     const inFlight = new Set<string>();
     const done = guardStart(inFlight, "k", () => startWorkItem(item({ key: "k" }), { invoke, host, toast: vi.fn(), opened: vi.fn() }));
     await vi.waitFor(() => expect(host.querySelector("button")).not.toBeNull());

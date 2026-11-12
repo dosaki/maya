@@ -221,7 +221,7 @@ pub struct Config {
     pub keys: Option<KeyBindings>,
     #[serde(default)]
     pub network: NetworkConfig,
-    /// The Issues tab: which issues to list and how to mark a started one.
+    /// The Work Items tab: which issues to list and how to mark a started one.
     #[serde(default)]
     pub work_items: WorkItemsConfig,
 }
@@ -450,12 +450,54 @@ impl CustomTool {
     }
 }
 
-/// The Issues tab's settings.
+/// Coral Boards as a source of work items. In a rule, `labels` are tag
+/// names, `repos` are product codes and a user's `login` is an email.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CoralItems {
+    pub enabled: bool,
+    /// The Coral address, `https://…`, without a trailing slash.
+    pub base_url: String,
+    pub token: TokenSource,
+    pub rules: Vec<ItemRule>,
+    /// The Coral status id a started item moves to.
+    #[serde(default)]
+    pub start_status: Option<String>,
+}
+
+impl Default for CoralItems {
+    fn default() -> Self {
+        CoralItems {
+            enabled: false,
+            base_url: String::new(),
+            token: TokenSource::Stored,
+            rules: vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![] }],
+            start_status: None,
+        }
+    }
+}
+
+impl CoralItems {
+    /// The variable to read, `CORAL_TOKEN` when blank; None for a stored token.
+    pub fn env_name(&self) -> Option<String> {
+        match &self.token {
+            TokenSource::Stored => None,
+            TokenSource::Env { name } => {
+                let name = name.trim();
+                Some(if name.is_empty() { "CORAL_TOKEN" } else { name }.to_string())
+            }
+        }
+    }
+}
+
+/// The Work Items tab's settings.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkItemsConfig {
     pub github: ForgeItems,
     pub gitlab: ForgeItems,
+    #[serde(default)]
+    pub coral: CoralItems,
     #[serde(default)]
     pub prompt: String,
     #[serde(default)]
@@ -493,6 +535,39 @@ pub fn validate_work_items(w: &WorkItemsConfig) -> Result<(), String> {
                 }
                 _ => {}
             }
+        }
+    }
+    if w.coral.enabled {
+        let url = w.coral.base_url.trim();
+        // `http://localhost:1@other.example` is other.example: no user part.
+        let authority = url.split_once("://").map_or("", |(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
+        if authority.contains('@') {
+            return Err("The Coral address cannot contain @ before its path.".into());
+        }
+        let local = ["http://localhost", "http://127.0.0.1"].iter().any(|h| url.strip_prefix(h).is_some_and(|r| r.is_empty() || r.starts_with(':') || r.starts_with('/')));
+        if !(url.strip_prefix("https://").is_some_and(|r| !r.is_empty()) || local) {
+            return Err("The Coral address must start with https://.".into());
+        }
+        // Only the origin is kept, so a host-less one would leave nothing to ask.
+        if authority.is_empty() || authority.starts_with(':') || !valid_port(authority) {
+            return Err("The Coral address needs a host, like https://coral.example.com.".into());
+        }
+    }
+    if let TokenSource::Env { name } = &w.coral.token {
+        let n = name.trim();
+        if !n.is_empty() && !valid_env_name(n) {
+            return Err("The Coral token variable must be a name like CORAL_TOKEN.".into());
+        }
+    }
+    for r in &w.coral.rules {
+        match &r.assignee {
+            Assignee::Anyone if r.repos.iter().all(|x| x.trim().is_empty()) => {
+                return Err("A Coral rule for anyone's work items must name its products.".into());
+            }
+            Assignee::User { login } if login.trim().is_empty() => {
+                return Err("A rule for someone else's issues needs their login.".into());
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -798,6 +873,18 @@ impl Config {
             clean_all(&mut f.tracker_repos, clean_repo);
             f.start_status = f.start_status.as_deref().map(str::trim).filter(|s| f.status_labels.iter().any(|l| l == s)).map(String::from);
         }
+        w.coral.base_url = crate::work_items::coral::origin(&w.coral.base_url);
+        if let TokenSource::Env { name } = &mut w.coral.token {
+            *name = name.trim().to_string();
+        }
+        for r in &mut w.coral.rules {
+            if let Assignee::User { login } = &mut r.assignee {
+                *login = login.trim().to_string();
+            }
+            clean_all(&mut r.labels, |s| s.trim().to_string());
+            clean_all(&mut r.repos, |s| s.trim().to_string());
+        }
+        w.coral.start_status = w.coral.start_status.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
         assign_tool_ids(&mut w.custom, crate::now_ms());
         for t in &mut w.custom {
             for f in [&mut t.name, &mut t.list_command, &mut t.start_command, &mut t.me] {
@@ -979,6 +1066,82 @@ mod tests {
         assert!(validate_work_items(&w).is_ok());
         w.github.rules.push(ItemRule { assignee: Assignee::User { login: " ".into() }, labels: vec![], repos: vec![] });
         assert_eq!(validate_work_items(&w).unwrap_err(), "A rule for someone else's issues needs their login.");
+    }
+
+    #[test]
+    fn coral_is_off_by_default_and_an_old_file_reads() {
+        let w: WorkItemsConfig = serde_json::from_str(r#"{"github":{"enabled":true,"rules":[]},"gitlab":{"enabled":true,"rules":[]}}"#).unwrap();
+        assert!(!w.coral.enabled);
+        assert_eq!(w.coral.rules, vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![] }]);
+        assert_eq!(w.coral, CoralItems::default());
+    }
+
+    #[test]
+    fn validate_refuses_a_coral_rule_for_anyone_without_products() {
+        let mut w = WorkItemsConfig::default();
+        w.coral.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec![" ".into()] });
+        assert_eq!(validate_work_items(&w).unwrap_err(), "A Coral rule for anyone's work items must name its products.");
+        w.coral.rules[1].repos = vec!["PAY".into()];
+        assert!(validate_work_items(&w).is_ok());
+    }
+
+    #[test]
+    fn validate_refuses_a_bad_coral_address() {
+        let mut w = WorkItemsConfig::default();
+        w.coral.base_url = "ftp://x".into();
+        assert!(validate_work_items(&w).is_ok(), "only when enabled");
+        w.coral.enabled = true;
+        for bad in ["ftp://x", "", "https://", "http://localhost.evil.com", "http://example.com"] {
+            w.coral.base_url = bad.into();
+            assert_eq!(validate_work_items(&w).unwrap_err(), "The Coral address must start with https://.", "{bad}");
+        }
+        for ok in ["https://coral.test", "http://localhost:3000", "http://127.0.0.1:3000", "https://coral.test/items/a@b"] {
+            w.coral.base_url = ok.into();
+            assert!(validate_work_items(&w).is_ok(), "{ok}");
+        }
+        // A user part would send the token to the host after the `@`.
+        for bad in ["http://localhost:1@other.example", "http://localhost@other.example/", "https://user@coral.test"] {
+            w.coral.base_url = bad.into();
+            assert_eq!(validate_work_items(&w).unwrap_err(), "The Coral address cannot contain @ before its path.", "{bad}");
+        }
+        for bad in ["https:///", "https://?x", "https://#x", "https://:443", "https://coral.test:abc", "https://coral.test:1:2", "http://localhost:abc"] {
+            w.coral.base_url = bad.into();
+            assert_eq!(validate_work_items(&w).unwrap_err(), "The Coral address needs a host, like https://coral.example.com.", "{bad}");
+        }
+        w.coral.base_url = "https://[::1]:8443".into();
+        assert!(validate_work_items(&w).is_ok(), "an IPv6 host with a port");
+    }
+
+    #[test]
+    fn validate_refuses_a_bad_coral_token_variable() {
+        let mut w = WorkItemsConfig::default();
+        w.coral.token = TokenSource::Env { name: "CORAL_TOKEN;x".into() };
+        assert_eq!(validate_work_items(&w).unwrap_err(), "The Coral token variable must be a name like CORAL_TOKEN.");
+        for ok in ["", "  ", " MY_CORAL ", "_X1"] {
+            w.coral.token = TokenSource::Env { name: ok.into() };
+            assert!(validate_work_items(&w).is_ok(), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn coral_env_name_defaults_to_coral_token() {
+        let mut c = CoralItems::default();
+        assert_eq!(c.env_name(), None);
+        c.token = TokenSource::Env { name: " ".into() };
+        assert_eq!(c.env_name().as_deref(), Some("CORAL_TOKEN"));
+        c.token = TokenSource::Env { name: " MY_CORAL ".into() };
+        assert_eq!(c.env_name().as_deref(), Some("MY_CORAL"));
+    }
+
+    #[test]
+    fn normalize_trims_the_coral_address() {
+        let mut c = Config::default();
+        c.work_items.coral.base_url = " https://coral.test/ ".into();
+        c.normalize_work_items();
+        assert_eq!(c.work_items.coral.base_url, "https://coral.test");
+        c.work_items.coral.base_url = "https://coral.test/items/AB-1".into();
+        c.normalize_work_items();
+        assert_eq!(c.work_items.coral.base_url, "https://coral.test");
     }
 
     #[test]
@@ -1399,7 +1562,7 @@ mod tests {
         let typed_only = r#"{"completedTimeoutMinutes":5,"network":{"role":"assistant","mainHost":"desk.local"}}"#;
         assert!(!serde_json::from_str::<Config>(typed_only).unwrap().migrate().network.pair_again, "a host typed but never paired");
         let resaved = serde_json::to_string(&serde_json::from_str::<Config>(old_link).unwrap()).unwrap();
-        assert!(!resaved.contains("token"), "the protocol 1 token is never written back");
+        assert!(!resaved.contains(r#""token":"t""#), "the protocol 1 token is never written back");
         let fresh = Config::default().migrate();
         assert!(!fresh.network.pair_again, "nothing was paired, nothing to say");
     }

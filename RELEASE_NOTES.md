@@ -1,3 +1,10 @@
+# 0.55.0
+
+## New
+
+- The Issues tab is now called Work Items, the same as its settings.
+- Coral work items and defects show in Work Items beside your GitHub and GitLab issues. Connect Coral in Settings → Work Items with its address and a personal token. Start assigns the item to you, sets its status and opens a session in the product's repository.
+
 # 0.54.0
 
 ## New

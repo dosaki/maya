@@ -30,7 +30,8 @@ the right terminal first.
   - Using built-in notifications, and/or a voice and/or a Dock badge
   - Keeps quiet under a Focus mode, or when you mute her from the top bar
 - Lists the pull requests that ask for your review and the ones assigned to you, filtered by state and repository, with a dot for the review (green approved, blue commented, red changes requested): yours on review requests, the reviewers' on PRs assigned to you; reviews them in one click, and tells you when a PR assigned to you is approved or needs changes
-- Lists your GitHub and GitLab issues by the rules you set in Settings → Work Items (assignee, labels, repositories), and starts one with Start: Maya assigns it to you, sets its status label, and starts her agent on it in a fresh worktree of its repository. Items from any other tool show there too, through a script of your own (Settings → Work Items → Add New).
+- Work Items tab: lists your GitHub and GitLab issues by the rules you set in Settings → Work Items (assignee, labels, repositories), and starts one with Start: Maya assigns it to you, sets its status label, and starts her agent on it in a fresh worktree of its repository. Items from any other tool show there too, through a script of your own (Settings → Work Items → Add New).
+- Coral work items and defects show in the Work Items tab too. To connect Coral, open Settings → Work Items → Coral and enter its address (for example https://coral.example.com) and a personal token: paste one made in Coral, or choose "From variable" and name the variable that holds it (CORAL_TOKEN by default). Press Test to check the connection. Choose whose items show (yours, someone's by email, or anyone's), and filter by tags and products. "On Start, set status to" sets the status of an item when you start it. Start assigns the item to you, sets its status and opens a session in the product's repository. Maya asks which repository to use when the product has none, several, or one you have not used in Maya yet (in a rule, a clone or a session).
 - Does what you tell her by voice, through the agent you choose: "Maya, tell <session> to do <thing>"
 - Resumes old sessions of any of them, and reviews pull requests with the agent you chose, in a worktree of one clone per repository, on a prompt you can edit in Settings
 - Shows the sessions of all your machines on one board.
@@ -47,7 +48,7 @@ Run the commands below, or download Maya manually from the
 Requirements:
 
 - One of [Claude Code](https://claude.com/claude-code), [Codex](https://github.com/openai/codex), Antigravity, Grok Build, [Kiro CLI](https://kiro.dev/cli) or [OpenCode](https://opencode.ai), installed and, if applicable, signed in. Maya asks which one powers her on the first start; the others show on the board when they are installed.
-- Pull requests: turn on GitHub or GitLab in Settings → Git and give it a token (or the name of a variable that holds one). Issues: the same tokens; Start needs write access (GitHub Issues: read and write, or repo; GitLab api).
+- Pull requests: turn on GitHub or GitLab in Settings → Git and give it a token (or the name of a variable that holds one). Work Items: the same tokens; Start needs write access (GitHub Issues: read and write, or repo; GitLab api).
 - Deployments: turn on GitHub in Settings → Git. The token needs `repo` (classic), or Actions: read, Deployments: read and write and Metadata: read (fine-grained).
 - macOS on Apple Silicon or Intel (macOS 14 or later for voice).
 - Windows 10 or 11, 64-bit, with [Git for Windows](https://git-scm.com/download/win).
