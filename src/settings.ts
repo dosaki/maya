@@ -742,9 +742,11 @@ function coralSource(
 ): HTMLElement {
   const hasToken = model.coralHasToken === true;
   let tokenKind = cfg.token.kind;
-  // A Test result says who a token was at an address: another of either makes it stale.
+  // A Test result says who a token was at an address, and the statuses came
+  // from that Coral: another address or token makes both stale.
   const forgetTest = () => {
     model.coralTest = null;
+    model.coralStatuses = null;
   };
 
   const on = toggle("wi-coral-enabled", cfg.enabled, () => save(), "Use Coral");

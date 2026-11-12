@@ -548,6 +548,16 @@ pub fn validate_work_items(w: &WorkItemsConfig) -> Result<(), String> {
         if !(url.strip_prefix("https://").is_some_and(|r| !r.is_empty()) || local) {
             return Err("The Coral address must start with https://.".into());
         }
+        // Only the origin is kept, so a host-less one would leave nothing to ask.
+        if authority.is_empty() || authority.starts_with(':') || !valid_port(authority) {
+            return Err("The Coral address needs a host, like https://coral.example.com.".into());
+        }
+    }
+    if let TokenSource::Env { name } = &w.coral.token {
+        let n = name.trim();
+        if !n.is_empty() && !valid_env_name(n) {
+            return Err("The Coral token variable must be a name like CORAL_TOKEN.".into());
+        }
     }
     for r in &w.coral.rules {
         match &r.assignee {
@@ -1093,6 +1103,23 @@ mod tests {
         for bad in ["http://localhost:1@other.example", "http://localhost@other.example/", "https://user@coral.test"] {
             w.coral.base_url = bad.into();
             assert_eq!(validate_work_items(&w).unwrap_err(), "The Coral address cannot contain @ before its path.", "{bad}");
+        }
+        for bad in ["https:///", "https://?x", "https://#x", "https://:443", "https://coral.test:abc", "https://coral.test:1:2", "http://localhost:abc"] {
+            w.coral.base_url = bad.into();
+            assert_eq!(validate_work_items(&w).unwrap_err(), "The Coral address needs a host, like https://coral.example.com.", "{bad}");
+        }
+        w.coral.base_url = "https://[::1]:8443".into();
+        assert!(validate_work_items(&w).is_ok(), "an IPv6 host with a port");
+    }
+
+    #[test]
+    fn validate_refuses_a_bad_coral_token_variable() {
+        let mut w = WorkItemsConfig::default();
+        w.coral.token = TokenSource::Env { name: "CORAL_TOKEN;x".into() };
+        assert_eq!(validate_work_items(&w).unwrap_err(), "The Coral token variable must be a name like CORAL_TOKEN.");
+        for ok in ["", "  ", " MY_CORAL ", "_X1"] {
+            w.coral.token = TokenSource::Env { name: ok.into() };
+            assert!(validate_work_items(&w).is_ok(), "{ok:?}");
         }
     }
 

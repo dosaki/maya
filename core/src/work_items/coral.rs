@@ -191,12 +191,15 @@ pub fn parse_item(v: &Value, c: &Coral) -> Option<WorkItem> {
     })
 }
 
+/// A 2xx reply with no `data` list: not an empty one, so nothing reads as gone.
+const NO_LIST: &str = "Coral's reply had no list";
+
 /// Every `data` row of a paginated list (`?page=`), up to `MAX_PAGES` pages.
 fn all_pages(http: &dyn Http, c: &Coral, path: &str) -> Result<Vec<Value>, String> {
     let mut out = Vec::new();
     for page in 1..=MAX_PAGES {
         let v = get_json(http, c, &c.api(&format!("{path}?pageSize=100&page={page}")))?;
-        let rows = v["data"].as_array().cloned().unwrap_or_default();
+        let rows = v["data"].as_array().cloned().ok_or_else(|| NO_LIST.to_string())?;
         let n = rows.len();
         out.extend(rows);
         let done = match v["total"].as_u64() {
@@ -313,7 +316,8 @@ fn list_type(http: &dyn Http, c: &Coral, item_type: &str, assignee: Option<&str>
             Err(e) if e == NO_PRODUCT && !codes.is_empty() => return Err(Skip::Warn(format!("Coral has no product {}", codes.join(", ")))),
             Err(e) => return Err(Skip::Fail(e)),
         };
-        for item in v["data"].as_array().into_iter().flatten().filter_map(|i| parse_item(i, c)) {
+        let rows = v["data"].as_array().ok_or_else(|| Skip::Fail(NO_LIST.to_string()))?;
+        for item in rows.iter().filter_map(|i| parse_item(i, c)) {
             if out.len() < MAX_ITEMS && seen.insert(item.key.clone()) {
                 out.push(item);
             }
@@ -666,6 +670,17 @@ mod tests {
             assert!(u.contains("cursor="), "{u}");
             assert!(!u.contains("phase") && !u.contains("subtask") && !u.contains("productCode") && !u.contains("tagId"), "{u}");
         }
+    }
+
+    #[test]
+    fn a_reply_with_no_list_is_a_failure_not_an_empty_one() {
+        let http = FakeHttp::new(vec![("/work-items", 200, "{}")]);
+        let (err, _) = list(&http, &coral(), &cfg(vec![rule(Assignee::Me, &[], &[])]), &me_user()).unwrap_err();
+        assert_eq!(err, NO_LIST);
+        let http = FakeHttp::new(vec![("/tags", 200, "{\"total\": 3}")]);
+        let (err, warnings) = list(&http, &coral(), &cfg(vec![rule(Assignee::Anyone, &["urgent"], &[])]), &me_user()).unwrap_err();
+        assert_eq!(err, NO_LIST);
+        assert!(warnings.is_empty(), "no tag is said to be missing: {warnings:?}");
     }
 
     #[test]

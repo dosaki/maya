@@ -2623,8 +2623,8 @@ describe("Settings → Work Items Coral", () => {
     expect(onCoralStatuses).toHaveBeenCalledTimes(1);
   });
 
-  it("forgets the last Test result when the address or the token changes", () => {
-    const tested = () => model({ coralHasToken: true, coralTest: "Connected as Ana" });
+  it("forgets the last Test result and the statuses when the address or the token changes", () => {
+    const tested = () => model({ coralHasToken: true, coralTest: "Connected as Ana", coralStatuses: [{ id: "s-1", name: "In Progress", category: "active", sub: false, position: 1 }] });
     const helpOf = (root: HTMLElement) => field<HTMLElement>(root, "[data-action=coral-test]").closest(".settings__row")!.querySelector(".settings__help")!.textContent;
     expect(helpOf(renderSettings(tested(), handlers()))).toBe("Connected as Ana");
     const cases: [string, (root: HTMLElement) => void][] = [
@@ -2640,11 +2640,13 @@ describe("Settings → Work Items Coral", () => {
       act(root);
       root.remove();
       expect(m.coralTest, what).toBeNull();
+      expect(m.coralStatuses, what).toBeNull();
     }
     // A rule is not the connection: the result stays.
     const m = tested();
     change(field(renderSettings(m, handlers()), "input[name=wi-labels]"), "team: api");
     expect(m.coralTest).toBe("Connected as Ana");
+    expect(m.coralStatuses).toHaveLength(1);
   });
 
   it("shows the Test result, and lists the statuses after it connects", async () => {
