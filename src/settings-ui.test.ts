@@ -17,6 +17,16 @@ describe("row", () => {
     expect(r.querySelector("#settings-help-agent.settings__help")!.textContent).toBe("x");
     expect(ctl.getAttribute("aria-describedby")).toBe("settings-help-agent");
   });
+  it("scopes the help id when asked, so two rows with one control name stay unique", () => {
+    const a = row({ label: "A", help: "x", control: select("same"), idScope: "github" });
+    const b = row({ label: "B", help: "y", control: select("same"), idScope: "gitlab" });
+    document.body.append(a, b);
+    const ids = [...document.querySelectorAll("[id]")].map((e) => e.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(a.querySelector("select")!.getAttribute("aria-describedby")).toBe(a.querySelector(".settings__help")!.id);
+    a.remove();
+    b.remove();
+  });
   it("is a div with several controls", () => {
     const a = document.createElement("button");
     const b = document.createElement("button");

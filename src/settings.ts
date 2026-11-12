@@ -1289,9 +1289,9 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     hint.textContent = WORK_ITEMS_HINT[forge];
     body.push(
       row({ label: "Issues to pick up", help: "An issue shows when it matches any one of these rules.", control: rulesBox, stack: true }),
-      row({ label: "Status labels", help: "In order, comma-separated.", control: status }),
+      row({ label: "Status labels", help: "In order, comma-separated.", control: status, idScope: forge }),
       row({ label: "On Start, set status to", control: start }),
-      row({ label: "Tracker-only repositories", help: "Comma-separated.", control: tracker }),
+      row({ label: "Tracker-only repositories", help: "Comma-separated.", control: tracker, idScope: forge }),
       footRow(hint),
     );
     if (!gitOn) {

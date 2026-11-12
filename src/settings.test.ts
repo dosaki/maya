@@ -4,6 +4,9 @@ import { RUNNING_VERSION } from "./release-notes";
 import { SETTINGS_GROUPS, SETTINGS_LEDES, SETTINGS_NAV, SOURCES_OPEN_KEY, forgeSummary, gitConnections, ruleSummary, storedSourcesOpen, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 import { builtinVoiceName, secretStore } from "./platform";
 import styles from "./styles.css?raw";
+import mobileStyles from "./mobile/mobile.css?raw";
+import popoverMain from "./fixtures/popover-rules-main.json";
+import { renderVoicePanel } from "./voice";
 import artSrc from "./assets/maya-full-body.png";
 
 const voiceBase = {
@@ -1907,6 +1910,19 @@ describe("Settings → Work Items", () => {
     expect(keys.indexOf("workItems")).toBe(keys.indexOf("reviews") + 1);
   });
 
+  it("gives no two elements the same id, and each help is linked to its own forge's field", () => {
+    const root = renderSettings(wiModel(), handlers());
+    document.body.append(root);
+    const ids = [...root.querySelectorAll("[id]")].map((e) => e.id);
+    expect(ids.filter((id, i) => ids.indexOf(id) !== i)).toEqual([]);
+    for (const f of ["github", "gitlab"]) {
+      const field = box(root, f).querySelector("input[name=wi-statusLabels]")!;
+      const help = document.getElementById(field.getAttribute("aria-describedby")!)!;
+      expect(box(root, f).contains(help)).toBe(true);
+    }
+    root.remove();
+  });
+
   it("saves a rule typed as comma lists", () => {
     const h = { ...handlers(), onWorkItems: vi.fn() };
     const root = renderSettings(wiModel(), h);
@@ -2316,5 +2332,141 @@ describe("workItemsConfig custom tools", () => {
     expect(workItemsConfig(null).custom).toEqual([]);
     const t = { id: "custom-1", name: "Jira", enabled: true, listCommand: "ls", startCommand: "", me: "" };
     expect(workItemsConfig({ custom: [t] }).custom).toEqual([t]);
+  });
+});
+
+describe("the Voice popover keeps its look", () => {
+  // jsdom does not apply styles.css to computed style, so this compares the
+  // rules instead: every rule (and @media) that matches an element inside the
+  // popover, per element, against the same list taken from main's stylesheets
+  // (src/fixtures/popover-rules-main.json) before the Settings redesign.
+  function splitSelectors(text: string): string[] {
+    const out: string[] = [];
+    let depth = 0;
+    let cur = "";
+    for (const ch of text) {
+      if (ch === "(" || ch === "[") depth++;
+      if (ch === ")" || ch === "]") depth--;
+      if (ch === "," && depth === 0) { out.push(cur.trim()); cur = ""; } else cur += ch;
+    }
+    out.push(cur.trim());
+    return out;
+  }
+
+  function popover(): HTMLElement {
+    const aside = document.createElement("aside");
+    aside.id = "voice-panel";
+    aside.className = "settings popover";
+    aside.append(renderVoicePanel(
+      { listening: true, state: "error", detail: "Mic gone", level: 0, heard: "", said: "", pending: "Archive three sessions.", until: Date.now() + 5000, turns: 1 },
+      [{ who: "user", text: "what is waiting", at: 1 }, { who: "maya", text: "Two sessions.", at: 2 }],
+      { onCancel() {} },
+    ));
+    aside.append(renderVoicePanel({ listening: true, state: "idle", detail: "", level: 0, heard: "", said: "", pending: null, turns: 0 }, [], { onCancel() {} }));
+    document.body.append(aside);
+    return aside;
+  }
+
+  /** For each element in the popover, the "media | selector { declarations }" entries that match it. */
+  function popoverRules(sheets: string[]): Record<string, string[]> {
+    const aside = popover();
+    const out: Record<string, string[]> = {};
+    const elements = [aside, ...Array.from(aside.querySelectorAll("*"))];
+    const keyOf = (el: Element, i: number) => `${i}:${el.tagName.toLowerCase()}${el.id ? "#" + el.id : ""}.${[...el.classList].join(".")}`;
+    const visit = (rules: CSSRuleList, media: string) => {
+      for (const rule of Array.from(rules)) {
+        if ((rule as CSSMediaRule).media) {
+          visit((rule as CSSMediaRule).cssRules, `${media}@media ${(rule as CSSMediaRule).media.mediaText} `);
+          continue;
+        }
+        const style = rule as CSSStyleRule;
+        if (!style.selectorText) continue;
+        for (const sel of splitSelectors(style.selectorText)) {
+          elements.forEach((el, i) => {
+            let hit = false;
+            try { hit = el.matches(sel); } catch { hit = false; }
+            if (hit) (out[keyOf(el, i)] ??= []).push(`${media}${sel} { ${style.style.cssText} }`);
+          });
+        }
+      }
+    };
+    for (const css of sheets) {
+      const style = document.createElement("style");
+      style.textContent = css;
+      document.head.append(style);
+      visit(style.sheet!.cssRules, "");
+      style.remove();
+    }
+    aside.remove();
+    return out;
+  }
+
+  it("is styled by the same rules as before the redesign", () => {
+    const now = popoverRules([styles, mobileStyles]);
+    expect(Object.keys(now).length).toBeGreaterThan(6);
+    expect(now).toEqual(popoverMain);
+  });
+
+  it("is reached by no rule scoped to the Settings pane", () => {
+    const hits = Object.values(popoverRules([styles, mobileStyles])).flat().filter((r) => r.includes(".settings.pane"));
+    expect(hits).toEqual([]);
+  });
+});
+
+describe("the Settings stylesheet after the redesign", () => {
+  const text = styles.replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = (css: string) => {
+    const style = document.createElement("style");
+    style.textContent = css;
+    document.head.append(style);
+    const list = Array.from(style.sheet!.cssRules);
+    style.remove();
+    return list;
+  };
+
+  it("no longer carries the old label grid, the 559px row rule, the 22px code or the unused check and switch rules", () => {
+    expect(text).not.toMatch(/\.settings__section label/);
+    expect(text).not.toMatch(/max-width:\s*559px/);
+    expect(text).not.toMatch(/\n\.settings__code\s*\{/);
+    expect(text).not.toMatch(/\.settings__(check|switch|git-kinds)\b/);
+    expect(text).not.toMatch(/\n\.settings__row\s*\{/);
+  });
+
+  it("leaves no rule matching a Work Items rule-body label or a segmented label that makes it a grid", () => {
+    const root = renderSettings({ ...voiceBase, settingsGroup: "workItems", git: gitConnections([{ provider: "github", enabled: true, token: { kind: "env", name: "GH_TOKEN" } }]) }, handlers());
+    document.body.append(root);
+    const labels = [root.querySelector(".settings__rule-body label")!, root.querySelector(".settings__seg label") ?? root.querySelector(".settings__rule-body label")!];
+    expect(labels[0]).not.toBeNull();
+    for (const label of labels) {
+      for (const rule of rules(styles)) {
+        const sel = rule as CSSStyleRule;
+        if (!sel.selectorText) continue;
+        let hit = false;
+        try { hit = label.matches(sel.selectorText); } catch { hit = false; }
+        if (hit) expect(sel.style.getPropertyValue("display"), sel.selectorText).not.toBe("grid");
+      }
+    }
+    root.remove();
+  });
+
+  it("keeps the key chips under their own comment, apart from the state dot", () => {
+    const kbd = styles.indexOf(".settings.pane .settings__kbd {");
+    const state = styles.indexOf(".settings.pane .settings__state {");
+    const stateComment = styles.indexOf("/* State, as a dot and a word. */");
+    const kbdComment = styles.indexOf("/* Key chips. */");
+    expect(kbdComment).toBeGreaterThan(-1);
+    expect(kbdComment).toBeLessThan(kbd);
+    expect(stateComment).toBeGreaterThan(kbd);
+    expect(stateComment).toBeLessThan(state);
+  });
+
+  it("keeps Work Items, details and pre padding on the spacing scale", () => {
+    expect(styles).not.toMatch(/\.settings__rule-body \{[^}]*padding: 14px/);
+    expect(styles).not.toMatch(/\.settings__details > summary \{[^}]*padding: 14px/);
+    expect(styles).not.toMatch(/\.settings__details-body pre \{[^}]*padding: 14px/);
+  });
+
+  it("drops the top margin of a help that is the first thing in its row", () => {
+    expect(styles).toContain(".settings.pane .settings__row-text > .settings__help:first-child { margin-top: 0; }");
   });
 });

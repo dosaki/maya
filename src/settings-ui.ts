@@ -42,6 +42,8 @@ export function row(opts: {
   control?: Node | Node[];
   tag?: "label" | "div";
   stack?: boolean;
+  /** Keeps the help's id unique when two rows hold a control of the same name (one per forge, say). */
+  idScope?: string;
 }): HTMLElement {
   const controls = opts.control === undefined ? [] : Array.isArray(opts.control) ? opts.control : [opts.control];
   const single = controls.length === 1 ? controls[0]! : null;
@@ -53,7 +55,7 @@ export function row(opts: {
     const help = el("span", "settings__help", opts.help);
     const name = single instanceof HTMLElement ? (single as HTMLInputElement).name : "";
     if (name) {
-      help.id = `settings-help-${name}`;
+      help.id = opts.idScope ? `settings-help-${opts.idScope}-${name}` : `settings-help-${name}`;
       (single as HTMLElement).setAttribute("aria-describedby", help.id);
     }
     text.append(help);

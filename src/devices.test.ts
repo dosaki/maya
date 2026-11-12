@@ -176,8 +176,6 @@ describe("renderDevices", () => {
   });
 });
 
-// The Settings repaint keeps the first render's list and patches it against
-// each new render, so the kept root's listener must act on the new rows.
 describe("the Devices stylesheet", () => {
   it("scopes every device rule to .settings.pane and keeps the row direction over the column rule", () => {
     const rules = css.split("\n").filter((l) => /^\S*\.settings__(device|devices|assistant|assistants|badge)\b/.test(l.trim()) || /^\.settings\.pane \.settings__(device|devices|assistant|assistants|badge)/.test(l));
@@ -189,6 +187,8 @@ describe("the Devices stylesheet", () => {
   });
 });
 
+// The Settings repaint keeps the first render's list and patches it against
+// each new render, so the kept root's listener must act on the new rows.
 describe("after a repaint", () => {
   const patch = (old: HTMLElement, fresh: HTMLElement) => morph(old, fresh);
   const cell = (c: HTMLElement, sel: string) => c.querySelector<HTMLButtonElement>(sel)!;
