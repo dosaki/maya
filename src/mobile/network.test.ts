@@ -290,7 +290,8 @@ describe("the Devices card", () => {
   it("lists the group and calls network_join with the typed host", async () => {
     const pane = await mount();
     expect(pane.querySelector(".settings-page__title")!.textContent).toBe("Devices");
-    expect(pane.textContent).toContain("This device (Pixel 8)");
+    expect(pane.querySelector(".settings__device-name")?.textContent).toBe("Pixel 8This phone");
+    expect(pane.querySelector(".settings__device-name .settings__badge")?.textContent).toBe("This phone");
     expect(pane.textContent).toContain("laptop");
     // A phone is never offered Make main; the connected main has no Join or Remove.
     expect(pane.querySelector("button[data-action=make-main]")).toBeNull();

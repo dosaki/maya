@@ -29,14 +29,56 @@ const status = (connected: boolean, devices: DeviceRow[]): NetworkStatus => ({
 });
 
 describe("renderDevices", () => {
-  it("shows this device first, then the main with a badge", () => {
-    const el = renderDevices(status(true, [desk, me, nas]), model(), handlers(), 2000);
+  it("shows this device first, with its badge, then the main with the Main state", () => {
+    const el = renderDevices(status(true, [desk, me, nas]), model(), handlers(), 3_601_000);
     const rows = [...el.querySelectorAll(".settings__assistant")];
-    expect(rows[0].textContent).toContain("This device");
-    expect(rows[0].textContent).toContain("laptop");
+    expect(rows[0].querySelector(".settings__device-name")?.textContent).toContain("laptop");
+    expect(rows[0].querySelector(".settings__device-name .settings__badge")?.textContent).toBe("This device");
+    expect(rows[0].querySelector(".settings__device-meta")?.textContent).toBe("macos, 192.168.1.9");
     expect(rows[1].textContent).toContain("desk");
-    expect(rows[1].querySelector(".settings__badge")?.textContent).toBe("Main");
+    expect(rows[1].querySelector(".settings__state--main")?.textContent).toBe("Main");
+    expect(rows[1].querySelector(".settings__badge")).toBeNull();
     expect(rows[2].querySelector(".settings__badge")).toBeNull();
+    expect(rows[2].querySelector(".settings__state--off")?.textContent).toBe("Last seen 1h ago");
+  });
+
+  it("calls this device 'This phone' when the phone renders it", () => {
+    const el = renderDevices(status(true, [desk, me]), model(), handlers(), 2000, "this phone");
+    expect(el.querySelector(".settings__badge")?.textContent).toBe("This phone");
+  });
+
+  it("states a connected assistant as Connected and an unseen one as Never connected", () => {
+    const net: NetworkStatus = {
+      role: "main",
+      code: null,
+      devices: [{ ...me, isMain: true }],
+      assistants: [
+        { id: "g", name: "g", hostname: "g", platform: "macos", connected: true, lastSeen: null },
+        { id: "h", name: "h", hostname: "h", platform: "linux", connected: false, lastSeen: null },
+      ],
+      assistant: { connected: false, mainName: null, error: null },
+    };
+    const el = renderDevices(net, model(), handlers(), 2000);
+    expect(el.querySelector("[data-row=g] .settings__state--on")?.textContent).toBe("Connected");
+    expect(el.querySelector("[data-row=h] .settings__state--off")?.textContent).toBe("Never connected");
+    expect(el.querySelector("[data-row=self\\:km] .settings__state--main")?.textContent).toBe("Main");
+  });
+
+  it("marks each row by its platform", () => {
+    const win = dev({ id: "w", key: "kw", name: "w", platform: "windows" });
+    const lin = dev({ id: "l", key: "kl", name: "l", platform: "linux" });
+    const odd = dev({ id: "o", key: "ko", name: "o", platform: "freebsd" });
+    const el = renderDevices(status(true, [me, nas, win, lin, pixel, odd]), model(), handlers(), 2000);
+    expect([...el.querySelectorAll(".settings__device-mark")].map((m) => m.textContent)).toEqual(["Mac", "Mac", "Windows", "Linux", "Phone", "freebsd"]);
+  });
+
+  it("puts the state under the name when asked", () => {
+    const el = renderDevices(status(true, [me, nas]), model(), handlers(), 3_601_000, "this phone", { stateUnderName: true });
+    const nasRow = el.querySelector("[data-row=kn]")!;
+    expect(nasRow.querySelector(".settings__device-meta .settings__state")?.textContent).toBe("Last seen 1h ago");
+    const side = renderDevices(status(true, [me, nas]), model(), handlers(), 3_601_000);
+    expect(side.querySelector("[data-row=kn] .settings__device-meta .settings__state")).toBeNull();
+    expect(side.querySelector("[data-row=kn] .settings__state")).not.toBeNull();
   });
 
   it("adds the hostname to rows whose names clash, and only those", () => {
@@ -105,12 +147,15 @@ describe("renderDevices", () => {
       assistant: { connected: false, mainName: null, error: null },
     };
     const el = renderDevices(net, model(), h, 2000);
-    expect(el.querySelector(".settings__assistant")?.textContent).toContain("This device");
+    expect(el.querySelector(".settings__assistant .settings__badge")?.textContent).toBe("This device");
     expect([...el.querySelectorAll<HTMLButtonElement>("button[data-action=remove-assistant]")].map((b) => b.dataset.id)).toEqual(["g", "p"]);
     el.querySelector<HTMLButtonElement>("button[data-action=make-main]")!.click();
     expect(h.onMakeMain).toHaveBeenCalledWith("g");
     const box = el.querySelector<HTMLInputElement>("input[data-action=mirror]")!;
     expect(box.parentElement?.textContent).toContain("Sees and controls all sessions");
+    expect(box.classList.contains("settings__toggle")).toBe(true);
+    expect(box.closest(".settings__device-text")).not.toBeNull();
+    expect(box.getAttribute("aria-label")).toBe("Sees and controls all sessions");
     box.checked = false;
     box.dispatchEvent(new Event("change", { bubbles: true }));
     expect(h.onMirror).toHaveBeenCalledWith("p", false);

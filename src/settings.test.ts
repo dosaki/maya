@@ -712,13 +712,16 @@ describe("renderSettings", () => {
     expect(err.closest(".settings__section")).toBeNull();
   });
 
-  it("puts a device's buttons on their own row under its name and status", () => {
+  it("puts a device's buttons in their own group after its name, state and mirror switch", () => {
     const assistants = [{ id: "a1", name: "Iris", hostname: "iris", platform: "android", address: "192.168.55.99", connected: true, lastSeen: null, canLead: true, wantsMirror: true, mirror: true }];
     const el = renderSettings({ ...voiceBase, networkRole: "main", network: { ...voiceBase.network, role: "main", assistants } }, handlers());
     const row = el.querySelector(".settings__assistant")!;
-    expect(row.firstElementChild?.textContent).toContain("Iris (Android, 192.168.55.99) — Connected");
+    expect(row.querySelector(".settings__device-name")?.textContent).toBe("Iris");
+    expect(row.querySelector(".settings__device-meta")?.textContent).toBe("Android, 192.168.55.99");
+    expect(row.querySelector(".settings__state--on")?.textContent).toBe("Connected");
     const actions = row.querySelector(".settings__assistant-actions")!;
-    expect([...actions.children].map((c) => (c as HTMLElement).dataset.action ?? c.querySelector<HTMLElement>("input")?.dataset.action)).toEqual(["remove-assistant", "mirror"]);
+    expect([...actions.children].map((c) => (c as HTMLElement).dataset.action)).toEqual(["remove-assistant"]);
+    expect(row.querySelector(".settings__device-text input[data-action=mirror]")).not.toBeNull();
   });
 
   it("a row that mirrors gets the switch but never Make main", () => {
@@ -1052,8 +1055,8 @@ describe("Network settings", () => {
       },
       handlers(),
     );
-    const rows = [...el.querySelectorAll(".settings__assistant span")].map((n) => n.textContent);
-    expect(rows).toEqual(["Gnowee (macos, 192.168.55.70) — Connected", "desk (macos) — Never connected"]);
+    const rows = [...el.querySelectorAll(".settings__assistant")].map((r) => [r.querySelector(".settings__device-name")?.textContent, r.querySelector(".settings__device-meta")?.textContent, r.querySelector(".settings__state")?.textContent]);
+    expect(rows).toEqual([["Gnowee", "macos, 192.168.55.70", "Connected"], ["desk", "macos", "Never connected"]]);
   });
 
   it("role assistant shows host, port, name, code, Pair and the status line", () => {
@@ -1463,7 +1466,8 @@ describe("the mirror switch", () => {
     expect(boxes.map((b) => b.dataset.id)).toEqual(["p"]);
     expect(boxes[0].checked).toBe(true);
     expect(boxes[0].parentElement!.textContent).toContain("Sees and controls all sessions");
-    expect(el.textContent).toContain("Pixel (Android, 192.168.1.30)");
+    expect(el.querySelector("[data-row=p] .settings__device-name")?.textContent).toBe("Pixel");
+    expect(el.querySelector("[data-row=p] .settings__device-meta")?.textContent).toBe("Android, 192.168.1.30");
     boxes[0].checked = false;
     boxes[0].dispatchEvent(new Event("change", { bubbles: true }));
     expect(h.onMirror).toHaveBeenCalledWith("p", false);

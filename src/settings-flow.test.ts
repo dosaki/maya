@@ -822,7 +822,10 @@ describe("settings flow", () => {
     onNetwork({ payload: { ...before, assistants: [{ ...before.assistants[0], connected: true, lastSeen: 1 }] } });
     panel.hidden = false;
     await flush();
-    expect(panel.textContent).toContain("Gnowee (macos) — Connected");
+    const gnowee = panel.querySelector("[data-row=a1]")!;
+    expect(gnowee.querySelector(".settings__device-name")?.textContent).toBe("Gnowee");
+    expect(gnowee.querySelector(".settings__device-meta")?.textContent).toBe("macos");
+    expect(gnowee.querySelector(".settings__state--on")?.textContent).toBe("Connected");
     expect(panel.textContent).not.toContain("Never connected");
   });
 

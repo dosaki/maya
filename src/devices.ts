@@ -47,10 +47,14 @@ export const REMOVE_NEEDS_MAIN = "Connect to the main Maya to remove a device.";
 
 const platformLabel = (p: string) => (p === "android" ? "Android" : p);
 
+const MARKS: Record<string, string> = { macos: "Mac", windows: "Windows", linux: "Linux", android: "Phone" };
+const markText = (p: string) => MARKS[p] ?? p;
+
 /** A button with no listener of its own: the list's one delegated listener reads `data-*` at click time. */
-function button(action: string, text: string, data: { key?: string; id?: string }, disabled = false): HTMLButtonElement {
+function button(action: string, text: string, data: { key?: string; id?: string }, disabled = false, kind?: "quiet" | "danger" | "gold"): HTMLButtonElement {
   const b = document.createElement("button");
   b.type = "button";
+  b.className = kind === "danger" ? "settings__btn settings__btn--quiet settings__btn--danger" : kind ? `settings__btn settings__btn--${kind}` : "settings__btn";
   b.dataset.action = action;
   if (data.key !== undefined) b.dataset.key = data.key;
   if (data.id !== undefined) b.dataset.id = data.id;
@@ -62,9 +66,58 @@ function button(action: string, text: string, data: { key?: string; id?: string 
 /** A row; `data-row` is what a repaint matches it by, so the node survives. */
 function rowEl(id: string): HTMLElement {
   const row = document.createElement("div");
-  row.className = "settings__assistant";
+  row.className = "settings__assistant settings__device";
   row.dataset.row = id;
   return row;
+}
+
+function div(cls: string, text?: string): HTMLElement {
+  const d = document.createElement("div");
+  d.className = cls;
+  if (text !== undefined) d.textContent = text;
+  return d;
+}
+
+function stateEl(text: string, tone: "on" | "main" | "off"): HTMLElement {
+  const s = document.createElement("span");
+  s.className = `settings__state settings__state--${tone}`;
+  s.textContent = text;
+  return s;
+}
+
+interface Parts {
+  platform: string;
+  name: string;
+  badge?: string;
+  /** The meta line: platform, hostname and address. */
+  meta: string;
+  state?: HTMLElement;
+  /** Further lines in the text column (a note, the mirror switch). */
+  extra?: HTMLElement[];
+  actions?: HTMLElement;
+}
+
+/** The row's children, always in this order: mark, text (name, meta, extras), state, actions. */
+function fill(row: HTMLElement, p: Parts, stateUnderName: boolean): void {
+  const mark = document.createElement("span");
+  mark.className = "settings__device-mark";
+  mark.textContent = markText(p.platform);
+  const text = div("settings__device-text");
+  const name = div("settings__device-name");
+  name.append(p.name);
+  if (p.badge) {
+    const badge = document.createElement("span");
+    badge.className = "settings__badge";
+    badge.textContent = p.badge;
+    name.append(badge);
+  }
+  const meta = div("settings__device-meta");
+  if (stateUnderName && p.state) meta.append(p.state);
+  else meta.append(p.meta);
+  text.append(name, meta, ...(p.extra ?? []));
+  row.append(mark, text);
+  if (!stateUnderName && p.state) row.append(p.state);
+  if (p.actions) row.append(p.actions);
 }
 
 /** The parts after a member's name: its hostname too when another device has the same name. */
@@ -73,13 +126,11 @@ function details(d: DeviceRow, clash: Set<string>): string {
   return [platformLabel(d.platform), host, d.address].filter(Boolean).join(", ");
 }
 
-function selfRow(d: DeviceRow, clash: Set<string>): HTMLElement {
+function selfRow(d: DeviceRow, clash: Set<string>, thisDevice: string, under: boolean): HTMLElement {
   const row = rowEl(`self:${d.key}`);
   row.dataset.key = d.key;
   row.classList.add("settings__device--self");
-  const info = document.createElement("span");
-  info.textContent = `This device (${d.name}) — ${details(d, clash)}`;
-  row.append(info);
+  fill(row, { platform: d.platform, name: d.name, badge: thisDevice === "this phone" ? "This phone" : "This device", meta: details(d, clash), state: d.isMain ? stateEl("Main", "main") : undefined }, under);
   return row;
 }
 
@@ -98,77 +149,65 @@ function joinForm(d: DeviceRow, m: DevicesModel): HTMLElement {
   port.name = "join-port";
   port.placeholder = String(DEFAULT_PORT);
   port.value = String(m.joinPort || d.port || DEFAULT_PORT);
-  form.append(host, port, button("join-confirm", "Join", { key: d.key }), button("join-cancel", "Cancel", { key: d.key }));
+  form.append(host, port, button("join-confirm", "Join", { key: d.key }, false, "gold"), button("join-cancel", "Cancel", { key: d.key }));
   return form;
 }
 
-function memberRow(d: DeviceRow, net: NetworkStatus, m: DevicesModel, nowMs: number, clash: Set<string>): HTMLElement[] {
+function lastSeen(connected: boolean, lastSeenAt: number | null, nowMs: number): HTMLElement {
+  if (connected) return stateEl("Connected", "on");
+  return stateEl(lastSeenAt !== null ? `Last seen ${formatAge(lastSeenAt, nowMs)} ago` : "Never connected", "off");
+}
+
+function memberRow(d: DeviceRow, net: NetworkStatus, m: DevicesModel, nowMs: number, clash: Set<string>, under: boolean): HTMLElement[] {
   const row = rowEl(d.key);
   row.dataset.key = d.key;
   const connectedMain = d.isMain && net.assistant.connected;
-  const status = connectedMain ? "Connected" : d.lastSeen !== null ? `Last seen ${formatAge(d.lastSeen, nowMs)} ago` : "Never connected";
-  const info = document.createElement("span");
-  info.textContent = `${d.name} (${details(d, clash)}) — ${status}`;
-  if (d.isMain) {
-    const badge = document.createElement("span");
-    badge.className = "settings__badge";
-    badge.textContent = "Main";
-    info.append(" ", badge);
-  }
-  const actions = document.createElement("div");
-  actions.className = "settings__assistant-actions";
+  const actions = div("settings__assistant-actions");
   if (!d.isSelf && !d.isMain) {
-    const rm = button("remove-member", "Remove", { key: d.key }, !net.assistant.connected);
+    const rm = button("remove-member", "Remove", { key: d.key }, !net.assistant.connected, "danger");
     if (!net.assistant.connected) rm.title = REMOVE_NEEDS_MAIN;
     actions.append(rm);
   }
   if (!d.isSelf && d.platform !== "android" && !connectedMain) {
-    const join = button("join", "Join", { key: d.key });
-    actions.append(join);
+    actions.append(button("join", "Join", { key: d.key }));
   }
-  row.append(info, actions);
+  fill(row, { platform: d.platform, name: d.name, meta: details(d, clash), state: d.isMain ? stateEl("Main", "main") : lastSeen(false, d.lastSeen, nowMs), actions }, under);
   const out = [row];
   if (m.joining === d.key) out.push(joinForm(d, m));
   return out;
 }
 
-function assistantRows(net: NetworkStatus, m: DevicesModel, nowMs: number, thisDevice: string): HTMLElement[] {
+function assistantRows(net: NetworkStatus, m: DevicesModel, nowMs: number, thisDevice: string, under: boolean): HTMLElement[] {
   const out: HTMLElement[] = [];
   for (const a of net.assistants) {
     const row = rowEl(a.id);
     row.dataset.id = a.id;
-    const info = document.createElement("span");
-    info.textContent = `${a.name} (${[platformLabel(a.platform), a.address].filter(Boolean).join(", ")}) — ${a.connected ? "Connected" : a.lastSeen !== null ? `Last seen ${formatAge(a.lastSeen, nowMs)} ago` : "Never connected"}`;
+    const extra: HTMLElement[] = [];
     if (a.note) {
-      const note = document.createElement("div");
-      note.className = "settings__hint";
+      const note = div("settings__hint", a.note);
       note.dataset.for = "assistant-note";
-      note.textContent = a.note;
-      info.append(note);
-    }
-    const rm = button("remove-assistant", "Remove", { id: a.id }, m.promoting);
-    // Name and status on one line, the buttons on their own row beneath,
-    // so a long status never squeezes them into a column.
-    const actions = document.createElement("div");
-    actions.className = "settings__assistant-actions";
-    actions.append(rm);
-    row.append(info, actions);
-    if (a.connected && a.canLead && !(a.wantsMirror || a.mirror)) {
-      const mk = button("make-main", "Make main", { id: a.id }, m.promoting);
-      actions.append(mk);
+      extra.push(note);
     }
     if (a.wantsMirror || a.mirror) {
       const sw = document.createElement("label");
-      sw.className = "settings__switch";
+      sw.className = "settings__device-extra";
       const box = document.createElement("input");
       box.type = "checkbox";
+      box.className = "settings__toggle";
       box.dataset.action = "mirror";
       box.dataset.id = a.id;
+      box.setAttribute("aria-label", "Sees and controls all sessions");
       box.checked = !!a.mirror;
       box.disabled = m.promoting;
-      sw.append(box, document.createTextNode(" Sees and controls all sessions"));
-      actions.append(sw);
+      sw.append(box, document.createTextNode("Sees and controls all sessions"));
+      extra.push(sw);
     }
+    const actions = div("settings__assistant-actions");
+    actions.append(button("remove-assistant", "Remove", { id: a.id }, m.promoting, "danger"));
+    if (a.connected && a.canLead && !(a.wantsMirror || a.mirror)) {
+      actions.append(button("make-main", "Make main", { id: a.id }, m.promoting));
+    }
+    fill(row, { platform: a.platform, name: a.name, meta: [platformLabel(a.platform), a.address].filter(Boolean).join(", "), state: lastSeen(a.connected, a.lastSeen, nowMs), extra, actions }, under);
     out.push(row);
     if (m.promote === a.id) {
       const confirm = document.createElement("div");
@@ -181,7 +220,7 @@ function assistantRows(net: NetworkStatus, m: DevicesModel, nowMs: number, thisD
         confirm.append(p);
       }
       confirm.append(
-        button("promote-confirm", m.promoting ? "Handing over…" : "Make main", { id: a.id }, m.promoting),
+        button("promote-confirm", m.promoting ? "Handing over…" : "Make main", { id: a.id }, m.promoting, "gold"),
         button("promote-cancel", "Cancel", { id: a.id }, m.promoting),
       );
       out.push(confirm);
@@ -226,9 +265,11 @@ function delegate(list: HTMLElement, h: DevicesHandlers): void {
  * The device list: this device first, then, on a main, its paired devices
  * (with Remove, Make main and the phone's switch) or, on any other device,
  * the other members of the group. `thisDevice` is how a hand-over names
- * this machine ("this Mac").
+ * this machine ("this Mac"); `opts.stateUnderName` puts each row's state
+ * in its meta line (the phone).
  */
-export function renderDevices(net: NetworkStatus, m: DevicesModel, h: DevicesHandlers, nowMs: number, thisDevice = "this device"): HTMLElement {
+export function renderDevices(net: NetworkStatus, m: DevicesModel, h: DevicesHandlers, nowMs: number, thisDevice = "this device", opts: { stateUnderName?: boolean } = {}): HTMLElement {
+  const under = !!opts.stateUnderName;
   const list = document.createElement("div");
   list.className = "settings__assistants settings__devices";
   list.dataset.row = "devices-list";
@@ -241,9 +282,9 @@ export function renderDevices(net: NetworkStatus, m: DevicesModel, h: DevicesHan
     if (seen.has(name)) clash.add(name);
     seen.add(name);
   }
-  if (self) list.append(selfRow(self, clash));
-  if (net.role === "main") list.append(...assistantRows(net, m, nowMs, thisDevice));
-  else for (const d of devices) if (!d.isSelf) list.append(...memberRow(d, net, m, nowMs, clash));
+  if (self) list.append(selfRow(self, clash, thisDevice, under));
+  if (net.role === "main") list.append(...assistantRows(net, m, nowMs, thisDevice, under));
+  else for (const d of devices) if (!d.isSelf) list.append(...memberRow(d, net, m, nowMs, clash, under));
   delegate(list, h);
   return list;
 }
