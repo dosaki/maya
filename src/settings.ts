@@ -1598,7 +1598,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   };
 
   const elevenRows: HTMLElement[] = [
-    cardHead({ label: "ElevenLabs", order: 1, control: toggle("elevenEnabled", model.elevenEnabled, (on) => h.onElevenEnabled(on)) }),
+    cardHead({ label: "ElevenLabs", order: 1, control: toggle("elevenEnabled", model.elevenEnabled, (on) => h.onElevenEnabled(on), "Use ElevenLabs") }),
   ];
   if (model.elevenEnabled) {
     elevenRows.push(keyField("elevenKey", model.elevenKeySet, "paste your key", (k) => h.onElevenKey(k)));
@@ -1622,7 +1622,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       label: "Voice server",
       help: "Any OpenAI-compatible speech server.",
       order: 2,
-      control: toggle("serverEnabled", model.serverEnabled, (on) => h.onServerEnabled(on)),
+      control: toggle("serverEnabled", model.serverEnabled, (on) => h.onServerEnabled(on), "Use a voice server"),
     }),
   ];
   if (model.serverEnabled) {

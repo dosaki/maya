@@ -143,11 +143,13 @@ function joinForm(d: DeviceRow, m: DevicesModel): HTMLElement {
   host.type = "text";
   host.name = "join-host";
   host.placeholder = "Host or address";
+  host.setAttribute("aria-label", "Host or address");
   host.value = m.joinHost || d.address;
   const port = document.createElement("input");
   port.type = "number";
   port.name = "join-port";
   port.placeholder = String(DEFAULT_PORT);
+  port.setAttribute("aria-label", "Port");
   port.value = String(m.joinPort || d.port || DEFAULT_PORT);
   form.append(host, port, button("join-confirm", "Join", { key: d.key }, false, "gold"), button("join-cancel", "Cancel", { key: d.key }));
   return form;

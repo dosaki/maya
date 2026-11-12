@@ -50,7 +50,8 @@ export function row(opts: {
   const tag = opts.tag ?? (single instanceof HTMLElement && LABELABLE.has(single.tagName) ? "label" : "div");
   const r = el(tag, opts.stack ? "settings__row settings__row--stack" : "settings__row");
   const text = el("span", "settings__row-text");
-  if (opts.label !== undefined) text.append(el("span", "settings__label", opts.label));
+  const labelEl = opts.label !== undefined ? el("span", "settings__label", opts.label) : null;
+  if (labelEl) text.append(labelEl);
   if (opts.help) {
     const help = el("span", "settings__help", opts.help);
     const name = single instanceof HTMLElement ? (single as HTMLInputElement).name : "";
@@ -66,7 +67,25 @@ export function row(opts: {
     ctl.append(...controls);
     r.append(ctl);
   }
+  if (tag === "div" && labelEl && typeof opts.label === "string") nameControls(r, labelEl, opts.idScope);
   return r;
+}
+
+/**
+ * A `div` row has no wrapping `<label>`, so its text must name its controls
+ * itself: the label gets a stable id (from the first named control, scoped
+ * like the help's) and each control with no name of its own points at it.
+ */
+function nameControls(r: HTMLElement, labelEl: HTMLElement, idScope?: string): void {
+  const own = [...r.querySelectorAll<HTMLElement>(":scope > .settings__control > *")];
+  const targets = own.filter((c) => (LABELABLE.has(c.tagName) || c.getAttribute("role") === "radiogroup") && !c.hasAttribute("aria-label") && !c.hasAttribute("aria-labelledby"));
+  const first = targets[0];
+  if (!first) return;
+  const named = first.matches("[name]") ? first : first.querySelector("[name]");
+  const name = (named as HTMLInputElement | null)?.name;
+  if (!name) return;
+  labelEl.id = idScope ? `settings-label-${idScope}-${name}` : `settings-label-${name}`;
+  for (const c of targets) c.setAttribute("aria-labelledby", labelEl.id);
 }
 
 export function cardHead(opts: { label: Content; help?: string; control?: Node; order?: number }): HTMLElement {

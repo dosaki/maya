@@ -137,3 +137,37 @@ describe("source", () => {
     expect(el.dataset.source).toBe("github");
   });
 });
+
+describe("a div row names its controls", () => {
+  it("points a choice at the row's label", () => {
+    const r = row({ label: "Token", control: choice("kind", [["a", "A"], ["b", "B"]] as const, "a", () => undefined), tag: "div" });
+    const label = r.querySelector<HTMLElement>(".settings__label")!;
+    expect(label.id).toBe("settings-label-kind");
+    expect(r.querySelector("[role=radiogroup]")!.getAttribute("aria-labelledby")).toBe(label.id);
+    // The radios are named by their own labels.
+    expect(r.querySelector("input[type=radio]")!.hasAttribute("aria-labelledby")).toBe(false);
+  });
+
+  it("names each field of a multi-control row, scoping the id, and keeps a name already given", () => {
+    const a = document.createElement("input");
+    a.name = "timeout";
+    const b = toggle("other", true, () => undefined, "Own name");
+    const r = row({ label: "Wait", control: [a, b], idScope: "x" });
+    const id = r.querySelector(".settings__label")!.id;
+    expect(id).toBe("settings-label-x-timeout");
+    expect(a.getAttribute("aria-labelledby")).toBe(id);
+    expect(b.hasAttribute("aria-labelledby")).toBe(false);
+  });
+
+  it("leaves a label row to its wrapping label", () => {
+    const ctl = select("agent");
+    const r = row({ label: "Agent", control: ctl });
+    expect(r.tagName).toBe("LABEL");
+    expect(ctl.hasAttribute("aria-labelledby")).toBe(false);
+  });
+
+  it("names the card-head switches the Voice screen draws", () => {
+    const sw = toggle("elevenEnabled", true, () => undefined, "Use ElevenLabs");
+    expect(cardHead({ label: "ElevenLabs", control: sw }).querySelector("input")!.getAttribute("aria-label")).toBe("Use ElevenLabs");
+  });
+});
