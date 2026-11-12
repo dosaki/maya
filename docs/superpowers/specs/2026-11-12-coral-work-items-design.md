@@ -69,8 +69,10 @@ Facts from the Coral Boards source (`packages/web/src/routes/api/v1`,
 - `GET /api/v1/work-items` lists items. Filters: `itemType` (one of
   `phase`, `work_item`, `subtask`, `defect`; one value per call),
   `assignees` (CSV of user ids, assignee role only; there is no "me"),
-  `statusCategory=todo,active` (open work), `productCode` (CSV; an unknown
-  code makes the whole call 404), `tagId` with `tagCombinator=and`,
+  `statusCategory=todo,active` (open work), `productCode` (CSV; the call
+  404s with "Product not found" only when none of the codes exists),
+  `location` (`product`, `triage` or `unassigned`), `tagId` with
+  `tagCombinator=and`,
   `page`/`pageSize` (max 100) or `cursor`/`nextCursor`. Projects are not
   in this list. Reply `{data, total, nextCursor?, …}`. Each item has `id`
   (UUID), `displayCode` (`BED-0021`), `title`, `description`,
@@ -140,7 +142,9 @@ with the defaults below):
 - `enabled`: off by default.
 - `baseUrl`: the Coral address, e.g. `https://coral.example.com`. Required
   when on. Settings refuses an address that is not `https://` (or
-  `http://localhost`/`127.0.0.1` for testing), and strips a trailing `/`.
+  `http://localhost`/`127.0.0.1` for testing), or that has an `@` before
+  its path (a user part, which would send the token to the host after
+  it), and strips a trailing `/`.
 - `token`: a `TokenSource`, as the Git connections have: a token stored in
   the system key store (pasted in Settings) or the name of an environment
   variable. Stored under its own key-store entry, never in `config.json`.
@@ -187,24 +191,31 @@ and the vertical layout.
   the forges keep "me"), then, per rule, one list call for
   `itemType=work_item` and one for `itemType=defect`, following
   `nextCursor` up to the item cap the custom tools have (500 in all), with
-  `statusCategory=todo,active`, `assignees=<id>` (me or the named person;
-  none for anyone), `productCode`, and `tagId`s with `tagCombinator=and`.
-  Phases, subtasks and projects are never asked for.
+  `statusCategory=todo,active`, `location=product` (only items that live
+  in a product: a triage or unassigned one has no page and no product for
+  Start to find a repository in), `assignees=<id>` (me or the named
+  person; none for anyone), `productCode`, and `tagId`s with
+  `tagCombinator=and`. Phases, subtasks and projects are never asked for.
+  `users/me` is asked in Coral's own thread of the poll, so a Coral that
+  hangs holds up no other source.
 - Tag names and named people are resolved to ids per poll (or cached per
   settings generation). *My call:* a rule's tag may be written
   "scope: name" or a bare name; a bare name matches every tag of that
   name, and the rule then matches an item carrying any one of them (one
   list call per combination is not worth it: the rule asks once per
-  matching tag and merges). A name Coral does not know, and a product
-  code Coral answers 404 for, is a source error line ("Coral has no tag
-  \<name>", "Coral has no product \<code>"), and that rule is skipped; the
-  other rules still run.
+  matching tag and merges). A name Coral does not know, and a rule whose
+  product codes Coral answers "Product not found" for (none of them
+  exists), is a source error line ("Coral has no tag \<name>", "Coral has
+  no product \<code>"), and that rule is skipped; the other rules still
+  run. A rule that fails while others answer is a line too, prefixed
+  "Coral: ".
 - An item becomes a `WorkItem`:
   - `source` `"coral"`, `key` `coral:<item UUID>` (*my call:* the UUID,
     not the code, so a started item stays linked to its entry when it
     moves to another product and gets a new code), `id` the
     `displayCode`, `number` none.
-  - `title`, `description` (empty when null), `url`
+  - `title`, `description` (empty when null; cut at 20,000 characters, as
+    the custom tools' are), `url`
     `<address>/items/<displayCode>`.
   - `status` the status name; `labels` the tag names, as Coral shows them
     ("scope: name" for a scoped tag).
@@ -213,14 +224,18 @@ and the vertical layout.
   - `updatedAt` as given.
   - `repo` none and `tracker` true: Start finds the repository (below).
 - Items from several rules merge as today (one per key, newest first).
-- Errors read like the forges': a refused token says "Coral refused the
-  token: paste a new one in Settings → Work Items"; an unreachable address
-  says so.
+- Errors read like the forges': a refused token (401) says "Coral refused
+  the token: paste a new one in Settings → Work Items"; a 403 is a token
+  that lacks a permission, not a refused one, so Coral's own message shows
+  ("403: Forbidden: items:write permission required"); an unreachable
+  address says so.
 - A started Coral item that no rule returns any more is read by itself
   (`GET /work-items/{code}`, following a 301) as the forges' started items
-  are; it is closed when its status category is `done` or Coral says 404.
-  The re-read item replaces the started entry's copy (new code, title,
-  status), under the same key.
+  are; it is closed when its status category is `done` or Coral says the
+  item is gone (its own 404, "Work item not found"; any other 404, a
+  proxy's say, is a failure and the entry stays). It is not re-read in a
+  poll where `users/me` failed. The re-read item replaces the started
+  entry's copy (new code, title, status), under the same key.
 
 ### Start
 
