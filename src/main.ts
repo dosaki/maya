@@ -70,7 +70,7 @@ async function startItem(key: string): Promise<void> {
   const host = document.getElementById("modal-host");
   if (!host) return;
   if (!item) {
-    showToast("That issue is no longer on the list.");
+    showToast("That work item is no longer on the list.");
     return;
   }
   await guardStart(startingItems, key, () => startWorkItem(item, { invoke, host, toast: showToast, opened: openStarted }), paintWorkItems);

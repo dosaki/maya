@@ -724,6 +724,14 @@ export function terminalChoices(): [NewSessionTerminal, string][] {
   return values.map((v) => [v, terminalLabel(v, platform)]);
 }
 
+/**
+ * Whether Coral may have a token to ask with: a stored one, or a variable
+ * (which may be unset: a failed ask just leaves the help text).
+ */
+function coralCanAsk(hasToken: boolean | undefined, cfg: CoralItems): boolean {
+  return cfg.token.kind === "env" || hasToken === true;
+}
+
 /** The Coral card in the Sources group: address, token, rules and what Start sets. */
 function coralSource(
   model: SettingsModel,
@@ -734,6 +742,10 @@ function coralSource(
 ): HTMLElement {
   const hasToken = model.coralHasToken === true;
   let tokenKind = cfg.token.kind;
+  // A Test result says who a token was at an address: another of either makes it stale.
+  const forgetTest = () => {
+    model.coralTest = null;
+  };
 
   const on = toggle("wi-coral-enabled", cfg.enabled, () => save(), "Use Coral");
 
@@ -805,6 +817,7 @@ function coralSource(
   // whole box: nothing is saved until it is typed (or the rule goes).
   const save = (items: CoralItems = read()) => {
     if (items.rules.some((r) => r.assignee.kind === "user" && r.assignee.login === "")) return;
+    if (items.baseUrl !== cfg.baseUrl || JSON.stringify(items.token) !== JSON.stringify(cfg.token)) forgetTest();
     h.onWorkItems?.("coral", items);
   };
   url.addEventListener("change", () => {
@@ -829,10 +842,18 @@ function coralSource(
     tok.addEventListener("change", () => {
       const t = tok.value.trim();
       tok.value = "";
-      if (t) h.onCoralToken?.(t);
+      if (!t) return;
+      forgetTest();
+      h.onCoralToken?.(t);
     });
     controls.push(tok);
-    if (hasToken) controls.push(settingsBtn("Clear", { action: "coral-clear", kind: "quiet" }, () => h.onCoralClearToken?.()));
+    if (hasToken)
+      controls.push(
+        settingsBtn("Clear", { action: "coral-clear", kind: "quiet" }, () => {
+          forgetTest();
+          h.onCoralClearToken?.();
+        }),
+      );
   } else {
     controls.push(env);
   }
@@ -867,7 +888,7 @@ function coralSource(
     open: (model.sourcesOpen ?? {}).coral === true,
     onToggle: (open) => {
       remember("coral", open);
-      if (open && hasToken && model.coralStatuses == null) loadStatuses();
+      if (open && coralCanAsk(model.coralHasToken, cfg) && model.coralStatuses == null) loadStatuses();
     },
     control: on,
     body: [
@@ -2457,7 +2478,7 @@ export async function initSettings(): Promise<void> {
     onGitEnabled: (p, on) => void saveGit(p, (c) => { c.enabled = on; }),
     onGitBaseUrl: (url) => void saveGit("gitlab", (c) => { c.baseUrl = url || null; }),
     onGitClone: (p, protocol) => void saveGit(p, (c) => { c.clone = protocol; }),
-    onCoralToken: (token) => void run(async () => { await invoke("store_coral_token", { token }); model.coralStatuses = null; await loadCoralStatus(); }),
+    onCoralToken: (token) => void run(async () => { await invoke("store_coral_token", { token }); model.coralStatuses = null; model.coralTest = null; await loadCoralStatus(); }),
     onCoralClearToken: () => void run(async () => { await invoke("clear_coral_token"); model.coralStatuses = null; model.coralTest = null; await loadCoralStatus(); }),
     onCoralTest: async () => {
       try {
@@ -2786,7 +2807,7 @@ export async function initSettings(): Promise<void> {
     await loadVoices();
     await loadGitStatus();
     await loadCoralStatus();
-    if (model.coralHasToken && model.sourcesOpen?.coral) void loadCoralStatuses().catch(() => { /* the card says to Test */ });
+    if (model.workItems && coralCanAsk(model.coralHasToken, model.workItems.coral) && model.sourcesOpen?.coral) void loadCoralStatuses().catch(() => { /* the card says to Test */ });
     await loadModels();
     try {
       const raw = await invoke<string>("voice_selftest");

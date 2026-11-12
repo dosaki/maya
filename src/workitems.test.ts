@@ -224,6 +224,42 @@ describe("work items", () => {
     expect([...host.querySelectorAll<HTMLOptionElement>("select[name=source] option")].map((o) => o.textContent)).toContain("Coral");
   });
 
+  it("shows a Coral item's assignees and age, as a forge item's", () => {
+    const now = Date.parse("2026-09-29T10:00:00Z");
+    const coral = item({ key: "coral:u-1", source: "coral", id: "BED-0021", number: null, repo: null, tracker: true, assignees: ["Ana"], updatedAt: "2026-09-29T08:00:00Z" });
+    const meta = renderItemCard(coral, now, null, false, "Coral").querySelector(".item__meta")!;
+    expect(meta.textContent).toBe("Ana · 2h ago");
+    expect(meta.classList.contains("item__meta--pick")).toBe(false);
+    expect(renderItemCard({ ...coral, assignees: [] }, now, null, false, "Coral").querySelector(".item__meta")!.textContent).toBe("Unassigned · 2h ago");
+  });
+
+  it("calls a Coral item a work item when asking to take it over", () => {
+    const coral = item({ key: "coral:u-1", source: "coral", id: "BED-0021", repo: null, tracker: true });
+    const el = renderStartDialog(coral, { takeover: ["Ana"], pick: null, branch: "b", repo: null }, { onStart: vi.fn(), onCancel: vi.fn() });
+    expect(el.textContent).toContain("This work item is already assigned to Ana. Are you sure you want to take over?");
+  });
+
+  it("tells a Coral user to link a repository to the product when Maya knows none", () => {
+    const coral = item({ key: "coral:u-1", source: "coral", id: "BED-0021", repo: null, tracker: true });
+    const el = renderStartDialog(coral, { takeover: [], pick: { picked: null, why: "", options: [] }, branch: "b", repo: null }, { onStart: vi.fn(), onCancel: vi.fn() });
+    expect(el.textContent).toContain("Maya knows no repositories for BED-0021 yet. Link one to its product in Coral, or clone it into the clones folder first.");
+    expect(el.textContent).not.toContain("rule");
+  });
+
+  it("starts a Coral item in the repository the check found after a takeover question", async () => {
+    const api = { forge: "github", path: "acme/api" } as const;
+    const host = document.createElement("div");
+    const check = { takeover: ["Ana"], pick: null, branch: "issue-bed-0021-x", repo: api };
+    const invoke = vi.fn().mockResolvedValueOnce(check).mockResolvedValueOnce({ dir: "/c/api-issue-bed-0021-x", nativeTerm: null, notice: null });
+    const coral = item({ key: "coral:u-1", source: "coral", id: "BED-0021", number: null, repo: null, tracker: true });
+    const done = startWorkItem(coral, { invoke, host, toast: vi.fn(), opened: vi.fn() });
+    await vi.waitFor(() => expect(host.querySelector(".card__btn--primary")).not.toBeNull());
+    expect(host.querySelector("select[name=repo]")).toBeNull();
+    host.querySelector<HTMLButtonElement>(".card__btn--primary")!.click();
+    await done;
+    expect(invoke).toHaveBeenNthCalledWith(2, "work_item_start", { key: "coral:u-1", repo: api, takeOver: ["Ana"] });
+  });
+
   it("cancel starts nothing", async () => {
     const host = document.createElement("div");
     const invoke = vi.fn().mockResolvedValueOnce({ takeover: ["maria"], pick: null, branch: "b", repo: null });

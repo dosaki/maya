@@ -2615,6 +2615,38 @@ describe("Settings → Work Items Coral", () => {
     await vi.waitFor(() => expect(field<HTMLSelectElement>(root, "select[name=wi-coral-startStatus]").options.length).toBe(3));
   });
 
+  it("loads the statuses when the card opens with the token from a variable", () => {
+    const onCoralStatuses = vi.fn().mockRejectedValue("No Coral token: set CORAL_TOKEN or paste a token in Settings → Work Items.");
+    const env = { ...workItemsConfig(null), coral: { ...workItemsConfig(null).coral, token: { kind: "env" as const, name: "CORAL_TOKEN" } } };
+    const root = renderSettings(model({ workItems: env, coralHasToken: false, coralStatuses: null }), { ...handlers(), onCoralStatuses });
+    card(root).querySelector<HTMLButtonElement>(".settings__source-toggle")!.click();
+    expect(onCoralStatuses).toHaveBeenCalledTimes(1);
+  });
+
+  it("forgets the last Test result when the address or the token changes", () => {
+    const tested = () => model({ coralHasToken: true, coralTest: "Connected as Ana" });
+    const helpOf = (root: HTMLElement) => field<HTMLElement>(root, "[data-action=coral-test]").closest(".settings__row")!.querySelector(".settings__help")!.textContent;
+    expect(helpOf(renderSettings(tested(), handlers()))).toBe("Connected as Ana");
+    const cases: [string, (root: HTMLElement) => void][] = [
+      ["address", (root) => change(field(root, "input[name=wi-coral-baseUrl]"), "https://other.test")],
+      ["token", (root) => change(field(root, "input[name=wi-coral-token]"), "cbp_new")],
+      ["clear", (root) => field<HTMLButtonElement>(root, "[data-action=coral-clear]").click()],
+      ["kind", (root) => field<HTMLInputElement>(root, "input[name=wi-coral-tokenKind][value=env]").click()],
+    ];
+    for (const [what, act] of cases) {
+      const m = tested();
+      const root = renderSettings(m, handlers());
+      document.body.append(root);
+      act(root);
+      root.remove();
+      expect(m.coralTest, what).toBeNull();
+    }
+    // A rule is not the connection: the result stays.
+    const m = tested();
+    change(field(renderSettings(m, handlers()), "input[name=wi-labels]"), "team: api");
+    expect(m.coralTest).toBe("Connected as Ana");
+  });
+
   it("shows the Test result, and lists the statuses after it connects", async () => {
     const onCoralTest = vi.fn().mockResolvedValue("Connected as Ana");
     const onCoralStatuses = vi.fn().mockResolvedValue(statuses);

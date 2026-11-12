@@ -110,8 +110,9 @@ export function renderItemCard(item: WorkItem, nowMs: number, card: Card | null,
   } else {
     const updated = Date.parse(item.updatedAt);
     const age = Number.isFinite(updated) ? `${formatAge(updated, nowMs)} ago` : "?";
+    // A Coral item never has a repository of its own: Start finds its product's.
     const meta =
-      item.repo === null || item.tracker
+      item.source !== "coral" && (item.repo === null || item.tracker)
         ? el("span", "item__meta item__meta--pick", "No repo: Maya picks")
         : el("span", "item__meta", `${item.assignees.length > 0 ? item.assignees.join(", ") : "Unassigned"} · ${age}`);
     const start = button("Start", "start", "card__btn card__btn--primary");
@@ -289,9 +290,13 @@ export function renderStartDialog(item: WorkItem, check: StartCheck, h: { onStar
   cancel.type = "button";
   cancel.addEventListener("click", () => h.onCancel());
   const buttons = el("div", "startdialog__buttons");
+  const coral = item.source === "coral";
   if (check.pick && check.pick.options.length === 0) {
-    // Nothing to choose from, so nothing to start.
-    body.append(el("p", "", "Maya knows no repositories yet. Name one in a rule in Settings → Work Items, or clone it into the clones folder first."));
+    // Nothing to choose from, so nothing to start. A Coral rule names products, not repositories.
+    const none = coral
+      ? `Maya knows no repositories for ${item.id} yet. Link one to its product in Coral, or clone it into the clones folder first.`
+      : "Maya knows no repositories yet. Name one in a rule in Settings → Work Items, or clone it into the clones folder first.";
+    body.append(el("p", "", none));
     buttons.append(cancel);
     body.append(buttons);
     panel.append(head, body);
@@ -299,7 +304,7 @@ export function renderStartDialog(item: WorkItem, check: StartCheck, h: { onStar
     return root;
   }
   if (check.takeover.length > 0) {
-    body.append(el("p", "", `This issue is already assigned to ${check.takeover.join(", ")}. Are you sure you want to take over?`));
+    body.append(el("p", "", `This ${coral ? "work item" : "issue"} is already assigned to ${check.takeover.join(", ")}. Are you sure you want to take over?`));
   }
   const start = el("button", "card__btn card__btn--primary", check.takeover.length > 0 ? "Yes, take over and start" : "Start session");
   start.type = "button";
