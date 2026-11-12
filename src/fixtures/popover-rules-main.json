@@ -1,0 +1,60 @@
+{
+ "0:aside#voice-panel.settings.popover": [
+  "* { box-sizing: border-box; }",
+  ".settings { display: flex; flex-direction: column; gap: 10px; }",
+  ".popover { position: absolute; top: 48px; right: 16px; width: 320px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; box-shadow: 0 8px 30px rgba(0,0,0,.18); z-index: 10; }"
+ ],
+ "1:div.voice-panel": [
+  "* { box-sizing: border-box; }",
+  ".voice-panel { display: flex; flex-direction: column; gap: 10px; }"
+ ],
+ "2:div.voice__error": [
+  "* { box-sizing: border-box; }",
+  ".voice__error { color: var(--muted); font-size: 13px; }",
+  ".voice__error { color: rgb(229, 72, 77); }"
+ ],
+ "3:div.voice__turns": [
+  "* { box-sizing: border-box; }",
+  ".voice__turns { display: flex; flex-direction: column; gap: 6px; max-height: 40vh; overflow-y: auto; }"
+ ],
+ "4:div.voice__turn.voice__turn--user": [
+  "* { box-sizing: border-box; }",
+  ".voice__turn { padding: 6px 10px; border-radius: 8px; font-size: 13px; }",
+  ".voice__turn--user { background: color-mix(in srgb, var(--working) 14%, transparent); align-self: flex-end; }"
+ ],
+ "5:div.voice__turn.voice__turn--maya": [
+  "* { box-sizing: border-box; }",
+  ".voice__turn { padding: 6px 10px; border-radius: 8px; font-size: 13px; }",
+  ".voice__turn--maya { background: var(--bg); align-self: flex-start; }"
+ ],
+ "6:div.voice__pending": [
+  "* { box-sizing: border-box; }",
+  ".voice__pending { padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--awaiting) 14%, transparent); font-size: 13px; }"
+ ],
+ "7:br.": [
+  "* { box-sizing: border-box; }"
+ ],
+ "8:span.voice__countdown": [
+  "* { box-sizing: border-box; }"
+ ],
+ "9:button.card__btn": [
+  "* { box-sizing: border-box; }",
+  ".settings button { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 5px 10px; color: var(--text); cursor: pointer; }",
+  ".card__btn { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; color: var(--text); cursor: pointer; font-size: 12px; white-space: nowrap; }",
+  ".voice__pending button { margin: 6px 6px 0px 0px; }",
+  ".card__btn { min-height: 40px; }",
+  ".settings button { min-height: 40px; }"
+ ],
+ "10:div.voice-panel": [
+  "* { box-sizing: border-box; }",
+  ".voice-panel { display: flex; flex-direction: column; gap: 10px; }"
+ ],
+ "11:div.voice__turns": [
+  "* { box-sizing: border-box; }",
+  ".voice__turns { display: flex; flex-direction: column; gap: 6px; max-height: 40vh; overflow-y: auto; }"
+ ],
+ "12:div.voice__empty": [
+  "* { box-sizing: border-box; }",
+  ".voice__empty { color: var(--muted); font-size: 13px; }"
+ ]
+}

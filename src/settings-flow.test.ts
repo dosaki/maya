@@ -453,8 +453,8 @@ describe("settings flow", () => {
     await flush();
     expect(document.querySelector<HTMLInputElement>("input[name=timeout]")!.value).toBe("42");
     expect(document.querySelector<HTMLInputElement>("input[name=projectsDir]")!.value).toBe("/p");
-    expect(document.querySelector("button[data-action=install-codex]")?.textContent).toBe("Install Codex hook");
-    expect(document.body.textContent).toContain("Remove Claude hook");
+    expect(document.querySelector("button[data-action=install-codex]")?.getAttribute("aria-label")).toBe("Install Codex hook");
+    expect(document.querySelector("button[data-action=remove]")?.getAttribute("aria-label")).toBe("Remove Claude hook");
   });
 
   it("repaints on a voice event only when listening changes, so typing survives", async () => {
@@ -822,7 +822,10 @@ describe("settings flow", () => {
     onNetwork({ payload: { ...before, assistants: [{ ...before.assistants[0], connected: true, lastSeen: 1 }] } });
     panel.hidden = false;
     await flush();
-    expect(panel.textContent).toContain("Gnowee (macos) — Connected");
+    const gnowee = panel.querySelector("[data-row=a1]")!;
+    expect(gnowee.querySelector(".settings__device-name")?.textContent).toBe("Gnowee");
+    expect(gnowee.querySelector(".settings__device-meta")?.textContent).toBe("macOS");
+    expect(gnowee.querySelector(".settings__state--on")?.textContent).toBe("Connected");
     expect(panel.textContent).not.toContain("Never connected");
   });
 
@@ -1107,5 +1110,93 @@ describe("settings flow", () => {
       expect(document.activeElement).toBe(gl().querySelector(sel));
     }
     localStorage.removeItem("maya.settingsGroup");
+  });
+  describe("Work Items sources through a repaint", () => {
+    const tool = { id: "custom-1", name: "Linear", enabled: true, listCommand: "linear-items", startCommand: "", me: "" };
+    const items = { enabled: true, rules: [{ assignee: { kind: "me" }, labels: [], repos: [] }], statusLabels: ["todo"], startStatus: null, trackerRepos: [] };
+    const both = [
+      { provider: "github", enabled: true, baseUrl: null, token: { kind: "env", name: "GH_TOKEN" } },
+      { provider: "gitlab", enabled: true, baseUrl: null, token: { kind: "env", name: "GITLAB_TOKEN" } },
+    ];
+    let config: Record<string, unknown>;
+    let saved: any = null;
+    const setup = async () => {
+      config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", git: both, workItems: { github: items, gitlab: items, prompt: "", custom: [tool] } };
+      saved = null;
+      invoke.mockImplementation((cmd: string, args?: any) => {
+        if (cmd === "codex_hook_status") return Promise.resolve(false);
+        if (cmd === "hook_status") return Promise.resolve(true);
+        if (cmd === "get_config") return Promise.resolve({ ...config });
+        if (cmd === "set_config") {
+          // The backend names a new custom tool.
+          const custom = (args.config.workItems?.custom ?? []).map((t: { id: string }) => (t.id ? t : { ...t, id: "custom-99" }));
+          saved = args.config;
+          config = { ...args.config, workItems: { ...args.config.workItems, custom } };
+          return Promise.resolve({ ...config });
+        }
+        if (cmd === "get_git_status") return Promise.resolve({ github: { hasToken: false }, gitlab: { hasToken: false } });
+        if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+        if (cmd === "list_whisper_models") return Promise.resolve([]);
+        if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+        return Promise.reject(new Error("unexpected " + cmd));
+      });
+      await initSettings();
+      await flush();
+      document.getElementById("settings")!.hidden = false;
+      document.dispatchEvent(new CustomEvent("maya:settings-group", { detail: "workItems" }));
+      await flush();
+    };
+    const src = (key: string) => document.querySelector<HTMLElement>(`[data-source="${key}"]`)!;
+    afterEach(() => {
+      localStorage.removeItem("maya.settingsGroup");
+      localStorage.removeItem("maya.settingsSources");
+    });
+
+    it("keeps an open source open, and the focused field focused, through a repaint", async () => {
+      await setup();
+      src("github").querySelector<HTMLButtonElement>(".settings__source-toggle")!.click();
+      const before = src("github").querySelector<HTMLInputElement>("input[name=wi-statusLabels]")!;
+      before.focus();
+      before.setSelectionRange(1, 3);
+      window.dispatchEvent(new CustomEvent("maya:config-changed"));
+      await flush();
+      const after = src("github").querySelector<HTMLInputElement>("input[name=wi-statusLabels]")!;
+      expect(after).not.toBe(before);
+      expect(src("github").hasAttribute("data-open")).toBe(true);
+      expect(document.activeElement).toBe(after);
+      expect([after.selectionStart, after.selectionEnd]).toEqual([1, 3]);
+    });
+
+    it("keeps focus in GitLab's field, not GitHub's of the same name", async () => {
+      await setup();
+      src("github").querySelector<HTMLButtonElement>(".settings__source-toggle")!.click();
+      src("gitlab").querySelector<HTMLButtonElement>(".settings__source-toggle")!.click();
+      src("gitlab").querySelector<HTMLInputElement>("input[name=wi-statusLabels]")!.focus();
+      window.dispatchEvent(new CustomEvent("maya:config-changed"));
+      await flush();
+      expect(document.activeElement).toBe(src("gitlab").querySelector("input[name=wi-statusLabels]"));
+    });
+
+    it("keeps a custom tool's details open through a repaint", async () => {
+      await setup();
+      const d = src("custom-1").querySelector("details")!;
+      d.open = true;
+      d.dispatchEvent(new Event("toggle"));
+      window.dispatchEvent(new CustomEvent("maya:config-changed"));
+      await flush();
+      const fresh = src("custom-1").querySelector("details")!;
+      expect(fresh).not.toBe(d);
+      expect(fresh.open).toBe(true);
+    });
+
+    it("opens a custom tool just added", async () => {
+      await setup();
+      document.querySelector<HTMLButtonElement>("[data-action=ct-add]")!.click();
+      await flush();
+      expect(saved.workItems.custom.map((t: { id: string }) => t.id)).toEqual(["custom-1", ""]);
+      expect(src("custom-99").hasAttribute("data-open")).toBe(true);
+      expect(src("custom-1").hasAttribute("data-open")).toBe(false);
+      expect(JSON.parse(localStorage.getItem("maya.settingsSources")!)).toEqual({ "custom-99": true });
+    });
   });
 });

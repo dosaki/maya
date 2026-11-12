@@ -1,3 +1,15 @@
+# 0.54.0
+
+## New
+
+- Settings has a new look, on the computer and on the phone. Each screen is centred, with its settings grouped in cards, the help for each setting next to it, a switch for every on and off, and room to breathe.
+- In Settings → Work Items, each source (GitHub, GitLab and each custom tool) folds up, and shows whether it is on while folded. Maya remembers which ones you left open.
+- Settings → Release Notes shows Maya beside the notes.
+
+## Fixed
+
+- A Work Items rule's Labels and Repositories fields are wide enough to read again.
+
 # 0.53.0
 
 ## New

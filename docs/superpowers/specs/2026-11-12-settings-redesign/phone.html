@@ -1,0 +1,384 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Maya Settings — phone</title><style>
+:root {
+  --bg: #0c0b09; --panel: #16140f; --text: #f1e9d8; --muted: #a39a86; --border: #2c2719;
+  --gold: #d9ab3c; --gold-bright: #f0c85a; --gold-deep: #8f6a1c; --on-gold: #1a1408;
+  --completed: #16a34a; --idle: #9ca3af; --danger: #e5786b;
+  /* New: a hairline inside cards, and a sunken field. */
+  --rule: #221e16; --field: #0f0e0b; --soft: #1c1913;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
+  font-size: 14px; color: var(--text); background: var(--bg); color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); }
+[hidden] { display: none !important; }
+
+/* Maya's own top bar, as it is. */
+.topbar { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--gold-deep); background: linear-gradient(180deg, #14120d, var(--bg)); }
+.topbar__title { margin: 0; font-size: 16px; font-weight: 600; color: var(--gold-bright); letter-spacing: .02em; }
+.tabs { display: flex; gap: 4px; margin-left: 16px; flex: 1; align-items: center; }
+.tab { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 5px 10px; color: var(--muted); font: inherit; }
+.tab--active { background: var(--panel); border-color: var(--gold-deep); color: var(--gold-bright); }
+.tabs__spacer { flex: 1; }
+
+/* ---------- The Settings shell: sidebar + one readable column, centred as a pair. ---------- */
+.shell { display: grid; grid-template-columns: 208px minmax(0, 760px); gap: 56px; justify-content: center; padding: 40px 32px 96px; }
+.nav { position: sticky; top: 24px; align-self: start; display: flex; flex-direction: column; gap: 14px; }
+.nav__group { display: flex; flex-direction: column; gap: 2px; }
+.nav__group + .nav__group { padding-top: 14px; border-top: 1px solid var(--rule); }
+.nav__item { font: inherit; text-align: left; background: none; border: 1px solid transparent; border-radius: 8px; padding: 8px 12px; color: var(--muted); cursor: pointer; }
+.nav__item:hover { color: var(--text); background: var(--soft); }
+.nav__item[aria-current=true] { background: var(--panel); border-color: var(--gold-deep); color: var(--gold-bright); }
+
+/* ---------- A screen ---------- */
+.screen__head { margin: 2px 0 32px; }
+.screen__title { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
+.screen__lede { margin: 8px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; max-width: 60ch; }
+
+.group { margin: 0 0 36px; }
+.group__title { margin: 0 0 4px 2px; font-size: 15px; font-weight: 600; }
+.group__note { margin: 0 0 12px 2px; color: var(--muted); font-size: 13px; line-height: 1.5; max-width: 64ch; }
+.group__title + .card { margin-top: 12px; }
+.group__foot { margin: 10px 2px 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; max-width: 64ch; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+.card + .card { margin-top: 16px; }
+
+/* A row: what it is (and a line of help) on the left, its control on the right. */
+.row { display: flex; align-items: center; gap: 24px; padding: 16px 20px; min-height: 60px; }
+.row + .row, .row + .rows, .rows + .row { border-top: 1px solid var(--rule); }
+.row__text { flex: 1; min-width: 0; }
+.row__label { display: block; font-weight: 500; }
+.row__help { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.45; max-width: 52ch; }
+.row__control { flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.row__control--field { flex-basis: 300px; }
+.row__control--field > * { flex: 1; }
+/* A stacked row: the control takes the whole width under its label. */
+.row--stack { flex-direction: column; align-items: stretch; gap: 12px; }
+/* A card's own header: its on/off and name. */
+.row--head { min-height: 56px; background: var(--soft); border-radius: 12px 12px 0 0; }
+.row--head .row__label { font-size: 15px; font-weight: 600; }
+.card--off .row:not(.row--head) { opacity: .45; }
+.row--foot { min-height: 0; padding: 12px 20px; justify-content: space-between; }
+
+/* Fields */
+input[type=text], input[type=password], input[type=number], select, textarea {
+  font: inherit; color: var(--text); background: var(--field); border: 1px solid var(--border); border-radius: 8px; height: 36px; padding: 0 12px; width: 100%; min-width: 0;
+}
+textarea { height: auto; padding: 10px 12px; line-height: 1.5; resize: vertical; }
+input::placeholder, textarea::placeholder { color: #6f6757; }
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: none; border-color: var(--gold-deep); box-shadow: 0 0 0 3px rgba(217,171,60,.16); }
+select { appearance: none; padding-right: 32px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 17px) 16px, calc(100% - 12px) 16px; background-size: 5px 5px; background-repeat: no-repeat; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.num { width: 88px !important; flex: 0 0 88px !important; text-align: right; }
+.unit { color: var(--muted); }
+
+/* Switch: every on/off in Settings. */
+.switch { appearance: none; position: relative; flex: 0 0 auto; width: 38px; height: 22px; margin: 0; border-radius: 999px; background: #3a3426; border: 1px solid #4a4231; cursor: pointer; transition: background .15s; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--text); transition: transform .15s; }
+.switch:checked { background: var(--gold); border-color: var(--gold); }
+.switch:checked::after { transform: translateX(16px); background: var(--on-gold); }
+@media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition: none; } }
+
+/* Segmented choice: two or three options that read as one control. */
+.seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--field); border: 1px solid var(--border); border-radius: 9px; }
+.seg label { position: relative; }
+.seg input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.seg span { display: block; padding: 5px 12px; border-radius: 6px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.seg input:checked + span { background: var(--panel); color: var(--text); box-shadow: inset 0 0 0 1px var(--gold-deep); }
+
+/* Buttons */
+.btn { font: inherit; font-size: 13px; color: var(--text); background: var(--soft); border: 1px solid var(--border); border-radius: 8px; padding: 7px 14px; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: #4a4231; }
+.btn--gold { background: var(--gold); border-color: var(--gold); color: var(--on-gold); font-weight: 600; }
+.btn--quiet { background: none; border-color: transparent; color: var(--muted); padding: 7px 8px; }
+.btn--quiet:hover { color: var(--text); border-color: transparent; }
+.btn--danger { color: var(--danger); }
+.add { font: inherit; display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin-top: 12px; padding: 12px; border: 1px dashed #3a3426; border-radius: 10px; background: none; color: var(--muted); cursor: pointer; }
+.add:hover { color: var(--gold-bright); border-color: var(--gold-deep); }
+
+/* State, as a dot and a word. */
+.state { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--idle); }
+.state--on { color: var(--text); }
+.state--on::before { background: var(--completed); box-shadow: 0 0 0 3px rgba(22,163,74,.18); }
+.state--main::before { background: var(--gold); box-shadow: 0 0 0 3px rgba(217,171,60,.18); }
+
+/* Key chips */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; align-items: center; }
+.kbd { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; border: 1px solid #3a3426; border-bottom-width: 2px; border-radius: 7px; background: var(--field); font-size: 13px; }
+.kbd button { font: inherit; background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 4px; border-radius: 4px; }
+.kbd button:hover { color: var(--text); background: var(--soft); }
+.kbd--only { padding-right: 10px; }
+
+/* Work Items rules: each its own inset box, fields stacked. */
+.rules { display: flex; flex-direction: column; gap: 12px; }
+.rule { border: 1px solid var(--border); border-radius: 10px; background: var(--field); }
+.rule__head { display: flex; align-items: center; justify-content: space-between; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--rule); color: var(--muted); font-size: 13px; }
+.rule__body { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px 16px; align-items: center; padding: 14px 16px 16px; }
+.rule__body label { color: var(--muted); font-size: 13px; }
+.rule__body input, .rule__body select { background: var(--panel); }
+.who { display: flex; gap: 8px; }
+
+details { border-top: 1px solid var(--rule); }
+summary { padding: 14px 20px; cursor: pointer; color: var(--muted); font-size: 13px; list-style: none; }
+summary::before { content: "▸"; display: inline-block; width: 16px; transition: transform .15s; }
+details[open] summary::before { transform: rotate(90deg); }
+summary:hover { color: var(--text); }
+.details__body { padding: 0 20px 20px; display: flex; flex-direction: column; gap: 12px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+pre { margin: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--field); color: #e3d9c3; font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Voice: the providers are tried in order, so they are numbered. */
+.order { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--gold-deep); color: var(--gold-bright); font-size: 12px; font-weight: 600; flex: 0 0 auto; }
+.range { display: flex; align-items: center; gap: 12px; flex-basis: 300px; }
+.range input { flex: 1; accent-color: var(--gold); }
+.range output { width: 3em; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+
+/* Network: the pairing code is the one loud thing in Settings. */
+.code { display: flex; align-items: center; gap: 32px; padding: 28px 28px; border: 1px solid var(--gold-deep); border-radius: 14px; background: radial-gradient(120% 140% at 0% 0%, rgba(217,171,60,.10), transparent 60%), var(--panel); }
+.code__digits { font: 600 40px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; color: var(--gold-bright); }
+.code__text { flex: 1; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.code__text strong { display: block; color: var(--text); font-size: 14px; font-weight: 500; margin-bottom: 4px; }
+
+/* Devices */
+.device { display: flex; align-items: center; gap: 16px; padding: 16px 20px; }
+.device + .device { border-top: 1px solid var(--rule); }
+.device__mark { width: 52px; height: 36px; border-radius: 9px; display: grid; place-items: center; background: var(--soft); border: 1px solid var(--border); color: var(--muted); font-size: 11.5px; font-weight: 600; flex: 0 0 auto; }
+.device__text { flex: 1; min-width: 0; }
+.device__name { font-weight: 500; }
+.device__name small { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--gold-deep); border-radius: 999px; color: var(--gold-bright); font-size: 11px; font-weight: 500; }
+.device__meta { margin-top: 3px; color: var(--muted); font-size: 13px; }
+.device__extra { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+
+/* Release notes */
+.notes { max-width: 68ch; }
+.notes article + article { margin-top: 32px; padding-top: 28px; border-top: 1px solid var(--rule); }
+.notes h2 { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
+.notes h2 small { margin-left: 10px; padding: 2px 8px; border-radius: 999px; background: var(--gold); color: var(--on-gold); font-size: 11px; font-weight: 600; vertical-align: 2px; }
+.notes h3 { margin: 16px 0 8px; font-size: 13px; font-weight: 600; color: var(--gold); }
+.notes ul { margin: 0; padding-left: 20px; line-height: 1.6; }
+.notes li + li { margin-top: 8px; }
+.notes code { font-size: 12.5px; padding: 1px 5px; border-radius: 5px; background: var(--soft); border: 1px solid var(--border); }
+
+
+/* Work Items sources: collapsible, with their on/off always in view. */
+.src__head { display: flex; align-items: center; gap: 12px; padding: 0 20px 0 0; min-height: 60px; }
+.src__toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; align-self: stretch; padding: 0 0 0 16px; background: none; border: 0; border-radius: 12px 0 0 12px; font: inherit; color: var(--text); text-align: left; cursor: pointer; }
+.src__chev { width: 20px; height: 20px; display: grid; place-items: center; color: var(--muted); }
+.src__chev::before { content: ""; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
+.src[data-open] .src__chev::before { transform: rotate(45deg); }
+.src__name { font-size: 15px; font-weight: 600; white-space: nowrap; }
+.src__tag { padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.src__sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
+.src__state { font-size: 13px; color: var(--muted); min-width: 2em; text-align: right; }
+.src:has(.src__head .switch:checked) .src__state { color: var(--gold-bright); }
+.src__toggle:hover .src__chev, .src__toggle:hover .src__name { color: var(--gold-bright); }
+.src__body { border-top: 1px solid var(--rule); }
+.src:not([data-open]) .src__body { display: none; }
+.src[data-open] .src__head { background: var(--soft); border-radius: 12px 12px 0 0; }
+.src[data-open] .src__sum { display: none; }
+.card--off .src__name { color: var(--muted); }
+.card--off.src .row { opacity: 1; }
+.card--off .src__body { opacity: .5; }
+.card.src + .card.src { margin-top: 12px; }
+@media (prefers-reduced-motion: reduce) { .src__chev::before { transition: none; } }
+
+/* Release notes: Maya stands to their left, her raised hand presenting them. */
+.rn { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 8px; align-items: start; }
+.rn__art { position: sticky; top: 24px; height: min(76vh, 600px); width: auto; margin-left: -64px; pointer-events: none; user-select: none; filter: drop-shadow(0 0 28px rgba(217,171,60,.22)); }
+@media (max-width: 1100px) { .rn { grid-template-columns: minmax(0, 1fr); } .rn__art { display: none; } }
+
+
+body { padding: 32px 24px 64px; }
+.wall { display: flex; flex-wrap: wrap; gap: 40px 32px; justify-content: center; }
+.wall__intro { flex: 0 0 100%; text-align: center; margin: 0 0 8px; }
+.wall__intro p { max-width: 760px; margin: 0 auto !important; }
+.wall__intro h1 { margin: 0 0 8px; font-size: 22px; }
+.wall__intro p { margin: 0; color: var(--muted); line-height: 1.55; }
+.phone { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.phone figcaption { width: 300px; color: var(--muted); font-size: 13px; text-align: center; line-height: 1.45; }
+.screen { width: 390px; height: 844px; overflow: auto; border: 10px solid #26221a; border-radius: 44px; background: var(--bg); font-size: 15px; box-shadow: 0 24px 60px rgba(0,0,0,.5); scrollbar-width: none; }
+.pbar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; padding: 40px 16px 10px; border-bottom: 1px solid var(--gold-deep); background: linear-gradient(180deg, #14120d, var(--bg)); }
+.pbar__title { color: var(--gold-bright); font-weight: 600; }
+.pbar__tabs { display: flex; gap: 4px; }
+.pbar__tabs span { padding: 6px 10px; border: 1px solid transparent; border-radius: 6px; color: var(--muted); font-size: 14px; }
+.pbar__tabs .on { background: var(--panel); border-color: var(--gold-deep); color: var(--gold-bright); }
+.pbody { padding: 16px 16px 48px; }
+.ptitle { margin: 4px 0 6px; font-size: 26px; font-weight: 600; letter-spacing: -.01em; }
+.plede { margin: 0 0 24px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.back { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 6px -6px; padding: 8px 6px; min-height: 40px; background: none; border: 0; color: var(--gold-bright); font: inherit; }
+.chev { width: 9px; height: 9px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); flex: 0 0 auto; margin-right: 4px; }
+.chev--back { transform: rotate(135deg); border-color: var(--gold-bright); margin: 0 2px 0 4px; }
+.pbody .card + .card { margin-top: 16px; }
+.pbody .group__title { margin-top: 28px; }
+.nrow { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 64px; padding: 12px 16px 12px 18px; background: none; border: 0; color: var(--text); font: inherit; text-align: left; }
+.nrow + .nrow { border-top: 1px solid var(--rule); }
+.nrow__text { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.nrow__name { font-weight: 500; }
+.nrow__sum { color: var(--muted); font-size: 13.5px; }
+.pbody .row { min-height: 64px; padding: 14px 16px 14px 18px; gap: 16px; }
+.frow { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px 16px; }
+.frow + .frow, .row + .frow, .frow + .srow { border-top: 1px solid var(--rule); }
+.frow label { color: var(--muted); font-size: 13.5px; }
+.frow input { height: 44px; font-size: 15px; }
+.frow--split { flex-direction: row; gap: 12px; }
+.frow--split > div { display: flex; flex-direction: column; gap: 8px; }
+.frow--split > div:first-child { flex: 0 0 100px; }
+.frow--split > div:last-child { flex: 1; min-width: 0; }
+.srow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px 14px 18px; }
+.bar1, .bar2 { display: flex; gap: 10px; padding: 12px 16px 16px; border-top: 1px solid var(--rule); }
+.bar1 .btn, .bar2 .btn { flex: 1; min-height: 46px; font-size: 15px; }
+.warn { margin-top: 12px; padding: 12px 14px; border: 1px solid rgba(229,120,107,.4); border-radius: 10px; background: rgba(229,120,107,.08); color: #f0b2a9; font-size: 13.5px; line-height: 1.45; }
+.switch { width: 44px; height: 26px; }
+.switch::after { width: 20px; height: 20px; }
+.switch:checked::after { transform: translateX(18px); }
+.seg span { padding: 8px 14px; font-size: 14px; }
+.pbody .device { padding: 14px 16px; }
+.pbody .device__meta { margin-top: 4px; }
+.rnart { display: block; width: calc(100% + 32px); margin: 0 -16px; height: 200px; object-fit: cover; object-position: 50% 6%; -webkit-mask-image: linear-gradient(#000 55%, transparent); mask-image: linear-gradient(#000 55%, transparent); }
+.rnhead { position: relative; margin: -72px 0 20px; text-align: right; text-shadow: 0 1px 8px var(--bg), 0 0 2px var(--bg); }
+.rnhead .ptitle { margin: 0 0 4px; }
+.rnhead .plede { margin: 0; }
+.rnback { position: relative; z-index: 1; margin-bottom: -46px; }
+.pbody .notes h2 { font-size: 17px; }
+.pbody .notes article + article { margin-top: 24px; padding-top: 22px; }
+</style></head><body><div class="wall">
+  <div class="wall__intro">
+    <h1>Maya on the phone: Settings</h1>
+    <p>The same design on the Android app. The phone keeps its list-then-page navigation; each page uses the desktop's cards, rows, switches and help text, sized for a thumb: rows at least 56px tall, fields under their label, and actions as full-width buttons.</p>
+  </div>
+
+  <!-- 1. The list -->
+  <figure class="phone"><div class="screen">
+    <div class="pbar"><span class="pbar__title">Maya</span><span class="pbar__tabs"><span>Sessions</span><span class="on">Settings</span></span></div>
+    <div class="pbody">
+      <h2 class="ptitle">Settings</h2>
+      <div class="card">
+        <button class="nrow"><span class="nrow__text"><span class="nrow__name">Network</span><span class="nrow__sum"><span class="state state--on">Connected to tiago-mbp</span></span></span><span class="chev"></span></button>
+        <button class="nrow"><span class="nrow__text"><span class="nrow__name">Devices</span><span class="nrow__sum">3 devices</span></span><span class="chev"></span></button>
+      </div>
+      <div class="card">
+        <button class="nrow"><span class="nrow__text"><span class="nrow__name">Notifications</span><span class="nrow__sum">Awaiting decision</span></span><span class="chev"></span></button>
+        <button class="nrow"><span class="nrow__text"><span class="nrow__name">Voice</span><span class="nrow__sum">Speak on, wake word off</span></span><span class="chev"></span></button>
+      </div>
+      <div class="card">
+        <button class="nrow"><span class="nrow__text"><span class="nrow__name">Session viewer</span><span class="nrow__sum">Chat</span></span><span class="chev"></span></button>
+      </div>
+      <div class="card">
+        <button class="nrow"><span class="nrow__text"><span class="nrow__name">Release Notes</span><span class="nrow__sum">Maya 0.53.0</span></span><span class="chev"></span></button>
+      </div>
+    </div>
+  </div><figcaption>The list: grouped like the desktop sidebar, each with its state.</figcaption></figure>
+
+  <!-- 2. Network -->
+  <figure class="phone"><div class="screen">
+    <div class="pbar"><span class="pbar__title">Maya</span><span class="pbar__tabs"><span>Sessions</span><span class="on">Settings</span></span></div>
+    <div class="pbody">
+      <button class="back"><span class="chev chev--back"></span>Settings</button>
+      <h2 class="ptitle">Network</h2>
+      <p class="plede">This phone joins the Maya on your computer.</p>
+      <h3 class="group__title">This phone</h3>
+      <div class="card">
+        <div class="frow"><label>Name</label><input type="text" value="Pixel 9"></div>
+        <div class="srow"><span class="state state--on">Connected to tiago-mbp</span><span class="unit">192.168.1.9:47321</span></div>
+        <div class="bar2"><button class="btn">Save name</button><button class="btn btn--danger">Leave</button></div>
+      </div>
+      <h3 class="group__title">Key</h3>
+      <div class="card">
+        <div class="row"><div class="row__text"><span class="row__label">New key</span><span class="row__help">Drops every pairing, so each device must pair again.</span></div></div>
+        <div class="bar1"><button class="btn btn--danger">New key</button></div>
+      </div>
+    </div>
+  </div><figcaption>Network, joined.</figcaption></figure>
+
+  <!-- 3. Network, not joined -->
+  <figure class="phone"><div class="screen">
+    <div class="pbar"><span class="pbar__title">Maya</span><span class="pbar__tabs"><span>Sessions</span><span class="on">Settings</span></span></div>
+    <div class="pbody">
+      <button class="back"><span class="chev chev--back"></span>Settings</button>
+      <h2 class="ptitle">Network</h2>
+      <p class="plede">This phone joins the Maya on your computer.</p>
+      <h3 class="group__title">Join a main</h3>
+      <p class="group__note">On the computer, open Settings → Network and type the pairing code it shows.</p>
+      <div class="card">
+        <div class="frow"><label>Host</label><input type="text" class="mono" placeholder="192.168.1.9"></div>
+        <div class="frow frow--split"><div><label>Port</label><input type="number" value="4127"></div><div><label>Pairing code</label><input type="text" class="mono" placeholder="0000-0000" inputmode="numeric"></div></div>
+        <div class="bar1"><button class="btn btn--gold">Join</button></div>
+      </div>
+      <h3 class="group__title">This phone</h3>
+      <div class="card">
+        <div class="frow"><label>Name</label><input type="text" value="Pixel 9"></div>
+        <div class="bar1"><button class="btn">Save name</button></div>
+      </div>
+    </div>
+  </div><figcaption>Network, before joining: the one gold button is Join.</figcaption></figure>
+
+  <!-- 4. Notifications -->
+  <figure class="phone"><div class="screen">
+    <div class="pbar"><span class="pbar__title">Maya</span><span class="pbar__tabs"><span>Sessions</span><span class="on">Settings</span></span></div>
+    <div class="pbody">
+      <button class="back"><span class="chev chev--back"></span>Settings</button>
+      <h2 class="ptitle">Notifications</h2>
+      <p class="plede">When the phone tells you a session needs you.</p>
+      <div class="card">
+        <div class="row"><div class="row__text"><span class="row__label">Awaiting Decision</span></div><input type="checkbox" class="switch" checked></div>
+        <div class="row"><div class="row__text"><span class="row__label">Completed</span></div><input type="checkbox" class="switch"></div>
+      </div>
+      <div class="warn">Notifications are off for Maya in Android settings.</div>
+      <h3 class="group__title">Battery</h3>
+      <div class="card">
+        <div class="row"><div class="row__text"><span class="row__help" style="margin:0">Android may otherwise stop Maya with the screen off, and her notifications with her.</span></div></div>
+        <div class="bar1"><button class="btn">Keep Maya awake</button></div>
+      </div>
+    </div>
+  </div><figcaption>Notifications, with Android's own switch off.</figcaption></figure>
+
+  <!-- 5. Voice + viewer -->
+  <figure class="phone"><div class="screen">
+    <div class="pbar"><span class="pbar__title">Maya</span><span class="pbar__tabs"><span>Sessions</span><span class="on">Settings</span></span></div>
+    <div class="pbody">
+      <button class="back"><span class="chev chev--back"></span>Settings</button>
+      <h2 class="ptitle">Voice</h2>
+      <p class="plede">While Maya is on screen. She never listens with the app closed.</p>
+      <div class="card">
+        <div class="row"><div class="row__text"><span class="row__label">Speak</span><span class="row__help">Reads out sessions that need you.</span></div><input type="checkbox" class="switch" checked></div>
+        <div class="row"><div class="row__text"><span class="row__label">Wake word "Maya"</span><span class="row__help">Experimental. The word is set on your computer.</span></div><input type="checkbox" class="switch"></div>
+      </div>
+      <p class="group__foot">Voice needs a desktop main.</p>
+
+      <h2 class="ptitle" style="margin-top:36px">Session viewer</h2>
+      <div class="card"><div class="row"><div class="row__text"><span class="row__label">Show sessions as</span></div><div class="seg"><label><input type="radio" name="pv" checked><span>Chat</span></label><label><input type="radio" name="pv"><span>Terminal</span></label></div></div></div>
+    </div>
+  </div><figcaption>Voice (and, below the fold, Session viewer as a two-way choice).</figcaption></figure>
+
+  <!-- 6. Devices -->
+  <figure class="phone"><div class="screen">
+    <div class="pbar"><span class="pbar__title">Maya</span><span class="pbar__tabs"><span>Sessions</span><span class="on">Settings</span></span></div>
+    <div class="pbody">
+      <button class="back"><span class="chev chev--back"></span>Settings</button>
+      <h2 class="ptitle">Devices</h2>
+      <p class="plede">The computers and phones in your group.</p>
+      <div class="card">
+        <div class="device"><div class="device__mark">Phone</div><div class="device__text"><div class="device__name">Pixel 9<small>This phone</small></div><div class="device__meta">Android</div></div></div>
+        <div class="device"><div class="device__mark">Mac</div><div class="device__text"><div class="device__name">tiago-mbp</div><div class="device__meta"><span class="state state--main">Main</span></div></div></div>
+        <div class="device"><div class="device__mark">Mac</div><div class="device__text"><div class="device__name">studio-mini</div><div class="device__meta"><span class="state state--on">Connected</span></div></div></div>
+        <div class="device"><div class="device__mark">Linux</div><div class="device__text"><div class="device__name">work-linux</div><div class="device__meta"><span class="state">Last seen 1h ago</span></div></div></div>
+      </div>
+    </div>
+  </div><figcaption>Devices: state under the name, since the row has no room beside it.</figcaption></figure>
+
+  <!-- 7. Release notes -->
+  <figure class="phone"><div class="screen">
+    <div class="pbar"><span class="pbar__title">Maya</span><span class="pbar__tabs"><span>Sessions</span><span class="on">Settings</span></span></div>
+    <div class="pbody">
+      <button class="back rnback"><span class="chev chev--back"></span>Settings</button>
+      <img class="rnart" src="../../../../src/assets/maya-full-body.png" alt="">
+      <div class="rnhead"><h2 class="ptitle">Release notes</h2><p class="plede">You're running Maya 0.53.0.</p></div>
+      <div class="notes">
+        <article><h2>0.53.0<small>Running</small></h2><h3>New</h3><ul>
+          <li>The Issues tab takes items from any project management tool. In Settings → Work Items, add a custom tool with a name and a command that prints your items as JSON.</li>
+          <li>Start works on a custom tool's items too.</li></ul></article>
+        <article><h2>0.52.2</h2><h3>Fixed</h3><ul><li>When GitHub's hourly request limit runs out, Maya now says so, with the time it resets.</li></ul></article>
+      </div>
+    </div>
+  </div><figcaption>Release notes: Maya from the waist up, as in the phone's What's new window.</figcaption></figure>
+</div>
+</body></html>

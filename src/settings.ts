@@ -10,12 +10,14 @@ import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys,
 import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
+import art from "./assets/maya-full-body.png";
 import { morph } from "./morph";
 import { renderDevices, type DeviceRow, type DevicesHandlers, type DevicesModel } from "./devices";
 import { terminalLabel } from "./terminalpick";
-import { renderReleaseNotes } from "./release-notes";
+import { RUNNING_VERSION, renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 import { updates } from "./update";
+import { addButton, btn as settingsBtn, card, cardHead, choice, footRow, group, notice, row, screenHead, source, state, toggle } from "./settings-ui";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -158,6 +160,10 @@ export interface SettingsModel {
   git?: GitConnectionJson[];
   /** The Work Items settings; the defaults when absent. */
   workItems?: WorkItemsConfig;
+  /** Which Work Items sources are open, by `github`, `gitlab` or a custom tool's id; folded when absent. */
+  sourcesOpen?: Record<string, boolean>;
+  /** Which custom tools have their "Output format" details open, by tool id. */
+  customDetailsOpen?: Record<string, boolean>;
   /** Whether a pasted token is stored, and the last Test's outcome. */
   gitStatus?: Record<GitProvider, { hasToken: boolean; test?: string | null }>;
   /** This install can check for updates (`update_kind` is not `off`). */
@@ -344,6 +350,50 @@ export function workItemsConfig(raw: Partial<WorkItemsConfig> | null | undefined
   return { github: forge(raw?.github), gitlab: forge(raw?.gitlab), prompt: raw?.prompt ?? "", custom: raw?.custom ?? [] };
 }
 
+/** "a", "a or b", "a, b or c". */
+function orList(items: string[]): string {
+  return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
+}
+
+/** A rule in a line, for its box's head: "Assigned to me, labelled bug, in dosaki/maya". */
+export function ruleSummary(rule: ItemRule): string {
+  const a = rule.assignee;
+  let text = a.kind === "me" ? "Assigned to me" : a.kind === "anyone" ? "Anyone's issues" : `Assigned to ${a.login || "someone"}`;
+  if (rule.labels.length > 0) text += `, labelled ${orList(rule.labels)}`;
+  if (rule.repos.length > 0) text += `, in ${orList(rule.repos)}`;
+  return text;
+}
+
+/** A forge's settings in a line, for its folded head: "2 rules; Start sets status to in progress". */
+export function forgeSummary(items: ForgeItems): string {
+  const n = items.rules.length;
+  const rules = `${n} rule${n === 1 ? "" : "s"}`;
+  return items.startStatus ? `${rules}; Start sets status to ${items.startStatus}` : rules;
+}
+
+export const SOURCES_OPEN_KEY = "maya.settingsSources";
+
+/** The Work Items sources open last time on this device; none when unset or unreadable. */
+export function storedSourcesOpen(): Record<string, boolean> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(SOURCES_OPEN_KEY) ?? "{}");
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return {};
+    return Object.fromEntries(Object.entries(v).filter(([, open]) => typeof open === "boolean"));
+  } catch {
+    return {};
+  }
+}
+
+/** Records which sources are open, in the model and on this device. */
+function setSourcesOpen(model: SettingsModel, open: Record<string, boolean>): void {
+  model.sourcesOpen = { ...model.sourcesOpen, ...open };
+  try {
+    localStorage.setItem(SOURCES_OPEN_KEY, JSON.stringify(model.sourcesOpen));
+  } catch {
+    /* private mode: nothing to remember */
+  }
+}
+
 const WORK_ITEMS_HINT: Record<GitProvider, string> = {
   github: "Start assigns the issue and sets its status: the token needs Issues: read and write (fine-grained) or repo (classic).",
   gitlab: "Start assigns the issue and sets its status: the token needs the api scope.",
@@ -402,6 +452,31 @@ export const SETTINGS_GROUPS = [
 ] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number][0];
 
+/** The sidebar's divided clusters, top to bottom. */
+export const SETTINGS_NAV: readonly (readonly SettingsGroup[])[] = [
+  ["general", "keyboard"],
+  ["sessions", "git", "reviews", "workItems"],
+  ["notifications", "voice"],
+  ["network", "devices"],
+  ["debug", "releaseNotes"],
+];
+
+/** What each screen's head says under its title. */
+export const SETTINGS_LEDES: Record<SettingsGroup, string> = {
+  general: "The agent behind Maya, and how she looks.",
+  keyboard: "The keys for the Chat tab, a session's reply box and the new-session prompt.",
+  sessions: "How Maya follows your sessions, and where new ones start.",
+  git: "The accounts Maya reads pull requests and merge requests with. Reviews clone with your own git credentials.",
+  reviews: "Where reviews are checked out, what the Review button asks the agent, and when Maya tells you about your own pull requests.",
+  workItems: "Where the Issues tab finds your work, and what Start does with an item.",
+  notifications: "How Maya tells you a session needs you.",
+  voice: "How Maya speaks to you, and how she hears you.",
+  network: "Join your other computers and your phone to this Maya.",
+  devices: "The computers and phones joined to this Maya.",
+  debug: "For looking under the hood.",
+  releaseNotes: "What changed in each version of Maya.",
+};
+
 export const SETTINGS_GROUP_KEY = "maya.settingsGroup";
 
 function asSettingsGroup(v: string | null | undefined): SettingsGroup {
@@ -422,21 +497,7 @@ function section(title: string, key: SettingsGroup): HTMLElement {
   const s = document.createElement("section");
   s.className = `settings__section settings__section--${key}`;
   s.dataset.group = key;
-  const heading = document.createElement("h2");
-  heading.className = "settings__heading";
-  heading.textContent = title;
-  s.append(heading);
-  return s;
-}
-
-/** A titled part of a section, such as Voice's Speaking and Listening. */
-function subsection(title: string): HTMLElement {
-  const s = document.createElement("div");
-  s.className = "settings__subsection";
-  const heading = document.createElement("h3");
-  heading.className = "settings__subheading";
-  heading.textContent = title;
-  s.append(heading);
+  s.append(screenHead(title, SETTINGS_LEDES[key]));
   return s;
 }
 
@@ -445,43 +506,32 @@ function subsection(title: string): HTMLElement {
  * that records the next Enter press, and Reset to defaults.
  */
 function renderKeyboard(section: HTMLElement, keys: KeyBindings, h: SettingsHandlers): void {
-  const hint = document.createElement("div");
-  hint.className = "settings__hint";
-  hint.textContent = "The keys for the Chat tab, a session's reply box and the new-session prompt. An Enter press in neither list does what the box does by itself.";
-  section.append(hint);
+  const rows: HTMLElement[] = [];
   for (const [action, name] of KEY_ACTIONS) {
-    const row = document.createElement("div");
-    row.className = "settings__row settings__keys";
-    row.dataset.keys = action;
-    const label = document.createElement("span");
-    label.className = "settings__keys-name";
-    label.textContent = name;
-    row.append(label);
+    const chips: Node[] = [];
     for (const combo of keys[action]) {
       const chip = document.createElement("span");
-      chip.className = "chip";
+      chip.className = "settings__kbd";
       chip.append(comboLabel(combo));
       if (action !== "send" || keys.send.length > 1) {
         const remove = document.createElement("button");
         remove.type = "button";
-        remove.className = "chip__remove";
         remove.setAttribute("aria-label", `Remove ${comboLabel(combo)}`);
         remove.textContent = "×";
         remove.addEventListener("click", () => h.onKeys?.(removeCombo(keys, action, combo)));
         chip.append(remove);
+      } else {
+        chip.classList.add("settings__kbd--only");
       }
-      row.append(chip);
+      chips.push(chip);
     }
-    const add = document.createElement("button");
-    add.type = "button";
-    add.dataset.action = "keys-add";
-    add.textContent = "Add";
+    const add = settingsBtn("+ Add", { action: "keys-add", kind: "quiet" });
     const error = document.createElement("span");
     error.className = "settings__error";
     let recording = false;
     const stop = () => {
       recording = false;
-      add.textContent = "Add";
+      add.textContent = "+ Add";
     };
     add.addEventListener("click", () => {
       recording = true;
@@ -504,15 +554,16 @@ function renderKeyboard(section: HTMLElement, keys: KeyBindings, h: SettingsHand
       if (typeof next === "string") error.textContent = next;
       else h.onKeys?.(next);
     });
-    row.append(add, error);
-    section.append(row);
+    const r = row({ label: name, control: [...chips, add, error] });
+    r.classList.add("settings__keys");
+    r.dataset.keys = action;
+    r.querySelector(".settings__label")!.classList.add("settings__keys-name");
+    rows.push(r);
   }
-  const reset = document.createElement("button");
-  reset.type = "button";
-  reset.dataset.action = "keys-reset";
-  reset.textContent = "Reset to defaults";
-  reset.addEventListener("click", () => h.onKeys?.(defaultKeys()));
-  section.append(reset);
+  section.append(
+    group({ foot: "An Enter press in neither list does what the box does by itself." }, card(...rows)),
+    settingsBtn("Reset to defaults", { action: "keys-reset" }, () => h.onKeys?.(defaultKeys())),
+  );
 }
 
 /** "483 921" from "483921": a space after the first three digits. */
@@ -531,6 +582,8 @@ interface FocusedField {
   name: string;
   /** Set for radios, which share a name across the group. */
   value?: string;
+  /** The Work Items source it is in: both forges name their fields alike. */
+  source?: string;
   start: number | null;
   end: number | null;
   direction: "forward" | "backward" | "none" | null;
@@ -545,6 +598,8 @@ function focusedField(root: HTMLElement): FocusedField | null {
   if (!isField(el) || !el.name || !root.contains(el)) return null;
   const focused: FocusedField = { name: el.name, start: null, end: null, direction: null };
   if (el instanceof HTMLInputElement && el.type === "radio") focused.value = el.value;
+  const source = el.closest<HTMLElement>("[data-source]")?.dataset.source;
+  if (source !== undefined) focused.source = source;
   if (el instanceof HTMLSelectElement) return focused;
   try {
     // Null (or a throw, in some engines) for inputs with no caret, such as checkboxes.
@@ -558,7 +613,8 @@ function focusedField(root: HTMLElement): FocusedField | null {
 }
 
 function restoreFocus(root: HTMLElement, f: FocusedField): void {
-  const named = [...root.querySelectorAll("input, select, textarea")].filter((e): e is Field => isField(e) && e.name === f.name);
+  const scope = (f.source !== undefined && [...root.querySelectorAll<HTMLElement>("[data-source]")].find((s) => s.dataset.source === f.source)) || root;
+  const named = [...scope.querySelectorAll("input, select, textarea")].filter((e): e is Field => isField(e) && e.name === f.name);
   const el = (f.value !== undefined && named.find((e) => e.value === f.value)) || named[0];
   if (!el) return;
   el.focus();
@@ -574,8 +630,9 @@ function restoreFocus(root: HTMLElement, f: FocusedField): void {
 export const PAIRING_TICK_MS = 30_000;
 
 /**
- * Refreshes the code's expiry line in place, or once it expired removes the
- * code and sets the button back to "Show pairing code".
+ * Refreshes the code's expiry line in place, or once it expired puts the
+ * empty state ("No code yet") in the code's place and sets the button back
+ * to "Show pairing code".
  */
 export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: number): void {
   const code = model.network?.code;
@@ -583,8 +640,10 @@ export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: 
   const expiry = panel.querySelector<HTMLElement>(".settings__code-expiry");
   if (!code || !box) return;
   if (nowMs > code.expiresAt) {
-    box.remove();
+    box.classList.add("settings__code--empty");
+    box.textContent = "No code yet";
     expiry?.remove();
+    panel.querySelector(".settings__pair-title")?.remove();
     const regen = panel.querySelector<HTMLButtonElement>("button[data-action=regenerate-code]");
     if (regen) regen.textContent = "Show pairing code";
   } else if (expiry) {
@@ -592,29 +651,37 @@ export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: 
   }
 }
 
-function addressesLine(addresses: string[]): HTMLElement {
-  const line = document.createElement("div");
-  line.className = "settings__hint settings__addresses";
-  line.textContent = `This machine's addresses: ${addresses.join(", ")}`;
-  return line;
+function addressesText(addresses: string[]): string {
+  return `This machine's addresses: ${addresses.join(", ")}`;
 }
 
 /**
  * Puts a fresh address list on the page in place, since no event follows
  * a Wi‑Fi, VPN or sleep/wake change. A repaint would wipe unsaved edits in
- * the other fields. Returns whether anything changed.
+ * the other fields. The line is the Port row's help. Returns whether
+ * anything changed.
  */
 export function tickAddresses(panel: ParentNode, model: SettingsModel, addresses: string[]): boolean {
   const before = model.network?.addresses ?? [];
   if (before.length === addresses.length && before.every((a, i) => a === addresses[i])) return false;
   if (model.network) model.network.addresses = addresses;
   const line = panel.querySelector<HTMLElement>(".settings__addresses");
+  const port = panel.querySelector<HTMLElement>("input[name=networkPort]");
   if (addresses.length === 0) {
     line?.remove();
+    port?.removeAttribute("aria-describedby");
   } else if (line) {
-    line.textContent = addressesLine(addresses).textContent;
+    line.textContent = addressesText(addresses);
   } else {
-    panel.querySelector("input[name=networkPort]")?.closest("label")?.insertAdjacentElement("afterend", addressesLine(addresses));
+    const text = port?.closest(".settings__row")?.querySelector(".settings__row-text");
+    if (port && text) {
+      const help = document.createElement("span");
+      help.className = "settings__help settings__addresses";
+      help.id = "settings-help-networkPort";
+      help.textContent = addressesText(addresses);
+      port.setAttribute("aria-describedby", help.id);
+      text.append(help);
+    }
   }
   return true;
 }
@@ -649,7 +716,10 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   // `hidden`, so a switch keeps half-typed fields and the in-place ticks
   // (pairing code, addresses) still find their elements.
   const sections = Object.fromEntries(SETTINGS_GROUPS.map(([key, title]) => [key, section(title, key)])) as Record<SettingsGroup, HTMLElement>;
-  const navButtons = SETTINGS_GROUPS.map(([key, title]) => {
+  const titles = new Map<SettingsGroup, string>(SETTINGS_GROUPS);
+  const navButtons = new Map<SettingsGroup, HTMLButtonElement>();
+  for (const key of SETTINGS_NAV.flat()) {
+    const title = titles.get(key)!;
     const b = document.createElement("button");
     b.type = "button";
     b.className = "settings__nav-item";
@@ -670,32 +740,31 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     // serves the keyboard.
     b.addEventListener("pointerdown", (e) => { if (e.button === 0) choose(); });
     b.addEventListener("click", choose);
-    return b;
-  });
+    navButtons.set(key, b);
+  }
   // The live sections, found when the nav is used: a repaint keeps the old
   // Devices section and drops this render's, so nothing may close over it.
   const show = (group: SettingsGroup) => {
     for (const s of nav.parentElement?.querySelectorAll<HTMLElement>(".settings__section") ?? []) s.hidden = s.dataset.group !== group;
-    for (const b of navButtons) {
+    for (const b of navButtons.values()) {
       if (b.dataset.group === group) b.setAttribute("aria-current", "true");
       else b.removeAttribute("aria-current");
     }
   };
-  nav.append(...navButtons);
+  for (const keys of SETTINGS_NAV) {
+    const g = document.createElement("div");
+    g.className = "settings__nav-group";
+    g.append(...keys.map((k) => navButtons.get(k)!));
+    nav.append(g);
+  }
   content.append(...Object.values(sections));
   show(model.settingsGroup ?? "general");
   const { general, keyboard, sessions, git, reviews, workItems, notifications, voice, network, devices, debug, releaseNotes } = sections;
-  const speaking = subsection("Speaking");
-  const listening = subsection("Listening");
-  voice.append(speaking, listening);
-
   const agents = model.agents.length > 0 ? model.agents : [CLAUDE_AGENT];
   // An agent that is chosen but not listed (uninstalled, or the listing has
   // not landed yet) stays selected, with only its Default model, rather than
   // the select silently showing another agent.
   const chosenAgent: AgentInfo = agents.find((a) => a.harness === model.agent) ?? (model.agent ? { harness: model.agent, models: [], efforts: [], modes: [] } : agents[0]);
-  const agentLabel = document.createElement("label");
-  agentLabel.textContent = "Agent";
   const agentSel = document.createElement("select");
   agentSel.name = "agent";
   for (const a of agents) {
@@ -717,16 +786,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     agentModelSel.disabled = true;
     h.onAgent(agentSel.value as Harness);
   });
-  agentLabel.append(agentSel);
-  general.append(agentLabel);
-  const agentHint = document.createElement("div");
-  agentHint.className = "settings__hint";
-  agentHint.dataset.for = "agent";
-  agentHint.textContent = "Interprets your voice commands, picks folders for 'Let Maya choose', and is the default for new and resumed sessions and reviews.";
-  general.append(agentHint);
+  const agentHelp = "Interprets your voice commands, picks folders for 'Let Maya choose', and is the default for new and resumed sessions and reviews.";
 
-  const agentModelLabel = document.createElement("label");
-  agentModelLabel.textContent = "Model";
   const agentModelSel = document.createElement("select");
   agentModelSel.name = "agentModel";
   const def = document.createElement("option");
@@ -741,11 +802,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   agentModelSel.value = chosenAgent.models.some((m) => m.id === model.agentModel) ? model.agentModel : "";
   agentModelSel.addEventListener("change", () => h.onAgentModel(agentSel.value as Harness, agentModelSel.value));
-  agentModelLabel.append(agentModelSel);
-  general.append(agentModelLabel);
 
-  const themeLabel = document.createElement("label");
-  themeLabel.textContent = "Theme";
   const themeSel = document.createElement("select");
   themeSel.name = "colorTheme";
   for (const [value, text] of COLOR_THEMES) {
@@ -756,31 +813,28 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   themeSel.value = model.colorTheme ?? "dark";
   themeSel.addEventListener("change", () => h.onColorTheme?.(asColorTheme(themeSel.value)));
-  themeLabel.append(themeSel);
-  general.append(themeLabel);
 
   renderKeyboard(keyboard, model.keys ?? defaultKeys(), h);
 
+  const agentRow = row({ label: "Agent", help: agentHelp, control: agentSel });
+  agentRow.querySelector(".settings__help")!.setAttribute("data-for", "agent");
+  const updateRows: HTMLElement[] = [];
   if (model.version) {
-    const version = document.createElement("div");
-    version.className = "settings__hint settings__version";
-    version.textContent = `Maya ${model.version}`;
-    if (model.updatesOn && h.onCheckUpdates) {
-      const check = document.createElement("button");
-      check.type = "button";
-      check.dataset.action = "check-updates";
-      check.textContent = "Check for updates";
-      check.addEventListener("click", () => h.onCheckUpdates?.());
-      version.append(" ", check);
-      if (model.updateStatus) {
-        const status = document.createElement("span");
-        status.className = "settings__update-status";
-        status.textContent = model.updateStatus;
-        version.append(" ", status);
-      }
-    }
-    general.append(version);
+    const checking = model.updatesOn && h.onCheckUpdates;
+    const versionRow = row({
+      label: `Maya ${model.version}`,
+      help: checking ? model.updateStatus : undefined,
+      control: checking ? settingsBtn("Check for updates", { action: "check-updates" }, () => h.onCheckUpdates?.()) : undefined,
+    });
+    versionRow.querySelector(".settings__label")!.classList.add("settings__version");
+    versionRow.querySelector(".settings__help")?.classList.add("settings__update-status");
+    updateRows.push(versionRow);
   }
+  general.append(
+    group({ title: "Agent" }, card(agentRow, row({ label: "Model", control: agentModelSel }))),
+    group({ title: "Appearance" }, card(row({ label: "Theme", control: themeSel }))),
+    ...(updateRows.length > 0 ? [group({ title: "Updates" }, card(...updateRows))] : []),
+  );
 
   const net = model.network ?? DEFAULT_NETWORK_STATUS;
   const netRole = model.networkRole ?? net.role;
@@ -790,66 +844,71 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   const netName = model.networkName ?? "";
   const netCode = model.networkCode ?? "";
 
-  const status = document.createElement("div");
-  status.className = "settings__status";
-  status.textContent =
+  // A hook row: the status sentence is the help, the state and button are the
+  // control. The button's full text stays as its accessible name.
+  const hookRow = (
+    label: string,
+    help: string,
+    installed: boolean | null,
+    button: { action: string; text: string; disabled: boolean; onClick: () => void },
+  ) => {
+    const b = settingsBtn(installed ? "Remove" : "Install", { action: button.action, kind: installed ? "quiet" : "plain", disabled: button.disabled }, button.onClick);
+    b.setAttribute("aria-label", button.text);
+    return row({
+      label,
+      help,
+      control: [...(installed === null ? [] : [state(installed ? "Installed" : "Not installed", installed ? "on" : "off")]), b],
+    });
+  };
+
+  const hookRowEl = hookRow(
+    "Claude Code hook",
     model.hookInstalled === null
       ? "Checking Claude Code hook…"
       : model.hookInstalled
         ? "Claude Code hook is installed. Awaiting Decision and Completed are precise."
-        : "Claude Code hook is not installed. Permission prompts will show as Working.";
-  sessions.append(status);
-
-  const btn = document.createElement("button");
-  btn.type = "button";
-  if (model.hookInstalled) {
-    btn.dataset.action = "remove";
-    btn.textContent = "Remove Claude hook";
-    btn.addEventListener("click", () => h.onRemove());
-  } else {
-    btn.dataset.action = "install";
-    btn.textContent = "Install Claude hook";
-    btn.disabled = model.hookInstalled === null;
-    btn.addEventListener("click", () => h.onInstall());
-  }
-  sessions.append(btn);
+        : "Claude Code hook is not installed. Permission prompts will show as Working.",
+    model.hookInstalled,
+    model.hookInstalled
+      ? { action: "remove", text: "Remove Claude hook", disabled: false, onClick: () => h.onRemove() }
+      : { action: "install", text: "Install Claude hook", disabled: model.hookInstalled === null, onClick: () => h.onInstall() },
+  );
 
   const line = model.statusline ?? null;
-  const lineStatus = document.createElement("div");
-  lineStatus.className = "settings__status";
-  lineStatus.textContent =
+  const lineRowEl = hookRow(
+    "Usage status line",
     line === null
       ? "Checking status line…"
       : line.blockedBy
         ? `Usage and limits cannot be recorded: the status line is set in ${line.blockedBy}.`
         : line.installed
           ? "Usage and limits are recorded from Claude Code's status line."
-          : "Usage and limits are not recorded. Install the status line wrapper to see them in session windows.";
-  const lineButton = document.createElement("button");
-  lineButton.type = "button";
-  lineButton.dataset.action = line?.installed ? "remove-statusline" : "install-statusline";
-  lineButton.textContent = line?.installed ? "Remove usage status line" : "Install usage status line";
-  lineButton.disabled = line === null || !!line.blockedBy;
-  lineButton.addEventListener("click", () => line?.installed ? h.onStatuslineRemove?.() : h.onStatuslineInstall?.());
-  sessions.append(lineStatus, lineButton);
+          : "Usage and limits are not recorded. Install the status line wrapper to see them in session windows.",
+    line === null ? null : line.installed,
+    {
+      action: line?.installed ? "remove-statusline" : "install-statusline",
+      text: line?.installed ? "Remove usage status line" : "Install usage status line",
+      disabled: line === null || !!line.blockedBy,
+      onClick: () => line?.installed ? h.onStatuslineRemove?.() : h.onStatuslineInstall?.(),
+    },
+  );
 
-  const codexStatus = document.createElement("div");
-  codexStatus.className = "settings__status";
-  codexStatus.textContent = model.codexHookInstalled == null
-    ? "Checking Codex hook…"
-    : model.codexHookInstalled
-      ? "Codex hook is installed. Restart Codex and use /hooks to review and trust it for session updates."
-      : "Codex hook is not installed. Session state is inferred from transcripts.";
-  const codexButton = document.createElement("button");
-  codexButton.type = "button";
-  codexButton.dataset.action = model.codexHookInstalled ? "remove-codex" : "install-codex";
-  codexButton.textContent = model.codexHookInstalled ? "Remove Codex hook" : "Install Codex hook";
-  codexButton.disabled = model.codexHookInstalled == null;
-  codexButton.addEventListener("click", () => model.codexHookInstalled ? h.onCodexRemove?.() : h.onCodexInstall?.());
-  sessions.append(codexStatus, codexButton);
+  const codexRowEl = hookRow(
+    "Codex hook",
+    model.codexHookInstalled == null
+      ? "Checking Codex hook…"
+      : model.codexHookInstalled
+        ? "Codex hook is installed. Restart Codex and use /hooks to review and trust it for session updates."
+        : "Codex hook is not installed. Session state is inferred from transcripts.",
+    model.codexHookInstalled ?? null,
+    {
+      action: model.codexHookInstalled ? "remove-codex" : "install-codex",
+      text: model.codexHookInstalled ? "Remove Codex hook" : "Install Codex hook",
+      disabled: model.codexHookInstalled == null,
+      onClick: () => model.codexHookInstalled ? h.onCodexRemove?.() : h.onCodexInstall?.(),
+    },
+  );
 
-  const label = document.createElement("label");
-  label.textContent = "Completed decays to Idle after (minutes)";
   const input = document.createElement("input");
   input.type = "number";
   input.name = "timeout";
@@ -859,21 +918,17 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const n = Number(input.value);
     if (Number.isFinite(n) && n >= 1) h.onTimeout(Math.floor(n));
   });
-  label.append(input);
-  sessions.append(label);
+  const minutes = document.createElement("span");
+  minutes.textContent = "minutes";
 
-  const dirLabel = document.createElement("label");
-  dirLabel.textContent = "Projects directory";
   const dirInput = document.createElement("input");
   dirInput.type = "text";
   dirInput.name = "projectsDir";
+  dirInput.className = "mono";
   dirInput.placeholder = "~/dev";
   dirInput.value = model.projectsDir;
   dirInput.addEventListener("change", () => h.onProjectsDir(dirInput.value.trim()));
-  dirLabel.append(dirInput);
-  sessions.append(dirLabel);
-  const viewerLabel = document.createElement("label");
-  viewerLabel.textContent = "Session viewer";
+
   const viewerSel = document.createElement("select");
   viewerSel.name = "viewerTheme";
   for (const [value, text] of [["chat", "Chat"], ["terminal", "Terminal"]] as const) {
@@ -884,10 +939,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   viewerSel.value = model.viewerTheme ?? "chat";
   viewerSel.addEventListener("change", () => h.onViewerTheme?.(viewerSel.value as ViewerTheme));
-  viewerLabel.append(viewerSel);
-  sessions.append(viewerLabel);
-  const terminalField = document.createElement("label");
-  terminalField.textContent = "New sessions open in";
+
   const terminalSel = document.createElement("select");
   terminalSel.name = "newSessionTerminal";
   const choices = terminalChoices();
@@ -900,243 +952,183 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   const saved = model.newSessionTerminal ?? "terminal";
   terminalSel.value = choices.some(([value]) => value === saved) ? saved : "terminal";
   terminalSel.addEventListener("change", () => h.onNewSessionTerminal?.(terminalSel.value as NewSessionTerminal));
-  terminalField.append(terminalSel);
-  sessions.append(terminalField);
 
-  const clonesLabel = document.createElement("label");
-  clonesLabel.textContent = "Clones directory (for reviews and worktrees)";
+  sessions.append(
+    group(
+      { title: "Session tracking", note: "Hooks let the agents tell Maya what they are doing, rather than her guessing from transcripts." },
+      card(hookRowEl, lineRowEl, codexRowEl),
+    ),
+    group({ title: "Board" }, card(
+      row({ label: "Completed decays to Idle after", control: [input, minutes] }),
+      row({ label: "Session viewer", control: viewerSel }),
+    )),
+    group({ title: "New sessions" }, card(
+      row({ label: "Projects directory", control: dirInput }),
+      row({ label: "Open in", control: terminalSel }),
+    )),
+  );
+
   const clonesInput = document.createElement("input");
   clonesInput.type = "text";
   clonesInput.name = "clonesDir";
+  clonesInput.className = "mono";
   clonesInput.placeholder = "~/dev/reviews";
   clonesInput.value = model.clonesDir;
   clonesInput.addEventListener("change", () => h.onClonesDir(clonesInput.value.trim()));
-  clonesLabel.append(clonesInput);
-  reviews.append(clonesLabel);
 
-  const reviewLabel = document.createElement("label");
-  reviewLabel.textContent = "Review prompt (for the Review button)";
   const reviewInput = document.createElement("textarea");
   reviewInput.name = "reviewPrompt";
-  reviewInput.rows = 4;
+  reviewInput.rows = 7;
   reviewInput.placeholder = DEFAULT_REVIEW_PROMPT;
   reviewInput.value = model.reviewPrompt;
   reviewInput.addEventListener("change", () => h.onReviewPrompt(reviewInput.value.trim()));
-  reviewLabel.append(reviewInput);
-  reviews.append(reviewLabel);
-  const reviewHint = document.createElement("div");
-  reviewHint.className = "settings__hint";
-  reviewHint.dataset.for = "reviewPrompt";
-  reviewHint.textContent = "Blank uses the built-in prompt. {number}, {repo} and {url} are filled in; a prompt that uses none gets \" PR #<number> (<url>)\" appended.";
-  reviews.append(reviewHint);
 
-  const notifyLabel = document.createElement("label");
-  notifyLabel.className = "settings__check";
-  const notifyBox = document.createElement("input");
-  notifyBox.type = "checkbox";
-  notifyBox.name = "notify";
-  notifyBox.checked = model.notifyOnAwaiting;
-  notifyBox.addEventListener("change", () => h.onNotify(notifyBox.checked));
-  notifyLabel.append(notifyBox, document.createTextNode(" Notify me when a session awaits a decision"));
-  notifications.append(notifyLabel);
+  reviews.append(
+    group({ title: "Reviews" }, card(
+      row({ label: "Clones directory", help: "For reviews and worktrees.", control: clonesInput }),
+      row({
+        label: "Review prompt",
+        help: "Blank uses the built-in prompt. {number}, {repo} and {url} are filled in; a prompt that uses none gets \" PR #<number> (<url>)\" appended.",
+        control: reviewInput,
+        stack: true,
+      }),
+    )),
+    group({ title: "Your pull requests" }, card(row({
+      label: "Notify me when a PR assigned to me is approved or needs changes",
+      control: toggle("notifyPrReview", model.notifyOnPrReview !== false, (on) => h.onNotifyPrReview?.(on)),
+    }))),
+  );
 
-  const prLabel = document.createElement("label");
-  prLabel.className = "settings__check";
-  const prBox = document.createElement("input");
-  prBox.type = "checkbox";
-  prBox.name = "notifyPrReview";
-  prBox.checked = model.notifyOnPrReview !== false;
-  prBox.addEventListener("change", () => h.onNotifyPrReview?.(prBox.checked));
-  prLabel.append(prBox, document.createTextNode(" Notify me when a PR assigned to me is approved or needs changes"));
-  reviews.append(prLabel);
+  debug.append(
+    group({}, card(row({
+      label: "Debug mode",
+      help: "Shows the Debug tab and Maya's own card.",
+      control: toggle("debug-mode", model.debugMode === true, (on) => h.onDebugMode?.(on)),
+    }))),
+  );
 
-  const debugLabel = document.createElement("label");
-  debugLabel.className = "settings__check";
-  const debugBox = document.createElement("input");
-  debugBox.type = "checkbox";
-  debugBox.name = "debug-mode";
-  debugBox.checked = model.debugMode === true;
-  debugBox.addEventListener("change", () => h.onDebugMode?.(debugBox.checked));
-  debugLabel.append(debugBox, document.createTextNode(" Debug mode: show the Debug tab and Maya's own card"));
-  debug.append(debugLabel);
+  const notes = renderReleaseNotes();
+  for (const heading of notes.querySelectorAll(".release-notes__version")) {
+    if (heading.textContent === `Maya ${RUNNING_VERSION}`) {
+      const pill = document.createElement("span");
+      pill.className = "settings__running";
+      pill.textContent = "Running";
+      heading.append(pill);
+    }
+  }
+  const rn = document.createElement("div");
+  rn.className = "settings__rn";
+  const img = document.createElement("img");
+  img.className = "settings__rn-art";
+  img.alt = "";
+  img.src = art;
+  rn.append(img, notes);
+  releaseNotes.append(rn);
 
-  releaseNotes.append(renderReleaseNotes());
-
+  const gitCards: HTMLElement[] = [];
   for (const conn of model.git ?? gitConnections(null)) {
     const p = conn.provider;
     const status = model.gitStatus?.[p] ?? { hasToken: false };
-    const box = document.createElement("div");
-    box.className = "settings__git";
-    box.dataset.provider = p;
-
-    const onLabel = document.createElement("label");
-    onLabel.className = "settings__check";
-    const on = document.createElement("input");
-    on.type = "checkbox";
-    on.name = `gitEnabled-${p}`;
-    on.checked = conn.enabled;
-    on.addEventListener("change", () => h.onGitEnabled?.(p, on.checked));
-    onLabel.append(on, document.createTextNode(` ${GIT_LABEL[p]}`));
-    box.append(onLabel);
+    const off = !conn.enabled;
+    const rows: HTMLElement[] = [
+      cardHead({
+        label: GIT_LABEL[p],
+        control: toggle(`gitEnabled-${p}`, conn.enabled, (on) => h.onGitEnabled?.(p, on), `Use ${GIT_LABEL[p]}`),
+      }),
+    ];
 
     if (p === "gitlab") {
-      const urlLabel = document.createElement("label");
-      urlLabel.textContent = "URL";
       const url = document.createElement("input");
       url.type = "text";
+      url.className = "mono";
       url.name = "gitBaseUrl-gitlab";
       url.placeholder = "https://gitlab.com";
       url.value = conn.baseUrl ?? "";
-      url.disabled = !conn.enabled;
+      url.disabled = off;
       url.addEventListener("change", () => h.onGitBaseUrl?.(url.value.trim()));
-      urlLabel.append(url);
-      box.append(urlLabel);
+      rows.push(row({ label: "URL", control: url }));
     }
 
-    const kinds = document.createElement("div");
-    kinds.className = "settings__git-kinds";
-    for (const [kind, text] of [["stored", "Paste a token"], ["env", "From env var"]] as const) {
-      const l = document.createElement("label");
-      l.className = "settings__check";
-      const r = document.createElement("input");
-      r.type = "radio";
-      r.name = `gitTokenKind-${p}`;
-      r.value = kind;
-      r.checked = conn.token.kind === kind;
-      r.disabled = !conn.enabled;
-      r.addEventListener("change", () => h.onGitTokenKind?.(p, kind));
-      l.append(r, document.createTextNode(` ${text}`));
-      kinds.append(l);
-    }
-    box.append(kinds);
-
-    const clones = document.createElement("div");
-    clones.className = "settings__git-kinds";
-    clones.append(document.createTextNode("Clone with "));
-    for (const [protocol, text] of [["ssh", "SSH"], ["https", "HTTPS"]] as const) {
-      const l = document.createElement("label");
-      l.className = "settings__check";
-      const r = document.createElement("input");
-      r.type = "radio";
-      r.name = `gitClone-${p}`;
-      r.value = protocol;
-      r.checked = (conn.clone ?? "ssh") === protocol;
-      r.disabled = !conn.enabled;
-      r.addEventListener("change", () => h.onGitClone?.(p, protocol));
-      l.append(r, document.createTextNode(` ${text}`));
-      clones.append(l);
-    }
-    box.append(clones);
+    rows.push(row({
+      label: "Token",
+      help: p === "github" ? "Needs the repo scope." : "Needs read_api.",
+      control: choice(`gitTokenKind-${p}`, [["stored", "Paste a token"], ["env", "From env var"]] as const, conn.token.kind, (kind) => h.onGitTokenKind?.(p, kind), off),
+      tag: "div",
+    }));
 
     if (conn.token.kind === "stored") {
-      const tokLabel = document.createElement("label");
-      tokLabel.textContent = `${GIT_LABEL[p]} token`;
       const tok = document.createElement("input");
       tok.type = "password";
       tok.name = `gitToken-${p}`;
       tok.autocomplete = "off";
-      tok.disabled = !conn.enabled;
-      tok.placeholder = status.hasToken ? `saved in ${secretStore()}; paste to replace` : "paste your token";
+      tok.disabled = off;
+      tok.placeholder = status.hasToken ? "paste to replace" : "paste your token";
       tok.addEventListener("change", () => {
         const t = tok.value.trim();
         tok.value = "";
         if (t) h.onGitToken?.(p, t);
       });
-      tokLabel.append(tok);
-      box.append(tokLabel);
-      if (status.hasToken) {
-        const clear = document.createElement("button");
-        clear.type = "button";
-        clear.className = "settings__link";
-        clear.dataset.action = "git-clear";
-        clear.textContent = "Clear";
-        clear.addEventListener("click", () => h.onGitClearToken?.(p));
-        box.append(clear);
-      }
+      const controls: HTMLElement[] = [tok];
+      if (status.hasToken) controls.push(settingsBtn("Clear", { action: "git-clear", kind: "quiet" }, () => h.onGitClearToken?.(p)));
+      rows.push(row({ label: `${GIT_LABEL[p]} token`, help: status.hasToken ? `Saved in ${secretStore()}.` : null, control: controls }));
     } else {
-      const envLabel = document.createElement("label");
-      envLabel.textContent = "Variable";
       const env = document.createElement("input");
       env.type = "text";
+      env.className = "mono";
       env.name = `gitEnvName-${p}`;
       env.placeholder = GIT_DEFAULT_ENV[p];
       env.value = conn.token.name;
-      env.disabled = !conn.enabled;
+      env.disabled = off;
       env.addEventListener("change", () => h.onGitEnvName?.(p, env.value.trim()));
-      envLabel.append(env);
-      box.append(envLabel);
+      rows.push(row({ label: "Variable", control: env }));
     }
 
-    const test = document.createElement("button");
-    test.type = "button";
-    test.className = "settings__link";
-    test.dataset.action = "git-test";
-    test.textContent = "Test";
-    test.disabled = !conn.enabled;
-    test.addEventListener("click", () => h.onGitTest?.(p));
-    box.append(test);
+    rows.push(row({
+      label: "Clone with",
+      control: choice(`gitClone-${p}`, [["ssh", "SSH"], ["https", "HTTPS"]] as const, conn.clone ?? "ssh", (protocol) => h.onGitClone?.(p, protocol), off),
+      tag: "div",
+    }));
+
+    let outcome: Node = document.createTextNode("");
     if (status.test) {
-      const out = document.createElement("div");
-      out.className = "settings__hint settings__git-test";
+      const out = document.createElement("span");
+      out.className = "settings__git-test";
       out.textContent = status.test;
-      box.append(out);
+      outcome = out;
     }
-    git.append(box);
+    rows.push(footRow(outcome, settingsBtn("Test", { action: "git-test", disabled: off }, () => h.onGitTest?.(p))));
+
+    const c = card(...rows);
+    c.classList.add("settings__git");
+    if (off) c.classList.add("settings__card--off");
+    c.dataset.provider = p;
+    gitCards.push(c);
   }
-  const gitHint = document.createElement("div");
-  gitHint.className = "settings__hint";
-  gitHint.textContent = "Maya reads pull requests and merge requests with these tokens. GitHub needs the repo scope; GitLab needs read_api. Reviews clone over SSH or HTTPS with your own git credentials.";
-  git.append(gitHint);
+  git.append(group({}, ...gitCards));
 
   const workItemsConfigNow = model.workItems ?? workItemsConfig(null);
   const connections = model.git ?? gitConnections(null);
+  const sourcesOpen = model.sourcesOpen ?? {};
+  // Opening or folding a source changes the DOM in place (see `source`); the
+  // model and this device remember it, so a repaint draws it the same way.
+  const rememberSource = (key: string, open: boolean) => setSourcesOpen(model, { [key]: open });
+  const sources: HTMLElement[] = [];
+  let ruleIds = 0;
   for (const forge of ["github", "gitlab"] as const) {
     const cfg = workItemsConfigNow[forge];
+    const label = GIT_LABEL[forge];
     const gitOn = connections.find((c) => c.provider === forge)?.enabled === true;
-    const box = document.createElement("div");
-    box.className = "settings__git settings__workitems";
-    box.dataset.forge = forge;
-
-    const onLabel = document.createElement("label");
-    onLabel.className = "settings__check";
-    const on = document.createElement("input");
-    on.type = "checkbox";
-    on.name = `wi-${forge}-enabled`;
-    on.checked = cfg.enabled;
-    onLabel.append(on, document.createTextNode(` ${GIT_LABEL[forge]}`));
-    box.append(onLabel);
-
-    if (!gitOn) {
-      const off = document.createElement("div");
-      off.className = "settings__hint";
-      off.append(document.createTextNode(`${GIT_LABEL[forge]} is off in Settings → Git. `));
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "settings__link";
-      open.dataset.action = "wi-open-git";
-      open.textContent = "Open Git settings";
-      open.addEventListener("click", () => h.onOpenGroup?.("git"));
-      off.append(open);
-      box.append(off);
-    }
+    const gitOffText = `${label} is off in Settings → Git.`;
+    const on = toggle(`wi-${forge}-enabled`, cfg.enabled, () => save(), `Use ${label}`);
 
     const rulesBox = document.createElement("div");
     rulesBox.className = "settings__rules";
-    const caption = document.createElement("div");
-    caption.className = "settings__hint";
-    caption.textContent = "Issues to pick up, by rule";
-    rulesBox.append(caption);
 
-    const statusLabel = document.createElement("label");
-    statusLabel.textContent = "Status labels (in order, comma-separated)";
     const status = document.createElement("input");
     status.type = "text";
     status.name = "wi-statusLabels";
     status.value = cfg.statusLabels.join(", ");
-    statusLabel.append(status);
 
-    const startLabel = document.createElement("label");
-    startLabel.textContent = "On Start, set status to";
     const start = document.createElement("select");
     start.name = "wi-startStatus";
     const fillStart = (labels: string[], chosen: string | null) => {
@@ -1154,28 +1146,27 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       start.value = chosen !== null && labels.includes(chosen) ? chosen : "";
     };
     fillStart(cfg.statusLabels, cfg.startStatus);
-    startLabel.append(start);
 
-    const trackerLabel = document.createElement("label");
-    trackerLabel.textContent = "Tracker-only repositories (comma-separated)";
     const tracker = document.createElement("input");
     tracker.type = "text";
     tracker.name = "wi-trackerRepos";
+    tracker.className = "mono";
     tracker.value = cfg.trackerRepos.join(", ");
-    trackerLabel.append(tracker);
 
-    /** The settings as the page shows them; a rule for someone with no login yet reads as such. */
+    /** One rule as its box shows it; someone with no login yet reads as such. */
+    const readRule = (r: HTMLElement): ItemRule => {
+      const kind = r.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!.value;
+      const login = r.querySelector<HTMLInputElement>("input[name=wi-login]")!.value.trim();
+      return {
+        assignee: kind === "user" ? { kind: "user", login } : kind === "anyone" ? { kind: "anyone" } : { kind: "me" },
+        labels: commaList(r.querySelector<HTMLInputElement>("input[name=wi-labels]")!.value),
+        repos: commaList(r.querySelector<HTMLInputElement>("input[name=wi-repos]")!.value),
+      };
+    };
+    /** The settings as the page shows them. */
     const read = (): ForgeItems => ({
       enabled: on.checked,
-      rules: [...rulesBox.querySelectorAll<HTMLElement>(".settings__rule")].map((r) => {
-        const kind = r.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!.value;
-        const login = r.querySelector<HTMLInputElement>("input[name=wi-login]")!.value.trim();
-        return {
-          assignee: kind === "user" ? { kind: "user", login } : kind === "anyone" ? { kind: "anyone" } : { kind: "me" },
-          labels: commaList(r.querySelector<HTMLInputElement>("input[name=wi-labels]")!.value),
-          repos: commaList(r.querySelector<HTMLInputElement>("input[name=wi-repos]")!.value),
-        };
-      }),
+      rules: [...rulesBox.querySelectorAll<HTMLElement>(".settings__rule")].map(readRule),
       statusLabels: commaList(status.value),
       startStatus: start.value === "" ? null : start.value,
       trackerRepos: commaList(tracker.value),
@@ -1187,20 +1178,25 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       h.onWorkItems?.(forge, items);
     };
 
+    const add = addButton("+ Add rule", "wi-add-rule", () => {
+      const items = read();
+      items.rules.push({ assignee: { kind: "me" }, labels: [], repos: [] });
+      save(items);
+    });
+
     const addRule = (rule: ItemRule) => {
+      const id = `wi-${forge}-rule-${ruleIds++}`;
       const r = document.createElement("div");
       r.className = "settings__rule";
-      const field = (text: string, control: HTMLElement) => {
-        const f = document.createElement("div");
-        f.className = "settings__rule-field";
-        const c = document.createElement("span");
-        c.className = "settings__hint";
-        c.textContent = text;
-        f.append(c, control);
-        return f;
+      const fieldLabel = (text: string, forId: string) => {
+        const l = document.createElement("label");
+        l.htmlFor = forId;
+        l.textContent = text;
+        return l;
       };
       const assignee = document.createElement("select");
       assignee.name = "wi-assignee";
+      assignee.id = `${id}-assignee`;
       for (const [value, text] of [["me", "Me"], ["user", "Someone"], ["anyone", "Anyone"]]) {
         const o = document.createElement("option");
         o.value = value;
@@ -1224,46 +1220,52 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       const labels = document.createElement("input");
       labels.type = "text";
       labels.name = "wi-labels";
+      labels.id = `${id}-labels`;
       labels.placeholder = "bug, urgent";
       labels.value = rule.labels.join(", ");
       labels.addEventListener("change", () => save());
       const repos = document.createElement("input");
       repos.type = "text";
       repos.name = "wi-repos";
+      repos.id = `${id}-repos`;
+      repos.className = "mono";
       repos.placeholder = "any repository";
       repos.value = rule.repos.join(", ");
       repos.addEventListener("change", () => save());
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "settings__link";
-      remove.dataset.action = "wi-remove-rule";
-      remove.setAttribute("aria-label", "Remove rule");
-      remove.textContent = "✕";
-      remove.addEventListener("click", () => {
+      const remove = settingsBtn("Remove", { action: "wi-remove-rule", kind: "quiet" }, () => {
         r.remove();
         save();
       });
+      remove.classList.add("settings__btn--danger");
+      remove.setAttribute("aria-label", "Remove rule");
+
+      const head = document.createElement("div");
+      head.className = "settings__rule-head";
+      const sum = document.createElement("span");
+      sum.className = "settings__rule-sum";
+      sum.textContent = ruleSummary(rule);
+      head.append(sum, remove);
+      // The head follows the fields as they are typed, before any save.
+      const sumUp = () => { sum.textContent = ruleSummary(readRule(r)); };
+      r.addEventListener("input", sumUp);
+      r.addEventListener("change", sumUp);
+
       const who = document.createElement("div");
       who.className = "settings__rule-who";
       who.append(assignee, login);
-      r.append(field("Assignee", who), field("Labels", labels), field("Repositories", repos), remove);
-      rulesBox.append(r);
+      const body = document.createElement("div");
+      body.className = "settings__rule-body";
+      body.append(
+        fieldLabel("Assignee", assignee.id), who,
+        fieldLabel("Labels", labels.id), labels,
+        fieldLabel("Repositories", repos.id), repos,
+      );
+      r.append(head, body);
+      rulesBox.insertBefore(r, add);
     };
+    rulesBox.append(add);
     for (const rule of cfg.rules) addRule(rule);
 
-    const add = document.createElement("button");
-    add.type = "button";
-    add.className = "settings__link";
-    add.dataset.action = "wi-add-rule";
-    add.textContent = "+ Add rule";
-    add.addEventListener("click", () => {
-      const items = read();
-      items.rules.push({ assignee: { kind: "me" }, labels: [], repos: [] });
-      save(items);
-    });
-    rulesBox.append(add);
-
-    on.addEventListener("change", () => save());
     status.addEventListener("change", () => {
       // The On Start choices follow the labels just typed.
       fillStart(commaList(status.value), start.value);
@@ -1272,18 +1274,48 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     start.addEventListener("change", () => save());
     tracker.addEventListener("change", () => save());
 
-    box.append(rulesBox, statusLabel, startLabel, trackerLabel);
-    const hint = document.createElement("div");
-    hint.className = "settings__hint";
-    hint.textContent = WORK_ITEMS_HINT[forge];
-    box.append(hint);
-
+    const body: HTMLElement[] = [];
     if (!gitOn) {
-      for (const el of box.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select, button")) {
-        if (el !== on && el.dataset.action !== "wi-open-git") el.disabled = true;
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "settings__link";
+      open.dataset.action = "wi-open-git";
+      open.textContent = "Open Git settings";
+      open.addEventListener("click", () => h.onOpenGroup?.("git"));
+      body.push(row({ label: gitOffText, control: open }));
+    }
+    const hint = document.createElement("span");
+    hint.className = "settings__help";
+    hint.textContent = WORK_ITEMS_HINT[forge];
+    body.push(
+      row({ label: "Issues to pick up", help: "An issue shows when it matches any one of these rules.", control: rulesBox, stack: true }),
+      row({ label: "Status labels", help: "In order, comma-separated.", control: status, idScope: forge }),
+      row({ label: "On Start, set status to", control: start }),
+      row({ label: "Tracker-only repositories", help: "Comma-separated.", control: tracker, idScope: forge }),
+      footRow(hint),
+    );
+    if (!gitOn) {
+      for (const part of body) {
+        for (const el of part.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select, button")) {
+          if (el.dataset.action !== "wi-open-git") el.disabled = true;
+        }
       }
     }
-    workItems.append(box);
+
+    const box = source({
+      key: forge,
+      name: label,
+      summary: gitOn ? forgeSummary(cfg) : gitOffText,
+      stateText: !gitOn ? "Git off" : cfg.enabled ? "On" : "Off",
+      stateOn: gitOn && cfg.enabled,
+      open: sourcesOpen[forge] === true,
+      onToggle: (open) => rememberSource(forge, open),
+      control: on,
+      body,
+    });
+    box.classList.add("settings__git", "settings__workitems");
+    box.dataset.forge = forge;
+    sources.push(box);
   }
 
   const customTools = workItemsConfigNow.custom ?? [];
@@ -1301,166 +1333,127 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       };
     });
   const sendCustom = (tools: CustomTool[]) => h.onCustomTools?.(tools);
+  const optional = (text: string) => {
+    const f = document.createDocumentFragment();
+    const unit = document.createElement("span");
+    unit.className = "settings__unit";
+    unit.textContent = "(optional)";
+    f.append(`${text} `, unit);
+    return f;
+  };
   customTools.forEach((tool, i) => {
-    const box = document.createElement("div");
-    box.className = "settings__git settings__custom";
-    box.dataset.tool = tool.id;
     const change = () => sendCustom(readCustom());
+    const on = toggle(`ct-${i}-enabled`, tool.enabled, change, "Use this tool");
 
-    const head = document.createElement("div");
-    head.className = "settings__check";
-    const on = document.createElement("input");
-    on.type = "checkbox";
-    on.name = `ct-${i}-enabled`;
-    on.setAttribute("aria-label", "Use this tool");
-    on.checked = tool.enabled;
-    on.addEventListener("change", change);
-    const name = document.createElement("input");
-    name.type = "text";
-    name.name = `ct-${i}-name`;
-    name.setAttribute("aria-label", "Tool name");
-    name.placeholder = "Linear (mine-only)";
-    name.value = tool.name;
-    name.addEventListener("change", () => {
-      name.value = name.value.trim();
-      change();
-    });
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "settings__link";
-    remove.dataset.action = "ct-remove";
-    remove.setAttribute("aria-label", "Remove custom tool");
-    remove.textContent = "✕";
-    remove.addEventListener("click", () => {
-      const at = [...workItems.querySelectorAll(".settings__custom")].indexOf(box);
-      sendCustom(readCustom().filter((_, j) => j !== at));
-    });
-    head.append(on, name, remove);
-    box.append(head);
-
-    const text = (label: string, key: "listCommand" | "startCommand" | "me", suffix: string) => {
-      const l = document.createElement("label");
-      l.append(document.createTextNode(label));
+    const text = (key: "name" | "listCommand" | "startCommand" | "me", suffix: string, mono: boolean) => {
       const el = document.createElement("input");
       el.type = "text";
       el.name = `ct-${i}-${suffix}`;
+      if (mono) el.className = "mono";
       el.value = tool[key];
       el.addEventListener("change", () => {
         el.value = el.value.trim();
         change();
       });
-      l.append(el);
-      box.append(l);
+      return el;
     };
-    text("List command", "listCommand", "list");
-    text("On-start command (optional)", "startCommand", "start");
-    text("Your name there (optional)", "me", "me");
-    const meHint = document.createElement("div");
-    meHint.className = "settings__hint";
-    meHint.textContent = "Start asks before taking over an item assigned to someone else. Blank: it never asks.";
-    box.append(meHint);
+    const name = text("name", "name", false);
+    name.setAttribute("aria-label", "Tool name");
+    name.placeholder = "Linear (mine-only)";
 
     const details = document.createElement("details");
+    details.className = "settings__details";
+    details.open = model.customDetailsOpen?.[tool.id] === true;
+    details.addEventListener("toggle", () => {
+      model.customDetailsOpen = { ...model.customDetailsOpen, [tool.id]: details.open };
+    });
     const summary = document.createElement("summary");
-    summary.textContent = "Show the output format and an example script";
-    const listHint = document.createElement("div");
-    listHint.className = "settings__hint";
-    listHint.textContent = "The list command runs every 2 minutes through your shell and must finish within 30 seconds. It prints JSON like the example; id, title and url are required. repo is owner/name, github:owner/name, gitlab:group/name or a clone URL; without one, Maya picks the repository when you start.";
-    const startHint = document.createElement("div");
-    startHint.className = "settings__hint";
-    startHint.textContent = "The on-start command runs when you press Start, with the item's JSON on its input, to assign or move it in your tool. On macOS and Linux, anything a command leaves running is stopped when it ends.";
+    summary.textContent = "Output format and an example script";
+    const detailsBody = document.createElement("div");
+    detailsBody.className = "settings__details-body";
+    const listHint = document.createElement("span");
+    listHint.textContent = "It prints JSON like this; id, title and url are required. repo is owner/name, github:owner/name, gitlab:group/name or a clone URL; without one, Maya picks the repository when you start.";
     const format = document.createElement("pre");
     format.textContent = CUSTOM_TOOL_FORMAT;
     const script = document.createElement("pre");
     script.textContent = CUSTOM_TOOL_SCRIPT;
-    details.append(summary, listHint, startHint, format, script);
-    box.append(details);
-    workItems.append(box);
-  });
-  const addTool = document.createElement("button");
-  addTool.type = "button";
-  addTool.className = "settings__link";
-  addTool.dataset.action = "ct-add";
-  addTool.textContent = "+ Add New";
-  addTool.addEventListener("click", () => sendCustom([...readCustom(), { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]));
-  workItems.append(addTool);
+    const stopHint = document.createElement("span");
+    stopHint.textContent = "On macOS and Linux, anything a command leaves running is stopped when it ends.";
+    detailsBody.append(listHint, format, script, stopHint);
+    details.append(summary, detailsBody);
 
-  const workLabel = document.createElement("label");
-  workLabel.textContent = "Work prompt";
+    const remove = settingsBtn("Remove this tool", { action: "ct-remove", kind: "quiet" }, () => {
+      const at = [...workItems.querySelectorAll(".settings__custom")].indexOf(box);
+      sendCustom(readCustom().filter((_, j) => j !== at));
+    });
+    remove.classList.add("settings__btn--danger");
+
+    const box = source({
+      key: tool.id,
+      name: tool.name,
+      tag: "Custom tool",
+      summary: tool.listCommand,
+      monoSummary: true,
+      stateText: tool.enabled ? "On" : "Off",
+      stateOn: tool.enabled,
+      open: sourcesOpen[tool.id] === true,
+      onToggle: (open) => rememberSource(tool.id, open),
+      control: on,
+      body: [
+        row({ label: "Name", help: "How its items are labelled on the Issues tab.", control: name }),
+        row({ label: "List command", help: "Runs every 2 minutes through your shell, and must finish within 30 seconds.", control: text("listCommand", "list", true), stack: true }),
+        row({ label: optional("On-start command"), help: "Runs when you press Start, with the item's JSON on its input, to assign or move it in your tool.", control: text("startCommand", "start", true), stack: true }),
+        row({ label: optional("Your name there"), help: "Start asks before taking over an item assigned to someone else. Blank: it never asks.", control: text("me", "me", false) }),
+        details,
+        footRow(document.createTextNode(""), remove),
+      ],
+    });
+    box.classList.add("settings__git", "settings__custom");
+    box.dataset.tool = tool.id;
+    sources.push(box);
+  });
+  const addTool = addButton("+ Add a custom tool", "ct-add", () =>
+    sendCustom([...readCustom(), { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]),
+  );
+
   const workInput = document.createElement("textarea");
   workInput.name = "workPrompt";
-  workInput.rows = 4;
+  workInput.rows = 6;
+  workInput.setAttribute("aria-label", "Work prompt");
   workInput.value = workItemsConfigNow.prompt;
   workInput.addEventListener("change", () => h.onWorkPrompt?.(workInput.value.trim()));
-  workLabel.append(workInput);
-  workItems.append(workLabel);
-  const workHint = document.createElement("div");
-  workHint.className = "settings__hint";
-  workHint.dataset.for = "workPrompt";
-  workHint.textContent = "Blank uses the built-in prompt. {id}, {title}, {url}, {description} and {repo} are filled in.";
-  workItems.append(workHint);
 
-  const speakLabel = document.createElement("label");
-  speakLabel.className = "settings__check";
-  const speakBox = document.createElement("input");
-  speakBox.type = "checkbox";
-  speakBox.name = "speak";
-  speakBox.checked = model.speakNotifications;
-  speakBox.addEventListener("change", () => h.onSpeak(speakBox.checked));
-  speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
-  notifications.append(speakLabel);
+  workItems.append(
+    group({ title: "Sources", note: "Open one to change what the Issues tab picks up from it." }, ...sources, addTool),
+    group({ title: "Work prompt" }, card(row({
+      help: "What Start tells the agent. Blank uses the built-in prompt. {id}, {title}, {url}, {description} and {repo} are filled in.",
+      control: workInput,
+      stack: true,
+    }))),
+  );
 
+  let focusFoot: HTMLElement | undefined;
   if (model.focusVisible === false) {
     // macOS keeps the Focus state from apps without Full Disk Access, so
     // Maya would speak through Do Not Disturb.
-    const focusHint = document.createElement("div");
-    focusHint.className = "settings__hint";
-    focusHint.dataset.for = "focus";
-    focusHint.textContent = "Maya cannot tell when a Focus mode such as Do Not Disturb is on, so she keeps speaking. Give her Full Disk Access to let a Focus mode keep her quiet; macOS then asks to quit and reopen her. ";
-    const open = document.createElement("button");
-    open.type = "button";
-    open.dataset.action = "full-disk-access";
-    open.textContent = "Open Full Disk Access";
-    open.addEventListener("click", () => h.onFullDiskAccess?.());
-    focusHint.append(open);
-    notifications.append(focusHint);
+    focusFoot = document.createElement("span");
+    focusFoot.dataset.for = "focus";
+    focusFoot.append("Maya cannot tell when a Focus mode such as Do Not Disturb is on, so she keeps speaking. Give her Full Disk Access to let a Focus mode keep her quiet; macOS then asks to quit and reopen her. ");
+    focusFoot.append(settingsBtn("Open Full Disk Access", { action: "full-disk-access" }, () => h.onFullDiskAccess?.()));
   }
+  notifications.append(
+    group({ foot: focusFoot }, card(
+      row({ label: "Notify me when a session awaits a decision", control: toggle("notify", model.notifyOnAwaiting, (on) => h.onNotify(on)) }),
+      row({ label: "Speak instead of a sound", help: "\"needs a decision\", \"is finished\"", control: toggle("speak", model.speakNotifications, (on) => h.onSpeak(on)) }),
+    )),
+  );
 
   // The live role, not the select: previewing Assistant before a Pair
   // succeeds must not untick listening on a machine that is not one yet.
   const isAssistant = model.network?.role === "assistant";
-  const listenLabel = document.createElement("label");
-  listenLabel.className = "settings__check";
-  const listenBox = document.createElement("input");
-  listenBox.type = "checkbox";
-  listenBox.name = "listen";
-  listenBox.checked = isAssistant ? false : model.listen;
+  const listenBox = toggle("listen", isAssistant ? false : model.listen, (on) => h.onListen(on));
   listenBox.disabled = isAssistant;
-  listenBox.addEventListener("change", () => h.onListen(listenBox.checked));
-  const word = model.listenWord?.trim() || "Maya";
-  listenLabel.append(listenBox, document.createTextNode(` Listen for "${word}" (on-device speech recognition)`));
-  listening.append(listenLabel);
-  if (isAssistant) {
-    // The main Maya owns notifications and listening while this machine is
-    // an assistant: say so right under the toggle rather than leave it
-    // looking merely unticked.
-    const note = document.createElement("div");
-    note.className = "settings__hint";
-    note.dataset.for = "listen";
-    note.textContent = "The main Maya notifies and listens for this machine.";
-    listening.append(note);
-  } else if (model.listenError) {
-    // The listener stopped on its own (Dictation off, no microphone…): say
-    // why right under the toggle, or an unticked box looks like a glitch.
-    const err = document.createElement("div");
-    err.className = "settings__error";
-    err.dataset.for = "listen";
-    err.textContent = model.listenError;
-    listening.append(err);
-  }
 
-  const wordLabel = document.createElement("label");
-  wordLabel.textContent = "Wake word";
   const wordInput = document.createElement("input");
   wordInput.type = "text";
   wordInput.name = "listenWord";
@@ -1468,16 +1461,13 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   wordInput.value = model.listenWord ?? "";
   wordInput.disabled = isAssistant;
   wordInput.addEventListener("change", () => h.onListenWord?.(wordInput.value.trim()));
-  wordLabel.append(wordInput);
-  listening.append(wordLabel);
-  const wordHint = document.createElement("div");
-  wordHint.className = "settings__hint";
-  wordHint.dataset.for = "listenWord";
-  wordHint.textContent = "Blank is \"Maya\". A phone joined to this Maya listens for the same word. Pick a word the speech recognition spells the way you type it.";
-  listening.append(wordHint);
+  const wordRow = row({
+    label: "Wake word",
+    help: "Blank is \"Maya\". A phone joined to this Maya listens for the same word. Pick a word the speech recognition spells the way you type it.",
+    control: wordInput,
+  });
+  wordRow.querySelector(".settings__help")!.setAttribute("data-for", "listenWord");
 
-  const recLabel = document.createElement("label");
-  recLabel.textContent = "Speech recognition";
   const rec = document.createElement("select");
   rec.name = "recognizer";
   for (const [v, text] of recognizerOptions()) {
@@ -1488,14 +1478,16 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   rec.value = model.recognizer;
   rec.addEventListener("change", () => h.onRecognizer(rec.value === "builtin" ? "builtin" : "system"));
-  recLabel.append(rec);
-  listening.append(recLabel);
+
+  const listenRows: HTMLElement[] = [
+    row({ label: "Listen for the wake word", help: "On-device speech recognition.", control: listenBox }),
+    wordRow,
+    row({ label: "Speech recognition", control: rec }),
+  ];
 
   if (model.recognizer === "builtin") {
     const mb = (n: number) => `${Math.round(n / 1_000_000)} MB`;
     const chosen = model.models.find((m) => m.id === model.whisperModel);
-    const modelPickerLabel = document.createElement("label");
-    modelPickerLabel.textContent = "Model";
     const sel = document.createElement("select");
     sel.name = "whisperModel";
     for (const m of model.models) {
@@ -1506,53 +1498,32 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     }
     sel.value = model.whisperModel;
     sel.addEventListener("change", () => h.onWhisperModel(sel.value));
-    modelPickerLabel.append(sel);
-    listening.append(modelPickerLabel);
+    listenRows.push(row({ label: "Model", control: sel }));
 
-    const row = document.createElement("div");
-    row.className = "settings__row";
     if (chosen && !chosen.downloaded) {
-      const dl = document.createElement("button");
-      dl.type = "button";
-      dl.dataset.action = "download-model";
-      if (model.downloading?.id === chosen.id) {
-        dl.textContent = `Downloading ${chosen.label}…`;
-      } else if (model.downloading) {
-        dl.textContent = "Wait for the current download";
-      } else {
-        dl.textContent = `Download (${mb(chosen.bytes)})`;
-      }
-      dl.disabled = model.downloading !== null;
-      dl.addEventListener("click", () => h.onDownloadModel(chosen.id));
-      row.append(dl);
-      if (!model.downloading) {
-        const hint = document.createElement("div");
-        hint.className = "settings__hint";
-        hint.textContent = `Download the model once; it stays on ${thisComputerLower()}.`;
-        row.append(hint);
-      }
+      const dl = settingsBtn(
+        model.downloading?.id === chosen.id ? `Downloading ${chosen.label}…` : model.downloading ? "Wait for the current download" : `Download (${mb(chosen.bytes)})`,
+        { action: "download-model", disabled: model.downloading !== null },
+        () => h.onDownloadModel(chosen.id),
+      );
+      listenRows.push(row({
+        label: chosen.label,
+        help: model.downloading ? undefined : `Download the model once; it stays on ${thisComputerLower()}.`,
+        control: [state("Not downloaded", "off"), dl],
+      }));
     }
     if (chosen?.downloaded) {
-      const rm = document.createElement("button");
-      rm.type = "button";
-      rm.dataset.action = "remove-model";
+      const rm = settingsBtn("Remove", { action: "remove-model", kind: "quiet", disabled: true });
       rm.dataset.model = chosen.id;
-      rm.textContent = "Remove";
-      rm.disabled = true;
       rm.title = "The model in use cannot be removed; pick another first.";
-      row.append(rm);
+      listenRows.push(row({ label: chosen.label, control: [state("In use", "on"), rm] }));
     }
     for (const m of model.models) {
       if (!m.downloaded || m.id === model.whisperModel) continue;
-      const rm = document.createElement("button");
-      rm.type = "button";
-      rm.dataset.action = "remove-model";
+      const rm = settingsBtn(`Remove ${m.label.split(" (")[0]}`, { action: "remove-model", kind: "quiet" }, () => h.onRemoveModel(m.id));
       rm.dataset.model = m.id;
-      rm.textContent = `Remove ${m.label.split(" (")[0]}`;
-      rm.addEventListener("click", () => h.onRemoveModel(m.id));
-      row.append(rm);
+      listenRows.push(row({ label: m.label, control: [state("Downloaded", "on"), rm] }));
     }
-    listening.append(row);
     if (model.downloading) {
       const bar = document.createElement("progress");
       bar.setAttribute("name", "modelDownload");
@@ -1562,12 +1533,10 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       const pct = document.createElement("div");
       pct.className = "settings__progress";
       pct.textContent = `Downloading ${downloadingLabel}… ${Math.round((100 * model.downloading.received) / Math.max(1, model.downloading.total))}%`;
-      listening.append(bar, pct);
+      listenRows.push(row({ control: [bar, pct], stack: true }));
     }
   }
 
-  const micLabel = document.createElement("label");
-  micLabel.textContent = "Microphone";
   const mic = document.createElement("select");
   mic.name = "microphone";
   const auto = document.createElement("option");
@@ -1582,60 +1551,58 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   mic.value = model.microphones.includes(model.microphone) ? model.microphone : "";
   mic.addEventListener("change", () => h.onMicrophone(mic.value));
-  micLabel.append(mic);
-  listening.append(micLabel);
+  listenRows.push(row({ label: "Microphone", control: mic }));
 
-  const order = document.createElement("p");
-  order.dataset.for = "voice-order";
-  order.textContent = `Maya speaks with the first voice that works: ElevenLabs, then the voice server, then ${builtinVoiceName()} (built in).`;
-  speaking.append(order);
+  // Why the toggle is off (or not Maya's to turn on) is the card's foot note.
+  if (isAssistant) {
+    // The main Maya owns notifications and listening while this machine is
+    // an assistant: say so rather than leave it looking merely unticked.
+    const note = document.createElement("span");
+    note.className = "settings__hint";
+    note.dataset.for = "listen";
+    note.textContent = "The main Maya notifies and listens for this machine.";
+    listenRows.push(footRow(note));
+  } else if (model.listenError) {
+    // The listener stopped on its own (Dictation off, no microphone…): say
+    // why, or an unticked box looks like a glitch.
+    const err = document.createElement("span");
+    err.className = "settings__error";
+    err.dataset.for = "listen";
+    err.textContent = model.listenError;
+    listenRows.push(footRow(err));
+  }
+  const listeningGroup = group({ title: "Listening" }, card(...listenRows));
 
-  const checkbox = (name: string, text: string, checked: boolean, onChange: (on: boolean) => void) => {
-    const label = document.createElement("label");
-    label.className = "settings__check";
-    const box = document.createElement("input");
-    box.type = "checkbox";
-    box.name = name;
-    box.checked = checked;
-    box.addEventListener("change", () => onChange(box.checked));
-    label.append(box, document.createTextNode(` ${text}`));
-    return label;
-  };
-  const textField = (name: string, text: string, value: string, placeholder: string, onChange: (v: string) => void) => {
-    const label = document.createElement("label");
-    label.textContent = text;
+  const textField = (name: string, label: string, value: string, placeholder: string, onChange: (v: string) => void, mono = false) => {
     const input = document.createElement("input");
     input.type = "text";
     input.name = name;
     input.value = value;
     input.placeholder = placeholder;
+    if (mono) input.classList.add("mono");
     input.addEventListener("change", () => onChange(input.value.trim()));
-    label.append(input);
-    return label;
+    return row({ label, control: input });
   };
-  const keyField = (name: string, text: string, placeholder: string, onKey: (k: string) => void) => {
-    const label = document.createElement("label");
-    label.textContent = text;
+  const keyField = (name: string, set: boolean, placeholder: string, onKey: (k: string) => void) => {
     const key = document.createElement("input");
     key.type = "password";
     key.name = name;
-    key.placeholder = placeholder;
+    key.placeholder = set ? "paste to replace" : placeholder;
     key.autocomplete = "off";
     key.addEventListener("change", () => {
       const k = key.value.trim();
       if (k) onKey(k);
       key.value = "";
     });
-    label.append(key);
-    return label;
+    return row({ label: "API key", help: set ? `Saved in ${secretStore()}.` : undefined, control: key });
   };
 
-  speaking.append(checkbox("elevenEnabled", "Use ElevenLabs", model.elevenEnabled, (on) => h.onElevenEnabled(on)));
+  const elevenRows: HTMLElement[] = [
+    cardHead({ label: "ElevenLabs", order: 1, control: toggle("elevenEnabled", model.elevenEnabled, (on) => h.onElevenEnabled(on), "Use ElevenLabs") }),
+  ];
   if (model.elevenEnabled) {
-    speaking.append(keyField("elevenKey", "ElevenLabs API key", model.elevenKeySet ? `saved in ${secretStore()}; paste to replace` : "paste your key", (k) => h.onElevenKey(k)));
+    elevenRows.push(keyField("elevenKey", model.elevenKeySet, "paste your key", (k) => h.onElevenKey(k)));
 
-    const voiceLabel = document.createElement("label");
-    voiceLabel.textContent = "ElevenLabs voice";
     const voice = document.createElement("select");
     voice.name = "elevenVoice";
     for (const v of model.elevenVoices) {
@@ -1647,17 +1614,23 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     voice.value = model.elevenVoices.some((v) => v.voiceId === model.elevenVoiceId) ? model.elevenVoiceId : (model.elevenVoices[0]?.voiceId ?? "");
     voice.disabled = model.elevenVoices.length === 0;
     voice.addEventListener("change", () => h.onElevenVoice(voice.value));
-    voiceLabel.append(voice);
-    speaking.append(voiceLabel);
+    elevenRows.push(row({ label: "Voice", control: voice }));
   }
 
-  speaking.append(checkbox("serverEnabled", "Use a voice server (OpenAI-compatible)", model.serverEnabled, (on) => h.onServerEnabled(on)));
+  const serverRows: HTMLElement[] = [
+    cardHead({
+      label: "Voice server",
+      help: "Any OpenAI-compatible speech server.",
+      order: 2,
+      control: toggle("serverEnabled", model.serverEnabled, (on) => h.onServerEnabled(on), "Use a voice server"),
+    }),
+  ];
   if (model.serverEnabled) {
-    speaking.append(textField("serverUrl", "Server address", model.serverUrl, "http://localhost:8004", (u) => h.onServerUrl(u)));
+    serverRows.push(textField("serverUrl", "Server address", model.serverUrl, "http://localhost:8004", (u) => h.onServerUrl(u), true));
 
+    const listError = model.serverVoicesError ? `Could not list the server's voices: ${model.serverVoicesError}` : undefined;
+    let serverVoiceRow: HTMLElement;
     if (model.serverVoices.length > 0) {
-      const voiceLabel = document.createElement("label");
-      voiceLabel.textContent = "Voice";
       const voice = document.createElement("select");
       voice.name = "serverVoice";
       // A saved voice the server no longer lists stays selectable.
@@ -1672,31 +1645,31 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       }
       voice.value = saved;
       voice.addEventListener("change", () => h.onServerVoice(voice.value));
-      voiceLabel.append(voice);
-      speaking.append(voiceLabel);
+      serverVoiceRow = row({ label: "Voice", help: listError, control: voice });
     } else {
-      speaking.append(textField("serverVoice", "Voice", model.serverVoice, "default", (v) => h.onServerVoice(v)));
+      const text = document.createElement("input");
+      text.type = "text";
+      text.name = "serverVoice";
+      text.value = model.serverVoice;
+      text.placeholder = "default";
+      text.addEventListener("change", () => h.onServerVoice(text.value.trim()));
+      serverVoiceRow = row({ label: "Voice", help: listError, control: text });
     }
-    if (model.serverVoicesError) {
-      const listed = document.createElement("p");
-      listed.dataset.for = "server-voices";
-      listed.textContent = `Could not list the server's voices: ${model.serverVoicesError}`;
-      speaking.append(listed);
-    }
+    serverVoiceRow.querySelector(".settings__help")?.setAttribute("data-for", "server-voices");
+    serverRows.push(serverVoiceRow);
 
-    speaking.append(textField("serverModel", "Model", model.serverModel, "optional", (m) => h.onServerModel(m)));
-    speaking.append(keyField("serverKey", "API key", model.serverKeySet ? `saved in ${secretStore()}; paste to replace` : "optional; paste a key", (k) => h.onServerKey(k)));
+    serverRows.push(textField("serverModel", "Model", model.serverModel, "optional", (m) => h.onServerModel(m)));
+    serverRows.push(keyField("serverKey", model.serverKeySet, "optional", (k) => h.onServerKey(k)));
   }
 
   // The number follows the drag; the volume is saved once the slider is let go.
-  const volumeLabel = document.createElement("label");
-  volumeLabel.textContent = "Voice volume ";
   const volume = document.createElement("input");
   volume.type = "range";
   volume.name = "voiceVolume";
   volume.min = "10";
   volume.max = "100";
   volume.step = "5";
+  volume.setAttribute("aria-label", "Voice volume");
   volume.value = String(model.voiceVolume ?? 100);
   const volumeShown = document.createElement("span");
   volumeShown.dataset.for = "voice-volume";
@@ -1706,25 +1679,34 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   const volumeControl = document.createElement("span");
   volumeControl.className = "settings__range";
   volumeControl.append(volume, volumeShown);
-  volumeLabel.append(volumeControl);
-  speaking.append(volumeLabel);
 
-  const tryBtn = document.createElement("button");
-  tryBtn.type = "button";
-  tryBtn.dataset.action = "try-voice";
-  tryBtn.textContent = "Try the voice";
-  tryBtn.addEventListener("click", () => h.onTryVoice());
-  speaking.append(tryBtn);
-
+  let tryNote: HTMLElement;
   if (model.voiceReport) {
-    const report = document.createElement("p");
-    report.dataset.for = "voice-report";
-    report.textContent = model.voiceReport;
-    speaking.append(report);
+    tryNote = document.createElement("span");
+    tryNote.className = "settings__hint";
+    tryNote.dataset.for = "voice-report";
+    tryNote.textContent = model.voiceReport;
+  } else {
+    tryNote = state("Hear how Maya sounds now", "off");
   }
 
-  const roleLabel = document.createElement("label");
-  roleLabel.textContent = "Network";
+  const elevenCard = card(...elevenRows);
+  elevenCard.classList.toggle("settings__card--off", !model.elevenEnabled);
+  const serverCard = card(...serverRows);
+  serverCard.classList.toggle("settings__card--off", !model.serverEnabled);
+  const speakingGroup = group(
+    { title: "Speaking", note: `Maya speaks with the first voice that works, in this order.` },
+    elevenCard,
+    serverCard,
+    card(cardHead({ label: builtinVoiceName(), help: "Built in; always there.", order: 3 })),
+    card(
+      row({ label: "Volume", control: volumeControl }),
+      footRow(tryNote, settingsBtn("Try the voice", { action: "try-voice" }, () => h.onTryVoice())),
+    ),
+  );
+  speakingGroup.querySelector(".settings__group-note")!.setAttribute("data-for", "voice-order");
+  voice.append(speakingGroup, listeningGroup);
+
   const roleSel = document.createElement("select");
   roleSel.name = "networkRole";
   for (const [v, text] of [["off", "Off"], ["main", "Act as main Maya"], ["assistant", "Assistant to a main Maya"]] as const) {
@@ -1736,22 +1718,23 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   roleSel.value = netRole;
   roleSel.disabled = !!model.networkPromoting;
   roleSel.addEventListener("change", () => h.onRole(roleSel.value === "main" || roleSel.value === "assistant" ? roleSel.value : "off"));
-  roleLabel.append(roleSel);
-  network.append(roleLabel);
+
+  // The first card: the role, then what that role needs. What would be said
+  // about the card as a whole (an error, the status, "pair again") sits in its foot.
+  const netRows: HTMLElement[] = [row({ label: "This Maya", control: roleSel })];
+  const netFoot: HTMLElement[] = [];
 
   if (netRole !== "off" && net.pairAgain) {
     const note = document.createElement("div");
     note.className = "settings__hint";
     note.dataset.for = "pair-again-note";
     note.textContent = "This Maya was updated to secure pairing — pair again.";
-    network.append(note);
+    netFoot.push(footRow(note));
   }
 
   // Both roles carry a name: assistants show the main's in "Connected to …",
   // and the main shows an assistant's on its cards.
-  const nameField = () => {
-    const nameLabel = document.createElement("label");
-    nameLabel.textContent = "This machine's name";
+  const nameRow = () => {
     const nameInput = document.createElement("input");
     nameInput.type = "text";
     nameInput.name = "networkName";
@@ -1760,20 +1743,18 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     nameInput.disabled = !!model.networkPromoting;
     nameInput.addEventListener("input", () => { model.networkName = nameInput.value; });
     nameInput.addEventListener("change", () => h.onName(nameInput.value.trim()));
-    nameLabel.append(nameInput);
-    return nameLabel;
+    return row({ label: "This machine's name", control: nameInput });
   };
-  if (netRole === "main" && net.mainError) {
-    const err = document.createElement("div");
-    err.className = "settings__error";
-    err.dataset.for = "network";
-    err.textContent = net.mainError;
-    network.append(err);
-  }
+  const pairingGroups: HTMLElement[] = [];
 
   if (netRole === "main") {
-    const portLabel = document.createElement("label");
-    portLabel.textContent = "Port";
+    if (net.mainError) {
+      const err = document.createElement("div");
+      err.className = "settings__error";
+      err.dataset.for = "network";
+      err.textContent = net.mainError;
+      netFoot.push(footRow(err));
+    }
     const portInput = document.createElement("input");
     portInput.type = "number";
     portInput.name = "networkPort";
@@ -1786,47 +1767,41 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     };
     portInput.addEventListener("input", () => { model.networkPort = readPort(); });
     portInput.addEventListener("change", () => h.onPort(readPort()));
-    portLabel.append(portInput);
-    network.append(portLabel);
-    if (net.addresses && net.addresses.length > 0) network.append(addressesLine(net.addresses));
-    network.append(nameField());
+    const addresses = net.addresses && net.addresses.length > 0 ? addressesText(net.addresses) : null;
+    const portRow = row({ label: "Port", help: addresses, control: portInput });
+    portRow.querySelector(".settings__help")?.classList.add("settings__addresses");
+    netRows.push(portRow, nameRow());
 
-    if (net.code && nowMs <= net.code.expiresAt) {
-      const codeBox = document.createElement("div");
-      codeBox.className = "settings__code";
-      codeBox.textContent = formatPairingCode(net.code.code);
-      network.append(codeBox);
+    const live = !!net.code && nowMs <= net.code.expiresAt;
+    const pairCard = document.createElement("div");
+    pairCard.className = "settings__pair";
+    const codeBox = document.createElement("div");
+    codeBox.className = live ? "settings__code" : "settings__code settings__code--empty";
+    codeBox.textContent = live && net.code ? formatPairingCode(net.code.code) : "No code yet";
+    const pairText = document.createElement("div");
+    pairText.className = "settings__pair-text";
+    if (live && net.code) {
+      const title = document.createElement("strong");
+      title.className = "settings__pair-title";
+      title.textContent = "Type this on the machine you are pairing.";
       const expiry = document.createElement("div");
       expiry.className = "settings__hint settings__code-expiry";
       expiry.textContent = `expires in ${expiresInMinutes(net.code.expiresAt, nowMs)} min`;
-      network.append(expiry);
+      pairText.append(title, expiry);
     } else if (net.codeUsedUp) {
       const used = document.createElement("div");
       used.className = "settings__hint";
       used.textContent = "Code used up after 3 wrong tries — Regenerate.";
-      network.append(used);
+      pairText.append(used);
     }
-
-    const regen = document.createElement("button");
-    regen.type = "button";
-    regen.dataset.action = "regenerate-code";
-    regen.textContent = net.code && nowMs <= net.code.expiresAt ? "Regenerate" : "Show pairing code";
     // Reopening pairing mid-handover would let a new assistant pair with a main about to stop.
-    regen.disabled = !!model.networkPromoting;
-    regen.addEventListener("click", () => h.onRegenerate());
-    network.append(regen);
-
-    const hint = document.createElement("div");
-    hint.className = "settings__hint";
-    hint.dataset.for = "devices-hint";
-    hint.textContent = "Paired devices are in Settings › Devices.";
-    network.append(hint);
+    const regen = settingsBtn(live ? "Regenerate" : "Show pairing code", { action: "regenerate-code", disabled: !!model.networkPromoting }, () => h.onRegenerate());
+    pairCard.append(codeBox, pairText, regen);
+    pairingGroups.push(group({ title: "Pairing code", foot: "Paired devices are in Settings › Devices." }, pairCard));
   } else if (netRole === "assistant") {
     // Values live on the model, updated on every keystroke (not just on
     // `change`), so an unrelated repaint (a `voice` or `network` event) never
     // wipes a half-typed field; `change` still drives when each is saved.
-    const hostLabel = document.createElement("label");
-    hostLabel.textContent = "Main's host or address";
     const hostInput = document.createElement("input");
     hostInput.type = "text";
     hostInput.name = "networkHost";
@@ -1835,11 +1810,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     hostInput.disabled = !!model.networkPromoting;
     hostInput.addEventListener("input", () => { model.networkMainHost = hostInput.value; });
     hostInput.addEventListener("change", () => h.onMainHost(hostInput.value.trim()));
-    hostLabel.append(hostInput);
-    network.append(hostLabel);
 
-    const mainPortLabel = document.createElement("label");
-    mainPortLabel.textContent = "Port";
     const mainPortInput = document.createElement("input");
     mainPortInput.type = "number";
     mainPortInput.name = "networkMainPort";
@@ -1852,57 +1823,27 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     };
     mainPortInput.addEventListener("input", () => { model.networkMainPort = readMainPort(); });
     mainPortInput.addEventListener("change", () => h.onMainPort(readMainPort()));
-    mainPortLabel.append(mainPortInput);
-    network.append(mainPortLabel);
 
-    network.append(nameField());
+    netRows.push(
+      row({ label: "Main's host or address", control: hostInput }),
+      row({ label: "Port", control: mainPortInput }),
+      nameRow(),
+    );
 
-    if (model.networkPaired && !model.networkRepair) {
-      const again = document.createElement("button");
-      again.type = "button";
-      again.className = "settings__link";
-      again.dataset.action = "pair-again";
-      again.textContent = "Pair again";
-      again.addEventListener("click", () => h.onPairAgain());
-      network.append(again);
-
-      const forget = document.createElement("button");
-      forget.type = "button";
-      forget.className = "settings__link";
-      forget.dataset.action = "forget-main";
-      forget.textContent = "Forget main";
-      forget.addEventListener("click", () => h.onForgetMain());
-      network.append(forget);
+    const needsCode = !model.networkPaired || model.networkRepair;
+    if (needsCode) {
+      const codeInput = document.createElement("input");
+      codeInput.type = "text";
+      codeInput.name = "networkCode";
+      codeInput.placeholder = "483921";
+      codeInput.value = netCode;
+      codeInput.addEventListener("input", () => { model.networkCode = codeInput.value; });
+      netRows.push(row({ label: "Pairing code", control: codeInput }));
     }
-  }
-  if (netRole === "assistant" && (!model.networkPaired || model.networkRepair)) {
-    const codeLabel = document.createElement("label");
-    codeLabel.textContent = "Pairing code";
-    const codeInput = document.createElement("input");
-    codeInput.type = "text";
-    codeInput.name = "networkCode";
-    codeInput.placeholder = "483921";
-    codeInput.value = netCode;
-    codeInput.addEventListener("input", () => { model.networkCode = codeInput.value; });
-    codeLabel.append(codeInput);
-    network.append(codeLabel);
 
-    const pairBtn = document.createElement("button");
-    pairBtn.type = "button";
-    pairBtn.dataset.action = "pair";
-    pairBtn.textContent = model.networkPairing ? "Pairing…" : "Pair";
-    pairBtn.disabled = !!model.networkPairing;
-    pairBtn.addEventListener("click", () => {
-      if (model.networkPairing) return;
-      h.onPair((model.networkMainHost ?? "").trim(), model.networkMainPort ?? 0, (model.networkName ?? "").trim(), (model.networkCode ?? "").trim());
-    });
-    network.append(pairBtn);
-  }
-
-  // Shown whenever the select shows Assistant, saved or still being
-  // previewed, so a failed Pair on a never-paired machine has somewhere to
-  // put its message instead of only the page-level error banner.
-  if (netRole === "assistant") {
+    // Shown whenever the select shows Assistant, saved or still being
+    // previewed, so a failed Pair on a never-paired machine has somewhere to
+    // put its message instead of only the page-level error banner.
     const statusText = model.networkError
       ? model.networkError
       : net.role === "assistant"
@@ -1912,11 +1853,13 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
             ? net.assistant.error
             : "Reconnecting…"
         : null;
+    let status: HTMLElement | null = null;
     if (statusText !== null) {
+      status = document.createElement("div");
       const statusEl = document.createElement("div");
       statusEl.className = "settings__status settings__status--network";
       statusEl.textContent = statusText;
-      network.append(statusEl);
+      status.append(statusEl);
       // While it retries, the last failure sits under "Reconnecting…".
       if (!model.networkError && net.role === "assistant" && !net.assistant.connected && net.assistant.retrying && net.assistant.error) {
         statusEl.title = net.assistant.error;
@@ -1924,41 +1867,47 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
         last.className = "settings__hint";
         last.dataset.for = "network-last-error";
         last.textContent = `Last error: ${net.assistant.error}`;
-        network.append(last);
+        status.append(last);
       }
     }
+
+    let actions: HTMLElement | null = null;
+    if (needsCode) {
+      actions = settingsBtn(model.networkPairing ? "Pairing…" : "Pair", { action: "pair", kind: "gold", disabled: !!model.networkPairing }, () => {
+        if (model.networkPairing) return;
+        h.onPair((model.networkMainHost ?? "").trim(), model.networkMainPort ?? 0, (model.networkName ?? "").trim(), (model.networkCode ?? "").trim());
+      });
+    } else {
+      const forget = settingsBtn("Forget main", { action: "forget-main", kind: "danger" }, () => h.onForgetMain());
+      forget.classList.add("settings__btn--quiet");
+      actions = document.createElement("div");
+      actions.className = "settings__foot-actions";
+      actions.append(settingsBtn("Pair again", { action: "pair-again", kind: "quiet" }, () => h.onPairAgain()), forget);
+    }
+    netFoot.push(footRow(status ?? document.createElement("span"), actions));
   }
+  network.append(group({}, card(...netRows, ...netFoot)), ...pairingGroups);
 
   if (netRole !== "off") {
+    const keyHelp = "Drops every pairing, so each device must pair again.";
+    let keyRow: HTMLElement;
     if (model.networkNewKeyConfirm) {
       const confirm = document.createElement("div");
       confirm.className = "settings__confirm";
       confirm.dataset.for = "new-key-confirm";
       const p = document.createElement("p");
       p.textContent = "Drop every pairing and make a new key?";
-      confirm.append(p);
-      const yes = document.createElement("button");
-      yes.type = "button";
-      yes.dataset.action = "new-key-confirm";
-      yes.textContent = "Drop and make a new key";
-      yes.addEventListener("click", () => h.onNewKey());
-      const no = document.createElement("button");
-      no.type = "button";
-      no.dataset.action = "new-key-cancel";
-      no.textContent = "Cancel";
-      no.addEventListener("click", () => h.onNewKeyCancel());
-      confirm.append(yes, no);
-      network.append(confirm);
+      confirm.append(
+        p,
+        settingsBtn("Drop and make a new key", { action: "new-key-confirm", kind: "danger" }, () => h.onNewKey()),
+        settingsBtn("Cancel", { action: "new-key-cancel" }, () => h.onNewKeyCancel()),
+      );
+      keyRow = row({ label: "New key", help: keyHelp, control: confirm, stack: true });
     } else {
-      const fresh = document.createElement("button");
-      fresh.type = "button";
-      fresh.className = "settings__link";
-      fresh.dataset.action = "new-key";
-      fresh.textContent = "New key";
-      fresh.disabled = !!model.networkPromoting;
-      fresh.addEventListener("click", () => h.onNewKeyAsk());
-      network.append(fresh);
+      const fresh = settingsBtn("New key", { action: "new-key", kind: "danger", disabled: !!model.networkPromoting }, () => h.onNewKeyAsk());
+      keyRow = row({ label: "New key", help: keyHelp, control: fresh });
     }
+    network.append(group({}, card(keyRow)));
   }
 
   if (net.role === "off") {
@@ -1967,7 +1916,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     none.dataset.for = "devices-off";
     none.dataset.row = "devices-off";
     none.textContent = "Turn the network on in Settings › Network to see your devices.";
-    devices.append(none);
+    devices.append(group({}, card(none)));
   } else {
     // The model's fields behind the view; a typed host stays in its input.
     const view: DevicesModel = {
@@ -1985,11 +1934,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
 
   if (model.error) {
-    const err = document.createElement("div");
-    err.className = "settings__error";
-    err.textContent = model.error;
     // Above the sections, so it shows whichever group is open.
-    content.prepend(err);
+    content.prepend(notice(model.error, "error"));
   }
   return root;
 }
@@ -2074,6 +2020,7 @@ export async function initSettings(): Promise<void> {
     networkMainPort: 0,
     networkName: "",
     settingsGroup: storedSettingsGroup(),
+    sourcesOpen: storedSourcesOpen(),
   };
 
   const applyNetworkConfig = (c: ConfigJson) => {
@@ -2120,13 +2067,14 @@ export async function initSettings(): Promise<void> {
     }
   };
 
-  const saveWorkItems = (patch: (w: WorkItemsConfig) => void) =>
+  const saveWorkItems = (patch: (w: WorkItemsConfig) => void, saved?: () => void) =>
     run(async () => {
       const fresh = await invoke<ConfigJson>("get_config");
       const workItems = workItemsConfig(fresh.workItems);
       patch(workItems);
       const c = await invoke<ConfigJson>("set_config", { config: { ...fresh, workItems } });
       applyConfig(c);
+      saved?.();
     });
 
   /** Applies `change` to one connection of the freshest config and saves the list. */
@@ -2235,7 +2183,17 @@ export async function initSettings(): Promise<void> {
   const handlers: SettingsHandlers = {
     onWorkItems: (forge, items) => void saveWorkItems((w) => { w[forge] = items; }),
     onWorkPrompt: (text) => void saveWorkItems((w) => { w.prompt = text; }),
-    onCustomTools: (tools) => void saveWorkItems((w) => { w.custom = tools; }),
+    onCustomTools: (tools) => {
+      // A tool just added has no id until the backend names it: open
+      // whichever tool the save brings back that was not there before.
+      const before = new Set((model.workItems?.custom ?? []).map((t) => t.id));
+      const adding = tools.some((t) => t.id === "");
+      void saveWorkItems((w) => { w.custom = tools; }, () => {
+        if (!adding) return;
+        const added = (model.workItems?.custom ?? []).filter((t) => !before.has(t.id));
+        if (added.length > 0) setSourcesOpen(model, Object.fromEntries(added.map((t) => [t.id, true])));
+      });
+    },
     onOpenGroup: (group) => document.dispatchEvent(new CustomEvent(OPEN_SETTINGS_GROUP, { detail: group })),
     onGitEnabled: (p, on) => void saveGit(p, (c) => { c.enabled = on; }),
     onGitBaseUrl: (url) => void saveGit("gitlab", (c) => { c.baseUrl = url || null; }),
