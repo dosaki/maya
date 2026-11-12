@@ -7,6 +7,8 @@
   /* Column and state colours stay as they were: grey, blue, yellow, green. */
   --awaiting: #d97706; --working: #2563eb; --completed: #16a34a; --idle: #9ca3af;
   --on-gold: #1a1408;
+  /* Settings: a hairline inside cards, a sunken field, a soft header, a warning red. */
+  --rule: #221e16; --field: #0f0e0b; --soft: #1c1913; --danger: #e5786b;
   --shadow: 0 1px 2px rgba(0,0,0,.5);
   /* Highlighted code: warm hues that sit with the gold, each readable as small text. */
   --code-keyword: #e78a4e; --code-string: #a9b665; --code-number: #d3869b; --code-comment: #928374;
@@ -107,6 +109,113 @@ body { margin: 0; background: var(--bg); }
 .release-notes .md h3 { margin: 8px 0 4px; font-size: 13px; color: var(--muted); }
 .release-notes .md ul { margin: 0; padding-left: 20px; }
 .release-notes .md li + li { margin-top: 4px; }
+
+/* The Settings building blocks (src/settings-ui.ts), after the approved mockup.
+   Scoped to the Settings pane so the Voice popover keeps its own look. */
+.settings.pane .settings__head { margin: 2px 0 32px; }
+.settings.pane .settings__title { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.01em; }
+.settings.pane .settings__lede { margin: 8px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; max-width: 60ch; }
+.settings.pane .settings__group { margin: 0 0 36px; }
+.settings.pane .settings__group-title { margin: 0 0 4px 2px; font-size: 15px; font-weight: 600; }
+.settings.pane .settings__group-note { margin: 0 0 12px 2px; color: var(--muted); font-size: 13px; line-height: 1.5; max-width: 64ch; }
+.settings.pane .settings__group-title + .settings__card { margin-top: 12px; }
+.settings.pane .settings__group-foot { margin: 10px 2px 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; max-width: 64ch; }
+.settings.pane .settings__card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+.settings.pane .settings__card + .settings__card { margin-top: 16px; }
+.settings.pane .settings__row { display: flex; justify-content: flex-start; align-items: center; flex-wrap: nowrap; gap: 24px; padding: 16px 20px; min-height: 60px; }
+.settings.pane .settings__row + .settings__row { border-top: 1px solid var(--rule); }
+.settings.pane .settings__row-text { flex: 1; min-width: 0; }
+.settings.pane .settings__label { display: block; font-weight: 500; }
+.settings.pane .settings__help { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.45; max-width: 52ch; }
+.settings.pane .settings__control { flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.settings.pane .settings__control:has(> input:not([type=checkbox]):not([type=radio]), > select, > textarea) { flex-basis: 300px; }
+.settings.pane .settings__control > input:not([type=checkbox]):not([type=radio]), .settings.pane .settings__control > select { flex: 1; }
+.settings.pane .settings__row--stack { flex-direction: column; align-items: stretch; gap: 12px; }
+.settings.pane .settings__row--head { min-height: 56px; background: var(--soft); border-radius: 12px 12px 0 0; }
+.settings.pane .settings__row--head .settings__label { font-size: 15px; font-weight: 600; }
+.settings.pane .settings__row--foot { min-height: 0; padding: 12px 20px; justify-content: space-between; }
+
+/* Fields inside a card. */
+.settings.pane .settings__card input:is([type=text], [type=password], [type=number], [type=search], [type=url]), .settings.pane .settings__card select, .settings.pane .settings__card textarea {
+  font: inherit; color: var(--text); background: var(--field); border: 1px solid var(--border); border-radius: 8px; height: 36px; padding: 0 12px; width: 100%; min-width: 0; max-width: none;
+}
+.settings.pane .settings__card textarea { height: auto; padding: 10px 12px; line-height: 1.5; resize: vertical; }
+.settings.pane .settings__card input::placeholder, .settings.pane .settings__card textarea::placeholder { color: var(--muted); opacity: .7; }
+.settings.pane .settings__card input:is([type=text], [type=password], [type=number], [type=search], [type=url]):focus, .settings.pane .settings__card select:focus, .settings.pane .settings__card textarea:focus, .settings.pane .settings__btn:focus-visible, .settings.pane .settings__add:focus-visible, .settings.pane .settings__source-toggle:focus-visible {
+  outline: none; border-color: var(--gold-deep); box-shadow: 0 0 0 3px rgba(217,171,60,.16);
+}
+.settings.pane .settings__card select { appearance: none; padding-right: 32px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 17px) 16px, calc(100% - 12px) 16px; background-size: 5px 5px; background-repeat: no-repeat; }
+.settings.pane .settings__card input[type=number] { width: 88px; flex: 0 0 88px; text-align: right; }
+.settings.pane .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+
+/* The on/off switch. */
+.settings.pane .settings__toggle { appearance: none; position: relative; flex: 0 0 auto; width: 38px; height: 22px; padding: 0; margin: 0; border-radius: 999px; background: var(--rule); border: 1px solid var(--border); cursor: pointer; transition: background .15s; }
+.settings.pane .settings__toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--text); transition: transform .15s; }
+.settings.pane .settings__toggle:checked { background: var(--gold); border-color: var(--gold); }
+.settings.pane .settings__toggle:checked::after { transform: translateX(16px); background: var(--on-gold); }
+.settings.pane .settings__toggle:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(217,171,60,.16); }
+.settings.pane .settings__toggle:disabled { opacity: .5; cursor: default; }
+
+/* A segmented choice: two or three options that read as one control. */
+.settings.pane .settings__seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--field); border: 1px solid var(--border); border-radius: 9px; }
+.settings.pane .settings__seg label { position: relative; display: block; }
+.settings.pane .settings__seg input { position: absolute; opacity: 0; inset: 0; width: 100%; height: 100%; padding: 0; margin: 0; cursor: pointer; }
+.settings.pane .settings__seg span { display: block; padding: 5px 12px; border-radius: 6px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.settings.pane .settings__seg input:checked + span { background: var(--panel); color: var(--text); box-shadow: inset 0 0 0 1px var(--gold-deep); }
+.settings.pane .settings__seg input:focus-visible + span { box-shadow: inset 0 0 0 1px var(--gold-deep), 0 0 0 3px rgba(217,171,60,.16); }
+.settings.pane .settings__seg input:disabled { cursor: default; }
+.settings.pane .settings__seg input:disabled + span { opacity: .5; }
+
+/* Buttons. */
+.settings.pane .settings__btn { font: inherit; font-size: 13px; color: var(--text); background: var(--soft); border: 1px solid var(--border); border-radius: 8px; padding: 7px 14px; cursor: pointer; white-space: nowrap; }
+.settings.pane .settings__btn:hover { border-color: var(--gold-deep); }
+.settings.pane .settings__btn:disabled { opacity: .5; cursor: default; }
+.settings.pane .settings__btn--gold { background: var(--gold); border-color: var(--gold); color: var(--on-gold); font-weight: 600; }
+.settings.pane .settings__btn--quiet { background: none; border-color: transparent; color: var(--muted); padding: 7px 8px; }
+.settings.pane .settings__btn--quiet:hover { color: var(--text); border-color: transparent; }
+.settings.pane .settings__btn--danger { color: var(--danger); }
+.settings.pane .settings__add { font: inherit; display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin-top: 12px; padding: 12px; border: 1px dashed var(--border); border-radius: 10px; background: none; color: var(--muted); cursor: pointer; }
+.settings.pane .settings__add:hover { color: var(--gold-bright); border-color: var(--gold-deep); }
+
+/* State, as a dot and a word. */
+.settings.pane .settings__state { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+.settings.pane .settings__state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--idle); }
+.settings.pane .settings__state--on { color: var(--text); }
+.settings.pane .settings__state--on::before { background: var(--completed); box-shadow: 0 0 0 3px rgba(22,163,74,.18); }
+.settings.pane .settings__state--main::before { background: var(--gold); box-shadow: 0 0 0 3px rgba(217,171,60,.18); }
+.settings.pane .settings__notice { padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--soft); color: var(--muted); font-size: 13px; line-height: 1.5; }
+.settings.pane .settings__notice.settings__error { color: var(--danger); border-color: var(--danger); }
+
+/* A provider's number, when the order they are tried in matters. */
+.settings.pane .settings__order { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--gold-deep); color: var(--gold-bright); font-size: 12px; font-weight: 600; flex: 0 0 auto; }
+
+/* A Work Items source: collapsible, its on/off always in view. */
+.settings.pane .settings__source-head { display: flex; align-items: center; gap: 12px; padding: 0 20px 0 0; min-height: 60px; }
+.settings.pane .settings__source-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; align-self: stretch; padding: 0 0 0 16px; background: none; border: 0; border-radius: 12px 0 0 12px; font: inherit; color: var(--text); text-align: left; cursor: pointer; }
+.settings.pane .settings__source-chev { width: 20px; height: 20px; display: grid; place-items: center; color: var(--muted); flex: 0 0 auto; }
+.settings.pane .settings__source-chev::before { content: ""; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
+.settings.pane .settings__source[data-open] .settings__source-chev::before { transform: rotate(45deg); }
+.settings.pane .settings__source-name { font-size: 15px; font-weight: 600; white-space: nowrap; }
+.settings.pane .settings__source-tag { padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.settings.pane .settings__source-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
+.settings.pane .settings__source-state { font-size: 13px; color: var(--muted); min-width: 2em; text-align: right; }
+.settings.pane .settings__source:not(.settings__source--off) .settings__source-state { color: var(--gold-bright); }
+.settings.pane .settings__source-toggle:hover .settings__source-chev, .settings.pane .settings__source-toggle:hover .settings__source-name { color: var(--gold-bright); }
+.settings.pane .settings__source-body { border-top: 1px solid var(--rule); }
+.settings.pane .settings__source:not([data-open]) .settings__source-body { display: none; }
+.settings.pane .settings__source[data-open] .settings__source-head { background: var(--soft); border-radius: 12px 12px 0 0; }
+.settings.pane .settings__source[data-open] .settings__source-sum { display: none; }
+.settings.pane .settings__source--off .settings__source-name { color: var(--muted); }
+.settings.pane .settings__source--off .settings__source-body { opacity: .5; }
+.settings.pane .settings__source.settings__card + .settings__source.settings__card { margin-top: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .settings.pane .settings__toggle, .settings.pane .settings__toggle::after, .settings.pane .settings__source-chev::before { transition: none; }
+}
+@media (max-width: 560px) {
+  .settings.pane .settings__row { flex-direction: column; align-items: stretch; gap: 10px; }
+  .settings.pane .settings__control { justify-content: flex-start; }
+  .settings.pane .settings__row--head { flex-direction: row; align-items: center; }
+}
 
 /* What's new after an update: Maya stands outside the window's left edge,
    her open hand toward the notes. The group (art and panel) is centred, so
@@ -597,6 +706,7 @@ body { margin: 0; background: var(--bg); }
   --bg: #f6f1e6; --panel: #fffdf8; --text: #231f14; --muted: #6b6350; --border: #ddd3bd;
   --gold: #a97c16; --gold-bright: #7a5710; --gold-deep: #d6bd7a;
   --on-gold: #1a1408;
+  --rule: #ebe3d0; --field: #fbf7ec; --soft: #f3ecdb; --danger: #c0262c;
   --shadow: 0 1px 2px rgba(70,50,10,.14);
   --code-keyword: #a23d05; --code-string: #5f6b0e; --code-number: #8f3f71; --code-comment: #6b6350;
   --code-function: #7a5710; --code-type: #0b5f70; --code-variable: #3d6e4f; --code-meta: #6b6350;
