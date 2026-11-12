@@ -16,7 +16,7 @@ import { terminalLabel } from "./terminalpick";
 import { renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 import { updates } from "./update";
-import { notice, screenHead } from "./settings-ui";
+import { btn as settingsBtn, card, group, notice, row, screenHead, toggle } from "./settings-ui";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -468,43 +468,32 @@ function subsection(title: string): HTMLElement {
  * that records the next Enter press, and Reset to defaults.
  */
 function renderKeyboard(section: HTMLElement, keys: KeyBindings, h: SettingsHandlers): void {
-  const hint = document.createElement("div");
-  hint.className = "settings__hint";
-  hint.textContent = "The keys for the Chat tab, a session's reply box and the new-session prompt. An Enter press in neither list does what the box does by itself.";
-  section.append(hint);
+  const rows: HTMLElement[] = [];
   for (const [action, name] of KEY_ACTIONS) {
-    const row = document.createElement("div");
-    row.className = "settings__row settings__keys";
-    row.dataset.keys = action;
-    const label = document.createElement("span");
-    label.className = "settings__keys-name";
-    label.textContent = name;
-    row.append(label);
+    const chips: Node[] = [];
     for (const combo of keys[action]) {
       const chip = document.createElement("span");
-      chip.className = "chip";
+      chip.className = "settings__kbd";
       chip.append(comboLabel(combo));
       if (action !== "send" || keys.send.length > 1) {
         const remove = document.createElement("button");
         remove.type = "button";
-        remove.className = "chip__remove";
         remove.setAttribute("aria-label", `Remove ${comboLabel(combo)}`);
         remove.textContent = "×";
         remove.addEventListener("click", () => h.onKeys?.(removeCombo(keys, action, combo)));
         chip.append(remove);
+      } else {
+        chip.classList.add("settings__kbd--only");
       }
-      row.append(chip);
+      chips.push(chip);
     }
-    const add = document.createElement("button");
-    add.type = "button";
-    add.dataset.action = "keys-add";
-    add.textContent = "Add";
+    const add = settingsBtn("+ Add", { action: "keys-add", kind: "quiet" });
     const error = document.createElement("span");
     error.className = "settings__error";
     let recording = false;
     const stop = () => {
       recording = false;
-      add.textContent = "Add";
+      add.textContent = "+ Add";
     };
     add.addEventListener("click", () => {
       recording = true;
@@ -527,15 +516,16 @@ function renderKeyboard(section: HTMLElement, keys: KeyBindings, h: SettingsHand
       if (typeof next === "string") error.textContent = next;
       else h.onKeys?.(next);
     });
-    row.append(add, error);
-    section.append(row);
+    const r = row({ label: name, control: [...chips, add, error] });
+    r.classList.add("settings__keys");
+    r.dataset.keys = action;
+    r.querySelector(".settings__label")!.classList.add("settings__keys-name");
+    rows.push(r);
   }
-  const reset = document.createElement("button");
-  reset.type = "button";
-  reset.dataset.action = "keys-reset";
-  reset.textContent = "Reset to defaults";
-  reset.addEventListener("click", () => h.onKeys?.(defaultKeys()));
-  section.append(reset);
+  section.append(
+    group({ foot: "An Enter press in neither list does what the box does by itself." }, card(...rows)),
+    settingsBtn("Reset to defaults", { action: "keys-reset" }, () => h.onKeys?.(defaultKeys())),
+  );
 }
 
 /** "483 921" from "483921": a space after the first three digits. */
@@ -725,8 +715,6 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   // not landed yet) stays selected, with only its Default model, rather than
   // the select silently showing another agent.
   const chosenAgent: AgentInfo = agents.find((a) => a.harness === model.agent) ?? (model.agent ? { harness: model.agent, models: [], efforts: [], modes: [] } : agents[0]);
-  const agentLabel = document.createElement("label");
-  agentLabel.textContent = "Agent";
   const agentSel = document.createElement("select");
   agentSel.name = "agent";
   for (const a of agents) {
@@ -748,16 +736,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     agentModelSel.disabled = true;
     h.onAgent(agentSel.value as Harness);
   });
-  agentLabel.append(agentSel);
-  general.append(agentLabel);
-  const agentHint = document.createElement("div");
-  agentHint.className = "settings__hint";
-  agentHint.dataset.for = "agent";
-  agentHint.textContent = "Interprets your voice commands, picks folders for 'Let Maya choose', and is the default for new and resumed sessions and reviews.";
-  general.append(agentHint);
+  const agentHelp = "Interprets your voice commands, picks folders for 'Let Maya choose', and is the default for new and resumed sessions and reviews.";
 
-  const agentModelLabel = document.createElement("label");
-  agentModelLabel.textContent = "Model";
   const agentModelSel = document.createElement("select");
   agentModelSel.name = "agentModel";
   const def = document.createElement("option");
@@ -772,11 +752,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   agentModelSel.value = chosenAgent.models.some((m) => m.id === model.agentModel) ? model.agentModel : "";
   agentModelSel.addEventListener("change", () => h.onAgentModel(agentSel.value as Harness, agentModelSel.value));
-  agentModelLabel.append(agentModelSel);
-  general.append(agentModelLabel);
 
-  const themeLabel = document.createElement("label");
-  themeLabel.textContent = "Theme";
   const themeSel = document.createElement("select");
   themeSel.name = "colorTheme";
   for (const [value, text] of COLOR_THEMES) {
@@ -787,31 +763,28 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   themeSel.value = model.colorTheme ?? "dark";
   themeSel.addEventListener("change", () => h.onColorTheme?.(asColorTheme(themeSel.value)));
-  themeLabel.append(themeSel);
-  general.append(themeLabel);
 
   renderKeyboard(keyboard, model.keys ?? defaultKeys(), h);
 
+  const agentRow = row({ label: "Agent", help: agentHelp, control: agentSel });
+  agentRow.querySelector(".settings__help")!.setAttribute("data-for", "agent");
+  const updateRows: HTMLElement[] = [];
   if (model.version) {
-    const version = document.createElement("div");
-    version.className = "settings__hint settings__version";
-    version.textContent = `Maya ${model.version}`;
-    if (model.updatesOn && h.onCheckUpdates) {
-      const check = document.createElement("button");
-      check.type = "button";
-      check.dataset.action = "check-updates";
-      check.textContent = "Check for updates";
-      check.addEventListener("click", () => h.onCheckUpdates?.());
-      version.append(" ", check);
-      if (model.updateStatus) {
-        const status = document.createElement("span");
-        status.className = "settings__update-status";
-        status.textContent = model.updateStatus;
-        version.append(" ", status);
-      }
-    }
-    general.append(version);
+    const checking = model.updatesOn && h.onCheckUpdates;
+    const versionRow = row({
+      label: `Maya ${model.version}`,
+      help: checking ? model.updateStatus : undefined,
+      control: checking ? settingsBtn("Check for updates", { action: "check-updates" }, () => h.onCheckUpdates?.()) : undefined,
+    });
+    versionRow.querySelector(".settings__label")!.classList.add("settings__version");
+    versionRow.querySelector(".settings__help")?.classList.add("settings__update-status");
+    updateRows.push(versionRow);
   }
+  general.append(
+    group({ title: "Agent" }, card(agentRow, row({ label: "Model", control: agentModelSel }))),
+    group({ title: "Appearance" }, card(row({ label: "Theme", control: themeSel }))),
+    ...(updateRows.length > 0 ? [group({ title: "Updates" }, card(...updateRows))] : []),
+  );
 
   const net = model.network ?? DEFAULT_NETWORK_STATUS;
   const netRole = model.networkRole ?? net.role;
@@ -961,16 +934,6 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   reviewHint.textContent = "Blank uses the built-in prompt. {number}, {repo} and {url} are filled in; a prompt that uses none gets \" PR #<number> (<url>)\" appended.";
   reviews.append(reviewHint);
 
-  const notifyLabel = document.createElement("label");
-  notifyLabel.className = "settings__check";
-  const notifyBox = document.createElement("input");
-  notifyBox.type = "checkbox";
-  notifyBox.name = "notify";
-  notifyBox.checked = model.notifyOnAwaiting;
-  notifyBox.addEventListener("change", () => h.onNotify(notifyBox.checked));
-  notifyLabel.append(notifyBox, document.createTextNode(" Notify me when a session awaits a decision"));
-  notifications.append(notifyLabel);
-
   const prLabel = document.createElement("label");
   prLabel.className = "settings__check";
   const prBox = document.createElement("input");
@@ -981,15 +944,13 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   prLabel.append(prBox, document.createTextNode(" Notify me when a PR assigned to me is approved or needs changes"));
   reviews.append(prLabel);
 
-  const debugLabel = document.createElement("label");
-  debugLabel.className = "settings__check";
-  const debugBox = document.createElement("input");
-  debugBox.type = "checkbox";
-  debugBox.name = "debug-mode";
-  debugBox.checked = model.debugMode === true;
-  debugBox.addEventListener("change", () => h.onDebugMode?.(debugBox.checked));
-  debugLabel.append(debugBox, document.createTextNode(" Debug mode: show the Debug tab and Maya's own card"));
-  debug.append(debugLabel);
+  debug.append(
+    group({}, card(row({
+      label: "Debug mode",
+      help: "Shows the Debug tab and Maya's own card.",
+      control: toggle("debug-mode", model.debugMode === true, (on) => h.onDebugMode?.(on)),
+    }))),
+  );
 
   releaseNotes.append(renderReleaseNotes());
 
@@ -1431,31 +1392,21 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   workHint.textContent = "Blank uses the built-in prompt. {id}, {title}, {url}, {description} and {repo} are filled in.";
   workItems.append(workHint);
 
-  const speakLabel = document.createElement("label");
-  speakLabel.className = "settings__check";
-  const speakBox = document.createElement("input");
-  speakBox.type = "checkbox";
-  speakBox.name = "speak";
-  speakBox.checked = model.speakNotifications;
-  speakBox.addEventListener("change", () => h.onSpeak(speakBox.checked));
-  speakLabel.append(speakBox, document.createTextNode(" Speak instead of a sound (\"needs a decision\", \"is finished\")"));
-  notifications.append(speakLabel);
-
+  let focusFoot: HTMLElement | undefined;
   if (model.focusVisible === false) {
     // macOS keeps the Focus state from apps without Full Disk Access, so
     // Maya would speak through Do Not Disturb.
-    const focusHint = document.createElement("div");
-    focusHint.className = "settings__hint";
-    focusHint.dataset.for = "focus";
-    focusHint.textContent = "Maya cannot tell when a Focus mode such as Do Not Disturb is on, so she keeps speaking. Give her Full Disk Access to let a Focus mode keep her quiet; macOS then asks to quit and reopen her. ";
-    const open = document.createElement("button");
-    open.type = "button";
-    open.dataset.action = "full-disk-access";
-    open.textContent = "Open Full Disk Access";
-    open.addEventListener("click", () => h.onFullDiskAccess?.());
-    focusHint.append(open);
-    notifications.append(focusHint);
+    focusFoot = document.createElement("span");
+    focusFoot.dataset.for = "focus";
+    focusFoot.append("Maya cannot tell when a Focus mode such as Do Not Disturb is on, so she keeps speaking. Give her Full Disk Access to let a Focus mode keep her quiet; macOS then asks to quit and reopen her. ");
+    focusFoot.append(settingsBtn("Open Full Disk Access", { action: "full-disk-access" }, () => h.onFullDiskAccess?.()));
   }
+  notifications.append(
+    group({ foot: focusFoot }, card(
+      row({ label: "Notify me when a session awaits a decision", control: toggle("notify", model.notifyOnAwaiting, (on) => h.onNotify(on)) }),
+      row({ label: "Speak instead of a sound", help: "\"needs a decision\", \"is finished\"", control: toggle("speak", model.speakNotifications, (on) => h.onSpeak(on)) }),
+    )),
+  );
 
   // The live role, not the select: previewing Assistant before a Pair
   // succeeds must not untick listening on a machine that is not one yet.

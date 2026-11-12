@@ -183,6 +183,11 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__add:hover { color: var(--gold-bright); border-color: var(--gold-deep); }
 
 /* State, as a dot and a word. */
+.settings.pane .settings__keys .settings__control { flex-wrap: wrap; }
+.settings.pane .settings__kbd { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 7px; background: var(--field); font-size: 13px; }
+.settings.pane .settings__kbd button { font: inherit; background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 4px; border-radius: 4px; }
+.settings.pane .settings__kbd button:hover { color: var(--text); background: var(--soft); }
+.settings.pane .settings__kbd--only { padding-right: 10px; }
 .settings.pane .settings__state { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; white-space: nowrap; }
 .settings.pane .settings__state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--idle); }
 .settings.pane .settings__state--on { color: var(--text); }

@@ -571,8 +571,8 @@ describe("renderSettings", () => {
   it("shows the app version at the end of the General section once it is known", () => {
     const el = renderSettings({ ...voiceBase, version: "0.13.0" }, handlers());
     const general = el.querySelector(".settings__section--general")!;
-    expect(general.lastElementChild?.className).toBe("settings__hint settings__version");
-    expect(general.lastElementChild?.textContent).toBe("Maya 0.13.0");
+    expect(general.lastElementChild?.className).toBe("settings__group");
+    expect(general.lastElementChild?.querySelector(".settings__version")?.textContent).toBe("Maya 0.13.0");
     expect(renderSettings(voiceBase, handlers()).querySelector(".settings__version")).toBeNull();
   });
 
@@ -1104,6 +1104,57 @@ describe("nextNetworkRole", () => {
   });
 });
 
+describe("General, Keyboard, Notifications and Debug in the card design", () => {
+  const titles = (el: HTMLElement, key: string) => [...el.querySelectorAll(`.settings__section--${key} .settings__group-title`)].map((t) => t.textContent);
+
+  it("groups General as Agent, Appearance and Updates, with the agent hint as the Agent row's help", () => {
+    const el = renderSettings({ ...voiceBase, version: "0.18.0", updatesOn: true, updateStatus: "Up to date." }, { ...handlers(), onCheckUpdates: vi.fn() });
+    expect(titles(el, "general")).toEqual(["Agent", "Appearance", "Updates"]);
+    const agentRow = el.querySelector("select[name=agent]")!.closest(".settings__row")!;
+    expect(agentRow.querySelector(".settings__help")?.textContent).toContain("voice commands");
+    const version = el.querySelector(".settings__version")!;
+    expect(version.classList.contains("settings__label")).toBe(true);
+    expect(version.textContent).toBe("Maya 0.18.0");
+    expect(version.closest(".settings__row")!.querySelector(".settings__help.settings__update-status")?.textContent).toBe("Up to date.");
+  });
+
+  it("leaves the Updates help out without a status, and the button out when updates are off", () => {
+    const h = { ...handlers(), onCheckUpdates: vi.fn() };
+    const on = renderSettings({ ...voiceBase, version: "0.18.0", updatesOn: true }, h);
+    expect(on.querySelector(".settings__version")!.closest(".settings__row")!.querySelector(".settings__help")).toBeNull();
+    const off = renderSettings({ ...voiceBase, version: "0.18.0", updatesOn: false, updateStatus: "Up to date." }, h);
+    expect(off.querySelector("[data-action=check-updates]")).toBeNull();
+    expect(off.querySelector(".settings__version")?.textContent).toBe("Maya 0.18.0");
+  });
+
+  it("shows Keyboard as one card of rows with a foot note, then Reset to defaults", () => {
+    const el = renderSettings({ ...voiceBase, keys: defaultKeys() }, { ...handlers(), onKeys: vi.fn() });
+    const rows = el.querySelectorAll(".settings__section--keyboard [data-keys]");
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) expect(r.classList.contains("settings__row") && r.classList.contains("settings__keys")).toBe(true);
+    const group = el.querySelector(".settings__section--keyboard .settings__group")!;
+    expect(group.querySelector(".settings__group-foot")?.textContent).toBe("An Enter press in neither list does what the box does by itself.");
+    expect(group.nextElementSibling?.matches("button[data-action=keys-reset]")).toBe(true);
+  });
+
+  it("makes the notification switches toggles, with the Focus hint as the foot", () => {
+    const h = handlers();
+    const el = renderSettings({ ...voiceBase, focusVisible: false }, h);
+    for (const name of ["notify", "speak"]) expect(el.querySelector(`input[name=${name}]`)!.classList.contains("settings__toggle")).toBe(true);
+    expect(el.querySelector("input[name=speak]")!.closest(".settings__row")!.querySelector(".settings__help")?.textContent).toBe('"needs a decision", "is finished"');
+    expect(el.querySelector(".settings__section--notifications .settings__group-foot [data-for=focus]")).not.toBeNull();
+    expect(renderSettings(voiceBase, h).querySelector(".settings__section--notifications .settings__group-foot")).toBeNull();
+  });
+
+  it("shows Debug mode as a toggle row with its help", () => {
+    const box = renderSettings(voiceBase, handlers()).querySelector("input[name=debug-mode]")!;
+    expect(box.classList.contains("settings__toggle")).toBe(true);
+    const row = box.closest(".settings__row")!;
+    expect(row.querySelector(".settings__label")?.textContent).toBe("Debug mode");
+    expect(row.querySelector(".settings__help")?.textContent).toBe("Shows the Debug tab and Maya's own card.");
+  });
+});
+
 describe("check for updates", () => {
   it("offers the button beside the version only where Maya can update", () => {
     const h = { ...handlers(), onCheckUpdates: vi.fn() };
@@ -1303,7 +1354,7 @@ describe("keyboard", () => {
     const h = { ...handlers(), onKeys: vi.fn() };
     const el = renderSettings({ ...voiceBase, ...model }, h);
     const row = (action: string) => el.querySelector<HTMLElement>(`.settings__keys[data-keys=${action}]`)!;
-    const chips = (action: string) => [...row(action).querySelectorAll(".chip")].map((c) => c.firstChild?.textContent);
+    const chips = (action: string) => [...row(action).querySelectorAll(".settings__kbd")].map((c) => c.firstChild?.textContent);
     return { h, el, row, chips };
   };
   const press = (target: HTMLElement, init: KeyboardEventInit) => {
@@ -1329,8 +1380,8 @@ describe("keyboard", () => {
 
   it("removes a combination, and offers no remove on Send's last one", () => {
     const { h, row } = open();
-    expect(row("send").querySelector(".chip__remove")).toBeNull();
-    row("newLine").querySelectorAll<HTMLButtonElement>(".chip__remove")[0].click();
+    expect(row("send").querySelector(".settings__kbd button")).toBeNull();
+    row("newLine").querySelectorAll<HTMLButtonElement>(".settings__kbd button")[0].click();
     expect(h.onKeys).toHaveBeenCalledWith({ send: ["Enter"], newLine: ["Ctrl+Enter"] });
   });
 
@@ -1359,11 +1410,11 @@ describe("keyboard", () => {
     const add = row("newLine").querySelector<HTMLButtonElement>("button[data-action=keys-add]")!;
     add.click();
     press(add, { key: "Escape" });
-    expect(add.textContent).toBe("Add");
+    expect(add.textContent).toBe("+ Add");
     press(add, { key: "Enter", shiftKey: true });
     add.click();
     add.dispatchEvent(new FocusEvent("blur"));
-    expect(add.textContent).toBe("Add");
+    expect(add.textContent).toBe("+ Add");
     press(add, { key: "Enter", shiftKey: true });
     expect(h.onKeys).not.toHaveBeenCalled();
   });
