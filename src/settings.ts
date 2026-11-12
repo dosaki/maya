@@ -16,7 +16,7 @@ import { terminalLabel } from "./terminalpick";
 import { renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 import { updates } from "./update";
-import { btn as settingsBtn, card, cardHead, choice, footRow, group, notice, row, screenHead, state, toggle } from "./settings-ui";
+import { addButton, btn as settingsBtn, card, cardHead, choice, footRow, group, notice, row, screenHead, source, state, toggle } from "./settings-ui";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -159,6 +159,10 @@ export interface SettingsModel {
   git?: GitConnectionJson[];
   /** The Work Items settings; the defaults when absent. */
   workItems?: WorkItemsConfig;
+  /** Which Work Items sources are open, by `github`, `gitlab` or a custom tool's id; folded when absent. */
+  sourcesOpen?: Record<string, boolean>;
+  /** Which custom tools have their "Output format" details open, by tool id. */
+  customDetailsOpen?: Record<string, boolean>;
   /** Whether a pasted token is stored, and the last Test's outcome. */
   gitStatus?: Record<GitProvider, { hasToken: boolean; test?: string | null }>;
   /** This install can check for updates (`update_kind` is not `off`). */
@@ -343,6 +347,50 @@ curl -s -H "Authorization: Bearer $TRACKER_TOKEN" https://tracker.example.com/ap
 export function workItemsConfig(raw: Partial<WorkItemsConfig> | null | undefined): WorkItemsConfig {
   const forge = (f?: ForgeItems): ForgeItems => f ?? { enabled: true, rules: [{ assignee: { kind: "me" }, labels: [], repos: [] }], statusLabels: [], startStatus: null, trackerRepos: [] };
   return { github: forge(raw?.github), gitlab: forge(raw?.gitlab), prompt: raw?.prompt ?? "", custom: raw?.custom ?? [] };
+}
+
+/** "a", "a or b", "a, b or c". */
+function orList(items: string[]): string {
+  return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
+}
+
+/** A rule in a line, for its box's head: "Assigned to me, labelled bug, in dosaki/maya". */
+export function ruleSummary(rule: ItemRule): string {
+  const a = rule.assignee;
+  let text = a.kind === "me" ? "Assigned to me" : a.kind === "anyone" ? "Anyone's issues" : `Assigned to ${a.login || "someone"}`;
+  if (rule.labels.length > 0) text += `, labelled ${orList(rule.labels)}`;
+  if (rule.repos.length > 0) text += `, in ${orList(rule.repos)}`;
+  return text;
+}
+
+/** A forge's settings in a line, for its folded head: "2 rules; Start sets status to in progress". */
+export function forgeSummary(items: ForgeItems): string {
+  const n = items.rules.length;
+  const rules = `${n} rule${n === 1 ? "" : "s"}`;
+  return items.startStatus ? `${rules}; Start sets status to ${items.startStatus}` : rules;
+}
+
+export const SOURCES_OPEN_KEY = "maya.settingsSources";
+
+/** The Work Items sources open last time on this device; none when unset or unreadable. */
+export function storedSourcesOpen(): Record<string, boolean> {
+  try {
+    const v: unknown = JSON.parse(localStorage.getItem(SOURCES_OPEN_KEY) ?? "{}");
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return {};
+    return Object.fromEntries(Object.entries(v).filter(([, open]) => typeof open === "boolean"));
+  } catch {
+    return {};
+  }
+}
+
+/** Records which sources are open, in the model and on this device. */
+function setSourcesOpen(model: SettingsModel, open: Record<string, boolean>): void {
+  model.sourcesOpen = { ...model.sourcesOpen, ...open };
+  try {
+    localStorage.setItem(SOURCES_OPEN_KEY, JSON.stringify(model.sourcesOpen));
+  } catch {
+    /* private mode: nothing to remember */
+  }
 }
 
 const WORK_ITEMS_HINT: Record<GitProvider, string> = {
@@ -544,6 +592,8 @@ interface FocusedField {
   name: string;
   /** Set for radios, which share a name across the group. */
   value?: string;
+  /** The Work Items source it is in: both forges name their fields alike. */
+  source?: string;
   start: number | null;
   end: number | null;
   direction: "forward" | "backward" | "none" | null;
@@ -558,6 +608,8 @@ function focusedField(root: HTMLElement): FocusedField | null {
   if (!isField(el) || !el.name || !root.contains(el)) return null;
   const focused: FocusedField = { name: el.name, start: null, end: null, direction: null };
   if (el instanceof HTMLInputElement && el.type === "radio") focused.value = el.value;
+  const source = el.closest<HTMLElement>("[data-source]")?.dataset.source;
+  if (source !== undefined) focused.source = source;
   if (el instanceof HTMLSelectElement) return focused;
   try {
     // Null (or a throw, in some engines) for inputs with no caret, such as checkboxes.
@@ -571,7 +623,8 @@ function focusedField(root: HTMLElement): FocusedField | null {
 }
 
 function restoreFocus(root: HTMLElement, f: FocusedField): void {
-  const named = [...root.querySelectorAll("input, select, textarea")].filter((e): e is Field => isField(e) && e.name === f.name);
+  const scope = (f.source !== undefined && [...root.querySelectorAll<HTMLElement>("[data-source]")].find((s) => s.dataset.source === f.source)) || root;
+  const named = [...scope.querySelectorAll("input, select, textarea")].filter((e): e is Field => isField(e) && e.name === f.name);
   const el = (f.value !== undefined && named.find((e) => e.value === f.value)) || named[0];
   if (!el) return;
   el.focus();
@@ -1042,53 +1095,27 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
 
   const workItemsConfigNow = model.workItems ?? workItemsConfig(null);
   const connections = model.git ?? gitConnections(null);
+  const sourcesOpen = model.sourcesOpen ?? {};
+  // Opening or folding a source changes the DOM in place (see `source`); the
+  // model and this device remember it, so a repaint draws it the same way.
+  const rememberSource = (key: string, open: boolean) => setSourcesOpen(model, { [key]: open });
+  const sources: HTMLElement[] = [];
+  let ruleIds = 0;
   for (const forge of ["github", "gitlab"] as const) {
     const cfg = workItemsConfigNow[forge];
+    const label = GIT_LABEL[forge];
     const gitOn = connections.find((c) => c.provider === forge)?.enabled === true;
-    const box = document.createElement("div");
-    box.className = "settings__git settings__workitems";
-    box.dataset.forge = forge;
-
-    const onLabel = document.createElement("label");
-    onLabel.className = "settings__check";
-    const on = document.createElement("input");
-    on.type = "checkbox";
-    on.name = `wi-${forge}-enabled`;
-    on.checked = cfg.enabled;
-    onLabel.append(on, document.createTextNode(` ${GIT_LABEL[forge]}`));
-    box.append(onLabel);
-
-    if (!gitOn) {
-      const off = document.createElement("div");
-      off.className = "settings__hint";
-      off.append(document.createTextNode(`${GIT_LABEL[forge]} is off in Settings → Git. `));
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "settings__link";
-      open.dataset.action = "wi-open-git";
-      open.textContent = "Open Git settings";
-      open.addEventListener("click", () => h.onOpenGroup?.("git"));
-      off.append(open);
-      box.append(off);
-    }
+    const gitOffText = `${label} is off in Settings → Git.`;
+    const on = toggle(`wi-${forge}-enabled`, cfg.enabled, () => save(), `Use ${label}`);
 
     const rulesBox = document.createElement("div");
     rulesBox.className = "settings__rules";
-    const caption = document.createElement("div");
-    caption.className = "settings__hint";
-    caption.textContent = "Issues to pick up, by rule";
-    rulesBox.append(caption);
 
-    const statusLabel = document.createElement("label");
-    statusLabel.textContent = "Status labels (in order, comma-separated)";
     const status = document.createElement("input");
     status.type = "text";
     status.name = "wi-statusLabels";
     status.value = cfg.statusLabels.join(", ");
-    statusLabel.append(status);
 
-    const startLabel = document.createElement("label");
-    startLabel.textContent = "On Start, set status to";
     const start = document.createElement("select");
     start.name = "wi-startStatus";
     const fillStart = (labels: string[], chosen: string | null) => {
@@ -1106,28 +1133,27 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       start.value = chosen !== null && labels.includes(chosen) ? chosen : "";
     };
     fillStart(cfg.statusLabels, cfg.startStatus);
-    startLabel.append(start);
 
-    const trackerLabel = document.createElement("label");
-    trackerLabel.textContent = "Tracker-only repositories (comma-separated)";
     const tracker = document.createElement("input");
     tracker.type = "text";
     tracker.name = "wi-trackerRepos";
+    tracker.className = "mono";
     tracker.value = cfg.trackerRepos.join(", ");
-    trackerLabel.append(tracker);
 
-    /** The settings as the page shows them; a rule for someone with no login yet reads as such. */
+    /** One rule as its box shows it; someone with no login yet reads as such. */
+    const readRule = (r: HTMLElement): ItemRule => {
+      const kind = r.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!.value;
+      const login = r.querySelector<HTMLInputElement>("input[name=wi-login]")!.value.trim();
+      return {
+        assignee: kind === "user" ? { kind: "user", login } : kind === "anyone" ? { kind: "anyone" } : { kind: "me" },
+        labels: commaList(r.querySelector<HTMLInputElement>("input[name=wi-labels]")!.value),
+        repos: commaList(r.querySelector<HTMLInputElement>("input[name=wi-repos]")!.value),
+      };
+    };
+    /** The settings as the page shows them. */
     const read = (): ForgeItems => ({
       enabled: on.checked,
-      rules: [...rulesBox.querySelectorAll<HTMLElement>(".settings__rule")].map((r) => {
-        const kind = r.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!.value;
-        const login = r.querySelector<HTMLInputElement>("input[name=wi-login]")!.value.trim();
-        return {
-          assignee: kind === "user" ? { kind: "user", login } : kind === "anyone" ? { kind: "anyone" } : { kind: "me" },
-          labels: commaList(r.querySelector<HTMLInputElement>("input[name=wi-labels]")!.value),
-          repos: commaList(r.querySelector<HTMLInputElement>("input[name=wi-repos]")!.value),
-        };
-      }),
+      rules: [...rulesBox.querySelectorAll<HTMLElement>(".settings__rule")].map(readRule),
       statusLabels: commaList(status.value),
       startStatus: start.value === "" ? null : start.value,
       trackerRepos: commaList(tracker.value),
@@ -1139,20 +1165,25 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       h.onWorkItems?.(forge, items);
     };
 
+    const add = addButton("+ Add rule", "wi-add-rule", () => {
+      const items = read();
+      items.rules.push({ assignee: { kind: "me" }, labels: [], repos: [] });
+      save(items);
+    });
+
     const addRule = (rule: ItemRule) => {
+      const id = `wi-${forge}-rule-${ruleIds++}`;
       const r = document.createElement("div");
       r.className = "settings__rule";
-      const field = (text: string, control: HTMLElement) => {
-        const f = document.createElement("div");
-        f.className = "settings__rule-field";
-        const c = document.createElement("span");
-        c.className = "settings__hint";
-        c.textContent = text;
-        f.append(c, control);
-        return f;
+      const fieldLabel = (text: string, forId: string) => {
+        const l = document.createElement("label");
+        l.htmlFor = forId;
+        l.textContent = text;
+        return l;
       };
       const assignee = document.createElement("select");
       assignee.name = "wi-assignee";
+      assignee.id = `${id}-assignee`;
       for (const [value, text] of [["me", "Me"], ["user", "Someone"], ["anyone", "Anyone"]]) {
         const o = document.createElement("option");
         o.value = value;
@@ -1176,46 +1207,52 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       const labels = document.createElement("input");
       labels.type = "text";
       labels.name = "wi-labels";
+      labels.id = `${id}-labels`;
       labels.placeholder = "bug, urgent";
       labels.value = rule.labels.join(", ");
       labels.addEventListener("change", () => save());
       const repos = document.createElement("input");
       repos.type = "text";
       repos.name = "wi-repos";
+      repos.id = `${id}-repos`;
+      repos.className = "mono";
       repos.placeholder = "any repository";
       repos.value = rule.repos.join(", ");
       repos.addEventListener("change", () => save());
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "settings__link";
-      remove.dataset.action = "wi-remove-rule";
-      remove.setAttribute("aria-label", "Remove rule");
-      remove.textContent = "✕";
-      remove.addEventListener("click", () => {
+      const remove = settingsBtn("Remove", { action: "wi-remove-rule", kind: "quiet" }, () => {
         r.remove();
         save();
       });
+      remove.classList.add("settings__btn--danger");
+      remove.setAttribute("aria-label", "Remove rule");
+
+      const head = document.createElement("div");
+      head.className = "settings__rule-head";
+      const sum = document.createElement("span");
+      sum.className = "settings__rule-sum";
+      sum.textContent = ruleSummary(rule);
+      head.append(sum, remove);
+      // The head follows the fields as they are typed, before any save.
+      const sumUp = () => { sum.textContent = ruleSummary(readRule(r)); };
+      r.addEventListener("input", sumUp);
+      r.addEventListener("change", sumUp);
+
       const who = document.createElement("div");
       who.className = "settings__rule-who";
       who.append(assignee, login);
-      r.append(field("Assignee", who), field("Labels", labels), field("Repositories", repos), remove);
-      rulesBox.append(r);
+      const body = document.createElement("div");
+      body.className = "settings__rule-body";
+      body.append(
+        fieldLabel("Assignee", assignee.id), who,
+        fieldLabel("Labels", labels.id), labels,
+        fieldLabel("Repositories", repos.id), repos,
+      );
+      r.append(head, body);
+      rulesBox.insertBefore(r, add);
     };
+    rulesBox.append(add);
     for (const rule of cfg.rules) addRule(rule);
 
-    const add = document.createElement("button");
-    add.type = "button";
-    add.className = "settings__link";
-    add.dataset.action = "wi-add-rule";
-    add.textContent = "+ Add rule";
-    add.addEventListener("click", () => {
-      const items = read();
-      items.rules.push({ assignee: { kind: "me" }, labels: [], repos: [] });
-      save(items);
-    });
-    rulesBox.append(add);
-
-    on.addEventListener("change", () => save());
     status.addEventListener("change", () => {
       // The On Start choices follow the labels just typed.
       fillStart(commaList(status.value), start.value);
@@ -1224,18 +1261,48 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     start.addEventListener("change", () => save());
     tracker.addEventListener("change", () => save());
 
-    box.append(rulesBox, statusLabel, startLabel, trackerLabel);
-    const hint = document.createElement("div");
-    hint.className = "settings__hint";
-    hint.textContent = WORK_ITEMS_HINT[forge];
-    box.append(hint);
-
+    const body: HTMLElement[] = [];
     if (!gitOn) {
-      for (const el of box.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select, button")) {
-        if (el !== on && el.dataset.action !== "wi-open-git") el.disabled = true;
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "settings__link";
+      open.dataset.action = "wi-open-git";
+      open.textContent = "Open Git settings";
+      open.addEventListener("click", () => h.onOpenGroup?.("git"));
+      body.push(row({ label: gitOffText, control: open }));
+    }
+    const hint = document.createElement("span");
+    hint.className = "settings__help";
+    hint.textContent = WORK_ITEMS_HINT[forge];
+    body.push(
+      row({ label: "Issues to pick up", help: "An issue shows when it matches any one of these rules.", control: rulesBox, stack: true }),
+      row({ label: "Status labels", help: "In order, comma-separated.", control: status }),
+      row({ label: "On Start, set status to", control: start }),
+      row({ label: "Tracker-only repositories", help: "Comma-separated.", control: tracker }),
+      footRow(hint),
+    );
+    if (!gitOn) {
+      for (const part of body) {
+        for (const el of part.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select, button")) {
+          if (el.dataset.action !== "wi-open-git") el.disabled = true;
+        }
       }
     }
-    workItems.append(box);
+
+    const box = source({
+      key: forge,
+      name: label,
+      summary: gitOn ? forgeSummary(cfg) : gitOffText,
+      stateText: !gitOn ? "Git off" : cfg.enabled ? "On" : "Off",
+      stateOn: gitOn && cfg.enabled,
+      open: sourcesOpen[forge] === true,
+      onToggle: (open) => rememberSource(forge, open),
+      control: on,
+      body,
+    });
+    box.classList.add("settings__git", "settings__workitems");
+    box.dataset.forge = forge;
+    sources.push(box);
   }
 
   const customTools = workItemsConfigNow.custom ?? [];
@@ -1253,104 +1320,104 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       };
     });
   const sendCustom = (tools: CustomTool[]) => h.onCustomTools?.(tools);
+  const optional = (text: string) => {
+    const f = document.createDocumentFragment();
+    const unit = document.createElement("span");
+    unit.className = "settings__unit";
+    unit.textContent = "(optional)";
+    f.append(`${text} `, unit);
+    return f;
+  };
   customTools.forEach((tool, i) => {
-    const box = document.createElement("div");
-    box.className = "settings__git settings__custom";
-    box.dataset.tool = tool.id;
     const change = () => sendCustom(readCustom());
+    const on = toggle(`ct-${i}-enabled`, tool.enabled, change, "Use this tool");
 
-    const head = document.createElement("div");
-    head.className = "settings__check";
-    const on = document.createElement("input");
-    on.type = "checkbox";
-    on.name = `ct-${i}-enabled`;
-    on.setAttribute("aria-label", "Use this tool");
-    on.checked = tool.enabled;
-    on.addEventListener("change", change);
-    const name = document.createElement("input");
-    name.type = "text";
-    name.name = `ct-${i}-name`;
-    name.setAttribute("aria-label", "Tool name");
-    name.placeholder = "Linear (mine-only)";
-    name.value = tool.name;
-    name.addEventListener("change", () => {
-      name.value = name.value.trim();
-      change();
-    });
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "settings__link";
-    remove.dataset.action = "ct-remove";
-    remove.setAttribute("aria-label", "Remove custom tool");
-    remove.textContent = "✕";
-    remove.addEventListener("click", () => {
-      const at = [...workItems.querySelectorAll(".settings__custom")].indexOf(box);
-      sendCustom(readCustom().filter((_, j) => j !== at));
-    });
-    head.append(on, name, remove);
-    box.append(head);
-
-    const text = (label: string, key: "listCommand" | "startCommand" | "me", suffix: string) => {
-      const l = document.createElement("label");
-      l.append(document.createTextNode(label));
+    const text = (key: "name" | "listCommand" | "startCommand" | "me", suffix: string, mono: boolean) => {
       const el = document.createElement("input");
       el.type = "text";
       el.name = `ct-${i}-${suffix}`;
+      if (mono) el.className = "mono";
       el.value = tool[key];
       el.addEventListener("change", () => {
         el.value = el.value.trim();
         change();
       });
-      l.append(el);
-      box.append(l);
+      return el;
     };
-    text("List command", "listCommand", "list");
-    text("On-start command (optional)", "startCommand", "start");
-    text("Your name there (optional)", "me", "me");
-    const meHint = document.createElement("div");
-    meHint.className = "settings__hint";
-    meHint.textContent = "Start asks before taking over an item assigned to someone else. Blank: it never asks.";
-    box.append(meHint);
+    const name = text("name", "name", false);
+    name.setAttribute("aria-label", "Tool name");
+    name.placeholder = "Linear (mine-only)";
 
     const details = document.createElement("details");
+    details.className = "settings__details";
+    details.open = model.customDetailsOpen?.[tool.id] === true;
+    details.addEventListener("toggle", () => {
+      model.customDetailsOpen = { ...model.customDetailsOpen, [tool.id]: details.open };
+    });
     const summary = document.createElement("summary");
-    summary.textContent = "Show the output format and an example script";
-    const listHint = document.createElement("div");
-    listHint.className = "settings__hint";
-    listHint.textContent = "The list command runs every 2 minutes through your shell and must finish within 30 seconds. It prints JSON like the example; id, title and url are required. repo is owner/name, github:owner/name, gitlab:group/name or a clone URL; without one, Maya picks the repository when you start.";
-    const startHint = document.createElement("div");
-    startHint.className = "settings__hint";
-    startHint.textContent = "The on-start command runs when you press Start, with the item's JSON on its input, to assign or move it in your tool. On macOS and Linux, anything a command leaves running is stopped when it ends.";
+    summary.textContent = "Output format and an example script";
+    const detailsBody = document.createElement("div");
+    detailsBody.className = "settings__details-body";
+    const listHint = document.createElement("span");
+    listHint.textContent = "It prints JSON like this; id, title and url are required. repo is owner/name, github:owner/name, gitlab:group/name or a clone URL; without one, Maya picks the repository when you start.";
     const format = document.createElement("pre");
     format.textContent = CUSTOM_TOOL_FORMAT;
     const script = document.createElement("pre");
     script.textContent = CUSTOM_TOOL_SCRIPT;
-    details.append(summary, listHint, startHint, format, script);
-    box.append(details);
-    workItems.append(box);
-  });
-  const addTool = document.createElement("button");
-  addTool.type = "button";
-  addTool.className = "settings__link";
-  addTool.dataset.action = "ct-add";
-  addTool.textContent = "+ Add New";
-  addTool.addEventListener("click", () => sendCustom([...readCustom(), { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]));
-  workItems.append(addTool);
+    const stopHint = document.createElement("span");
+    stopHint.textContent = "On macOS and Linux, anything a command leaves running is stopped when it ends.";
+    detailsBody.append(listHint, format, script, stopHint);
+    details.append(summary, detailsBody);
 
-  const workLabel = document.createElement("label");
-  workLabel.textContent = "Work prompt";
+    const remove = settingsBtn("Remove this tool", { action: "ct-remove", kind: "quiet" }, () => {
+      const at = [...workItems.querySelectorAll(".settings__custom")].indexOf(box);
+      sendCustom(readCustom().filter((_, j) => j !== at));
+    });
+    remove.classList.add("settings__btn--danger");
+
+    const box = source({
+      key: tool.id,
+      name: tool.name,
+      tag: "Custom tool",
+      summary: tool.listCommand,
+      monoSummary: true,
+      stateText: tool.enabled ? "On" : "Off",
+      stateOn: tool.enabled,
+      open: sourcesOpen[tool.id] === true,
+      onToggle: (open) => rememberSource(tool.id, open),
+      control: on,
+      body: [
+        row({ label: "Name", help: "How its items are labelled on the Issues tab.", control: name }),
+        row({ label: "List command", help: "Runs every 2 minutes through your shell, and must finish within 30 seconds.", control: text("listCommand", "list", true), stack: true }),
+        row({ label: optional("On-start command"), help: "Runs when you press Start, with the item's JSON on its input, to assign or move it in your tool.", control: text("startCommand", "start", true), stack: true }),
+        row({ label: optional("Your name there"), help: "Start asks before taking over an item assigned to someone else. Blank: it never asks.", control: text("me", "me", false) }),
+        details,
+        footRow(document.createTextNode(""), remove),
+      ],
+    });
+    box.classList.add("settings__git", "settings__custom");
+    box.dataset.tool = tool.id;
+    sources.push(box);
+  });
+  const addTool = addButton("+ Add a custom tool", "ct-add", () =>
+    sendCustom([...readCustom(), { id: "", name: "", enabled: true, listCommand: "", startCommand: "", me: "" }]),
+  );
+
   const workInput = document.createElement("textarea");
   workInput.name = "workPrompt";
-  workInput.rows = 4;
+  workInput.rows = 6;
+  workInput.setAttribute("aria-label", "Work prompt");
   workInput.value = workItemsConfigNow.prompt;
   workInput.addEventListener("change", () => h.onWorkPrompt?.(workInput.value.trim()));
-  workLabel.append(workInput);
-  workItems.append(workLabel);
-  const workHint = document.createElement("div");
-  workHint.className = "settings__hint";
-  workHint.dataset.for = "workPrompt";
-  workHint.textContent = "Blank uses the built-in prompt. {id}, {title}, {url}, {description} and {repo} are filled in.";
-  workItems.append(workHint);
+
+  workItems.append(
+    group({ title: "Sources", note: "Open one to change what the Issues tab picks up from it." }, ...sources, addTool),
+    group({ title: "Work prompt" }, card(row({
+      help: "What Start tells the agent. Blank uses the built-in prompt. {id}, {title}, {url}, {description} and {repo} are filled in.",
+      control: workInput,
+      stack: true,
+    }))),
+  );
 
   let focusFoot: HTMLElement | undefined;
   if (model.focusVisible === false) {
@@ -2013,6 +2080,7 @@ export async function initSettings(): Promise<void> {
     networkMainPort: 0,
     networkName: "",
     settingsGroup: storedSettingsGroup(),
+    sourcesOpen: storedSourcesOpen(),
   };
 
   const applyNetworkConfig = (c: ConfigJson) => {
@@ -2059,13 +2127,14 @@ export async function initSettings(): Promise<void> {
     }
   };
 
-  const saveWorkItems = (patch: (w: WorkItemsConfig) => void) =>
+  const saveWorkItems = (patch: (w: WorkItemsConfig) => void, saved?: () => void) =>
     run(async () => {
       const fresh = await invoke<ConfigJson>("get_config");
       const workItems = workItemsConfig(fresh.workItems);
       patch(workItems);
       const c = await invoke<ConfigJson>("set_config", { config: { ...fresh, workItems } });
       applyConfig(c);
+      saved?.();
     });
 
   /** Applies `change` to one connection of the freshest config and saves the list. */
@@ -2174,7 +2243,17 @@ export async function initSettings(): Promise<void> {
   const handlers: SettingsHandlers = {
     onWorkItems: (forge, items) => void saveWorkItems((w) => { w[forge] = items; }),
     onWorkPrompt: (text) => void saveWorkItems((w) => { w.prompt = text; }),
-    onCustomTools: (tools) => void saveWorkItems((w) => { w.custom = tools; }),
+    onCustomTools: (tools) => {
+      // A tool just added has no id until the backend names it: open
+      // whichever tool the save brings back that was not there before.
+      const before = new Set((model.workItems?.custom ?? []).map((t) => t.id));
+      const adding = tools.some((t) => t.id === "");
+      void saveWorkItems((w) => { w.custom = tools; }, () => {
+        if (!adding) return;
+        const added = (model.workItems?.custom ?? []).filter((t) => !before.has(t.id));
+        if (added.length > 0) setSourcesOpen(model, Object.fromEntries(added.map((t) => [t.id, true])));
+      });
+    },
     onOpenGroup: (group) => document.dispatchEvent(new CustomEvent(OPEN_SETTINGS_GROUP, { detail: group })),
     onGitEnabled: (p, on) => void saveGit(p, (c) => { c.enabled = on; }),
     onGitBaseUrl: (url) => void saveGit("gitlab", (c) => { c.baseUrl = url || null; }),

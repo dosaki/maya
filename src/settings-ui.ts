@@ -37,7 +37,7 @@ export function card(...rows: Node[]): HTMLElement {
 const LABELABLE = new Set(["INPUT", "SELECT", "TEXTAREA"]);
 
 export function row(opts: {
-  label: Content;
+  label?: Content;
   help?: Content | null;
   control?: Node | Node[];
   tag?: "label" | "div";
@@ -48,7 +48,7 @@ export function row(opts: {
   const tag = opts.tag ?? (single instanceof HTMLElement && LABELABLE.has(single.tagName) ? "label" : "div");
   const r = el(tag, opts.stack ? "settings__row settings__row--stack" : "settings__row");
   const text = el("span", "settings__row-text");
-  text.append(el("span", "settings__label", opts.label));
+  if (opts.label !== undefined) text.append(el("span", "settings__label", opts.label));
   if (opts.help) {
     const help = el("span", "settings__help", opts.help);
     const name = single instanceof HTMLElement ? (single as HTMLInputElement).name : "";

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
 import { RUNNING_VERSION } from "./release-notes";
-import { SETTINGS_GROUPS, SETTINGS_LEDES, SETTINGS_NAV, gitConnections, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { SETTINGS_GROUPS, SETTINGS_LEDES, SETTINGS_NAV, SOURCES_OPEN_KEY, forgeSummary, gitConnections, ruleSummary, storedSourcesOpen, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 import { secretStore } from "./platform";
 import styles from "./styles.css?raw";
 
@@ -1738,7 +1738,11 @@ describe("Settings → Work Items", () => {
     const h = { ...handlers(), onOpenGroup: vi.fn() };
     const root = renderSettings(wiModel({ git: gitConnections(null) }), h);
     const gl = box(root, "gitlab");
-    expect(gl.textContent).toContain("GitLab is off in Settings → Git.");
+    // The open body starts with the sentence and the link.
+    const first = gl.querySelector(".settings__source-body")!.firstElementChild!;
+    expect(first.textContent).toContain("GitLab is off in Settings → Git.");
+    expect(first.querySelector("[data-action=wi-open-git]")).not.toBeNull();
+    expect(gl.querySelector<HTMLButtonElement>(".settings__source-toggle")!.disabled).toBe(false);
     const fields = [...gl.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select")].filter((e) => e.name !== "wi-gitlab-enabled");
     expect(fields.length).toBeGreaterThan(0);
     expect(fields.every((e) => e.disabled)).toBe(true);
@@ -1767,6 +1771,238 @@ describe("Settings → Work Items", () => {
   });
 });
 
+describe("ruleSummary", () => {
+  it("names who the rule is for", () => {
+    expect(ruleSummary({ assignee: { kind: "me" }, labels: [], repos: [] })).toBe("Assigned to me");
+    expect(ruleSummary({ assignee: { kind: "user", login: "alice" }, labels: [], repos: [] })).toBe("Assigned to alice");
+    expect(ruleSummary({ assignee: { kind: "user", login: "" }, labels: [], repos: [] })).toBe("Assigned to someone");
+    expect(ruleSummary({ assignee: { kind: "anyone" }, labels: [], repos: [] })).toBe("Anyone's issues");
+  });
+  it("adds its labels and repositories", () => {
+    expect(ruleSummary({ assignee: { kind: "me" }, labels: ["a", "b", "c"], repos: [] })).toBe("Assigned to me, labelled a, b or c");
+    expect(ruleSummary({ assignee: { kind: "me" }, labels: [], repos: ["x/y", "x/z"] })).toBe("Assigned to me, in x/y or x/z");
+    expect(ruleSummary({ assignee: { kind: "me" }, labels: ["bug"], repos: ["dosaki/maya"] })).toBe("Assigned to me, labelled bug, in dosaki/maya");
+  });
+});
+
+describe("forgeSummary", () => {
+  const rule = { assignee: { kind: "me" as const }, labels: [], repos: [] };
+  it("counts the rules and names the start status when set", () => {
+    expect(forgeSummary({ enabled: true, rules: [rule], statusLabels: [], startStatus: null, trackerRepos: [] })).toBe("1 rule");
+    expect(forgeSummary({ enabled: true, rules: [rule, rule], statusLabels: ["in progress"], startStatus: "in progress", trackerRepos: [] })).toBe("2 rules; Start sets status to in progress");
+  });
+});
+
+describe("storedSourcesOpen", () => {
+  afterEach(() => localStorage.removeItem(SOURCES_OPEN_KEY));
+  it("reads the open sources, and nothing when missing or unreadable", () => {
+    expect(SOURCES_OPEN_KEY).toBe("maya.settingsSources");
+    localStorage.removeItem(SOURCES_OPEN_KEY);
+    expect(storedSourcesOpen()).toEqual({});
+    localStorage.setItem(SOURCES_OPEN_KEY, "{not json");
+    expect(storedSourcesOpen()).toEqual({});
+    localStorage.setItem(SOURCES_OPEN_KEY, "[true]");
+    expect(storedSourcesOpen()).toEqual({});
+    localStorage.setItem(SOURCES_OPEN_KEY, "7");
+    expect(storedSourcesOpen()).toEqual({});
+    localStorage.setItem(SOURCES_OPEN_KEY, '{"github":true,"custom-1":false}');
+    expect(storedSourcesOpen()).toEqual({ github: true, "custom-1": false });
+  });
+});
+
+describe("Settings → Work Items sources", () => {
+  afterEach(() => localStorage.removeItem(SOURCES_OPEN_KEY));
+  const rule = (over: { labels?: string[]; repos?: string[] } = {}) => ({ assignee: { kind: "me" as const }, labels: [] as string[], repos: [] as string[], ...over });
+  const forge = { enabled: true, rules: [rule(), rule({ labels: ["bug"] })], statusLabels: ["todo", "in progress"], startStatus: "in progress", trackerRepos: [] };
+  const gitlabItems = { enabled: false, rules: [rule()], statusLabels: [], startStatus: null, trackerRepos: [] };
+  const tool = { id: "custom-1", name: "Linear", enabled: true, listCommand: "~/bin/linear-items.sh", startCommand: "", me: "" };
+  const offTool = { id: "custom-2", name: "Jira", enabled: false, listCommand: "jira-items", startCommand: "", me: "" };
+  const both = gitConnections([{ provider: "github", enabled: true, token: { kind: "env", name: "GH_TOKEN" } }, { provider: "gitlab", enabled: true, token: { kind: "env", name: "GITLAB_TOKEN" } }]);
+  const model = (over: Partial<SettingsModel> = {}): SettingsModel => ({
+    ...voiceBase,
+    settingsGroup: "workItems",
+    git: both,
+    workItems: { github: forge, gitlab: gitlabItems, prompt: "", custom: [tool, offTool] },
+    ...over,
+  });
+  const src = (root: HTMLElement, key: string) => root.querySelector<HTMLElement>(`[data-source="${key}"]`)!;
+
+  it("lists GitHub, GitLab and each custom tool under Sources, then Add a custom tool", () => {
+    const root = renderSettings(model(), handlers());
+    const section = root.querySelector(".settings__section--workItems")!;
+    const sources = [...section.querySelectorAll<HTMLElement>("[data-source]")];
+    const group = sources[0].closest(".settings__group")!;
+    expect(group.querySelector(".settings__group-title")!.textContent).toBe("Sources");
+    expect(group.querySelector(".settings__group-note")!.textContent).toBe("Open one to change what the Issues tab picks up from it.");
+    expect(sources.map((s) => s.dataset.source)).toEqual(["github", "gitlab", "custom-1", "custom-2"]);
+    expect(sources.every((s) => s.parentElement === group)).toBe(true);
+    const add = group.lastElementChild as HTMLElement;
+    expect(add.classList.contains("settings__add")).toBe(true);
+    expect(add.textContent).toBe("+ Add a custom tool");
+    expect(add.dataset.action).toBe("ct-add");
+  });
+
+  it("starts folded, with a summary and whether each is on", () => {
+    const root = renderSettings(model(), handlers());
+    for (const key of ["github", "gitlab", "custom-1", "custom-2"]) expect(src(root, key).hasAttribute("data-open")).toBe(false);
+    const sum = (key: string) => src(root, key).querySelector(".settings__source-sum")!;
+    expect(sum("github").textContent).toBe(forgeSummary(forge));
+    expect(sum("gitlab").textContent).toBe("1 rule");
+    expect(sum("custom-1").textContent).toBe("~/bin/linear-items.sh");
+    expect(sum("custom-1").classList.contains("mono")).toBe(true);
+    expect(src(root, "custom-1").querySelector(".settings__source-tag")!.textContent).toBe("Custom tool");
+    expect(src(root, "github").querySelector(".settings__source-tag")).toBeNull();
+    const stateOf = (key: string) => src(root, key).querySelector(".settings__source-state")!.textContent;
+    expect(src(root, "github").querySelector<HTMLInputElement>("input[name=wi-github-enabled]")!.checked).toBe(true);
+    expect(stateOf("github")).toBe("On");
+    expect(stateOf("gitlab")).toBe("Off");
+    expect(src(root, "gitlab").classList.contains("settings__source--off")).toBe(true);
+    expect(src(root, "custom-1").querySelector<HTMLInputElement>("input[name=ct-0-enabled]")!.checked).toBe(true);
+    expect(stateOf("custom-1")).toBe("On");
+    expect(stateOf("custom-2")).toBe("Off");
+    // The switch sits in the head, beside the state word.
+    expect(src(root, "github").querySelector(".settings__source-head input[name=wi-github-enabled]")).not.toBeNull();
+    expect(src(root, "custom-2").querySelector(".settings__source-head input[name=ct-1-enabled]")).not.toBeNull();
+  });
+
+  it("reads Git off, with the sentence in place of the summary, when the Git account is off", () => {
+    const git = gitConnections([{ provider: "github", enabled: false, token: { kind: "env", name: "GH_TOKEN" } }, { provider: "gitlab", enabled: true, token: { kind: "env", name: "GITLAB_TOKEN" } }]);
+    const root = renderSettings(model({ git }), handlers());
+    const gh = src(root, "github");
+    expect(gh.querySelector(".settings__source-state")!.textContent).toBe("Git off");
+    expect(gh.querySelector(".settings__source-sum")!.textContent).toBe("GitHub is off in Settings → Git.");
+    expect(gh.classList.contains("settings__source--off")).toBe(true);
+    const offGl = renderSettings(model({ git: gitConnections(null), workItems: { github: forge, gitlab: { ...gitlabItems, enabled: true }, prompt: "", custom: [] } }), handlers());
+    expect(src(offGl, "gitlab").querySelector(".settings__source-sum")!.textContent).toBe("GitLab is off in Settings → Git.");
+    expect(src(offGl, "gitlab").querySelector(".settings__source-state")!.textContent).toBe("Git off");
+  });
+
+  it("opens a source in place and remembers it, without saving", () => {
+    const h = { ...handlers(), onWorkItems: vi.fn(), onCustomTools: vi.fn(), onWorkPrompt: vi.fn() };
+    const m = model();
+    const root = renderSettings(m, h);
+    const gh = src(root, "github");
+    const head = gh.querySelector<HTMLButtonElement>(".settings__source-toggle")!;
+    head.click();
+    expect(gh.hasAttribute("data-open")).toBe(true);
+    expect(src(root, "github")).toBe(gh);
+    expect(m.sourcesOpen?.github).toBe(true);
+    expect(localStorage.getItem("maya.settingsSources")).toBe('{"github":true}');
+    expect(h.onWorkItems).not.toHaveBeenCalled();
+    expect(h.onCustomTools).not.toHaveBeenCalled();
+    expect(h.onWorkPrompt).not.toHaveBeenCalled();
+    expect(src(renderSettings(m, h), "github").hasAttribute("data-open")).toBe(true);
+    // Folding it again is remembered too.
+    head.click();
+    expect(m.sourcesOpen?.github).toBe(false);
+    expect(localStorage.getItem("maya.settingsSources")).toBe('{"github":false}');
+    // A click on the switch neither opens nor folds.
+    src(root, "custom-1").querySelector<HTMLInputElement>("input[name=ct-0-enabled]")!.click();
+    expect(src(root, "custom-1").hasAttribute("data-open")).toBe(false);
+  });
+
+  it("draws each rule as a box whose head sums it up, with a quiet Remove", () => {
+    const h = { ...handlers(), onWorkItems: vi.fn() };
+    const root = renderSettings(model({ sourcesOpen: { github: true } }), h);
+    const rules = [...src(root, "github").querySelectorAll<HTMLElement>(".settings__rule")];
+    expect(rules).toHaveLength(2);
+    const head = (r: HTMLElement) => r.querySelector<HTMLElement>(".settings__rule-head")!;
+    const summary = (r: HTMLElement) => head(r).querySelector(".settings__rule-sum")!.textContent;
+    expect(summary(rules[0])).toBe(ruleSummary(forge.rules[0]));
+    expect(summary(rules[1])).toBe("Assigned to me, labelled bug");
+    const remove = head(rules[0]).querySelector<HTMLButtonElement>("button[data-action=wi-remove-rule]")!;
+    expect(remove.classList.contains("settings__btn--quiet")).toBe(true);
+    expect(remove.textContent).toBe("Remove");
+    const labels = rules[0].querySelector<HTMLInputElement>("input[name=wi-labels]")!;
+    labels.value = "bug, urgent";
+    labels.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(summary(rules[0])).toBe("Assigned to me, labelled bug or urgent");
+    expect(h.onWorkItems).not.toHaveBeenCalled();
+    const repos = rules[0].querySelector<HTMLInputElement>("input[name=wi-repos]")!;
+    repos.value = "dosaki/maya";
+    repos.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(summary(rules[0])).toBe("Assigned to me, labelled bug or urgent, in dosaki/maya");
+    // The rows of an open forge follow the rules.
+    const gh = src(root, "github");
+    const stack = rules[0].closest(".settings__row")!;
+    expect(stack.classList.contains("settings__row--stack")).toBe(true);
+    expect(stack.querySelector(".settings__label")!.textContent).toBe("Issues to pick up");
+    expect(stack.querySelector(".settings__help")!.textContent).toBe("An issue shows when it matches any one of these rules.");
+    expect(stack.querySelector(".settings__add[data-action=wi-add-rule]")!.textContent).toBe("+ Add rule");
+    const helpOf = (n: string) => gh.querySelector(`[name=${n}]`)!.closest(".settings__row")!.querySelector(".settings__help")?.textContent;
+    expect(helpOf("wi-statusLabels")).toBe("In order, comma-separated.");
+    expect(helpOf("wi-trackerRepos")).toBe("Comma-separated.");
+    expect(gh.querySelector("[name=wi-startStatus]")!.closest(".settings__row")!.querySelector(".settings__label")!.textContent).toBe("On Start, set status to");
+    const foot = gh.querySelector(".settings__source-body")!.lastElementChild!;
+    expect(foot.classList.contains("settings__row--foot")).toBe(true);
+    expect(foot.textContent).toContain("Issues: read and write");
+  });
+
+  it("lays a custom tool out with its name row and Remove this tool at the body's foot", () => {
+    const root = renderSettings(model(), handlers());
+    const t = src(root, "custom-1");
+    const name = t.querySelector<HTMLInputElement>("input[name=ct-0-name]")!;
+    const nameRow = name.closest(".settings__row")!;
+    expect(nameRow.querySelector(".settings__label")!.textContent).toBe("Name");
+    const remove = t.querySelector<HTMLButtonElement>("[data-action=ct-remove]")!;
+    expect(remove.textContent).toBe("Remove this tool");
+    expect(t.querySelector(".settings__source-head [data-action=ct-remove]")).toBeNull();
+    const body = t.querySelector(".settings__source-body")!;
+    expect(body.lastElementChild!.classList.contains("settings__row--foot")).toBe(true);
+    expect(body.lastElementChild!.contains(remove)).toBe(true);
+  });
+
+  it("keeps a custom tool's details open as the model says, and records a toggle", () => {
+    const m = model({ customDetailsOpen: { "custom-2": true } });
+    const root = renderSettings(m, handlers());
+    expect(src(root, "custom-1").querySelector("details")!.open).toBe(false);
+    expect(src(root, "custom-2").querySelector("details")!.open).toBe(true);
+    const d = src(root, "custom-1").querySelector("details")!;
+    d.open = true;
+    d.dispatchEvent(new Event("toggle"));
+    expect(m.customDetailsOpen?.["custom-1"]).toBe(true);
+  });
+
+  it("puts the work prompt in a stacked row", () => {
+    const root = renderSettings(model(), handlers());
+    const prompt = root.querySelector<HTMLTextAreaElement>("textarea[name=workPrompt]")!;
+    const r = prompt.closest(".settings__row")!;
+    expect(r.classList.contains("settings__row--stack")).toBe(true);
+    expect(r.querySelector(".settings__help")!.textContent).toBe("What Start tells the agent. Blank uses the built-in prompt. {id}, {title}, {url}, {description} and {repo} are filled in.");
+    expect(r.closest(".settings__group")!.querySelector(".settings__group-title")!.textContent).toBe("Work prompt");
+  });
+
+  it("cuts a long list command short rather than widen the head", () => {
+    const long = { ...tool, listCommand: "/a/very/long/path/to/a/script/that/lists/items --with --many --flags ".repeat(4) };
+    const root = renderSettings(model({ workItems: { github: forge, gitlab: gitlabItems, prompt: "", custom: [long] } }), handlers());
+    const sum = src(root, "custom-1").querySelector(".settings__source-sum")!;
+    // jsdom does not apply styles.css: check the rule and that the summary matches it.
+    const m = styles.match(/\.settings\.pane \.settings__source-sum\s*\{([^}]*)\}/);
+    expect(m).not.toBeNull();
+    expect(m![1]).toMatch(/text-overflow:\s*ellipsis/);
+    expect(m![1]).toMatch(/white-space:\s*nowrap/);
+    expect(m![1]).toMatch(/overflow:\s*hidden/);
+    expect(m![1]).toMatch(/min-width:\s*0/);
+    expect(sum.matches(".settings__source-sum")).toBe(true);
+  });
+
+  it("gives a rule's fields the full width of their column", () => {
+    const root = renderSettings(model({ sourcesOpen: { github: true } }), handlers());
+    const r = src(root, "github").querySelector<HTMLElement>(".settings__rule")!;
+    expect(styles).toMatch(/\.settings\.pane \.settings__rule-body\s*\{[^}]*grid-template-columns:\s*120px minmax\(0,\s*1fr\)/);
+    const widthRule = styles.match(/\.settings\.pane \.settings__rule input, \.settings\.pane \.settings__rule select\s*\{([^}]*)\}/);
+    expect(widthRule).not.toBeNull();
+    expect(widthRule![1]).toMatch(/width:\s*100%/);
+    for (const n of ["wi-labels", "wi-repos", "wi-login"]) {
+      expect(r.querySelector(`input[name=${n}]`)!.matches(".settings__rule input")).toBe(true);
+    }
+    expect(r.querySelector("select[name=wi-assignee]")!.matches(".settings__rule select")).toBe(true);
+    expect(r.querySelector("input[name=wi-labels]")!.parentElement!.classList.contains("settings__rule-body")).toBe(true);
+    expect(styles).not.toMatch(/\n\.settings__rule-field\s*\{/);
+    expect(styles).not.toMatch(/\n\.settings__custom pre\s*\{/);
+  });
+});
+
 describe("Settings → Work Items custom tools", () => {
   const items = { enabled: false, rules: [], statusLabels: [], startStatus: "", trackerRepos: [] };
   const t1 = { id: "custom-1", name: "Linear", enabled: true, listCommand: "linear-items", startCommand: "linear-start", me: "tiago" };
@@ -1787,11 +2023,19 @@ describe("Settings → Work Items custom tools", () => {
     expect(input(root, "ct-0-start").value).toBe("linear-start");
     expect(input(root, "ct-0-me").value).toBe("tiago");
     expect(input(root, "ct-1-list").value).toBe("jira-items");
-    expect(b[0].textContent).toContain("Start asks before taking over an item assigned to someone else. Blank: it never asks.");
-    expect(b[0].querySelector("details > summary")!.textContent).toBe("Show the output format and an example script");
+    const help = (n: string) => input(root, n).closest(".settings__row")!.querySelector(".settings__help")!.textContent;
+    expect(help("ct-0-name")).toBe("How its items are labelled on the Issues tab.");
+    expect(help("ct-0-list")).toBe("Runs every 2 minutes through your shell, and must finish within 30 seconds.");
+    expect(help("ct-0-start")).toBe("Runs when you press Start, with the item's JSON on its input, to assign or move it in your tool.");
+    expect(help("ct-0-me")).toBe("Start asks before taking over an item assigned to someone else. Blank: it never asks.");
+    expect(input(root, "ct-0-list").closest(".settings__row")!.classList.contains("settings__row--stack")).toBe(true);
+    expect(input(root, "ct-0-start").closest(".settings__row")!.classList.contains("settings__row--stack")).toBe(true);
+    expect(input(root, "ct-0-list").classList.contains("mono")).toBe(true);
+    expect(input(root, "ct-0-start").classList.contains("mono")).toBe(true);
+    expect(b[0].querySelector("details > summary")!.textContent).toBe("Output format and an example script");
     expect(b[0].querySelectorAll("details pre").length).toBe(2);
-    expect(b[0].querySelector("details")!.textContent).toContain("must finish within 30 seconds");
-    expect(b[0].querySelectorAll("details .settings__hint")[1].textContent).toBe("The on-start command runs when you press Start, with the item's JSON on its input, to assign or move it in your tool. On macOS and Linux, anything a command leaves running is stopped when it ends.");
+    expect(b[0].querySelector("details")!.textContent).toContain("id, title and url are required");
+    expect(b[0].querySelector("details")!.textContent).toContain("On macOS and Linux, anything a command leaves running is stopped when it ends.");
     expect(input(root, "ct-0-enabled").getAttribute("aria-label")).toBe("Use this tool");
     expect(input(root, "ct-0-name").getAttribute("aria-label")).toBe("Tool name");
   });

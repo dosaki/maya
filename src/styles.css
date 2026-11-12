@@ -83,15 +83,15 @@ body { margin: 0; background: var(--bg); }
 .settings__subsection + .settings__subsection { margin-top: 6px; padding-top: 14px; border-top: 1px solid var(--border); }
 .settings__subheading { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
 /* Each setting's name on the left, its control in one right-hand column every row shares. */
-.settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch) { display: grid; grid-template-columns: minmax(0, 1fr) 260px; align-items: center; gap: 12px; }
+.settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch):not(.settings__row) { display: grid; grid-template-columns: minmax(0, 1fr) 260px; align-items: center; gap: 12px; }
 .settings__body--sidebar .settings__section label > input[type=text], .settings__body--sidebar .settings__section label > input[type=password], .settings__body--sidebar .settings__section label > select, .settings__body--sidebar .settings__section label > .settings__range { width: 100%; max-width: none; }
 .settings__body--sidebar .settings__section label > input[type=number] { width: 90px; }
-.settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch):has(> textarea) { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch):not(.settings__row):has(> textarea) { grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .settings__body--sidebar textarea { max-width: none; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
 .settings__body--sidebar .settings__section > button, .settings__body--sidebar .settings__subsection > button { align-self: flex-start; }
 /* Too narrow for the shared control column: each label above its control. */
 @media (max-width: 479px) {
-  .settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch) { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch):not(.settings__row) { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 }
 .popover { position: absolute; top: 48px; right: 16px; width: 320px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; box-shadow: 0 8px 30px rgba(0,0,0,.18); z-index: 10; }
 .pane { flex: 1; min-height: 0; padding: 16px; overflow: auto; box-sizing: border-box; }
@@ -136,6 +136,8 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__control:has(> input:not([type=checkbox]):not([type=radio]), > select, > textarea) { flex-basis: 300px; }
 .settings.pane .settings__control > input:not([type=checkbox]):not([type=radio]), .settings.pane .settings__control > select { flex: 1; }
 .settings.pane .settings__row--stack { flex-direction: column; align-items: stretch; gap: 12px; }
+/* Down a column, the 300px basis above would be a height. */
+.settings.pane .settings__row--stack > .settings__control:has(> input:not([type=checkbox]):not([type=radio]), > select, > textarea) { flex-basis: auto; }
 .settings.pane .settings__row--head { min-height: 56px; background: var(--soft); border-radius: 12px 12px 0 0; }
 .settings.pane .settings__row--head .settings__label { font-size: 15px; font-weight: 600; }
 .settings.pane .settings__card--off .settings__row:not(.settings__row--head) { opacity: .45; }
@@ -153,7 +155,7 @@ body { margin: 0; background: var(--bg); }
 }
 .settings.pane .settings__card select { appearance: none; padding-right: 32px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 17px) 16px, calc(100% - 12px) 16px; background-size: 5px 5px; background-repeat: no-repeat; }
 .settings.pane .settings__card input[type=number] { width: 88px; flex: 0 0 88px; text-align: right; }
-.settings.pane .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.settings.pane .mono, .settings.pane .settings__card :is(input, textarea).mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 
 /* The on/off switch. */
 .settings.pane .settings__toggle { appearance: none; position: relative; flex: 0 0 auto; width: 38px; height: 22px; padding: 0; margin: 0; border-radius: 999px; background: var(--rule); border: 1px solid var(--border); cursor: pointer; transition: background .15s; }
@@ -220,13 +222,41 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__source--off .settings__source-name { color: var(--muted); }
 .settings.pane .settings__source--off .settings__source-body { opacity: .5; }
 .settings.pane .settings__source.settings__card + .settings__source.settings__card { margin-top: 12px; }
+.settings.pane .settings__unit { color: var(--muted); font-weight: 400; }
+.settings.pane .settings__row--foot > .settings__help { margin-top: 0; }
+
+/* Work Items rules: each its own inset box, each field beside its label at the full width. */
+.settings.pane .settings__rules { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.settings.pane .settings__rules > .settings__add { margin-top: 0; }
+.settings.pane .settings__rule { border: 1px solid var(--border); border-radius: 10px; background: var(--field); }
+.settings.pane .settings__rule-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--rule); color: var(--muted); font-size: 13px; }
+.settings.pane .settings__rule-sum { min-width: 0; overflow-wrap: anywhere; }
+.settings.pane .settings__rule-body { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px 16px; align-items: center; padding: 14px 16px 16px; }
+.settings.pane .settings__rule-body label { display: block; color: var(--muted); font-size: 13px; }
+.settings.pane .settings__rule input, .settings.pane .settings__rule select { width: 100%; }
+.settings.pane .settings__card .settings__rule-body :is(input, select) { background-color: var(--panel); }
+.settings.pane .settings__rule-who { display: flex; gap: 8px; min-width: 0; }
+.settings.pane .settings__rule-who > * { flex: 1; min-width: 0; }
+.settings.pane .settings__rule-who input[hidden] { display: none; }
+
+/* A details inside a card, such as a custom tool's output format. */
+.settings.pane .settings__details { border-top: 1px solid var(--rule); }
+.settings.pane .settings__details + .settings__row { border-top: 1px solid var(--rule); }
+.settings.pane .settings__details > summary { padding: 14px 20px; cursor: pointer; color: var(--muted); font-size: 13px; list-style: none; }
+.settings.pane .settings__details > summary::-webkit-details-marker { display: none; }
+.settings.pane .settings__details > summary::before { content: "▸"; display: inline-block; width: 16px; transition: transform .15s; }
+.settings.pane .settings__details[open] > summary::before { transform: rotate(90deg); }
+.settings.pane .settings__details > summary:hover { color: var(--text); }
+.settings.pane .settings__details-body { display: flex; flex-direction: column; gap: 12px; padding: 0 20px 20px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.settings.pane .settings__details-body pre { margin: 0; padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--field); color: var(--text); font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (prefers-reduced-motion: reduce) {
-  .settings.pane .settings__toggle, .settings.pane .settings__toggle::after, .settings.pane .settings__source-chev::before { transition: none; }
+  .settings.pane .settings__toggle, .settings.pane .settings__toggle::after, .settings.pane .settings__source-chev::before, .settings.pane .settings__details > summary::before { transition: none; }
 }
 @media (max-width: 560px) {
   .settings.pane .settings__row { flex-direction: column; align-items: stretch; gap: 10px; }
   .settings.pane .settings__control { justify-content: flex-start; }
   .settings.pane .settings__row--head { flex-direction: row; align-items: center; }
+  .settings.pane .settings__rule-body { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* What's new after an update: Maya stands outside the window's left edge,
@@ -577,12 +607,6 @@ body { margin: 0; background: var(--bg); }
 
 .settings__git:not(.settings__card) { display: flex; flex-direction: column; gap: 6px; padding: 8px 0 12px; border-bottom: 1px solid var(--border); }
 .settings__git-kinds { display: flex; gap: 12px; flex-wrap: wrap; }
-.settings__rules { display: flex; flex-direction: column; gap: 8px; }
-.settings__rule { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
-.settings__rule-field { display: flex; flex-direction: column; gap: 2px; flex: 1 1 140px; min-width: 0; }
-.settings__rule-who { display: flex; gap: 6px; }
-.settings__rule-who input[hidden] { display: none; }
-.settings__rule-who select, .settings__rule-who input { min-width: 0; flex: 1; }
 
 /* The Sessions banner: what was running when Maya last stopped. */
 .remembered-host:empty { display: none; }
@@ -761,4 +785,3 @@ body { margin: 0; background: var(--bg); }
 .startdialog__repo { width: 100%; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
 .startdialog__branch { font-family: ui-monospace, monospace; font-size: 12px; }
 .startdialog__buttons { display: flex; gap: 8px; align-self: flex-end; }
-.settings__custom pre { white-space: pre-wrap; margin: 0; font-size: 12px; }
