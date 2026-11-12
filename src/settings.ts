@@ -10,10 +10,11 @@ import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys,
 import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
 import { harnessLabel } from "./harness";
+import art from "./assets/maya-full-body.png";
 import { morph } from "./morph";
 import { renderDevices, type DeviceRow, type DevicesHandlers, type DevicesModel } from "./devices";
 import { terminalLabel } from "./terminalpick";
-import { renderReleaseNotes } from "./release-notes";
+import { RUNNING_VERSION, renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 import { updates } from "./update";
 import { addButton, btn as settingsBtn, card, cardHead, choice, footRow, group, notice, row, screenHead, source, state, toggle } from "./settings-ui";
@@ -1006,7 +1007,23 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     }))),
   );
 
-  releaseNotes.append(renderReleaseNotes());
+  const notes = renderReleaseNotes();
+  for (const heading of notes.querySelectorAll(".release-notes__version")) {
+    if (heading.textContent === `Maya ${RUNNING_VERSION}`) {
+      const pill = document.createElement("span");
+      pill.className = "settings__running";
+      pill.textContent = "Running";
+      heading.append(pill);
+    }
+  }
+  const rn = document.createElement("div");
+  rn.className = "settings__rn";
+  const img = document.createElement("img");
+  img.className = "settings__rn-art";
+  img.alt = "";
+  img.src = art;
+  rn.append(img, notes);
+  releaseNotes.append(rn);
 
   const gitCards: HTMLElement[] = [];
   for (const conn of model.git ?? gitConnections(null)) {

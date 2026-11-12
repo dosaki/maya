@@ -4,6 +4,7 @@ import { RUNNING_VERSION } from "./release-notes";
 import { SETTINGS_GROUPS, SETTINGS_LEDES, SETTINGS_NAV, SOURCES_OPEN_KEY, forgeSummary, gitConnections, ruleSummary, storedSourcesOpen, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 import { builtinVoiceName, secretStore } from "./platform";
 import styles from "./styles.css?raw";
+import artSrc from "./assets/maya-full-body.png";
 
 const voiceBase = {
   hookInstalled: true,
@@ -638,7 +639,29 @@ describe("renderSettings", () => {
     const s = el.querySelector<HTMLElement>(".settings__section[data-group=releaseNotes]")!;
     expect(s.hidden).toBe(false);
     expect(s.querySelector(".settings__title")!.textContent).toBe("Release Notes");
-    expect(s.querySelector(".release-notes__version")!.textContent).toBe(`Maya ${RUNNING_VERSION}`);
+    expect(s.querySelector(".release-notes__version")!.firstChild!.textContent).toBe(`Maya ${RUNNING_VERSION}`);
+  });
+
+  it("has Maya present the release notes, with the running version marked", () => {
+    const el = renderSettings({ ...voiceBase, settingsGroup: "releaseNotes" }, handlers());
+    const s = el.querySelector<HTMLElement>(".settings__section[data-group=releaseNotes]")!;
+    const rn = s.querySelector<HTMLElement>(".settings__rn")!;
+    const art = rn.querySelector<HTMLImageElement>("img.settings__rn-art")!;
+    expect(art.getAttribute("alt")).toBe("");
+    expect(art.getAttribute("src")).toBe(artSrc);
+    expect(art.nextElementSibling!.classList.contains("release-notes")).toBe(true);
+    const running = [...rn.querySelectorAll(".release-notes__version")].find((x) => x.textContent!.startsWith(`Maya ${RUNNING_VERSION}`))!;
+    expect(running.querySelector(".settings__running")!.textContent).toBe("Running");
+    expect(rn.querySelectorAll(".settings__running")).toHaveLength(1);
+  });
+
+  it("styles the notes only inside Settings, and drops the art under 1100px", () => {
+    expect(styles).toMatch(/\.settings\.pane \.settings__rn\s*\{[^}]*grid-template-columns:\s*290px minmax\(0, 1fr\)/);
+    expect(styles).toMatch(/\.settings\.pane \.settings__rn-art\s*\{[^}]*position:\s*sticky[^}]*top:\s*24px[^}]*min\(76vh, 600px\)[^}]*margin-left:\s*-64px[^}]*drop-shadow/);
+    expect(styles).toMatch(/\.settings\.pane \.release-notes\s*\{[^}]*max-width:\s*68ch/);
+    const media = styles.match(/@media \(max-width: 1100px\)\s*\{([^@]*?\.settings\.pane \.settings__rn-art[^\n]*)/)![1];
+    expect(media).toMatch(/\.settings\.pane \.settings__rn\s*\{\s*grid-template-columns:\s*minmax\(0, 1fr\)/);
+    expect(media).toMatch(/\.settings\.pane \.settings__rn-art\s*\{\s*display:\s*none/);
   });
 
   it("puts each setting in its group", () => {

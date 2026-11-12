@@ -111,6 +111,18 @@ body { margin: 0; background: var(--bg); }
 .release-notes .md h3 { margin: 8px 0 4px; font-size: 13px; color: var(--muted); }
 .release-notes .md ul { margin: 0; padding-left: 20px; }
 .release-notes .md li + li { margin-top: 4px; }
+/* In Settings, Maya stands to the left of the notes, her raised hand presenting them. */
+.settings.pane .settings__rn { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 8px; align-items: start; }
+.settings.pane .settings__rn-art { position: sticky; top: 24px; height: min(76vh, 600px); width: auto; margin-left: -64px; pointer-events: none; user-select: none; filter: drop-shadow(0 0 28px rgba(217,171,60,.22)); }
+.settings.pane .release-notes { max-width: 68ch; }
+.settings.pane .release-notes__version { margin: 0 0 12px; font-size: 18px; }
+.settings.pane .release-notes__version:not(:first-child) { margin-top: 32px; padding-top: 28px; border-top: 1px solid var(--rule); }
+.settings.pane .release-notes .md h3 { margin: 16px 0 8px; font-size: 13px; font-weight: 600; color: var(--gold); }
+.settings.pane .release-notes .md ul { padding-left: 20px; line-height: 1.6; }
+.settings.pane .release-notes .md li + li { margin-top: 8px; }
+.settings.pane .release-notes .md code { font-size: 12.5px; padding: 1px 5px; border-radius: 5px; background: var(--soft); border: 1px solid var(--border); }
+.settings.pane .settings__running { margin-left: 10px; padding: 2px 8px; border-radius: 999px; background: var(--gold); color: var(--on-gold); font-size: 11px; font-weight: 600; vertical-align: 2px; }
+@media (max-width: 1100px) { .settings.pane .settings__rn { grid-template-columns: minmax(0, 1fr); } .settings.pane .settings__rn-art { display: none; } }
 
 /* The Settings building blocks (src/settings-ui.ts), after the approved mockup.
    Scoped to the Settings pane so the Voice popover keeps its own look. */
