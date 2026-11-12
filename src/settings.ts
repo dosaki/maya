@@ -468,7 +468,7 @@ export const SETTINGS_LEDES: Record<SettingsGroup, string> = {
   sessions: "How Maya follows your sessions, and where new ones start.",
   git: "The accounts Maya reads pull requests and merge requests with. Reviews clone with your own git credentials.",
   reviews: "Where reviews are checked out, what the Review button asks the agent, and when Maya tells you about your own pull requests.",
-  workItems: "Where the Issues tab finds your work, and what Start does with an item.",
+  workItems: "Where the Work Items tab finds your work, and what Start does with an item.",
   notifications: "How Maya tells you a session needs you.",
   voice: "How Maya speaks to you, and how she hears you.",
   network: "Join your other computers and your phone to this Maya.",
@@ -1288,7 +1288,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     hint.className = "settings__help";
     hint.textContent = WORK_ITEMS_HINT[forge];
     body.push(
-      row({ label: "Issues to pick up", help: "An issue shows when it matches any one of these rules.", control: rulesBox, stack: true }),
+      row({ label: "Work items to pick up", help: "A work item shows when it matches any one of these rules.", control: rulesBox, stack: true }),
       row({ label: "Status labels", help: "In order, comma-separated.", control: status, idScope: forge }),
       row({ label: "On Start, set status to", control: start }),
       row({ label: "Tracker-only repositories", help: "Comma-separated.", control: tracker, idScope: forge }),
@@ -1400,7 +1400,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       onToggle: (open) => rememberSource(tool.id, open),
       control: on,
       body: [
-        row({ label: "Name", help: "How its items are labelled on the Issues tab.", control: name }),
+        row({ label: "Name", help: "How its items are labelled on the Work Items tab.", control: name }),
         row({ label: "List command", help: "Runs every 2 minutes through your shell, and must finish within 30 seconds.", control: text("listCommand", "list", true), stack: true }),
         row({ label: optional("On-start command"), help: "Runs when you press Start, with the item's JSON on its input, to assign or move it in your tool.", control: text("startCommand", "start", true), stack: true }),
         row({ label: optional("Your name there"), help: "Start asks before taking over an item assigned to someone else. Blank: it never asks.", control: text("me", "me", false) }),
@@ -1424,7 +1424,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   workInput.addEventListener("change", () => h.onWorkPrompt?.(workInput.value.trim()));
 
   workItems.append(
-    group({ title: "Sources", note: "Open one to change what the Issues tab picks up from it." }, ...sources, addTool),
+    group({ title: "Sources", note: "Open one to change what the Work Items tab picks up from it." }, ...sources, addTool),
     group({ title: "Work prompt" }, card(row({
       help: "What Start tells the agent. Blank uses the built-in prompt. {id}, {title}, {url}, {description} and {repo} are filled in.",
       control: workInput,

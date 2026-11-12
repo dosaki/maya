@@ -221,7 +221,7 @@ pub struct Config {
     pub keys: Option<KeyBindings>,
     #[serde(default)]
     pub network: NetworkConfig,
-    /// The Issues tab: which issues to list and how to mark a started one.
+    /// The Work Items tab: which issues to list and how to mark a started one.
     #[serde(default)]
     pub work_items: WorkItemsConfig,
 }
@@ -450,7 +450,7 @@ impl CustomTool {
     }
 }
 
-/// The Issues tab's settings.
+/// The Work Items tab's settings.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkItemsConfig {

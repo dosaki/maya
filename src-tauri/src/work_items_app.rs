@@ -1,4 +1,4 @@
-//! The Issues tab on the desktop: the poll that asks each service for the
+//! The Work Items tab on the desktop: the poll that asks each service for the
 //! rules' issues and keeps the started ones current, its state, and the
 //! page's commands, Start's among them. Locks: `store`, `work_items`,
 //! `forge_me` and the started file's one at a time, none across a network

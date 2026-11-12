@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { applyWorkFilters, areas, guardStart, makeWorkItemsView, needsDialog, renderItemCard, renderStartDialog, sessionFor, startWorkItem, workItemActionFor } from "./workitems";
+import indexHtml from "../index.html?raw";
 import type { Card, WorkItem } from "./types";
 
 const item = (over: Partial<WorkItem> = {}): WorkItem => ({
@@ -76,17 +77,22 @@ describe("work items", () => {
     el.remove();
   });
 
+  it("the tab button says Work Items", () => {
+    const doc = new DOMParser().parseFromString(indexHtml, "text/html");
+    expect(doc.querySelector("[data-tab=issues]")!.textContent!.trim().startsWith("Work Items")).toBe(true);
+  });
+
   it("says issues are off and opens Settings → Git when no Git connection is on", () => {
     const host = document.createElement("div");
     makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: true, off: true, fetchedAt: null }, [], Date.now());
-    expect(host.textContent).toContain("Issues are off. Turn on GitHub or GitLab in Settings → Git, or add a custom tool in Settings → Work Items.");
+    expect(host.textContent).toContain("Work items are off. Turn on GitHub or GitLab in Settings → Git, or add a custom tool in Settings → Work Items.");
     expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "git" });
   });
 
   it("says issues are off and opens Settings → Work Items when Git is on but both services are off there", () => {
     const host = document.createElement("div");
     makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: true, fetchedAt: null }, [], Date.now());
-    expect(host.textContent).toContain("Issues are off. Turn on GitHub, GitLab or a custom tool in Settings → Work Items.");
+    expect(host.textContent).toContain("Work items are off. Turn on GitHub, GitLab or a custom tool in Settings → Work Items.");
     expect(host.textContent).not.toContain("Settings → Git.");
     expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "workItems" });
   });
@@ -110,7 +116,7 @@ describe("work items", () => {
   it("says when no issue matches the rules", () => {
     const host = document.createElement("div");
     makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: false, fetchedAt: 1 }, [], Date.now());
-    expect(host.querySelector(".issues__area--pick")?.textContent).toContain("No issues match your rules.");
+    expect(host.querySelector(".issues__area--pick")?.textContent).toContain("No work items match your rules.");
   });
 
   it("keeps the filter dropdowns across repaints", () => {

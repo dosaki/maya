@@ -2072,13 +2072,17 @@ describe("Settings → Work Items sources", () => {
   });
   const src = (root: HTMLElement, key: string) => root.querySelector<HTMLElement>(`[data-source="${key}"]`)!;
 
+  it("the Work Items lede names the Work Items tab", () => {
+    expect(SETTINGS_LEDES.workItems).toBe("Where the Work Items tab finds your work, and what Start does with an item.");
+  });
+
   it("lists GitHub, GitLab and each custom tool under Sources, then Add a custom tool", () => {
     const root = renderSettings(model(), handlers());
     const section = root.querySelector(".settings__section--workItems")!;
     const sources = [...section.querySelectorAll<HTMLElement>("[data-source]")];
     const group = sources[0].closest(".settings__group")!;
     expect(group.querySelector(".settings__group-title")!.textContent).toBe("Sources");
-    expect(group.querySelector(".settings__group-note")!.textContent).toBe("Open one to change what the Issues tab picks up from it.");
+    expect(group.querySelector(".settings__group-note")!.textContent).toBe("Open one to change what the Work Items tab picks up from it.");
     expect(sources.map((s) => s.dataset.source)).toEqual(["github", "gitlab", "custom-1", "custom-2"]);
     expect(sources.every((s) => s.parentElement === group)).toBe(true);
     const add = group.lastElementChild as HTMLElement;
@@ -2171,8 +2175,8 @@ describe("Settings → Work Items sources", () => {
     const gh = src(root, "github");
     const stack = rules[0].closest(".settings__row")!;
     expect(stack.classList.contains("settings__row--stack")).toBe(true);
-    expect(stack.querySelector(".settings__label")!.textContent).toBe("Issues to pick up");
-    expect(stack.querySelector(".settings__help")!.textContent).toBe("An issue shows when it matches any one of these rules.");
+    expect(stack.querySelector(".settings__label")!.textContent).toBe("Work items to pick up");
+    expect(stack.querySelector(".settings__help")!.textContent).toBe("A work item shows when it matches any one of these rules.");
     expect(stack.querySelector(".settings__add[data-action=wi-add-rule]")!.textContent).toBe("+ Add rule");
     const helpOf = (n: string) => gh.querySelector(`[name=${n}]`)!.closest(".settings__row")!.querySelector(".settings__help")?.textContent;
     expect(helpOf("wi-statusLabels")).toBe("In order, comma-separated.");
@@ -2269,7 +2273,7 @@ describe("Settings → Work Items custom tools", () => {
     expect(input(root, "ct-0-me").value).toBe("tiago");
     expect(input(root, "ct-1-list").value).toBe("jira-items");
     const help = (n: string) => input(root, n).closest(".settings__row")!.querySelector(".settings__help")!.textContent;
-    expect(help("ct-0-name")).toBe("How its items are labelled on the Issues tab.");
+    expect(help("ct-0-name")).toBe("How its items are labelled on the Work Items tab.");
     expect(help("ct-0-list")).toBe("Runs every 2 minutes through your shell, and must finish within 30 seconds.");
     expect(help("ct-0-start")).toBe("Runs when you press Start, with the item's JSON on its input, to assign or move it in your tool.");
     expect(help("ct-0-me")).toBe("Start asks before taking over an item assigned to someone else. Blank: it never asks.");

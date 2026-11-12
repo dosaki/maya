@@ -83,7 +83,7 @@ pub fn source_of(forge: GitProvider) -> &'static str {
     }
 }
 
-/// One line above the Issues tab's areas.
+/// One line above the Work Items tab's areas.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceError {

@@ -158,7 +158,7 @@ pub struct AppState {
     pub store: Mutex<Store>,
     pub notifier: Mutex<notify::Notifier>,
     pub reviews: Mutex<ReviewState>,
-    /// The Issues tab. Lock rule: never held across a network call, and never with another lock.
+    /// The Work Items tab. Lock rule: never held across a network call, and never with another lock.
     pub work_items: Mutex<work_items_app::WorkItemsState>,
     /// Held while the started issues' file is read, changed and written, so
     /// there is one writer at a time (see `work_items_app::update_started`).

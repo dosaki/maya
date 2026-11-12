@@ -147,7 +147,7 @@ function fillSelect(sel: HTMLSelectElement, options: { value: string; label: str
 const SOURCE_LABEL: Record<string, string> = { github: "GitHub", gitlab: "GitLab" };
 
 /**
- * The Issues pane in `host`: the filters and search, built once so an open
+ * The Work Items pane in `host`: the filters and search, built once so an open
  * dropdown survives the repaints, over the two areas that `update` repaints
  * in place.
  */
@@ -175,8 +175,8 @@ export function makeWorkItemsView(host: HTMLElement) {
   const search = el("input", "issues__search");
   search.type = "text";
   search.name = "search";
-  search.placeholder = "Search issues";
-  search.setAttribute("aria-label", "Search issues");
+  search.placeholder = "Search work items";
+  search.setAttribute("aria-label", "Search work items");
   search.addEventListener("input", () => {
     filters.search = search.value;
     paint();
@@ -195,8 +195,8 @@ export function makeWorkItemsView(host: HTMLElement) {
       // Git off entirely, or on with both services off in Work Items.
       const group = state.gitOff ? "git" : "workItems";
       const message = state.gitOff
-        ? "Issues are off. Turn on GitHub or GitLab in Settings → Git, or add a custom tool in Settings → Work Items. "
-        : "Issues are off. Turn on GitHub, GitLab or a custom tool in Settings → Work Items. ";
+        ? "Work items are off. Turn on GitHub or GitLab in Settings → Git, or add a custom tool in Settings → Work Items. "
+        : "Work items are off. Turn on GitHub, GitLab or a custom tool in Settings → Work Items. ";
       const off = el("div", "reviews__off", message);
       const open = button("Open Settings", "settings");
       open.dataset.group = group;
@@ -232,7 +232,7 @@ export function makeWorkItemsView(host: HTMLElement) {
     const fresh = el("div", "issues__body");
     for (const e of state.errors) fresh.append(el("div", "reviews__error issues__error", e.message));
     const cols = el("div", "issues__cols");
-    const emptyPick = state.fetchedAt === null ? "Checking…" : state.items.length === 0 ? "No issues match your rules." : "No issues match these filters.";
+    const emptyPick = state.fetchedAt === null ? "Checking…" : state.items.length === 0 ? "No work items match your rules." : "No work items match these filters.";
     cols.append(
       area("pick", "To pick", shownPick.map((i) => renderItemCard(i, nowMs, null, starting.has(i.key), sourceLabelOf(i.source))), emptyPick),
       area("working", "Being worked on", shownWorking.map((w) => renderItemCard(w.item, nowMs, w.card, false, sourceLabelOf(w.item.source))), "Nothing started yet."),
@@ -252,7 +252,7 @@ export function makeWorkItemsView(host: HTMLElement) {
   };
 }
 
-/** What a click in the Issues pane means: one of the buttons, or nothing. */
+/** What a click in the Work Items pane means: one of the buttons, or nothing. */
 export function workItemActionFor(target: Element): WorkItemAction | null {
   const btn = target.closest<HTMLElement>("button[data-action]");
   if (!btn) return null;
