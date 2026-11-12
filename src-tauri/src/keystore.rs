@@ -23,6 +23,7 @@ pub const NETWORK_KEY: Item = Item { service: "maya-network-key", account: "priv
 
 pub const GITHUB_TOKEN: Item = Item { service: "maya-github", account: "token", label: "Maya GitHub token", linux_account: "github-token" };
 pub const GITLAB_TOKEN: Item = Item { service: "maya-gitlab", account: "token", label: "Maya GitLab token", linux_account: "gitlab-token" };
+pub const CORAL_TOKEN: Item = Item { service: "maya-coral", account: "token", label: "Maya Coral token", linux_account: "coral-token" };
 
 /// `security` exits with this when the item is not in the keychain.
 #[cfg(target_os = "macos")]

@@ -408,6 +408,8 @@ export interface StartCheck {
   takeover: string[];
   pick: RepoPick | null;
   branch: string;
+  /** The repository Start uses without asking: a Coral item's product's only one. */
+  repo: ItemRepo | null;
 }
 
 export interface WorkStarted {

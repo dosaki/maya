@@ -1,11 +1,13 @@
 //! Settings → Git on the desktop: tokens from the key store or a
 //! variable, the forges the polls ask, the page's commands, and the
-//! one-time import of `gh`'s token.
+//! one-time import of `gh`'s token. Coral's token and commands too, as
+//! Settings → Work Items uses them.
 
 use crate::{keystore, AppState};
-use maya_core::config::{self, GitConnection, GitProvider};
+use maya_core::config::{self, CoralItems, GitConnection, GitProvider};
 use maya_core::forge::{self, Forge, ForgeError};
 use maya_core::log;
+use maya_core::work_items::coral::{self, Coral, CoralStatus};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State as TauriState};
 
@@ -32,6 +34,12 @@ pub fn forges(conns: &[GitConnection]) -> (Vec<Forge>, Vec<ForgeError>) {
         }
     }
     out
+}
+
+/// The Coral connection with its token: the stored one or the variable's.
+/// Reads the key store: call it with no lock held.
+pub fn coral(cfg: &CoralItems) -> Result<Coral, String> {
+    coral::resolve(cfg, || keystore::load(&keystore::CORAL_TOKEN).ok().flatten(), forge::env::read)
 }
 
 /// After a Git setting or token changed: look everything up again, now.
@@ -139,6 +147,55 @@ pub fn test_git_connection(state: TauriState<AppState>, provider: GitProvider) -
     forge::whoami(http(), &f)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoralStatusJson {
+    has_token: bool,
+}
+
+/// Whether a pasted Coral token is stored; never the token.
+#[tauri::command(async)]
+pub fn get_coral_status() -> CoralStatusJson {
+    CoralStatusJson { has_token: keystore::load(&keystore::CORAL_TOKEN).ok().flatten().is_some() }
+}
+
+#[tauri::command(async)]
+pub fn store_coral_token(app: AppHandle, token: String) -> Result<(), String> {
+    keystore::store(&keystore::CORAL_TOKEN, &token).map_err(|e| format!("Could not store the token: {}", forge::scrub(&e, token.trim())))?;
+    settings_changed(&app);
+    Ok(())
+}
+
+#[tauri::command(async)]
+pub fn clear_coral_token(app: AppHandle) -> Result<(), String> {
+    keystore::remove(&keystore::CORAL_TOKEN).map_err(|e| format!("Could not remove the token: {e}"))?;
+    settings_changed(&app);
+    Ok(())
+}
+
+/// The saved Coral settings with their token, for the card's buttons.
+fn coral_from_settings(state: &AppState) -> Result<Coral, String> {
+    let cfg = state.store.lock().unwrap().config.work_items.coral.clone();
+    if cfg.base_url.trim().is_empty() {
+        return Err("Enter Coral's address first.".into());
+    }
+    coral(&cfg)
+}
+
+/// The token's user, from one call to Coral, for the Test button.
+#[tauri::command(async)]
+pub fn test_coral_connection(state: TauriState<AppState>) -> Result<String, String> {
+    forge::env::forget();
+    let me = coral::me(http(), &coral_from_settings(&state)?)?;
+    Ok(format!("Connected as {}", if me.name.is_empty() { &me.email } else { &me.name }))
+}
+
+/// Coral's statuses, for the start status list.
+#[tauri::command(async)]
+pub fn coral_statuses(state: TauriState<AppState>) -> Result<Vec<CoralStatus>, String> {
+    coral::statuses(http(), &coral_from_settings(&state)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +205,10 @@ mod tests {
     fn each_provider_has_its_key_store_item() {
         assert_eq!(token_item(GitProvider::Github).service, "maya-github");
         assert_eq!(token_item(GitProvider::Gitlab).service, "maya-gitlab");
+        assert_eq!(keystore::CORAL_TOKEN.service, "maya-coral");
+        assert_ne!(keystore::CORAL_TOKEN.service, keystore::GITHUB_TOKEN.service);
+        assert_ne!(keystore::CORAL_TOKEN.service, keystore::GITLAB_TOKEN.service);
+        assert_eq!(keystore::CORAL_TOKEN.linux_account, "coral-token");
     }
 
     #[test]

@@ -144,7 +144,7 @@ function fillSelect(sel: HTMLSelectElement, options: { value: string; label: str
   );
 }
 
-const SOURCE_LABEL: Record<string, string> = { github: "GitHub", gitlab: "GitLab" };
+const SOURCE_LABEL: Record<string, string> = { github: "GitHub", gitlab: "GitLab", coral: "Coral" };
 
 /**
  * The Work Items pane in `host`: the filters and search, built once so an open
@@ -372,11 +372,11 @@ export async function startWorkItem(
   if (host.childElementCount > 0) return toast(busy);
   try {
     const check = await invoke<StartCheck>("work_item_check", { key: item.key });
-    let repo: ItemRepo | null = null;
+    let chosen: { repo: ItemRepo | null } | null = null;
     if (needsDialog(check)) {
       // Something else may have opened a window while the check ran.
       if (host.childElementCount > 0) return toast(busy);
-      const chosen = await new Promise<{ repo: ItemRepo | null } | null>((resolve) => {
+      chosen = await new Promise<{ repo: ItemRepo | null } | null>((resolve) => {
         const close = (v: { repo: ItemRepo | null } | null) => {
           document.removeEventListener("keydown", onKey, true);
           gone.disconnect();
@@ -398,8 +398,9 @@ export async function startWorkItem(
         gone.observe(host, { childList: true });
       });
       if (!chosen) return;
-      repo = chosen.repo;
     }
+    // A repository the check found (a Coral product's only one) needs no dialog.
+    const repo = chosen?.repo ?? check.repo;
     const r = await invoke<WorkStarted>("work_item_start", { key: item.key, repo, takeOver: check.takeover });
     // A notice (the issue not updated, say) shows in the line above the areas.
     toast(`Working on ${item.id} in ${r.dir.split("/").filter(Boolean).pop() ?? r.dir}`);

@@ -1,8 +1,8 @@
 //! The Work Items tab on the desktop: the poll that asks each service for the
 //! rules' issues and keeps the started ones current, its state, and the
 //! page's commands, Start's among them. Locks: `store`, `work_items`,
-//! `forge_me` and the started file's one at a time, none across a network
-//! call or the one-shot agent.
+//! `forge_me`, `coral_me` and the started file's one at a time, none across
+//! a network call or the one-shot agent.
 
 use crate::{git, native, AppState};
 use maya_core::config::{CustomTool, GitProvider};
@@ -10,7 +10,8 @@ use maya_core::forge::{self, Forge, Me};
 use maya_core::store::now_ms;
 use maya_core::work_items::started::{self, Started};
 use maya_core::config::ForgeItems;
-use maya_core::work_items::{self, custom, github, gitlab, pick, source_of, start, Issue, ItemRepo, SourceError, WorkItem};
+use maya_core::work_items::coral::{self, Coral, CoralItem, CoralMe};
+use maya_core::work_items::{self, custom, github, gitlab, pick, source_of, start, Fetched, Issue, ItemRepo, SourceError, WorkItem};
 use maya_core::{actions, launch, log};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
@@ -31,7 +32,7 @@ pub struct WorkItemsState {
     pub source_labels: BTreeMap<String, String>,
     /// No Git connection is switched on.
     pub git_off: bool,
-    /// Nothing is asked: no switched-on Git connection has Work Items on and no custom tool is ready.
+    /// Nothing is asked: no switched-on Git connection has Work Items on, Coral is off and no custom tool is ready.
     pub off: bool,
     pub fetched_at: Option<u64>,
 }
@@ -50,10 +51,29 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
     let asked: Vec<_> = conns.into_iter().filter(|c| cfg.for_forge(c.provider).enabled).collect();
     let (forges, missing) = git::forges(&asked);
     let tool_asked = cfg.custom.iter().any(|t| t.enabled && !t.list_command.trim().is_empty());
-    let off = forges.is_empty() && missing.is_empty() && !tool_asked;
-    let missing: Vec<SourceError> = missing.into_iter().map(|e| SourceError { source: source_of(e.forge).to_string(), message: e.message }).collect();
-    let source_labels: BTreeMap<String, String> = cfg.custom.iter().map(|t| (t.id.clone(), t.label().to_string())).collect();
-    let fetched = work_items::fetch(&forges, &cfg, git::http(), &sites, None, &custom::list);
+    let off = forges.is_empty() && missing.is_empty() && !tool_asked && !cfg.coral.enabled;
+    let mut missing: Vec<SourceError> = missing.into_iter().map(|e| SourceError { source: source_of(e.forge).to_string(), message: e.message }).collect();
+    let mut source_labels: BTreeMap<String, String> = cfg.custom.iter().map(|t| (t.id.clone(), t.label().to_string())).collect();
+    source_labels.insert(coral::SOURCE.into(), "Coral".into());
+    // Coral with no token is a line, as a forge with none is; a failed "who
+    // am I" is a failed check, so the last Coral items stay.
+    let mut coral_failed = None;
+    let (coral_conn, coral_me) = match cfg.coral.enabled.then(|| git::coral(&cfg.coral)) {
+        None => (None, None),
+        Some(Err(message)) => {
+            missing.push(SourceError { source: coral::SOURCE.into(), message });
+            (None, None)
+        }
+        Some(Ok(c)) => match coral_me_for(&state, &c, generation) {
+            Ok(me) => (Some(c), Some(me)),
+            Err(e) => {
+                coral_failed = Some(Fetched { source: coral::SOURCE.into(), label: "Coral".into(), result: Err(e), warnings: vec![] });
+                (Some(c), None)
+            }
+        },
+    };
+    let mut fetched = work_items::fetch(&forges, &cfg, git::http(), &sites, coral_conn.as_ref().zip(coral_me.as_ref()), &custom::list);
+    fetched.extend(coral_failed);
     for f in &fetched {
         if let Err(e) = &f.result {
             log::line("app", format!("issues: {}: {e}", f.label));
@@ -66,6 +86,16 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
     let mut latest: Vec<WorkItem> = returned.values().map(|i| (*i).clone()).collect();
     let mut closed = Vec::new();
     for s in started::load(&started_path(app)).into_iter().filter(|s| !returned.contains_key(s.key.as_str())) {
+        if s.item.source == coral::SOURCE {
+            let Some(c) = &coral_conn else { continue };
+            // Read by its code, which follows the item when it moved to another product.
+            match coral::get(git::http(), c, &s.item.id) {
+                Ok(Some(it)) => latest.push(WorkItem { key: s.key.clone(), ..it.item }),
+                Ok(None) => closed.push(s.key.clone()),
+                Err(e) => log::line("app", format!("issues: {}: {e}", s.item.id)),
+            }
+            continue;
+        }
         let Some(repo) = &s.item.repo else { continue };
         let Some(forge) = forges.iter().find(|f| f.site.provider == repo.forge) else { continue };
         let Some(number) = s.item.number else { continue };
@@ -167,6 +197,9 @@ pub struct StartCheck {
     pub takeover: Vec<String>,
     pub pick: Option<RepoPick>,
     pub branch: String,
+    /// The repository Start uses without asking, for an item that has none
+    /// of its own: a Coral item whose product has exactly one.
+    pub repo: Option<ItemRepo>,
 }
 
 /// A started item's folder, its Native terminal when it runs in one, and
@@ -218,6 +251,19 @@ fn others(assignees: &[String], me: &str) -> Vec<String> {
 fn custom_takeover(tool: &CustomTool, assignees: &[String]) -> Vec<String> {
     let me = tool.me.trim();
     if me.is_empty() { Vec::new() } else { others(assignees, me) }
+}
+
+/// The takeover names for a Coral item: its assignees other than me, by name
+/// or by email (Coral lists one with no name by email), ignoring case.
+fn coral_takeover(assignees: &[String], me: &CoralMe) -> Vec<String> {
+    let named: Vec<String> = assignees.iter().filter(|a| !a.eq_ignore_ascii_case(&me.email)).cloned().collect();
+    others(&named, &me.name)
+}
+
+/// The repository a Coral item starts in without asking: its product's
+/// only one. None for none or several, which the pick asks about.
+fn coral_start_repo(mut repos: Vec<ItemRepo>) -> Option<ItemRepo> {
+    (repos.len() == 1).then(|| repos.remove(0))
 }
 
 /// The custom tool that listed `item`, found by its `source`, never by name.
@@ -284,10 +330,27 @@ fn me_for(state: &AppState, forge: &Forge, generation: u64) -> Result<Me, String
     Ok(me)
 }
 
+/// Who the Coral token belongs to: asked once per `generation`, which must
+/// be read before `c` was resolved, as `me_for` does for the forges.
+fn coral_me_for(state: &AppState, c: &Coral, generation: u64) -> Result<CoralMe, String> {
+    let cached = state.coral_me.lock().unwrap().clone();
+    if let Some((g, me)) = cached {
+        if g == generation {
+            return Ok(me);
+        }
+    }
+    let me = coral::me(git::http(), c)?;
+    let mut cache = state.coral_me.lock().unwrap();
+    if state.git_generation.load(Ordering::SeqCst) == generation {
+        *cache = Some((generation, me.clone()));
+    }
+    Ok(me)
+}
+
 /// Maya's brain picks the code's repository for `item` from the ones she
-/// knows: the rules', the listed items', the clones' and those of the
-/// sessions on the board or started from an issue.
-fn pick_repo(app: &AppHandle, item: &WorkItem, items: &[WorkItem]) -> RepoPick {
+/// knows: `first` (a Coral product's), the rules', the listed items', the
+/// clones' and those of the sessions on the board or started from an issue.
+fn pick_repo(app: &AppHandle, item: &WorkItem, items: &[WorkItem], first: &[ItemRepo]) -> RepoPick {
     let state = app.state::<AppState>();
     let (cfg, clones_root, sites, brain, model, maya_dir) = {
         let store = state.store.lock().unwrap();
@@ -301,7 +364,7 @@ fn pick_repo(app: &AppHandle, item: &WorkItem, items: &[WorkItem]) -> RepoPick {
     // Git runs with no lock held.
     let mut known = pick::clone_repos(&clones_root, &sites);
     known.extend(pick::repos_of_folders(&folders, &sites));
-    let options = pick::candidates(&cfg, items, &known);
+    let options = pick::candidates(&cfg, items, &known, first);
     let answer = if options.is_empty() {
         None
     } else {
@@ -373,6 +436,70 @@ fn read_fresh(state: &AppState, item: &WorkItem, generation: u64) -> Result<Opti
     Ok(Some(Fresh { forge, me, cfg, repo: repo.path.clone(), number, issue }))
 }
 
+/// A listed Coral item read afresh, with the connection and the user it was
+/// read as.
+struct CoralFresh {
+    coral: Coral,
+    me: CoralMe,
+    it: CoralItem,
+}
+
+/// Reads the Coral item `item` again, by its code; a done or deleted one is
+/// an error. Call it with no lock held.
+fn read_coral(state: &AppState, item: &WorkItem, generation: u64) -> Result<CoralFresh, String> {
+    let cfg = state.store.lock().unwrap().config.work_items.coral.clone();
+    if !cfg.enabled {
+        return Err("Turn on Coral in Settings → Work Items first.".into());
+    }
+    let coral = git::coral(&cfg)?;
+    let me = coral_me_for(state, &coral, generation).map_err(|e| format!("Coral: {e}"))?;
+    let it = coral::get(git::http(), &coral, &item.id).map_err(|e| format!("Coral: {e}"))?.ok_or("That work item was closed.")?;
+    Ok(CoralFresh { coral, me, it })
+}
+
+/// Start's check for a Coral item, read afresh: whom it takes the item
+/// from, and its product's repository, or Maya's pick when the product has
+/// none or several (its repositories offered first).
+fn check_coral(app: &AppHandle, listed_item: &WorkItem, items: &[WorkItem], generation: u64) -> Result<StartCheck, String> {
+    let state = app.state::<AppState>();
+    let f = read_coral(&state, listed_item, generation)?;
+    let item = f.it.item;
+    show_fresh(app, &item);
+    let takeover = coral_takeover(&item.assignees, &f.me);
+    let sites = forge::sites(&state.store.lock().unwrap().config.git_connections());
+    let repos = coral::product_repos(git::http(), &f.coral, coral::product_of(&item.id), &sites).unwrap_or_else(|e| {
+        log::line("app", format!("issues: the repositories of {}'s product: {e}", item.id));
+        Vec::new()
+    });
+    let branch = start::branch_name(&item);
+    Ok(match coral_start_repo(repos.clone()) {
+        Some(repo) => StartCheck { takeover, pick: None, branch, repo: Some(repo) },
+        None => StartCheck { takeover, pick: Some(pick_repo(app, &item, items, &repos)), branch, repo: None },
+    })
+}
+
+/// Start's write-back for a Coral item, read afresh: refused when someone
+/// the user did not agree to take it from holds it, or `repo` cannot start;
+/// else assigned to the user and moved to the start status, with a failure
+/// there a notice. The item as read.
+fn take_coral(app: &AppHandle, listed_item: &WorkItem, repo: &ItemRepo, take_over: &[String], generation: u64, notices: &mut Vec<String>) -> Result<WorkItem, String> {
+    let state = app.state::<AppState>();
+    let f = read_coral(&state, listed_item, generation)?;
+    let fresh = &f.it.item;
+    if let Some(why) = takeover_refusal(take_over, &coral_takeover(&fresh.assignees, &f.me), &f.me.name) {
+        // So the page's next check names whoever it is.
+        show_fresh(app, fresh);
+        return Err(why.into());
+    }
+    actions::work_item_preflight(&crate::local(&state), fresh, repo)?;
+    let start_status = state.store.lock().unwrap().config.work_items.coral.start_status.clone();
+    if let Err(e) = coral::take(git::http(), &f.coral, &f.it, &f.me, start_status.as_deref()) {
+        log::line("app", format!("issues: {} was not updated: {e}", fresh.id));
+        notices.push(format!("Started, but {} was not updated: {e}", fresh.id));
+    }
+    Ok(f.it.item)
+}
+
 /// Puts `item` in the list in place of its older copy and tells the page.
 fn show_fresh(app: &AppHandle, item: &WorkItem) {
     let snapshot = {
@@ -392,6 +519,9 @@ pub(crate) fn work_item_check(app: AppHandle, key: String) -> Result<StartCheck,
     let state = app.state::<AppState>();
     let generation = state.git_generation.load(Ordering::SeqCst);
     let (listed_item, items) = listed(&state, &key)?;
+    if listed_item.source == coral::SOURCE {
+        return check_coral(&app, &listed_item, &items, generation);
+    }
     let (item, takeover) = match read_fresh(&state, &listed_item, generation)? {
         Some(f) => {
             show_fresh(&app, &f.issue.item);
@@ -403,8 +533,8 @@ pub(crate) fn work_item_check(app: AppHandle, key: String) -> Result<StartCheck,
             (listed_item, takeover)
         }
     };
-    let pick = needs_pick(&item).then(|| pick_repo(&app, &item, &items));
-    Ok(StartCheck { takeover, pick, branch: start::branch_name(&item) })
+    let pick = needs_pick(&item).then(|| pick_repo(&app, &item, &items, &[]));
+    Ok(StartCheck { takeover, pick, branch: start::branch_name(&item), repo: None })
 }
 
 /// Starts the listed item `key` in `repo` (the item's own when it needs no
@@ -414,7 +544,8 @@ pub(crate) fn work_item_check(app: AppHandle, key: String) -> Result<StartCheck,
 /// start, assigns it to the user and sets its start status, then opens its
 /// session. A custom tool's item is checked against the tool's `me` and runs
 /// the tool's on-start command (when the tool is on) in place of the
-/// write-back. A failed write-back or command is a notice (also a line above
+/// write-back; a Coral item is checked against the Coral token's user and
+/// taken in Coral (`take_coral`). A failed write-back or command is a notice (also a line above
 /// the areas), not a failure. A Start under a minute old whose session has not shown
 /// up yet refuses a second one.
 #[tauri::command(async)]
@@ -428,44 +559,48 @@ pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo
     }
     let repo = repo_to_start(&listed_item, repo)?;
     let mut notices = Vec::new();
-    let item = match read_fresh(&state, &listed_item, generation)? {
-        Some(f) => {
-            let fresh = &f.issue.item;
-            if let Some(why) = takeover_refusal(&take_over, &fresh.assignees, &f.me.login) {
-                // So the page's next check names whoever it is.
-                show_fresh(&app, fresh);
-                return Err(why.into());
+    let item = if listed_item.source == coral::SOURCE {
+        take_coral(&app, &listed_item, &repo, &take_over, generation, &mut notices)?
+    } else {
+        match read_fresh(&state, &listed_item, generation)? {
+            Some(f) => {
+                let fresh = &f.issue.item;
+                if let Some(why) = takeover_refusal(&take_over, &fresh.assignees, &f.me.login) {
+                    // So the page's next check names whoever it is.
+                    show_fresh(&app, fresh);
+                    return Err(why.into());
+                }
+                actions::work_item_preflight(&crate::local(&state), fresh, &repo)?;
+                let taken = match f.forge.site.provider {
+                    GitProvider::Github => github::take(git::http(), &f.forge, &f.repo, f.number, &f.me, &fresh.assignees, &f.issue.labels, &f.cfg),
+                    GitProvider::Gitlab => gitlab::take(git::http(), &f.forge, &f.repo, f.number, &f.me, &f.issue.assignee_ids, &f.issue.labels, &f.cfg),
+                };
+                if let Err(e) = taken {
+                    log::line("app", format!("issues: {} was not updated: {e}", fresh.id));
+                    notices.push(format!("Started, but {} was not updated: {e}", fresh.id));
+                }
+                f.issue.item
             }
-            actions::work_item_preflight(&crate::local(&state), fresh, &repo)?;
-            let taken = match f.forge.site.provider {
-                GitProvider::Github => github::take(git::http(), &f.forge, &f.repo, f.number, &f.me, &fresh.assignees, &f.issue.labels, &f.cfg),
-                GitProvider::Gitlab => gitlab::take(git::http(), &f.forge, &f.repo, f.number, &f.me, &f.issue.assignee_ids, &f.issue.labels, &f.cfg),
-            };
-            if let Err(e) = taken {
-                log::line("app", format!("issues: {} was not updated: {e}", fresh.id));
-                notices.push(format!("Started, but {} was not updated: {e}", fresh.id));
-            }
-            f.issue.item
-        }
-        None => {
-            let tool = tool_of(&state, &listed_item);
-            if let Some(t) = &tool {
-                let me = t.me.trim();
-                if !me.is_empty() {
-                    if let Some(why) = takeover_refusal(&take_over, &listed_item.assignees, me) {
-                        return Err(why.into());
+            None => {
+                let tool = tool_of(&state, &listed_item);
+                if let Some(t) = &tool {
+                    let me = t.me.trim();
+                    if !me.is_empty() {
+                        if let Some(why) = takeover_refusal(&take_over, &listed_item.assignees, me) {
+                            return Err(why.into());
+                        }
                     }
                 }
-            }
-            actions::work_item_preflight(&crate::local(&state), &listed_item, &repo)?;
-            // The command runs with no lock held.
-            if let Some(t) = tool.filter(|t| t.enabled) {
-                if let Err(e) = custom::on_start(&t, &listed_item) {
-                    log::line("app", format!("issues: on-start for {}: {e}", listed_item.id));
-                    notices.push(format!("Started, but the on-start command for {} failed: {e}", listed_item.id));
+                actions::work_item_preflight(&crate::local(&state), &listed_item, &repo)?;
+                // The command runs with no lock held.
+                if let Some(t) = tool.filter(|t| t.enabled) {
+                    if let Err(e) = custom::on_start(&t, &listed_item) {
+                        log::line("app", format!("issues: on-start for {}: {e}", listed_item.id));
+                        notices.push(format!("Started, but the on-start command for {} failed: {e}", listed_item.id));
+                    }
                 }
+                listed_item
             }
-            listed_item
         }
     };
 
@@ -528,6 +663,23 @@ mod tests {
         assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["Maria", "tiago"]), me), None, "the name the question showed");
         assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["maria", "john"]), me), Some(new), "john was never shown, whatever the list holds now");
         assert_eq!(takeover_refusal(&s(&["maria", "john"]), &s(&["john"]), me), None, "one fewer is still covered");
+    }
+
+    #[test]
+    fn coral_takeover_names_the_other_assignees() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let me = CoralMe { id: "u-1".into(), name: "Me Person".into(), email: "me@coral.test".into() };
+        assert_eq!(coral_takeover(&s(&["Ana", "Me Person"]), &CoralMe { name: "me person".into(), ..me.clone() }), s(&["Ana"]));
+        assert_eq!(coral_takeover(&s(&["ME@coral.test", "Ana"]), &me), s(&["Ana"]), "listed by email when Coral has no name");
+        assert!(coral_takeover(&s(&["Me Person"]), &me).is_empty());
+    }
+
+    #[test]
+    fn one_product_repo_needs_no_dialog() {
+        let r = |p: &str| ItemRepo { forge: GitProvider::Github, path: p.into() };
+        assert_eq!(coral_start_repo(vec![r("acme/api")]), Some(r("acme/api")));
+        assert_eq!(coral_start_repo(vec![]), None);
+        assert_eq!(coral_start_repo(vec![r("acme/api"), r("acme/web")]), None);
     }
 
     #[test]
