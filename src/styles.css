@@ -280,6 +280,16 @@ body { margin: 0; background: var(--bg); }
   .whatsnew .whatsnew__panel { margin-left: 0; }
 }
 .settings__code { font: 600 22px ui-monospace, monospace; letter-spacing: .15em; color: var(--gold-bright); }
+/* The pairing card: the one loud thing in Settings. */
+.settings.pane .settings__pair { display: flex; align-items: center; gap: 32px; padding: 28px; border: 1px solid var(--gold-deep); border-radius: 14px; background: radial-gradient(120% 140% at 0% 0%, rgba(217,171,60,.10), transparent 60%), var(--panel); }
+.settings.pane .settings__pair .settings__code { font: 600 40px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; color: var(--gold-bright); }
+.settings.pane .settings__pair .settings__code--empty { font-size: 20px; letter-spacing: normal; font-weight: 500; color: var(--muted); }
+.settings.pane .settings__pair-text { flex: 1; min-width: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.settings.pane .settings__pair-title { display: block; color: var(--text); font-size: 14px; font-weight: 500; margin-bottom: 4px; }
+.settings.pane .settings__foot-actions { display: flex; align-items: center; gap: 4px; }
+.settings.pane .settings__confirm[data-for=new-key-confirm] { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding: 12px 16px; border-color: var(--rule); border-radius: 10px; background: var(--field); }
+.settings.pane .settings__confirm[data-for=new-key-confirm] p { flex: 1 1 100%; }
+@media (max-width: 720px) { .settings.pane .settings__pair { flex-direction: column; align-items: flex-start; gap: 16px; } }
 .settings button.settings__link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--muted); font-size: 12.5px; text-decoration: underline; cursor: pointer; }
 .settings__assistants { display: flex; flex-direction: column; }
 .settings__assistant { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: 1px solid var(--border); }

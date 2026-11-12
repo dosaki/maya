@@ -629,8 +629,9 @@ function restoreFocus(root: HTMLElement, f: FocusedField): void {
 export const PAIRING_TICK_MS = 30_000;
 
 /**
- * Refreshes the code's expiry line in place, or once it expired removes the
- * code and sets the button back to "Show pairing code".
+ * Refreshes the code's expiry line in place, or once it expired puts the
+ * empty state ("No code yet") in the code's place and sets the button back
+ * to "Show pairing code".
  */
 export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: number): void {
   const code = model.network?.code;
@@ -638,8 +639,10 @@ export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: 
   const expiry = panel.querySelector<HTMLElement>(".settings__code-expiry");
   if (!code || !box) return;
   if (nowMs > code.expiresAt) {
-    box.remove();
+    box.classList.add("settings__code--empty");
+    box.textContent = "No code yet";
     expiry?.remove();
+    panel.querySelector(".settings__pair-title")?.remove();
     const regen = panel.querySelector<HTMLButtonElement>("button[data-action=regenerate-code]");
     if (regen) regen.textContent = "Show pairing code";
   } else if (expiry) {
@@ -647,29 +650,37 @@ export function tickPairingCode(panel: ParentNode, model: SettingsModel, nowMs: 
   }
 }
 
-function addressesLine(addresses: string[]): HTMLElement {
-  const line = document.createElement("div");
-  line.className = "settings__hint settings__addresses";
-  line.textContent = `This machine's addresses: ${addresses.join(", ")}`;
-  return line;
+function addressesText(addresses: string[]): string {
+  return `This machine's addresses: ${addresses.join(", ")}`;
 }
 
 /**
  * Puts a fresh address list on the page in place, since no event follows
  * a Wi‑Fi, VPN or sleep/wake change. A repaint would wipe unsaved edits in
- * the other fields. Returns whether anything changed.
+ * the other fields. The line is the Port row's help. Returns whether
+ * anything changed.
  */
 export function tickAddresses(panel: ParentNode, model: SettingsModel, addresses: string[]): boolean {
   const before = model.network?.addresses ?? [];
   if (before.length === addresses.length && before.every((a, i) => a === addresses[i])) return false;
   if (model.network) model.network.addresses = addresses;
   const line = panel.querySelector<HTMLElement>(".settings__addresses");
+  const port = panel.querySelector<HTMLElement>("input[name=networkPort]");
   if (addresses.length === 0) {
     line?.remove();
+    port?.removeAttribute("aria-describedby");
   } else if (line) {
-    line.textContent = addressesLine(addresses).textContent;
+    line.textContent = addressesText(addresses);
   } else {
-    panel.querySelector("input[name=networkPort]")?.closest("label")?.insertAdjacentElement("afterend", addressesLine(addresses));
+    const text = port?.closest(".settings__row")?.querySelector(".settings__row-text");
+    if (port && text) {
+      const help = document.createElement("span");
+      help.className = "settings__help settings__addresses";
+      help.id = "settings-help-networkPort";
+      help.textContent = addressesText(addresses);
+      port.setAttribute("aria-describedby", help.id);
+      text.append(help);
+    }
   }
   return true;
 }
@@ -1679,8 +1690,6 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   speakingGroup.querySelector(".settings__group-note")!.setAttribute("data-for", "voice-order");
   voice.append(speakingGroup, listeningGroup);
 
-  const roleLabel = document.createElement("label");
-  roleLabel.textContent = "Network";
   const roleSel = document.createElement("select");
   roleSel.name = "networkRole";
   for (const [v, text] of [["off", "Off"], ["main", "Act as main Maya"], ["assistant", "Assistant to a main Maya"]] as const) {
@@ -1692,22 +1701,23 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   roleSel.value = netRole;
   roleSel.disabled = !!model.networkPromoting;
   roleSel.addEventListener("change", () => h.onRole(roleSel.value === "main" || roleSel.value === "assistant" ? roleSel.value : "off"));
-  roleLabel.append(roleSel);
-  network.append(roleLabel);
+
+  // The first card: the role, then what that role needs. What would be said
+  // about the card as a whole (an error, the status, "pair again") sits in its foot.
+  const netRows: HTMLElement[] = [row({ label: "This Maya", control: roleSel })];
+  const netFoot: HTMLElement[] = [];
 
   if (netRole !== "off" && net.pairAgain) {
     const note = document.createElement("div");
     note.className = "settings__hint";
     note.dataset.for = "pair-again-note";
     note.textContent = "This Maya was updated to secure pairing — pair again.";
-    network.append(note);
+    netFoot.push(footRow(note));
   }
 
   // Both roles carry a name: assistants show the main's in "Connected to …",
   // and the main shows an assistant's on its cards.
-  const nameField = () => {
-    const nameLabel = document.createElement("label");
-    nameLabel.textContent = "This machine's name";
+  const nameRow = () => {
     const nameInput = document.createElement("input");
     nameInput.type = "text";
     nameInput.name = "networkName";
@@ -1716,20 +1726,18 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     nameInput.disabled = !!model.networkPromoting;
     nameInput.addEventListener("input", () => { model.networkName = nameInput.value; });
     nameInput.addEventListener("change", () => h.onName(nameInput.value.trim()));
-    nameLabel.append(nameInput);
-    return nameLabel;
+    return row({ label: "This machine's name", control: nameInput });
   };
-  if (netRole === "main" && net.mainError) {
-    const err = document.createElement("div");
-    err.className = "settings__error";
-    err.dataset.for = "network";
-    err.textContent = net.mainError;
-    network.append(err);
-  }
+  const pairingGroups: HTMLElement[] = [];
 
   if (netRole === "main") {
-    const portLabel = document.createElement("label");
-    portLabel.textContent = "Port";
+    if (net.mainError) {
+      const err = document.createElement("div");
+      err.className = "settings__error";
+      err.dataset.for = "network";
+      err.textContent = net.mainError;
+      netFoot.push(footRow(err));
+    }
     const portInput = document.createElement("input");
     portInput.type = "number";
     portInput.name = "networkPort";
@@ -1742,47 +1750,41 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     };
     portInput.addEventListener("input", () => { model.networkPort = readPort(); });
     portInput.addEventListener("change", () => h.onPort(readPort()));
-    portLabel.append(portInput);
-    network.append(portLabel);
-    if (net.addresses && net.addresses.length > 0) network.append(addressesLine(net.addresses));
-    network.append(nameField());
+    const addresses = net.addresses && net.addresses.length > 0 ? addressesText(net.addresses) : null;
+    const portRow = row({ label: "Port", help: addresses, control: portInput });
+    portRow.querySelector(".settings__help")?.classList.add("settings__addresses");
+    netRows.push(portRow, nameRow());
 
-    if (net.code && nowMs <= net.code.expiresAt) {
-      const codeBox = document.createElement("div");
-      codeBox.className = "settings__code";
-      codeBox.textContent = formatPairingCode(net.code.code);
-      network.append(codeBox);
+    const live = !!net.code && nowMs <= net.code.expiresAt;
+    const pairCard = document.createElement("div");
+    pairCard.className = "settings__pair";
+    const codeBox = document.createElement("div");
+    codeBox.className = live ? "settings__code" : "settings__code settings__code--empty";
+    codeBox.textContent = live && net.code ? formatPairingCode(net.code.code) : "No code yet";
+    const pairText = document.createElement("div");
+    pairText.className = "settings__pair-text";
+    if (live && net.code) {
+      const title = document.createElement("strong");
+      title.className = "settings__pair-title";
+      title.textContent = "Type this on the machine you are pairing.";
       const expiry = document.createElement("div");
       expiry.className = "settings__hint settings__code-expiry";
       expiry.textContent = `expires in ${expiresInMinutes(net.code.expiresAt, nowMs)} min`;
-      network.append(expiry);
+      pairText.append(title, expiry);
     } else if (net.codeUsedUp) {
       const used = document.createElement("div");
       used.className = "settings__hint";
       used.textContent = "Code used up after 3 wrong tries — Regenerate.";
-      network.append(used);
+      pairText.append(used);
     }
-
-    const regen = document.createElement("button");
-    regen.type = "button";
-    regen.dataset.action = "regenerate-code";
-    regen.textContent = net.code && nowMs <= net.code.expiresAt ? "Regenerate" : "Show pairing code";
     // Reopening pairing mid-handover would let a new assistant pair with a main about to stop.
-    regen.disabled = !!model.networkPromoting;
-    regen.addEventListener("click", () => h.onRegenerate());
-    network.append(regen);
-
-    const hint = document.createElement("div");
-    hint.className = "settings__hint";
-    hint.dataset.for = "devices-hint";
-    hint.textContent = "Paired devices are in Settings › Devices.";
-    network.append(hint);
+    const regen = settingsBtn(live ? "Regenerate" : "Show pairing code", { action: "regenerate-code", disabled: !!model.networkPromoting }, () => h.onRegenerate());
+    pairCard.append(codeBox, pairText, regen);
+    pairingGroups.push(group({ title: "Pairing code", foot: "Paired devices are in Settings › Devices." }, pairCard));
   } else if (netRole === "assistant") {
     // Values live on the model, updated on every keystroke (not just on
     // `change`), so an unrelated repaint (a `voice` or `network` event) never
     // wipes a half-typed field; `change` still drives when each is saved.
-    const hostLabel = document.createElement("label");
-    hostLabel.textContent = "Main's host or address";
     const hostInput = document.createElement("input");
     hostInput.type = "text";
     hostInput.name = "networkHost";
@@ -1791,11 +1793,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     hostInput.disabled = !!model.networkPromoting;
     hostInput.addEventListener("input", () => { model.networkMainHost = hostInput.value; });
     hostInput.addEventListener("change", () => h.onMainHost(hostInput.value.trim()));
-    hostLabel.append(hostInput);
-    network.append(hostLabel);
 
-    const mainPortLabel = document.createElement("label");
-    mainPortLabel.textContent = "Port";
     const mainPortInput = document.createElement("input");
     mainPortInput.type = "number";
     mainPortInput.name = "networkMainPort";
@@ -1808,57 +1806,27 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     };
     mainPortInput.addEventListener("input", () => { model.networkMainPort = readMainPort(); });
     mainPortInput.addEventListener("change", () => h.onMainPort(readMainPort()));
-    mainPortLabel.append(mainPortInput);
-    network.append(mainPortLabel);
 
-    network.append(nameField());
+    netRows.push(
+      row({ label: "Main's host or address", control: hostInput }),
+      row({ label: "Port", control: mainPortInput }),
+      nameRow(),
+    );
 
-    if (model.networkPaired && !model.networkRepair) {
-      const again = document.createElement("button");
-      again.type = "button";
-      again.className = "settings__link";
-      again.dataset.action = "pair-again";
-      again.textContent = "Pair again";
-      again.addEventListener("click", () => h.onPairAgain());
-      network.append(again);
-
-      const forget = document.createElement("button");
-      forget.type = "button";
-      forget.className = "settings__link";
-      forget.dataset.action = "forget-main";
-      forget.textContent = "Forget main";
-      forget.addEventListener("click", () => h.onForgetMain());
-      network.append(forget);
+    const needsCode = !model.networkPaired || model.networkRepair;
+    if (needsCode) {
+      const codeInput = document.createElement("input");
+      codeInput.type = "text";
+      codeInput.name = "networkCode";
+      codeInput.placeholder = "483921";
+      codeInput.value = netCode;
+      codeInput.addEventListener("input", () => { model.networkCode = codeInput.value; });
+      netRows.push(row({ label: "Pairing code", control: codeInput }));
     }
-  }
-  if (netRole === "assistant" && (!model.networkPaired || model.networkRepair)) {
-    const codeLabel = document.createElement("label");
-    codeLabel.textContent = "Pairing code";
-    const codeInput = document.createElement("input");
-    codeInput.type = "text";
-    codeInput.name = "networkCode";
-    codeInput.placeholder = "483921";
-    codeInput.value = netCode;
-    codeInput.addEventListener("input", () => { model.networkCode = codeInput.value; });
-    codeLabel.append(codeInput);
-    network.append(codeLabel);
 
-    const pairBtn = document.createElement("button");
-    pairBtn.type = "button";
-    pairBtn.dataset.action = "pair";
-    pairBtn.textContent = model.networkPairing ? "Pairing…" : "Pair";
-    pairBtn.disabled = !!model.networkPairing;
-    pairBtn.addEventListener("click", () => {
-      if (model.networkPairing) return;
-      h.onPair((model.networkMainHost ?? "").trim(), model.networkMainPort ?? 0, (model.networkName ?? "").trim(), (model.networkCode ?? "").trim());
-    });
-    network.append(pairBtn);
-  }
-
-  // Shown whenever the select shows Assistant, saved or still being
-  // previewed, so a failed Pair on a never-paired machine has somewhere to
-  // put its message instead of only the page-level error banner.
-  if (netRole === "assistant") {
+    // Shown whenever the select shows Assistant, saved or still being
+    // previewed, so a failed Pair on a never-paired machine has somewhere to
+    // put its message instead of only the page-level error banner.
     const statusText = model.networkError
       ? model.networkError
       : net.role === "assistant"
@@ -1868,11 +1836,13 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
             ? net.assistant.error
             : "Reconnecting…"
         : null;
+    let status: HTMLElement | null = null;
     if (statusText !== null) {
+      status = document.createElement("div");
       const statusEl = document.createElement("div");
       statusEl.className = "settings__status settings__status--network";
       statusEl.textContent = statusText;
-      network.append(statusEl);
+      status.append(statusEl);
       // While it retries, the last failure sits under "Reconnecting…".
       if (!model.networkError && net.role === "assistant" && !net.assistant.connected && net.assistant.retrying && net.assistant.error) {
         statusEl.title = net.assistant.error;
@@ -1880,41 +1850,47 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
         last.className = "settings__hint";
         last.dataset.for = "network-last-error";
         last.textContent = `Last error: ${net.assistant.error}`;
-        network.append(last);
+        status.append(last);
       }
     }
+
+    let actions: HTMLElement | null = null;
+    if (needsCode) {
+      actions = settingsBtn(model.networkPairing ? "Pairing…" : "Pair", { action: "pair", kind: "gold", disabled: !!model.networkPairing }, () => {
+        if (model.networkPairing) return;
+        h.onPair((model.networkMainHost ?? "").trim(), model.networkMainPort ?? 0, (model.networkName ?? "").trim(), (model.networkCode ?? "").trim());
+      });
+    } else {
+      const forget = settingsBtn("Forget main", { action: "forget-main", kind: "danger" }, () => h.onForgetMain());
+      forget.classList.add("settings__btn--quiet");
+      actions = document.createElement("div");
+      actions.className = "settings__foot-actions";
+      actions.append(settingsBtn("Pair again", { action: "pair-again", kind: "quiet" }, () => h.onPairAgain()), forget);
+    }
+    netFoot.push(footRow(status ?? document.createElement("span"), actions));
   }
+  network.append(group({}, card(...netRows, ...netFoot)), ...pairingGroups);
 
   if (netRole !== "off") {
+    const keyHelp = "Drops every pairing, so each device must pair again.";
+    let keyRow: HTMLElement;
     if (model.networkNewKeyConfirm) {
       const confirm = document.createElement("div");
       confirm.className = "settings__confirm";
       confirm.dataset.for = "new-key-confirm";
       const p = document.createElement("p");
       p.textContent = "Drop every pairing and make a new key?";
-      confirm.append(p);
-      const yes = document.createElement("button");
-      yes.type = "button";
-      yes.dataset.action = "new-key-confirm";
-      yes.textContent = "Drop and make a new key";
-      yes.addEventListener("click", () => h.onNewKey());
-      const no = document.createElement("button");
-      no.type = "button";
-      no.dataset.action = "new-key-cancel";
-      no.textContent = "Cancel";
-      no.addEventListener("click", () => h.onNewKeyCancel());
-      confirm.append(yes, no);
-      network.append(confirm);
+      confirm.append(
+        p,
+        settingsBtn("Drop and make a new key", { action: "new-key-confirm", kind: "danger" }, () => h.onNewKey()),
+        settingsBtn("Cancel", { action: "new-key-cancel" }, () => h.onNewKeyCancel()),
+      );
+      keyRow = row({ label: "New key", help: keyHelp, control: confirm, stack: true });
     } else {
-      const fresh = document.createElement("button");
-      fresh.type = "button";
-      fresh.className = "settings__link";
-      fresh.dataset.action = "new-key";
-      fresh.textContent = "New key";
-      fresh.disabled = !!model.networkPromoting;
-      fresh.addEventListener("click", () => h.onNewKeyAsk());
-      network.append(fresh);
+      const fresh = settingsBtn("New key", { action: "new-key", kind: "danger", disabled: !!model.networkPromoting }, () => h.onNewKeyAsk());
+      keyRow = row({ label: "New key", help: keyHelp, control: fresh });
     }
+    network.append(group({}, card(keyRow)));
   }
 
   if (net.role === "off") {

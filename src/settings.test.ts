@@ -884,7 +884,8 @@ describe("Network settings", () => {
     );
     const addr = el.querySelector(".settings__addresses")!;
     expect(addr.textContent).toBe("This machine's addresses: 192.168.1.20, 10.0.0.5");
-    expect(addr.previousElementSibling?.querySelector("input[name=networkPort]")).not.toBeNull();
+    expect(addr.closest(".settings__row")?.querySelector("input[name=networkPort]")).not.toBeNull();
+    expect(addr.classList.contains("settings__help")).toBe(true);
   });
 
   it("tickAddresses updates, adds and removes the addresses line in place without a repaint", () => {
@@ -905,7 +906,7 @@ describe("Network settings", () => {
     expect(tickAddresses(el, model, ["10.0.0.5"])).toBe(true);
     const line = el.querySelector(".settings__addresses")!;
     expect(line.textContent).toBe("This machine's addresses: 10.0.0.5");
-    expect(line.previousElementSibling?.querySelector("input[name=networkPort]")).not.toBeNull();
+    expect(line.closest(".settings__row")?.querySelector("input[name=networkPort]")).not.toBeNull();
     expect(el.contains(port) && port.value).toBe("5000");
   });
 
@@ -962,7 +963,8 @@ describe("Network settings", () => {
     expect(renderSettings(withCode, handlers(), 100_000).querySelector(".settings__code-expiry")?.textContent).toBe("expires in 4 min");
     expect(renderSettings(withCode, handlers(), 250_000).querySelector(".settings__code-expiry")?.textContent).toBe("expires in 1 min");
     const expired = renderSettings(withCode, handlers(), 300_001);
-    expect(expired.querySelector(".settings__code")).toBeNull();
+    expect(expired.querySelector(".settings__code:not(.settings__code--empty)")).toBeNull();
+    expect(expired.querySelector(".settings__code--empty")?.textContent).toBe("No code yet");
     expect(expired.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Show pairing code");
     // The tick edits in place, so unsaved text elsewhere in Settings survives.
     const host = document.createElement("div");
@@ -975,7 +977,8 @@ describe("Network settings", () => {
     expect(host.querySelector(".settings__code")).not.toBeNull();
     expect(host.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Regenerate");
     tickPairingCode(host, withCode, 320_000);
-    expect(host.querySelector(".settings__code")).toBeNull();
+    expect(host.querySelector(".settings__code:not(.settings__code--empty)")).toBeNull();
+    expect(host.querySelector(".settings__code--empty")?.textContent).toBe("No code yet");
     expect(host.querySelector(".settings__code-expiry")).toBeNull();
     // The button no longer offers to regenerate a code that is gone.
     expect(host.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Show pairing code");
@@ -1003,7 +1006,8 @@ describe("Network settings", () => {
     );
     const err = el.querySelector(".settings__error[data-for=network]");
     expect(err?.textContent).toBe("Could not listen on port 4127: Address already in use (os error 48). Choose another port.");
-    expect(el.querySelector("select[name=networkRole]")!.closest("label")!.nextElementSibling).toBe(err);
+    expect(el.querySelector("select[name=networkRole]")!.closest(".settings__card")!.contains(err)).toBe(true);
+    expect(err!.closest(".settings__row--foot")).not.toBeNull();
     expect(el.querySelector(".settings__assistant")?.textContent).toContain("laptop");
     const plain = renderSettings({ ...voiceBase, networkRole: "main" }, handlers());
     expect(plain.querySelector(".settings__error[data-for=network]")).toBeNull();
@@ -1202,6 +1206,122 @@ describe("Settings › Devices", () => {
     expect(el.querySelector(".settings__section--network")!.textContent).toContain("Paired devices are in Settings › Devices.");
     expect(el.querySelector(".settings__section--network .settings__assistant")).toBeNull();
     expect(el.querySelector(".settings__section--devices .settings__assistant")).not.toBeNull();
+  });
+});
+
+describe("Settings → Network in the card-and-row design", () => {
+  const mainNet = (over: Record<string, unknown> = {}) => ({ role: "main" as const, code: null, assistants: [], assistant: { connected: false, mainName: null, error: null }, ...over });
+  const label = (r: Element) => r.querySelector(".settings__label")?.textContent;
+  const rowsOf = (card: Element) => [...card.querySelectorAll(":scope > .settings__row")];
+
+  it("a main's first card holds This Maya, Port with the addresses as its help, and the machine's name", () => {
+    const el = renderSettings({ ...voiceBase, networkRole: "main", networkPort: 4127, network: mainNet({ addresses: ["192.168.1.9", "10.8.0.4"] }) }, handlers());
+    const card = el.querySelector("select[name=networkRole]")!.closest(".settings__card")!;
+    expect(rowsOf(card).map(label)).toEqual(["This Maya", "Port", "This machine's name"]);
+    const portRow = rowsOf(card)[1]!;
+    expect(portRow.querySelector("input[name=networkPort]")).not.toBeNull();
+    expect(portRow.querySelector(".settings__help.settings__addresses")?.textContent).toBe("This machine's addresses: 192.168.1.9, 10.8.0.4");
+    expect(rowsOf(card)[2]!.querySelector("input[name=networkName]")).not.toBeNull();
+  });
+
+  it("tickAddresses puts a missing addresses line in as the Port row's help", () => {
+    const model = { ...voiceBase, networkRole: "main" as const, network: mainNet() };
+    const el = renderSettings(model, handlers());
+    expect(el.querySelector(".settings__addresses")).toBeNull();
+    tickAddresses(el, model, ["10.0.0.5"]);
+    const help = el.querySelector(".settings__addresses")!;
+    expect(help.classList.contains("settings__help")).toBe(true);
+    const portRow = el.querySelector("input[name=networkPort]")!.closest(".settings__row")!;
+    expect(portRow.contains(help)).toBe(true);
+    expect(el.querySelector("input[name=networkPort]")!.getAttribute("aria-describedby")).toBe(help.id);
+  });
+
+  it("the pairing card shows the code, the instruction, the expiry and Regenerate", () => {
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network: mainNet({ code: { code: "482199", expiresAt: 300_000 } }) }, handlers(), 0);
+    const pair = el.querySelector(".settings__pair")!;
+    expect(pair.querySelector(".settings__code")?.textContent).toBe("482 199");
+    expect(pair.querySelector(".settings__code")?.classList.contains("settings__code--empty")).toBe(false);
+    expect(pair.textContent).toContain("Type this on the machine you are pairing.");
+    expect(pair.querySelector(".settings__code-expiry")?.textContent).toBe("expires in 5 min");
+    expect(pair.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Regenerate");
+    expect(pair.closest(".settings__group")?.querySelector(".settings__group-title")?.textContent).toBe("Pairing code");
+    expect(pair.closest(".settings__group")?.querySelector(".settings__group-foot")?.textContent).toBe("Paired devices are in Settings › Devices.");
+  });
+
+  it("with no live code the pairing card shows 'No code yet' and Show pairing code", () => {
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network: mainNet() }, handlers());
+    const pair = el.querySelector(".settings__pair")!;
+    const code = pair.querySelector(".settings__code")!;
+    expect(code.classList.contains("settings__code--empty")).toBe(true);
+    expect(code.textContent).toBe("No code yet");
+    expect(pair.querySelector(".settings__code-expiry")).toBeNull();
+    expect(pair.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Show pairing code");
+  });
+
+  it("tickPairingCode turns an expired code into the empty state in place", () => {
+    const model: SettingsModel = { ...voiceBase, networkRole: "main", network: mainNet({ code: { code: "482199", expiresAt: 300_000 } }) };
+    const host = document.createElement("div");
+    host.append(renderSettings(model, handlers(), 100_000));
+    tickPairingCode(host, model, 320_000);
+    const code = host.querySelector(".settings__pair .settings__code")!;
+    expect(code.classList.contains("settings__code--empty")).toBe(true);
+    expect(code.textContent).toBe("No code yet");
+    expect(host.querySelector(".settings__pair")!.textContent).not.toContain("Type this on the machine");
+    expect(host.querySelector("button[data-action=regenerate-code]")?.textContent).toBe("Show pairing code");
+  });
+
+  it("the used-up state keeps today's wording inside the pairing card", () => {
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network: mainNet({ codeUsedUp: true }) }, handlers());
+    expect(el.querySelector(".settings__pair")?.textContent).toContain("Code used up after 3 wrong tries — Regenerate.");
+  });
+
+  it("only a main has the pairing card", () => {
+    expect(renderSettings({ ...voiceBase, networkRole: "assistant" }, handlers()).querySelector(".settings__pair")).toBeNull();
+    expect(renderSettings({ ...voiceBase }, handlers()).querySelector(".settings__pair")).toBeNull();
+  });
+
+  it("New key is a row with its help and a danger button; the confirmation opens in that card", () => {
+    const h = handlers();
+    const el = renderSettings({ ...voiceBase, networkRole: "main", network: mainNet() }, h);
+    const key = el.querySelector<HTMLButtonElement>("button[data-action=new-key]")!;
+    expect(key.classList.contains("settings__btn--danger")).toBe(true);
+    const keyRow = key.closest(".settings__row")!;
+    expect(label(keyRow)).toBe("New key");
+    expect(keyRow.querySelector(".settings__help")?.textContent).toBe("Drops every pairing, so each device must pair again.");
+    const asking = renderSettings({ ...voiceBase, networkRole: "main", network: mainNet(), networkNewKeyConfirm: true }, h);
+    const confirm = asking.querySelector("[data-for=new-key-confirm]")!;
+    expect(confirm.closest(".settings__card")?.textContent).toContain("New key");
+    expect(confirm.textContent).toContain("Drop every pairing and make a new key?");
+    expect(confirm.querySelector("button[data-action=new-key-confirm]")?.textContent).toBe("Drop and make a new key");
+    expect(confirm.querySelector("button[data-action=new-key-cancel]")?.textContent).toBe("Cancel");
+    expect(asking.querySelector("button[data-action=new-key]")).toBeNull();
+  });
+
+  it("an assistant's card has the fields as rows, Pair as its gold action and the status in the foot", () => {
+    const el = renderSettings(
+      { ...voiceBase, networkRole: "assistant", networkMainHost: "desk.local", networkMainPort: 4127, network: { role: "assistant", code: null, assistants: [], assistant: { connected: false, mainName: null, error: null } } },
+      handlers(),
+    );
+    const card = el.querySelector("select[name=networkRole]")!.closest(".settings__card")!;
+    expect(rowsOf(card).filter((r) => !r.classList.contains("settings__row--foot")).map(label)).toEqual(["This Maya", "Main's host or address", "Port", "This machine's name", "Pairing code"]);
+    for (const n of ["networkHost", "networkMainPort", "networkName", "networkCode"]) expect(card.querySelector(`input[name=${n}]`), n).not.toBeNull();
+    const pair = card.querySelector("button[data-action=pair]")!;
+    expect(pair.classList.contains("settings__btn--gold")).toBe(true);
+    expect(pair.closest(".settings__row--foot")).not.toBeNull();
+    const status = card.querySelector(".settings__status--network")!;
+    expect(status.closest(".settings__row--foot")).not.toBeNull();
+    expect(status.textContent).toBe("Reconnecting…");
+  });
+
+  it("a paired assistant's foot has Pair again and Forget main", () => {
+    const el = renderSettings({ ...voiceBase, networkRole: "assistant", networkPaired: true, networkMainHost: "desk.local" }, handlers());
+    for (const a of ["pair-again", "forget-main"]) expect(el.querySelector(`button[data-action=${a}]`)?.closest(".settings__row--foot"), a).not.toBeNull();
+  });
+
+  it("styles the pairing card with a gold edge, a 40px gold code and a 20px muted empty state", () => {
+    expect(styles).toMatch(/\.settings\.pane \.settings__pair\s*\{[^}]*border:\s*1px solid var\(--gold-deep\)[^}]*border-radius:\s*14px[^}]*radial-gradient/);
+    expect(styles).toMatch(/\.settings\.pane \.settings__pair \.settings__code\s*\{[^}]*font:[^}]*40px[^}]*color:\s*var\(--gold-bright\)/);
+    expect(styles).toMatch(/\.settings\.pane \.settings__pair \.settings__code--empty\s*\{[^}]*font-size:\s*20px[^}]*color:\s*var\(--muted\)/);
   });
 });
 
