@@ -195,8 +195,8 @@ export function makeWorkItemsView(host: HTMLElement) {
       // Git off entirely, or on with both services off in Work Items.
       const group = state.gitOff ? "git" : "workItems";
       const message = state.gitOff
-        ? "Work items are off. Turn on GitHub or GitLab in Settings → Git, or add a custom tool in Settings → Work Items. "
-        : "Work items are off. Turn on GitHub, GitLab or a custom tool in Settings → Work Items. ";
+        ? "Work items are off. Turn on GitHub or GitLab in Settings → Git, or turn on Coral or a custom tool in Settings → Work Items. "
+        : "Work items are off. Turn on GitHub, GitLab, Coral or a custom tool in Settings → Work Items. ";
       const off = el("div", "reviews__off", message);
       const open = button("Open Settings", "settings");
       open.dataset.group = group;

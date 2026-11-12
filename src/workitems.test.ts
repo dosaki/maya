@@ -82,17 +82,17 @@ describe("work items", () => {
     expect(doc.querySelector("[data-tab=issues]")!.textContent!.trim().startsWith("Work Items")).toBe(true);
   });
 
-  it("says issues are off and opens Settings → Git when no Git connection is on", () => {
+  it("says work items are off and opens Settings → Git when no Git connection is on", () => {
     const host = document.createElement("div");
     makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: true, off: true, fetchedAt: null }, [], Date.now());
-    expect(host.textContent).toContain("Work items are off. Turn on GitHub or GitLab in Settings → Git, or add a custom tool in Settings → Work Items.");
+    expect(host.textContent).toContain("Work items are off. Turn on GitHub or GitLab in Settings → Git, or turn on Coral or a custom tool in Settings → Work Items.");
     expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "git" });
   });
 
-  it("says issues are off and opens Settings → Work Items when Git is on but both services are off there", () => {
+  it("says work items are off and opens Settings → Work Items when Git is on but both services are off there", () => {
     const host = document.createElement("div");
     makeWorkItemsView(host).update({ items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: true, fetchedAt: null }, [], Date.now());
-    expect(host.textContent).toContain("Work items are off. Turn on GitHub, GitLab or a custom tool in Settings → Work Items.");
+    expect(host.textContent).toContain("Work items are off. Turn on GitHub, GitLab, Coral or a custom tool in Settings → Work Items.");
     expect(host.textContent).not.toContain("Settings → Git.");
     expect(workItemActionFor(host.querySelector("[data-action=settings]")!)).toEqual({ kind: "settings", group: "workItems" });
   });

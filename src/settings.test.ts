@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
 import { RUNNING_VERSION } from "./release-notes";
-import { SETTINGS_GROUPS, SETTINGS_LEDES, SETTINGS_NAV, SOURCES_OPEN_KEY, forgeSummary, gitConnections, ruleSummary, storedSourcesOpen, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { SETTINGS_GROUPS, SETTINGS_LEDES, SETTINGS_NAV, SOURCES_OPEN_KEY, coralSummary, forgeSummary, gitConnections, ruleSummary, storedSourcesOpen, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 import { builtinVoiceName, secretStore } from "./platform";
 import styles from "./styles.css?raw";
 import mobileStyles from "./mobile/mobile.css?raw";
@@ -2083,7 +2083,7 @@ describe("Settings → Work Items sources", () => {
     const group = sources[0].closest(".settings__group")!;
     expect(group.querySelector(".settings__group-title")!.textContent).toBe("Sources");
     expect(group.querySelector(".settings__group-note")!.textContent).toBe("Open one to change what the Work Items tab picks up from it.");
-    expect(sources.map((s) => s.dataset.source)).toEqual(["github", "gitlab", "custom-1", "custom-2"]);
+    expect(sources.map((s) => s.dataset.source)).toEqual(["github", "gitlab", "coral", "custom-1", "custom-2"]);
     expect(sources.every((s) => s.parentElement === group)).toBe(true);
     const add = group.lastElementChild as HTMLElement;
     expect(add.classList.contains("settings__add")).toBe(true);
@@ -2490,5 +2490,169 @@ describe("Devices with the network off", () => {
     expect(line.dataset.row).toBe("devices-off");
     expect(line.textContent).toBe("Turn the network on in Settings › Network to see your devices.");
     expect(line.parentElement!.classList.contains("settings__card")).toBe(true);
+  });
+});
+
+describe("Settings → Work Items Coral", () => {
+  afterEach(() => localStorage.removeItem(SOURCES_OPEN_KEY));
+  const model = (over: Partial<SettingsModel> = {}): SettingsModel => ({ ...voiceBase, settingsGroup: "workItems", workItems: workItemsConfig(null), ...over });
+  const card = (root: HTMLElement) => root.querySelector<HTMLElement>('[data-source="coral"]')!;
+  const field = <T extends HTMLElement>(root: HTMLElement, sel: string) => card(root).querySelector<T>(sel)!;
+  const change = (el: HTMLInputElement | HTMLSelectElement, value: string) => {
+    el.value = value;
+    el.dispatchEvent(new Event("change"));
+  };
+  const statuses = [
+    { id: "s-todo", name: "To do", category: "todo", sub: true, position: 1 },
+    { id: "s-doing", name: "In progress", category: "doing", sub: false, position: 2 },
+  ];
+
+  it("shows a Coral source, off by default, with its switch visible when folded", () => {
+    const root = renderSettings(model(), handlers());
+    const c = card(root);
+    expect(c.hasAttribute("data-open")).toBe(false);
+    expect(c.querySelector(".settings__source-name")!.textContent).toBe("Coral");
+    expect(c.querySelector(".settings__source-state")!.textContent).toBe("Off");
+    expect(c.querySelector(".settings__source-sum")!.textContent).toBe("Off");
+    expect(c.classList.contains("settings__source--off")).toBe(true);
+    expect(c.querySelector<HTMLInputElement>(".settings__source-head input[name=wi-coral-enabled]")!.checked).toBe(false);
+  });
+
+  it("remembers that the card is open", () => {
+    card(renderSettings(model(), handlers())).querySelector<HTMLButtonElement>(".settings__source-toggle")!.click();
+    expect(storedSourcesOpen().coral).toBe(true);
+  });
+
+  it("saves the Coral address, rules and start status", () => {
+    const onWorkItems = vi.fn();
+    const root = renderSettings(model({ coralHasToken: true, coralStatuses: statuses }), { ...handlers(), onWorkItems });
+    change(field(root, "input[name=wi-coral-baseUrl]"), " https://coral.test ");
+    expect(onWorkItems).toHaveBeenLastCalledWith("coral", expect.objectContaining({ baseUrl: "https://coral.test" }));
+    change(field(root, "input[name=wi-labels]"), "team: api");
+    change(field(root, "input[name=wi-repos]"), "BED");
+    change(field(root, "select[name=wi-coral-startStatus]"), "s-doing");
+    expect(onWorkItems).toHaveBeenLastCalledWith("coral", {
+      enabled: false,
+      baseUrl: "https://coral.test",
+      token: { kind: "stored" },
+      rules: [{ assignee: { kind: "me" }, labels: ["team: api"], repos: ["BED"] }],
+      startStatus: "s-doing",
+    });
+    field<HTMLInputElement>(root, "input[name=wi-coral-enabled]").checked = true;
+    field<HTMLInputElement>(root, "input[name=wi-coral-enabled]").dispatchEvent(new Event("change"));
+    expect(onWorkItems).toHaveBeenLastCalledWith("coral", expect.objectContaining({ enabled: true }));
+  });
+
+  it("saves an environment variable as the token, and a pasted token goes to the store", () => {
+    const onWorkItems = vi.fn();
+    const onCoralToken = vi.fn();
+    const root = renderSettings(model(), { ...handlers(), onWorkItems, onCoralToken });
+    const tok = field<HTMLInputElement>(root, "input[name=wi-coral-token]");
+    change(tok, "  abc\n");
+    expect(onCoralToken).toHaveBeenCalledWith("abc");
+    expect(tok.value).toBe("");
+    document.body.append(root);
+    field<HTMLInputElement>(root, "input[name=wi-coral-tokenKind][value=env]").click();
+    root.remove();
+    expect(onWorkItems).toHaveBeenLastCalledWith("coral", expect.objectContaining({ token: { kind: "env", name: "CORAL_TOKEN" } }));
+    const env = renderSettings(model({ workItems: { ...workItemsConfig(null), coral: { ...workItemsConfig(null).coral, token: { kind: "env", name: "MY_CORAL" } } } }), { ...handlers(), onWorkItems });
+    const name = field<HTMLInputElement>(env, "input[name=wi-coral-envName]");
+    expect(name.value).toBe("MY_CORAL");
+    expect(name.placeholder).toBe("CORAL_TOKEN");
+    change(name, "OTHER");
+    expect(onWorkItems).toHaveBeenLastCalledWith("coral", expect.objectContaining({ token: { kind: "env", name: "OTHER" } }));
+  });
+
+  it("clears a stored token", () => {
+    const onCoralClearToken = vi.fn();
+    const root = renderSettings(model({ coralHasToken: true }), { ...handlers(), onCoralClearToken });
+    field<HTMLButtonElement>(root, "[data-action=coral-clear]").click();
+    expect(onCoralClearToken).toHaveBeenCalled();
+  });
+
+  it("calls the rule fields Tags and Products for Coral, and Labels and Repositories for GitHub", () => {
+    const root = renderSettings(model(), handlers());
+    const labels = (r: Element) => [...r.querySelectorAll(".settings__rule-body label")].map((l) => l.textContent);
+    expect(labels(card(root))).toEqual(["Assignee", "Tags", "Products"]);
+    expect(labels(root.querySelector('[data-source="github"]')!)).toEqual(["Assignee", "Labels", "Repositories"]);
+    const rule = card(root).querySelector<HTMLElement>(".settings__rule")!;
+    expect(rule.querySelector<HTMLInputElement>("input[name=wi-login]")!.placeholder).toBe("their email");
+    expect(rule.querySelector<HTMLInputElement>("input[name=wi-repos]")!.placeholder).toBe("any product");
+  });
+
+  it("saves a rule for someone by their email, and none until the email is typed", () => {
+    const onWorkItems = vi.fn();
+    const root = renderSettings(model(), { ...handlers(), onWorkItems });
+    const who = field<HTMLSelectElement>(root, "select[name=wi-assignee]");
+    change(who, "user");
+    expect(onWorkItems).not.toHaveBeenCalled();
+    change(field(root, "input[name=wi-login]"), "ana@example.com");
+    expect(onWorkItems).toHaveBeenLastCalledWith("coral", expect.objectContaining({ rules: [{ assignee: { kind: "user", login: "ana@example.com" }, labels: [], repos: [] }] }));
+  });
+
+  it("lists Coral's statuses once they load, and keeps the saved one before", () => {
+    const withStart = { ...workItemsConfig(null), coral: { ...workItemsConfig(null).coral, startStatus: "s-doing" } };
+    const optionsOf = (root: HTMLElement) => [...field<HTMLSelectElement>(root, "select[name=wi-coral-startStatus]").options].map((o) => [o.value, o.textContent]);
+    const before = renderSettings(model({ workItems: withStart, coralHasToken: true, coralStatuses: null }), handlers());
+    expect(optionsOf(before)).toEqual([["", "Leave as it is"], ["s-doing", "Saved status"]]);
+    expect(field<HTMLSelectElement>(before, "select[name=wi-coral-startStatus]").value).toBe("s-doing");
+    expect(card(before).textContent).toContain("Test the connection to list Coral's statuses.");
+    const after = renderSettings(model({ workItems: withStart, coralHasToken: true, coralStatuses: statuses }), handlers());
+    expect(optionsOf(after)).toEqual([["", "Leave as it is"], ["s-todo", "To do"], ["s-doing", "In progress"]]);
+    expect(field<HTMLSelectElement>(after, "select[name=wi-coral-startStatus]").value).toBe("s-doing");
+    expect(card(after).textContent).not.toContain("Test the connection");
+    expect(card(after).textContent).toContain("A defect gets the first allowed status of the same kind");
+  });
+
+  it("loads the statuses when the card opens with a token, not without one", async () => {
+    const onCoralStatuses = vi.fn().mockResolvedValue(statuses);
+    const toggleOf = (root: HTMLElement) => card(root).querySelector<HTMLButtonElement>(".settings__source-toggle")!;
+    toggleOf(renderSettings(model({ coralHasToken: false }), { ...handlers(), onCoralStatuses })).click();
+    expect(onCoralStatuses).not.toHaveBeenCalled();
+    const root = renderSettings(model({ coralHasToken: true, coralStatuses: null }), { ...handlers(), onCoralStatuses });
+    toggleOf(root).click();
+    expect(onCoralStatuses).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(field<HTMLSelectElement>(root, "select[name=wi-coral-startStatus]").options.length).toBe(3));
+  });
+
+  it("shows the Test result, and lists the statuses after it connects", async () => {
+    const onCoralTest = vi.fn().mockResolvedValue("Connected as Ana");
+    const onCoralStatuses = vi.fn().mockResolvedValue(statuses);
+    const root = renderSettings(model({ coralHasToken: true }), { ...handlers(), onCoralTest, onCoralStatuses });
+    const row = field<HTMLElement>(root, "[data-action=coral-test]").closest(".settings__row")!;
+    field<HTMLButtonElement>(root, "[data-action=coral-test]").click();
+    expect(row.querySelector(".settings__help")!.textContent).toBe("Testing…");
+    await vi.waitFor(() => expect(row.querySelector(".settings__help")!.textContent).toBe("Connected as Ana"));
+    expect(onCoralStatuses).toHaveBeenCalled();
+    await vi.waitFor(() => expect(field<HTMLSelectElement>(root, "select[name=wi-coral-startStatus]").options.length).toBe(3));
+  });
+
+  it("shows why the Test failed, and does not list statuses", async () => {
+    const onCoralTest = vi.fn().mockRejectedValue("Enter Coral's address first.");
+    const onCoralStatuses = vi.fn();
+    const root = renderSettings(model(), { ...handlers(), onCoralTest, onCoralStatuses });
+    const row = field<HTMLElement>(root, "[data-action=coral-test]").closest(".settings__row")!;
+    field<HTMLButtonElement>(root, "[data-action=coral-test]").click();
+    await vi.waitFor(() => expect(row.querySelector(".settings__help")!.textContent).toBe("Enter Coral's address first."));
+    expect(onCoralStatuses).not.toHaveBeenCalled();
+  });
+
+  it("explains what the token does in the foot line", () => {
+    expect(card(renderSettings(model(), handlers())).querySelector(".settings__row--foot")!.textContent).toBe("The token acts as you in Coral: Start assigns the item to you and sets its status.");
+  });
+
+  it("gives no two elements the same id with GitHub, GitLab and Coral all drawn", () => {
+    const root = renderSettings(model(), handlers());
+    document.body.append(root);
+    const ids = [...root.querySelectorAll("[id]")].map((e) => e.id);
+    expect(ids.filter((id, i) => ids.indexOf(id) !== i)).toEqual([]);
+    root.remove();
+  });
+
+  it("summarises Coral in a line", () => {
+    const c = workItemsConfig(null).coral;
+    expect(coralSummary(c)).toBe("Off");
+    expect(coralSummary({ ...c, enabled: true })).toBe("1 rule");
+    expect(coralSummary({ ...c, enabled: true, rules: [c.rules[0]!, c.rules[0]!], startStatus: "s-doing" })).toBe("2 rules; Start sets a status");
   });
 });

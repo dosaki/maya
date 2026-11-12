@@ -447,6 +447,15 @@ export interface CoralItems {
   startStatus: string | null;
 }
 
+/** A status of Coral's global vocabulary; `sub` is true where a defect may take it. */
+export interface CoralStatus {
+  id: string;
+  name: string;
+  category: string;
+  sub: boolean;
+  position: number;
+}
+
 /** A user's own script that lists work items. */
 export interface CustomTool {
   id: string;
