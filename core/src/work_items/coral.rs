@@ -1,7 +1,7 @@
 //! Coral Boards over its REST API: the address and token, and the calls
 //! every Coral request goes through. The token never appears in an error.
 
-use super::{ItemRepo, WorkItem};
+use super::{clean_path, ItemRepo, WorkItem};
 use crate::config::{Assignee, CoralItems, ItemRule, TokenSource};
 use crate::forge::{answer_with, encode, route, scrub, status_message, ForgeSite, Http, Reply};
 use serde::Serialize;
@@ -438,7 +438,7 @@ pub fn product_repos(http: &dyn Http, c: &Coral, product: &str, sites: &[ForgeSi
     let v = get_json(http, c, &c.api(&format!("/products/{}/repositories", encode(product))))?;
     let mut out: Vec<ItemRepo> = Vec::new();
     for url in v.as_array().ok_or("Coral's repositories were not a list.")?.iter().filter_map(|r| r["url"].as_str()) {
-        let Some((site, path)) = route(url, sites) else { continue };
+        let Some((site, path)) = route(url, sites).and_then(|(site, p)| clean_path(&p).map(|p| (site, p))) else { continue };
         if !out.iter().any(|r| r.forge == site.provider && r.path.eq_ignore_ascii_case(&path)) {
             out.push(ItemRepo { forge: site.provider, path });
         }
@@ -448,9 +448,11 @@ pub fn product_repos(http: &dyn Http, c: &Coral, product: &str, sites: &[ForgeSi
 
 /// The status Start sets on an item of `item_type`: `start`, except that a
 /// defect may only take a status that is also a sub-status, so then the
-/// first one of the same category that is. None when there is none.
+/// first one of the same category that is. None when there is none; an id
+/// not among `all` is returned as is.
 pub fn status_for(item_type: &str, start: &str, all: &[CoralStatus]) -> Option<String> {
-    let want = all.iter().find(|s| s.id == start)?;
+    // An id Coral does not know is sent as is, so Coral's own error shows.
+    let Some(want) = all.iter().find(|s| s.id == start) else { return Some(start.to_string()) };
     if item_type != "defect" || want.sub {
         return Some(want.id.clone());
     }
@@ -819,7 +821,9 @@ mod tests {
             {"url": "https://github.com/acme/api.git"},
             {"url": "https://gitlab.acme.test/g/r/"},
             {"url": "https://bitbucket.org/x/y"},
-            {"url": "https://GitHub.com/Acme/API"}
+            {"url": "https://GitHub.com/Acme/API"},
+            {"url": "https://github.com/acme/../etc"},
+            {"url": "https://github.com/acme/we ird"}
         ])
         .to_string();
         let http = FakeHttp::new(vec![("/api/v1/products/BED/repositories", 200, &body)]);
@@ -875,7 +879,8 @@ mod tests {
         assert_eq!(status_for("defect", "s-test", &all).as_deref(), Some("s-test"));
         let none = vec![status("s-active", "active", false, 1), status("s-other", "todo", true, 2)];
         assert_eq!(status_for("defect", "s-active", &none), None);
-        assert_eq!(status_for("work_item", "gone", &all), None, "an unknown status");
+        assert_eq!(status_for("work_item", "gone", &all).as_deref(), Some("gone"), "an unknown status is sent as is");
+        assert_eq!(status_for("defect", "gone", &all).as_deref(), Some("gone"));
     }
 
     #[test]

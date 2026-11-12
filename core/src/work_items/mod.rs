@@ -77,6 +77,18 @@ pub fn merge(lists: Vec<Vec<WorkItem>>) -> Vec<WorkItem> {
     out
 }
 
+/// The repository path without `.git` and outer slashes; None when a part of
+/// it is not a plain repository or group name (letters, digits, `.`, `_`,
+/// `-`; never `.` or `..` alone), since a tracker's data is not trusted and
+/// the last part names a folder under the clones directory (`C:` or `..`
+/// there would leave it).
+pub(crate) fn clean_path(path: &str) -> Option<String> {
+    let p = path.trim().trim_matches('/');
+    let p = p.strip_suffix(".git").unwrap_or(p).trim_matches('/');
+    let safe = |part: &str| !part.is_empty() && part != "." && part != ".." && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    (!p.is_empty() && p.split('/').all(safe)).then(|| p.to_string())
+}
+
 /// The `source` of a forge's items: "github" or "gitlab".
 pub fn source_of(forge: GitProvider) -> &'static str {
     match forge {

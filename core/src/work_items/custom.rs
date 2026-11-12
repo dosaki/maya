@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::config::{CustomTool, GitProvider};
 use crate::forge::{route, ForgeSite};
-use crate::work_items::{ItemRepo, WorkItem};
+use crate::work_items::{clean_path, ItemRepo, WorkItem};
 
 /// How long a command may run.
 pub const TIMEOUT: Duration = Duration::from_secs(30);
@@ -229,19 +229,6 @@ pub fn parse_list(stdout: &str, tool: &CustomTool, sites: &[ForgeSite]) -> Resul
         }
     }
     Ok(items)
-}
-
-/// A repo path without a trailing `.git` and surrounding slashes or spaces; None when empty.
-/// The repository path without `.git` and outer slashes; None when a part of
-/// it is not a plain repository or group name (letters, digits, `.`, `_`,
-/// `-`; never `.` or `..` alone), since a tracker's data is not trusted and
-/// the last part names a folder under the clones directory (`C:` or `..`
-/// there would leave it).
-fn clean_path(path: &str) -> Option<String> {
-    let p = path.trim().trim_matches('/');
-    let p = p.strip_suffix(".git").unwrap_or(p).trim_matches('/');
-    let safe = |part: &str| !part.is_empty() && part != "." && part != ".." && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    (!p.is_empty() && p.split('/').all(safe)).then(|| p.to_string())
 }
 
 /// Where `repo` (as the script spelled it) lives, among the switched-on sites; None when Maya cannot place it.
