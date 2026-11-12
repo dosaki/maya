@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
 import { RUNNING_VERSION } from "./release-notes";
 import { SETTINGS_GROUPS, SETTINGS_LEDES, SETTINGS_NAV, SOURCES_OPEN_KEY, forgeSummary, gitConnections, ruleSummary, storedSourcesOpen, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
-import { secretStore } from "./platform";
+import { builtinVoiceName, secretStore } from "./platform";
 import styles from "./styles.css?raw";
 
 const voiceBase = {
@@ -361,14 +361,17 @@ describe("renderSettings", () => {
   it("shows the voice order and a switch per remote voice", () => {
     const h = handlers();
     const el = renderSettings(voiceBase, h);
-    expect(el.querySelector("[data-for=voice-order]")!.textContent).toMatch(/^Maya speaks with the first voice that works: ElevenLabs, then the voice server, then .+ \(built in\)\.$/);
+    expect(el.querySelector("[data-for=voice-order]")!.textContent).toBe("Maya speaks with the first voice that works, in this order.");
+    expect(el.querySelector("[data-for=voice-order]")!.classList.contains("settings__group-note")).toBe(true);
     expect(el.querySelector("select[name=voiceProvider]")).toBeNull();
     const eleven = el.querySelector<HTMLInputElement>("input[name=elevenEnabled]")!;
     const server = el.querySelector<HTMLInputElement>("input[name=serverEnabled]")!;
     expect(eleven.checked).toBe(false);
     expect(server.checked).toBe(false);
-    expect(eleven.closest("label")?.textContent).toContain("Use ElevenLabs");
-    expect(server.closest("label")?.textContent).toContain("Use a voice server (OpenAI-compatible)");
+    expect(eleven.classList.contains("settings__toggle")).toBe(true);
+    expect(server.classList.contains("settings__toggle")).toBe(true);
+    expect(eleven.closest(".settings__row--head")?.textContent).toContain("ElevenLabs");
+    expect(server.closest(".settings__row--head")?.textContent).toContain("Voice server");
     expect(el.querySelector("input[name=elevenKey]")).toBeNull();
     expect(el.querySelector("input[name=serverUrl]")).toBeNull();
     eleven.checked = true;
@@ -377,6 +380,94 @@ describe("renderSettings", () => {
     server.checked = true;
     server.dispatchEvent(new Event("change"));
     expect(h.onServerEnabled).toHaveBeenCalledWith(true);
+  });
+
+  describe("Voice screen", () => {
+    const voice = (m: object = {}) => renderSettings({ ...voiceBase, ...m }, handlers()).querySelector<HTMLElement>(".settings__section--voice")!;
+    const rowOf = (root: ParentNode, label: string) =>
+      [...root.querySelectorAll<HTMLElement>(".settings__row")].find((r) => r.querySelector(".settings__label")?.textContent === label)!;
+
+    it("has Speaking and Listening groups", () => {
+      const sec = voice();
+      expect([...sec.querySelectorAll(".settings__group-title")].map((x) => x.textContent)).toEqual(["Speaking", "Listening"]);
+      const [speaking, listening] = [...sec.querySelectorAll(".settings__group-title")];
+      const follows = (a: Element, b: Element) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+      expect(follows(speaking, sec.querySelector("input[name=elevenEnabled]")!)).toBe(true);
+      expect(follows(sec.querySelector("button[data-action=try-voice]")!, listening)).toBe(true);
+      expect(follows(listening, sec.querySelector("input[name=listen]")!)).toBe(true);
+    });
+
+    it("has three numbered voice cards with their heads", () => {
+      const sec = voice();
+      const cards = [...sec.querySelectorAll<HTMLElement>(".settings__group")[0]!.querySelectorAll<HTMLElement>(".settings__card")];
+      expect(cards).toHaveLength(4);
+      const heads = cards.slice(0, 3).map((c) => c.querySelector<HTMLElement>(".settings__row--head")!);
+      expect(heads.map((h) => h.querySelector(".settings__order")?.textContent)).toEqual(["1", "2", "3"]);
+      expect(heads.map((h) => h.querySelector(".settings__label")?.textContent)).toEqual(["ElevenLabs", "Voice server", builtinVoiceName()]);
+      expect(heads.map((h) => h.querySelector(".settings__help")?.textContent ?? null)).toEqual([null, "Any OpenAI-compatible speech server.", "Built in; always there."]);
+      expect(heads[0]!.querySelector("input[name=elevenEnabled]")).not.toBeNull();
+      expect(heads[1]!.querySelector("input[name=serverEnabled]")).not.toBeNull();
+      expect(heads[2]!.querySelector("input")).toBeNull();
+    });
+
+    it("marks a card whose switch is off, and keeps the fields of one that is on", () => {
+      const off = voice();
+      const offCards = [...off.querySelectorAll(".settings__card")];
+      expect(offCards.map((c) => c.classList.contains("settings__card--off"))).toEqual([true, true, false, false, false]);
+      const on = voice({ elevenEnabled: true, serverEnabled: true, elevenVoices: [{ voiceId: "a", name: "Rachel" }] });
+      const onCards = [...on.querySelectorAll(".settings__card")];
+      expect(onCards.map((c) => c.classList.contains("settings__card--off"))).toEqual([false, false, false, false, false]);
+      expect(rowOf(on, "API key").querySelector("input[name=elevenKey]")).not.toBeNull();
+      expect(rowOf(on, "Voice").querySelector("select[name=elevenVoice]")).not.toBeNull();
+      expect(rowOf(on, "Server address").querySelector("input[name=serverUrl]")?.classList.contains("mono")).toBe(true);
+      expect(rowOf(on, "Model").querySelector("input[name=serverModel]")).not.toBeNull();
+    });
+
+    it("says where a saved key is kept in the key row's help", () => {
+      const sec = voice({ elevenEnabled: true, elevenKeySet: true, serverEnabled: true, serverKeySet: true });
+      const helps = [...sec.querySelectorAll(".settings__row")].filter((r) => r.querySelector("input[type=password]")).map((r) => r.querySelector(".settings__help")?.textContent);
+      expect(helps).toEqual([`Saved in ${secretStore()}.`, `Saved in ${secretStore()}.`]);
+      expect(rowOf(voice({ elevenEnabled: true }), "API key").querySelector(".settings__help")).toBeNull();
+    });
+
+    it("puts the volume and the voice test in one card, the report in its foot", () => {
+      const sec = voice({ voiceReport: "Spoke with the voice server." });
+      const vol = sec.querySelector("input[name=voiceVolume]")!.closest<HTMLElement>(".settings__card")!;
+      expect(rowOf(vol, "Volume")).toBeTruthy();
+      const foot = vol.querySelector<HTMLElement>(".settings__row--foot")!;
+      expect(foot.querySelector("button[data-action=try-voice]")).not.toBeNull();
+      expect(foot.querySelector("[data-for=voice-report]")!.textContent).toBe("Spoke with the voice server.");
+      expect(voice().querySelector("[data-for=voice-report]")).toBeNull();
+      expect(voice().querySelector(".settings__card .settings__row--foot button[data-action=try-voice]")).not.toBeNull();
+    });
+
+    it("has Listening as one card of rows", () => {
+      const sec = voice({ recognizer: "builtin", models: [{ id: "base.en-q5_1", label: "Base", bytes: 1, downloaded: true }] });
+      const listen = rowOf(sec, "Listen for the wake word");
+      expect(listen.querySelector("input[name=listen]")?.classList.contains("settings__toggle")).toBe(true);
+      expect(listen.querySelector(".settings__help")?.textContent).toBe("On-device speech recognition.");
+      const card = listen.closest(".settings__card")!;
+      expect(rowOf(card, "Wake word").querySelector("input[name=listenWord]")).not.toBeNull();
+      expect(rowOf(card, "Wake word").querySelector(".settings__help")?.textContent).toBe("Blank is \"Maya\". A phone joined to this Maya listens for the same word. Pick a word the speech recognition spells the way you type it.");
+      expect(rowOf(card, "Speech recognition").querySelector("select[name=recognizer]")).not.toBeNull();
+      expect(rowOf(card, "Model").querySelector("select[name=whisperModel]")).not.toBeNull();
+      expect(rowOf(card, "Microphone").querySelector("select[name=microphone]")).not.toBeNull();
+    });
+
+    it("puts the listen error and note in the Listening card's foot", () => {
+      const failed = voice({ listenError: "Dictation is off." });
+      const err = failed.querySelector<HTMLElement>(".settings__error[data-for=listen]")!;
+      expect(err.closest(".settings__row--foot")).not.toBeNull();
+      expect(err.closest(".settings__card")).toBe(failed.querySelector("input[name=listen]")!.closest(".settings__card"));
+      const note = voice({ network: { role: "assistant" } as never }).querySelector<HTMLElement>(".settings__hint[data-for=listen]")!;
+      expect(note.textContent).toBe("The main Maya notifies and listens for this machine.");
+      expect(note.closest(".settings__row--foot")).not.toBeNull();
+      expect(voice().querySelector(".settings__row--foot [data-for=listen]")).toBeNull();
+    });
+
+    it("styles the foot error in the danger colour", () => {
+      expect(styles).toMatch(/\.settings\.pane \.settings__row--foot \.settings__error\s*\{[^}]*var\(--danger\)/);
+    });
   });
 
   it("the ElevenLabs section shows its key and voice when on", () => {
@@ -396,7 +487,7 @@ describe("renderSettings", () => {
     el.querySelector<HTMLButtonElement>("button[data-action=try-voice]")!.click();
     expect(h.onTryVoice).toHaveBeenCalled();
     const saved = renderSettings({ ...voiceBase, elevenEnabled: true, elevenKeySet: true }, h);
-    expect(saved.querySelector<HTMLInputElement>("input[name=elevenKey]")!.placeholder).toContain("saved");
+    expect(saved.querySelector<HTMLInputElement>("input[name=elevenKey]")!.placeholder).toBe("paste to replace");
   });
 
   it("the server section offers a list when the server has one and a text box when not", () => {
@@ -431,13 +522,13 @@ describe("renderSettings", () => {
 
     const key = el.querySelector<HTMLInputElement>("input[name=serverKey]")!;
     expect(key.type).toBe("password");
-    expect(key.placeholder).toBe("optional; paste a key");
+    expect(key.placeholder).toBe("optional");
     key.value = " sk-abc ";
     key.dispatchEvent(new Event("change"));
     expect(h.onServerKey).toHaveBeenCalledWith("sk-abc");
     expect(key.value).toBe("");
     const saved = renderSettings({ ...voiceBase, serverEnabled: true, serverKeySet: true }, h);
-    expect(saved.querySelector<HTMLInputElement>("input[name=serverKey]")!.placeholder).toContain("saved in");
+    expect(saved.querySelector<HTMLInputElement>("input[name=serverKey]")!.placeholder).toBe("paste to replace");
   });
 
   it("the voice test's report is shown", () => {
@@ -468,19 +559,20 @@ describe("renderSettings", () => {
     expect(h.onClonesDir).toHaveBeenCalledWith("~/tmp/reviews");
   });
 
-  it("takes a wake word, names it on the listen switch, and shows Maya when blank", () => {
+  it("takes a wake word, and the listen switch keeps its fixed label", () => {
     const h = { ...handlers(), onListenWord: vi.fn() };
     const blank = renderSettings({ ...voiceBase }, h);
     const input = blank.querySelector<HTMLInputElement>("input[name=listenWord]")!;
     expect(input.placeholder).toBe("Maya");
     expect(input.value).toBe("");
-    expect(blank.textContent).toContain('Listen for "Maya"');
+    expect(blank.textContent).toContain("Listen for the wake word");
     input.value = "  Jarvis ";
     input.dispatchEvent(new Event("change"));
     expect(h.onListenWord).toHaveBeenCalledWith("Jarvis");
     const named = renderSettings({ ...voiceBase, listenWord: "Jarvis" }, h);
     expect(named.querySelector<HTMLInputElement>("input[name=listenWord]")!.value).toBe("Jarvis");
-    expect(named.textContent).toContain('Listen for "Jarvis"');
+    expect(named.textContent).toContain("Listen for the wake word");
+    expect(named.textContent).not.toContain("Jarvis\"");
     const assistant = renderSettings({ ...voiceBase, networkRole: "assistant", network: { role: "assistant", code: null, assistants: [], assistant: { connected: true, mainName: "desk", error: null } } }, h);
     expect(assistant.querySelector<HTMLInputElement>("input[name=listenWord]")!.disabled).toBe(true);
   });
@@ -500,7 +592,7 @@ describe("renderSettings", () => {
     const failed = renderSettings({ ...voiceBase, listen: false, listenError: "Dictation is off. Turn it on in System Settings." }, h);
     const err = failed.querySelector<HTMLElement>(".settings__error[data-for=listen]")!;
     expect(err.textContent).toContain("Dictation is off");
-    expect(err.previousElementSibling?.querySelector("input[name=listen]")).not.toBeNull();
+    expect(err.closest(".settings__card")).toBe(failed.querySelector("input[name=listen]")!.closest(".settings__card"));
     expect(renderSettings({ ...voiceBase, listen: true, listenError: null }, h).querySelector(".settings__error[data-for=listen]")).toBeNull();
   });
 
@@ -584,16 +676,6 @@ describe("renderSettings", () => {
     expect(Object.fromEntries(Object.keys(expected).map((s) => [s, groupOf(s)]))).toEqual(expected);
   });
 
-  it("splits Voice into Speaking, then Listening", () => {
-    const voice = renderSettings(voiceBase, handlers()).querySelector(".settings__section--voice")!;
-    expect([...voice.querySelectorAll(".settings__subheading")].map((x) => x.textContent)).toEqual(["Speaking", "Listening"]);
-    const [speaking, listening] = [...voice.querySelectorAll(".settings__subheading")];
-    const follows = (a: Element, b: Element) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(follows(speaking, voice.querySelector("input[name=elevenEnabled]")!)).toBe(true);
-    expect(follows(voice.querySelector("button[data-action=try-voice]")!, listening)).toBe(true);
-    expect(follows(listening, voice.querySelector("input[name=listen]")!)).toBe(true);
-  });
-
   it("opens the group the model names", () => {
     const el = renderSettings({ ...voiceBase, settingsGroup: "network" }, handlers());
     expect([...el.querySelectorAll<HTMLElement>(".settings__section")].filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["network"]);
@@ -659,7 +741,7 @@ describe("renderSettings", () => {
     const el = renderSettings({ ...voiceBase, listen: true, microphone: "USB Mic", microphones: ["MacBook Pro Microphone", "USB Mic"], listenError: null }, h);
     const listen = el.querySelector<HTMLInputElement>("input[name=listen]")!;
     expect(listen.checked).toBe(true);
-    expect(listen.closest("label")?.textContent).toContain("Listen for");
+    expect(listen.closest("label")?.textContent).toContain("Listen for the wake word");
     listen.checked = false;
     listen.dispatchEvent(new Event("change"));
     expect(h.onListen).toHaveBeenCalledWith(false);
@@ -707,7 +789,7 @@ describe("renderSettings", () => {
     expect(dl.textContent).toContain("78 MB");
     dl.click();
     expect(h.onDownloadModel).toHaveBeenCalledWith("tiny.en");
-    expect(tiny.querySelector(".settings__row .settings__hint")?.textContent).toContain("Download");
+    expect(dl.closest(".settings__row")!.querySelector(".settings__help")?.textContent).toContain("Download");
   });
 
   it("says the model stays on this computer, under the Linux user agent", () => {
@@ -715,7 +797,7 @@ describe("renderSettings", () => {
     Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15", configurable: true });
     try {
       const tiny = renderSettings({ ...voiceBase, recognizer: "builtin", whisperModel: "tiny.en", models }, handlers());
-      expect(tiny.querySelector(".settings__row .settings__hint")?.textContent).toBe("Download the model once; it stays on this computer.");
+      expect(tiny.querySelector("button[data-action=download-model]")!.closest(".settings__row")!.querySelector(".settings__help")?.textContent).toBe("Download the model once; it stays on this computer.");
     } finally {
       Object.defineProperty(navigator, "userAgent", { value: original, configurable: true });
     }

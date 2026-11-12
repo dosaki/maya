@@ -79,16 +79,13 @@ body { margin: 0; background: var(--bg); }
   .settings__row { flex-direction: column; align-items: stretch; }
 }
 .settings__section { display: flex; flex-direction: column; gap: 10px; }
-.settings__subsection { display: flex; flex-direction: column; gap: 10px; }
-.settings__subsection + .settings__subsection { margin-top: 6px; padding-top: 14px; border-top: 1px solid var(--border); }
-.settings__subheading { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); }
 /* Each setting's name on the left, its control in one right-hand column every row shares. */
 .settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch):not(.settings__row) { display: grid; grid-template-columns: minmax(0, 1fr) 260px; align-items: center; gap: 12px; }
 .settings__body--sidebar .settings__section label > input[type=text], .settings__body--sidebar .settings__section label > input[type=password], .settings__body--sidebar .settings__section label > select, .settings__body--sidebar .settings__section label > .settings__range { width: 100%; max-width: none; }
 .settings__body--sidebar .settings__section label > input[type=number] { width: 90px; }
 .settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch):not(.settings__row):has(> textarea) { grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .settings__body--sidebar textarea { max-width: none; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
-.settings__body--sidebar .settings__section > button, .settings__body--sidebar .settings__subsection > button { align-self: flex-start; }
+.settings__body--sidebar .settings__section > button { align-self: flex-start; }
 /* Too narrow for the shared control column: each label above its control. */
 @media (max-width: 479px) {
   .settings__body--sidebar .settings__section label:not(.settings__check):not(.settings__switch):not(.settings__row) { grid-template-columns: minmax(0, 1fr); gap: 4px; }
@@ -142,6 +139,8 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__row--head .settings__label { font-size: 15px; font-weight: 600; }
 .settings.pane .settings__card--off .settings__row:not(.settings__row--head) { opacity: .45; }
 .settings.pane .settings__foot-end { margin-left: auto; }
+.settings.pane .settings__row--foot .settings__error { color: var(--danger); }
+.settings.pane .settings__card progress { flex: 1; width: 100%; }
 .settings.pane .settings__row--foot { min-height: 0; padding: 12px 20px; justify-content: space-between; }
 
 /* Fields inside a card. */

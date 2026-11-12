@@ -500,17 +500,6 @@ function section(title: string, key: SettingsGroup): HTMLElement {
   return s;
 }
 
-/** A titled part of a section, such as Voice's Speaking and Listening. */
-function subsection(title: string): HTMLElement {
-  const s = document.createElement("div");
-  s.className = "settings__subsection";
-  const heading = document.createElement("h3");
-  heading.className = "settings__subheading";
-  heading.textContent = title;
-  s.append(heading);
-  return s;
-}
-
 /**
  * Settings › Keyboard: each action's combinations as chips, an Add button
  * that records the next Enter press, and Reset to defaults.
@@ -759,10 +748,6 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   content.append(...Object.values(sections));
   show(model.settingsGroup ?? "general");
   const { general, keyboard, sessions, git, reviews, workItems, notifications, voice, network, devices, debug, releaseNotes } = sections;
-  const speaking = subsection("Speaking");
-  const listening = subsection("Listening");
-  voice.append(speaking, listening);
-
   const agents = model.agents.length > 0 ? model.agents : [CLAUDE_AGENT];
   // An agent that is chosen but not listed (uninstalled, or the listing has
   // not landed yet) stays selected, with only its Default model, rather than
@@ -1438,38 +1423,9 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   // The live role, not the select: previewing Assistant before a Pair
   // succeeds must not untick listening on a machine that is not one yet.
   const isAssistant = model.network?.role === "assistant";
-  const listenLabel = document.createElement("label");
-  listenLabel.className = "settings__check";
-  const listenBox = document.createElement("input");
-  listenBox.type = "checkbox";
-  listenBox.name = "listen";
-  listenBox.checked = isAssistant ? false : model.listen;
+  const listenBox = toggle("listen", isAssistant ? false : model.listen, (on) => h.onListen(on));
   listenBox.disabled = isAssistant;
-  listenBox.addEventListener("change", () => h.onListen(listenBox.checked));
-  const word = model.listenWord?.trim() || "Maya";
-  listenLabel.append(listenBox, document.createTextNode(` Listen for "${word}" (on-device speech recognition)`));
-  listening.append(listenLabel);
-  if (isAssistant) {
-    // The main Maya owns notifications and listening while this machine is
-    // an assistant: say so right under the toggle rather than leave it
-    // looking merely unticked.
-    const note = document.createElement("div");
-    note.className = "settings__hint";
-    note.dataset.for = "listen";
-    note.textContent = "The main Maya notifies and listens for this machine.";
-    listening.append(note);
-  } else if (model.listenError) {
-    // The listener stopped on its own (Dictation off, no microphone…): say
-    // why right under the toggle, or an unticked box looks like a glitch.
-    const err = document.createElement("div");
-    err.className = "settings__error";
-    err.dataset.for = "listen";
-    err.textContent = model.listenError;
-    listening.append(err);
-  }
 
-  const wordLabel = document.createElement("label");
-  wordLabel.textContent = "Wake word";
   const wordInput = document.createElement("input");
   wordInput.type = "text";
   wordInput.name = "listenWord";
@@ -1477,16 +1433,13 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   wordInput.value = model.listenWord ?? "";
   wordInput.disabled = isAssistant;
   wordInput.addEventListener("change", () => h.onListenWord?.(wordInput.value.trim()));
-  wordLabel.append(wordInput);
-  listening.append(wordLabel);
-  const wordHint = document.createElement("div");
-  wordHint.className = "settings__hint";
-  wordHint.dataset.for = "listenWord";
-  wordHint.textContent = "Blank is \"Maya\". A phone joined to this Maya listens for the same word. Pick a word the speech recognition spells the way you type it.";
-  listening.append(wordHint);
+  const wordRow = row({
+    label: "Wake word",
+    help: "Blank is \"Maya\". A phone joined to this Maya listens for the same word. Pick a word the speech recognition spells the way you type it.",
+    control: wordInput,
+  });
+  wordRow.querySelector(".settings__help")!.setAttribute("data-for", "listenWord");
 
-  const recLabel = document.createElement("label");
-  recLabel.textContent = "Speech recognition";
   const rec = document.createElement("select");
   rec.name = "recognizer";
   for (const [v, text] of recognizerOptions()) {
@@ -1497,14 +1450,16 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   rec.value = model.recognizer;
   rec.addEventListener("change", () => h.onRecognizer(rec.value === "builtin" ? "builtin" : "system"));
-  recLabel.append(rec);
-  listening.append(recLabel);
+
+  const listenRows: HTMLElement[] = [
+    row({ label: "Listen for the wake word", help: "On-device speech recognition.", control: listenBox }),
+    wordRow,
+    row({ label: "Speech recognition", control: rec }),
+  ];
 
   if (model.recognizer === "builtin") {
     const mb = (n: number) => `${Math.round(n / 1_000_000)} MB`;
     const chosen = model.models.find((m) => m.id === model.whisperModel);
-    const modelPickerLabel = document.createElement("label");
-    modelPickerLabel.textContent = "Model";
     const sel = document.createElement("select");
     sel.name = "whisperModel";
     for (const m of model.models) {
@@ -1515,53 +1470,32 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     }
     sel.value = model.whisperModel;
     sel.addEventListener("change", () => h.onWhisperModel(sel.value));
-    modelPickerLabel.append(sel);
-    listening.append(modelPickerLabel);
+    listenRows.push(row({ label: "Model", control: sel }));
 
-    const row = document.createElement("div");
-    row.className = "settings__row";
     if (chosen && !chosen.downloaded) {
-      const dl = document.createElement("button");
-      dl.type = "button";
-      dl.dataset.action = "download-model";
-      if (model.downloading?.id === chosen.id) {
-        dl.textContent = `Downloading ${chosen.label}…`;
-      } else if (model.downloading) {
-        dl.textContent = "Wait for the current download";
-      } else {
-        dl.textContent = `Download (${mb(chosen.bytes)})`;
-      }
-      dl.disabled = model.downloading !== null;
-      dl.addEventListener("click", () => h.onDownloadModel(chosen.id));
-      row.append(dl);
-      if (!model.downloading) {
-        const hint = document.createElement("div");
-        hint.className = "settings__hint";
-        hint.textContent = `Download the model once; it stays on ${thisComputerLower()}.`;
-        row.append(hint);
-      }
+      const dl = settingsBtn(
+        model.downloading?.id === chosen.id ? `Downloading ${chosen.label}…` : model.downloading ? "Wait for the current download" : `Download (${mb(chosen.bytes)})`,
+        { action: "download-model", disabled: model.downloading !== null },
+        () => h.onDownloadModel(chosen.id),
+      );
+      listenRows.push(row({
+        label: chosen.label,
+        help: model.downloading ? undefined : `Download the model once; it stays on ${thisComputerLower()}.`,
+        control: [state("Not downloaded", "off"), dl],
+      }));
     }
     if (chosen?.downloaded) {
-      const rm = document.createElement("button");
-      rm.type = "button";
-      rm.dataset.action = "remove-model";
+      const rm = settingsBtn("Remove", { action: "remove-model", kind: "quiet", disabled: true });
       rm.dataset.model = chosen.id;
-      rm.textContent = "Remove";
-      rm.disabled = true;
       rm.title = "The model in use cannot be removed; pick another first.";
-      row.append(rm);
+      listenRows.push(row({ label: chosen.label, control: [state("In use", "on"), rm] }));
     }
     for (const m of model.models) {
       if (!m.downloaded || m.id === model.whisperModel) continue;
-      const rm = document.createElement("button");
-      rm.type = "button";
-      rm.dataset.action = "remove-model";
+      const rm = settingsBtn(`Remove ${m.label.split(" (")[0]}`, { action: "remove-model", kind: "quiet" }, () => h.onRemoveModel(m.id));
       rm.dataset.model = m.id;
-      rm.textContent = `Remove ${m.label.split(" (")[0]}`;
-      rm.addEventListener("click", () => h.onRemoveModel(m.id));
-      row.append(rm);
+      listenRows.push(row({ label: m.label, control: [state("Downloaded", "on"), rm] }));
     }
-    listening.append(row);
     if (model.downloading) {
       const bar = document.createElement("progress");
       bar.setAttribute("name", "modelDownload");
@@ -1571,12 +1505,10 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       const pct = document.createElement("div");
       pct.className = "settings__progress";
       pct.textContent = `Downloading ${downloadingLabel}… ${Math.round((100 * model.downloading.received) / Math.max(1, model.downloading.total))}%`;
-      listening.append(bar, pct);
+      listenRows.push(row({ control: [bar, pct], stack: true }));
     }
   }
 
-  const micLabel = document.createElement("label");
-  micLabel.textContent = "Microphone";
   const mic = document.createElement("select");
   mic.name = "microphone";
   const auto = document.createElement("option");
@@ -1591,60 +1523,58 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   mic.value = model.microphones.includes(model.microphone) ? model.microphone : "";
   mic.addEventListener("change", () => h.onMicrophone(mic.value));
-  micLabel.append(mic);
-  listening.append(micLabel);
+  listenRows.push(row({ label: "Microphone", control: mic }));
 
-  const order = document.createElement("p");
-  order.dataset.for = "voice-order";
-  order.textContent = `Maya speaks with the first voice that works: ElevenLabs, then the voice server, then ${builtinVoiceName()} (built in).`;
-  speaking.append(order);
+  // Why the toggle is off (or not Maya's to turn on) is the card's foot note.
+  if (isAssistant) {
+    // The main Maya owns notifications and listening while this machine is
+    // an assistant: say so rather than leave it looking merely unticked.
+    const note = document.createElement("span");
+    note.className = "settings__hint";
+    note.dataset.for = "listen";
+    note.textContent = "The main Maya notifies and listens for this machine.";
+    listenRows.push(footRow(note));
+  } else if (model.listenError) {
+    // The listener stopped on its own (Dictation off, no microphone…): say
+    // why, or an unticked box looks like a glitch.
+    const err = document.createElement("span");
+    err.className = "settings__error";
+    err.dataset.for = "listen";
+    err.textContent = model.listenError;
+    listenRows.push(footRow(err));
+  }
+  const listeningGroup = group({ title: "Listening" }, card(...listenRows));
 
-  const checkbox = (name: string, text: string, checked: boolean, onChange: (on: boolean) => void) => {
-    const label = document.createElement("label");
-    label.className = "settings__check";
-    const box = document.createElement("input");
-    box.type = "checkbox";
-    box.name = name;
-    box.checked = checked;
-    box.addEventListener("change", () => onChange(box.checked));
-    label.append(box, document.createTextNode(` ${text}`));
-    return label;
-  };
-  const textField = (name: string, text: string, value: string, placeholder: string, onChange: (v: string) => void) => {
-    const label = document.createElement("label");
-    label.textContent = text;
+  const textField = (name: string, label: string, value: string, placeholder: string, onChange: (v: string) => void, mono = false) => {
     const input = document.createElement("input");
     input.type = "text";
     input.name = name;
     input.value = value;
     input.placeholder = placeholder;
+    if (mono) input.classList.add("mono");
     input.addEventListener("change", () => onChange(input.value.trim()));
-    label.append(input);
-    return label;
+    return row({ label, control: input });
   };
-  const keyField = (name: string, text: string, placeholder: string, onKey: (k: string) => void) => {
-    const label = document.createElement("label");
-    label.textContent = text;
+  const keyField = (name: string, set: boolean, placeholder: string, onKey: (k: string) => void) => {
     const key = document.createElement("input");
     key.type = "password";
     key.name = name;
-    key.placeholder = placeholder;
+    key.placeholder = set ? "paste to replace" : placeholder;
     key.autocomplete = "off";
     key.addEventListener("change", () => {
       const k = key.value.trim();
       if (k) onKey(k);
       key.value = "";
     });
-    label.append(key);
-    return label;
+    return row({ label: "API key", help: set ? `Saved in ${secretStore()}.` : undefined, control: key });
   };
 
-  speaking.append(checkbox("elevenEnabled", "Use ElevenLabs", model.elevenEnabled, (on) => h.onElevenEnabled(on)));
+  const elevenRows: HTMLElement[] = [
+    cardHead({ label: "ElevenLabs", order: 1, control: toggle("elevenEnabled", model.elevenEnabled, (on) => h.onElevenEnabled(on)) }),
+  ];
   if (model.elevenEnabled) {
-    speaking.append(keyField("elevenKey", "ElevenLabs API key", model.elevenKeySet ? `saved in ${secretStore()}; paste to replace` : "paste your key", (k) => h.onElevenKey(k)));
+    elevenRows.push(keyField("elevenKey", model.elevenKeySet, "paste your key", (k) => h.onElevenKey(k)));
 
-    const voiceLabel = document.createElement("label");
-    voiceLabel.textContent = "ElevenLabs voice";
     const voice = document.createElement("select");
     voice.name = "elevenVoice";
     for (const v of model.elevenVoices) {
@@ -1656,17 +1586,23 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     voice.value = model.elevenVoices.some((v) => v.voiceId === model.elevenVoiceId) ? model.elevenVoiceId : (model.elevenVoices[0]?.voiceId ?? "");
     voice.disabled = model.elevenVoices.length === 0;
     voice.addEventListener("change", () => h.onElevenVoice(voice.value));
-    voiceLabel.append(voice);
-    speaking.append(voiceLabel);
+    elevenRows.push(row({ label: "Voice", control: voice }));
   }
 
-  speaking.append(checkbox("serverEnabled", "Use a voice server (OpenAI-compatible)", model.serverEnabled, (on) => h.onServerEnabled(on)));
+  const serverRows: HTMLElement[] = [
+    cardHead({
+      label: "Voice server",
+      help: "Any OpenAI-compatible speech server.",
+      order: 2,
+      control: toggle("serverEnabled", model.serverEnabled, (on) => h.onServerEnabled(on)),
+    }),
+  ];
   if (model.serverEnabled) {
-    speaking.append(textField("serverUrl", "Server address", model.serverUrl, "http://localhost:8004", (u) => h.onServerUrl(u)));
+    serverRows.push(textField("serverUrl", "Server address", model.serverUrl, "http://localhost:8004", (u) => h.onServerUrl(u), true));
 
+    const listError = model.serverVoicesError ? `Could not list the server's voices: ${model.serverVoicesError}` : undefined;
+    let serverVoiceRow: HTMLElement;
     if (model.serverVoices.length > 0) {
-      const voiceLabel = document.createElement("label");
-      voiceLabel.textContent = "Voice";
       const voice = document.createElement("select");
       voice.name = "serverVoice";
       // A saved voice the server no longer lists stays selectable.
@@ -1681,31 +1617,31 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       }
       voice.value = saved;
       voice.addEventListener("change", () => h.onServerVoice(voice.value));
-      voiceLabel.append(voice);
-      speaking.append(voiceLabel);
+      serverVoiceRow = row({ label: "Voice", help: listError, control: voice });
     } else {
-      speaking.append(textField("serverVoice", "Voice", model.serverVoice, "default", (v) => h.onServerVoice(v)));
+      const text = document.createElement("input");
+      text.type = "text";
+      text.name = "serverVoice";
+      text.value = model.serverVoice;
+      text.placeholder = "default";
+      text.addEventListener("change", () => h.onServerVoice(text.value.trim()));
+      serverVoiceRow = row({ label: "Voice", help: listError, control: text });
     }
-    if (model.serverVoicesError) {
-      const listed = document.createElement("p");
-      listed.dataset.for = "server-voices";
-      listed.textContent = `Could not list the server's voices: ${model.serverVoicesError}`;
-      speaking.append(listed);
-    }
+    serverVoiceRow.querySelector(".settings__help")?.setAttribute("data-for", "server-voices");
+    serverRows.push(serverVoiceRow);
 
-    speaking.append(textField("serverModel", "Model", model.serverModel, "optional", (m) => h.onServerModel(m)));
-    speaking.append(keyField("serverKey", "API key", model.serverKeySet ? `saved in ${secretStore()}; paste to replace` : "optional; paste a key", (k) => h.onServerKey(k)));
+    serverRows.push(textField("serverModel", "Model", model.serverModel, "optional", (m) => h.onServerModel(m)));
+    serverRows.push(keyField("serverKey", model.serverKeySet, "optional", (k) => h.onServerKey(k)));
   }
 
   // The number follows the drag; the volume is saved once the slider is let go.
-  const volumeLabel = document.createElement("label");
-  volumeLabel.textContent = "Voice volume ";
   const volume = document.createElement("input");
   volume.type = "range";
   volume.name = "voiceVolume";
   volume.min = "10";
   volume.max = "100";
   volume.step = "5";
+  volume.setAttribute("aria-label", "Voice volume");
   volume.value = String(model.voiceVolume ?? 100);
   const volumeShown = document.createElement("span");
   volumeShown.dataset.for = "voice-volume";
@@ -1715,22 +1651,33 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   const volumeControl = document.createElement("span");
   volumeControl.className = "settings__range";
   volumeControl.append(volume, volumeShown);
-  volumeLabel.append(volumeControl);
-  speaking.append(volumeLabel);
 
-  const tryBtn = document.createElement("button");
-  tryBtn.type = "button";
-  tryBtn.dataset.action = "try-voice";
-  tryBtn.textContent = "Try the voice";
-  tryBtn.addEventListener("click", () => h.onTryVoice());
-  speaking.append(tryBtn);
-
+  let tryNote: HTMLElement;
   if (model.voiceReport) {
-    const report = document.createElement("p");
-    report.dataset.for = "voice-report";
-    report.textContent = model.voiceReport;
-    speaking.append(report);
+    tryNote = document.createElement("span");
+    tryNote.className = "settings__hint";
+    tryNote.dataset.for = "voice-report";
+    tryNote.textContent = model.voiceReport;
+  } else {
+    tryNote = state("Hear how Maya sounds now", "off");
   }
+
+  const elevenCard = card(...elevenRows);
+  elevenCard.classList.toggle("settings__card--off", !model.elevenEnabled);
+  const serverCard = card(...serverRows);
+  serverCard.classList.toggle("settings__card--off", !model.serverEnabled);
+  const speakingGroup = group(
+    { title: "Speaking", note: `Maya speaks with the first voice that works, in this order.` },
+    elevenCard,
+    serverCard,
+    card(cardHead({ label: builtinVoiceName(), help: "Built in; always there.", order: 3 })),
+    card(
+      row({ label: "Volume", control: volumeControl }),
+      footRow(tryNote, settingsBtn("Try the voice", { action: "try-voice" }, () => h.onTryVoice())),
+    ),
+  );
+  speakingGroup.querySelector(".settings__group-note")!.setAttribute("data-for", "voice-order");
+  voice.append(speakingGroup, listeningGroup);
 
   const roleLabel = document.createElement("label");
   roleLabel.textContent = "Network";
