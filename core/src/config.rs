@@ -539,6 +539,11 @@ pub fn validate_work_items(w: &WorkItemsConfig) -> Result<(), String> {
     }
     if w.coral.enabled {
         let url = w.coral.base_url.trim();
+        // `http://localhost:1@other.example` is other.example: no user part.
+        let authority = url.split_once("://").map_or("", |(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""));
+        if authority.contains('@') {
+            return Err("The Coral address cannot contain @ before its path.".into());
+        }
         let local = ["http://localhost", "http://127.0.0.1"].iter().any(|h| url.strip_prefix(h).is_some_and(|r| r.is_empty() || r.starts_with(':') || r.starts_with('/')));
         if !(url.strip_prefix("https://").is_some_and(|r| !r.is_empty()) || local) {
             return Err("The Coral address must start with https://.".into());
@@ -1080,9 +1085,14 @@ mod tests {
             w.coral.base_url = bad.into();
             assert_eq!(validate_work_items(&w).unwrap_err(), "The Coral address must start with https://.", "{bad}");
         }
-        for ok in ["https://coral.test", "http://localhost:3000", "http://127.0.0.1:3000"] {
+        for ok in ["https://coral.test", "http://localhost:3000", "http://127.0.0.1:3000", "https://coral.test/items/a@b"] {
             w.coral.base_url = ok.into();
             assert!(validate_work_items(&w).is_ok(), "{ok}");
+        }
+        // A user part would send the token to the host after the `@`.
+        for bad in ["http://localhost:1@other.example", "http://localhost@other.example/", "https://user@coral.test"] {
+            w.coral.base_url = bad.into();
+            assert_eq!(validate_work_items(&w).unwrap_err(), "The Coral address cannot contain @ before its path.", "{bad}");
         }
     }
 

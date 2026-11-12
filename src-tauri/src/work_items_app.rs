@@ -11,12 +11,13 @@ use maya_core::store::now_ms;
 use maya_core::work_items::started::{self, Started};
 use maya_core::config::ForgeItems;
 use maya_core::work_items::coral::{self, Coral, CoralItem, CoralMe};
-use maya_core::work_items::{self, custom, github, gitlab, pick, source_of, start, Fetched, Issue, ItemRepo, SourceError, WorkItem};
+use maya_core::work_items::{self, custom, github, gitlab, pick, source_of, start, Issue, ItemRepo, SourceError, WorkItem};
 use maya_core::{actions, launch, log};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager, State as TauriState};
 
 /// The last issues fetched, the started ones, and why a service could not be asked.
@@ -56,24 +57,24 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
     let mut source_labels: BTreeMap<String, String> = cfg.custom.iter().map(|t| (t.id.clone(), t.label().to_string())).collect();
     source_labels.insert(coral::SOURCE.into(), "Coral".into());
     // Coral with no token is a line, as a forge with none is; a failed "who
-    // am I" is a failed check, so the last Coral items stay.
-    let mut coral_failed = None;
-    let (coral_conn, coral_me) = match cfg.coral.enabled.then(|| git::coral(&cfg.coral)) {
-        None => (None, None),
+    // am I" is a failed check, so the last Coral items stay. It is asked in
+    // Coral's own thread of the fetch, so a slow Coral holds up no other source.
+    let coral_conn = match cfg.coral.enabled.then(|| git::coral(&cfg.coral)) {
+        None => None,
         Some(Err(message)) => {
             missing.push(SourceError { source: coral::SOURCE.into(), message });
-            (None, None)
+            None
         }
-        Some(Ok(c)) => match coral_me_for(&state, &c, generation) {
-            Ok(me) => (Some(c), Some(me)),
-            Err(e) => {
-                coral_failed = Some(Fetched { source: coral::SOURCE.into(), label: "Coral".into(), result: Err(e), warnings: vec![] });
-                (Some(c), None)
-            }
-        },
+        Some(Ok(c)) => Some(c),
     };
-    let mut fetched = work_items::fetch(&forges, &cfg, git::http(), &sites, coral_conn.as_ref().zip(coral_me.as_ref()), &custom::list);
-    fetched.extend(coral_failed);
+    let coral_me: OnceLock<CoralMe> = OnceLock::new();
+    let state_ref: &AppState = &state;
+    let me_of = |c: &Coral| -> Result<CoralMe, String> {
+        let me = coral_me_for(state_ref, c, generation)?;
+        let _ = coral_me.set(me.clone());
+        Ok(me)
+    };
+    let fetched = work_items::fetch(&forges, &cfg, git::http(), &sites, coral_conn.as_ref().map(|c| (c, &me_of as work_items::CoralMeOf)), &custom::list);
     for f in &fetched {
         if let Err(e) = &f.result {
             log::line("app", format!("issues: {}: {e}", f.label));
@@ -87,12 +88,13 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
     let mut closed = Vec::new();
     for s in started::load(&started_path(app)).into_iter().filter(|s| !returned.contains_key(s.key.as_str())) {
         if s.item.source == coral::SOURCE {
-            let Some(c) = &coral_conn else { continue };
+            // Not when Coral could not say who the token is: its answers are not trusted this round.
+            let (Some(c), Some(_)) = (&coral_conn, coral_me.get()) else { continue };
             // Read by its code, which follows the item when it moved to another product.
-            match coral::get(git::http(), c, &s.item.id) {
-                Ok(Some(it)) => latest.push(WorkItem { key: s.key.clone(), ..it.item }),
-                Ok(None) => closed.push(s.key.clone()),
-                Err(e) => log::line("app", format!("issues: {}: {e}", s.item.id)),
+            match coral_reread(&s.key, coral::get(git::http(), c, &s.item.id)) {
+                Reread::Latest(item) => latest.push(*item),
+                Reread::Closed => closed.push(s.key.clone()),
+                Reread::Keep(e) => log::line("app", format!("issues: {}: {e}", s.item.id)),
             }
             continue;
         }
@@ -148,6 +150,25 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
     let _ = app.emit("work-items", &snapshot);
 }
 
+/// What a started Coral item's re-read means for the poll.
+#[derive(Debug, PartialEq)]
+enum Reread {
+    /// Its latest copy, under the key it was started with.
+    Latest(Box<WorkItem>),
+    /// Coral says it is gone or done: the started entry goes.
+    Closed,
+    /// Coral could not be asked: the entry stays as it is.
+    Keep(String),
+}
+
+fn coral_reread(key: &str, got: Result<Option<CoralItem>, String>) -> Reread {
+    match got {
+        Ok(Some(it)) => Reread::Latest(Box::new(WorkItem { key: key.to_string(), ..it.item })),
+        Ok(None) => Reread::Closed,
+        Err(e) => Reread::Keep(e),
+    }
+}
+
 fn started_path(app: &AppHandle) -> std::path::PathBuf {
     started::path(&app.state::<AppState>().store.lock().unwrap().claude_dir().join("maya"))
 }
@@ -174,7 +195,7 @@ pub(crate) fn list_work_items(state: TauriState<AppState>) -> WorkItemsState {
     state.work_items.lock().unwrap().clone()
 }
 
-const GONE: &str = "That issue is no longer on the list.";
+const GONE: &str = "That work item is no longer on the list.";
 
 /// Maya's pick of the repository for an item that has none, and the ones to
 /// choose from instead.
@@ -385,16 +406,17 @@ fn pick_repo(app: &AppHandle, item: &WorkItem, items: &[WorkItem], first: &[Item
 }
 
 /// Why Start refuses the user's answer to the takeover question, if it does:
-/// the issue is someone else's and the user agreed to take it over from
+/// the item is someone else's and the user agreed to take it over from
 /// nobody, or it is assigned to someone outside `agreed` (the names the
-/// question showed and the user said yes to).
-fn takeover_refusal(agreed: &[String], fresh: &[String], me: &str) -> Option<&'static str> {
+/// question showed and the user said yes to). `source` is the item's: a
+/// Coral item is a work item, the others issues.
+fn takeover_refusal(agreed: &[String], fresh: &[String], me: &str, source: &str) -> Option<&'static str> {
     let now = others(fresh, me);
     if now.is_empty() {
         return None;
     }
     if agreed.is_empty() {
-        return Some("This issue is assigned to someone else.");
+        return Some(if source == coral::SOURCE { "This work item is assigned to someone else." } else { "This issue is assigned to someone else." });
     }
     let named = others(agreed, me);
     let new = now.iter().any(|n| !named.iter().any(|c| c.eq_ignore_ascii_case(n)));
@@ -486,7 +508,7 @@ fn take_coral(app: &AppHandle, listed_item: &WorkItem, repo: &ItemRepo, take_ove
     let state = app.state::<AppState>();
     let f = read_coral(&state, listed_item, generation)?;
     let fresh = &f.it.item;
-    if let Some(why) = takeover_refusal(take_over, &coral_takeover(&fresh.assignees, &f.me), &f.me.name) {
+    if let Some(why) = takeover_refusal(take_over, &coral_takeover(&fresh.assignees, &f.me), &f.me.name, coral::SOURCE) {
         // So the page's next check names whoever it is.
         show_fresh(app, fresh);
         return Err(why.into());
@@ -565,7 +587,7 @@ pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo
         match read_fresh(&state, &listed_item, generation)? {
             Some(f) => {
                 let fresh = &f.issue.item;
-                if let Some(why) = takeover_refusal(&take_over, &fresh.assignees, &f.me.login) {
+                if let Some(why) = takeover_refusal(&take_over, &fresh.assignees, &f.me.login, &fresh.source) {
                     // So the page's next check names whoever it is.
                     show_fresh(&app, fresh);
                     return Err(why.into());
@@ -586,7 +608,7 @@ pub(crate) fn work_item_start(app: AppHandle, key: String, repo: Option<ItemRepo
                 if let Some(t) = &tool {
                     let me = t.me.trim();
                     if !me.is_empty() {
-                        if let Some(why) = takeover_refusal(&take_over, &listed_item.assignees, me) {
+                        if let Some(why) = takeover_refusal(&take_over, &listed_item.assignees, me, &listed_item.source) {
                             return Err(why.into());
                         }
                     }
@@ -658,11 +680,24 @@ mod tests {
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
         let (me, gone) = ("tiago", "This issue is assigned to someone else.");
         let new = "Someone else was assigned since you checked; check again.";
-        assert_eq!(takeover_refusal(&s(&[]), &s(&["Tiago"]), me), None, "mine alone asks nothing");
-        assert_eq!(takeover_refusal(&s(&[]), &s(&["maria"]), me), Some(gone), "agreed to nobody");
-        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["Maria", "tiago"]), me), None, "the name the question showed");
-        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["maria", "john"]), me), Some(new), "john was never shown, whatever the list holds now");
-        assert_eq!(takeover_refusal(&s(&["maria", "john"]), &s(&["john"]), me), None, "one fewer is still covered");
+        assert_eq!(takeover_refusal(&s(&[]), &s(&["Tiago"]), me, "github"), None, "mine alone asks nothing");
+        assert_eq!(takeover_refusal(&s(&[]), &s(&["maria"]), me, "github"), Some(gone), "agreed to nobody");
+        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["Maria", "tiago"]), me, "github"), None, "the name the question showed");
+        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["maria", "john"]), me, "github"), Some(new), "john was never shown, whatever the list holds now");
+        assert_eq!(takeover_refusal(&s(&["maria", "john"]), &s(&["john"]), me, "github"), None, "one fewer is still covered");
+        assert_eq!(takeover_refusal(&s(&[]), &s(&["maria"]), me, "coral"), Some("This work item is assigned to someone else."), "a Coral item is a work item");
+        assert_eq!(takeover_refusal(&s(&["maria"]), &s(&["maria", "john"]), me, "coral"), Some(new));
+    }
+
+    #[test]
+    fn a_started_coral_items_reread_replaces_closes_or_keeps_it() {
+        let it = CoralItem { item: WorkItem { key: "coral:new-uuid".into(), source: "coral".into(), title: "fresh".into(), ..item(None, true) }, uuid: "new-uuid".into(), item_type: "work_item".into(), assignments: vec![], status_id: None };
+        match coral_reread("coral:old", Ok(Some(it))) {
+            Reread::Latest(i) => assert_eq!((i.key.as_str(), i.title.as_str()), ("coral:old", "fresh"), "the latest copy, under the started key"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(coral_reread("coral:old", Ok(None)), Reread::Closed);
+        assert_eq!(coral_reread("coral:old", Err("404: <html>Not Found</html>".into())), Reread::Keep("404: <html>Not Found</html>".into()), "a failure keeps it");
     }
 
     #[test]

@@ -114,10 +114,15 @@ pub struct Fetched {
     pub warnings: Vec<String>,
 }
 
+/// Who a Coral connection's token belongs to.
+pub type CoralMeOf<'a> = &'a (dyn Fn(&Coral) -> Result<CoralMe, String> + Sync);
+
 /// Asks every forge whose Work Items are on, Coral when it is on and given,
-/// and every enabled tool with a list command, at once. The app passes
-/// `&custom::list` as `list_tool`.
-pub fn fetch(forges: &[Forge], cfg: &WorkItemsConfig, http: &dyn Http, sites: &[ForgeSite], coral: Option<(&Coral, &CoralMe)>, list_tool: &(dyn Fn(&CustomTool, &[ForgeSite]) -> Result<Vec<WorkItem>, String> + Sync)) -> Vec<Fetched> {
+/// and every enabled tool with a list command, at once. Coral's user is
+/// asked for (by `coral`'s second half) in Coral's own thread, so a Coral
+/// that hangs holds up no other source. The app passes `&custom::list` as
+/// `list_tool`.
+pub fn fetch(forges: &[Forge], cfg: &WorkItemsConfig, http: &dyn Http, sites: &[ForgeSite], coral: Option<(&Coral, CoralMeOf)>, list_tool: &(dyn Fn(&CustomTool, &[ForgeSite]) -> Result<Vec<WorkItem>, String> + Sync)) -> Vec<Fetched> {
     type Asked = Result<(Vec<WorkItem>, Vec<String>), (String, Vec<String>)>;
     std::thread::scope(|s| {
         let mut handles: Vec<(String, String, _)> = Vec::new();
@@ -133,8 +138,12 @@ pub fn fetch(forges: &[Forge], cfg: &WorkItemsConfig, http: &dyn Http, sites: &[
             };
             handles.push((source_of(f.site.provider).to_string(), f.site.provider.label().to_string(), s.spawn(ask)));
         }
-        if let Some((c, me)) = coral.filter(|_| cfg.coral.enabled) {
-            handles.push((coral::SOURCE.to_string(), "Coral".to_string(), s.spawn(move || -> Asked { coral::list(http, c, &cfg.coral, me) })));
+        if let Some((c, me_of)) = coral.filter(|_| cfg.coral.enabled) {
+            let ask = move || -> Asked {
+                let me = me_of(c).map_err(|e| (e, vec![]))?;
+                coral::list(http, c, &cfg.coral, &me)
+            };
+            handles.push((coral::SOURCE.to_string(), "Coral".to_string(), s.spawn(ask)));
         }
         for t in cfg.custom.iter().filter(|t| t.enabled && !t.list_command.trim().is_empty()) {
             handles.push((t.id.clone(), t.label().to_string(), s.spawn(move || -> Asked { list_tool(t, sites).map(|i| (i, vec![])).map_err(|e| (e, vec![])) })));
@@ -284,15 +293,32 @@ mod tests {
         let http = FakeHttp::new(vec![("itemType=work_item", 200, body), ("itemType=defect", 200, r#"{"data":[],"nextCursor":null}"#)]);
         let mut cfg = WorkItemsConfig::default();
         cfg.coral.enabled = true;
-        let fetched = fetch(&[], &cfg, &http, &[], Some((&c, &me)), &|_, _| Ok(vec![]));
+        let me_of = |_: &Coral| Ok(me.clone());
+        let fetched = fetch(&[], &cfg, &http, &[], Some((&c, &me_of)), &|_, _| Ok(vec![]));
         assert_eq!(fetched.len(), 1);
         assert_eq!((fetched[0].source.as_str(), fetched[0].label.as_str()), ("coral", "Coral"));
         assert_eq!(fetched[0].result.as_ref().unwrap()[0].key, "coral:i-1");
         // Off, or no connection: not asked.
         cfg.coral.enabled = false;
-        assert!(fetch(&[], &cfg, &http, &[], Some((&c, &me)), &|_, _| Ok(vec![])).is_empty());
+        assert!(fetch(&[], &cfg, &http, &[], Some((&c, &me_of)), &|_, _| Ok(vec![])).is_empty());
         cfg.coral.enabled = true;
         assert!(fetch(&[], &cfg, &http, &[], None, &|_, _| Ok(vec![])).is_empty());
+    }
+
+    #[test]
+    fn a_failed_who_am_i_fails_only_corals_check() {
+        use crate::forge::fake::FakeHttp;
+        let (c, _) = coral_conn();
+        let http = FakeHttp::new(vec![]);
+        let mut cfg = WorkItemsConfig::default();
+        cfg.coral.enabled = true;
+        cfg.custom = vec![CustomTool { id: "custom-1".into(), name: "T".into(), enabled: true, list_command: "x".into(), ..Default::default() }];
+        let me_of = |_: &Coral| Err("could not reach coral.test: timeout".to_string());
+        let fetched = fetch(&[], &cfg, &http, &[], Some((&c, &me_of)), &|_, _| Ok(vec![]));
+        let coral = fetched.iter().find(|f| f.source == "coral").unwrap();
+        assert_eq!(coral.result, Err("could not reach coral.test: timeout".to_string()));
+        assert!(http.seen.lock().unwrap().is_empty(), "nothing is listed without the user");
+        assert!(fetched.iter().find(|f| f.source == "custom-1").unwrap().result.is_ok(), "the tool is still asked");
     }
 
     #[test]
@@ -317,7 +343,8 @@ mod tests {
             crate::config::ItemRule { assignee: crate::config::Assignee::Me, labels: vec![], repos: vec![] },
         ];
         let old = WorkItem { key: "coral:i-1".into(), source: "coral".into(), ..test_item() };
-        let fetched = fetch(&[], &cfg, &http, &[], Some((&c, &me)), &|_, _| Ok(vec![]));
+        let me_of = |_: &Coral| Ok(me.clone());
+        let fetched = fetch(&[], &cfg, &http, &[], Some((&c, &me_of)), &|_, _| Ok(vec![]));
         let (items, errors) = combine(&[old.clone()], fetched, vec![]);
         assert_eq!(items, vec![old], "the old items stay");
         let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();

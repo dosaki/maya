@@ -1,8 +1,8 @@
 //! Coral Boards over its REST API: the address and token, and the calls
 //! every Coral request goes through. The token never appears in an error.
 
-use super::{clean_path, ItemRepo, WorkItem};
-use crate::config::{Assignee, CoralItems, ItemRule, TokenSource};
+use super::{clean_path, custom::MAX_DESCRIPTION, ItemRepo, WorkItem};
+use crate::config::{Assignee, CoralItems, GitProvider, ItemRule, TokenSource};
 use crate::forge::{answer_with, encode, route, scrub, status_message, ForgeSite, Http, Reply};
 use serde::Serialize;
 use serde_json::Value;
@@ -16,6 +16,11 @@ pub const MAX_ITEMS: usize = 500;
 const MAX_PAGES: usize = 50;
 /// The most redirects one GET follows.
 const MAX_HOPS: usize = 3;
+/// Coral's own answer for an item that is not there. Any other 404 (a
+/// proxy's, or another server's at a mistyped address) is a failure.
+const ITEM_GONE: &str = "404: Work item not found";
+/// Coral's own answer when none of a listing's product codes exists.
+const NO_PRODUCT: &str = "404: Product not found";
 
 /// A Coral address with its token. No `Debug`: it would show the token.
 #[derive(Clone)]
@@ -66,11 +71,12 @@ impl Coral {
     }
 }
 
-/// The body of a 2xx reply, else why not.
+/// The body of a 2xx reply, else why not. A 403 is a token that lacks a
+/// permission, not a refused one: Coral's own message says which.
 fn check(reply: Reply, token: &str) -> Result<String, String> {
     match reply.status {
         200..=299 => Ok(reply.body),
-        401 | 403 => Err("Coral refused the token: paste a new one in Settings → Work Items.".into()),
+        401 => Err("Coral refused the token: paste a new one in Settings → Work Items.".into()),
         status => Err(status_message(status, &reply.body, token)),
     }
 }
@@ -174,7 +180,7 @@ pub fn parse_item(v: &Value, c: &Coral) -> Option<WorkItem> {
         number: None,
         title: v["title"].as_str()?.to_string(),
         url: c.web(code),
-        description: text(v, "description"),
+        description: text(v, "description").chars().take(MAX_DESCRIPTION).collect(),
         status: v["status"]["name"].as_str().map(str::to_string),
         labels,
         assignees,
@@ -282,7 +288,9 @@ fn combinations(choices: &[Vec<String>]) -> Vec<Vec<String>> {
 /// The open items of one type for one rule, page after page, into `out`.
 #[allow(clippy::too_many_arguments)]
 fn list_type(http: &dyn Http, c: &Coral, item_type: &str, assignee: Option<&str>, codes: &[String], tag_ids: &[String], out: &mut Vec<WorkItem>, seen: &mut HashSet<String>) -> Result<(), Skip> {
-    let mut filters = format!("itemType={item_type}&pageSize=100&statusCategory=todo,active");
+    // Only items that live in a product: a triage or unassigned one has no
+    // page of its own and no product for Start to find a repository in.
+    let mut filters = format!("itemType={item_type}&location=product&pageSize=100&statusCategory=todo,active");
     if let Some(id) = assignee {
         filters.push_str(&format!("&assignees={}", encode(id)));
     }
@@ -302,7 +310,7 @@ fn list_type(http: &dyn Http, c: &Coral, item_type: &str, assignee: Option<&str>
         let v = match get_json(http, c, &url) {
             Ok(v) => v,
             // Coral answers 404 when none of the product codes exists.
-            Err(e) if e.starts_with("404") && !codes.is_empty() => return Err(Skip::Warn(format!("Coral has no product {}", codes.join(", ")))),
+            Err(e) if e == NO_PRODUCT && !codes.is_empty() => return Err(Skip::Warn(format!("Coral has no product {}", codes.join(", ")))),
             Err(e) => return Err(Skip::Fail(e)),
         };
         for item in v["data"].as_array().into_iter().flatten().filter_map(|i| parse_item(i, c)) {
@@ -356,7 +364,8 @@ pub fn list(http: &dyn Http, c: &Coral, cfg: &CoralItems, me: &CoralMe) -> Resul
         return Err((failures.swap_remove(0), warnings));
     }
     failures.dedup();
-    warnings.extend(failures);
+    // A rule's failure beside rules that answered: the line names Coral.
+    warnings.extend(failures.into_iter().map(|e| if e.starts_with("Coral") { e } else { format!("Coral: {e}") }));
     Ok((items, warnings))
 }
 
@@ -377,11 +386,11 @@ pub struct CoralItem {
     pub status_id: Option<String>,
 }
 
-/// The item `code`; None when it is gone (404) or done.
+/// The item `code`; None when Coral says it is gone, or it is done.
 pub fn get(http: &dyn Http, c: &Coral, code: &str) -> Result<Option<CoralItem>, String> {
     let v = match get_json(http, c, &c.api(&format!("/work-items/{}", encode(code)))) {
         Ok(v) => v,
-        Err(e) if e.starts_with("404") => return Ok(None),
+        Err(e) if e == ITEM_GONE => return Ok(None),
         Err(e) => return Err(e),
     };
     if v["status"]["category"].as_str() == Some("done") {
@@ -434,11 +443,19 @@ pub fn statuses(http: &dyn Http, c: &Coral) -> Result<Vec<CoralStatus>, String> 
 }
 
 /// The repositories of a product that live on a forge Maya knows, once each.
+/// A GitHub row's `owner` and `repo`, which Coral parses from its address,
+/// win over the address's path, so a deep link names its repository.
 pub fn product_repos(http: &dyn Http, c: &Coral, product: &str, sites: &[ForgeSite]) -> Result<Vec<ItemRepo>, String> {
     let v = get_json(http, c, &c.api(&format!("/products/{}/repositories", encode(product))))?;
     let mut out: Vec<ItemRepo> = Vec::new();
-    for url in v.as_array().ok_or("Coral's repositories were not a list.")?.iter().filter_map(|r| r["url"].as_str()) {
-        let Some((site, path)) = route(url, sites).and_then(|(site, p)| clean_path(&p).map(|p| (site, p))) else { continue };
+    for row in v.as_array().ok_or("Coral's repositories were not a list.")? {
+        let Some(url) = row["url"].as_str() else { continue };
+        let Some((site, routed)) = route(url, sites) else { continue };
+        let parsed = match (row["owner"].as_str(), row["repo"].as_str()) {
+            (Some(owner), Some(repo)) if site.provider == GitProvider::Github && !owner.is_empty() && !repo.is_empty() => format!("{owner}/{repo}"),
+            _ => routed,
+        };
+        let Some(path) = clean_path(&parsed) else { continue };
         if !out.iter().any(|r| r.forge == site.provider && r.path.eq_ignore_ascii_case(&path)) {
             out.push(ItemRepo { forge: site.provider, path });
         }
@@ -521,6 +538,14 @@ mod tests {
         let http = FakeHttp::new(vec![("/users/me", 401, r#"{"error":"bad token cbp_secret"}"#)]);
         let e = get_json(&http, &coral(), "https://coral.test/api/v1/users/me").unwrap_err();
         assert_eq!(e, "Coral refused the token: paste a new one in Settings → Work Items.");
+        assert!(!e.contains("cbp_"));
+    }
+
+    #[test]
+    fn a_forbidden_call_shows_corals_message_without_the_token() {
+        let http = FakeHttp::new(vec![("/work-items", 403, r#"{"error":"Forbidden: items:write permission required cbp_secret"}"#)]);
+        let e = get_json(&http, &coral(), "https://coral.test/api/v1/work-items").unwrap_err();
+        assert_eq!(e, "403: Forbidden: items:write permission required ***");
         assert!(!e.contains("cbp_"));
     }
 
@@ -756,6 +781,47 @@ mod tests {
     }
 
     #[test]
+    fn a_404_that_is_not_corals_own_is_an_error() {
+        // A proxy, or another server at a mistyped address, answers 404 too:
+        // only Coral's own "Work item not found" means the item is gone.
+        let http = FakeHttp::new(vec![("/BED-0021", 404, "<html>Not Found</html>"), ("/BED-0022", 404, r#"{"error":"Not found"}"#)]);
+        assert_eq!(get(&http, &coral(), "BED-0021").unwrap_err(), "404: <html>Not Found</html>");
+        assert_eq!(get(&http, &coral(), "BED-0022").unwrap_err(), "404: Not found");
+    }
+
+    #[test]
+    fn a_long_description_is_cut() {
+        let mut v = full_item();
+        v["description"] = json!("é".repeat(MAX_DESCRIPTION + 10));
+        assert_eq!(parse_item(&v, &coral()).unwrap().description.chars().count(), MAX_DESCRIPTION);
+    }
+
+    #[test]
+    fn list_asks_only_for_items_in_a_product() {
+        let http = FakeHttp::new(vec![("/work-items", 200, &page(vec![], None))]);
+        list(&http, &coral(), &cfg(vec![rule(Assignee::Me, &[], &[])]), &me_user()).unwrap();
+        for u in urls(&http) {
+            assert!(u.contains("location=product"), "{u}");
+        }
+    }
+
+    #[test]
+    fn a_rule_that_failed_beside_others_names_coral() {
+        let http = FakeHttp::new(vec![("assignees=u-me", 200, &page(vec![numbered(1)], None)), ("/work-items", 500, "oops")]);
+        let (items, warnings) = list(&http, &coral(), &cfg(vec![rule(Assignee::Me, &[], &[]), rule(Assignee::Anyone, &[], &["BED"])]), &me_user()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(warnings, vec!["Coral: 500: oops"]);
+    }
+
+    #[test]
+    fn a_404_for_products_that_is_not_corals_own_fails_the_rule() {
+        let http = FakeHttp::new(vec![("/work-items", 404, "<html>Not Found</html>")]);
+        let (e, warnings) = list(&http, &coral(), &cfg(vec![rule(Assignee::Me, &[], &["BED"])]), &me_user()).unwrap_err();
+        assert_eq!(e, "404: <html>Not Found</html>");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     fn get_follows_a_move_within_coral() {
         let http = FakeHttp::new(vec![("/work-items/OPS-0004", 200, &full_item().to_string()), ("/work-items/BED-0021", 301, "")]).with_location("/work-items/BED-0021", "/api/v1/work-items/OPS-0004");
         let got = get(&http, &coral(), "BED-0021").unwrap().unwrap();
@@ -823,12 +889,15 @@ mod tests {
             {"url": "https://bitbucket.org/x/y"},
             {"url": "https://GitHub.com/Acme/API"},
             {"url": "https://github.com/acme/../etc"},
-            {"url": "https://github.com/acme/we ird"}
+            {"url": "https://github.com/acme/we ird"},
+            {"url": "https://github.com/acme/web/tree/main", "owner": "acme", "repo": "web"}
         ])
         .to_string();
         let http = FakeHttp::new(vec![("/api/v1/products/BED/repositories", 200, &body)]);
         let repos = product_repos(&http, &coral(), "BED", &sites).unwrap();
-        assert_eq!(repos, vec![ItemRepo { forge: GitProvider::Github, path: "acme/api".into() }, ItemRepo { forge: GitProvider::Gitlab, path: "g/r".into() }]);
+        let r = |forge, path: &str| ItemRepo { forge, path: path.into() };
+        // Coral's parsed owner and repo win over a deep GitHub address.
+        assert_eq!(repos, vec![r(GitProvider::Github, "acme/api"), r(GitProvider::Gitlab, "g/r"), r(GitProvider::Github, "acme/web")]);
     }
 
     fn me_and_item(assignments: Vec<Assignment>, status_id: Option<&str>, item_type: &str) -> (CoralMe, CoralItem) {
