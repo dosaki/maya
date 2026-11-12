@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { comboLabel, defaultKeys } from "./keys";
 import { RUNNING_VERSION } from "./release-notes";
-import { SETTINGS_GROUPS, gitConnections, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
+import { SETTINGS_GROUPS, SETTINGS_LEDES, SETTINGS_NAV, gitConnections, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 
 const voiceBase = {
   hookInstalled: true,
@@ -101,7 +101,7 @@ describe("renderSettings", () => {
   it("puts Maya's agent first, with that agent's models under it", () => {
     const h = handlers();
     const el = renderSettings({ ...voiceBase, agents, agent: "grok", agentModel: "grok-4.7" }, h);
-    expect(el.querySelector(".settings__section .settings__heading")?.textContent).toBe("General");
+    expect(el.querySelector(".settings__section .settings__title")?.textContent).toBe("General");
     const agent = el.querySelector<HTMLSelectElement>("select[name=agent]")!;
     expect([...agent.options].map((o) => o.textContent)).toEqual(["Claude Code", "Grok Build"]);
     expect(agent.value).toBe("grok");
@@ -430,18 +430,44 @@ describe("renderSettings", () => {
     const el = renderSettings(voiceBase, handlers());
     const nav = [...el.querySelectorAll<HTMLButtonElement>(".settings__nav button")];
     expect(nav.map((b) => b.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Work Items", "Notifications", "Voice", "Network", "Devices", "Debug", "Release Notes"]);
-    expect([...el.querySelectorAll(".settings__heading")].map((x) => x.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Work Items", "Notifications", "Voice", "Network", "Devices", "Debug", "Release Notes"]);
+    expect([...el.querySelectorAll(".settings__title")].map((x) => x.textContent)).toEqual(["General", "Keyboard", "Sessions", "Git", "Pull requests", "Work Items", "Notifications", "Voice", "Network", "Devices", "Debug", "Release Notes"]);
     const sections = [...el.querySelectorAll<HTMLElement>(".settings__section")];
     expect(sections.map((s) => s.dataset.group)).toEqual(["general", "keyboard", "sessions", "git", "reviews", "workItems", "notifications", "voice", "network", "devices", "debug", "releaseNotes"]);
     expect(sections.filter((s) => !s.hidden).map((s) => s.dataset.group)).toEqual(["general"]);
     expect(nav.map((b) => b.getAttribute("aria-current"))).toEqual(["true", null, null, null, null, null, null, null, null, null, null, null]);
   });
 
+  it("gives every section its group's title and lede", () => {
+    const el = renderSettings(voiceBase, handlers());
+    for (const [key, title] of SETTINGS_GROUPS) {
+      const s = el.querySelector<HTMLElement>(`.settings__section[data-group=${key}]`)!;
+      expect(s.querySelector(".settings__title")!.textContent).toBe(title);
+      expect(s.querySelector(".settings__lede")!.textContent).toBe(SETTINGS_LEDES[key]);
+    }
+    expect(SETTINGS_GROUPS).toHaveLength(12);
+  });
+
+  it("clusters the sidebar into five groups", () => {
+    const el = renderSettings(voiceBase, handlers());
+    const clusters = [...el.querySelectorAll(".settings__nav-group")];
+    expect(clusters.map((c) => c.children.length)).toEqual([2, 4, 2, 2, 2]);
+    expect(clusters.map((c) => [...c.querySelectorAll<HTMLElement>("button")].map((b) => b.dataset.group))).toEqual(SETTINGS_NAV.map((g) => [...g]));
+  });
+
+  it("shows a failure as a notice above every section", () => {
+    const el = renderSettings({ ...voiceBase, error: "boom" }, handlers());
+    const first = el.querySelector(".settings__content")!.firstElementChild!;
+    expect(first.classList.contains("settings__notice")).toBe(true);
+    expect(first.classList.contains("settings__error")).toBe(true);
+    expect(first.textContent).toBe("boom");
+    expect(el.querySelectorAll(".settings__notice")).toHaveLength(1);
+  });
+
   it("shows the release notes, last in the sidebar", () => {
     const el = renderSettings({ ...voiceBase, settingsGroup: "releaseNotes" }, handlers());
     const s = el.querySelector<HTMLElement>(".settings__section[data-group=releaseNotes]")!;
     expect(s.hidden).toBe(false);
-    expect(s.querySelector(".settings__heading")!.textContent).toBe("Release Notes");
+    expect(s.querySelector(".settings__title")!.textContent).toBe("Release Notes");
     expect(s.querySelector(".release-notes__version")!.textContent).toBe(`Maya ${RUNNING_VERSION}`);
   });
 

@@ -16,6 +16,7 @@ import { terminalLabel } from "./terminalpick";
 import { renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 import { updates } from "./update";
+import { notice, screenHead } from "./settings-ui";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -402,6 +403,31 @@ export const SETTINGS_GROUPS = [
 ] as const;
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number][0];
 
+/** The sidebar's divided clusters, top to bottom. */
+export const SETTINGS_NAV: readonly (readonly SettingsGroup[])[] = [
+  ["general", "keyboard"],
+  ["sessions", "git", "reviews", "workItems"],
+  ["notifications", "voice"],
+  ["network", "devices"],
+  ["debug", "releaseNotes"],
+];
+
+/** What each screen's head says under its title. */
+export const SETTINGS_LEDES: Record<SettingsGroup, string> = {
+  general: "The agent behind Maya, and how she looks.",
+  keyboard: "The keys for the Chat tab, a session's reply box and the new-session prompt.",
+  sessions: "How Maya follows your sessions, and where new ones start.",
+  git: "The accounts Maya reads pull requests and merge requests with. Reviews clone with your own git credentials.",
+  reviews: "Where reviews are checked out, what the Review button asks the agent, and when Maya tells you about your own pull requests.",
+  workItems: "Where the Issues tab finds your work, and what Start does with an item.",
+  notifications: "How Maya tells you a session needs you.",
+  voice: "How Maya speaks to you, and how she hears you.",
+  network: "Join your other computers and your phone to this Maya.",
+  devices: "The computers and phones joined to this Maya.",
+  debug: "For looking under the hood.",
+  releaseNotes: "What changed in each version of Maya.",
+};
+
 export const SETTINGS_GROUP_KEY = "maya.settingsGroup";
 
 function asSettingsGroup(v: string | null | undefined): SettingsGroup {
@@ -422,10 +448,7 @@ function section(title: string, key: SettingsGroup): HTMLElement {
   const s = document.createElement("section");
   s.className = `settings__section settings__section--${key}`;
   s.dataset.group = key;
-  const heading = document.createElement("h2");
-  heading.className = "settings__heading";
-  heading.textContent = title;
-  s.append(heading);
+  s.append(screenHead(title, SETTINGS_LEDES[key]));
   return s;
 }
 
@@ -649,7 +672,10 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   // `hidden`, so a switch keeps half-typed fields and the in-place ticks
   // (pairing code, addresses) still find their elements.
   const sections = Object.fromEntries(SETTINGS_GROUPS.map(([key, title]) => [key, section(title, key)])) as Record<SettingsGroup, HTMLElement>;
-  const navButtons = SETTINGS_GROUPS.map(([key, title]) => {
+  const titles = new Map<SettingsGroup, string>(SETTINGS_GROUPS);
+  const navButtons = new Map<SettingsGroup, HTMLButtonElement>();
+  for (const key of SETTINGS_NAV.flat()) {
+    const title = titles.get(key)!;
     const b = document.createElement("button");
     b.type = "button";
     b.className = "settings__nav-item";
@@ -670,18 +696,23 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     // serves the keyboard.
     b.addEventListener("pointerdown", (e) => { if (e.button === 0) choose(); });
     b.addEventListener("click", choose);
-    return b;
-  });
+    navButtons.set(key, b);
+  }
   // The live sections, found when the nav is used: a repaint keeps the old
   // Devices section and drops this render's, so nothing may close over it.
   const show = (group: SettingsGroup) => {
     for (const s of nav.parentElement?.querySelectorAll<HTMLElement>(".settings__section") ?? []) s.hidden = s.dataset.group !== group;
-    for (const b of navButtons) {
+    for (const b of navButtons.values()) {
       if (b.dataset.group === group) b.setAttribute("aria-current", "true");
       else b.removeAttribute("aria-current");
     }
   };
-  nav.append(...navButtons);
+  for (const keys of SETTINGS_NAV) {
+    const g = document.createElement("div");
+    g.className = "settings__nav-group";
+    g.append(...keys.map((k) => navButtons.get(k)!));
+    nav.append(g);
+  }
   content.append(...Object.values(sections));
   show(model.settingsGroup ?? "general");
   const { general, keyboard, sessions, git, reviews, workItems, notifications, voice, network, devices, debug, releaseNotes } = sections;
@@ -1985,11 +2016,8 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
 
   if (model.error) {
-    const err = document.createElement("div");
-    err.className = "settings__error";
-    err.textContent = model.error;
     // Above the sections, so it shows whichever group is open.
-    content.prepend(err);
+    content.prepend(notice(model.error, "error"));
   }
   return root;
 }
