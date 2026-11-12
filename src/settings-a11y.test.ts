@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => undefined) }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
 
-import { gitConnections, renderSettings, type SettingsModel, type NetworkStatus } from "./settings";
+import { gitConnections, renderSettings, workItemsConfig, type SettingsModel, type NetworkStatus } from "./settings";
 import { PHONE_LIST, renderNetwork, type NetworkModel, type PhoneGroup } from "./mobile/network";
 
 // Every control a screen draws has a name a screen reader can read: a wrapping
@@ -102,7 +102,7 @@ const base: SettingsModel = {
     { provider: "gitlab", enabled: true, token: { kind: "env", name: "GITLAB_TOKEN" } },
   ]),
   gitStatus: { github: { hasToken: true }, gitlab: { hasToken: false } },
-  workItems: { github: forge, gitlab: forge, prompt: "", custom: [tool] },
+  workItems: { github: forge, gitlab: forge, coral: workItemsConfig(null).coral, prompt: "", custom: [tool] },
   sourcesOpen: { github: true, gitlab: true, "custom-1": true },
   network: mainNet,
   networkRole: "main",

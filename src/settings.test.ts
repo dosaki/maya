@@ -1998,7 +1998,7 @@ describe("Settings → Work Items", () => {
 
   it("offers only the status labels for On Start", () => {
     const items = { enabled: true, rules: [], statusLabels: ["todo", "doing"], startStatus: "doing", trackerRepos: [] };
-    const root = renderSettings(wiModel({ workItems: { github: items, gitlab: items, prompt: "", custom: [] } }), handlers());
+    const root = renderSettings(wiModel({ workItems: { github: items, gitlab: items, coral: workItemsConfig(null).coral, prompt: "", custom: [] } }), handlers());
     const sel = box(root, "github").querySelector<HTMLSelectElement>("select[name=wi-startStatus]")!;
     expect([...sel.options].map((o) => o.textContent)).toEqual(["Leave as it is", "todo", "doing"]);
     expect(sel.value).toBe("doing");
@@ -2067,7 +2067,7 @@ describe("Settings → Work Items sources", () => {
     ...voiceBase,
     settingsGroup: "workItems",
     git: both,
-    workItems: { github: forge, gitlab: gitlabItems, prompt: "", custom: [tool, offTool] },
+    workItems: { github: forge, gitlab: gitlabItems, coral: workItemsConfig(null).coral, prompt: "", custom: [tool, offTool] },
     ...over,
   });
   const src = (root: HTMLElement, key: string) => root.querySelector<HTMLElement>(`[data-source="${key}"]`)!;
@@ -2121,7 +2121,7 @@ describe("Settings → Work Items sources", () => {
     expect(gh.querySelector(".settings__source-state")!.textContent).toBe("Git off");
     expect(gh.querySelector(".settings__source-sum")!.textContent).toBe("GitHub is off in Settings → Git.");
     expect(gh.classList.contains("settings__source--off")).toBe(true);
-    const offGl = renderSettings(model({ git: gitConnections(null), workItems: { github: forge, gitlab: { ...gitlabItems, enabled: true }, prompt: "", custom: [] } }), handlers());
+    const offGl = renderSettings(model({ git: gitConnections(null), workItems: { github: forge, gitlab: { ...gitlabItems, enabled: true }, coral: workItemsConfig(null).coral, prompt: "", custom: [] } }), handlers());
     expect(src(offGl, "gitlab").querySelector(".settings__source-sum")!.textContent).toBe("GitLab is off in Settings → Git.");
     expect(src(offGl, "gitlab").querySelector(".settings__source-state")!.textContent).toBe("Git off");
   });
@@ -2223,7 +2223,7 @@ describe("Settings → Work Items sources", () => {
 
   it("cuts a long list command short rather than widen the head", () => {
     const long = { ...tool, listCommand: "/a/very/long/path/to/a/script/that/lists/items --with --many --flags ".repeat(4) };
-    const root = renderSettings(model({ workItems: { github: forge, gitlab: gitlabItems, prompt: "", custom: [long] } }), handlers());
+    const root = renderSettings(model({ workItems: { github: forge, gitlab: gitlabItems, coral: workItemsConfig(null).coral, prompt: "", custom: [long] } }), handlers());
     const sum = src(root, "custom-1").querySelector(".settings__source-sum")!;
     // jsdom does not apply styles.css: check the rule and that the summary matches it.
     const m = styles.match(/\.settings\.pane \.settings__source-sum\s*\{([^}]*)\}/);
@@ -2256,7 +2256,7 @@ describe("Settings → Work Items custom tools", () => {
   const items = { enabled: false, rules: [], statusLabels: [], startStatus: "", trackerRepos: [] };
   const t1 = { id: "custom-1", name: "Linear", enabled: true, listCommand: "linear-items", startCommand: "linear-start", me: "tiago" };
   const t2 = { id: "custom-2", name: "Jira", enabled: false, listCommand: "jira-items", startCommand: "", me: "" };
-  const model = (): SettingsModel => ({ ...voiceBase, settingsGroup: "workItems", workItems: { github: items, gitlab: items, prompt: "", custom: [t1, t2] } });
+  const model = (): SettingsModel => ({ ...voiceBase, settingsGroup: "workItems", workItems: { github: items, gitlab: items, coral: workItemsConfig(null).coral, prompt: "", custom: [t1, t2] } });
   const boxes = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>(".settings__custom")];
   const input = (root: HTMLElement, n: string) => root.querySelector<HTMLInputElement>(`input[name=${n}]`)!;
 
@@ -2328,6 +2328,14 @@ describe("Settings → Work Items custom tools", () => {
     const fields = [...root.querySelectorAll<HTMLInputElement | HTMLButtonElement>(".settings__custom input, .settings__custom button, [data-action=ct-add]")];
     expect(fields.length).toBeGreaterThan(10);
     expect(fields.every((f) => !f.disabled)).toBe(true);
+  });
+});
+
+describe("workItemsConfig coral", () => {
+  it("is off with one rule for my items when the file lacks it", () => {
+    expect(workItemsConfig(null).coral).toEqual({ enabled: false, baseUrl: "", token: { kind: "stored" }, rules: [{ assignee: { kind: "me" }, labels: [], repos: [] }], startStatus: null });
+    const coral = { enabled: true, baseUrl: "https://coral.test", token: { kind: "env" as const, name: "CORAL_TOKEN" }, rules: [], startStatus: "s1" };
+    expect(workItemsConfig({ coral }).coral).toEqual(coral);
   });
 });
 

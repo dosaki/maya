@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, isLinux, isWindows, recognizerOptions, secretStore, thisComputerLower } from "./platform";
-import type { ColorTheme, CustomTool, ForgeItems, GitProvider, Harness, ItemRule, NewSessionTerminal, ViewerTheme, WorkItemsConfig } from "./types";
+import type { ColorTheme, CoralItems, CustomTool, ForgeItems, GitProvider, Harness, ItemRule, NewSessionTerminal, ViewerTheme, WorkItemsConfig } from "./types";
 import { setViewerTheme } from "./modal";
 import { COLOR_THEMES, applyColorTheme, asColorTheme } from "./theme";
 import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys, removeCombo, setKeyBindings, type KeyBindings } from "./keys";
@@ -347,7 +347,8 @@ curl -s -H "Authorization: Bearer $TRACKER_TOKEN" https://tracker.example.com/ap
 /** The Work Items settings as the Rust side defaults them: one rule for my issues. */
 export function workItemsConfig(raw: Partial<WorkItemsConfig> | null | undefined): WorkItemsConfig {
   const forge = (f?: ForgeItems): ForgeItems => f ?? { enabled: true, rules: [{ assignee: { kind: "me" }, labels: [], repos: [] }], statusLabels: [], startStatus: null, trackerRepos: [] };
-  return { github: forge(raw?.github), gitlab: forge(raw?.gitlab), prompt: raw?.prompt ?? "", custom: raw?.custom ?? [] };
+  const coral: CoralItems = raw?.coral ?? { enabled: false, baseUrl: "", token: { kind: "stored" }, rules: [{ assignee: { kind: "me" }, labels: [], repos: [] }], startStatus: null };
+  return { github: forge(raw?.github), gitlab: forge(raw?.gitlab), coral, prompt: raw?.prompt ?? "", custom: raw?.custom ?? [] };
 }
 
 /** "a", "a or b", "a, b or c". */

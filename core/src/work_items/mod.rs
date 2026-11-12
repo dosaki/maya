@@ -1,5 +1,6 @@
 //! Work items: the issues of a forge (or a custom tool), in one shape.
 
+pub mod coral;
 pub mod custom;
 pub mod github;
 pub mod gitlab;

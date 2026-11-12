@@ -202,6 +202,17 @@ pub trait Http: Sync {
     fn send_json(&self, method: &str, url: &str, token: &str, body: &str) -> Result<Reply, String>;
 }
 
+/// The header a token goes in: Coral's personal and agent tokens (`cbp_`,
+/// `cba_`) in `x-api-token` (Coral reads a Bearer as a Keycloak token), every
+/// other in `Authorization: Bearer`.
+pub fn auth_header(token: &str) -> (&'static str, String) {
+    if token.starts_with("cbp_") || token.starts_with("cba_") {
+        ("x-api-token", token.to_string())
+    } else {
+        ("Authorization", format!("Bearer {token}"))
+    }
+}
+
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// `Http` over `ureq`, every status handed back rather than raised. It
@@ -259,7 +270,8 @@ impl Http for Ureq {
         if let Some(until) = self.pauses.until(token, url, crate::now_ms()) {
             return Ok(Reply::waiting(until));
         }
-        let mut request = self.agent.get(url).header("Authorization", &format!("Bearer {token}")).header("User-Agent", "Maya").header("Accept", "application/json");
+        let (name, value) = auth_header(token);
+        let mut request = self.agent.get(url).header(name, &value).header("User-Agent", "Maya").header("Accept", "application/json");
         let kept = self.etags.tag(token, url);
         if let Some(tag) = &kept {
             request = request.header("If-None-Match", tag);
@@ -283,10 +295,11 @@ impl Http for Ureq {
     }
 
     fn post_json(&self, url: &str, token: &str, body: &str) -> Result<Reply, String> {
+        let (name, value) = auth_header(token);
         self.send(token, url, || {
             self.agent
                 .post(url)
-                .header("Authorization", &format!("Bearer {token}"))
+                .header(name, &value)
                 .header("User-Agent", "Maya")
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")
@@ -300,9 +313,10 @@ impl Http for Ureq {
             "PUT" => self.agent.put(url),
             other => return Err(format!("unsupported method {other}")),
         };
+        let (name, value) = auth_header(token);
         self.send(token, url, || {
             request
-                .header("Authorization", &format!("Bearer {token}"))
+                .header(name, &value)
                 .header("User-Agent", "Maya")
                 .header("Accept", "application/json")
                 .header("Content-Type", "application/json")
@@ -492,6 +506,13 @@ pub(crate) mod fake {
 mod tests {
     use super::*;
     use crate::config::{GitConnection, GitProvider, TokenSource};
+
+    #[test]
+    fn coral_tokens_go_in_x_api_token() {
+        assert_eq!(auth_header("cbp_ab"), ("x-api-token", "cbp_ab".to_string()));
+        assert_eq!(auth_header("cba_ab"), ("x-api-token", "cba_ab".to_string()));
+        assert_eq!(auth_header("ghp_x"), ("Authorization", "Bearer ghp_x".to_string()));
+    }
 
     #[test]
     fn the_forges_trust_the_systems_certificates() {

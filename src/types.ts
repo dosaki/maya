@@ -435,6 +435,16 @@ export interface ForgeItems {
   trackerRepos: string[];
 }
 
+/** Coral Boards as a source: tags go in a rule's `labels`, product codes in its `repos`, an email in a user's `login`. */
+export interface CoralItems {
+  enabled: boolean;
+  baseUrl: string;
+  token: { kind: "stored" } | { kind: "env"; name: string };
+  rules: ItemRule[];
+  /** A Coral status id. */
+  startStatus: string | null;
+}
+
 /** A user's own script that lists work items. */
 export interface CustomTool {
   id: string;
@@ -449,6 +459,7 @@ export interface CustomTool {
 export interface WorkItemsConfig {
   github: ForgeItems;
   gitlab: ForgeItems;
+  coral: CoralItems;
   prompt: string;
   custom: CustomTool[];
 }
