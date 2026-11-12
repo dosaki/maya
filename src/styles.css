@@ -65,8 +65,8 @@ body { margin: 0; background: var(--bg); }
 .settings__nav { display: flex; flex-direction: column; gap: 14px; position: sticky; top: 24px; }
 .settings__nav-group { display: flex; flex-direction: column; gap: 2px; }
 .settings__nav-group + .settings__nav-group { padding-top: 14px; border-top: 1px solid var(--rule); }
-.settings__body--sidebar .settings__nav-item { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 7px 12px; color: var(--muted); text-align: left; font: inherit; cursor: pointer; }
-.settings__body--sidebar .settings__nav-item:hover { color: var(--text); }
+.settings__body--sidebar .settings__nav-item { background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 8px 12px; color: var(--muted); text-align: left; font: inherit; cursor: pointer; }
+.settings__body--sidebar .settings__nav-item:hover { color: var(--text); background: var(--soft); }
 .settings__body--sidebar .settings__nav-item[aria-current=true] { background: var(--panel); border-color: var(--gold-deep); color: var(--gold-bright); }
 .settings__content { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 @media (max-width: 899px) {
@@ -76,6 +76,8 @@ body { margin: 0; background: var(--bg); }
   .settings__nav-group + .settings__nav-group { padding-top: 0; border-top: 0; }
 }
 .settings__section { display: flex; flex-direction: column; gap: 10px; }
+/* In the pane each group carries its own margin, as in the mockup. */
+.settings.pane .settings__section { gap: 0; }
 .settings__body--sidebar textarea { max-width: none; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
 .settings__body--sidebar .settings__section > button { align-self: flex-start; }
 .popover { position: absolute; top: 48px; right: 16px; width: 320px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; box-shadow: 0 8px 30px rgba(0,0,0,.18); z-index: 10; }
@@ -100,7 +102,8 @@ body { margin: 0; background: var(--bg); }
 .release-notes .md li + li { margin-top: 4px; }
 /* In Settings, Maya stands to the left of the notes, her raised hand presenting them. */
 .settings.pane .settings__rn { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 8px; align-items: start; }
-.settings.pane .settings__rn-art { position: sticky; top: 24px; height: min(76vh, 600px); width: auto; margin-left: -64px; pointer-events: none; user-select: none; filter: drop-shadow(0 0 28px rgba(217,171,60,.22)); }
+/* She fills her column and the 64px she reaches into the gap, so her hand stops short of the notes. */
+.settings.pane .settings__rn-art { position: sticky; top: 24px; width: calc(100% + 64px); height: auto; max-height: min(76vh, 600px); object-fit: contain; object-position: left top; margin-left: -64px; pointer-events: none; user-select: none; filter: drop-shadow(0 0 28px rgba(217,171,60,.22)); }
 .settings.pane .release-notes { max-width: 68ch; }
 .settings.pane .release-notes__version { margin: 0 0 12px; font-size: 18px; }
 .settings.pane .release-notes__version:not(:first-child) { margin-top: 32px; padding-top: 28px; border-top: 1px solid var(--rule); }
@@ -130,17 +133,23 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__help { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; line-height: 1.45; max-width: 52ch; }
 .settings.pane .settings__row-text > .settings__help:first-child { margin-top: 0; }
 .settings.pane .settings__control { flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-.settings.pane .settings__control:has(> input:not([type=checkbox]):not([type=radio]), > select, > textarea) { flex-basis: 300px; }
-.settings.pane .settings__control > input:not([type=checkbox]):not([type=radio]), .settings.pane .settings__control > select { flex: 1; }
+/* A number field keeps its own 88px; other fields take the 300px column. */
+.settings.pane .settings__control:has(> input:not([type=checkbox]):not([type=radio]):not([type=number]), > select, > textarea) { flex-basis: 300px; }
+.settings.pane .settings__control > input:not([type=checkbox]):not([type=radio]):not([type=number]), .settings.pane .settings__control > select { flex: 1; }
+.settings.pane .settings__control:has(> .settings__range) { flex-basis: 300px; }
+.settings.pane .settings__range { width: 100%; max-width: none; gap: 12px; }
+.settings.pane .settings__range input[type=range] { accent-color: var(--gold); }
+.settings.pane .settings__range span { color: var(--muted); }
 .settings.pane .settings__row--stack { flex-direction: column; align-items: stretch; gap: 12px; }
 /* Down a column, the 300px basis above would be a height. */
-.settings.pane .settings__row--stack > .settings__control:has(> input:not([type=checkbox]):not([type=radio]), > select, > textarea) { flex-basis: auto; }
+.settings.pane .settings__row--stack > .settings__control:has(> input:not([type=checkbox]):not([type=radio]):not([type=number]), > select, > textarea) { flex-basis: auto; }
 .settings.pane .settings__row--head { min-height: 56px; background: var(--soft); border-radius: 12px 12px 0 0; }
 .settings.pane .settings__row--head .settings__label { font-size: 15px; font-weight: 600; }
+.settings.pane .settings__row--head:last-child { border-radius: 12px; }
 .settings.pane .settings__card--off .settings__row:not(.settings__row--head) { opacity: .45; }
 .settings.pane .settings__foot-end { margin-left: auto; }
 .settings.pane .settings__row--foot .settings__error { color: var(--danger); }
-.settings.pane .settings__card progress { flex: 1; width: 100%; }
+.settings.pane .settings__card progress { flex: 1; width: 100%; accent-color: var(--gold); }
 .settings.pane .settings__row--foot { min-height: 0; padding: 12px 20px; justify-content: space-between; }
 
 /* Fields inside a card. */
@@ -223,6 +232,7 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__source--off .settings__source-body { opacity: .5; }
 .settings.pane .settings__source.settings__card + .settings__source.settings__card { margin-top: 12px; }
 .settings.pane .settings__unit { color: var(--muted); font-weight: 400; }
+.settings.pane .settings__git-test { min-width: 0; color: var(--muted); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
 .settings.pane .settings__row--foot > .settings__help { margin-top: 0; }
 
 /* Work Items rules: each its own inset box, each field beside its label at the full width. */
@@ -244,7 +254,7 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__details + .settings__row { border-top: 1px solid var(--rule); }
 .settings.pane .settings__details > summary { padding: 12px 20px; cursor: pointer; color: var(--muted); font-size: 13px; list-style: none; }
 .settings.pane .settings__details > summary::-webkit-details-marker { display: none; }
-.settings.pane .settings__details > summary::before { content: "▸"; display: inline-block; width: 16px; transition: transform .15s; }
+.settings.pane .settings__details > summary::before { content: "▸"; display: inline-block; width: 10px; margin-right: 6px; text-align: center; transition: transform .15s; }
 .settings.pane .settings__details[open] > summary::before { transform: rotate(90deg); }
 .settings.pane .settings__details > summary:hover { color: var(--text); }
 .settings.pane .settings__details-body { display: flex; flex-direction: column; gap: 12px; padding: 0 20px 20px; color: var(--muted); font-size: 13px; line-height: 1.5; }
@@ -252,9 +262,10 @@ body { margin: 0; background: var(--bg); }
 @media (prefers-reduced-motion: reduce) {
   .settings.pane .settings__toggle, .settings.pane .settings__toggle::after, .settings.pane .settings__source-chev::before, .settings.pane .settings__details > summary::before { transition: none; }
 }
+/* Narrow: a field goes under its label; a switch, a choice or a button stays beside it. */
 @media (max-width: 560px) {
-  .settings.pane .settings__row { flex-direction: column; align-items: stretch; gap: 10px; }
-  .settings.pane .settings__control { justify-content: flex-start; }
+  .settings.pane .settings__row:has(> .settings__control > :is(input:not([type=checkbox]):not([type=radio]):not([type=number]), select, textarea)) { flex-direction: column; align-items: stretch; gap: 10px; }
+  .settings.pane .settings__row:has(> .settings__control > :is(input:not([type=checkbox]):not([type=radio]):not([type=number]), select, textarea)) > .settings__control { justify-content: flex-start; flex-basis: auto; }
   .settings.pane .settings__row--head { flex-direction: row; align-items: center; }
   .settings.pane .settings__rule-body { grid-template-columns: minmax(0, 1fr); }
 }
@@ -295,6 +306,7 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__assistant { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: 1px solid var(--border); }
 .settings.pane .settings__badge { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--gold-deep); border-radius: 999px; color: var(--gold-bright); font-size: 11px; font-weight: 500; }
 .settings.pane .settings__assistant-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.settings.pane .settings__assistant-actions > .settings__btn--danger { order: 1; }
 .settings.pane .settings__devices { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
 .settings.pane .settings__device { flex-direction: row; align-items: center; gap: 16px; padding: 16px 20px; }
 .settings.pane .settings__device:first-child { border-top: 0; }
@@ -302,10 +314,17 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__device-text { flex: 1; min-width: 0; }
 .settings.pane .settings__device-name { font-weight: 500; }
 .settings.pane .settings__device-meta { margin-top: 3px; color: var(--muted); font-size: 13px; }
-.settings.pane .settings__device-extra { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+.settings.pane .settings__device-extra { display: flex; align-items: center; justify-content: flex-start; gap: 10px; margin-top: 10px; font-size: 13px; color: var(--muted); }
 .settings.pane .settings__devices .settings__hint { margin-top: 6px; }
 .settings.pane .settings__devices .settings__confirm { padding: 12px 20px; border-top: 1px solid var(--border); }
 .settings.pane .settings__device-meta > .settings__state { display: flex; margin-top: 4px; }
+/* Narrow: the state and actions go on a line under the name, which keeps the row's width. */
+@media (max-width: 560px) {
+  .settings.pane .settings__device { flex-wrap: wrap; row-gap: 8px; }
+  .settings.pane .settings__device-text { flex: 1 1 calc(100% - 68px); }
+  .settings.pane .settings__device > .settings__state { margin-left: 68px; }
+  .settings.pane .settings__device > .settings__assistant-actions { margin-left: auto; }
+}
 .settings__confirm { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 8px; margin: 4px 0; border: 1px solid var(--border); border-radius: 6px; }
 .settings__confirm p { margin: 0; }
 .settings progress { width: 100%; }
