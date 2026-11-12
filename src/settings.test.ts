@@ -1466,6 +1466,10 @@ describe("Settings → Git", () => {
     expect(foot.querySelector("button[data-action=git-test]")).not.toBeNull();
     expect(foot.querySelector(".settings__git-test")?.textContent).toBe("Connected as @tiago");
     expect(block(root, "gitlab").querySelector(".settings__row--foot .settings__git-test")).toBeNull();
+    // No result: the Test button still sits at the end of the row.
+    const testBtn = block(root, "gitlab").querySelector(".settings__row--foot button[data-action=git-test]")!;
+    expect(testBtn.classList.contains("settings__foot-end")).toBe(true);
+    expect(styles).toMatch(/\.settings\.pane \.settings__foot-end\s*\{[^}]*margin-left:\s*auto/);
   });
 });
 

@@ -74,10 +74,13 @@ export function cardHead(opts: { label: Content; help?: string; control?: Node; 
   return r;
 }
 
-export function footRow(left: Content, right?: Node): HTMLElement {
+export function footRow(left: Content, right?: HTMLElement): HTMLElement {
   const r = el("div", "settings__row settings__row--foot");
   r.append(left);
-  if (right) r.append(right);
+  if (right) {
+    right.classList.add("settings__foot-end");
+    r.append(right);
+  }
   return r;
 }
 
