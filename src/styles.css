@@ -291,20 +291,21 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__confirm[data-for=new-key-confirm] p { flex: 1 1 100%; }
 @media (max-width: 720px) { .settings.pane .settings__pair { flex-direction: column; align-items: flex-start; gap: 16px; } }
 .settings button.settings__link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--muted); font-size: 12.5px; text-decoration: underline; cursor: pointer; }
-.settings__assistants { display: flex; flex-direction: column; }
-.settings__assistant { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: 1px solid var(--border); }
-.settings__badge { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--gold-deep); border-radius: 999px; color: var(--gold-bright); font-size: 11px; font-weight: 500; }
-.settings__assistant-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
-.settings__devices { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
-.settings__device { flex-direction: row; align-items: center; gap: 16px; padding: 16px 20px; }
-.settings__device:first-child { border-top: 0; }
-.settings__device-mark { width: 52px; height: 36px; border-radius: 9px; display: grid; place-items: center; background: var(--soft); border: 1px solid var(--border); color: var(--muted); font-size: 11.5px; font-weight: 600; flex: 0 0 auto; }
-.settings__device-text { flex: 1; min-width: 0; }
-.settings__device-name { font-weight: 500; }
-.settings__device-meta { margin-top: 3px; color: var(--muted); font-size: 13px; }
-.settings__device-extra { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px; color: var(--muted); }
-.settings__devices .settings__hint { margin-top: 6px; }
-.settings__devices .settings__confirm { padding: 12px 20px; border-top: 1px solid var(--border); }
+.settings.pane .settings__assistants { display: flex; flex-direction: column; }
+.settings.pane .settings__assistant { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: 1px solid var(--border); }
+.settings.pane .settings__badge { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--gold-deep); border-radius: 999px; color: var(--gold-bright); font-size: 11px; font-weight: 500; }
+.settings.pane .settings__assistant-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.settings.pane .settings__devices { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
+.settings.pane .settings__device { flex-direction: row; align-items: center; gap: 16px; padding: 16px 20px; }
+.settings.pane .settings__device:first-child { border-top: 0; }
+.settings.pane .settings__device-mark { width: 52px; height: 36px; border-radius: 9px; display: grid; place-items: center; background: var(--soft); border: 1px solid var(--border); color: var(--muted); font-size: 11.5px; font-weight: 600; flex: 0 0 auto; }
+.settings.pane .settings__device-text { flex: 1; min-width: 0; }
+.settings.pane .settings__device-name { font-weight: 500; }
+.settings.pane .settings__device-meta { margin-top: 3px; color: var(--muted); font-size: 13px; }
+.settings.pane .settings__device-extra { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+.settings.pane .settings__devices .settings__hint { margin-top: 6px; }
+.settings.pane .settings__devices .settings__confirm { padding: 12px 20px; border-top: 1px solid var(--border); }
+.settings.pane .settings__device-meta > .settings__state { display: flex; margin-top: 4px; }
 .settings__confirm { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 8px; margin: 4px 0; border: 1px solid var(--border); border-radius: 6px; }
 .settings__confirm p { margin: 0; }
 .settings progress { width: 100%; }

@@ -112,8 +112,8 @@ function fill(row: HTMLElement, p: Parts, stateUnderName: boolean): void {
     name.append(badge);
   }
   const meta = div("settings__device-meta");
+  meta.append(p.meta);
   if (stateUnderName && p.state) meta.append(p.state);
-  else meta.append(p.meta);
   text.append(name, meta, ...(p.extra ?? []));
   row.append(mark, text);
   if (!stateUnderName && p.state) row.append(p.state);
@@ -171,7 +171,9 @@ function memberRow(d: DeviceRow, net: NetworkStatus, m: DevicesModel, nowMs: num
   if (!d.isSelf && d.platform !== "android" && !connectedMain) {
     actions.append(button("join", "Join", { key: d.key }));
   }
-  fill(row, { platform: d.platform, name: d.name, meta: details(d, clash), state: d.isMain ? stateEl("Main", "main") : lastSeen(false, d.lastSeen, nowMs), actions }, under);
+  // A main shows "Main"; when it is not connected its meta still says when it was last seen.
+  const away = d.isMain && !connectedMain ? ` — ${lastSeen(false, d.lastSeen, nowMs).textContent}` : "";
+  fill(row, { platform: d.platform, name: d.name, meta: details(d, clash) + away, state: d.isMain ? stateEl("Main", "main") : lastSeen(false, d.lastSeen, nowMs), actions }, under);
   const out = [row];
   if (m.joining === d.key) out.push(joinForm(d, m));
   return out;

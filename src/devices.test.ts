@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import css from "./styles.css?raw";
 import { morph } from "./morph";
 import { renderDevices, type DevicesHandlers, type DevicesModel, type DeviceRow } from "./devices";
 import type { NetworkStatus } from "./settings";
@@ -72,10 +73,22 @@ describe("renderDevices", () => {
     expect([...el.querySelectorAll(".settings__device-mark")].map((m) => m.textContent)).toEqual(["Mac", "Mac", "Windows", "Linux", "Phone", "freebsd"]);
   });
 
+  it("a main that is not connected says when it was last seen in its meta; a connected one adds nothing", () => {
+    const away = renderDevices(status(false, [me, desk]), model(), handlers(), 3_601_000);
+    expect(away.querySelector("[data-row=kd] .settings__device-meta")?.textContent).toBe("macos, 192.168.1.2 — Last seen 1h ago");
+    expect(away.querySelector("[data-row=kd] .settings__state--main")?.textContent).toBe("Main");
+    const never = renderDevices(status(false, [me, { ...desk, lastSeen: null }]), model(), handlers(), 2000);
+    expect(never.querySelector("[data-row=kd] .settings__device-meta")?.textContent).toBe("macos, 192.168.1.2 — Never connected");
+    const up = renderDevices(status(true, [me, desk]), model(), handlers(), 3_601_000);
+    expect(up.querySelector("[data-row=kd] .settings__device-meta")?.textContent).toBe("macos, 192.168.1.2");
+  });
+
   it("puts the state under the name when asked", () => {
     const el = renderDevices(status(true, [me, nas]), model(), handlers(), 3_601_000, "this phone", { stateUnderName: true });
     const nasRow = el.querySelector("[data-row=kn]")!;
-    expect(nasRow.querySelector(".settings__device-meta .settings__state")?.textContent).toBe("Last seen 1h ago");
+    const meta = nasRow.querySelector(".settings__device-meta")!;
+    expect(meta.firstChild?.textContent).toBe("macos, 192.168.1.5");
+    expect(meta.querySelector(".settings__state")?.textContent).toBe("Last seen 1h ago");
     const side = renderDevices(status(true, [me, nas]), model(), handlers(), 3_601_000);
     expect(side.querySelector("[data-row=kn] .settings__device-meta .settings__state")).toBeNull();
     expect(side.querySelector("[data-row=kn] .settings__state")).not.toBeNull();
@@ -165,6 +178,17 @@ describe("renderDevices", () => {
 
 // The Settings repaint keeps the first render's list and patches it against
 // each new render, so the kept root's listener must act on the new rows.
+describe("the Devices stylesheet", () => {
+  it("scopes every device rule to .settings.pane and keeps the row direction over the column rule", () => {
+    const rules = css.split("\n").filter((l) => /^\S*\.settings__(device|devices|assistant|assistants|badge)\b/.test(l.trim()) || /^\.settings\.pane \.settings__(device|devices|assistant|assistants|badge)/.test(l));
+    expect(rules.length).toBeGreaterThan(8);
+    for (const l of css.split("\n")) if (/^\.settings__(device|devices|assistant|assistants|badge)/.test(l)) throw new Error("unscoped: " + l);
+    expect(css).toMatch(/\.settings\.pane \.settings__assistant \{[^}]*flex-direction: column/);
+    expect(css).toMatch(/\.settings\.pane \.settings__device \{[^}]*flex-direction: row/);
+    expect(css.indexOf(".settings.pane .settings__device {")).toBeGreaterThan(css.indexOf(".settings.pane .settings__assistant {"));
+  });
+});
+
 describe("after a repaint", () => {
   const patch = (old: HTMLElement, fresh: HTMLElement) => morph(old, fresh);
   const cell = (c: HTMLElement, sel: string) => c.querySelector<HTMLButtonElement>(sel)!;
