@@ -9,6 +9,7 @@ pub mod start;
 pub mod started;
 
 use crate::config::{CustomTool, GitProvider, WorkItemsConfig};
+use coral::{Coral, CoralMe};
 use crate::forge::{Forge, ForgeSite, Http};
 use serde::{Deserialize, Serialize};
 
@@ -97,27 +98,43 @@ pub struct Fetched {
     pub source: String,
     pub label: String,
     pub result: Result<Vec<WorkItem>, String>,
+    /// Lines for rules that named something the source does not have: the items still show.
+    pub warnings: Vec<String>,
 }
 
-/// Asks every forge whose Work Items are on and every enabled tool with a
-/// list command, at once. The app passes `&custom::list` as `list_tool`.
-pub fn fetch(forges: &[Forge], cfg: &WorkItemsConfig, http: &dyn Http, sites: &[ForgeSite], list_tool: &(dyn Fn(&CustomTool, &[ForgeSite]) -> Result<Vec<WorkItem>, String> + Sync)) -> Vec<Fetched> {
+/// Asks every forge whose Work Items are on, Coral when it is on and given,
+/// and every enabled tool with a list command, at once. The app passes
+/// `&custom::list` as `list_tool`.
+pub fn fetch(forges: &[Forge], cfg: &WorkItemsConfig, http: &dyn Http, sites: &[ForgeSite], coral: Option<(&Coral, &CoralMe)>, list_tool: &(dyn Fn(&CustomTool, &[ForgeSite]) -> Result<Vec<WorkItem>, String> + Sync)) -> Vec<Fetched> {
+    type Asked = Result<(Vec<WorkItem>, Vec<String>), String>;
     std::thread::scope(|s| {
         let mut handles: Vec<(String, String, _)> = Vec::new();
         for f in forges.iter().filter(|f| cfg.for_forge(f.site.provider).enabled) {
             let items = cfg.for_forge(f.site.provider);
-            let ask = move || match f.site.provider {
-                GitProvider::Github => github::list(http, f, items),
-                GitProvider::Gitlab => gitlab::list(http, f, items),
+            let ask = move || -> Asked {
+                match f.site.provider {
+                    GitProvider::Github => github::list(http, f, items),
+                    GitProvider::Gitlab => gitlab::list(http, f, items),
+                }
+                .map(|i| (i, vec![]))
             };
             handles.push((source_of(f.site.provider).to_string(), f.site.provider.label().to_string(), s.spawn(ask)));
         }
+        if let Some((c, me)) = coral.filter(|_| cfg.coral.enabled) {
+            handles.push((coral::SOURCE.to_string(), "Coral".to_string(), s.spawn(move || -> Asked { coral::list(http, c, &cfg.coral, me) })));
+        }
         for t in cfg.custom.iter().filter(|t| t.enabled && !t.list_command.trim().is_empty()) {
-            handles.push((t.id.clone(), t.label().to_string(), s.spawn(move || list_tool(t, sites))));
+            handles.push((t.id.clone(), t.label().to_string(), s.spawn(move || -> Asked { list_tool(t, sites).map(|i| (i, vec![])) })));
         }
         handles
             .into_iter()
-            .map(|(source, label, h)| Fetched { source, label, result: h.join().unwrap_or_else(|_| Err("the check stopped unexpectedly".into())) })
+            .map(|(source, label, h)| {
+                let (result, warnings) = match h.join().unwrap_or_else(|_| Err("the check stopped unexpectedly".into())) {
+                    Ok((items, warnings)) => (Ok(items), warnings),
+                    Err(e) => (Err(e), vec![]),
+                };
+                Fetched { source, label, result, warnings }
+            })
             .collect()
     })
 }
@@ -129,11 +146,16 @@ pub fn fetch(forges: &[Forge], cfg: &WorkItemsConfig, http: &dyn Http, sites: &[
 pub fn combine(previous: &[WorkItem], fetched: Vec<Fetched>, mut errors: Vec<SourceError>) -> (Vec<WorkItem>, Vec<SourceError>) {
     let mut lists = Vec::new();
     for f in fetched {
+        errors.extend(f.warnings.into_iter().map(|message| SourceError { source: f.source.clone(), message }));
         match f.result {
             Ok(items) => lists.push(items),
             Err(e) => {
                 lists.push(previous.iter().filter(|i| i.source == f.source).cloned().collect());
-                let message = if f.source == "github" || f.source == "gitlab" { format!("{} issues check failed: {e}", f.label) } else { format!("{}: {e}", f.label) };
+                let message = match f.source.as_str() {
+                    "github" | "gitlab" => format!("{} issues check failed: {e}", f.label),
+                    coral::SOURCE => format!("{} work items check failed: {e}", f.label),
+                    _ => format!("{}: {e}", f.label),
+                };
                 errors.push(SourceError { source: f.source, message });
             }
         }
@@ -191,8 +213,8 @@ mod tests {
         let gh = WorkItem { key: "github:a/b#1".into(), source: "github".into(), ..test_item() };
         let gl = WorkItem { key: "gitlab:g/r#2".into(), source: "gitlab".into(), ..test_item() };
         let fetched = vec![
-            Fetched { source: "github".into(), label: "GitHub".into(), result: Err("could not reach github.com: timeout".into()) },
-            Fetched { source: "gitlab".into(), label: "GitLab".into(), result: Ok(vec![]) },
+            Fetched { source: "github".into(), label: "GitHub".into(), result: Err("could not reach github.com: timeout".into()), warnings: vec![] },
+            Fetched { source: "gitlab".into(), label: "GitLab".into(), result: Ok(vec![]), warnings: vec![] },
         ];
         let (items, errors) = combine(&[gh.clone(), gl], fetched, vec![]);
         assert_eq!(items, vec![gh]);
@@ -202,7 +224,7 @@ mod tests {
     #[test]
     fn a_failed_tool_keeps_its_last_items_and_names_itself() {
         let old = WorkItem { key: "custom-1:ENG-1".into(), source: "custom-1".into(), ..test_item() };
-        let fetched = vec![Fetched { source: "custom-1".into(), label: "Linear (mine-only)".into(), result: Err("the command exited with status 1".into()) }];
+        let fetched = vec![Fetched { source: "custom-1".into(), label: "Linear (mine-only)".into(), result: Err("the command exited with status 1".into()), warnings: vec![] }];
         let (items, errors) = combine(&[old.clone()], fetched, vec![]);
         assert_eq!(items, vec![old]);
         assert_eq!(errors, vec![SourceError { source: "custom-1".into(), message: "Linear (mine-only): the command exited with status 1".into() }]);
@@ -229,11 +251,52 @@ mod tests {
             ..Default::default()
         };
         let http = FakeHttp::new(vec![]);
-        let fetched = fetch(&[], &cfg, &http, &[], &|t, s| custom::list_with(t, s, &|c| vec!["sh".into(), "-c".into(), c.into()]));
+        let fetched = fetch(&[], &cfg, &http, &[], None, &|t, s| custom::list_with(t, s, &|c| vec!["sh".into(), "-c".into(), c.into()]));
         assert_eq!(fetched.len(), 1);
         assert_eq!(fetched[0].source, "custom-1");
         let items = fetched[0].result.as_ref().unwrap();
         assert_eq!(items.len(), 1);
         assert!(items[0].id.contains("A-1") || items[0].key.contains("A-1"), "{:?}", items[0]);
+    }
+
+    fn coral_conn() -> (Coral, CoralMe) {
+        (Coral { base: "https://coral.test".into(), token: "cbp_secret".into() }, CoralMe { id: "u-me".into(), name: "Maria".into(), email: "maria@example.test".into() })
+    }
+
+    #[test]
+    fn fetch_asks_coral_when_it_is_on() {
+        use crate::forge::fake::FakeHttp;
+        let (c, me) = coral_conn();
+        let body = r#"{"data":[{"id":"i-1","displayCode":"BED-0001","title":"A"}],"nextCursor":null}"#;
+        let http = FakeHttp::new(vec![("itemType=work_item", 200, body), ("itemType=defect", 200, r#"{"data":[],"nextCursor":null}"#)]);
+        let mut cfg = WorkItemsConfig::default();
+        cfg.coral.enabled = true;
+        let fetched = fetch(&[], &cfg, &http, &[], Some((&c, &me)), &|_, _| Ok(vec![]));
+        assert_eq!(fetched.len(), 1);
+        assert_eq!((fetched[0].source.as_str(), fetched[0].label.as_str()), ("coral", "Coral"));
+        assert_eq!(fetched[0].result.as_ref().unwrap()[0].key, "coral:i-1");
+        // Off, or no connection: not asked.
+        cfg.coral.enabled = false;
+        assert!(fetch(&[], &cfg, &http, &[], Some((&c, &me)), &|_, _| Ok(vec![])).is_empty());
+        cfg.coral.enabled = true;
+        assert!(fetch(&[], &cfg, &http, &[], None, &|_, _| Ok(vec![])).is_empty());
+    }
+
+    #[test]
+    fn a_failed_coral_check_keeps_its_items_and_says_so() {
+        let old = WorkItem { key: "coral:i-1".into(), source: "coral".into(), ..test_item() };
+        let fetched = vec![Fetched { source: "coral".into(), label: "Coral".into(), result: Err("could not reach coral.test: timeout".into()), warnings: vec![] }];
+        let (items, errors) = combine(&[old.clone()], fetched, vec![]);
+        assert_eq!(items, vec![old]);
+        assert_eq!(errors, vec![SourceError { source: "coral".into(), message: "Coral work items check failed: could not reach coral.test: timeout".into() }]);
+    }
+
+    #[test]
+    fn coral_warnings_show_beside_its_items() {
+        let item = WorkItem { key: "coral:i-1".into(), source: "coral".into(), ..test_item() };
+        let fetched = vec![Fetched { source: "coral".into(), label: "Coral".into(), result: Ok(vec![item.clone()]), warnings: vec!["Coral has no tag nope".into()] }];
+        let (items, errors) = combine(&[], fetched, vec![]);
+        assert_eq!(items, vec![item]);
+        assert_eq!(errors, vec![SourceError { source: "coral".into(), message: "Coral has no tag nope".into() }]);
     }
 }

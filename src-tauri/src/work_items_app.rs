@@ -53,7 +53,7 @@ pub(crate) fn poll_work_items(app: &AppHandle) {
     let off = forges.is_empty() && missing.is_empty() && !tool_asked;
     let missing: Vec<SourceError> = missing.into_iter().map(|e| SourceError { source: source_of(e.forge).to_string(), message: e.message }).collect();
     let source_labels: BTreeMap<String, String> = cfg.custom.iter().map(|t| (t.id.clone(), t.label().to_string())).collect();
-    let fetched = work_items::fetch(&forges, &cfg, git::http(), &sites, &custom::list);
+    let fetched = work_items::fetch(&forges, &cfg, git::http(), &sites, None, &custom::list);
     for f in &fetched {
         if let Err(e) = &f.result {
             log::line("app", format!("issues: {}: {e}", f.label));

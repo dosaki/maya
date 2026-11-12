@@ -258,7 +258,7 @@ impl Ureq {
         let headers = resp.headers();
         let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
         let reset_at = self.pauses.note(token, url, status, &body, &header, crate::now_ms()).filter(|_| !(200..300).contains(&status));
-        Ok((Reply { status, body, reset_at }, header("etag")))
+        Ok((Reply { status, body, reset_at, location: header("location") }, header("etag")))
     }
 
     /// The reply, unless the quota `url` draws on is used up.
@@ -372,7 +372,7 @@ pub fn rate_limit_message(p: GitProvider, reset_at: Option<u64>) -> String {
 /// The body of a 2xx reply, else why not. An error body is scrubbed of
 /// `token` before it is cut, so no part of the token survives the cut.
 fn check(p: GitProvider, reply: Reply, token: &str, need: Need) -> Result<String, String> {
-    let Reply { status, body, reset_at } = reply;
+    let Reply { status, body, reset_at, .. } = reply;
     match status {
         200..=299 => Ok(body),
         403 | 429 if status == 429 || reset_at.is_some() || limits::says_rate_limit(&body) => Err(rate_limit_message(p, reset_at)),
@@ -491,16 +491,27 @@ pub(crate) mod fake {
     pub struct FakeHttp {
         pub replies: Vec<(&'static str, u16, String)>,
         pub seen: Mutex<Vec<(String, String, Option<String>, Option<String>)>>,
+        /// A `Location` header for the replies to URLs containing the needle.
+        pub locations: Vec<(&'static str, String)>,
     }
 
     impl FakeHttp {
         pub fn new(replies: Vec<(&'static str, u16, &str)>) -> Self {
-            FakeHttp { replies: replies.into_iter().map(|(n, s, b)| (n, s, b.to_string())).collect(), seen: Mutex::new(Vec::new()) }
+            FakeHttp { replies: replies.into_iter().map(|(n, s, b)| (n, s, b.to_string())).collect(), seen: Mutex::new(Vec::new()), locations: Vec::new() }
+        }
+
+        pub fn with_location(mut self, needle: &'static str, location: &str) -> Self {
+            self.locations.push((needle, location.to_string()));
+            self
         }
 
         fn answer(&self, url: &str, token: &str, body: Option<&str>, method: Option<&str>) -> Result<super::Reply, String> {
             self.seen.lock().unwrap().push((url.to_string(), token.to_string(), body.map(str::to_string), method.map(str::to_string)));
-            self.replies.iter().find(|(n, _, _)| url.contains(n)).map(|(_, s, b)| (*s, b.clone()).into()).ok_or_else(|| "no route".to_string())
+            self.replies.iter().find(|(n, _, _)| url.contains(n)).map(|(_, s, b)| {
+                let mut reply: super::Reply = (*s, b.clone()).into();
+                reply.location = self.locations.iter().find(|(n, _)| url.contains(n)).map(|(_, l)| l.clone());
+                reply
+            }).ok_or_else(|| "no route".to_string())
         }
     }
 
@@ -766,8 +777,8 @@ mod tests {
         ]);
         let http = Ureq::new();
         let url = format!("{base}/repos/O/r/pulls");
-        assert_eq!(http.get(&url, "ghp_x").unwrap(), Reply { status: 200, body: "[1]".into(), reset_at: None });
-        assert_eq!(http.get(&url, "ghp_x").unwrap(), Reply { status: 200, body: "[1]".into(), reset_at: None }, "the 304 gives the kept body");
+        assert_eq!(http.get(&url, "ghp_x").unwrap(), Reply { status: 200, body: "[1]".into(), reset_at: None, location: None });
+        assert_eq!(http.get(&url, "ghp_x").unwrap(), Reply { status: 200, body: "[1]".into(), reset_at: None, location: None }, "the 304 gives the kept body");
         assert_eq!(http.get(&url, "ghp_x").unwrap().body, "[2]");
         let seen = seen.lock().unwrap();
         assert!(!seen[0].contains("if-none-match"), "{}", seen[0]);

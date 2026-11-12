@@ -16,18 +16,20 @@ pub struct Reply {
     pub status: u16,
     pub body: String,
     pub reset_at: Option<u64>,
+    /// The `Location` header of a redirect, as sent.
+    pub location: Option<String>,
 }
 
 impl From<(u16, String)> for Reply {
     fn from((status, body): (u16, String)) -> Self {
-        Reply { status, body, reset_at: None }
+        Reply { status, body, reset_at: None, location: None }
     }
 }
 
 impl Reply {
     /// The answer for a quota Maya is waiting on, sent without asking the forge.
     pub fn waiting(until: u64) -> Self {
-        Reply { status: 429, body: r#"{"message":"rate limit: waiting for it to reset"}"#.into(), reset_at: Some(until) }
+        Reply { status: 429, body: r#"{"message":"rate limit: waiting for it to reset"}"#.into(), reset_at: Some(until), location: None }
     }
 }
 

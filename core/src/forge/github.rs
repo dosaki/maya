@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn active_repos_reads_at_most_five_pages() {
         let full: String = format!("[{}]", (0..100).map(|i| format!(r#"{{"full_name":"O/r{i}","pushed_at":"2026-10-28T00:00:00Z"}}"#)).collect::<Vec<_>>().join(","));
-        let http = FakeHttp { replies: vec![("/user/repos", 200, full)], seen: Default::default() };
+        let http = FakeHttp { replies: vec![("/user/repos", 200, full)], seen: Default::default(), locations: vec![] };
         assert_eq!(active_repos(&http, &forge(), now()).unwrap().len(), 500);
         let seen = http.seen.lock().unwrap();
         assert_eq!(seen.len(), 5);
