@@ -1,9 +1,10 @@
 //! Coral Boards over its REST API: the address and token, and the calls
 //! every Coral request goes through. The token never appears in an error.
 
-use super::WorkItem;
+use super::{ItemRepo, WorkItem};
 use crate::config::{Assignee, CoralItems, ItemRule, TokenSource};
-use crate::forge::{answer_with, encode, scrub, status_message, Http, Reply};
+use crate::forge::{answer_with, encode, route, scrub, status_message, ForgeSite, Http, Reply};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -108,7 +109,6 @@ pub(crate) fn get_json(http: &dyn Http, c: &Coral, url: &str) -> Result<Value, S
 }
 
 /// A PATCH's or PUT's (or POST's) JSON body sent; the reply is not read.
-#[allow(dead_code)] // Start (a later task) calls it
 pub(crate) fn send_json(http: &dyn Http, c: &Coral, method: &str, url: &str, body: &Value) -> Result<(), String> {
     let body = body.to_string();
     let r = if method == "POST" { http.post_json(url, &c.token, &body) } else { http.send_json(method, url, &c.token, &body) };
@@ -404,6 +404,80 @@ pub fn get(http: &dyn Http, c: &Coral, code: &str) -> Result<Option<CoralItem>, 
 /// The product of an item code: the part before its last `-`.
 pub fn product_of(code: &str) -> &str {
     code.rsplit_once('-').map_or(code, |(product, _)| product)
+}
+
+/// A status of Coral's global vocabulary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoralStatus {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    /// Coral's `isAlsoSubStatus`: a defect may only take a status where this is true.
+    pub sub: bool,
+    pub position: i64,
+}
+
+/// Every status, by position.
+pub fn statuses(http: &dyn Http, c: &Coral) -> Result<Vec<CoralStatus>, String> {
+    let v = get_json(http, c, &c.api("/statuses"))?;
+    let mut all: Vec<CoralStatus> = v
+        .as_array()
+        .ok_or("Coral's statuses were not a list.")?
+        .iter()
+        .filter_map(|s| {
+            Some(CoralStatus { id: s["id"].as_str()?.to_string(), name: text(s, "name"), category: text(s, "category"), sub: s["isAlsoSubStatus"].as_bool().unwrap_or(false), position: s["position"].as_i64().unwrap_or(0) })
+        })
+        .collect();
+    all.sort_by_key(|s| s.position);
+    Ok(all)
+}
+
+/// The repositories of a product that live on a forge Maya knows, once each.
+pub fn product_repos(http: &dyn Http, c: &Coral, product: &str, sites: &[ForgeSite]) -> Result<Vec<ItemRepo>, String> {
+    let v = get_json(http, c, &c.api(&format!("/products/{}/repositories", encode(product))))?;
+    let mut out: Vec<ItemRepo> = Vec::new();
+    for url in v.as_array().ok_or("Coral's repositories were not a list.")?.iter().filter_map(|r| r["url"].as_str()) {
+        let Some((site, path)) = route(url, sites) else { continue };
+        if !out.iter().any(|r| r.forge == site.provider && r.path.eq_ignore_ascii_case(&path)) {
+            out.push(ItemRepo { forge: site.provider, path });
+        }
+    }
+    Ok(out)
+}
+
+/// The status Start sets on an item of `item_type`: `start`, except that a
+/// defect may only take a status that is also a sub-status, so then the
+/// first one of the same category that is. None when there is none.
+pub fn status_for(item_type: &str, start: &str, all: &[CoralStatus]) -> Option<String> {
+    let want = all.iter().find(|s| s.id == start)?;
+    if item_type != "defect" || want.sub {
+        return Some(want.id.clone());
+    }
+    all.iter().filter(|s| s.sub && s.category == want.category).min_by_key(|s| s.position).map(|s| s.id.clone())
+}
+
+/// Takes an item for me: assigns me beside the others, then moves it to
+/// `start_status`. The assignment comes first: Coral refuses to move a todo
+/// item to an active status without an assignee.
+pub fn take(http: &dyn Http, c: &Coral, it: &CoralItem, me: &CoralMe, start_status: Option<&str>) -> Result<(), String> {
+    let url = c.api(&format!("/work-items/{}", encode(&it.item.id)));
+    if !it.assignments.iter().any(|a| a.user_id == me.id && a.role == "assignee") {
+        // PUT replaces the whole list, so every existing assignment goes back.
+        let mut all: Vec<Value> = it.assignments.iter().map(|a| serde_json::json!({ "userId": a.user_id, "role": a.role })).collect();
+        all.push(serde_json::json!({ "userId": me.id, "role": "assignee" }));
+        send_json(http, c, "PUT", &format!("{url}/assignments"), &serde_json::json!({ "assignments": all }))?;
+    }
+    let Some(start) = start_status else { return Ok(()) };
+    let all = statuses(http, c)?;
+    let id = status_for(&it.item_type, start, &all).ok_or_else(|| {
+        let name = all.iter().find(|s| s.id == start).map_or(start, |s| s.name.as_str());
+        format!("Coral allows no status like {name} on a defect; the status was left as it is.")
+    })?;
+    if it.status_id.as_deref() == Some(id.as_str()) {
+        return Ok(());
+    }
+    send_json(http, c, "PATCH", &url, &serde_json::json!({ "statusId": id }))
 }
 
 #[cfg(test)]
@@ -713,5 +787,112 @@ mod tests {
         assert_eq!(product_of("BED-0021"), "BED");
         assert_eq!(product_of("MY-APP-0003"), "MY-APP");
         assert_eq!(product_of("BED"), "BED");
+    }
+
+    fn status(id: &str, category: &str, sub: bool, position: i64) -> CoralStatus {
+        CoralStatus { id: id.into(), name: format!("Name {id}"), category: category.into(), sub, position }
+    }
+
+    fn statuses_body() -> String {
+        json!([
+            {"id": "s-doing", "name": "Doing", "category": "active", "isIdle": false, "isTesting": false, "isInitial": false, "isAlsoSubStatus": true, "position": 2},
+            {"id": "s-todo", "name": "Todo", "category": "todo", "isIdle": false, "isTesting": false, "isInitial": true, "isAlsoSubStatus": false, "position": 1}
+        ])
+        .to_string()
+    }
+
+    #[test]
+    fn statuses_are_read_by_position() {
+        let http = FakeHttp::new(vec![("/api/v1/statuses", 200, &statuses_body())]);
+        let all = statuses(&http, &coral()).unwrap();
+        assert_eq!(all, vec![CoralStatus { name: "Todo".into(), ..status("s-todo", "todo", false, 1) }, CoralStatus { name: "Doing".into(), ..status("s-doing", "active", true, 2) }]);
+    }
+
+    #[test]
+    fn product_repos_route_to_known_forges() {
+        use crate::config::{GitConnection, GitProvider};
+        let sites = vec![
+            ForgeSite::of(&GitConnection::default_for(GitProvider::Github)),
+            ForgeSite::of(&GitConnection { base_url: Some("https://gitlab.acme.test".into()), enabled: true, ..GitConnection::default_for(GitProvider::Gitlab) }),
+        ];
+        let body = json!([
+            {"url": "https://github.com/acme/api.git"},
+            {"url": "https://gitlab.acme.test/g/r/"},
+            {"url": "https://bitbucket.org/x/y"},
+            {"url": "https://GitHub.com/Acme/API"}
+        ])
+        .to_string();
+        let http = FakeHttp::new(vec![("/api/v1/products/BED/repositories", 200, &body)]);
+        let repos = product_repos(&http, &coral(), "BED", &sites).unwrap();
+        assert_eq!(repos, vec![ItemRepo { forge: GitProvider::Github, path: "acme/api".into() }, ItemRepo { forge: GitProvider::Gitlab, path: "g/r".into() }]);
+    }
+
+    fn me_and_item(assignments: Vec<Assignment>, status_id: Option<&str>, item_type: &str) -> (CoralMe, CoralItem) {
+        let item = get(&FakeHttp::new(vec![("/BED-0021", 200, &full_item().to_string())]), &coral(), "BED-0021").unwrap().unwrap();
+        (me_user(), CoralItem { assignments, status_id: status_id.map(str::to_string), item_type: item_type.into(), ..item })
+    }
+
+    fn asg(user: &str, role: &str) -> Assignment {
+        Assignment { user_id: user.into(), role: role.into() }
+    }
+
+    #[test]
+    fn take_adds_me_beside_the_others_then_sets_the_status() {
+        let (me, it) = me_and_item(vec![asg("u-3", "assignee"), asg("u-4", "reviewer")], Some("s-todo"), "work_item");
+        let http = FakeHttp::new(vec![("/assignments", 204, ""), ("/api/v1/statuses", 200, &statuses_body()), ("/api/v1/work-items/BED-0021", 200, "{}")]);
+        take(&http, &coral(), &it, &me, Some("s-doing")).unwrap();
+        let seen = http.seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!((seen[0].0.as_str(), seen[0].3.as_deref()), ("https://coral.test/api/v1/work-items/BED-0021/assignments", Some("PUT")));
+        let put: Value = serde_json::from_str(seen[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(put, json!({"assignments": [{"userId": "u-3", "role": "assignee"}, {"userId": "u-4", "role": "reviewer"}, {"userId": me.id, "role": "assignee"}]}));
+        assert!(seen[1].0.ends_with("/api/v1/statuses"));
+        assert_eq!((seen[2].0.as_str(), seen[2].3.as_deref()), ("https://coral.test/api/v1/work-items/BED-0021", Some("PATCH")));
+        assert_eq!(serde_json::from_str::<Value>(seen[2].2.as_deref().unwrap()).unwrap(), json!({"statusId": "s-doing"}));
+        assert_eq!(seen[2].1, "cbp_secret");
+    }
+
+    #[test]
+    fn take_skips_the_assignment_when_i_am_assigned_and_the_status_when_it_is_set() {
+        let (me, it) = me_and_item(vec![asg(&me_user().id, "assignee")], Some("s-doing"), "work_item");
+        let http = FakeHttp::new(vec![("/api/v1/statuses", 200, &statuses_body())]);
+        take(&http, &coral(), &it, &me, Some("s-doing")).unwrap();
+        assert_eq!(urls(&http), vec!["https://coral.test/api/v1/statuses"], "nothing was written");
+        // Reviewing the item is not being its assignee: I am added.
+        let (me, it) = me_and_item(vec![asg(&me_user().id, "reviewer")], None, "work_item");
+        let http = FakeHttp::new(vec![("/assignments", 204, "")]);
+        take(&http, &coral(), &it, &me, None).unwrap();
+        let seen = http.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "no status asked for, none read");
+        assert!(seen[0].2.as_deref().unwrap().contains(r#""role":"reviewer""#), "the reviewer assignment stays");
+    }
+
+    #[test]
+    fn a_defect_gets_the_first_allowed_status_of_the_same_kind() {
+        let all = vec![status("s-active", "active", false, 1), status("s-doing", "active", true, 2), status("s-test", "active", true, 3)];
+        assert_eq!(status_for("defect", "s-active", &all).as_deref(), Some("s-doing"));
+        assert_eq!(status_for("work_item", "s-active", &all).as_deref(), Some("s-active"));
+        assert_eq!(status_for("defect", "s-test", &all).as_deref(), Some("s-test"));
+        let none = vec![status("s-active", "active", false, 1), status("s-other", "todo", true, 2)];
+        assert_eq!(status_for("defect", "s-active", &none), None);
+        assert_eq!(status_for("work_item", "gone", &all), None, "an unknown status");
+    }
+
+    #[test]
+    fn a_defect_with_no_allowed_status_keeps_its_status_and_says_so() {
+        let (me, it) = me_and_item(vec![asg(&me_user().id, "assignee")], Some("s-todo"), "defect");
+        let http = FakeHttp::new(vec![("/api/v1/statuses", 200, &statuses_body())]);
+        let e = take(&http, &coral(), &it, &me, Some("s-todo")).unwrap_err();
+        assert_eq!(e, "Coral allows no status like Todo on a defect; the status was left as it is.");
+        assert_eq!(http.seen.lock().unwrap().len(), 1, "no PATCH");
+    }
+
+    #[test]
+    fn a_refused_status_change_shows_corals_message() {
+        let (me, it) = me_and_item(vec![asg(&me_user().id, "assignee")], Some("s-todo"), "work_item");
+        let http = FakeHttp::new(vec![("/api/v1/statuses", 200, &statuses_body()), ("/api/v1/work-items/BED-0021", 400, r#"{"error":"Bugs need a severity"}"#)]);
+        let e = take(&http, &coral(), &it, &me, Some("s-doing")).unwrap_err();
+        assert!(e.starts_with("400") && e.contains("Bugs need a severity"), "{e}");
+        assert!(!e.contains("cbp_secret"));
     }
 }
