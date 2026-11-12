@@ -32,6 +32,16 @@ describe("row", () => {
     const b = document.createElement("button");
     expect(row({ label: "L", control: [a, b] }).tagName).toBe("DIV");
   });
+  it("links the help to the named field when the row also holds a button", () => {
+    const tok = document.createElement("input");
+    tok.name = "gitToken-github";
+    const clear = document.createElement("button");
+    const r = row({ label: "GitHub token", help: "Saved in Keychain.", control: [tok, clear] });
+    expect(r.tagName).toBe("DIV");
+    expect(tok.getAttribute("aria-describedby")).toBe("settings-help-gitToken-github");
+    expect(r.querySelector("#settings-help-gitToken-github")!.textContent).toBe("Saved in Keychain.");
+    expect(clear.hasAttribute("aria-describedby")).toBe(false);
+  });
   it("can be stacked", () => {
     expect(row({ label: "L", stack: true }).classList.contains("settings__row--stack")).toBe(true);
   });

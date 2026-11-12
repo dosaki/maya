@@ -424,6 +424,8 @@ describe("the Devices card", () => {
     const pane = await mount(off);
     expect(pane.querySelector(".settings__devices")).toBeNull();
     expect(pane.textContent).toContain("Join a main in Settings › Network to see your devices.");
+    const none = pane.querySelector<HTMLElement>("[data-row=devices-off]")!;
+    expect(none.parentElement!.classList.contains("settings__card")).toBe(true);
   });
 });
 

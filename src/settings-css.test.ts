@@ -38,6 +38,19 @@ describe("the Settings screens' spacing", () => {
   });
 });
 
+describe("long names", () => {
+  it("cuts a long custom tool name short in its header, so the switch stays reachable", () => {
+    const name = rule(".settings.pane .settings__source-name");
+    expect(name).toContain("min-width: 0");
+    expect(name).toContain("overflow: hidden");
+    expect(name).toContain("text-overflow: ellipsis");
+  });
+
+  it("wraps a long device name inside its column", () => {
+    expect(rule(".settings.pane .settings__device-name")).toContain("overflow-wrap: anywhere");
+  });
+});
+
 describe("Settings fields", () => {
   it("keeps a number field 88px wide: only other fields widen the control to 300px", () => {
     const wide = /\.settings\.pane \.settings__control:has\(([^{]*)\)\s*\{\s*flex-basis: 300px/.exec(css)!;

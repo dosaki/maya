@@ -220,7 +220,7 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__source-chev { width: 20px; height: 20px; display: grid; place-items: center; color: var(--muted); flex: 0 0 auto; }
 .settings.pane .settings__source-chev::before { content: ""; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
 .settings.pane .settings__source[data-open] .settings__source-chev::before { transform: rotate(45deg); }
-.settings.pane .settings__source-name { font-size: 15px; font-weight: 600; white-space: nowrap; }
+.settings.pane .settings__source-name { font-size: 15px; font-weight: 600; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .settings.pane .settings__source-tag { padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
 .settings.pane .settings__source-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
 .settings.pane .settings__source-state { font-size: 13px; color: var(--muted); min-width: 2em; text-align: right; }
@@ -314,7 +314,7 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__device:first-child { border-top: 0; }
 .settings.pane .settings__device-mark { width: 52px; height: 36px; border-radius: 9px; display: grid; place-items: center; background: var(--soft); border: 1px solid var(--border); color: var(--muted); font-size: 11.5px; font-weight: 600; flex: 0 0 auto; }
 .settings.pane .settings__device-text { flex: 1; min-width: 0; }
-.settings.pane .settings__device-name { font-weight: 500; }
+.settings.pane .settings__device-name { font-weight: 500; overflow-wrap: anywhere; }
 .settings.pane .settings__device-meta { margin-top: 3px; color: var(--muted); font-size: 13px; }
 .settings.pane .settings__device-extra { display: flex; align-items: center; justify-content: flex-start; gap: 10px; margin-top: 10px; font-size: 13px; color: var(--muted); }
 .settings.pane .settings__devices .settings__hint { margin-top: 6px; }

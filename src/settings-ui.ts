@@ -54,10 +54,11 @@ export function row(opts: {
   if (labelEl) text.append(labelEl);
   if (opts.help) {
     const help = el("span", "settings__help", opts.help);
-    const name = single instanceof HTMLElement ? (single as HTMLInputElement).name : "";
-    if (name) {
-      help.id = opts.idScope ? `settings-help-${opts.idScope}-${name}` : `settings-help-${name}`;
-      (single as HTMLElement).setAttribute("aria-describedby", help.id);
+    // The first named field among the controls: a row may also hold a button (Clear) or a unit.
+    const field = controls.find((c): c is HTMLInputElement => c instanceof HTMLElement && LABELABLE.has(c.tagName) && !!(c as HTMLInputElement).name);
+    if (field) {
+      help.id = opts.idScope ? `settings-help-${opts.idScope}-${field.name}` : `settings-help-${field.name}`;
+      field.setAttribute("aria-describedby", help.id);
     }
     text.append(help);
   }

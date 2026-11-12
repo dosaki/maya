@@ -214,9 +214,9 @@ function releaseNotesCards(): HTMLElement[] {
 /** The group's devices: this phone and the others. A phone is never a main, so no pairing and no Make main. */
 function devicesCards(m: NetworkModel, h: NetworkHandlers): HTMLElement[] {
   if (m.status.role === "off") {
-    const none = el("p", "settings__group-note", "Join a main in Settings › Network to see your devices.");
+    const none = el("p", "settings__hint", "Join a main in Settings › Network to see your devices.");
     none.dataset.row = "devices-off";
-    return [group({}, none)];
+    return [group({}, card(none))];
   }
   // The model's fields behind the view; a typed host stays in its input.
   const view: DevicesModel = {
