@@ -24,6 +24,16 @@ describe("the phone's Settings sizes", () => {
     expect(toggle).toContain("height: 26px");
     expect(rule(".settings.pane .settings__bar .settings__btn")).toContain("min-height: 46px");
   });
+  it("keeps a 16px gutter: the page's own padding, not the pane's on top of it", () => {
+    expect(rule(".settings.pane")).toContain("padding: 0");
+    expect(rule(".settings.pane .settings__body")).toContain("padding: 16px 16px 48px");
+  });
+  it("stretches each of two side-by-side fields under its label, the number field 44px tall too", () => {
+    expect(rule(".settings.pane .settings__field")).toContain("align-items: stretch");
+    expect(rule(".settings.pane .settings__card .settings__field > input")).toContain("flex: none");
+    // It must outrank the number field's own rule, which comes first.
+    expect(css.indexOf(".settings.pane .settings__card .settings__field > input")).toBeGreaterThan(css.indexOf(".settings.pane .settings__card input[type=number]"));
+  });
   it("keeps buttons and segmented options at 40px or more", () => {
     expect(rule(".settings.pane .settings__btn")).toContain("min-height: 40px");
     expect(rule(".settings.pane .settings__seg span")).toContain("min-height: 40px");

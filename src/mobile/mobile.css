@@ -65,6 +65,8 @@
 /* Settings on the phone: the desktop's cards and rows (styles.css, scoped to
    `.settings.pane`) at thumb size. Tap targets are 40px or more, rows 56px,
    fields 44px at 15px, switches 44x26 and bar buttons 46px. */
+/* The page pads itself (16px, as the mockup), so the pane adds none. */
+.settings.pane { padding: 0; }
 .settings.pane .settings__body { display: block; padding: 16px 16px 48px; }
 .settings.pane .settings__title { font-size: 26px; }
 .settings.pane .settings__head { margin: 4px 0 24px; }
@@ -78,7 +80,9 @@
 .settings.pane .settings__card input:is([type=text], [type=password], [type=number], [type=search], [type=url]), .settings.pane .settings__card select { height: 44px; font-size: 15px; }
 .settings.pane .settings__card input[type=number] { width: 100%; flex: 1; text-align: left; }
 .settings.pane .settings__row--split { align-items: flex-start; gap: 12px; padding-bottom: 16px; }
-.settings.pane .settings__field { display: flex; flex-direction: column; gap: 8px; flex: 1; min-width: 0; }
+.settings.pane .settings__field { display: flex; flex-direction: column; align-items: stretch; gap: 8px; flex: 1; min-width: 0; }
+/* Down the label's column, `flex: 1` would be a height of 0. */
+.settings.pane .settings__card .settings__field > input { flex: none; }
 .settings.pane .settings__field:first-child { flex: 0 0 100px; }
 .settings.pane .settings__field .settings__label { color: var(--muted); font-weight: 400; font-size: 13.5px; }
 .settings.pane .settings__toggle { width: 44px; height: 26px; }
