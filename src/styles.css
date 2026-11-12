@@ -138,6 +138,7 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__row--stack { flex-direction: column; align-items: stretch; gap: 12px; }
 .settings.pane .settings__row--head { min-height: 56px; background: var(--soft); border-radius: 12px 12px 0 0; }
 .settings.pane .settings__row--head .settings__label { font-size: 15px; font-weight: 600; }
+.settings.pane .settings__card--off .settings__row:not(.settings__row--head) { opacity: .45; }
 .settings.pane .settings__row--foot { min-height: 0; padding: 12px 20px; justify-content: space-between; }
 
 /* Fields inside a card. */

@@ -1023,10 +1023,14 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       tag: "div",
     }));
 
-    const outcome = document.createElement("span");
-    outcome.className = "settings__git-test";
-    outcome.textContent = status.test ?? "";
-    rows.push(footRow(status.test ? outcome : document.createElement("span"), settingsBtn("Test", { action: "git-test", disabled: off }, () => h.onGitTest?.(p))));
+    let outcome: Node = document.createTextNode("");
+    if (status.test) {
+      const out = document.createElement("span");
+      out.className = "settings__git-test";
+      out.textContent = status.test;
+      outcome = out;
+    }
+    rows.push(footRow(outcome, settingsBtn("Test", { action: "git-test", disabled: off }, () => h.onGitTest?.(p))));
 
     const c = card(...rows);
     c.classList.add("settings__git");

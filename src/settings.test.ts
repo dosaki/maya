@@ -3,6 +3,7 @@ import { comboLabel, defaultKeys } from "./keys";
 import { RUNNING_VERSION } from "./release-notes";
 import { SETTINGS_GROUPS, SETTINGS_LEDES, SETTINGS_NAV, gitConnections, workItemsConfig, nextNetworkRole, pairingRepaintDue, renderSettings, SETTINGS_GROUP_KEY, storedSettingsGroup, terminalChoices, tickAddresses, tickPairingCode, type SettingsModel } from "./settings";
 import { secretStore } from "./platform";
+import styles from "./styles.css?raw";
 
 const voiceBase = {
   hookInstalled: true,
@@ -1413,6 +1414,12 @@ describe("Settings → Git", () => {
     expect(block(root, "gitlab").querySelector(".settings__row--head .settings__label")?.textContent).toBe("GitLab");
     expect(gh.classList.contains("settings__card--off")).toBe(false);
     expect(block(root, "gitlab").classList.contains("settings__card--off")).toBe(true);
+    // jsdom does not apply styles.css, so check the rule's source and that the
+    // off card's other rows are non-head rows inside it.
+    expect(styles).toMatch(/\.settings\.pane \.settings__card--off \.settings__row:not\(\.settings__row--head\)\s*\{[^}]*opacity:\s*\.45/);
+    const gl = block(root, "gitlab");
+    expect(gl.querySelector(".settings__row--head")!.matches(".settings__card--off .settings__row:not(.settings__row--head)")).toBe(false);
+    expect(gl.querySelector("input[name=gitClone-gitlab]")!.closest(".settings__row")!.matches(".settings__card--off .settings__row:not(.settings__row--head)")).toBe(true);
   });
 
   it("offers the token kind and the clone protocol as segmented choices", () => {
