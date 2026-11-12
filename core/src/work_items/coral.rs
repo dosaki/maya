@@ -337,20 +337,23 @@ fn list_rule(l: &mut Lookups, rule: &ItemRule, me: &CoralMe, out: &mut Vec<WorkI
 
 /// The open work items and defects the rules pick, and a line for each rule
 /// that named a tag, product or user Coral does not have (or that failed
-/// while others did). Err only when no rule could be asked.
-pub fn list(http: &dyn Http, c: &Coral, cfg: &CoralItems, me: &CoralMe) -> Result<(Vec<WorkItem>, Vec<String>), String> {
+/// while others did). Err only when no rule could be asked: every one that
+/// was tried failed, or warned and left the rest failing. The Err carries
+/// the warnings too, so they still show.
+pub fn list(http: &dyn Http, c: &Coral, cfg: &CoralItems, me: &CoralMe) -> Result<(Vec<WorkItem>, Vec<String>), (String, Vec<String>)> {
     let mut lookups = Lookups { http, c, tags: None, users: None };
     let (mut items, mut seen) = (Vec::new(), HashSet::new());
     let (mut warnings, mut failures) = (Vec::new(), Vec::new());
+    let mut answered = false;
     for rule in &cfg.rules {
         match list_rule(&mut lookups, rule, me, &mut items, &mut seen) {
-            Ok(()) => {}
+            Ok(()) => answered = true,
             Err(Skip::Warn(w)) => warnings.push(w),
             Err(Skip::Fail(e)) => failures.push(e),
         }
     }
-    if !cfg.rules.is_empty() && failures.len() == cfg.rules.len() {
-        return Err(failures.swap_remove(0));
+    if !answered && !failures.is_empty() {
+        return Err((failures.swap_remove(0), warnings));
     }
     failures.dedup();
     warnings.extend(failures);
@@ -617,9 +620,18 @@ mod tests {
     fn every_rule_failing_is_an_error_and_a_refusal_says_so() {
         let http = FakeHttp::new(vec![("/work-items", 401, r#"{"error":"bad"}"#)]);
         let e = list(&http, &coral(), &cfg(vec![rule(Assignee::Me, &[], &[])]), &me_user()).unwrap_err();
-        assert_eq!(e, "Coral refused the token: paste a new one in Settings → Work Items.");
+        assert_eq!(e.0, "Coral refused the token: paste a new one in Settings → Work Items.");
         let http = FakeHttp::new(vec![]);
-        assert!(list(&http, &coral(), &cfg(vec![rule(Assignee::Me, &[], &[])]), &me_user()).unwrap_err().starts_with("could not reach coral.test"));
+        assert!(list(&http, &coral(), &cfg(vec![rule(Assignee::Me, &[], &[])]), &me_user()).unwrap_err().0.starts_with("could not reach coral.test"));
+    }
+
+    #[test]
+    fn a_warning_rule_does_not_hide_that_every_listing_failed() {
+        let http = FakeHttp::new(vec![("/tags", 200, &tags_page()), ("/work-items", 500, "oops")]);
+        let rules = vec![rule(Assignee::Me, &["nope"], &[]), rule(Assignee::Me, &[], &[])];
+        let (e, warnings) = list(&http, &coral(), &cfg(rules), &me_user()).unwrap_err();
+        assert_eq!(e, "500: oops");
+        assert_eq!(warnings, vec!["Coral has no tag nope"]);
     }
 
     #[test]
