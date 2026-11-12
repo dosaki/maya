@@ -35,7 +35,7 @@ describe("renderDevices", () => {
     const rows = [...el.querySelectorAll(".settings__assistant")];
     expect(rows[0].querySelector(".settings__device-name")?.textContent).toContain("laptop");
     expect(rows[0].querySelector(".settings__device-name .settings__badge")?.textContent).toBe("This device");
-    expect(rows[0].querySelector(".settings__device-meta")?.textContent).toBe("macos, 192.168.1.9");
+    expect(rows[0].querySelector(".settings__device-meta")?.textContent).toBe("macOS, 192.168.1.9");
     expect(rows[1].textContent).toContain("desk");
     expect(rows[1].querySelector(".settings__state--main")?.textContent).toBe("Main");
     expect(rows[1].querySelector(".settings__badge")).toBeNull();
@@ -75,19 +75,19 @@ describe("renderDevices", () => {
 
   it("a main that is not connected says when it was last seen in its meta; a connected one adds nothing", () => {
     const away = renderDevices(status(false, [me, desk]), model(), handlers(), 3_601_000);
-    expect(away.querySelector("[data-row=kd] .settings__device-meta")?.textContent).toBe("macos, 192.168.1.2 — Last seen 1h ago");
+    expect(away.querySelector("[data-row=kd] .settings__device-meta")?.textContent).toBe("macOS, 192.168.1.2 — Last seen 1h ago");
     expect(away.querySelector("[data-row=kd] .settings__state--main")?.textContent).toBe("Main");
     const never = renderDevices(status(false, [me, { ...desk, lastSeen: null }]), model(), handlers(), 2000);
-    expect(never.querySelector("[data-row=kd] .settings__device-meta")?.textContent).toBe("macos, 192.168.1.2 — Never connected");
+    expect(never.querySelector("[data-row=kd] .settings__device-meta")?.textContent).toBe("macOS, 192.168.1.2 — Never connected");
     const up = renderDevices(status(true, [me, desk]), model(), handlers(), 3_601_000);
-    expect(up.querySelector("[data-row=kd] .settings__device-meta")?.textContent).toBe("macos, 192.168.1.2");
+    expect(up.querySelector("[data-row=kd] .settings__device-meta")?.textContent).toBe("macOS, 192.168.1.2");
   });
 
   it("puts the state under the name when asked", () => {
     const el = renderDevices(status(true, [me, nas]), model(), handlers(), 3_601_000, "this phone", { stateUnderName: true });
     const nasRow = el.querySelector("[data-row=kn]")!;
     const meta = nasRow.querySelector(".settings__device-meta")!;
-    expect(meta.firstChild?.textContent).toBe("macos, 192.168.1.5");
+    expect(meta.firstChild?.textContent).toBe("macOS, 192.168.1.5");
     expect(meta.querySelector(".settings__state")?.textContent).toBe("Last seen 1h ago");
     const side = renderDevices(status(true, [me, nas]), model(), handlers(), 3_601_000);
     expect(side.querySelector("[data-row=kn] .settings__device-meta .settings__state")).toBeNull();
@@ -233,5 +233,44 @@ describe("after a repaint", () => {
     cell(kept, "button[data-action=join]").click();
     expect(h.onJoinAsk).toHaveBeenCalledWith("kd");
     expect(h.onRemoveMember).not.toHaveBeenCalled();
+  });
+});
+
+describe("renderDevices markup", () => {
+  const order = (root: ParentNode, sel: string) => [...root.querySelectorAll<HTMLButtonElement>(`${sel} button`)].map((b) => b.dataset.action);
+
+  it("puts Remove last in a member's actions, so tab order matches what is on screen", () => {
+    const el = renderDevices(status(true, [me, desk, nas]), model(), handlers(), 2000);
+    expect(order(el, "[data-row=kn] .settings__assistant-actions")).toEqual(["join", "remove-member"]);
+  });
+
+  it("puts Remove last in an assistant's actions too", () => {
+    const net: NetworkStatus = {
+      role: "main",
+      code: null,
+      assistants: [{ id: "a1", name: "Gnowee", platform: "linux", address: "", connected: true, lastSeen: 1, canLead: true } as never],
+      devices: [dev({ ...me, isMain: true })],
+      assistant: { connected: false, mainName: null, error: null },
+    };
+    const el = renderDevices(net, model(), handlers(), 2000);
+    expect(order(el, "[data-row=a1] .settings__assistant-actions")).toEqual(["make-main", "remove-assistant"]);
+  });
+
+  it("names each platform: macOS, Windows, Linux, Android", () => {
+    const rows = [dev({ id: "1", key: "k1", name: "a", platform: "macos" }), dev({ id: "2", key: "k2", name: "b", platform: "windows" }), dev({ id: "3", key: "k3", name: "c", platform: "linux" }), dev({ id: "4", key: "k4", name: "d", platform: "android" })];
+    const el = renderDevices(status(true, [me, ...rows]), model(), handlers(), 2000);
+    const metas = [...el.querySelectorAll(".settings__device-meta")].map((m) => m.firstChild?.textContent);
+    expect(metas.slice(1)).toEqual(["macOS", "Windows", "Linux", "Android"]);
+  });
+
+  it("draws the Join form with a plain Join and a quiet Cancel, keeping its names and data", () => {
+    const el = renderDevices(status(true, [me, desk, nas]), model({ joining: "kn" }), handlers(), 2000);
+    const form = el.querySelector<HTMLElement>("[data-for=join-form]")!;
+    expect(form.dataset.row).toBe("join:kn");
+    expect([...form.children].map((c) => (c as HTMLElement).getAttribute("name") ?? (c as HTMLElement).dataset.action)).toEqual(["join-host", "join-port", "join-confirm", "join-cancel"]);
+    expect(form.querySelector("[data-action=join-confirm]")!.className).toBe("settings__btn");
+    expect(form.querySelector("[data-action=join-cancel]")!.className).toBe("settings__btn settings__btn--quiet");
+    expect(form.querySelector("input[name=join-host]")!.getAttribute("aria-label")).toBe("Host or address");
+    expect(form.querySelector("input[name=join-port]")!.getAttribute("aria-label")).toBe("Port");
   });
 });

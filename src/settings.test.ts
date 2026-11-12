@@ -1082,7 +1082,7 @@ describe("Network settings", () => {
       handlers(),
     );
     const rows = [...el.querySelectorAll(".settings__assistant")].map((r) => [r.querySelector(".settings__device-name")?.textContent, r.querySelector(".settings__device-meta")?.textContent, r.querySelector(".settings__state")?.textContent]);
-    expect(rows).toEqual([["Gnowee", "macos, 192.168.55.70", "Connected"], ["desk", "macos", "Never connected"]]);
+    expect(rows).toEqual([["Gnowee", "macOS, 192.168.55.70", "Connected"], ["desk", "macOS", "Never connected"]]);
   });
 
   it("role assistant shows host, port, name, code, Pair and the status line", () => {
@@ -2468,5 +2468,15 @@ describe("the Settings stylesheet after the redesign", () => {
 
   it("drops the top margin of a help that is the first thing in its row", () => {
     expect(styles).toContain(".settings.pane .settings__row-text > .settings__help:first-child { margin-top: 0; }");
+  });
+});
+
+describe("Devices with the network off", () => {
+  it("holds today's line in a card, keeping its data-for and data-row", () => {
+    const el = renderSettings({ ...voiceBase, settingsGroup: "devices" }, handlers());
+    const line = el.querySelector<HTMLElement>(".settings__section--devices [data-for=devices-off]")!;
+    expect(line.dataset.row).toBe("devices-off");
+    expect(line.textContent).toBe("Turn the network on in Settings › Network to see your devices.");
+    expect(line.parentElement!.classList.contains("settings__card")).toBe(true);
   });
 });

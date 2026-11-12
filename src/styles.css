@@ -149,6 +149,8 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__card--off .settings__row:not(.settings__row--head) { opacity: .45; }
 .settings.pane .settings__foot-end { margin-left: auto; }
 .settings.pane .settings__row--foot .settings__error { color: var(--danger); }
+.settings.pane .settings__keys .settings__error { color: var(--danger); }
+.settings.pane .settings__card > .settings__hint { margin: 0; padding: 16px 20px; }
 .settings.pane .settings__card progress { flex: 1; width: 100%; accent-color: var(--gold); }
 .settings.pane .settings__row--foot { min-height: 0; padding: 12px 20px; justify-content: space-between; }
 
@@ -229,7 +231,8 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__source[data-open] .settings__source-head { background: var(--soft); border-radius: 12px 12px 0 0; }
 .settings.pane .settings__source[data-open] .settings__source-sum { display: none; }
 .settings.pane .settings__source--off .settings__source-name { color: var(--muted); }
-.settings.pane .settings__source--off .settings__source-body { opacity: .5; }
+/* An off source's body is dimmed, except the row holding the link to Git settings: its one live control. */
+.settings.pane .settings__source--off .settings__source-body > :not(:has(.settings__link)) { opacity: .5; }
 .settings.pane .settings__source.settings__card + .settings__source.settings__card { margin-top: 12px; }
 .settings.pane .settings__unit { color: var(--muted); font-weight: 400; }
 .settings.pane .settings__git-test { min-width: 0; color: var(--muted); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
@@ -306,7 +309,6 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__assistant { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-top: 1px solid var(--border); }
 .settings.pane .settings__badge { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--gold-deep); border-radius: 999px; color: var(--gold-bright); font-size: 11px; font-weight: 500; }
 .settings.pane .settings__assistant-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
-.settings.pane .settings__assistant-actions > .settings__btn--danger { order: 1; }
 .settings.pane .settings__devices { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
 .settings.pane .settings__device { flex-direction: row; align-items: center; gap: 16px; padding: 16px 20px; }
 .settings.pane .settings__device:first-child { border-top: 0; }
@@ -318,6 +320,13 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__devices .settings__hint { margin-top: 6px; }
 .settings.pane .settings__devices .settings__confirm { padding: 12px 20px; border-top: 1px solid var(--border); }
 .settings.pane .settings__device-meta > .settings__state { display: flex; margin-top: 4px; }
+/* The Join form: a wrapping row, the host filling it, the port 88px, the card's field look. */
+.settings.pane .settings__devices [data-for=join-form] { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; border-radius: 0; border-width: 1px 0 0; }
+.settings.pane .settings__devices [data-for=join-form] input { font: inherit; color: var(--text); background: var(--field); border: 1px solid var(--border); border-radius: 8px; height: 36px; padding: 0 12px; min-width: 0; }
+.settings.pane .settings__devices [data-for=join-form] input[name=join-host] { flex: 1 1 220px; width: auto; }
+.settings.pane .settings__devices [data-for=join-form] input[name=join-port] { flex: 0 0 88px; width: 88px; text-align: right; }
+.settings.pane .settings__devices [data-for=join-form] input::placeholder { color: var(--muted); opacity: .7; }
+.settings.pane .settings__devices [data-for=join-form] input:focus { outline: none; border-color: var(--gold-deep); box-shadow: 0 0 0 3px rgba(217,171,60,.16); }
 /* Narrow: the state and actions go on a line under the name, which keeps the row's width. */
 @media (max-width: 560px) {
   .settings.pane .settings__device { flex-wrap: wrap; row-gap: 8px; }

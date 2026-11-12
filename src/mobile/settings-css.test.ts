@@ -48,3 +48,9 @@ describe("the phone's Settings sizes", () => {
     expect(back).toContain("z-index: 1");
   });
 });
+
+describe("the phone's Join form", () => {
+  it("makes its fields 44px", () => {
+    expect(rule(".settings.pane .settings__devices [data-for=join-form] input")).toContain("height: 44px");
+  });
+});

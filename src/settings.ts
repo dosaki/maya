@@ -1916,7 +1916,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     none.dataset.for = "devices-off";
     none.dataset.row = "devices-off";
     none.textContent = "Turn the network on in Settings › Network to see your devices.";
-    devices.append(none);
+    devices.append(group({}, card(none)));
   } else {
     // The model's fields behind the view; a typed host stays in its input.
     const view: DevicesModel = {

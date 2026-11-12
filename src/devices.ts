@@ -45,7 +45,8 @@ export interface DevicesHandlers {
 export const DEFAULT_PORT = 4127;
 export const REMOVE_NEEDS_MAIN = "Connect to the main Maya to remove a device.";
 
-const platformLabel = (p: string) => (p === "android" ? "Android" : p);
+const PLATFORMS: Record<string, string> = { macos: "macOS", windows: "Windows", linux: "Linux", android: "Android" };
+const platformLabel = (p: string) => PLATFORMS[p] ?? p;
 
 const MARKS: Record<string, string> = { macos: "Mac", windows: "Windows", linux: "Linux", android: "Phone" };
 const markText = (p: string) => MARKS[p] ?? p;
@@ -151,7 +152,7 @@ function joinForm(d: DeviceRow, m: DevicesModel): HTMLElement {
   port.placeholder = String(DEFAULT_PORT);
   port.setAttribute("aria-label", "Port");
   port.value = String(m.joinPort || d.port || DEFAULT_PORT);
-  form.append(host, port, button("join-confirm", "Join", { key: d.key }, false, "gold"), button("join-cancel", "Cancel", { key: d.key }));
+  form.append(host, port, button("join-confirm", "Join", { key: d.key }), button("join-cancel", "Cancel", { key: d.key }, false, "quiet"));
   return form;
 }
 
@@ -165,13 +166,14 @@ function memberRow(d: DeviceRow, net: NetworkStatus, m: DevicesModel, nowMs: num
   row.dataset.key = d.key;
   const connectedMain = d.isMain && net.assistant.connected;
   const actions = div("settings__assistant-actions");
+  if (!d.isSelf && d.platform !== "android" && !connectedMain) {
+    actions.append(button("join", "Join", { key: d.key }));
+  }
+  // Remove comes last, as it reads on screen.
   if (!d.isSelf && !d.isMain) {
     const rm = button("remove-member", "Remove", { key: d.key }, !net.assistant.connected, "danger");
     if (!net.assistant.connected) rm.title = REMOVE_NEEDS_MAIN;
     actions.append(rm);
-  }
-  if (!d.isSelf && d.platform !== "android" && !connectedMain) {
-    actions.append(button("join", "Join", { key: d.key }));
   }
   // A main shows "Main"; when it is not connected its meta still says when it was last seen.
   const away = d.isMain && !connectedMain ? ` — ${lastSeen(false, d.lastSeen, nowMs).textContent}` : "";
@@ -207,10 +209,10 @@ function assistantRows(net: NetworkStatus, m: DevicesModel, nowMs: number, thisD
       extra.push(sw);
     }
     const actions = div("settings__assistant-actions");
-    actions.append(button("remove-assistant", "Remove", { id: a.id }, m.promoting, "danger"));
     if (a.connected && a.canLead && !(a.wantsMirror || a.mirror)) {
       actions.append(button("make-main", "Make main", { id: a.id }, m.promoting));
     }
+    actions.append(button("remove-assistant", "Remove", { id: a.id }, m.promoting, "danger"));
     fill(row, { platform: a.platform, name: a.name, meta: [platformLabel(a.platform), a.address].filter(Boolean).join(", "), state: lastSeen(a.connected, a.lastSeen, nowMs), extra, actions }, under);
     out.push(row);
     if (m.promote === a.id) {

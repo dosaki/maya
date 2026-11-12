@@ -97,6 +97,8 @@
 .settings.pane .settings__group > .settings__notice { margin-top: 12px; }
 .settings.pane .settings__body > .settings__notice { margin-bottom: 16px; }
 .settings.pane .settings__device { padding: 14px 16px; }
+.settings.pane .settings__devices [data-for=join-form] { padding: 12px 16px; }
+.settings.pane .settings__devices [data-for=join-form] input { height: 44px; font-size: 15px; }
 
 /* Settings opens on a list of groups, as Android's own does: cards of rows,
    each the group's name over what is set under it, tapping into its page. */

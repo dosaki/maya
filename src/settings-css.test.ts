@@ -99,8 +99,40 @@ describe("the Devices rows", () => {
     expect(rule(".settings.pane .settings__device-extra")).toContain("justify-content: flex-start");
   });
 
-  it("puts a row's Remove after its other actions", () => {
-    expect(rule(".settings.pane .settings__assistant-actions > .settings__btn--danger")).toContain("order: 1");
+  it("leaves a row's actions in DOM order: Remove is last in the markup, so no `order` moves it", () => {
+    expect(css).not.toMatch(/settings__assistant-actions > \.settings__btn--danger/);
+    expect(rule(".settings.pane .settings__assistant-actions")).not.toContain("order");
+  });
+
+  it("draws the Join form as a wrapping row: the host fills it, the port is 88px, fields look like a card's", () => {
+    const form = ".settings.pane .settings__devices [data-for=join-form]";
+    const r = rule(form);
+    expect(r).toContain("flex-direction: row");
+    expect(r).toContain("flex-wrap: wrap");
+    const host = rule(`${form} input[name=join-host]`);
+    expect(host).toContain("flex: 1 1 220px");
+    expect(host).toContain("width: auto");
+    const port = rule(`${form} input[name=join-port]`);
+    expect(port).toContain("flex: 0 0 88px");
+    expect(port).toContain("width: 88px");
+    const field = rule(`${form} input`);
+    for (const d of ["height: 36px", "background: var(--field)", "border-radius: 8px"]) expect(field).toContain(d);
+  });
+});
+
+describe("Work Items and Keyboard details", () => {
+  it("dims an off source's body except the row holding the link to Git settings", () => {
+    const r = rule(".settings.pane .settings__source--off .settings__source-body > :not(:has(.settings__link))");
+    expect(r).toContain("opacity: .5");
+    expect(css).not.toMatch(/\.settings__source--off \.settings__source-body \{/);
+  });
+
+  it("draws the Keyboard row's error in the danger colour inside the pane", () => {
+    expect(rule(".settings.pane .settings__keys .settings__error")).toContain("color: var(--danger)");
+  });
+
+  it("pads the hint a card holds on Devices", () => {
+    expect(rule(".settings.pane .settings__card > .settings__hint")).toContain("padding: 16px 20px");
   });
 });
 

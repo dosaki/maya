@@ -74,7 +74,7 @@ const base: SettingsModel = {
   speakNotifications: true,
   elevenEnabled: true,
   elevenKeySet: true,
-  elevenVoices: [{ id: "v1", name: "Rachel" }] as SettingsModel["elevenVoices"],
+  elevenVoices: [{ voiceId: "v1", name: "Rachel" }],
   elevenVoiceId: "v1",
   serverEnabled: true,
   serverUrl: "http://localhost:8000",
