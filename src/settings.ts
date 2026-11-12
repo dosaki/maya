@@ -913,7 +913,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
       row({ label: "Session viewer", control: viewerSel }),
     )),
     group({ title: "New sessions" }, card(
-      row({ label: "Projects directory", help: "Where \"Let Maya choose\" looks for a folder.", control: dirInput }),
+      row({ label: "Projects directory", control: dirInput }),
       row({ label: "Open in", control: terminalSel }),
     )),
   );
