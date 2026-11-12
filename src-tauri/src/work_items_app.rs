@@ -5,7 +5,7 @@
 //! a network call or the one-shot agent.
 
 use crate::{git, native, AppState};
-use maya_core::config::{CustomTool, GitProvider};
+use maya_core::config::{CustomTool, GitProvider, WorkItemsConfig};
 use maya_core::forge::{self, Forge, Me};
 use maya_core::store::now_ms;
 use maya_core::work_items::started::{self, Started};
@@ -219,7 +219,7 @@ pub struct StartCheck {
     pub pick: Option<RepoPick>,
     pub branch: String,
     /// The repository Start uses without asking, for an item that has none
-    /// of its own: a Coral item whose product has exactly one.
+    /// of its own: a Coral item whose product has exactly one, already known.
     pub repo: Option<ItemRepo>,
 }
 
@@ -282,9 +282,15 @@ fn coral_takeover(assignees: &[String], me: &CoralMe) -> Vec<String> {
 }
 
 /// The repository a Coral item starts in without asking: its product's
-/// only one. None for none or several, which the pick asks about.
-fn coral_start_repo(mut repos: Vec<ItemRepo>) -> Option<ItemRepo> {
-    (repos.len() == 1).then(|| repos.remove(0))
+/// only one, when it is already among `mine` (the user's rules, listed
+/// items, clones and sessions). Coral's admins choose a product's
+/// repositories, and a session in a repository runs its project settings,
+/// so one the user has not met goes to the pick, which shows it and asks.
+fn coral_start_repo(repos: &[ItemRepo], mine: &[ItemRepo]) -> Option<ItemRepo> {
+    match repos {
+        [only] if mine.iter().any(|m| m.forge == only.forge && m.path.eq_ignore_ascii_case(&only.path)) => Some(only.clone()),
+        _ => None,
+    }
 }
 
 /// The custom tool that listed `item`, found by its `source`, never by name.
@@ -368,15 +374,14 @@ fn coral_me_for(state: &AppState, c: &Coral, generation: u64) -> Result<CoralMe,
     Ok(me)
 }
 
-/// Maya's brain picks the code's repository for `item` from the ones she
-/// knows: `first` (a Coral product's), the rules', the listed items', the
-/// clones' and those of the sessions on the board or started from an issue.
-fn pick_repo(app: &AppHandle, item: &WorkItem, items: &[WorkItem], first: &[ItemRepo]) -> RepoPick {
+/// The Work Items settings, and the repositories of the clones and of the
+/// sessions on the board or started from an issue.
+fn known_repos(app: &AppHandle) -> (WorkItemsConfig, Vec<ItemRepo>) {
     let state = app.state::<AppState>();
-    let (cfg, clones_root, sites, brain, model, maya_dir) = {
+    let (cfg, clones_root, sites) = {
         let store = state.store.lock().unwrap();
         let c = &store.config;
-        (c.work_items.clone(), c.clones_dir_path(), forge::sites(&c.git_connections()), c.brain(), c.brain_model().map(String::from), store.claude_dir().join("maya"))
+        (c.work_items.clone(), c.clones_dir_path(), forge::sites(&c.git_connections()))
     };
     let mut folders: Vec<PathBuf> = crate::board_cards(app).into_iter().filter(|c| !c.brain && !c.cwd.is_empty()).map(|c| PathBuf::from(c.cwd)).collect();
     folders.extend(started::load(&started_path(app)).into_iter().filter(|s| !s.dir.is_empty()).map(|s| PathBuf::from(s.dir)));
@@ -385,7 +390,20 @@ fn pick_repo(app: &AppHandle, item: &WorkItem, items: &[WorkItem], first: &[Item
     // Git runs with no lock held.
     let mut known = pick::clone_repos(&clones_root, &sites);
     known.extend(pick::repos_of_folders(&folders, &sites));
-    let options = pick::candidates(&cfg, items, &known, first);
+    (cfg, known)
+}
+
+/// Maya's brain picks the code's repository for `item` from the ones she
+/// knows: `first` (a Coral product's), the rules', the listed items', and
+/// `known` (from `known_repos`).
+fn pick_repo(app: &AppHandle, item: &WorkItem, items: &[WorkItem], first: &[ItemRepo], cfg: &WorkItemsConfig, known: &[ItemRepo]) -> RepoPick {
+    let state = app.state::<AppState>();
+    let (brain, model, maya_dir) = {
+        let store = state.store.lock().unwrap();
+        let c = &store.config;
+        (c.brain(), c.brain_model().map(String::from), store.claude_dir().join("maya"))
+    };
+    let options = pick::candidates(cfg, items, known, first);
     let answer = if options.is_empty() {
         None
     } else {
@@ -494,9 +512,11 @@ fn check_coral(app: &AppHandle, listed_item: &WorkItem, items: &[WorkItem], gene
         Vec::new()
     });
     let branch = start::branch_name(&item);
-    Ok(match coral_start_repo(repos.clone()) {
+    let (cfg, known) = known_repos(app);
+    let mine = pick::candidates(&cfg, items, &known, &[]);
+    Ok(match coral_start_repo(&repos, &mine) {
         Some(repo) => StartCheck { takeover, pick: None, branch, repo: Some(repo) },
-        None => StartCheck { takeover, pick: Some(pick_repo(app, &item, items, &repos)), branch, repo: None },
+        None => StartCheck { takeover, pick: Some(pick_repo(app, &item, items, &repos, &cfg, &known)), branch, repo: None },
     })
 }
 
@@ -555,7 +575,10 @@ pub(crate) fn work_item_check(app: AppHandle, key: String) -> Result<StartCheck,
             (listed_item, takeover)
         }
     };
-    let pick = needs_pick(&item).then(|| pick_repo(&app, &item, &items, &[]));
+    let pick = needs_pick(&item).then(|| {
+        let (cfg, known) = known_repos(&app);
+        pick_repo(&app, &item, &items, &[], &cfg, &known)
+    });
     Ok(StartCheck { takeover, pick, branch: start::branch_name(&item), repo: None })
 }
 
@@ -710,11 +733,14 @@ mod tests {
     }
 
     #[test]
-    fn one_product_repo_needs_no_dialog() {
+    fn one_known_product_repo_needs_no_dialog() {
         let r = |p: &str| ItemRepo { forge: GitProvider::Github, path: p.into() };
-        assert_eq!(coral_start_repo(vec![r("acme/api")]), Some(r("acme/api")));
-        assert_eq!(coral_start_repo(vec![]), None);
-        assert_eq!(coral_start_repo(vec![r("acme/api"), r("acme/web")]), None);
+        let mine = [r("Acme/API"), r("acme/web")];
+        assert_eq!(coral_start_repo(&[r("acme/api")], &mine), Some(r("acme/api")), "known, ignoring case");
+        assert_eq!(coral_start_repo(&[r("evil/api")], &mine), None, "a repository the user has not met asks");
+        assert_eq!(coral_start_repo(&[r("acme/api")], &[ItemRepo { forge: GitProvider::Gitlab, path: "acme/api".into() }]), None, "another forge's is another repository");
+        assert_eq!(coral_start_repo(&[], &mine), None);
+        assert_eq!(coral_start_repo(&[r("acme/api"), r("acme/web")], &mine), None);
     }
 
     #[test]

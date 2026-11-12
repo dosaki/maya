@@ -404,7 +404,7 @@ export async function startWorkItem(
       });
       if (!chosen) return;
     }
-    // A repository the check found (a Coral product's only one) needs no dialog.
+    // A repository the check found (a Coral product's only one, already known) needs no dialog.
     const repo = chosen?.repo ?? check.repo;
     const r = await invoke<WorkStarted>("work_item_start", { key: item.key, repo, takeOver: check.takeover });
     // A notice (the issue not updated, say) shows in the line above the areas.
