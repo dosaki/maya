@@ -453,8 +453,8 @@ describe("settings flow", () => {
     await flush();
     expect(document.querySelector<HTMLInputElement>("input[name=timeout]")!.value).toBe("42");
     expect(document.querySelector<HTMLInputElement>("input[name=projectsDir]")!.value).toBe("/p");
-    expect(document.querySelector("button[data-action=install-codex]")?.textContent).toBe("Install Codex hook");
-    expect(document.body.textContent).toContain("Remove Claude hook");
+    expect(document.querySelector("button[data-action=install-codex]")?.getAttribute("aria-label")).toBe("Install Codex hook");
+    expect(document.querySelector("button[data-action=remove]")?.getAttribute("aria-label")).toBe("Remove Claude hook");
   });
 
   it("repaints on a voice event only when listening changes, so typing survives", async () => {

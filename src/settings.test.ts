@@ -171,7 +171,7 @@ describe("renderSettings", () => {
   it("names which agent each hook button is for", () => {
     const labels = (claude: boolean, codex: boolean) =>
       [...renderSettings({ ...voiceBase, hookInstalled: claude, codexHookInstalled: codex }, handlers()).querySelectorAll("button")]
-        .map((b) => b.textContent)
+        .map((b) => b.getAttribute("aria-label"))
         .filter((t) => t?.includes("hook"));
     expect(labels(false, false)).toEqual(["Install Claude hook", "Install Codex hook"]);
     expect(labels(true, true)).toEqual(["Remove Claude hook", "Remove Codex hook"]);
@@ -180,7 +180,7 @@ describe("renderSettings", () => {
   it("the status line block offers install, remove or says what blocks it", () => {
     const h = { ...handlers(), onStatuslineInstall: vi.fn(), onStatuslineRemove: vi.fn() };
     const render = (statusline: SettingsModel["statusline"]) => renderSettings({ ...voiceBase, statusline }, h);
-    const texts = (el: HTMLElement) => [...el.querySelectorAll(".settings__status")].map((s) => s.textContent);
+    const texts = (el: HTMLElement) => [...el.querySelectorAll(".settings__help")].map((s) => s.textContent);
 
     const checking = render(null);
     expect(texts(checking)).toContain("Checking status line…");
@@ -188,14 +188,16 @@ describe("renderSettings", () => {
     const missing = render({ installed: false });
     expect(texts(missing)).toContain("Usage and limits are not recorded. Install the status line wrapper to see them in session windows.");
     const install = missing.querySelector<HTMLButtonElement>("button[data-action=install-statusline]")!;
-    expect(install.textContent).toBe("Install usage status line");
+    expect(install.getAttribute("aria-label")).toBe("Install usage status line");
+    expect(install.textContent).toBe("Install");
     install.click();
     expect(h.onStatuslineInstall).toHaveBeenCalledOnce();
 
     const installed = render({ installed: true });
     expect(texts(installed)).toContain("Usage and limits are recorded from Claude Code's status line.");
     const remove = installed.querySelector<HTMLButtonElement>("button[data-action=remove-statusline]")!;
-    expect(remove.textContent).toBe("Remove usage status line");
+    expect(remove.getAttribute("aria-label")).toBe("Remove usage status line");
+    expect(remove.textContent).toBe("Remove");
     remove.click();
     expect(h.onStatuslineRemove).toHaveBeenCalledOnce();
 
@@ -219,7 +221,7 @@ describe("renderSettings", () => {
   it("offers install when the hook is missing", () => {
     const h = handlers();
     const el = renderSettings({ hookInstalled: false, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
-    expect(el.querySelector(".settings__status")?.textContent).toContain("not installed");
+    expect([...el.querySelectorAll(".settings__help")].find((x) => x.textContent?.startsWith("Claude Code hook"))?.textContent).toContain("not installed");
     const btn = el.querySelector<HTMLButtonElement>("button[data-action=install]")!;
     btn.click();
     expect(h.onInstall).toHaveBeenCalled();
@@ -229,7 +231,7 @@ describe("renderSettings", () => {
   it("offers remove when the hook is installed", () => {
     const h = handlers();
     const el = renderSettings({ hookInstalled: true, completedTimeoutMinutes: 30, projectsDir: "", clonesDir: "", notifyOnAwaiting: true, speakNotifications: true, elevenEnabled: false, elevenKeySet: false, elevenVoices: [], elevenVoiceId: "", serverEnabled: false, serverUrl: "", serverVoice: "", serverModel: "", serverKeySet: false, serverVoices: [], serverVoicesError: null, voiceReport: null, error: null, listen: false, microphone: "", microphones: [], agent: null, agentModel: "", agents: [], reviewPrompt: "", listenError: null, recognizer: "system" as const, whisperModel: "base.en-q5_1", models: [], downloading: null }, h);
-    expect(el.querySelector(".settings__status")?.textContent).toContain("installed");
+    expect([...el.querySelectorAll(".settings__help")].find((x) => x.textContent?.startsWith("Claude Code hook"))?.textContent).toContain("installed");
     el.querySelector<HTMLButtonElement>("button[data-action=remove]")!.click();
     expect(h.onRemove).toHaveBeenCalled();
   });
@@ -278,6 +280,80 @@ describe("renderSettings", () => {
     box.dispatchEvent(new Event("change"));
     expect(h.onNotifyPrReview).toHaveBeenCalledWith(false);
     expect(renderSettings({ ...model, notifyOnPrReview: false }, h).querySelector<HTMLInputElement>("input[name=notifyPrReview]")!.checked).toBe(false);
+  });
+
+  describe("Sessions and Pull requests screens", () => {
+    const rowOf = (root: ParentNode, label: string) =>
+      [...root.querySelectorAll<HTMLElement>(".settings__row")].find((r) => r.querySelector(".settings__label")?.textContent === label)!;
+    const titles = (sec: Element) => [...sec.querySelectorAll(".settings__group-title")].map((t) => t.textContent);
+
+    it("Sessions has Session tracking, Board and New sessions groups", () => {
+      const sec = renderSettings(voiceBase, handlers()).querySelector(".settings__section--sessions")!;
+      expect(titles(sec)).toEqual(["Session tracking", "Board", "New sessions"]);
+      expect(sec.querySelector(".settings__group-note")?.textContent).toBe("Hooks let the agents tell Maya what they are doing, rather than her guessing from transcripts.");
+      const tracking = sec.querySelector(".settings__group")!;
+      expect([...tracking.querySelectorAll(".settings__row .settings__label")].map((l) => l.textContent)).toEqual(["Claude Code hook", "Usage status line", "Codex hook"]);
+    });
+
+    it("each hook row shows Installed or Not installed beside its button", () => {
+      const render = (hookInstalled: boolean, codexHookInstalled: boolean, statusline: SettingsModel["statusline"]) =>
+        renderSettings({ ...voiceBase, hookInstalled, codexHookInstalled, statusline }, handlers());
+      const on = render(true, true, { installed: true });
+      for (const [label, action] of [["Claude Code hook", "remove"], ["Usage status line", "remove-statusline"], ["Codex hook", "remove-codex"]] as const) {
+        const r = rowOf(on, label);
+        expect(r.querySelector(".settings__state")?.className).toContain("settings__state--on");
+        expect(r.querySelector(".settings__state")?.textContent).toBe("Installed");
+        expect(r.querySelector<HTMLButtonElement>(`button[data-action=${action}]`)?.textContent).toBe("Remove");
+      }
+      const off = render(false, false, { installed: false });
+      for (const [label, action] of [["Claude Code hook", "install"], ["Usage status line", "install-statusline"], ["Codex hook", "install-codex"]] as const) {
+        const r = rowOf(off, label);
+        expect(r.querySelector(".settings__state")?.className).toContain("settings__state--off");
+        expect(r.querySelector(".settings__state")?.textContent).toBe("Not installed");
+        expect(r.querySelector<HTMLButtonElement>(`button[data-action=${action}]`)?.textContent).toBe("Install");
+      }
+    });
+
+    it("keeps the full button text as the accessible name and the status sentence as help", () => {
+      const el = renderSettings({ ...voiceBase, hookInstalled: false, codexHookInstalled: true }, handlers());
+      expect(rowOf(el, "Claude Code hook").querySelector("button")!.getAttribute("aria-label")).toBe("Install Claude hook");
+      expect(rowOf(el, "Claude Code hook").querySelector(".settings__help")?.textContent).toBe("Claude Code hook is not installed. Permission prompts will show as Working.");
+      expect(rowOf(el, "Codex hook").querySelector("button")!.getAttribute("aria-label")).toBe("Remove Codex hook");
+    });
+
+    it("a blocked status line shows the blocked-by sentence as its help and no Installed state", () => {
+      const el = renderSettings({ ...voiceBase, statusline: { installed: false, blockedBy: "/etc/x.json" } }, handlers());
+      const r = rowOf(el, "Usage status line");
+      expect(r.querySelector(".settings__help")?.textContent).toBe("Usage and limits cannot be recorded: the status line is set in /etc/x.json.");
+      expect(r.querySelector(".settings__state")?.textContent).toBe("Not installed");
+    });
+
+    it("Board puts the unit 'minutes' after the timeout box", () => {
+      const el = renderSettings(voiceBase, handlers());
+      const input = el.querySelector<HTMLInputElement>("input[name=timeout]")!;
+      expect(input.nextElementSibling?.tagName).toBe("SPAN");
+      expect(input.nextElementSibling?.textContent).toBe("minutes");
+      expect(input.closest(".settings__row")?.querySelector(".settings__label")?.textContent).toBe("Completed decays to Idle after");
+      expect(rowOf(el, "Session viewer").querySelector("select[name=viewerTheme]")).not.toBeNull();
+    });
+
+    it("New sessions has Projects directory and Open in rows", () => {
+      const el = renderSettings(voiceBase, handlers());
+      expect(rowOf(el, "Projects directory").querySelector("input[name=projectsDir]")).not.toBeNull();
+      expect(rowOf(el, "Open in").querySelector("select[name=newSessionTerminal]")).not.toBeNull();
+    });
+
+    it("Pull requests has Reviews and Your pull requests groups", () => {
+      const sec = renderSettings(voiceBase, handlers()).querySelector(".settings__section--reviews")!;
+      expect(titles(sec)).toEqual(["Reviews", "Your pull requests"]);
+      const stack = sec.querySelector("textarea[name=reviewPrompt]")!.closest(".settings__row--stack")!;
+      expect(stack).not.toBeNull();
+      expect(sec.querySelector<HTMLTextAreaElement>("textarea[name=reviewPrompt]")!.rows).toBe(7);
+      expect(stack.querySelector(".settings__help")?.textContent).toContain("Blank uses the built-in prompt.");
+      expect(rowOf(sec, "Clones directory").querySelector(".settings__help")?.textContent).toBe("For reviews and worktrees.");
+      expect(rowOf(sec, "Clones directory").querySelector("input[name=clonesDir]")).not.toBeNull();
+      expect(sec.querySelector("input[name=notifyPrReview]")?.classList.contains("settings__toggle")).toBe(true);
+    });
   });
 
   it("shows the voice order and a switch per remote voice", () => {

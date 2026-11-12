@@ -16,7 +16,7 @@ import { terminalLabel } from "./terminalpick";
 import { renderReleaseNotes } from "./release-notes";
 import { DEFAULT_REVIEW_PROMPT } from "./reviewprompt";
 import { updates } from "./update";
-import { btn as settingsBtn, card, group, notice, row, screenHead, toggle } from "./settings-ui";
+import { btn as settingsBtn, card, group, notice, row, screenHead, state, toggle } from "./settings-ui";
 
 /** Which network role this Maya plays, and what Settings › Network shows. */
 export type NetworkRole = "off" | "main" | "assistant";
@@ -794,66 +794,71 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   const netName = model.networkName ?? "";
   const netCode = model.networkCode ?? "";
 
-  const status = document.createElement("div");
-  status.className = "settings__status";
-  status.textContent =
+  // A hook row: the status sentence is the help, the state and button are the
+  // control. The button's full text stays as its accessible name.
+  const hookRow = (
+    label: string,
+    help: string,
+    installed: boolean | null,
+    button: { action: string; text: string; disabled: boolean; onClick: () => void },
+  ) => {
+    const b = settingsBtn(installed ? "Remove" : "Install", { action: button.action, kind: installed ? "quiet" : "plain", disabled: button.disabled }, button.onClick);
+    b.setAttribute("aria-label", button.text);
+    return row({
+      label,
+      help,
+      control: [...(installed === null ? [] : [state(installed ? "Installed" : "Not installed", installed ? "on" : "off")]), b],
+    });
+  };
+
+  const hookRowEl = hookRow(
+    "Claude Code hook",
     model.hookInstalled === null
       ? "Checking Claude Code hook…"
       : model.hookInstalled
         ? "Claude Code hook is installed. Awaiting Decision and Completed are precise."
-        : "Claude Code hook is not installed. Permission prompts will show as Working.";
-  sessions.append(status);
-
-  const btn = document.createElement("button");
-  btn.type = "button";
-  if (model.hookInstalled) {
-    btn.dataset.action = "remove";
-    btn.textContent = "Remove Claude hook";
-    btn.addEventListener("click", () => h.onRemove());
-  } else {
-    btn.dataset.action = "install";
-    btn.textContent = "Install Claude hook";
-    btn.disabled = model.hookInstalled === null;
-    btn.addEventListener("click", () => h.onInstall());
-  }
-  sessions.append(btn);
+        : "Claude Code hook is not installed. Permission prompts will show as Working.",
+    model.hookInstalled,
+    model.hookInstalled
+      ? { action: "remove", text: "Remove Claude hook", disabled: false, onClick: () => h.onRemove() }
+      : { action: "install", text: "Install Claude hook", disabled: model.hookInstalled === null, onClick: () => h.onInstall() },
+  );
 
   const line = model.statusline ?? null;
-  const lineStatus = document.createElement("div");
-  lineStatus.className = "settings__status";
-  lineStatus.textContent =
+  const lineRowEl = hookRow(
+    "Usage status line",
     line === null
       ? "Checking status line…"
       : line.blockedBy
         ? `Usage and limits cannot be recorded: the status line is set in ${line.blockedBy}.`
         : line.installed
           ? "Usage and limits are recorded from Claude Code's status line."
-          : "Usage and limits are not recorded. Install the status line wrapper to see them in session windows.";
-  const lineButton = document.createElement("button");
-  lineButton.type = "button";
-  lineButton.dataset.action = line?.installed ? "remove-statusline" : "install-statusline";
-  lineButton.textContent = line?.installed ? "Remove usage status line" : "Install usage status line";
-  lineButton.disabled = line === null || !!line.blockedBy;
-  lineButton.addEventListener("click", () => line?.installed ? h.onStatuslineRemove?.() : h.onStatuslineInstall?.());
-  sessions.append(lineStatus, lineButton);
+          : "Usage and limits are not recorded. Install the status line wrapper to see them in session windows.",
+    line === null ? null : line.installed,
+    {
+      action: line?.installed ? "remove-statusline" : "install-statusline",
+      text: line?.installed ? "Remove usage status line" : "Install usage status line",
+      disabled: line === null || !!line.blockedBy,
+      onClick: () => line?.installed ? h.onStatuslineRemove?.() : h.onStatuslineInstall?.(),
+    },
+  );
 
-  const codexStatus = document.createElement("div");
-  codexStatus.className = "settings__status";
-  codexStatus.textContent = model.codexHookInstalled == null
-    ? "Checking Codex hook…"
-    : model.codexHookInstalled
-      ? "Codex hook is installed. Restart Codex and use /hooks to review and trust it for session updates."
-      : "Codex hook is not installed. Session state is inferred from transcripts.";
-  const codexButton = document.createElement("button");
-  codexButton.type = "button";
-  codexButton.dataset.action = model.codexHookInstalled ? "remove-codex" : "install-codex";
-  codexButton.textContent = model.codexHookInstalled ? "Remove Codex hook" : "Install Codex hook";
-  codexButton.disabled = model.codexHookInstalled == null;
-  codexButton.addEventListener("click", () => model.codexHookInstalled ? h.onCodexRemove?.() : h.onCodexInstall?.());
-  sessions.append(codexStatus, codexButton);
+  const codexRowEl = hookRow(
+    "Codex hook",
+    model.codexHookInstalled == null
+      ? "Checking Codex hook…"
+      : model.codexHookInstalled
+        ? "Codex hook is installed. Restart Codex and use /hooks to review and trust it for session updates."
+        : "Codex hook is not installed. Session state is inferred from transcripts.",
+    model.codexHookInstalled ?? null,
+    {
+      action: model.codexHookInstalled ? "remove-codex" : "install-codex",
+      text: model.codexHookInstalled ? "Remove Codex hook" : "Install Codex hook",
+      disabled: model.codexHookInstalled == null,
+      onClick: () => model.codexHookInstalled ? h.onCodexRemove?.() : h.onCodexInstall?.(),
+    },
+  );
 
-  const label = document.createElement("label");
-  label.textContent = "Completed decays to Idle after (minutes)";
   const input = document.createElement("input");
   input.type = "number";
   input.name = "timeout";
@@ -863,21 +868,17 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     const n = Number(input.value);
     if (Number.isFinite(n) && n >= 1) h.onTimeout(Math.floor(n));
   });
-  label.append(input);
-  sessions.append(label);
+  const minutes = document.createElement("span");
+  minutes.textContent = "minutes";
 
-  const dirLabel = document.createElement("label");
-  dirLabel.textContent = "Projects directory";
   const dirInput = document.createElement("input");
   dirInput.type = "text";
   dirInput.name = "projectsDir";
+  dirInput.className = "mono";
   dirInput.placeholder = "~/dev";
   dirInput.value = model.projectsDir;
   dirInput.addEventListener("change", () => h.onProjectsDir(dirInput.value.trim()));
-  dirLabel.append(dirInput);
-  sessions.append(dirLabel);
-  const viewerLabel = document.createElement("label");
-  viewerLabel.textContent = "Session viewer";
+
   const viewerSel = document.createElement("select");
   viewerSel.name = "viewerTheme";
   for (const [value, text] of [["chat", "Chat"], ["terminal", "Terminal"]] as const) {
@@ -888,10 +889,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   viewerSel.value = model.viewerTheme ?? "chat";
   viewerSel.addEventListener("change", () => h.onViewerTheme?.(viewerSel.value as ViewerTheme));
-  viewerLabel.append(viewerSel);
-  sessions.append(viewerLabel);
-  const terminalField = document.createElement("label");
-  terminalField.textContent = "New sessions open in";
+
   const terminalSel = document.createElement("select");
   terminalSel.name = "newSessionTerminal";
   const choices = terminalChoices();
@@ -904,45 +902,52 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   const saved = model.newSessionTerminal ?? "terminal";
   terminalSel.value = choices.some(([value]) => value === saved) ? saved : "terminal";
   terminalSel.addEventListener("change", () => h.onNewSessionTerminal?.(terminalSel.value as NewSessionTerminal));
-  terminalField.append(terminalSel);
-  sessions.append(terminalField);
 
-  const clonesLabel = document.createElement("label");
-  clonesLabel.textContent = "Clones directory (for reviews and worktrees)";
+  sessions.append(
+    group(
+      { title: "Session tracking", note: "Hooks let the agents tell Maya what they are doing, rather than her guessing from transcripts." },
+      card(hookRowEl, lineRowEl, codexRowEl),
+    ),
+    group({ title: "Board" }, card(
+      row({ label: "Completed decays to Idle after", control: [input, minutes] }),
+      row({ label: "Session viewer", control: viewerSel }),
+    )),
+    group({ title: "New sessions" }, card(
+      row({ label: "Projects directory", help: "Where \"Let Maya choose\" looks for a folder.", control: dirInput }),
+      row({ label: "Open in", control: terminalSel }),
+    )),
+  );
+
   const clonesInput = document.createElement("input");
   clonesInput.type = "text";
   clonesInput.name = "clonesDir";
+  clonesInput.className = "mono";
   clonesInput.placeholder = "~/dev/reviews";
   clonesInput.value = model.clonesDir;
   clonesInput.addEventListener("change", () => h.onClonesDir(clonesInput.value.trim()));
-  clonesLabel.append(clonesInput);
-  reviews.append(clonesLabel);
 
-  const reviewLabel = document.createElement("label");
-  reviewLabel.textContent = "Review prompt (for the Review button)";
   const reviewInput = document.createElement("textarea");
   reviewInput.name = "reviewPrompt";
-  reviewInput.rows = 4;
+  reviewInput.rows = 7;
   reviewInput.placeholder = DEFAULT_REVIEW_PROMPT;
   reviewInput.value = model.reviewPrompt;
   reviewInput.addEventListener("change", () => h.onReviewPrompt(reviewInput.value.trim()));
-  reviewLabel.append(reviewInput);
-  reviews.append(reviewLabel);
-  const reviewHint = document.createElement("div");
-  reviewHint.className = "settings__hint";
-  reviewHint.dataset.for = "reviewPrompt";
-  reviewHint.textContent = "Blank uses the built-in prompt. {number}, {repo} and {url} are filled in; a prompt that uses none gets \" PR #<number> (<url>)\" appended.";
-  reviews.append(reviewHint);
 
-  const prLabel = document.createElement("label");
-  prLabel.className = "settings__check";
-  const prBox = document.createElement("input");
-  prBox.type = "checkbox";
-  prBox.name = "notifyPrReview";
-  prBox.checked = model.notifyOnPrReview !== false;
-  prBox.addEventListener("change", () => h.onNotifyPrReview?.(prBox.checked));
-  prLabel.append(prBox, document.createTextNode(" Notify me when a PR assigned to me is approved or needs changes"));
-  reviews.append(prLabel);
+  reviews.append(
+    group({ title: "Reviews" }, card(
+      row({ label: "Clones directory", help: "For reviews and worktrees.", control: clonesInput }),
+      row({
+        label: "Review prompt",
+        help: "Blank uses the built-in prompt. {number}, {repo} and {url} are filled in; a prompt that uses none gets \" PR #<number> (<url>)\" appended.",
+        control: reviewInput,
+        stack: true,
+      }),
+    )),
+    group({ title: "Your pull requests" }, card(row({
+      label: "Notify me when a PR assigned to me is approved or needs changes",
+      control: toggle("notifyPrReview", model.notifyOnPrReview !== false, (on) => h.onNotifyPrReview?.(on)),
+    }))),
+  );
 
   debug.append(
     group({}, card(row({
