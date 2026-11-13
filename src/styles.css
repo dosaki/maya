@@ -76,8 +76,11 @@ body { margin: 0; background: var(--bg); }
 .card__close:hover { color: var(--text); background: var(--border); }
 .card__close .icon { display: block; }
 /* Project · machine · branch · model; the separators are drawn here, so a missing part leaves none. */
-.card__sub { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.card__sub { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .card__sub > * { flex: none; }
+.card__sub > :is(.card__project, .card__model) { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The project gives way last: the branch and model shrink first. */
+.card__sub > .card__project { flex-shrink: 0; max-width: 55%; }
 .card__sub > :is(.card__remote, .card__branch, .card__model)::before { content: "·"; margin-right: 5px; color: var(--muted); opacity: .6; }
 .card__remote { color: var(--gold); display: inline-flex; align-items: center; gap: 0; }
 .card__branch { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
@@ -89,7 +92,8 @@ body { margin: 0; background: var(--bg); }
 .card__question[data-kind="permission"] { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: calc(var(--card-text) - 1.5px); }
 .card__snippet { margin: 0; color: var(--muted); font-size: calc(var(--card-text) - 1px); line-height: var(--card-leading); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .card__foot { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--rule); padding: calc(var(--card-section) / 2) 0 calc(var(--card-section) / 2 + 2px); }
-.card__facts { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* A fact that does not fit wraps onto a second line, which is clipped: it drops out whole rather than reading "$0". */
+.card__facts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 8px; row-gap: 12px; height: 24px; flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .card__ctx { display: inline-flex; align-items: center; gap: 5px; }
 .card__ctx::before { content: ""; width: 13px; height: 13px; border-radius: 50%; flex: none; background: radial-gradient(circle, var(--panel) 3.5px, transparent 4px), conic-gradient(var(--gold) var(--p), var(--border) 0); }
 .card__ctx[data-band="high"] { color: var(--danger); }
@@ -102,7 +106,7 @@ body { margin: 0; background: var(--bg); }
 .card:hover .card__icon, .card:focus-visible .card__icon { color: var(--text); }
 .card__icon:hover:not(:disabled) { background: var(--border); }
 .card__icon[data-action="compact"] { color: var(--danger) !important; }
-.card__icon.card__btn--stop { color: #f87171; }
+.card__icon.card__btn--stop, .card:hover .card__icon.card__btn--stop, .card:focus-visible .card__icon.card__btn--stop { color: #f87171; }
 .card__icon:disabled { opacity: .5; cursor: default; }
 .settings { display: flex; flex-direction: column; gap: 10px; }
 /* The groups down a sidebar, the open one beside it, the pair centred; a row of buttons on top when narrow. */
@@ -859,7 +863,7 @@ body { margin: 0; background: var(--bg); }
 :root[data-theme="light"] .card:hover, :root[data-theme="light"] .card:focus-visible { box-shadow: 0 0 0 1px var(--gold-deep), 0 6px 18px rgba(169,124,22,.16); }
 :root[data-theme="light"] .popover { box-shadow: 0 8px 30px rgba(60,45,10,.16); }
 :root[data-theme="light"] .modal__panel { box-shadow: 0 20px 60px rgba(60,45,10,.28); }
-:root[data-theme="light"] .card__btn--stop { color: #b91c1c; }
+:root[data-theme="light"] .card__btn--stop, :root[data-theme="light"] .card:hover .card__icon.card__btn--stop, :root[data-theme="light"] .card:focus-visible .card__icon.card__btn--stop { color: #b91c1c; }
 :root[data-theme="light"] .reviews__error, :root[data-theme="light"] .deploy__error, :root[data-theme="light"] .voice--error, :root[data-theme="light"] .voice__error { color: #c0262c; }
 :root[data-theme="light"] .debug__line--speech .debug__source { color: #7e22ce; }
 :root[data-theme="light"] .item__status { background: #f3e6c4; color: var(--gold-bright); }

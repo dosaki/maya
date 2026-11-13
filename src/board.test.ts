@@ -3,6 +3,8 @@ import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { renderCard } from "./card";
 import { formatAge, projectName } from "./format";
 import type { Card } from "./types";
+import styles from "./styles.css?raw";
+import mobileStyles from "./mobile/mobile.css?raw";
 
 const NOW = 1_790_600_000_000;
 
@@ -319,5 +321,30 @@ describe("swapBoard on a sideways-scrolling board", () => {
     Object.defineProperty(old, "scrollLeft", { value: 640, writable: true });
     swapBoard(host, renderBoard([card({})], NOW + 60_000));
     expect(host.querySelector<HTMLElement>(".board")!.scrollLeft).toBe(640);
+  });
+});
+
+describe("card styles", () => {
+  it("keeps Stop red while the pointer is on the card, as hovering turns the other icons to the text colour", () => {
+    expect(styles).toMatch(/\.card:hover \.card__icon\.card__btn--stop[^{]*\{[^}]*color:\s*#f87171/);
+    expect(styles).toMatch(/:root\[data-theme="light"\] \.card:hover \.card__icon\.card__btn--stop[^{]*\{[^}]*color:\s*#b91c1c/);
+  });
+
+  it("gives the PR pill the phone's 40px tap height", () => {
+    const rule = mobileStyles.match(/([^{}]*\.card__pr[^{}]*)\{([^}]*)\}/);
+    expect(rule?.[2]).toMatch(/min-height:\s*40px/);
+  });
+
+  it("clips the line under the name and the footer's facts instead of spilling past a narrow card", () => {
+    expect(styles).toMatch(/\.card__sub \{[^}]*overflow:\s*hidden/);
+    expect(styles).toMatch(/\.card__sub > :is\(\.card__project, \.card__model\)[^{]*\{[^}]*text-overflow:\s*ellipsis/);
+    expect(styles).toMatch(/\.card__facts \{[^}]*overflow:\s*hidden/);
+    expect(styles).toMatch(/\.card__facts \{[^}]*flex-wrap:\s*wrap/);
+    expect(styles).toMatch(/\.card__sub > \.card__project \{[^}]*flex-shrink:\s*0/);
+  });
+
+  it("names a long model in its tooltip, since the line may cut it short", () => {
+    const model = "anthropic/claude-sonnet-4-5-20250929";
+    expect(renderCard(card({ model }), NOW).querySelector<HTMLElement>(".card__model")!.title).toBe(model);
   });
 });

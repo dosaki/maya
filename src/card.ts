@@ -83,7 +83,11 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
     branch.title = card.branch;
     sub.append(branch);
   }
-  if (card.model) sub.append(el("span", "card__model", card.model));
+  if (card.model) {
+    const model = el("span", "card__model", card.model);
+    model.title = card.model;
+    sub.append(model);
+  }
   root.append(head, sub);
 
   if (card.awaiting) {
