@@ -439,10 +439,8 @@ mod tests {
 
     #[cfg(unix)]
     fn script(dir: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let p = dir.join("lister");
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&p, &format!("#!/bin/sh\n{body}\n"));
         p
     }
 

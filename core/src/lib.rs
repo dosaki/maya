@@ -42,6 +42,8 @@ pub mod statusline;
 pub mod store;
 pub mod terminal;
 pub mod terminal_tmux;
+#[cfg(all(test, unix))]
+mod test_script;
 pub mod transcript;
 pub mod usage;
 pub mod tty;

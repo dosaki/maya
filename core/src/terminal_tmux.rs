@@ -244,10 +244,8 @@ mod tests {
     /// fails on Enter, as a server that died between the two commands does.
     #[cfg(unix)]
     fn tmux_failing_on_enter(dir: &Path) -> Tmux {
-        use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("tmux");
-        std::fs::write(&bin, "#!/bin/sh\ncase \"$1\" in\n  list-panes) printf '/dev/pts/3\\ts:0.0\\ts\\n' ;;\n  send-keys) for a; do [ \"$a\" = -H ] && exit 1; done ;;\nesac\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&bin, "#!/bin/sh\ncase \"$1\" in\n  list-panes) printf '/dev/pts/3\\ts:0.0\\ts\\n' ;;\n  send-keys) for a; do [ \"$a\" = -H ] && exit 1; done ;;\nesac\n");
         Tmux { binary: bin }
     }
 

@@ -478,12 +478,10 @@ mod tests {
 
     #[cfg(unix)]
     fn fake(script: &str) -> (std::path::PathBuf, Launch) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("maya-fake-stdio-{}", crate::launch::new_session_uuid()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("agent");
-        std::fs::write(&bin, format!("#!/bin/sh\n{script}")).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&bin, &format!("#!/bin/sh\n{script}"));
         let l = Launch { agent: Harness::Other, binary: bin, model: None, cwd: dir.join("work"), system_prompt: String::new(), resume: None, writable: vec![] };
         (dir, l)
     }
