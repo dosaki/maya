@@ -63,18 +63,6 @@ export function formatTokens(n: number): string {
 }
 
 /** A vertical meter along a card's edge, filled to the context percentage. */
-export function contextMeter(ctx: ContextUsage): HTMLElement {
-  const meter = document.createElement("div");
-  meter.className = "card__meter";
-  meter.dataset.band = contextBand(ctx.percent);
-  meter.title = `Context ${ctx.percent}% · ${formatTokens(ctx.used)} of ${formatTokens(ctx.window)}`;
-  const fill = document.createElement("div");
-  fill.className = "card__meter-fill";
-  fill.style.height = `${ctx.percent}%`;
-  meter.append(fill);
-  return meter;
-}
-
 export function compactButton(className = "card__btn"): HTMLButtonElement {
   const b = iconButton("compact", "Compact context", className);
   b.dataset.action = "compact";

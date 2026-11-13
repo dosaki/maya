@@ -9,7 +9,12 @@ export const OPEN_DELAY_MS = 1000;
  * permission or plan ask once its menu is known), or null when the card is
  * not waiting on one (or every question is answered).
  */
-export function renderOptions(card: Card, next: number, opts: { descriptions: boolean; enabled: boolean }): HTMLElement | null {
+/**
+ * `numbered` stacks the answers as rows, each led by its number (the card);
+ * `label: false` leaves "Question N of M" to the caller, which shows it
+ * above the question.
+ */
+export function renderOptions(card: Card, next: number, opts: { descriptions: boolean; enabled: boolean; numbered?: boolean; label?: boolean }): HTMLElement | null {
   const aw = card.awaiting;
   if (card.state !== "awaiting" || !aw) return null;
   const q = aw.questions[next];
@@ -17,14 +22,14 @@ export function renderOptions(card: Card, next: number, opts: { descriptions: bo
 
   const root = document.createElement("div");
   root.className = "options";
-  if (aw.questions.length > 1) {
+  if (aw.questions.length > 1 && opts.label !== false) {
     const label = document.createElement("div");
     label.className = "options__label";
     label.textContent = `Question ${next + 1} of ${aw.questions.length} · ${q.header}`;
     root.append(label);
   }
   const list = document.createElement("div");
-  list.className = "options__list";
+  list.className = opts.numbered ? "options__list options--rows" : "options__list";
   q.options.forEach((o, i) => {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -43,6 +48,14 @@ export function renderOptions(card: Card, next: number, opts: { descriptions: bo
       desc.className = "options__desc";
       desc.textContent = o.description;
       btn.append(name, desc);
+    } else if (opts.numbered) {
+      const num = document.createElement("span");
+      num.className = "options__num";
+      num.textContent = String(i + 1);
+      const text = document.createElement("span");
+      text.className = "options__text";
+      text.textContent = o.label;
+      btn.append(num, text);
     } else {
       btn.textContent = o.label;
     }

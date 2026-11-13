@@ -22,6 +22,15 @@ describe("renderOptions", () => {
     expect(el.querySelector(".options__desc")).toBeNull();
   });
 
+  it("numbers the answers as stacked rows, and leaves the label to the caller, when asked", () => {
+    const el = renderOptions(two, 0, { descriptions: false, enabled: true, numbered: true, label: false })!;
+    expect(el.querySelector(".options__label")).toBeNull();
+    expect(el.querySelector(".options__list")!.classList.contains("options--rows")).toBe(true);
+    const btns = [...el.querySelectorAll<HTMLButtonElement>("button[data-action=answer]")];
+    expect(btns.map((b) => [b.querySelector(".options__num")?.textContent, b.querySelector(".options__text")?.textContent])).toEqual([["1", "S"], ["2", "L"]]);
+    expect(el.querySelector(".options__warn")).not.toBeNull();
+  });
+
   it("shows descriptions when asked and disables while not yet enabled", () => {
     const el = renderOptions(two, 0, { descriptions: true, enabled: false })!;
     expect([...el.querySelectorAll(".options__desc")].map((d) => d.textContent)).toEqual(["small", "large"]);

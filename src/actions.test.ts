@@ -10,7 +10,7 @@ describe("cardActionFor", () => {
     const el = renderCard(card, 0);
     document.body.replaceChildren(el);
     expect(cardActionFor(el.querySelector("button[data-action=terminal]")!)).toEqual({ kind: "terminal", sessionId: "s1" });
-    expect(cardActionFor(el.querySelector("button[data-action=reply]")!)).toEqual({ kind: "open", sessionId: "s1" });
+    expect(cardActionFor(el.querySelector(".card__foot")!)).toEqual({ kind: "open", sessionId: "s1" });
     expect(cardActionFor(el.querySelector(".card__name")!)).toEqual({ kind: "open", sessionId: "s1" });
     expect(cardActionFor(document.body)).toBeNull();
   });

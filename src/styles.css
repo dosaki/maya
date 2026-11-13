@@ -62,24 +62,48 @@ body { margin: 0; background: var(--bg); }
 .column__head { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 12px 6px; }
 .column__title { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .column__count { color: var(--muted); font-variant-numeric: tabular-nums; }
-.column__cards { overflow-y: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: 8px; }
+.column__cards { overflow-y: auto; padding: 0 8px 8px; display: flex; flex-direction: column; gap: var(--card-gap); }
 .column__empty { color: var(--muted); font-style: italic; padding: 12px; text-align: center; }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; box-shadow: var(--shadow); cursor: pointer; }
+/* A session card (design A3): head, the line under the name, the ask, the
+   last message, then a footer of facts and plain icons. The sizes come from
+   the card size variables at the top. */
+.card { position: relative; display: flex; flex-direction: column; gap: var(--card-section); background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: var(--card-pad-y) var(--card-pad-x) 0; box-shadow: var(--shadow); cursor: pointer; }
 .card:hover, .card:focus-visible { border-color: var(--gold); outline: none; box-shadow: 0 0 0 1px var(--gold-deep), 0 6px 18px rgba(217,171,60,.10); }
-.card__head { display: flex; align-items: center; gap: 8px; }
-.card__name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.card__remote { color: var(--gold); margin-left: 6px; display: inline-flex; align-items: center; }
-.card__age { color: var(--muted); font-variant-numeric: tabular-nums; margin-left: auto; }
+.card__head { display: flex; align-items: center; gap: 8px; margin-bottom: calc(var(--card-section) / -2); }
+.card__name { font-weight: 600; font-size: var(--card-name); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card__age { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; margin-left: auto; flex: none; }
 .card__close { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; margin: -5px -7px -5px -5px; padding: 0; border: 0; border-radius: 4px; background: none; color: var(--muted); cursor: pointer; flex: none; }
 .card__close:hover { color: var(--text); background: var(--border); }
 .card__close .icon { display: block; }
-.card__project { color: var(--muted); font-size: 12px; margin-top: 2px; }
+/* Project · machine · branch · model; the separators are drawn here, so a missing part leaves none. */
+.card__sub { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.card__sub > * { flex: none; }
+.card__sub > :is(.card__remote, .card__branch, .card__model)::before { content: "·"; margin-right: 5px; color: var(--muted); opacity: .6; }
+.card__remote { color: var(--gold); display: inline-flex; align-items: center; gap: 0; }
+.card__branch { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
 .card--stale { opacity: .55; }
-.card__awaiting { margin-top: 8px; padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--awaiting) 14%, transparent); border-left: 3px solid var(--awaiting); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
-.card__awaiting[data-kind="question"] { background: color-mix(in srgb, var(--working) 12%, transparent); border-left-color: var(--working); font-family: inherit; }
-.card__awaiting[data-kind="text"] { font-family: inherit; }
-.card__awaiting[data-kind="plan"] { background: color-mix(in srgb, var(--completed) 12%, transparent); border-left-color: var(--completed); font-family: inherit; }
-.card__snippet { margin: 8px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.card__ask { display: flex; flex-direction: column; gap: 8px; }
+.card__ask .options { margin-top: 0; }
+.card__ask .options__label { margin-bottom: -4px; }
+.card__question { font-size: var(--card-text); line-height: var(--card-leading); white-space: pre-wrap; word-break: break-word; }
+.card__question[data-kind="permission"] { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: calc(var(--card-text) - 1.5px); }
+.card__snippet { margin: 0; color: var(--muted); font-size: calc(var(--card-text) - 1px); line-height: var(--card-leading); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.card__foot { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--rule); padding: calc(var(--card-section) / 2) 0 calc(var(--card-section) / 2 + 2px); }
+.card__facts { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.card__ctx { display: inline-flex; align-items: center; gap: 5px; }
+.card__ctx::before { content: ""; width: 13px; height: 13px; border-radius: 50%; flex: none; background: radial-gradient(circle, var(--panel) 3.5px, transparent 4px), conic-gradient(var(--gold) var(--p), var(--border) 0); }
+.card__ctx[data-band="high"] { color: var(--danger); }
+.card__ctx[data-band="high"]::before { background: radial-gradient(circle, var(--panel) 3.5px, transparent 4px), conic-gradient(var(--danger) var(--p), var(--border) 0); }
+.card__pr { padding: 1px 7px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--muted); font: inherit; font-size: 11.5px; cursor: pointer; }
+.card__pr:hover { color: var(--text); border-color: var(--gold-deep); }
+.card__foot .card__actions { margin: 0 -6px 0 0; gap: 2px; flex-wrap: nowrap; }
+.card__icon { display: inline-flex; align-items: center; justify-content: center; width: var(--card-icon); height: calc(var(--card-icon) - 2px); padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
+.card__icon .icon { display: block; }
+.card:hover .card__icon, .card:focus-visible .card__icon { color: var(--text); }
+.card__icon:hover:not(:disabled) { background: var(--border); }
+.card__icon[data-action="compact"] { color: var(--danger) !important; }
+.card__icon.card__btn--stop { color: #f87171; }
+.card__icon:disabled { opacity: .5; cursor: default; }
 .settings { display: flex; flex-direction: column; gap: 10px; }
 /* The groups down a sidebar, the open one beside it, the pair centred; a row of buttons on top when narrow. */
 .settings__body.settings__body--sidebar { display: grid; grid-template-columns: 208px minmax(0, 760px); gap: 56px; justify-content: center; align-items: start; padding-top: 40px; }
@@ -409,10 +433,6 @@ body { margin: 0; background: var(--bg); }
 .turn--assistant { align-self: flex-start; background: color-mix(in srgb, var(--panel) 70%, var(--bg)); border: 1px solid var(--border); }
 .turn--tool { align-self: flex-start; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; padding: 2px 8px; }
 .turn__who { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
-.card { position: relative; }
-.card__meter { position: absolute; left: 0; top: 8px; bottom: 8px; width: 4px; border-radius: 2px; background: color-mix(in srgb, var(--border) 60%, transparent); overflow: hidden; }
-/* The context meter is gold in every band; the Compact button appears at 75%. */
-.card__meter-fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; background: linear-gradient(180deg, var(--gold-bright), var(--gold)); }
 /* The header's usage strip: context, the account's limit windows, the session's cost. It
    sheds detail as the head narrows (data-stage on .modal__head, set by a ResizeObserver). */
 .usage { flex: none; display: flex; align-items: center; gap: 14px; align-self: center; font-size: 12px; color: var(--muted); white-space: nowrap; }
@@ -434,7 +454,6 @@ body { margin: 0; background: var(--bg); }
 .usage__chip[data-band="high"] { border-color: var(--awaiting); color: var(--awaiting); }
 .modal__head[data-stage="narrow"] .modal__statusline--head, .modal__head[data-stage="chip"] .modal__statusline--head { display: none; }
 .modal__head[data-stage="chip"] .modal__project { display: none; }
-.card__meta { display: flex; align-items: center; gap: 6px; }
 .card__harness, .modal__harness, .remembered__agent { width: 14px; height: 14px; border-radius: 3px; flex: none; }
 .modal__harness { align-self: center; }
 .card__harness--text, .modal__harness--text, .remembered__agent--text { width: auto; height: auto; padding: 1px 6px; border: 1px solid var(--border); border-radius: 999px; font-size: 10px; color: var(--muted); white-space: nowrap; }
@@ -463,6 +482,10 @@ body { margin: 0; background: var(--bg); }
 .modal__banner { flex-wrap: wrap; }
 .modal__banner .options { flex-basis: 100%; }
 .options__warn { font-size: 11.5px; color: var(--awaiting); margin-top: 6px; }
+.options--rows { flex-direction: column; flex-wrap: nowrap; gap: 6px; }
+.options--rows .options__btn { flex-direction: row; align-items: baseline; gap: 10px; padding: var(--card-opt-pad-y) var(--card-opt-pad-x); border-color: var(--border); font-size: calc(var(--card-text) - 1.5px); }
+.options--rows .options__btn:hover:not(:disabled) { border-color: var(--awaiting); }
+.options__num { color: var(--awaiting); font-weight: 600; font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
 
 /* While a session asks, the menu stands in for the composer, laid out as the
    CLI's: numbered options, the own row with its box (or, on a multi-select

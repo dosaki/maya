@@ -28,9 +28,11 @@ describe("remoteTerminalToast", () => {
 describe("renderCard: PR button", () => {
   it("names a GitLab merge request MR !n and a GitHub one PR #n", () => {
     const gl = renderCard({ ...base, pr: { number: 12, url: "https://gitlab.com/g/r/-/merge_requests/12", state: "open", forge: "gitlab" } }, 0);
-    expect(gl.querySelector("button[data-action=pr]")?.textContent).toBe("MR !12");
+    expect(gl.querySelector("button[data-action=pr]")?.textContent).toBe("!12");
+    expect(gl.querySelector("button[data-action=pr]")?.getAttribute("aria-label")).toBe("MR !12");
     const gh = renderCard({ ...base, pr: { number: 7, url: "https://github.com/o/r/pull/7", state: "open" } }, 0);
-    expect(gh.querySelector("button[data-action=pr]")?.textContent).toBe("PR #7");
+    expect(gh.querySelector("button[data-action=pr]")?.textContent).toBe("#7");
+    expect(gh.querySelector("button[data-action=pr]")?.getAttribute("aria-label")).toBe("PR #7");
   });
 });
 
@@ -38,9 +40,9 @@ describe("renderCard: remote cards", () => {
   it("marks a remote card with the machine and drops the Terminal button", () => {
     const el = renderCard({ ...base, machine: "laptop", stale: false }, 0);
     expect(el.querySelector(".card__remote")?.getAttribute("title")).toBe("Runs on laptop");
-    expect(el.querySelector(".card__project")?.textContent).toBe("proj on laptop");
+    expect(el.querySelector(".card__project")?.textContent).toBe("proj");
+    expect(el.querySelector(".card__sub .card__machine")?.textContent).toBe("laptop");
     expect(el.querySelector("button[data-action=terminal]")).toBeNull();
-    expect(el.querySelector("button[data-action=reply]")).not.toBeNull();
     expect(renderCard({ ...base, machine: "laptop", stale: true }, 0).classList.contains("card--stale")).toBe(true);
     expect(renderCard(base, 0).querySelector("button[data-action=terminal]")).not.toBeNull();
   });
@@ -153,12 +155,12 @@ describe("renderCard: options and Stop", () => {
 
   it("card shows compact options and Stop", () => {
     const el = renderCard(asking, 5000);
-    expect([...el.querySelectorAll(".options button[data-action=answer]")].map((b) => b.textContent)).toEqual(["SQLite", "Postgres"]);
+    expect([...el.querySelectorAll(".options button[data-action=answer] .options__text")].map((b) => b.textContent)).toEqual(["SQLite", "Postgres"]);
     // Type something and Chat about this live in the session view.
     expect(el.textContent).not.toContain("Type something");
     expect(el.textContent).not.toContain("Chat about this");
     const stop = el.querySelector<HTMLButtonElement>(".card__actions button[data-action=stop]")!;
-    expect(stop.textContent).toBe("Stop");
+    expect(stop.getAttribute("aria-label")).toBe("Stop");
     expect(stop.disabled).toBe(false);
     expect(renderCard({ ...base, state: "working", stateSince: 1000 }, 5000).querySelector("button[data-action=stop]")).not.toBeNull();
     expect(renderCard({ ...base, state: "working", stateSince: 1000, shell: true }, 5000).querySelector("button[data-action=stop]")).toBeNull();
