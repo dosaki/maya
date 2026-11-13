@@ -123,7 +123,7 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
   root.dataset.forge = pr.forge;
   root.dataset.repo = pr.repo;
   root.dataset.number = String(pr.number);
-  const head = el("header", "pr__head");
+  const line = el("div", "pr__line");
   const name = el("span", "pr__name");
   const mark = markFor(pr, tab);
   if (mark) {
@@ -141,14 +141,16 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
   forgeMark.setAttribute("role", "img");
   forgeMark.setAttribute("aria-label", pr.forge === "gitlab" ? "GitLab" : "GitHub");
   name.append(forgeMark);
-  name.append(el("span", "pr__repo", `${pr.repo.split("/").pop() ?? pr.repo} ${prRef(pr)}`));
-  const chips = el("span", "pr__chips");
-  if (pr.isDraft) chips.append(el("span", "pr__chip pr__chip--draft", "draft"));
-  head.append(name, chips);
-  root.append(head, el("div", "pr__title", pr.title));
+  const repo = el("span", "pr__repo", `${pr.repo.split("/").pop() ?? pr.repo} ${prRef(pr)}`);
+  repo.title = pr.repo;
+  name.append(repo);
+  line.append(name, el("span", "pr__title", pr.title));
   const updated = Date.parse(pr.updatedAt);
-  root.append(el("div", "pr__meta", `${pr.author} · updated ${Number.isFinite(updated) ? formatAge(updated, nowMs) : "?"} ago · ${pr.repo}`));
+  const main = el("div", "pr__main");
+  main.append(line, el("div", "pr__meta", `${pr.author} · updated ${Number.isFinite(updated) ? formatAge(updated, nowMs) : "?"} ago`));
+  root.append(main);
   const actions = el("div", "card__actions");
+  if (pr.isDraft) actions.append(el("span", "pr__chip pr__chip--draft", "draft"));
   if (related?.machine) {
     // Its terminal is on another Mac: name the machine instead of a button.
     const where = el("span", "pr__machine", `on ${related.machine}`);

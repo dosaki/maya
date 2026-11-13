@@ -3,6 +3,8 @@ import { boardCards, countable, renderBoard, swapBoard } from "./board";
 import { renderCard } from "./card";
 import { formatAge, projectName } from "./format";
 import type { Card } from "./types";
+import styles from "./styles.css?raw";
+import mobileStyles from "./mobile/mobile.css?raw";
 
 const NOW = 1_790_600_000_000;
 
@@ -33,27 +35,80 @@ describe("the brain card", () => {
   });
 });
 
-describe("context meter", () => {
-  it("shows a meter with the percent, colour band and tooltip, or nothing before the first turn", () => {
-    expect(renderCard(card({}), NOW).querySelector(".card__meter")).toBeNull();
+describe("context ring", () => {
+  it("shows the context as a ring with its percentage, band and tooltip in the footer, or nothing before the first turn", () => {
+    expect(renderCard(card({}), NOW).querySelector(".card__ctx")).toBeNull();
     const el = renderCard(card({ context: { used: 124_000, window: 200_000, percent: 62 } }), NOW);
-    const meter = el.querySelector<HTMLElement>(".card__meter")!;
-    expect(meter.title).toBe("Context 62% · 124k of 200k");
-    expect(meter.dataset.band).toBe("mid");
-    expect(el.querySelector<HTMLElement>(".card__meter-fill")!.style.height).toBe("62%");
-    expect(renderCard(card({ context: { used: 10_000, window: 200_000, percent: 5 } }), NOW).querySelector<HTMLElement>(".card__meter")!.dataset.band).toBe("low");
-    expect(renderCard(card({ context: { used: 900_000, window: 1_000_000, percent: 90 } }), NOW).querySelector<HTMLElement>(".card__meter")!.title).toBe("Context 90% · 900k of 1M");
+    const ctx = el.querySelector<HTMLElement>(".card__foot .card__ctx")!;
+    expect(ctx.textContent).toBe("62%");
+    expect(ctx.title).toBe("Context 62% · 124k of 200k");
+    expect(ctx.dataset.band).toBe("mid");
+    expect(ctx.style.getPropertyValue("--p")).toBe("62%");
+    expect(el.querySelector(".card__meter")).toBeNull();
+    expect(renderCard(card({ context: { used: 10_000, window: 200_000, percent: 5 } }), NOW).querySelector<HTMLElement>(".card__ctx")!.dataset.band).toBe("low");
+    expect(renderCard(card({ context: { used: 900_000, window: 1_000_000, percent: 90 } }), NOW).querySelector<HTMLElement>(".card__ctx")!.dataset.band).toBe("high");
   });
 
-  it("offers Compact from 75 percent", () => {
+  it("offers Compact from 75 percent, as Maya's compact icon in the footer", () => {
     expect(renderCard(card({ context: { used: 148_000, window: 200_000, percent: 74 } }), NOW).querySelector("button[data-action=compact]")).toBeNull();
     const el = renderCard(card({ context: { used: 150_000, window: 200_000, percent: 75 } }), NOW);
-    const btn = el.querySelector<HTMLButtonElement>("button[data-action=compact]")!;
+    const btn = el.querySelector<HTMLButtonElement>(".card__foot .card__actions button[data-action=compact]")!;
     expect(btn.querySelector("svg.icon-compact")).not.toBeNull();
     expect(btn.textContent?.trim()).toBe("");
     expect(btn.getAttribute("aria-label")).toBe("Compact context");
     expect(btn.title).toContain("/compact");
-    expect(el.querySelector<HTMLElement>(".card__meter")!.dataset.band).toBe("high");
+    expect(el.querySelector<HTMLElement>(".card__ctx")!.dataset.band).toBe("high");
+  });
+});
+
+describe("the line under the name", () => {
+  it("names the project, machine, branch and model, each only when known", () => {
+    const branch = "feat/a-very-long-branch-name-that-overflows";
+    const el = renderCard(card({ machine: "laptop", branch, model: "Opus 5.5" }), NOW);
+    const sub = el.querySelector(".card__sub")!;
+    expect(sub.querySelector(".card__project")!.textContent).toBe("eye");
+    expect(sub.querySelector(".card__machine")!.textContent).toBe("laptop");
+    expect(sub.querySelector(".card__remote")).not.toBeNull();
+    const b = sub.querySelector<HTMLElement>(".card__branch")!;
+    expect(b.textContent).toBe(branch);
+    expect(b.title).toBe(branch);
+    expect(sub.querySelector(".card__model")!.textContent).toBe("Opus 5.5");
+  });
+
+  it("shows only the agent and project when nothing else is known, with no stray separator", () => {
+    const sub = renderCard(card({}), NOW).querySelector(".card__sub")!;
+    expect(sub.querySelector(".card__branch, .card__model, .card__machine, .card__remote")).toBeNull();
+    expect(sub.textContent).toBe("eye");
+    expect(renderCard(card({ branch: null, model: null }), NOW).querySelector(".card__sub")!.textContent).toBe("eye");
+  });
+});
+
+describe("the footer", () => {
+  const usage = (micros: number) => ({ input: 1, cachedInput: 0, cacheWrite: 0, output: 1, cost: { micros, unit: "usd" as const, estimated: false, models: [] } });
+
+  it("shows the PR as a small pill and the cost so far", () => {
+    const el = renderCard(card({ pr: { number: 97, url: "https://github.com/o/r/pull/97", state: "open", forge: "github" }, usage: usage(1_240_000) }), NOW);
+    const pr = el.querySelector<HTMLButtonElement>(".card__foot .card__facts button[data-action=pr]")!;
+    expect(pr.textContent).toBe("#97");
+    expect(pr.getAttribute("aria-label")).toBe("PR #97");
+    expect(el.querySelector(".card__foot .card__facts .card__cost")!.textContent).toBe("$1.24");
+  });
+
+  it("shows no cost before one is known", () => {
+    expect(renderCard(card({}), NOW).querySelector(".card__cost")).toBeNull();
+    expect(renderCard(card({ usage: { input: 1, cachedInput: 0, cacheWrite: 0, output: 1, cost: null } }), NOW).querySelector(".card__cost")).toBeNull();
+  });
+
+  it("keeps the footer, with its buttons on the right, on a card that knows nothing else", () => {
+    const foot = renderCard(card({}), NOW).querySelector(".card__foot")!;
+    expect(foot.querySelector(".card__facts")!.children).toHaveLength(0);
+    expect(foot.lastElementChild!.classList.contains("card__actions")).toBe(true);
+  });
+
+  it("has no Reply button: a click anywhere on the card opens it", () => {
+    const el = renderCard(card({ snippet: "Done." }), NOW);
+    expect(el.querySelector("[data-action=reply]")).toBeNull();
+    expect(el.tabIndex).toBe(0);
   });
 });
 
@@ -67,7 +122,7 @@ describe("card badges and PR button", () => {
     expect(plain.querySelector("button[data-action=pr]")).toBeNull();
     const withPr = renderCard(card({ pr: { number: 781, url: "https://github.com/o/r/pull/781", state: "merged" } }), NOW);
     const btn = withPr.querySelector<HTMLButtonElement>("button[data-action=pr]")!;
-    expect(btn.textContent).toBe("PR #781");
+    expect(btn.textContent).toBe("#781");
     expect(btn.title).toContain("merged");
     expect(btn.title).toContain("https://github.com/o/r/pull/781");
   });
@@ -103,15 +158,28 @@ describe("renderCard", () => {
     expect(el.querySelector(".card__snippet")?.textContent).toBe("All done.");
   });
 
-  it("shows the awaiting detail with its kind", () => {
+  it("shows the awaiting detail as the question, with its kind", () => {
     const el = renderCard(card({ state: "awaiting", awaiting: { kind: "permission", detail: "Bash: rm -rf build", questions: [] } }), NOW);
-    expect(el.querySelector(".card__awaiting")?.textContent).toBe("Bash: rm -rf build");
-    expect(el.querySelector(".card__awaiting")?.getAttribute("data-kind")).toBe("permission");
+    expect(el.querySelector(".card__ask .card__question")?.textContent).toBe("Bash: rm -rf build");
+    expect(el.querySelector(".card__question")?.getAttribute("data-kind")).toBe("permission");
+    expect(el.querySelector(".card__awaiting")).toBeNull();
+  });
+
+  it("puts a question over numbered answers, then the last message", () => {
+    const q = (header: string) => ({ question: "Which?", header, multiSelect: false, options: [{ label: "A", description: "" }, { label: "B", description: "" }, { label: "C", description: "" }] });
+    const el = renderCard(card({ state: "awaiting", stateSince: NOW - 5000, snippet: "I looked.", awaiting: { kind: "question", detail: "Which approach?", questions: [q("Approach"), q("Scope")] } }), NOW);
+    const ask = el.querySelector(".card__ask")!;
+    expect(ask.firstElementChild?.textContent).toBe("Question 1 of 2 · Approach");
+    expect(ask.querySelector(".card__question")?.textContent).toBe("Which approach?");
+    expect(ask.querySelectorAll(".options__label")).toHaveLength(1);
+    expect([...ask.querySelectorAll(".options__num")].map((n) => n.textContent)).toEqual(["1", "2", "3"]);
+    expect([...ask.querySelectorAll("button[data-action=answer]")].map((b) => b.querySelector(".options__text")?.textContent)).toEqual(["A", "B", "C"]);
+    expect(ask.nextElementSibling?.classList.contains("card__snippet")).toBe(true);
   });
 
   it("renders option buttons for an open question", () => {
     const el = renderCard(card({ state: "awaiting", stateSince: NOW - 5000, awaiting: { kind: "question", detail: "Q?", questions: [{ question: "Q?", header: "H", multiSelect: false, options: [{ label: "A", description: "" }] }] } }), NOW);
-    expect(el.querySelector("button[data-action=answer]")?.textContent).toBe("A");
+    expect(el.querySelector("button[data-action=answer] .options__text")?.textContent).toBe("A");
   });
 
   it("escapes text content", () => {
@@ -130,7 +198,6 @@ describe("other harnesses", () => {
     expect(badge.alt).toBe("Codex");
     expect(badge.src).not.toBe("");
     expect(el.querySelector("button[data-action=compact]")).not.toBeNull();
-    expect(el.querySelector("button[data-action=reply]")).not.toBeNull();
     const agy = renderCard(card({ harness: "antigravity", hasInbox: false }), NOW);
     expect(agy.querySelector<HTMLImageElement>("img.card__harness")!.alt).toBe("Antigravity");
     const grok = renderCard(card({ harness: "grok", hasInbox: false }), NOW);
@@ -139,17 +206,17 @@ describe("other harnesses", () => {
 });
 
 describe("card action icons", () => {
-  it("uses a console icon for Terminal and a speech bubble for Reply, with labels", () => {
-    const el = renderCard(card({}), NOW);
-    const term = el.querySelector<HTMLButtonElement>("button[data-action=terminal]")!;
-    const reply = el.querySelector<HTMLButtonElement>("button[data-action=reply]")!;
+  it("uses plain icons with labels for Terminal and Stop", () => {
+    const el = renderCard(card({ state: "working", stateSince: NOW - 5000 }), NOW);
+    const term = el.querySelector<HTMLButtonElement>(".card__actions button[data-action=terminal]")!;
     expect(term.querySelector("svg.icon-terminal")).not.toBeNull();
-    expect(reply.querySelector("svg.icon-reply")).not.toBeNull();
     expect(term.textContent?.trim()).toBe("");
     expect(term.getAttribute("aria-label")).toBe("Open terminal");
     expect(term.title).toBe("Open terminal");
-    expect(reply.getAttribute("aria-label")).toBe("Reply");
-    expect(reply.title).toBe("Reply");
+    const stop = el.querySelector<HTMLButtonElement>(".card__actions button[data-action=stop]")!;
+    expect(stop.querySelector("svg.icon-stop")).not.toBeNull();
+    expect(stop.textContent?.trim()).toBe("");
+    expect(stop.getAttribute("aria-label")).toBe("Stop");
   });
 });
 
@@ -246,14 +313,6 @@ describe("renderBoard", () => {
   });
 });
 
-describe("card actions", () => {
-  it("renders Terminal and Reply buttons", () => {
-    const el = renderCard(card({}), NOW);
-    expect(el.querySelector("button[data-action=terminal] svg.icon-terminal")).not.toBeNull();
-    expect(el.querySelector("button[data-action=reply] svg.icon-reply")).not.toBeNull();
-  });
-});
-
 describe("swapBoard on a sideways-scrolling board", () => {
   it("keeps the board's own horizontal scroll across a repaint", () => {
     const host = document.createElement("div");
@@ -262,5 +321,37 @@ describe("swapBoard on a sideways-scrolling board", () => {
     Object.defineProperty(old, "scrollLeft", { value: 640, writable: true });
     swapBoard(host, renderBoard([card({})], NOW + 60_000));
     expect(host.querySelector<HTMLElement>(".board")!.scrollLeft).toBe(640);
+  });
+});
+
+describe("card styles", () => {
+  it("keeps Stop red while the pointer is on the card, as hovering turns the other icons to the text colour", () => {
+    expect(styles).toMatch(/\.card:hover \.card__icon\.card__btn--stop[^{]*\{[^}]*color:\s*#f87171/);
+    expect(styles).toMatch(/:root\[data-theme="light"\] \.card:hover \.card__icon\.card__btn--stop[^{]*\{[^}]*color:\s*#b91c1c/);
+  });
+
+  it("gives the PR pill the phone's 40px tap height", () => {
+    const rule = mobileStyles.match(/([^{}]*\.card__pr[^{}]*)\{([^}]*)\}/);
+    expect(rule?.[2]).toMatch(/min-height:\s*40px/);
+  });
+
+  it("makes the footer's facts as tall as the phone's PR pill, so the row does not clip it", () => {
+    const rule = mobileStyles.match(/([^{}]*\.card__facts[^{}]*)\{([^}]*)\}/);
+    expect(rule?.[2]).toMatch(/(^|[^-])height:\s*40px/);
+    // A wrapped fact must still start below the 40px, even after a 24px line with no pill.
+    expect(rule?.[2]).toMatch(/row-gap:\s*40px/);
+  });
+
+  it("clips the line under the name and the footer's facts instead of spilling past a narrow card", () => {
+    expect(styles).toMatch(/\.card__sub \{[^}]*overflow:\s*hidden/);
+    expect(styles).toMatch(/\.card__sub > :is\(\.card__project, \.card__model\)[^{]*\{[^}]*text-overflow:\s*ellipsis/);
+    expect(styles).toMatch(/\.card__facts \{[^}]*overflow:\s*hidden/);
+    expect(styles).toMatch(/\.card__facts \{[^}]*flex-wrap:\s*wrap/);
+    expect(styles).toMatch(/\.card__sub > \.card__project \{[^}]*flex-shrink:\s*0/);
+  });
+
+  it("names a long model in its tooltip, since the line may cut it short", () => {
+    const model = "anthropic/claude-sonnet-4-5-20250929";
+    expect(renderCard(card({ model }), NOW).querySelector<HTMLElement>(".card__model")!.title).toBe(model);
   });
 });

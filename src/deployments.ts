@@ -45,32 +45,34 @@ function renderRun(run: DeploymentRun, nowMs: number, ui: RowUi): HTMLElement {
   root.dataset.repo = run.repo;
   root.dataset.runId = String(run.runId);
   if (wait.kind === "approval") root.dataset.environmentIds = wait.environments.map((e) => e.id).join(",");
-  const head = el("header", "pr__head");
+  const main = el("div", "pr__main");
+  const line = el("div", "pr__line");
   const name = el("span", "pr__name");
-  name.append(el("span", "pr__repo", run.repo.split("/").pop() ?? run.repo));
+  const repo = el("span", "pr__repo", run.repo.split("/").pop() ?? run.repo);
+  repo.title = run.repo;
   const open = button("deploy__link", "open-run", run.workflow);
   open.title = run.url;
-  name.append(open, el("span", "deploy__branch", run.branch));
-  const chips = el("span", "pr__chips");
-  if (wait.kind === "approval") for (const env of wait.environments) chips.append(el("span", "pr__chip", env.name));
-  head.append(name, chips);
-  root.append(head, el("div", "pr__title", run.title));
+  name.append(repo, open, el("span", "deploy__branch", run.branch));
+  line.append(name, el("span", "pr__title", run.title));
+  main.append(line);
   if (wait.kind === "blocked") {
     if (wait.by) {
       const by = button("deploy__link", "open-blocker", `Waiting on ${wait.by.sha.slice(0, 7)} ${wait.by.title}`);
       by.title = wait.by.url;
-      root.append(by);
+      main.append(by);
     } else {
-      root.append(el("span", "pr__meta", "Waiting on another deployment"));
+      main.append(el("span", "pr__meta", "Waiting on another deployment"));
     }
   }
   const since = Date.parse(run.since);
-  root.append(el("div", "pr__meta", `${run.actor} · waiting ${Number.isFinite(since) ? formatAge(since, nowMs) : "?"} · ${run.repo}`));
+  main.append(el("div", "pr__meta", `${run.actor} · waiting ${Number.isFinite(since) ? formatAge(since, nowMs) : "?"}`));
+  root.append(main);
   if (wait.kind === "approval") {
     const busy = ui.busy.has(run.runId);
     const error = ui.errors.get(run.runId);
-    if (error) root.append(el("div", "deploy__error", error));
+    if (error) main.append(el("div", "deploy__error", error));
     const actions = el("div", "card__actions");
+    for (const env of wait.environments) actions.append(el("span", "pr__chip", env.name));
     const reject = button("card__btn", "reject", "Reject");
     const approve = button("card__btn card__btn--primary", "approve", "Approve");
     reject.disabled = approve.disabled = busy;

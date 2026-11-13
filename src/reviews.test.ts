@@ -76,6 +76,20 @@ describe("renderReviews", () => {
     expect(first.querySelector("button[data-action=review]")?.textContent).toBe("Review");
   });
 
+  it("lays a PR out as one row: its text on the left, then the chips and buttons on the right", () => {
+    const live = [session({ sessionId: "a", pid: 42, name: "review bedrock #451", state: "awaiting" })];
+    const el = renderReviews({ prs: [pr({ isDraft: true })], errors: [], off: false, fetchedAt: NOW }, NOW, { cards: live, clonesDir: null });
+    const row = el.querySelector<HTMLElement>(".reviews__list > .pr")!;
+    expect([...row.children].map((c) => c.className)).toEqual(["pr__main", "card__actions"]);
+    const line = row.querySelector(".pr__main > .pr__line")!;
+    expect(line.querySelector(".pr__repo")?.textContent).toBe("bedrock #451");
+    expect(line.querySelector(".pr__repo")?.getAttribute("title")).toBe("Org/bedrock");
+    expect(line.querySelector(".pr__title")?.textContent).toBe("docs: expand upgrade notes");
+    expect(row.querySelector(".pr__main > .pr__meta")?.textContent).toBe("jane · updated 2h ago");
+    const right = [...row.querySelector(":scope > .card__actions")!.children].map((c) => (c as HTMLElement).dataset.action ?? c.className);
+    expect(right).toEqual(["pr__chip pr__chip--draft", "terminal", "open-pr", "review"]);
+  });
+
   it("marks the user's own review with a coloured dot, and none when not reviewed", () => {
     const dot = (myReview: ReviewPr["myReview"]) => renderReviews({ prs: [pr({ myReview })], errors: [], off: false, fetchedAt: NOW }, NOW).querySelector<HTMLElement>(".pr__dot");
     expect(dot(null)).toBeNull();

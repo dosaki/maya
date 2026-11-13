@@ -1,3 +1,4 @@
+import { iconButton } from "./icons";
 import { invoke } from "@tauri-apps/api/core";
 import { canStop } from "./harness";
 import { OPEN_DELAY_MS } from "./options";
@@ -95,13 +96,18 @@ export const stopGuard = makeStopGuard((sessionId) => invoke("stop_session", { s
  * disabled inside the open delay, so a tap meant for what was there before
  * cannot stop a turn that just started, and while a Stop is pending.
  */
-export function stopButton(card: Card, nowMs: number, className = "card__btn"): HTMLButtonElement | null {
+export function stopButton(card: Card, nowMs: number, className = "card__btn", look: "text" | "icon" = "text"): HTMLButtonElement | null {
   if (!canStop(card)) return null;
-  const b = document.createElement("button");
-  b.type = "button";
-  b.className = `${className} card__btn--stop`;
+  let b: HTMLButtonElement;
+  if (look === "icon") {
+    b = iconButton("stop", "Stop", `${className} card__btn--stop`);
+  } else {
+    b = document.createElement("button");
+    b.type = "button";
+    b.className = `${className} card__btn--stop`;
+    b.textContent = "Stop";
+  }
   b.dataset.action = "stop";
-  b.textContent = "Stop";
   b.title = "Stop what the session is doing, as Esc does in its terminal";
   b.disabled = nowMs - card.stateSince < OPEN_DELAY_MS || stopGuard.stopping(card);
   return b;

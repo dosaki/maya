@@ -36,7 +36,10 @@ describe("renderDeployments", () => {
     expect([...root.querySelectorAll("button[data-action=reject], button[data-action=approve]")].map((b) => b.textContent)).toEqual(["Reject", "Approve"]);
     const row = root.querySelector<HTMLElement>("[data-run-id='7']")!;
     expect(row.dataset.repo).toBe("O/r");
-    expect(row.querySelector(".pr__meta")?.textContent).toBe("jane · waiting 2h · O/r");
+    expect(row.querySelector(".pr__meta")?.textContent).toBe("jane · waiting 2h");
+    expect([...row.children].map((c) => c.className)).toEqual(["pr__main", "card__actions"]);
+    const right = [...row.querySelector(":scope > .card__actions")!.children].map((c) => (c as HTMLElement).dataset.action ?? c.className);
+    expect(right).toEqual(["pr__chip", "reject", "approve"]);
     expect(row.querySelector("[data-action=open-run]")?.textContent).toBe("Deploy");
     expect(row.querySelector(".pr__title")?.textContent).toBe("change 7");
   });
@@ -49,6 +52,8 @@ describe("renderDeployments", () => {
     expect(row.querySelector("[data-action=approve]")).toBeNull();
     expect(row.querySelector("[data-action=reject]")).toBeNull();
     expect(row.querySelector(".pr__chip")).toBeNull();
+    expect(row.querySelector(":scope > .pr__main [data-action=open-blocker]")).not.toBeNull();
+    expect(deploymentActionFor(row.querySelector("[data-action=open-blocker]")!)).toEqual({ kind: "open-blocker", repo: "O/r", runId: 9 });
   });
 
   it("says waiting on another deployment when the blocker is unknown", () => {

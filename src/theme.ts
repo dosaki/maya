@@ -1,4 +1,4 @@
-import type { ColorTheme } from "./types";
+import type { CardSize, ColorTheme } from "./types";
 
 /** The themes the picker offers. Dark comes first: it is the default, and the look Maya always had. */
 export const COLOR_THEMES = [
@@ -21,5 +21,30 @@ export function applyColorTheme(theme: ColorTheme): void {
     localStorage.setItem(COLOR_THEME_KEY, theme);
   } catch {
     // Without storage the next start paints dark for a moment; the saved settings still choose the theme once they load.
+  }
+}
+
+/** The card sizes the picker offers, tightest first. */
+export const CARD_SIZES = [
+  ["compact", "Compact"],
+  ["roomy", "Roomy"],
+  ["spacious", "Spacious"],
+] as const;
+
+/** Where the page remembers its card size, so the next start paints it before the saved settings arrive. */
+export const CARD_SIZE_KEY = "maya.cardSize";
+
+/** A saved card size as a size: Spacious, the default, for anything that is not one. */
+export function asCardSize(value: unknown): CardSize {
+  return CARD_SIZES.find(([key]) => key === value)?.[0] ?? "spacious";
+}
+
+/** Puts the card size on the page, and remembers it for the next start's first paint. */
+export function applyCardSize(size: CardSize): void {
+  document.documentElement.dataset.cards = size;
+  try {
+    localStorage.setItem(CARD_SIZE_KEY, size);
+  } catch {
+    // Without storage the next start paints Spacious for a moment; the saved settings still choose the size once they load.
   }
 }
