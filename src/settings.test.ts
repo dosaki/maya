@@ -2019,6 +2019,7 @@ describe("Settings → Work Items", () => {
 describe("ruleSummary", () => {
   it("names who the rule is for", () => {
     expect(ruleSummary({ assignee: { kind: "me" }, labels: [], repos: [] })).toBe("Assigned to me");
+    expect(ruleSummary({ assignee: { kind: "me" }, labels: [], repos: [], statuses: ["s-new", "s-x"] }, (id) => (id === "s-new" ? "New" : "Saved status"))).toBe("Assigned to me, status New or Saved status");
     expect(ruleSummary({ assignee: { kind: "user", login: "alice" }, labels: [], repos: [] })).toBe("Assigned to alice");
     expect(ruleSummary({ assignee: { kind: "user", login: "" }, labels: [], repos: [] })).toBe("Assigned to someone");
     expect(ruleSummary({ assignee: { kind: "anyone" }, labels: [], repos: [] })).toBe("Anyone's issues");
@@ -2535,7 +2536,7 @@ describe("Settings → Work Items Coral", () => {
       enabled: false,
       baseUrl: "https://coral.test",
       token: { kind: "stored" },
-      rules: [{ assignee: { kind: "me" }, labels: ["team: api"], repos: ["BED"] }],
+      rules: [{ assignee: { kind: "me" }, labels: ["team: api"], repos: ["BED"], statuses: [] }],
       startStatus: "s-doing",
     });
     field<HTMLInputElement>(root, "input[name=wi-coral-enabled]").checked = true;
@@ -2573,7 +2574,7 @@ describe("Settings → Work Items Coral", () => {
   it("calls the rule fields Tags and Products for Coral, and Labels and Repositories for GitHub", () => {
     const root = renderSettings(model(), handlers());
     const labels = (r: Element) => [...r.querySelectorAll(".settings__rule-body label")].map((l) => l.textContent);
-    expect(labels(card(root))).toEqual(["Assignee", "Tags", "Products"]);
+    expect(labels(card(root))).toEqual(["Assignee", "Tags", "Products", "Statuses"]);
     expect(labels(root.querySelector('[data-source="github"]')!)).toEqual(["Assignee", "Labels", "Repositories"]);
     const rule = card(root).querySelector<HTMLElement>(".settings__rule")!;
     expect(rule.querySelector<HTMLInputElement>("input[name=wi-login]")!.placeholder).toBe("their email");
@@ -2587,7 +2588,7 @@ describe("Settings → Work Items Coral", () => {
     change(who, "user");
     expect(onWorkItems).not.toHaveBeenCalled();
     change(field(root, "input[name=wi-login]"), "ana@example.com");
-    expect(onWorkItems).toHaveBeenLastCalledWith("coral", expect.objectContaining({ rules: [{ assignee: { kind: "user", login: "ana@example.com" }, labels: [], repos: [] }] }));
+    expect(onWorkItems).toHaveBeenLastCalledWith("coral", expect.objectContaining({ rules: [{ assignee: { kind: "user", login: "ana@example.com" }, labels: [], repos: [], statuses: [] }] }));
   });
 
   it("lists Coral's statuses once they load, and keeps the saved one before", () => {
@@ -2681,6 +2682,64 @@ describe("Settings → Work Items Coral", () => {
     const ids = [...root.querySelectorAll("[id]")].map((e) => e.id);
     expect(ids.filter((id, i) => ids.indexOf(id) !== i)).toEqual([]);
     root.remove();
+  });
+
+  const open = [
+    { id: "s-new", name: "New", category: "todo", sub: true, position: 0 },
+    { id: "s-prog", name: "In Progress", category: "active", sub: true, position: 1 },
+    { id: "s-review", name: "Review", category: "active", sub: false, position: 2 },
+    { id: "s-done", name: "Done", category: "done", sub: true, position: 9 },
+  ];
+  const withRuleStatuses = (ids: string[]) => ({ ...workItemsConfig(null), coral: { ...workItemsConfig(null).coral, enabled: true, rules: [{ assignee: { kind: "me" as const }, labels: [], repos: [], statuses: ids }] } });
+  const boxes = (root: HTMLElement) => [...card(root).querySelectorAll<HTMLInputElement>("input[name=wi-statuses]")];
+
+  it("offers a Coral rule each open status, ticks the saved ones and saves a change", () => {
+    const onWorkItems = vi.fn();
+    const root = renderSettings(model({ workItems: withRuleStatuses(["s-new"]), coralHasToken: true, coralStatuses: open }), { ...handlers(), onWorkItems });
+    expect(boxes(root).map((b) => [b.value, b.checked, b.closest("label")!.textContent])).toEqual([["s-new", true, "New"], ["s-prog", false, "In Progress"], ["s-review", false, "Review"]]);
+    const prog = boxes(root)[1]!;
+    prog.checked = true;
+    prog.dispatchEvent(new Event("change"));
+    expect(onWorkItems).toHaveBeenLastCalledWith("coral", expect.objectContaining({ rules: [expect.objectContaining({ statuses: ["s-new", "s-prog"] })] }));
+  });
+
+  it("keeps a Coral rule's saved statuses before Coral's are listed", () => {
+    const onWorkItems = vi.fn();
+    const root = renderSettings(model({ workItems: withRuleStatuses(["s-new"]), coralHasToken: true, coralStatuses: null }), { ...handlers(), onWorkItems });
+    expect(boxes(root).map((b) => [b.value, b.checked, b.closest("label")!.textContent])).toEqual([["s-new", true, "Saved status"]]);
+    expect(card(root).querySelector(".settings__rule")!.textContent).toContain("Test the connection to list Coral's statuses.");
+    change(field(root, "input[name=wi-labels]"), "team: api");
+    expect(onWorkItems).toHaveBeenLastCalledWith("coral", expect.objectContaining({ rules: [expect.objectContaining({ labels: ["team: api"], statuses: ["s-new"] })] }));
+  });
+
+  it("fills the Coral rules' statuses when they are listed after the card is shown", async () => {
+    const onCoralTest = vi.fn().mockResolvedValue("Connected as Ana");
+    const onCoralStatuses = vi.fn().mockResolvedValue(open);
+    const root = renderSettings(model({ workItems: withRuleStatuses(["s-prog"]), coralHasToken: true, coralStatuses: null }), { ...handlers(), onCoralTest, onCoralStatuses });
+    field<HTMLButtonElement>(root, "[data-action=coral-test]").click();
+    await vi.waitFor(() => expect(boxes(root).map((b) => b.value)).toEqual(["s-new", "s-prog", "s-review"]));
+    expect(boxes(root).filter((b) => b.checked).map((b) => b.value)).toEqual(["s-prog"]);
+    expect(card(root).querySelector(".settings__rule")!.textContent).not.toContain("Test the connection to list Coral's statuses.");
+  });
+
+  it("starts a new Coral rule with no statuses", () => {
+    const onWorkItems = vi.fn();
+    const root = renderSettings(model({ coralStatuses: open }), { ...handlers(), onWorkItems });
+    field<HTMLButtonElement>(root, "[data-action=wi-add-rule]").click();
+    const rules = onWorkItems.mock.lastCall![1].rules;
+    expect(rules[rules.length - 1].statuses).toEqual([]);
+  });
+
+  it("shows no Statuses in a GitHub or GitLab rule", () => {
+    const root = renderSettings(model({ coralStatuses: open }), handlers());
+    const all = root.querySelectorAll("input[name=wi-statuses]").length;
+    expect(all).toBe(card(root).querySelectorAll("input[name=wi-statuses]").length);
+    expect(root.querySelector('[data-source="github"] .settings__rule')).not.toBeNull();
+  });
+
+  it("names a Coral rule's statuses in its head", () => {
+    const root = renderSettings(model({ workItems: withRuleStatuses(["s-new", "s-gone"]), coralHasToken: true, coralStatuses: open }), handlers());
+    expect(card(root).querySelector(".settings__rule-sum")!.textContent).toBe("Assigned to me, status New or Saved status");
   });
 
   it("summarises Coral in a line", () => {

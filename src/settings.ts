@@ -369,12 +369,13 @@ function orList(items: string[]): string {
   return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
 }
 
-/** A rule in a line, for its box's head: "Assigned to me, labelled bug, in dosaki/maya". */
-export function ruleSummary(rule: ItemRule): string {
+/** A rule in a line, for its box's head: "Assigned to me, labelled bug, in dosaki/maya". `statusName` names a Coral status id. */
+export function ruleSummary(rule: ItemRule, statusName: (id: string) => string = () => "Saved status"): string {
   const a = rule.assignee;
   let text = a.kind === "me" ? "Assigned to me" : a.kind === "anyone" ? "Anyone's issues" : `Assigned to ${a.login || "someone"}`;
   if (rule.labels.length > 0) text += `, labelled ${orList(rule.labels)}`;
   if (rule.repos.length > 0) text += `, in ${orList(rule.repos)}`;
+  if (rule.statuses && rule.statuses.length > 0) text += `, status ${orList(rule.statuses.map(statusName))}`;
   return text;
 }
 
@@ -791,7 +792,10 @@ function coralSource(
   fillStart(model.coralStatuses ?? null, cfg.startStatus);
   const loadStatuses = () => {
     const chosen = start.value === "" ? null : start.value;
-    h.onCoralStatuses?.().then((list) => fillStart(list, chosen), () => { /* the help already says how to list them */ });
+    h.onCoralStatuses?.().then((list) => {
+      fillStart(list, chosen);
+      editor.showStatuses(list);
+    }, () => { /* the help already says how to list them */ });
   };
 
   const editor = rulesEditor({
@@ -799,10 +803,11 @@ function coralSource(
     nextId: nextRuleId,
     rules: cfg.rules,
     words: CORAL_RULE_WORDS,
+    statuses: model.coralStatuses ?? null,
     onChange: () => save(),
     onAdd: () => {
       const items = read();
-      items.rules.push({ assignee: { kind: "me" }, labels: [], repos: [] });
+      items.rules.push({ assignee: { kind: "me" }, labels: [], repos: [], statuses: [] });
       save(items);
     },
   });
@@ -940,15 +945,58 @@ const CORAL_RULE_WORDS: RuleWords = {
  * `onChange` runs when a field changes (a rule for someone with no name yet
  * is the caller's to hold back); `onAdd` when the add button is pressed.
  */
+/**
+ * A Coral rule's Statuses: a checkbox per open status of `list`, in its
+ * order, ticked for `ticked`; a ticked id `list` lacks shows as "Saved
+ * status", so a save keeps it. `null` is not listed yet. Each checkbox
+ * carries `onChange`, so one `morph` keeps stays wired.
+ */
+function statusChecks(id: string, list: CoralStatus[] | null, ticked: string[], onChange: () => void): HTMLElement {
+  const g = document.createElement("div");
+  g.className = "settings__rule-statuses";
+  g.id = id;
+  g.setAttribute("role", "group");
+  g.setAttribute("aria-label", "Statuses");
+  const open = (list ?? []).filter((st) => st.category === "todo" || st.category === "active");
+  const check = (value: string, text: string, on: boolean) => {
+    const l = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.name = "wi-statuses";
+    box.value = value;
+    box.checked = on;
+    box.addEventListener("change", onChange);
+    l.append(box, text);
+    g.append(l);
+  };
+  for (const st of open) check(st.id, st.name, ticked.includes(st.id));
+  for (const t of ticked) if (!open.some((st) => st.id === t)) check(t, "Saved status", true);
+  if (list === null) {
+    const help = document.createElement("p");
+    help.className = "settings__help";
+    help.textContent = "Test the connection to list Coral's statuses.";
+    g.append(help);
+  }
+  return g;
+}
+
+const tickedIn = (g: HTMLElement): string[] => [...g.querySelectorAll<HTMLInputElement>("input[name=wi-statuses]")].filter((b) => b.checked).map((b) => b.value);
+
 function rulesEditor(opts: {
   idPrefix: string;
   nextId: () => number;
   rules: ItemRule[];
   words: RuleWords;
+  /** Coral's statuses, for a Statuses row in each rule; null before they are listed, undefined for no row. */
+  statuses?: CoralStatus[] | null;
   onChange: () => void;
   onAdd: () => void;
-}): { box: HTMLElement; read: () => ItemRule[] } {
+}): { box: HTMLElement; read: () => ItemRule[]; showStatuses: (list: CoralStatus[]) => void } {
   const { words } = opts;
+  let statuses = opts.statuses;
+  const statusName = (id: string) => statuses?.find((st) => st.id === id)?.name ?? "Saved status";
+  /** Each rule's refresh for a new status list. */
+  const refreshers: ((list: CoralStatus[]) => void)[] = [];
   const box = document.createElement("div");
   box.className = "settings__rules";
   const add = addButton("+ Add rule", "wi-add-rule", opts.onAdd);
@@ -957,10 +1005,12 @@ function rulesEditor(opts: {
   const readRule = (r: HTMLElement): ItemRule => {
     const kind = r.querySelector<HTMLSelectElement>("select[name=wi-assignee]")!.value;
     const login = r.querySelector<HTMLInputElement>("input[name=wi-login]")!.value.trim();
+    const group = r.querySelector<HTMLElement>(".settings__rule-statuses");
     return {
       assignee: kind === "user" ? { kind: "user", login } : kind === "anyone" ? { kind: "anyone" } : { kind: "me" },
       labels: commaList(r.querySelector<HTMLInputElement>("input[name=wi-labels]")!.value),
       repos: commaList(r.querySelector<HTMLInputElement>("input[name=wi-repos]")!.value),
+      ...(group ? { statuses: tickedIn(group) } : {}),
     };
   };
 
@@ -1012,6 +1062,8 @@ function rulesEditor(opts: {
     repos.placeholder = words.reposPlaceholder;
     repos.value = rule.repos.join(", ");
     repos.addEventListener("change", () => opts.onChange());
+    const onStatus = () => opts.onChange();
+    const group = statuses === undefined ? null : statusChecks(`${id}-statuses`, statuses, rule.statuses ?? [], onStatus);
     const remove = settingsBtn("Remove", { action: "wi-remove-rule", kind: "quiet" }, () => {
       r.remove();
       opts.onChange();
@@ -1023,10 +1075,17 @@ function rulesEditor(opts: {
     head.className = "settings__rule-head";
     const sum = document.createElement("span");
     sum.className = "settings__rule-sum";
-    sum.textContent = ruleSummary(rule);
+    sum.textContent = ruleSummary(rule, statusName);
     head.append(sum, remove);
     // The head follows the fields as they are typed, before any save.
-    const sumUp = () => { sum.textContent = ruleSummary(readRule(r)); };
+    const sumUp = () => { sum.textContent = ruleSummary(readRule(r), statusName); };
+    if (group) {
+      // Repainted in place: a checkbox under the pointer keeps its hover.
+      refreshers.push((list) => {
+        morph(group, statusChecks(group.id, list, tickedIn(group), onStatus));
+        sumUp();
+      });
+    }
     r.addEventListener("input", sumUp);
     r.addEventListener("change", sumUp);
 
@@ -1039,6 +1098,7 @@ function rulesEditor(opts: {
       fieldLabel("Assignee", assignee.id), who,
       fieldLabel(words.labels, labels.id), labels,
       fieldLabel(words.repos, repos.id), repos,
+      ...(group ? [fieldLabel("Statuses", group.id), group] : []),
     );
     r.append(head, body);
     box.insertBefore(r, add);
@@ -1046,7 +1106,14 @@ function rulesEditor(opts: {
   box.append(add);
   for (const rule of opts.rules) addRule(rule);
 
-  return { box, read: () => [...box.querySelectorAll<HTMLElement>(".settings__rule")].map(readRule) };
+  return {
+    box,
+    read: () => [...box.querySelectorAll<HTMLElement>(".settings__rule")].map(readRule),
+    showStatuses: (list) => {
+      statuses = list;
+      for (const refresh of refreshers) refresh(list);
+    },
+  };
 }
 
 export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs: number = Date.now()): HTMLElement {

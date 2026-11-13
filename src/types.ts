@@ -426,6 +426,8 @@ export interface ItemRule {
   assignee: ItemAssignee;
   labels: string[];
   repos: string[];
+  /** Coral status ids, for a Coral rule; empty is every open status. */
+  statuses?: string[];
 }
 
 /** The Work Items settings of one service, as the config stores them. */
