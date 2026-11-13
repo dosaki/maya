@@ -603,10 +603,12 @@ type Field = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 /** The named field in `root` that has focus, and its selection when it has one. */
 interface FocusedField {
   name: string;
-  /** Set for radios, which share a name across the group. */
+  /** Set for radios and checkboxes, which share a name across a group. */
   value?: string;
   /** The Work Items source it is in: both forges name their fields alike. */
   source?: string;
+  /** Which of its source's rules it is in: every rule names its fields alike. */
+  rule?: number;
   start: number | null;
   end: number | null;
   direction: "forward" | "backward" | "none" | null;
@@ -620,9 +622,12 @@ function focusedField(root: HTMLElement): FocusedField | null {
   const el = document.activeElement;
   if (!isField(el) || !el.name || !root.contains(el)) return null;
   const focused: FocusedField = { name: el.name, start: null, end: null, direction: null };
-  if (el instanceof HTMLInputElement && el.type === "radio") focused.value = el.value;
-  const source = el.closest<HTMLElement>("[data-source]")?.dataset.source;
+  if (el instanceof HTMLInputElement && (el.type === "radio" || el.type === "checkbox")) focused.value = el.value;
+  const sourceEl = el.closest<HTMLElement>("[data-source]");
+  const source = sourceEl?.dataset.source;
   if (source !== undefined) focused.source = source;
+  const rule = el.closest(".settings__rule");
+  if (sourceEl && rule) focused.rule = [...sourceEl.querySelectorAll(".settings__rule")].indexOf(rule);
   if (el instanceof HTMLSelectElement) return focused;
   try {
     // Null (or a throw, in some engines) for inputs with no caret, such as checkboxes.
@@ -636,7 +641,8 @@ function focusedField(root: HTMLElement): FocusedField | null {
 }
 
 function restoreFocus(root: HTMLElement, f: FocusedField): void {
-  const scope = (f.source !== undefined && [...root.querySelectorAll<HTMLElement>("[data-source]")].find((s) => s.dataset.source === f.source)) || root;
+  const source = (f.source !== undefined && [...root.querySelectorAll<HTMLElement>("[data-source]")].find((s) => s.dataset.source === f.source)) || root;
+  const scope = (f.rule !== undefined && source.querySelectorAll<HTMLElement>(".settings__rule")[f.rule]) || source;
   const named = [...scope.querySelectorAll("input, select, textarea")].filter((e): e is Field => isField(e) && e.name === f.name);
   const el = (f.value !== undefined && named.find((e) => e.value === f.value)) || named[0];
   if (!el) return;

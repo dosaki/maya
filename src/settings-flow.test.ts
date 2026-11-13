@@ -1177,6 +1177,24 @@ describe("settings flow", () => {
       expect(document.activeElement).toBe(src("gitlab").querySelector("input[name=wi-statusLabels]"));
     });
 
+    it("keeps focus on the same status box of the same Coral rule through a repaint", async () => {
+      await setup();
+      const coral = { enabled: true, baseUrl: "https://coral.test", token: { kind: "stored" }, rules: [{ assignee: { kind: "me" }, labels: [], repos: [], statuses: ["s-new"] }, { assignee: { kind: "anyone" }, labels: [], repos: ["PAY"], statuses: ["s-new", "s-prog"] }], startStatus: null };
+      config = { ...config, workItems: { ...(config.workItems as object), coral } };
+      window.dispatchEvent(new CustomEvent("maya:config-changed"));
+      await flush();
+      src("coral").querySelector<HTMLButtonElement>(".settings__source-toggle")!.click();
+      const box = (rule: number, id: string) => src("coral").querySelectorAll(".settings__rule")[rule]!.querySelector<HTMLInputElement>(`input[name=wi-statuses][value=${id}]`)!;
+      for (const [rule, id] of [[1, "s-new"], [1, "s-prog"], [0, "s-new"]] as const) {
+        const before = box(rule, id);
+        before.focus();
+        window.dispatchEvent(new CustomEvent("maya:config-changed"));
+        await flush();
+        expect(box(rule, id)).not.toBe(before);
+        expect(document.activeElement, `${rule} ${id}`).toBe(box(rule, id));
+      }
+    });
+
     it("keeps a custom tool's details open through a repaint", async () => {
       await setup();
       const d = src("custom-1").querySelector("details")!;
