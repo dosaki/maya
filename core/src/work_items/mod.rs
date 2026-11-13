@@ -339,8 +339,8 @@ mod tests {
         let mut cfg = WorkItemsConfig::default();
         cfg.coral.enabled = true;
         cfg.coral.rules = vec![
-            crate::config::ItemRule { assignee: crate::config::Assignee::Me, labels: vec!["nope".into()], repos: vec![] },
-            crate::config::ItemRule { assignee: crate::config::Assignee::Me, labels: vec![], repos: vec![] },
+            crate::config::ItemRule { assignee: crate::config::Assignee::Me, labels: vec!["nope".into()], repos: vec![], statuses: vec![] },
+            crate::config::ItemRule { assignee: crate::config::Assignee::Me, labels: vec![], repos: vec![], statuses: vec![] },
         ];
         let old = WorkItem { key: "coral:i-1".into(), source: "coral".into(), ..test_item() };
         let me_of = |_: &Coral| Ok(me.clone());

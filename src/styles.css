@@ -250,6 +250,12 @@ body { margin: 0; background: var(--bg); }
 .settings.pane .settings__card .settings__rule-body :is(input, select) { background-color: var(--panel); }
 .settings.pane .settings__rule-who { display: flex; gap: 8px; min-width: 0; }
 .settings.pane .settings__rule-who > * { flex: 1; min-width: 0; }
+/* A Coral rule's Statuses: one checkbox per line, its name beside it. */
+.settings.pane .settings__rule-body > label[for$="-statuses"] { align-self: start; padding-top: 2px; }
+.settings.pane .settings__rule-statuses { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.settings.pane .settings__rule-statuses label { display: flex; align-items: center; justify-content: flex-start; gap: 8px; color: var(--text); font-size: 14px; }
+.settings.pane .settings__rule .settings__rule-statuses input { width: auto; margin: 0; flex: none; accent-color: var(--gold); }
+.settings.pane .settings__rule-statuses .settings__help { margin: 0; }
 .settings.pane .settings__rule-who input[hidden] { display: none; }
 
 /* A details inside a card, such as a custom tool's output format. */

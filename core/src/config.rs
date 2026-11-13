@@ -392,6 +392,9 @@ pub struct ItemRule {
     /// Empty is any repository.
     #[serde(default)]
     pub repos: Vec<String>,
+    /// Coral status ids, for a Coral rule; empty is every open status.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statuses: Vec<String>,
 }
 
 /// The work items of one service: switched on or off, the rules that pick
@@ -414,7 +417,7 @@ impl Default for ForgeItems {
     fn default() -> Self {
         ForgeItems {
             enabled: true,
-            rules: vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![] }],
+            rules: vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![], statuses: vec![] }],
             status_labels: vec![],
             start_status: None,
             tracker_repos: vec![],
@@ -471,7 +474,7 @@ impl Default for CoralItems {
             enabled: false,
             base_url: String::new(),
             token: TokenSource::Stored,
-            rules: vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![] }],
+            rules: vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![], statuses: vec![] }],
             start_status: None,
         }
     }
@@ -883,6 +886,9 @@ impl Config {
             }
             clean_all(&mut r.labels, |s| s.trim().to_string());
             clean_all(&mut r.repos, |s| s.trim().to_string());
+            clean_all(&mut r.statuses, |s| s.trim().to_string());
+            let mut seen = std::collections::HashSet::new();
+            r.statuses.retain(|s| seen.insert(s.clone()));
         }
         w.coral.start_status = w.coral.start_status.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
         assign_tool_ids(&mut w.custom, crate::now_ms());
@@ -985,7 +991,7 @@ mod tests {
         let w = Config::default().work_items;
         for f in [&w.github, &w.gitlab] {
             assert!(f.enabled);
-            assert_eq!(f.rules, vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![] }]);
+            assert_eq!(f.rules, vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![], statuses: vec![] }]);
             assert!(f.status_labels.is_empty() && f.start_status.is_none() && f.tracker_repos.is_empty());
         }
         let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":5}"#).unwrap();
@@ -1047,7 +1053,7 @@ mod tests {
     #[test]
     fn work_items_round_trip_in_camel_case() {
         let mut c = Config::default();
-        c.work_items.github.rules.push(ItemRule { assignee: Assignee::User { login: "maria".into() }, labels: vec!["in progress".into()], repos: vec!["acme/api".into()] });
+        c.work_items.github.rules.push(ItemRule { assignee: Assignee::User { login: "maria".into() }, labels: vec!["in progress".into()], repos: vec!["acme/api".into()], statuses: vec![] });
         c.work_items.github.status_labels = vec!["todo".into(), "in progress".into()];
         c.work_items.github.start_status = Some("in progress".into());
         let text = serde_json::to_string(&c).unwrap();
@@ -1060,11 +1066,11 @@ mod tests {
     #[test]
     fn a_rule_for_anyone_must_name_its_repositories() {
         let mut w = WorkItemsConfig::default();
-        w.gitlab.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec!["urgent".into()], repos: vec![] });
+        w.gitlab.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec!["urgent".into()], repos: vec![], statuses: vec![] });
         assert_eq!(validate_work_items(&w).unwrap_err(), "A rule for anyone's issues must name its repositories.");
         w.gitlab.rules[1].repos = vec!["grp/r".into()];
         assert!(validate_work_items(&w).is_ok());
-        w.github.rules.push(ItemRule { assignee: Assignee::User { login: " ".into() }, labels: vec![], repos: vec![] });
+        w.github.rules.push(ItemRule { assignee: Assignee::User { login: " ".into() }, labels: vec![], repos: vec![], statuses: vec![] });
         assert_eq!(validate_work_items(&w).unwrap_err(), "A rule for someone else's issues needs their login.");
     }
 
@@ -1072,14 +1078,14 @@ mod tests {
     fn coral_is_off_by_default_and_an_old_file_reads() {
         let w: WorkItemsConfig = serde_json::from_str(r#"{"github":{"enabled":true,"rules":[]},"gitlab":{"enabled":true,"rules":[]}}"#).unwrap();
         assert!(!w.coral.enabled);
-        assert_eq!(w.coral.rules, vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![] }]);
+        assert_eq!(w.coral.rules, vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![], statuses: vec![] }]);
         assert_eq!(w.coral, CoralItems::default());
     }
 
     #[test]
     fn validate_refuses_a_coral_rule_for_anyone_without_products() {
         let mut w = WorkItemsConfig::default();
-        w.coral.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec![" ".into()] });
+        w.coral.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec![" ".into()], statuses: vec![] });
         assert_eq!(validate_work_items(&w).unwrap_err(), "A Coral rule for anyone's work items must name its products.");
         w.coral.rules[1].repos = vec!["PAY".into()];
         assert!(validate_work_items(&w).is_ok());
@@ -1134,6 +1140,23 @@ mod tests {
     }
 
     #[test]
+    fn item_rule_statuses_default_to_empty_and_stay_out_of_the_json() {
+        let r: ItemRule = serde_json::from_str(r#"{"assignee":{"kind":"me"},"labels":[],"repos":[]}"#).unwrap();
+        assert!(r.statuses.is_empty());
+        assert!(!serde_json::to_string(&r).unwrap().contains("statuses"));
+        let r = ItemRule { statuses: vec!["s-1".into()], ..r };
+        assert!(serde_json::to_string(&r).unwrap().contains(r#""statuses":["s-1"]"#));
+    }
+
+    #[test]
+    fn normalize_trims_a_coral_rules_statuses() {
+        let mut c = Config::default();
+        c.work_items.coral.rules.push(ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![], statuses: vec![" s-1 ".into(), " ".into(), "s-1".into()] });
+        c.normalize_work_items();
+        assert_eq!(c.work_items.coral.rules.last().unwrap().statuses, vec!["s-1".to_string()]);
+    }
+
+    #[test]
     fn normalize_trims_the_coral_address() {
         let mut c = Config::default();
         c.work_items.coral.base_url = " https://coral.test/ ".into();
@@ -1147,7 +1170,7 @@ mod tests {
     #[test]
     fn a_login_with_a_space_is_refused() {
         let mut w = WorkItemsConfig::default();
-        w.github.rules.push(ItemRule { assignee: Assignee::User { login: "maria silva".into() }, labels: vec![], repos: vec![] });
+        w.github.rules.push(ItemRule { assignee: Assignee::User { login: "maria silva".into() }, labels: vec![], repos: vec![], statuses: vec![] });
         assert_eq!(validate_work_items(&w).unwrap_err(), "A login cannot contain spaces.");
         w.github.rules[1].assignee = Assignee::User { login: " maria\t".into() };
         assert!(validate_work_items(&w).is_ok(), "the spaces around it are trimmed when saved");
@@ -1157,7 +1180,7 @@ mod tests {
     fn a_rule_for_anyone_whose_repositories_clean_to_nothing_is_refused() {
         for blank in ["https://github.com/", ".git", "/", " "] {
             let mut w = WorkItemsConfig::default();
-            w.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec![blank.into()] });
+            w.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec![blank.into()], statuses: vec![] });
             assert!(validate_work_items(&w).is_err(), "{blank}");
         }
     }
