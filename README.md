@@ -16,6 +16,8 @@ the right terminal first.
 
 - Shows Claude Code, Codex, Antigravity, Grok Build, Kiro CLI and OpenCode sessions on one board as cards in a Kanban-like board
   - Each session card lands in a column: Idle, Working, Awaiting Decision or Completed
+  - Each card names its project, branch and model, and its footer shows the context, the PR and the cost so far; click a card to open its chat
+  - Cards come in three sizes, Compact, Roomy or Spacious (Settings → General → Cards); Spacious is the default
 - Lets you reply, answer questions, and run slash commands and `!` shell lines from the card
 - Stops a session that is working with a Stop button, which sends it the same Esc you would press in its terminal
 - Answers a question from a menu like the agent's own: pick an option, write your own words with "Type something", or pick "Chat about this" to talk it over first
@@ -25,7 +27,7 @@ the right terminal first.
 - Runs sessions inside Maya, with no terminal app, when you choose Native (Settings › Sessions › New sessions open in): in the terminal look the session's window is then its live terminal, and the session stops when Maya quits. When you start a Native session, resume a single one, or start one to review a pull request, its live terminal opens at once, before the session shows on the board. If the session ends before it shows there, Maya shows the last lines it printed. From the main, or the phone, you can also watch and type into a Native session's live terminal through the Maya that runs it
 - Shows what a session's terminal shows: the conversation, each command's output, edit diffs, how long it has been working, and its model, folder and branch
   - As a chat or in a terminal look, like the agent's own terminal (Settings → Sessions, or the `>_` button on the session)
-- Shows each session's context, its account's usage limits and its cost so far, in the session window
+- Shows each session's context, its account's usage limits and its cost so far, in the session window (the context and cost also show on its card)
 - Tells you when a session needs you
   - Using built-in notifications, and/or a voice and/or a Dock badge
   - Keeps quiet under a Focus mode, or when you mute her from the top bar
