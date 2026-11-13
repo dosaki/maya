@@ -1,3 +1,9 @@
+# 0.56.0
+
+## New
+
+- A Coral rule can pick the statuses it lists in Settings → Work Items, so items already in review stay out of Work Items. A rule with none picked lists every open status, as before.
+
 # 0.55.0
 
 ## New
