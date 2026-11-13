@@ -1195,6 +1195,34 @@ describe("settings flow", () => {
       }
     });
 
+    it("keeps the latest of two quick status changes when the first save is slow to write", async () => {
+      await setup();
+      const coral = { enabled: true, baseUrl: "https://coral.test", token: { kind: "stored" }, rules: [{ assignee: { kind: "me" }, labels: [], repos: [], statuses: ["s-new"] }], startStatus: null };
+      config = { ...config, workItems: { ...(config.workItems as object), coral } };
+      window.dispatchEvent(new CustomEvent("maya:config-changed"));
+      await flush();
+      src("coral").querySelector<HTMLButtonElement>(".settings__source-toggle")!.click();
+      // The first write waits until released; the ones after it go straight through.
+      const base = invoke.getMockImplementation()!;
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      let writes = 0;
+      invoke.mockImplementation((cmd: string, args?: any) => (cmd === "set_config" && writes++ === 0 ? held.then(() => base(cmd, args)) : base(cmd, args)));
+      const box = (id: string) => src("coral").querySelector<HTMLInputElement>(`input[name=wi-statuses][value=${id}]`)!;
+      box("s-new").checked = false;
+      box("s-new").dispatchEvent(new Event("change"));
+      await flush();
+      expect(writes).toBe(1);
+      // Re-tick New: the page now reads ["s-new"] again, and that is the latest choice.
+      box("s-new").checked = true;
+      box("s-new").dispatchEvent(new Event("change"));
+      await flush();
+      release();
+      await flush();
+      await flush();
+      expect(saved.workItems.coral.rules[0].statuses).toEqual(["s-new"]);
+    });
+
     it("keeps a custom tool's details open through a repaint", async () => {
       await setup();
       const d = src("custom-1").querySelector("details")!;

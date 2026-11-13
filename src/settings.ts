@@ -947,15 +947,11 @@ const CORAL_RULE_WORDS: RuleWords = {
 };
 
 /**
- * The boxes of rules a source picks up work items by, with "+ Add rule" last.
- * `onChange` runs when a field changes (a rule for someone with no name yet
- * is the caller's to hold back); `onAdd` when the add button is pressed.
- */
-/**
- * A Coral rule's Statuses: a checkbox per open status of `list`, in its
- * order, ticked for `ticked`; a ticked id `list` lacks shows as "Saved
- * status", so a save keeps it. `null` is not listed yet. Each checkbox
- * carries `onChange`, so one `morph` keeps stays wired.
+ * A Coral rule's Statuses: a checkbox per open status in `list`, in its
+ * order, ticked when its id is in `ticked`. A ticked id that `list` does not
+ * have shows as "Saved status", so a save keeps it. A `null` list has not
+ * been loaded yet. Each checkbox carries `onChange`, so a checkbox that
+ * `morph` keeps stays wired.
  */
 function statusChecks(id: string, list: CoralStatus[] | null, ticked: string[], onChange: () => void): HTMLElement {
   const g = document.createElement("div");
@@ -988,6 +984,11 @@ function statusChecks(id: string, list: CoralStatus[] | null, ticked: string[], 
 
 const tickedIn = (g: HTMLElement): string[] => [...g.querySelectorAll<HTMLInputElement>("input[name=wi-statuses]")].filter((b) => b.checked).map((b) => b.value);
 
+/**
+ * The boxes of rules a source picks up work items by, with "+ Add rule" last.
+ * `onChange` runs when a field changes (a rule for someone with no name yet
+ * is the caller's to hold back); `onAdd` when the add button is pressed.
+ */
 function rulesEditor(opts: {
   idPrefix: string;
   nextId: () => number;
@@ -2418,15 +2419,18 @@ export async function initSettings(): Promise<void> {
     return list;
   };
 
+  // One save at a time: each reads the config the one before it wrote, so two
+  // quick changes (a status ticked twice) cannot land out of order.
+  let workItemsSaves: Promise<void> = Promise.resolve();
   const saveWorkItems = (patch: (w: WorkItemsConfig) => void, saved?: () => void) =>
-    run(async () => {
+    (workItemsSaves = workItemsSaves.then(() => run(async () => {
       const fresh = await invoke<ConfigJson>("get_config");
       const workItems = workItemsConfig(fresh.workItems);
       patch(workItems);
       const c = await invoke<ConfigJson>("set_config", { config: { ...fresh, workItems } });
       applyConfig(c);
       saved?.();
-    });
+    })));
 
   /** Applies `change` to one connection of the freshest config and saves the list. */
   const saveGit = (p: GitProvider, change: (c: GitConnectionJson) => void) =>
