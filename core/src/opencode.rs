@@ -845,9 +845,7 @@ mod tests {
     fn a_stalled_service_start_does_not_hang_the_caller() {
         let t = tempfile::tempdir().unwrap();
         let script = t.path().join("opencode-bin");
-        std::fs::write(&script, "#!/bin/sh\nsleep 3\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&script, "#!/bin/sh\nsleep 3\n");
         let file = t.path().join("opencode/service.json");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         let started = std::time::Instant::now();

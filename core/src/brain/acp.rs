@@ -913,13 +913,11 @@ mod tests {
     /// it reads with `got` lands in `in.log` next to it.
     #[cfg(unix)]
     fn fake(agent: Harness, script: &str) -> (std::path::PathBuf, Launch) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("maya-fake-acp-{}", crate::launch::new_session_uuid()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("agent");
         let body = format!("#!/bin/sh\nlog=\"$(dirname \"$0\")/in.log\"\ngot() {{ read -r line; printf '%s\\n' \"$line\" >> \"$log\"; }}\n{script}");
-        std::fs::write(&bin, body).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&bin, &body);
         let mut l = launch(agent);
         l.binary = bin;
         l.cwd = dir.join("work");

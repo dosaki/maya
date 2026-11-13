@@ -338,12 +338,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_brain_that_exited_is_reaped_when_dropped() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("maya-fake-claude-{}", crate::launch::new_session_uuid()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
-        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&bin, "#!/bin/sh\nexit 0\n");
         let mut l = launch();
         l.binary = bin;
         l.cwd = dir.join("work");
@@ -361,12 +359,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn every_line_she_writes_stamps_the_output_clock_even_one_no_event_comes_from() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("maya-fake-claude-{}", crate::launch::new_session_uuid()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
-        std::fs::write(&bin, "#!/bin/sh\nread line\necho 'not json, still output'\ncat >/dev/null\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&bin, "#!/bin/sh\nread line\necho 'not json, still output'\ncat >/dev/null\n");
         let mut l = launch();
         l.binary = bin;
         l.cwd = dir.join("work");
@@ -389,12 +385,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_fake_claude_process_runs_a_turn_and_exits() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("maya-fake-claude-{}", crate::launch::new_session_uuid()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
-        std::fs::write(&bin, "#!/bin/sh\nread line\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"fake-1\"}'\necho '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}'\ncat >/dev/null\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&bin, "#!/bin/sh\nread line\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"fake-1\"}'\necho '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}'\necho '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"ok\"}'\ncat >/dev/null\n");
         let mut l = launch();
         l.binary = bin;
         l.cwd = dir.join("work");
