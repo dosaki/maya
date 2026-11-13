@@ -310,14 +310,14 @@ mod tests {
     #[test]
     fn a_rule_becomes_one_call_per_project_with_encoded_paths() {
         let api = "https://gitlab.acme.io/api/v4";
-        let me = ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![] };
+        let me = ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec![], statuses: vec![] };
         assert_eq!(list_urls(api, &me), vec![format!("{api}/issues?state=opened&order_by=updated_at&sort=desc&per_page=50&non_archived=true&scope=assigned_to_me")]);
-        let anyone = ItemRule { assignee: Assignee::Anyone, labels: vec!["status::todo".into(), "a b".into()], repos: vec!["grp/sub/r".into(), "grp/x".into()] };
+        let anyone = ItemRule { assignee: Assignee::Anyone, labels: vec!["status::todo".into(), "a b".into()], repos: vec!["grp/sub/r".into(), "grp/x".into()], statuses: vec![] };
         assert_eq!(list_urls(api, &anyone), vec![
             format!("{api}/projects/grp%2Fsub%2Fr/issues?state=opened&order_by=updated_at&sort=desc&per_page=50&labels=status%3A%3Atodo,a%20b"),
             format!("{api}/projects/grp%2Fx/issues?state=opened&order_by=updated_at&sort=desc&per_page=50&labels=status%3A%3Atodo,a%20b"),
         ]);
-        let maria = ItemRule { assignee: Assignee::User { login: "maria".into() }, labels: vec![], repos: vec![] };
+        let maria = ItemRule { assignee: Assignee::User { login: "maria".into() }, labels: vec![], repos: vec![], statuses: vec![] };
         assert_eq!(list_urls(api, &maria), vec![format!("{api}/issues?state=opened&order_by=updated_at&sort=desc&per_page=50&non_archived=true&scope=all&assignee_username=maria")]);
     }
 
@@ -337,14 +337,14 @@ mod tests {
     fn list_merges_the_projects_and_one_failure_fails_the_service() {
         let c = GitConnection { enabled: true, base_url: Some("https://gitlab.acme.io".into()), ..GitConnection::default_for(GitProvider::Gitlab) };
         let f = Forge { site: ForgeSite::of(&c), token: "glpat".into() };
-        let cfg = ForgeItems { rules: vec![ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["grp/a".into(), "grp/b".into()] }], ..WorkItemsConfig::default().gitlab };
+        let cfg = ForgeItems { rules: vec![ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["grp/a".into(), "grp/b".into()], statuses: vec![] }], ..WorkItemsConfig::default().gitlab };
         let http = FakeHttp::new(vec![("grp%2Fa", 200, "[]"), ("grp%2Fb", 404, r#"{"message":"404 Project Not Found"}"#)]);
         assert_eq!(list(&http, &f, &cfg).unwrap_err(), "404: 404 Project Not Found");
     }
 
     #[test]
     fn an_archived_project_a_rule_names_is_left_out_and_asked_about_once() {
-        let named = |repos: &[&str]| ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: repos.iter().map(|s| s.to_string()).collect() };
+        let named = |repos: &[&str]| ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: repos.iter().map(|s| s.to_string()).collect(), statuses: vec![] };
         let cfg = ForgeItems { rules: vec![named(&["grp/old", "grp/new"]), named(&["grp/old"])], ..WorkItemsConfig::default().gitlab };
         let issue = r#"[{"iid":1,"title":"t","web_url":"u","references":{"full":"grp/new#1"},"labels":[],"assignees":[],"author":{"username":"a"}}]"#;
         let http = FakeHttp::new(vec![
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn a_rule_whose_projects_are_all_archived_asks_for_nothing_more() {
-        let cfg = ForgeItems { rules: vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec!["grp/old".into()] }], ..WorkItemsConfig::default().gitlab };
+        let cfg = ForgeItems { rules: vec![ItemRule { assignee: Assignee::Me, labels: vec![], repos: vec!["grp/old".into()], statuses: vec![] }], ..WorkItemsConfig::default().gitlab };
         let http = FakeHttp::new(vec![("/projects/grp%2Fold", 200, r#"{"archived":true}"#), ("/issues", 200, r#"[{"iid":9,"title":"t","web_url":"u","references":{"full":"x/y#9"}}]"#)]);
         assert!(list(&http, &gitlab_forge(), &cfg).unwrap().is_empty());
         assert_eq!(http.seen.lock().unwrap().len(), 1, "not a search across GitLab");

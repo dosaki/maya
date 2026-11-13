@@ -96,7 +96,7 @@ mod tests {
     fn candidates_leave_out_the_trackers_and_repeat_nothing() {
         let mut cfg = WorkItemsConfig::default();
         cfg.github.tracker_repos = vec!["acme/issues".into()];
-        cfg.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/api".into(), "acme/issues".into()] });
+        cfg.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/api".into(), "acme/issues".into()], statuses: vec![] });
         let item = |f, p: &str| WorkItem { repo: Some(ItemRepo { forge: f, path: p.into() }), ..test_item() };
         let c = candidates(&cfg, &[item(GitProvider::Github, "acme/web"), item(GitProvider::Github, "acme/api")], &[ItemRepo { forge: GitProvider::Gitlab, path: "grp/r".into() }], &[]);
         assert_eq!(c.iter().map(|r| format!("{:?}:{}", r.forge, r.path)).collect::<Vec<_>>(), vec!["Github:acme/api", "Github:acme/web", "Gitlab:grp/r"]);
@@ -106,7 +106,7 @@ mod tests {
     fn candidates_match_trackers_and_repeats_ignoring_case() {
         let mut cfg = WorkItemsConfig::default();
         cfg.github.tracker_repos = vec!["Acme/Issues".into()];
-        cfg.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/issues".into(), "Acme/API".into()] });
+        cfg.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/issues".into(), "Acme/API".into()], statuses: vec![] });
         let c = candidates(&cfg, &[], &[ItemRepo { forge: GitProvider::Github, path: "acme/api".into() }], &[]);
         assert_eq!(c.len(), 1, "{c:?}");
         assert!(c[0].path.eq_ignore_ascii_case("acme/api"));
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn the_first_repos_come_first() {
         let mut cfg = WorkItemsConfig::default();
-        cfg.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/api".into()] });
+        cfg.github.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/api".into()], statuses: vec![] });
         let gl = ItemRepo { forge: GitProvider::Gitlab, path: "g/r".into() };
         let c = candidates(&cfg, &[], &[ItemRepo { forge: GitProvider::Gitlab, path: "G/R".into() }], &[gl.clone()]);
         assert_eq!(c[0], gl);

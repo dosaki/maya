@@ -231,15 +231,31 @@ impl From<String> for Skip {
     }
 }
 
-/// The tags and users of Coral, each asked for the first time it is needed.
+/// The tags, users and statuses of Coral, each asked for the first time it is needed.
 struct Lookups<'a> {
     http: &'a dyn Http,
     c: &'a Coral,
     tags: Option<Result<Vec<Tag>, String>>,
     users: Option<Result<Vec<(String, String)>, String>>,
+    statuses: Option<Result<Vec<CoralStatus>, String>>,
 }
 
 impl Lookups<'_> {
+    /// The `statusId` filter for a rule's statuses: None for none, else
+    /// their ids, once each is one of Coral's open statuses.
+    fn status_filter(&mut self, ids: &[String]) -> Result<Option<String>, Skip> {
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let (http, c) = (self.http, self.c);
+        let all = self.statuses.get_or_insert_with(|| statuses(http, c)).as_ref().map_err(|e| Skip::Fail(e.clone()))?;
+        let open = |id: &String| all.iter().any(|s| &s.id == id && (s.category == "todo" || s.category == "active"));
+        if let Some(gone) = ids.iter().find(|id| !open(id)) {
+            return Err(Skip::Warn(format!("Coral has no open status {gone}")));
+        }
+        Ok(Some(ids.iter().map(|id| encode(id)).collect::<Vec<_>>().join(",")))
+    }
+
     fn tags(&mut self) -> Result<&[Tag], String> {
         let (http, c) = (self.http, self.c);
         let tags = self.tags.get_or_insert_with(|| {
@@ -290,7 +306,7 @@ fn combinations(choices: &[Vec<String>]) -> Vec<Vec<String>> {
 
 /// The open items of one type for one rule, page after page, into `out`.
 #[allow(clippy::too_many_arguments)]
-fn list_type(http: &dyn Http, c: &Coral, item_type: &str, assignee: Option<&str>, codes: &[String], tag_ids: &[String], out: &mut Vec<WorkItem>, seen: &mut HashSet<String>) -> Result<(), Skip> {
+fn list_type(http: &dyn Http, c: &Coral, item_type: &str, assignee: Option<&str>, codes: &[String], tag_ids: &[String], status_ids: Option<&str>, out: &mut Vec<WorkItem>, seen: &mut HashSet<String>) -> Result<(), Skip> {
     // Only items that live in a product: a triage or unassigned one has no
     // page of its own and no product for Start to find a repository in.
     let mut filters = format!("itemType={item_type}&location=product&pageSize=100&statusCategory=todo,active");
@@ -299,6 +315,9 @@ fn list_type(http: &dyn Http, c: &Coral, item_type: &str, assignee: Option<&str>
     }
     if !codes.is_empty() {
         filters.push_str(&format!("&productCode={}", codes.iter().map(|c| encode(c)).collect::<Vec<_>>().join(",")));
+    }
+    if let Some(ids) = status_ids {
+        filters.push_str(&format!("&statusId={ids}"));
     }
     for id in tag_ids {
         filters.push_str(&format!("&tagId={}", encode(id)));
@@ -338,10 +357,11 @@ fn list_rule(l: &mut Lookups, rule: &ItemRule, me: &CoralMe, out: &mut Vec<WorkI
         Assignee::User { login } => Some(l.user(login)?.ok_or_else(|| Skip::Warn(format!("Coral has no user {login}")))?),
     };
     let codes: Vec<String> = rule.repos.iter().map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect();
+    let status_ids = l.status_filter(&rule.statuses)?;
     let combos = combinations(&l.tag_choices(&rule.labels)?);
     for tag_ids in combos {
         for item_type in ["work_item", "defect"] {
-            list_type(l.http, l.c, item_type, assignee.as_deref(), &codes, &tag_ids, out, seen)?;
+            list_type(l.http, l.c, item_type, assignee.as_deref(), &codes, &tag_ids, status_ids.as_deref(), out, seen)?;
         }
     }
     Ok(())
@@ -353,7 +373,7 @@ fn list_rule(l: &mut Lookups, rule: &ItemRule, me: &CoralMe, out: &mut Vec<WorkI
 /// was tried failed, or warned and left the rest failing. The Err carries
 /// the warnings too, so they still show.
 pub fn list(http: &dyn Http, c: &Coral, cfg: &CoralItems, me: &CoralMe) -> Result<(Vec<WorkItem>, Vec<String>), (String, Vec<String>)> {
-    let mut lookups = Lookups { http, c, tags: None, users: None };
+    let mut lookups = Lookups { http, c, tags: None, users: None, statuses: None };
     let (mut items, mut seen) = (Vec::new(), HashSet::new());
     let (mut warnings, mut failures) = (Vec::new(), Vec::new());
     let mut answered = false;
@@ -577,7 +597,7 @@ mod tests {
     }
 
     fn rule(assignee: Assignee, labels: &[&str], repos: &[&str]) -> ItemRule {
-        ItemRule { assignee, labels: labels.iter().map(|s| s.to_string()).collect(), repos: repos.iter().map(|s| s.to_string()).collect() }
+        ItemRule { assignee, labels: labels.iter().map(|s| s.to_string()).collect(), repos: repos.iter().map(|s| s.to_string()).collect(), statuses: vec![] }
     }
 
     fn cfg(rules: Vec<ItemRule>) -> CoralItems {
@@ -716,6 +736,58 @@ mod tests {
         assert!(urls(&http).iter().any(|u| u.contains("assignees=u-9")));
         assert_eq!(warnings, vec!["Coral has no user who@example.test"]);
         assert_eq!(urls(&http).iter().filter(|u| u.contains("/users?")).count(), 1, "users are asked once");
+    }
+
+    fn statuses_json() -> String {
+        json!([
+            {"id": "s-new", "name": "New", "category": "todo", "isAlsoSubStatus": true, "position": 0},
+            {"id": "s-prog", "name": "In Progress", "category": "active", "isAlsoSubStatus": true, "position": 1},
+            {"id": "s-review", "name": "Review", "category": "active", "isAlsoSubStatus": false, "position": 2},
+            {"id": "s-done", "name": "Done", "category": "done", "isAlsoSubStatus": true, "position": 9}
+        ])
+        .to_string()
+    }
+
+    fn with_statuses(mut r: ItemRule, statuses: &[&str]) -> ItemRule {
+        r.statuses = statuses.iter().map(|s| s.to_string()).collect();
+        r
+    }
+
+    #[test]
+    fn a_rule_asks_only_for_its_statuses() {
+        let http = FakeHttp::new(vec![("/statuses", 200, &statuses_json()), ("/work-items", 200, &page(vec![], None))]);
+        list(&http, &coral(), &cfg(vec![with_statuses(rule(Assignee::Me, &[], &[]), &["s-new", "s-prog"])]), &me_user()).unwrap();
+        let work: Vec<String> = urls(&http).into_iter().filter(|u| u.contains("/work-items")).collect();
+        assert_eq!(work.len(), 2, "work items and defects");
+        for u in work {
+            assert!(u.contains("statusId=s-new,s-prog"), "{u}");
+            assert!(u.contains("statusCategory=todo,active"), "{u}");
+        }
+    }
+
+    #[test]
+    fn a_rule_with_no_statuses_asks_coral_for_none() {
+        let http = FakeHttp::new(vec![("/work-items", 200, &page(vec![], None))]);
+        list(&http, &coral(), &cfg(vec![rule(Assignee::Me, &[], &[])]), &me_user()).unwrap();
+        assert!(urls(&http).iter().all(|u| !u.contains("/statuses") && !u.contains("statusId")), "{:?}", urls(&http));
+    }
+
+    #[test]
+    fn a_rule_naming_a_status_coral_has_not_open_warns_and_lists_nothing() {
+        let http = FakeHttp::new(vec![("/statuses", 200, &statuses_json()), ("/work-items", 200, &page(vec![numbered(1)], None))]);
+        let rules = vec![with_statuses(rule(Assignee::Me, &[], &[]), &["s-new", "s-gone"]), with_statuses(rule(Assignee::Me, &[], &[]), &["s-done"])];
+        let (items, warnings) = list(&http, &coral(), &cfg(rules), &me_user()).unwrap();
+        assert!(items.is_empty());
+        assert_eq!(warnings, vec!["Coral has no open status s-gone", "Coral has no open status s-done"]);
+        assert!(urls(&http).iter().all(|u| !u.contains("/work-items")), "{:?}", urls(&http));
+    }
+
+    #[test]
+    fn coral_statuses_are_asked_once_per_listing() {
+        let http = FakeHttp::new(vec![("/statuses", 200, &statuses_json()), ("/work-items", 200, &page(vec![], None))]);
+        let rules = vec![with_statuses(rule(Assignee::Me, &[], &[]), &["s-new"]), with_statuses(rule(Assignee::Anyone, &[], &["PAY"]), &["s-prog"])];
+        list(&http, &coral(), &cfg(rules), &me_user()).unwrap();
+        assert_eq!(urls(&http).iter().filter(|u| u.contains("/statuses")).count(), 1);
     }
 
     #[test]

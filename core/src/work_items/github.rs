@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn a_rule_becomes_one_search_with_quoted_terms() {
-        let r = |assignee, labels: &[&str], repos: &[&str]| ItemRule { assignee, labels: labels.iter().map(|s| s.to_string()).collect(), repos: repos.iter().map(|s| s.to_string()).collect() };
+        let r = |assignee, labels: &[&str], repos: &[&str]| ItemRule { assignee, labels: labels.iter().map(|s| s.to_string()).collect(), repos: repos.iter().map(|s| s.to_string()).collect(), statuses: vec![] };
         assert_eq!(search_query(&r(Assignee::Me, &[], &[])), "is:issue is:open archived:false assignee:@me");
         assert_eq!(
             search_query(&r(Assignee::Anyone, &["in progress", "bug"], &["acme/api", "acme/web"])),
@@ -221,7 +221,7 @@ mod tests {
     fn list_asks_once_per_rule_and_names_the_issues_permission_on_refusal() {
         let f = Forge { site: ForgeSite::of(&GitConnection::default_for(GitProvider::Github)), token: "ghp_x".into() };
         let mut cfg = WorkItemsConfig::default().github;
-        cfg.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/api".into()] });
+        cfg.rules.push(ItemRule { assignee: Assignee::Anyone, labels: vec![], repos: vec!["acme/api".into()], statuses: vec![] });
         let http = FakeHttp::new(vec![("/search/issues", 200, r#"{"items":[]}"#)]);
         assert!(list(&http, &f, &cfg).unwrap().is_empty());
         let seen = http.seen.lock().unwrap();
