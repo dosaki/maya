@@ -54,6 +54,7 @@
 .card { padding: 12px 14px 0; }
 .card__icon { min-width: 40px; min-height: 40px; }
 .card__pr { min-height: 40px; }
+.card__facts { height: 40px; row-gap: 40px; }
 
 /* The first run's overlay; a stopped server's card sits on the board instead, under live tabs. */
 #setup { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--bg); z-index: 20; }

@@ -335,6 +335,13 @@ describe("card styles", () => {
     expect(rule?.[2]).toMatch(/min-height:\s*40px/);
   });
 
+  it("makes the footer's facts as tall as the phone's PR pill, so the row does not clip it", () => {
+    const rule = mobileStyles.match(/([^{}]*\.card__facts[^{}]*)\{([^}]*)\}/);
+    expect(rule?.[2]).toMatch(/(^|[^-])height:\s*40px/);
+    // A wrapped fact must still start below the 40px, even after a 24px line with no pill.
+    expect(rule?.[2]).toMatch(/row-gap:\s*40px/);
+  });
+
   it("clips the line under the name and the footer's facts instead of spilling past a narrow card", () => {
     expect(styles).toMatch(/\.card__sub \{[^}]*overflow:\s*hidden/);
     expect(styles).toMatch(/\.card__sub > :is\(\.card__project, \.card__model\)[^{]*\{[^}]*text-overflow:\s*ellipsis/);
