@@ -1,3 +1,11 @@
+# 0.57.0
+
+## New
+
+- Session cards are calmer: the context, PR and cost sit in a thin footer beside plain icon buttons, the card shows its branch and model, and answers to a question are numbered rows. Click a card to open its chat; the Reply button is gone.
+- Settings → General → Cards picks Compact, Roomy or Spacious cards. Spacious is the default.
+- Pull Requests and Deployments show as one column of rows instead of a grid of cards.
+
 # 0.56.0
 
 ## New
