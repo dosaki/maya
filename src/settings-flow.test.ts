@@ -94,6 +94,39 @@ describe("settings flow", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
 
+  it("sizes the cards from the saved choice, and applies and saves a new one", async () => {
+    localStorage.clear();
+    delete document.documentElement.dataset.cards;
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", cardSize: "compact" };
+    let saved: { cardSize?: string } | undefined;
+    invoke.mockImplementation((cmd: string, args?: { config?: { cardSize?: string } }) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "set_config") {
+        saved = args?.config;
+        return Promise.resolve({ ...config, ...args?.config });
+      }
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+
+    await initSettings();
+    await flush();
+    expect(document.documentElement.dataset.cards).toBe("compact");
+    const select = document.querySelector<HTMLSelectElement>("select[name=cardSize]")!;
+    expect(select.value).toBe("compact");
+
+    select.value = "roomy";
+    select.dispatchEvent(new Event("change"));
+    expect(document.documentElement.dataset.cards).toBe("roomy");
+    await flush();
+    expect(saved?.cardSize).toBe("roomy");
+    expect(document.documentElement.dataset.cards).toBe("roomy");
+  });
+
   it("follows the saved message keys, and applies and saves new ones", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", keys: { send: ["Meta+Enter"], newLine: ["Enter"] } };
     let saved: { keys?: unknown } | undefined;

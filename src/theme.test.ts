@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import indexHtml from "../index.html?raw";
-import { COLOR_THEMES, COLOR_THEME_KEY, applyColorTheme, asColorTheme } from "./theme";
+import { CARD_SIZES, CARD_SIZE_KEY, COLOR_THEMES, COLOR_THEME_KEY, applyCardSize, applyColorTheme, asCardSize, asColorTheme } from "./theme";
 
 beforeEach(() => {
   localStorage.clear();
   delete document.documentElement.dataset.theme;
+  delete document.documentElement.dataset.cards;
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -38,6 +39,32 @@ describe("colour themes", () => {
   });
 });
 
+describe("card sizes", () => {
+  it("offers Compact, Roomy and Spacious", () => {
+    expect(CARD_SIZES).toEqual([["compact", "Compact"], ["roomy", "Roomy"], ["spacious", "Spacious"]]);
+  });
+
+  it("reads an unknown or missing card size as Spacious", () => {
+    expect(asCardSize("roomy")).toBe("roomy");
+    expect(asCardSize("compact")).toBe("compact");
+    for (const odd of [undefined, null, "", "huge", "ROOMY", 3]) expect(asCardSize(odd)).toBe("spacious");
+  });
+
+  it("puts the card size on the page and remembers it", () => {
+    applyCardSize("compact");
+    expect(document.documentElement.dataset.cards).toBe("compact");
+    expect(localStorage.getItem(CARD_SIZE_KEY)).toBe("compact");
+  });
+
+  it("still sizes the cards when the browser will not store anything", () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("storage is off");
+    });
+    expect(() => applyCardSize("roomy")).not.toThrow();
+    expect(document.documentElement.dataset.cards).toBe("roomy");
+  });
+});
+
 /** The inline script in index.html, which runs before the stylesheet paints. */
 function bootScript(): string {
   const match = indexHtml.match(/<script>([\s\S]*?)<\/script>/);
@@ -62,6 +89,28 @@ describe("the first paint", () => {
       boot();
       expect(document.documentElement.dataset.theme).toBeUndefined();
     }
+  });
+
+  it("starts with the card size saved last time, Compact or Roomy", () => {
+    for (const saved of ["compact", "roomy"]) {
+      localStorage.setItem(CARD_SIZE_KEY, saved);
+      boot();
+      expect(document.documentElement.dataset.cards).toBe(saved);
+    }
+  });
+
+  it("leaves the cards Spacious when nothing, Spacious or something unknown was saved", () => {
+    boot();
+    expect(document.documentElement.dataset.cards).toBeUndefined();
+    for (const saved of ["spacious", "huge"]) {
+      localStorage.setItem(CARD_SIZE_KEY, saved);
+      boot();
+      expect(document.documentElement.dataset.cards).toBeUndefined();
+    }
+  });
+
+  it("uses the same card size key as the theme module", () => {
+    expect(bootScript()).toContain(`"${CARD_SIZE_KEY}"`);
   });
 
   it("uses the same storage key as the theme module", () => {

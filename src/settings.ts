@@ -3,9 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, isLinux, isWindows, recognizerOptions, secretStore, thisComputerLower } from "./platform";
-import type { ColorTheme, CoralItems, CoralStatus, CustomTool, ForgeItems, GitProvider, Harness, ItemRule, NewSessionTerminal, ViewerTheme, WorkItemsConfig } from "./types";
+import type { CardSize, ColorTheme, CoralItems, CoralStatus, CustomTool, ForgeItems, GitProvider, Harness, ItemRule, NewSessionTerminal, ViewerTheme, WorkItemsConfig } from "./types";
 import { setViewerTheme } from "./modal";
-import { COLOR_THEMES, applyColorTheme, asColorTheme } from "./theme";
+import { CARD_SIZES, COLOR_THEMES, applyCardSize, applyColorTheme, asCardSize, asColorTheme } from "./theme";
 import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys, removeCombo, setKeyBindings, type KeyBindings } from "./keys";
 import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
@@ -97,6 +97,7 @@ export interface SettingsModel {
   viewerTheme?: ViewerTheme;
   /** The colours of the windows; dark when absent. */
   colorTheme?: ColorTheme;
+  cardSize?: CardSize;
   /** The keys that send and make a new line; the defaults when absent. */
   keys?: KeyBindings;
   /** The macOS app new sessions open in; Terminal when absent. */
@@ -230,6 +231,7 @@ export type Recognizer = "system" | "builtin";
 export interface SettingsHandlers {
   onViewerTheme?(t: ViewerTheme): void;
   onColorTheme?(t: ColorTheme): void;
+  onCardSize?(s: CardSize): void;
   onKeys?(k: KeyBindings): void;
   onNewSessionTerminal?(t: NewSessionTerminal): void;
   /** One service's Work Items settings, read from the page, to save. */
@@ -431,6 +433,7 @@ interface ConfigJson {
   workItems?: WorkItemsConfig;
   viewerTheme?: ViewerTheme;
   colorTheme?: ColorTheme;
+  cardSize?: CardSize;
   keys?: KeyBindings | null;
   newSessionTerminal?: NewSessionTerminal;
   git?: GitConnectionJson[] | null;
@@ -1235,6 +1238,17 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   themeSel.value = model.colorTheme ?? "dark";
   themeSel.addEventListener("change", () => h.onColorTheme?.(asColorTheme(themeSel.value)));
 
+  const sizeSel = document.createElement("select");
+  sizeSel.name = "cardSize";
+  for (const [value, text] of CARD_SIZES) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = text;
+    sizeSel.append(o);
+  }
+  sizeSel.value = model.cardSize ?? "spacious";
+  sizeSel.addEventListener("change", () => h.onCardSize?.(asCardSize(sizeSel.value)));
+
   renderKeyboard(keyboard, model.keys ?? defaultKeys(), h);
 
   const agentRow = row({ label: "Agent", help: agentHelp, control: agentSel });
@@ -1253,7 +1267,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   general.append(
     group({ title: "Agent" }, card(agentRow, row({ label: "Model", control: agentModelSel }))),
-    group({ title: "Appearance" }, card(row({ label: "Theme", control: themeSel }))),
+    group({ title: "Appearance" }, card(row({ label: "Theme", control: themeSel }), row({ label: "Cards", control: sizeSel }))),
     ...(updateRows.length > 0 ? [group({ title: "Updates" }, card(...updateRows))] : []),
   );
 
@@ -2484,6 +2498,8 @@ export async function initSettings(): Promise<void> {
     setViewerTheme(model.viewerTheme);
     model.colorTheme = asColorTheme(c.colorTheme);
     applyColorTheme(model.colorTheme);
+    model.cardSize = asCardSize(c.cardSize);
+    applyCardSize(model.cardSize);
     model.keys = asKeyBindings(c.keys);
     setKeyBindings(model.keys);
     model.newSessionTerminal = c.newSessionTerminal ?? "terminal";
@@ -2639,6 +2655,12 @@ export async function initSettings(): Promise<void> {
       model.colorTheme = t;
       applyColorTheme(t);
       void run(() => saveConfig({ colorTheme: t }));
+    },
+    onCardSize: (size) => {
+      // At once, like the theme: the cards change as the choice is made.
+      model.cardSize = size;
+      applyCardSize(size);
+      void run(() => saveConfig({ cardSize: size }));
     },
     onKeys: (k) => {
       // At once, like the theme: the boxes follow the new keys before the save lands.

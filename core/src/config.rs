@@ -210,6 +210,10 @@ pub struct Config {
     /// The colours of the desktop windows; the phone keeps its own look.
     #[serde(default)]
     pub color_theme: ColorTheme,
+    /// How roomy the session cards and the Pull Requests and Deployments
+    /// rows are on the desktop; the phone keeps its own padding.
+    #[serde(default)]
+    pub card_size: CardSize,
     /// Where new sessions open: a terminal app (Terminal or iTerm2 on macOS,
     /// the system's one elsewhere), or Native, a terminal Maya hosts herself
     /// on every platform.
@@ -287,6 +291,16 @@ pub enum ColorTheme {
     #[default]
     Dark,
     Light,
+}
+
+/// How roomy the cards are. Spacious is the default.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CardSize {
+    Compact,
+    Roomy,
+    #[default]
+    Spacious,
 }
 
 /// Where new sessions open: on macOS the app that opens the windows of
@@ -751,6 +765,7 @@ impl Default for Config {
             last_shown_version: None,
             viewer_theme: ViewerTheme::Chat,
             color_theme: ColorTheme::Dark,
+            card_size: CardSize::Spacious,
             new_session_terminal: NewSessionTerminal::Terminal,
             keys: None,
             network: NetworkConfig::default(),
@@ -1347,6 +1362,17 @@ mod tests {
         let c: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 5, "muted": true}"#).unwrap();
         assert!(c.muted);
         assert!(serde_json::to_string(&c).unwrap().contains("\"muted\":true"));
+    }
+
+    #[test]
+    fn the_card_size_defaults_to_spacious_and_round_trips() {
+        assert_eq!(Config::default().card_size, CardSize::Spacious);
+        let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
+        assert_eq!(older.card_size, CardSize::Spacious);
+        let set = Config { card_size: CardSize::Compact, ..Config::default() };
+        let text = serde_json::to_string(&set).unwrap();
+        assert!(text.contains(r#""cardSize":"compact""#), "{text}");
+        assert_eq!(serde_json::from_str::<Config>(&text).unwrap().card_size, CardSize::Compact);
     }
 
     #[test]

@@ -134,3 +134,33 @@ describe("code colours", () => {
     }
   });
 });
+
+/** The custom properties of every rule whose selector is exactly `selector`, later rules winning. */
+function allVars(selector: string): Record<string, string> {
+  const found: Record<string, string> = {};
+  let from = 0;
+  for (;;) {
+    const start = css.indexOf(`\n${selector} {`, from);
+    if (start < 0) return found;
+    const open = css.indexOf("{", start);
+    const body = css.slice(open + 1, css.indexOf("}", open));
+    for (const match of body.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) found[match[1]] = match[2].trim();
+    from = open;
+  }
+}
+
+describe("card sizes", () => {
+  const SIZES: Record<string, Record<string, string>> = {
+    compact: { "--card-pad-y": "10px", "--card-pad-x": "12px", "--card-gap": "8px", "--card-name": "14px", "--card-text": "13px", "--card-leading": "1.4", "--card-section": "8px", "--card-opt-pad-y": "5px", "--card-opt-pad-x": "8px", "--card-icon": "26px", "--row-pad-y": "8px", "--row-pad-x": "12px" },
+    roomy: { "--card-pad-y": "16px", "--card-pad-x": "18px", "--card-gap": "14px", "--card-name": "15px", "--card-text": "14px", "--card-leading": "1.5", "--card-section": "12px", "--card-opt-pad-y": "8px", "--card-opt-pad-x": "12px", "--card-icon": "28px", "--row-pad-y": "11px", "--row-pad-x": "14px" },
+    spacious: { "--card-pad-y": "20px", "--card-pad-x": "22px", "--card-gap": "18px", "--card-name": "15.5px", "--card-text": "14.5px", "--card-leading": "1.55", "--card-section": "16px", "--card-opt-pad-y": "10px", "--card-opt-pad-x": "14px", "--card-icon": "30px", "--row-pad-y": "14px", "--row-pad-x": "16px" },
+  };
+
+  it("makes Spacious the default, on the page with no size set", () => {
+    expect(allVars(DARK)).toMatchObject(SIZES.spacious);
+  });
+
+  it.each(["compact", "roomy"])("sets every size property for %s cards", (size) => {
+    expect(vars(`:root[data-cards="${size}"]`)).toEqual(SIZES[size]);
+  });
+});

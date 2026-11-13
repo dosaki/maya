@@ -333,6 +333,9 @@ export type ViewerTheme = "chat" | "terminal";
 /** The colours of Maya's windows; dark is the look Maya always had. */
 export type ColorTheme = "dark" | "light";
 
+/** How roomy the cards are; Spacious is the default. */
+export type CardSize = "compact" | "roomy" | "spacious";
+
 /** Where new sessions open: the macOS app that opens their windows, or Native, where Maya hosts the terminal. */
 export type NewSessionTerminal = "terminal" | "iterm" | "native";
 
