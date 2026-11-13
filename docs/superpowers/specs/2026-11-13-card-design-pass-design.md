@@ -132,8 +132,9 @@ A click anywhere on the card still opens its chat.
 
 ### Phone
 
-- The phone shares `src/` and the stylesheet, so it gets the new cards,
-  rows and setting.
+- The phone shares `src/` and the stylesheet, so it gets the new cards
+  and rows. It keeps its own card padding and tap sizes, as it keeps its
+  own colour theme.
 - At phone width, a row's buttons wrap below its text.
 
 ## Left to the builder
