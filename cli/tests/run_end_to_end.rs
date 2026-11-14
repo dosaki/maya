@@ -146,10 +146,17 @@ fn run_stops_with_two_when_the_config_on_disk_stops_being_an_assistants() {
         std::thread::spawn(move || run(&claude_dir, Arc::new(FakeTerminal::default()), stop))
     };
     wait_until("connected", || handle.status().assistants.iter().any(|a| a.name == "box" && a.connected));
+    // On connecting, the run loads config.json, adds the main's group and
+    // saves it. Edited before that save lands, the edit would be written
+    // over and the role would read Assistant again, so wait for the group.
+    let config_path = claude_dir.join("maya/config.json");
+    wait_until("group saved", || {
+        let on_disk: serde_json::Value = std::fs::read_to_string(&config_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        on_disk["network"]["groupVersion"].as_u64().is_some_and(|v| v >= 1)
+    });
 
     // Edited to role off while connected: the watcher sees it and the run
     // closes the link and exits 2, without waiting for a reconnect.
-    let config_path = claude_dir.join("maya/config.json");
     let mut c = maya_core::config::load(&config_path);
     c.network.role = maya_core::config::NetworkRole::Off;
     maya_core::config::save(&config_path, &c).unwrap();
