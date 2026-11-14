@@ -44,10 +44,10 @@ describe("card sizes", () => {
     expect(CARD_SIZES).toEqual([["compact", "Compact"], ["roomy", "Roomy"], ["spacious", "Spacious"]]);
   });
 
-  it("reads an unknown or missing card size as Spacious", () => {
+  it("reads an unknown or missing card size as Compact", () => {
     expect(asCardSize("roomy")).toBe("roomy");
-    expect(asCardSize("compact")).toBe("compact");
-    for (const odd of [undefined, null, "", "huge", "ROOMY", 3]) expect(asCardSize(odd)).toBe("spacious");
+    expect(asCardSize("spacious")).toBe("spacious");
+    for (const odd of [undefined, null, "", "huge", "ROOMY", 3]) expect(asCardSize(odd)).toBe("compact");
   });
 
   it("puts the card size on the page and remembers it", () => {
@@ -91,18 +91,18 @@ describe("the first paint", () => {
     }
   });
 
-  it("starts with the card size saved last time, Compact or Roomy", () => {
-    for (const saved of ["compact", "roomy"]) {
+  it("starts with the card size saved last time, Roomy or Spacious", () => {
+    for (const saved of ["roomy", "spacious"]) {
       localStorage.setItem(CARD_SIZE_KEY, saved);
       boot();
       expect(document.documentElement.dataset.cards).toBe(saved);
     }
   });
 
-  it("leaves the cards Spacious when nothing, Spacious or something unknown was saved", () => {
+  it("leaves the cards Compact when nothing, Compact or something unknown was saved", () => {
     boot();
     expect(document.documentElement.dataset.cards).toBeUndefined();
-    for (const saved of ["spacious", "huge"]) {
+    for (const saved of ["compact", "huge"]) {
       localStorage.setItem(CARD_SIZE_KEY, saved);
       boot();
       expect(document.documentElement.dataset.cards).toBeUndefined();

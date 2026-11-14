@@ -211,9 +211,15 @@ pub struct Config {
     #[serde(default)]
     pub color_theme: ColorTheme,
     /// How roomy the session cards and the Pull Requests and Deployments
-    /// rows are on the desktop; the phone keeps its own padding.
-    #[serde(default)]
-    pub card_size: CardSize,
+    /// rows are on the desktop; the phone keeps its own padding. Written
+    /// only once someone picks a size: until then the cards are the
+    /// default, Compact.
+    #[serde(default, rename = "cards", skip_serializing_if = "Option::is_none")]
+    pub card_size: Option<CardSize>,
+    /// The size 0.57.0 kept, which it wrote for everyone: as Spacious when
+    /// nobody had picked one. `migrate` keeps it only as Compact or Roomy.
+    #[serde(default, rename = "cardSize", skip_serializing)]
+    pub legacy_card_size: Option<CardSize>,
     /// Where new sessions open: a terminal app (Terminal or iTerm2 on macOS,
     /// the system's one elsewhere), or Native, a terminal Maya hosts herself
     /// on every platform.
@@ -293,13 +299,13 @@ pub enum ColorTheme {
     Light,
 }
 
-/// How roomy the cards are. Spacious is the default.
+/// How roomy the cards are. Compact is the default.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum CardSize {
+    #[default]
     Compact,
     Roomy,
-    #[default]
     Spacious,
 }
 
@@ -765,7 +771,8 @@ impl Default for Config {
             last_shown_version: None,
             viewer_theme: ViewerTheme::Chat,
             color_theme: ColorTheme::Dark,
-            card_size: CardSize::Spacious,
+            card_size: None,
+            legacy_card_size: None,
             new_session_terminal: NewSessionTerminal::Terminal,
             keys: None,
             network: NetworkConfig::default(),
@@ -817,6 +824,12 @@ impl Config {
         if let Some(m) = self.interpreter_model.take() {
             if self.agent_model.trim().is_empty() && self.brain() == Harness::ClaudeCode {
                 self.agent_model = m;
+            }
+        }
+        if let Some(old) = self.legacy_card_size.take() {
+            // 0.57.0 saved Spacious, its default, for everyone who had not picked a size.
+            if self.card_size.is_none() && old != CardSize::Spacious {
+                self.card_size = Some(old);
             }
         }
         self.network.drop_insecure_pairings();
@@ -1365,14 +1378,31 @@ mod tests {
     }
 
     #[test]
-    fn the_card_size_defaults_to_spacious_and_round_trips() {
-        assert_eq!(Config::default().card_size, CardSize::Spacious);
+    fn the_cards_are_compact_until_a_size_is_picked_and_only_a_pick_is_written() {
+        assert_eq!(Config::default().card_size, None);
+        assert_eq!(CardSize::default(), CardSize::Compact);
         let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes":30}"#).unwrap();
-        assert_eq!(older.card_size, CardSize::Spacious);
-        let set = Config { card_size: CardSize::Compact, ..Config::default() };
-        let text = serde_json::to_string(&set).unwrap();
-        assert!(text.contains(r#""cardSize":"compact""#), "{text}");
-        assert_eq!(serde_json::from_str::<Config>(&text).unwrap().card_size, CardSize::Compact);
+        assert_eq!(older.migrate().card_size, None);
+        assert!(!serde_json::to_string(&Config::default()).unwrap().contains("cards"), "no pick, nothing written");
+        for size in [CardSize::Compact, CardSize::Roomy, CardSize::Spacious] {
+            let text = serde_json::to_string(&Config { card_size: Some(size), ..Config::default() }).unwrap();
+            assert!(!text.contains("cardSize"), "{text}");
+            assert_eq!(serde_json::from_str::<Config>(&text).unwrap().migrate().card_size, Some(size));
+        }
+        assert!(serde_json::to_string(&Config { card_size: Some(CardSize::Spacious), ..Config::default() }).unwrap().contains(r#""cards":"spacious""#));
+    }
+
+    #[test]
+    fn a_size_from_0_57_0_counts_as_picked_only_when_it_is_not_spacious() {
+        // 0.57.0 wrote `cardSize` for everyone, as Spacious when nobody had picked one.
+        let parse = |fields: &str| serde_json::from_str::<Config>(&format!(r#"{{"completedTimeoutMinutes":30,{fields}}}"#)).unwrap();
+        let read = |fields: &str| parse(fields).migrate().card_size;
+        assert_eq!(read(r#""cardSize":"spacious""#), None);
+        assert_eq!(read(r#""cardSize":"roomy""#), Some(CardSize::Roomy));
+        assert_eq!(read(r#""cardSize":"compact""#), Some(CardSize::Compact));
+        assert_eq!(read(r#""cardSize":"roomy","cards":"spacious""#), Some(CardSize::Spacious), "a pick since then wins");
+        let saved = serde_json::to_string(&parse(r#""cardSize":"roomy""#).migrate()).unwrap();
+        assert!(saved.contains(r#""cards":"roomy""#) && !saved.contains("cardSize"), "{saved}");
     }
 
     #[test]

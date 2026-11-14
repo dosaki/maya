@@ -34,9 +34,9 @@ export const CARD_SIZES = [
 /** Where the page remembers its card size, so the next start paints it before the saved settings arrive. */
 export const CARD_SIZE_KEY = "maya.cardSize";
 
-/** A saved card size as a size: Spacious, the default, for anything that is not one. */
+/** A saved card size as a size: Compact, the default, for anything that is not one. */
 export function asCardSize(value: unknown): CardSize {
-  return CARD_SIZES.find(([key]) => key === value)?.[0] ?? "spacious";
+  return CARD_SIZES.find(([key]) => key === value)?.[0] ?? "compact";
 }
 
 /** Puts the card size on the page, and remembers it for the next start's first paint. */
@@ -45,6 +45,6 @@ export function applyCardSize(size: CardSize): void {
   try {
     localStorage.setItem(CARD_SIZE_KEY, size);
   } catch {
-    // Without storage the next start paints Spacious for a moment; the saved settings still choose the size once they load.
+    // Without storage the next start paints Compact for a moment; the saved settings still choose the size once they load.
   }
 }
