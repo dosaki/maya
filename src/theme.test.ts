@@ -109,6 +109,12 @@ describe("the first paint", () => {
     }
   });
 
+  it("ignores the size 0.57.0 kept, which it kept as Spacious for everyone who had not picked one", () => {
+    localStorage.setItem("maya.cardSize", "spacious");
+    boot();
+    expect(document.documentElement.dataset.cards).toBeUndefined();
+  });
+
   it("uses the same card size key as the theme module", () => {
     expect(bootScript()).toContain(`"${CARD_SIZE_KEY}"`);
   });

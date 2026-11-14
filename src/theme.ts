@@ -31,8 +31,9 @@ export const CARD_SIZES = [
   ["spacious", "Spacious"],
 ] as const;
 
-/** Where the page remembers its card size, so the next start paints it before the saved settings arrive. */
-export const CARD_SIZE_KEY = "maya.cardSize";
+/** Where the page remembers its card size, so the next start paints it before the saved settings arrive.
+ *  0.57.0 used `maya.cardSize`, and kept Spacious there for everyone who had not picked a size. */
+export const CARD_SIZE_KEY = "maya.cards";
 
 /** A saved card size as a size: Compact, the default, for anything that is not one. */
 export function asCardSize(value: unknown): CardSize {
