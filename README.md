@@ -17,7 +17,7 @@ the right terminal first.
 - Shows Claude Code, Codex, Antigravity, Grok Build, Kiro CLI and OpenCode sessions on one board as cards in a Kanban-like board
   - Each session card lands in a column: Idle, Working, Awaiting Decision or Completed
   - Each card names its project, branch and model, and its footer shows the context, the PR and the cost so far; click a card to open its chat
-  - Cards come in three sizes, Compact, Roomy or Spacious (Settings → General → Cards); Spacious is the default
+  - Cards come in three sizes, Compact, Roomy or Spacious (Settings → General → Cards); Compact is the default
 - Lets you reply, answer questions, and run slash commands and `!` shell lines from the card
 - Stops a session that is working with a Stop button, which sends it the same Esc you would press in its terminal
 - Answers a question from a menu like the agent's own: pick an option, write your own words with "Type something", or pick "Chat about this" to talk it over first

@@ -97,9 +97,9 @@ describe("settings flow", () => {
   it("sizes the cards from the saved choice, and applies and saves a new one", async () => {
     localStorage.clear();
     delete document.documentElement.dataset.cards;
-    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", cardSize: "compact" };
-    let saved: { cardSize?: string } | undefined;
-    invoke.mockImplementation((cmd: string, args?: { config?: { cardSize?: string } }) => {
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", cards: "spacious" };
+    let saved: { cards?: string } | undefined;
+    invoke.mockImplementation((cmd: string, args?: { config?: { cards?: string } }) => {
       if (cmd === "codex_hook_status") return Promise.resolve(false);
       if (cmd === "hook_status") return Promise.resolve(true);
       if (cmd === "get_config") return Promise.resolve({ ...config });
@@ -115,15 +115,15 @@ describe("settings flow", () => {
 
     await initSettings();
     await flush();
-    expect(document.documentElement.dataset.cards).toBe("compact");
+    expect(document.documentElement.dataset.cards).toBe("spacious");
     const select = document.querySelector<HTMLSelectElement>("select[name=cardSize]")!;
-    expect(select.value).toBe("compact");
+    expect(select.value).toBe("spacious");
 
     select.value = "roomy";
     select.dispatchEvent(new Event("change"));
     expect(document.documentElement.dataset.cards).toBe("roomy");
     await flush();
-    expect(saved?.cardSize).toBe("roomy");
+    expect(saved?.cards).toBe("roomy");
     expect(document.documentElement.dataset.cards).toBe("roomy");
   });
 

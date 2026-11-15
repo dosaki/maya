@@ -156,11 +156,11 @@ describe("card sizes", () => {
     spacious: { "--card-pad-y": "20px", "--card-pad-x": "22px", "--card-gap": "18px", "--card-name": "15.5px", "--card-text": "14.5px", "--card-leading": "1.55", "--card-section": "16px", "--card-opt-pad-y": "10px", "--card-opt-pad-x": "14px", "--card-icon": "30px", "--row-pad-y": "14px", "--row-pad-x": "16px" },
   };
 
-  it("makes Spacious the default, on the page with no size set", () => {
-    expect(allVars(DARK)).toMatchObject(SIZES.spacious);
+  it("makes Compact the default, on the page with no size set", () => {
+    expect(allVars(DARK)).toMatchObject(SIZES.compact);
   });
 
-  it.each(["compact", "roomy"])("sets every size property for %s cards", (size) => {
+  it.each(["roomy", "spacious"])("sets every size property for %s cards", (size) => {
     expect(vars(`:root[data-cards="${size}"]`)).toEqual(SIZES[size]);
   });
 });

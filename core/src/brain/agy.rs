@@ -515,12 +515,10 @@ mod tests {
 
     #[cfg(unix)]
     fn fake(script: &str) -> (std::path::PathBuf, Launch) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("maya-fake-agy-{}", crate::launch::new_session_uuid()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("agy");
-        std::fs::write(&bin, format!("#!/bin/sh\n{}", script.replace("$DIR", &dir.to_string_lossy()))).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&bin, &format!("#!/bin/sh\n{}", script.replace("$DIR", &dir.to_string_lossy())));
         let mut l = launch();
         l.binary = bin;
         l.cwd = dir.join("work");

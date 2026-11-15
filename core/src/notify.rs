@@ -1593,9 +1593,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let exe = |name: &str| {
             let p = d.path().join(name);
-            std::fs::write(&p, "#!/bin/sh\n").unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_script::write(&p, "#!/bin/sh\n");
         };
         assert_eq!(speech_command(""), None);
         exe("espeak-ng");
@@ -1617,9 +1615,7 @@ mod tests {
         let marker = d.path().join("cancelled");
         let fake = d.path().join("spd-say");
         // The cancel hangs as well, as it does with no audio sink.
-        std::fs::write(&fake, format!("#!/bin/sh\nif [ \"$1\" = -C ]; then echo $$ > '{}'; exec sleep 60; fi\nexec sleep 60\n", marker.display())).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&fake, &format!("#!/bin/sh\nif [ \"$1\" = -C ]; then echo $$ > '{}'; exec sleep 60; fi\nexec sleep 60\n", marker.display()));
         let started = std::time::Instant::now();
         assert!(!speak_within(&fake, &["-w".to_string()], "x", std::time::Duration::from_secs(1)));
         assert!(started.elapsed() < std::time::Duration::from_secs(3), "took {:?}", started.elapsed());
@@ -1642,9 +1638,7 @@ mod tests {
     fn a_synthesiser_that_returns_in_time_is_left_alone() {
         let d = tempfile::tempdir().unwrap();
         let fake = d.path().join("espeak-ng");
-        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::write(&fake, "#!/bin/sh\nexit 0\n");
         assert!(speak_within(&fake, &[], "hello", std::time::Duration::from_secs(5)));
     }
 }

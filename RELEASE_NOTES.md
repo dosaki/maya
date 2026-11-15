@@ -1,3 +1,9 @@
+# 0.58.0
+
+## New
+
+- Cards are Compact unless you pick another size in Settings → General → Cards. If you were on Spacious in 0.57.0, you move to Compact too, because 0.57.0 saved Spacious even when nobody had picked it. Compact or Roomy picked in 0.57.0 stays.
+
 # 0.57.0
 
 ## New

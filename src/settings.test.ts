@@ -1725,7 +1725,7 @@ describe("colour theme", () => {
     const general = el.querySelector(".settings__section--general")!;
     const sel = general.querySelector<HTMLSelectElement>("select[name=cardSize]")!;
     expect([...sel.options].map((o) => o.textContent)).toEqual(["Compact", "Roomy", "Spacious"]);
-    expect(sel.value).toBe("spacious");
+    expect(sel.value).toBe("compact");
     const theme = general.querySelector("select[name=colorTheme]")!.closest(".settings__row")!;
     const cards = sel.closest(".settings__row")!;
     expect(cards.querySelector(".settings__label")?.textContent).toBe("Cards");
@@ -1737,7 +1737,7 @@ describe("colour theme", () => {
 
   it("shows the saved card size", () => {
     const pick = (model: object) => renderSettings({ ...voiceBase, ...model }, handlers()).querySelector<HTMLSelectElement>("select[name=cardSize]")!.value;
-    expect(pick({ cardSize: "compact" })).toBe("compact");
+    expect(pick({ cardSize: "spacious" })).toBe("spacious");
   });
 
   it("shows the saved theme, and Dark when none was saved", () => {

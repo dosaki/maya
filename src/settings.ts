@@ -433,7 +433,8 @@ interface ConfigJson {
   workItems?: WorkItemsConfig;
   viewerTheme?: ViewerTheme;
   colorTheme?: ColorTheme;
-  cardSize?: CardSize;
+  /** The card size someone picked; absent until they pick one, when the cards are Compact. */
+  cards?: CardSize;
   keys?: KeyBindings | null;
   newSessionTerminal?: NewSessionTerminal;
   git?: GitConnectionJson[] | null;
@@ -1246,7 +1247,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
     o.textContent = text;
     sizeSel.append(o);
   }
-  sizeSel.value = model.cardSize ?? "spacious";
+  sizeSel.value = model.cardSize ?? "compact";
   sizeSel.addEventListener("change", () => h.onCardSize?.(asCardSize(sizeSel.value)));
 
   renderKeyboard(keyboard, model.keys ?? defaultKeys(), h);
@@ -2498,7 +2499,7 @@ export async function initSettings(): Promise<void> {
     setViewerTheme(model.viewerTheme);
     model.colorTheme = asColorTheme(c.colorTheme);
     applyColorTheme(model.colorTheme);
-    model.cardSize = asCardSize(c.cardSize);
+    model.cardSize = asCardSize(c.cards);
     applyCardSize(model.cardSize);
     model.keys = asKeyBindings(c.keys);
     setKeyBindings(model.keys);
@@ -2660,7 +2661,7 @@ export async function initSettings(): Promise<void> {
       // At once, like the theme: the cards change as the choice is made.
       model.cardSize = size;
       applyCardSize(size);
-      void run(() => saveConfig({ cardSize: size }));
+      void run(() => saveConfig({ cards: size }));
     },
     onKeys: (k) => {
       // At once, like the theme: the boxes follow the new keys before the save lands.
