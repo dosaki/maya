@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { renderCard } from "./card";
+import { cardTicks } from "./options";
 import { remoteTerminalToast, type Card } from "./types";
 
 const base: Card = {
@@ -178,8 +179,16 @@ describe("renderCard: options and Stop", () => {
     expect(el.querySelectorAll("button[data-action=answer]")).toHaveLength(2);
   });
 
-  it("keeps the multi-select note on a multi-select card", () => {
-    const el = renderCard({ ...asking, awaiting: { kind: "question", detail: "Which?", questions: [{ ...question, multiSelect: true, own: undefined, chatRow: undefined }] } }, 5000);
-    expect(el.querySelector(".options__note")?.textContent).toBe("Multi-select: open the session to tick several");
+  it("lets a multi-select card be ticked and sent from the card, showing what is ticked", () => {
+    const multi: Card = { ...asking, awaiting: { kind: "question", detail: "Which?", questions: [{ ...question, multiSelect: true, own: undefined, chatRow: undefined }] } };
+    cardTicks.clear(multi);
+    let el = renderCard(multi, 5000);
+    expect(el.querySelectorAll("button[data-action=tick]:not(:disabled)")).toHaveLength(2);
+    expect(el.querySelector<HTMLButtonElement>("button[data-action=send-ticks]")!.disabled).toBe(true);
+    cardTicks.toggle(multi, 0, 1);
+    el = renderCard(multi, 5000);
+    expect([...el.querySelectorAll(".options__btn--on .options__text")].map((t) => t.textContent)).toEqual([question.options[1].label]);
+    expect(el.querySelector<HTMLButtonElement>("button[data-action=send-ticks]")!.disabled).toBe(false);
+    cardTicks.clear(multi);
   });
 });

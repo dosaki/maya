@@ -490,6 +490,10 @@ body { margin: 0; background: var(--bg); }
 .options--rows .options__btn { flex-direction: row; align-items: baseline; gap: 10px; padding: var(--card-opt-pad-y) var(--card-opt-pad-x); border-color: var(--border); font-size: calc(var(--card-text) - 1.5px); }
 .options--rows .options__btn:hover:not(:disabled) { border-color: var(--awaiting); }
 .options__num { color: var(--awaiting); font-weight: 600; font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
+.options__box { flex: none; color: var(--muted); }
+.options__btn.options__btn--on { border-color: var(--gold-deep); }
+.options__btn--on .options__box { color: var(--gold); }
+.options__submit { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 
 /* While a session asks, the menu stands in for the composer, laid out as the
    CLI's: numbered options, the own row with its box (or, on a multi-select

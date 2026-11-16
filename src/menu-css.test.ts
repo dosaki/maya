@@ -24,3 +24,11 @@ describe("a multi-select row's box", () => {
     expect(block(".menu__row--on")).toMatch(/border-color/);
   });
 });
+
+describe("a multi-select option's box on a card", () => {
+  // `.options--rows .options__btn` sets the border too: one class would lose to it.
+  it("marks a ticked option by a rule as specific as the rows' own border", () => {
+    expect(block(".options__btn.options__btn--on")).toMatch(/border-color/);
+    expect(block(".options__btn--on .options__box")).toMatch(/color: var\(--gold\)/);
+  });
+});
