@@ -66,14 +66,15 @@ fn type_line_for(l: &Local, harness: model::Harness, tty: &str, line: &str) -> R
 /// Types the command `line` (a /command, a !shell line) into the session's
 /// terminal and submits it. Claude Code reads a bare Enter that arrives with
 /// 64 or more bytes of text as part of the text, so there the line goes as
-/// a one-line reply, whose Enter it always reads as a key; every other agent
-/// gets `type_line_for`.
+/// a one-line reply, whose Enter it always reads as a key (made as a reply's
+/// lines are, so a final `\` gets a space); every other agent gets
+/// `type_line_for`.
 fn type_command_for(l: &Local, harness: model::Harness, tty: &str, line: &str) -> Result<(), String> {
     if harness != model::Harness::ClaudeCode {
         return type_line_for(l, harness, tty, line);
     }
     let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
-    l.terminal.type_reply(tty, &[line.to_string()]).map_err(|(_, e)| e)
+    l.terminal.type_reply(tty, &answer::reply_lines(line)).map_err(|(_, e)| e)
 }
 
 /// An OpenCode card with its server: every action on such a card is a call
@@ -2068,8 +2069,10 @@ mod tests {
         set_session_option(&l, "s1", "effort", "high").unwrap();
         rename_session(&l, "s1", "A new name").unwrap();
         cycle_session_mode(&l, "s1").unwrap();
+        // A final `\` would make the Enter a new line: it gets a space, as a reply's does.
+        send_slash_command(&l, "s1", "!echo a \\").unwrap();
         let replies = t.replies.lock().unwrap().clone();
-        assert_eq!(replies, vec![vec![long], vec!["!ls".to_string()], vec!["/compact".to_string()], vec!["/effort high".to_string()], vec!["/rename A new name".to_string()]]);
+        assert_eq!(replies, vec![vec![long], vec!["!ls".to_string()], vec!["/compact".to_string()], vec!["/effort high".to_string()], vec!["/rename A new name".to_string()], vec!["!echo a \\ ".to_string()]]);
         drop(dir);
     }
 
