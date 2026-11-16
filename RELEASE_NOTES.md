@@ -2,7 +2,8 @@
 
 ## New
 
-- A multi-select question can be answered on its card. Tick the options you want, then press Send. Before, the card greyed out the options and said to open the session.
+- A multi-select question can be answered on its card. Tick the options you want, then press Send. Before, the card greyed out the options and said to open the session. The card and the session view show the same ticks, so you can start on one and finish on the other.
+- A message you were typing in a session's window is kept when you close the window, and is back when you open that session again. It goes once you send it.
 
 ## Fixed
 
