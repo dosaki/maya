@@ -8,7 +8,7 @@ import { openModal, openTermViewer, refreshModal, setProgress } from "./modal";
 import { bannerCard, endedText, localNativeCard, openStarted, setNativeOpener } from "./nativeopen";
 import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
-import { cardTicks, nextEnableDelay, tickOnCard } from "./options";
+import { sessionTicks, nextEnableDelay, tickOnCard } from "./options";
 import { makeProgress } from "./progress";
 import { approvalCount, deploymentActionFor, renderDeployments, withoutRun, type RowUi } from "./deployments";
 import { makeReviewsView, OPEN_SETTINGS_GROUP, reviewActionFor, waitingCount } from "./reviews";
@@ -251,7 +251,7 @@ function act(target: Element): void {
   else if (action.kind === "stop") void stop(card, target);
   else if (action.kind === "answer") void answer(card, action.questionIndex, { kind: "option", index: action.optionIndex }, target);
   else if (action.kind === "tick") tickOnCard(card, action.questionIndex, action.optionIndex, target);
-  else if (action.kind === "send-ticks") void answer(card, action.questionIndex, { kind: "options", indexes: cardTicks.ticked(card, action.questionIndex) }, target);
+  else if (action.kind === "send-ticks") void answer(card, action.questionIndex, { kind: "options", indexes: sessionTicks.ticked(card, action.questionIndex) }, target);
   else {
     closeNewSession();
     void openModal(card);
@@ -276,7 +276,7 @@ async function answer(card: Card, questionIndex: number, pick: Pick, button: Ele
   try {
     const outcome = await answerGuard.pick(card, questionIndex, pick, button as HTMLElement);
     if (outcome === "dropped") return;
-    cardTicks.clear(card);
+    sessionTicks.clear(card);
     progress.advance(card);
     paint();
   } catch (e) {

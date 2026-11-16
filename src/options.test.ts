@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cardTicks, makeTicks, renderOptions, tickOnCard } from "./options";
+import { sessionTicks, makeTicks, renderOptions, tickOnCard } from "./options";
 import type { Card } from "./types";
 
 const two: Card = { sessionId: "s", pid: 1, name: "n", cwd: "/x", state: "awaiting", stateSince: 0, snippet: "", hasInbox: true, harness: "claude-code", pr: null, context: null,
@@ -114,10 +114,10 @@ describe("tickOnCard", () => {
     tickOnCard(card, 1, 0, box.querySelector(".options__text")!);
     expect([box.classList.contains("options__btn--on"), box.getAttribute("aria-pressed"), box.querySelector(".options__box")?.textContent]).toEqual([true, "true", "☑"]);
     expect(send.disabled).toBe(false);
-    expect(cardTicks.ticked(card, 1)).toEqual([0]);
+    expect(sessionTicks.ticked(card, 1)).toEqual([0]);
     tickOnCard(card, 1, 0, box);
     expect([box.classList.contains("options__btn--on"), box.getAttribute("aria-pressed"), box.querySelector(".options__box")?.textContent]).toEqual([false, "false", "☐"]);
     expect(send.disabled).toBe(true);
-    expect(cardTicks.ticked(card, 1)).toEqual([]);
+    expect(sessionTicks.ticked(card, 1)).toEqual([]);
   });
 });

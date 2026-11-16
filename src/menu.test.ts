@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MENU_PICK, renderMenu, type MenuPick } from "./menu";
+import { sessionTicks } from "./options";
 import type { Card, Question } from "./types";
 
 const db: Question = {
@@ -26,6 +27,8 @@ function mount(card: Card = asking, opts = on) {
 const key = (target: EventTarget, k: string) => target.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
 
 describe("renderMenu", () => {
+  afterEach(() => sessionTicks.clear(asking));
+
   it("menu shows options, Type something and Chat about this in CLI order", () => {
     const { menu } = mount();
     expect(menu.querySelector(".menu__header")?.textContent).toBe("Database");
@@ -92,6 +95,21 @@ describe("renderMenu", () => {
     expect(picks).toEqual([{ questionIndex: 0, pick: { kind: "options", indexes: [1] } }]);
     rows[2].click();
     expect(picks[1]).toEqual({ questionIndex: 0, pick: { kind: "chat" } });
+  });
+
+  it("shares its ticks with the session's card: it starts with the card's and its own ticks reach the card", () => {
+    const multi = { ...db, multiSelect: true, own: undefined, chatRow: 4 };
+    const card: Card = { ...asking, awaiting: { kind: "question", detail: "Q", questions: [multi] } };
+    sessionTicks.toggle(card, 0, 1);
+    const { menu } = mount(card);
+    const rows = [...menu.querySelectorAll<HTMLElement>("[data-pick=tick]")];
+    expect(rows.map((r) => r.classList.contains("menu__row--on"))).toEqual([false, true]);
+    expect(rows.map((r) => r.getAttribute("aria-selected"))).toEqual(["false", "true"]);
+    expect(menu.querySelector<HTMLButtonElement>("button[data-action=options]")!.disabled).toBe(false);
+    rows[0].click();
+    expect(sessionTicks.ticked(card, 0)).toEqual([0, 1]);
+    rows[1].click();
+    expect(sessionTicks.ticked(card, 0)).toEqual([0]);
   });
 
   it("Enter ticks the selected row of a multi-select question", () => {

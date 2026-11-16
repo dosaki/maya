@@ -8,7 +8,7 @@ import { iconElement } from "./icons";
 import { MENU_PICK, renderMenu, type MenuPick } from "./menu";
 import { keepEqualChildren } from "./morph";
 import { CLAUDE_AGENT, renderChoice, type AgentInfo } from "./newsession";
-import { OPEN_DELAY_MS, nextEnableDelay } from "./options";
+import { OPEN_DELAY_MS, nextEnableDelay, sessionTicks } from "./options";
 import type { Progress } from "./progress";
 import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
 import { COMPACT_AT, STATE_LABEL, compactButton, prButton, prRef, remoteTitle, type Card, type Pick, type Turn, type ViewerTheme } from "./types";
@@ -1100,6 +1100,7 @@ async function answerPick(questionIndex: number, pick: Pick, el: HTMLElement): P
   try {
     const outcome = await answerGuard.pick(card, questionIndex, pick, el);
     if (current !== me || outcome === "dropped") return;
+    sessionTicks.clear(card);
     // Chat about this sets the whole ask aside; any other pick answers this question.
     if (pick.kind === "chat") progress?.finish(card);
     else progress?.advance(card);

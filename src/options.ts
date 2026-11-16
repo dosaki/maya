@@ -107,8 +107,8 @@ export function renderOptions(card: Card, next: number, opts: { descriptions: bo
 }
 
 /**
- * The options ticked on each card's multi-select question, kept across
- * repaints of the board. A session's ticks hold for one question of one
+ * The options ticked on each session's multi-select question, kept across
+ * repaints and while the session view is closed. A session's ticks hold for one question of one
  * ask: once the ask or the question moves on they are gone.
  */
 export function makeTicks() {
@@ -136,8 +136,8 @@ export function makeTicks() {
   };
 }
 
-/** The board's ticks, read by the cards and changed by their clicks. */
-export const cardTicks = makeTicks();
+/** The ticks of each session's multi-select question, shared by its card and its session view. */
+export const sessionTicks = makeTicks();
 
 /**
  * Ticks or unticks option `index` of the card's question, from a click on
@@ -145,7 +145,7 @@ export const cardTicks = makeTicks();
  * board does not repaint while the pointer is moving over it.
  */
 export function tickOnCard(card: Card, question: number, index: number, target: Element): void {
-  const ticked = cardTicks.toggle(card, question, index);
+  const ticked = sessionTicks.toggle(card, question, index);
   const btn = target.closest<HTMLElement>("[data-action=tick]");
   if (btn) {
     const on = ticked.includes(index);

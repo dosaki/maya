@@ -1,3 +1,4 @@
+import { sessionTicks } from "./options";
 import type { Card, Pick } from "./types";
 
 /** The event a menu fires on the row that was chosen; it bubbles. */
@@ -35,7 +36,8 @@ function row(num: number, label: string, description?: string): HTMLElement {
  * act only once the menu has focus (clicked or tabbed into), never from
  * elsewhere in the view; digits typed in the own box are text. On a
  * multi-select question choosing an option ticks it, and Send, where the
- * CLI has its Submit row, fires the ticked ones together.
+ * CLI has its Submit row, fires the ticked ones together; the ticks are the
+ * session's `sessionTicks`, so the card shows them too.
  * `data-key` changes only when the ask, the question or `enabled` does,
  * so a repaint can keep the menu, its focus and a half-typed answer.
  */
@@ -55,13 +57,17 @@ export function renderMenu(card: Card, next: number, opts: { enabled: boolean; k
   rows.setAttribute("role", "listbox");
   if (q.multiSelect) rows.setAttribute("aria-multiselectable", "true");
   if (!opts.enabled) rows.setAttribute("aria-disabled", "true");
+  const startTicked = q.multiSelect ? sessionTicks.ticked(card, next) : [];
   q.options.forEach((o, i) => {
     const r = row(i + 1, o.label, o.description);
     r.dataset.action = "pick";
     r.dataset.row = String(i);
     r.dataset.pick = q.multiSelect ? "tick" : "option";
     r.dataset.index = String(i);
-    if (q.multiSelect) r.setAttribute("aria-selected", "false");
+    if (q.multiSelect) {
+      r.classList.toggle("menu__row--on", startTicked.includes(i));
+      r.setAttribute("aria-selected", String(startTicked.includes(i)));
+    }
     rows.append(r);
   });
   let box: HTMLTextAreaElement | null = null;
@@ -89,7 +95,7 @@ export function renderMenu(card: Card, next: number, opts: { enabled: boolean; k
     submit = el("button", "card__btn menu__send", "Send");
     submit.type = "button";
     submit.dataset.action = "options";
-    submit.disabled = true;
+    submit.disabled = !opts.enabled || startTicked.length === 0;
     line.append(submit);
     rows.append(line);
   }
@@ -129,7 +135,8 @@ export function renderMenu(card: Card, next: number, opts: { enabled: boolean; k
     if (rows.getAttribute("aria-disabled") === "true") return;
     select(r);
     if (r.dataset.pick === "tick") {
-      const on = r.classList.toggle("menu__row--on");
+      const on = sessionTicks.toggle(card, next, Number(r.dataset.index)).includes(Number(r.dataset.index));
+      r.classList.toggle("menu__row--on", on);
       r.setAttribute("aria-selected", String(on));
       if (submit) submit.disabled = !opts.enabled || ticked().length === 0;
     } else if (r.dataset.pick === "option") emit(r, { kind: "option", index: Number(r.dataset.index) });
