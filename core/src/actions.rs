@@ -63,6 +63,19 @@ fn type_line_for(l: &Local, harness: model::Harness, tty: &str, line: &str) -> R
     Ok(())
 }
 
+/// Types the command `line` (a /command, a !shell line) into the session's
+/// terminal and submits it. Claude Code reads a bare Enter that arrives with
+/// 64 or more bytes of text as part of the text, so there the line goes as
+/// a one-line reply, whose Enter it always reads as a key; every other agent
+/// gets `type_line_for`.
+fn type_command_for(l: &Local, harness: model::Harness, tty: &str, line: &str) -> Result<(), String> {
+    if harness != model::Harness::ClaudeCode {
+        return type_line_for(l, harness, tty, line);
+    }
+    let _typing = TYPING.lock().unwrap_or_else(|e| e.into_inner());
+    l.terminal.type_reply(tty, &[line.to_string()]).map_err(|(_, e)| e)
+}
+
 /// An OpenCode card with its server: every action on such a card is a call
 /// to the server rather than keys typed into a terminal.
 struct ServerCard {
@@ -323,7 +336,7 @@ pub fn compact_session(l: &Local, session_id: &str) -> Result<(), String> {
         opencode_free(&sc)?;
         return crate::opencode::compact(&sc.client, &sc.session.id);
     }
-    type_into_session(l, session_id, answer::COMPACT, "/compact", |c| c.compact)
+    type_into_session(l, session_id, answer::COMPACT, Typed::Line, "/compact", |c| c.compact)
 }
 
 /// How long Close waits for Claude to exit before it leaves the shell alone.
@@ -367,7 +380,7 @@ fn close_session_with(l: &Local, session_id: &str, exited: impl Fn(i32) -> bool)
     // Asked before `/exit` too: a terminal that closes with the agent is gone after it.
     let after = l.terminal.reach_after_exit(&tty);
     let closes_itself = l.terminal.closes_with_agent(&tty);
-    type_line_for(l, harness, &tty, answer::EXIT)?;
+    type_command_for(l, harness, &tty, answer::EXIT)?;
     // Typed while the agent still runs, `exit` would land in its prompt as a message.
     if !exited(pid) {
         return Err(format!("{} did not exit; the terminal was left open.", launch::label(harness)));
@@ -409,7 +422,7 @@ pub fn rename_session(l: &Local, session_id: &str, name: &str) -> Result<(), Str
         store.forget_pending_name(session_id);
         (card.harness, session_tty(&store, session_id, card.pid)?)
     };
-    type_line_for(l, harness, &tty, &line)
+    type_command_for(l, harness, &tty, &line)
 }
 
 /// Types `/rename` into the sessions whose pending name is due. Looked up
@@ -454,7 +467,7 @@ pub fn run_due_renames(l: &Local) {
     for (id, harness, tty, line) in due {
         crate::log::line(
             "rename",
-            match type_line_for(l, harness, &tty, &line) {
+            match type_command_for(l, harness, &tty, &line) {
                 Ok(()) => format!("typed {line:?} into {id} on {tty}"),
                 Err(e) => format!("could not rename {id} on {tty}: {e}"),
             },
@@ -507,7 +520,7 @@ pub fn set_session_option(l: &Local, session_id: &str, setting: &str, value: &st
         agents().into_iter().find(|a| a.harness == harness).unwrap_or_else(|| crate::agents::info_for(harness, None))
     };
     let line = answer::slash_command(setting, value, &info.model_ids(), &info.efforts)?;
-    type_into_session(l, session_id, &line, &format!("/{setting}"), allowed)
+    type_into_session(l, session_id, &line, Typed::Line, &format!("/{setting}"), allowed)
 }
 
 /// Types a `/command` or `!` shell line from the composer into the
@@ -528,7 +541,7 @@ pub fn send_slash_command(l: &Local, session_id: &str, text: &str) -> Result<(),
         return crate::opencode::command(&sc.client, &sc.session.id, name, text);
     }
     let shell = line.starts_with('!');
-    type_into_session(l, session_id, &line, if shell { "! shell lines" } else { "/ commands" }, move |c| if shell { c.shell_lines } else { c.slash_lines })
+    type_into_session(l, session_id, &line, Typed::Line, if shell { "! shell lines" } else { "/ commands" }, move |c| if shell { c.shell_lines } else { c.slash_lines })
 }
 
 /// Sends the agent's mode-cycle keys (Shift+Tab) to the session's terminal.
@@ -540,14 +553,22 @@ pub fn cycle_session_mode(l: &Local, session_id: &str) -> Result<(), String> {
     }
     let harness = l.store.lock().unwrap().card_for(session_id, now_ms()).ok_or("Session is no longer running.")?.harness;
     let keys = launch::capabilities(harness).mode_cycle.ok_or_else(|| format!("{} has no mode cycle.", launch::label(harness)))?;
-    type_into_session(l, session_id, keys, "mode cycle", |c| c.mode_cycle.is_some())
+    type_into_session(l, session_id, keys, Typed::Keys, "mode cycle", |c| c.mode_cycle.is_some())
+}
+
+/// What `type_into_session` types: a command line, submitted as
+/// `type_command_for` does, or keys such as Shift+Tab, typed as they are.
+#[derive(Clone, Copy, PartialEq)]
+enum Typed {
+    Line,
+    Keys,
 }
 
 /// Types `text` into a free session's terminal when the agent has `control`
 /// (`allowed` reads that off its capabilities). Claude Code queues what is
 /// typed while it works; the other agents must be idle or completed, since
 /// keys typed into their TUIs elsewhere act as shortcuts.
-fn type_into_session(l: &Local, session_id: &str, text: &str, control: &str, allowed: impl Fn(&launch::Capabilities) -> bool) -> Result<(), String> {
+fn type_into_session(l: &Local, session_id: &str, text: &str, typed: Typed, control: &str, allowed: impl Fn(&launch::Capabilities) -> bool) -> Result<(), String> {
     let (harness, tty) = {
         let mut store = l.store.lock().unwrap();
         let card = store.card_for(session_id, now_ms()).ok_or("Session is no longer running.")?;
@@ -561,7 +582,10 @@ fn type_into_session(l: &Local, session_id: &str, text: &str, control: &str, all
         }
         (card.harness, session_tty(&store, session_id, card.pid)?)
     };
-    type_line_for(l, harness, &tty, text)
+    match typed {
+        Typed::Line => type_command_for(l, harness, &tty, text),
+        Typed::Keys => type_line_for(l, harness, &tty, text),
+    }
 }
 
 /// The session's last turns.
@@ -2025,6 +2049,27 @@ mod tests {
         let refusing = FakeTerminal { fail_type: Some("This session is not in tmux; only replies reach it.".into()), ..Default::default() };
         let l2 = Local { store: &store, terminal: &refusing };
         assert_eq!(cycle_session_mode(&l2, "s1"), Err("This session is not in tmux; only replies reach it.".into()));
+        drop(dir);
+    }
+
+    /// Claude Code reads a bare Enter that arrives with 64 or more bytes of
+    /// text as part of the text, so a long command sat unsent in its box.
+    /// Its lines go as a reply, whose Enter it always reads as a key; the
+    /// mode cycle's keys stay keys, with no Enter that would send the box.
+    #[test]
+    fn claude_command_lines_are_sent_as_replies_and_the_mode_cycle_is_not() {
+        let (dir, store) = store_with_session("s1", 4242);
+        let t = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &t };
+        let long = format!("/rename {}", "x".repeat(70));
+        send_slash_command(&l, "s1", &long).unwrap();
+        send_slash_command(&l, "s1", "!ls").unwrap();
+        compact_session(&l, "s1").unwrap();
+        set_session_option(&l, "s1", "effort", "high").unwrap();
+        rename_session(&l, "s1", "A new name").unwrap();
+        cycle_session_mode(&l, "s1").unwrap();
+        let replies = t.replies.lock().unwrap().clone();
+        assert_eq!(replies, vec![vec![long], vec!["!ls".to_string()], vec!["/compact".to_string()], vec!["/effort high".to_string()], vec!["/rename A new name".to_string()]]);
         drop(dir);
     }
 

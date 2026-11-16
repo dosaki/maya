@@ -91,6 +91,8 @@ pub mod test_support {
         pub native: Mutex<std::collections::HashSet<String>>,
         /// The folder each `open_for_folder` named its session by.
         pub folders: Mutex<Vec<PathBuf>>,
+        /// The lines of each `type_reply` that went in whole, in order.
+        pub replies: Mutex<Vec<Vec<String>>>,
     }
 
     impl Terminal for FakeTerminal {
@@ -128,11 +130,13 @@ pub mod test_support {
             self.calls.lock().unwrap().push(Call::Keys { tty: tty.into(), keys: keys.into() });
             Ok(())
         }
-        /// Records each line as typed, without the keys between them.
+        /// Records each line as typed, without the keys between them, and
+        /// the reply in `replies`.
         fn type_reply(&self, tty: &str, lines: &[String]) -> Result<(), (usize, String)> {
             for (i, line) in lines.iter().enumerate() {
                 self.type_line(tty, line).map_err(|e| (i, e))?;
             }
+            self.replies.lock().unwrap().push(lines.to_vec());
             Ok(())
         }
         fn focus(&self, tty: &str) -> Result<(), String> {
