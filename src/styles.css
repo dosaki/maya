@@ -504,7 +504,8 @@ body { margin: 0; background: var(--bg); }
 .menu__row:hover, .menu__row--sel { border-color: var(--gold); background: color-mix(in srgb, var(--gold) 8%, var(--panel)); }
 .menu__rows[aria-disabled=true] .menu__row { cursor: default; opacity: .6; border-color: var(--border); background: none; }
 .menu__row[data-pick=tick] .menu__label::before { content: "☐ "; color: var(--muted); }
-.menu__row--on .menu__label::before { content: "☑ "; color: var(--gold); }
+.menu__row--on { border-color: var(--gold-deep); }
+.menu__row[data-pick=tick].menu__row--on .menu__label::before { content: "☑ "; color: var(--gold); }
 .menu__num { min-width: 16px; color: var(--gold); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .menu__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .menu__desc { color: var(--muted); font-size: 12px; }
@@ -757,7 +758,7 @@ body { margin: 0; background: var(--bg); }
 .modal--terminal .modal__composer [data-action=send]::after { content: "⏎"; font-size: 14px; }
 .modal--terminal .menu { background: #0a0a0a; border-top-color: #2a2824; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
 .modal--terminal .menu__row { border-color: transparent; }
-.modal--terminal .menu__row--sel { border-color: var(--gold-deep); }
+.modal--terminal .menu__row--sel, .modal--terminal .menu__row--on { border-color: var(--gold-deep); }
 .modal--terminal .menu__own { background: transparent; color: #e8e2d4; font-family: inherit; }
 
 /* Tool calls. Chat look: a compact row that opens the output or diff. */
