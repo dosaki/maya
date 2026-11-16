@@ -1005,6 +1005,45 @@ describe("the open session view while a session asks", () => {
     closeModal();
   });
 
+  it("keeps each session's unsent message when its window closes, and gives it back when it opens again", async () => {
+    const one = { ...base, sessionId: "d1" };
+    await openModal(one);
+    host().querySelector<HTMLTextAreaElement>(".modal__input")!.value = "half a thought";
+    closeModal();
+    await openModal({ ...base, sessionId: "d2" });
+    expect(host().querySelector<HTMLTextAreaElement>(".modal__input")!.value).toBe("");
+    closeModal();
+    await openModal(one);
+    expect(host().querySelector<HTMLTextAreaElement>(".modal__input")!.value).toBe("half a thought");
+    closeModal();
+  });
+
+  it("keeps the unsent message when the window closes while the session asks", async () => {
+    const working = { ...base, sessionId: "d3", state: "working" as const, stateSince: Date.now() - 5000 };
+    await openModal(working);
+    host().querySelector<HTMLTextAreaElement>(".modal__input")!.value = "for later";
+    refreshModal([{ ...asking, sessionId: "d3", stateSince: Date.now() - 5000 }]);
+    await flush();
+    closeModal();
+    await openModal(working);
+    expect(host().querySelector<HTMLTextAreaElement>(".modal__input")!.value).toBe("for later");
+    closeModal();
+  });
+
+  it("forgets the message once it is sent", async () => {
+    const card = { ...base, sessionId: "d4" };
+    await openModal(card);
+    host().querySelector<HTMLTextAreaElement>(".modal__input")!.value = "ship it";
+    host().querySelector<HTMLButtonElement>(".modal__composer button[data-action=send]")!.click();
+    await flush();
+    await flush();
+    expect(calls("send_reply")).toHaveLength(1);
+    closeModal();
+    await openModal(card);
+    expect(host().querySelector<HTMLTextAreaElement>(".modal__input")!.value).toBe("");
+    closeModal();
+  });
+
   it("keeps the menu, its focus and its own box through a repaint of the same question", async () => {
     const card = { ...asking, sessionId: "m2", stateSince: Date.now() - 5000 };
     await openModal(card);
