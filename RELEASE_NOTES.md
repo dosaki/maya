@@ -1,3 +1,10 @@
+# 0.58.1
+
+## Fixed
+
+- A /command, !shell line or rename of 64 characters or more sent from Maya to a Claude Code session is sent at once. Before, it stayed in the session's input with a new line after it.
+- Ticking an answer to a multi-select question in the session view shows a ☑ and a gold border on the row. Before, the row did not change, so ticking looked like it did nothing.
+
 # 0.58.0
 
 ## New
