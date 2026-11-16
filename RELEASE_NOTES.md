@@ -1,4 +1,8 @@
-# 0.58.1
+# 0.59.0
+
+## New
+
+- A multi-select question can be answered on its card. Tick the options you want, then press Send. Before, the card greyed out the options and said to open the session.
 
 ## Fixed
 
