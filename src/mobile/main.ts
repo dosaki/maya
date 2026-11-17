@@ -12,13 +12,13 @@ import { initDebug } from "../debug";
 import { setLocalMachine } from "../machines";
 import { closeModal, openModal, refreshModal, setComposerOptions, setOnDismiss, setProgress } from "../modal";
 import { closeNewSession, openNewSession } from "../newsession";
-import { nextEnableDelay } from "../options";
+import { sessionTicks, nextEnableDelay, tickOnCard } from "../options";
 import { makeProgress } from "../progress";
 import { initRemembered } from "../remembered";
 import { closeResume, openResume } from "../resume";
 import { makeTabs } from "../tabs";
 import { showToast } from "../toast";
-import type { Card, CardState } from "../types";
+import type { Card, CardState, Pick } from "../types";
 import { updates } from "../update";
 import { makeCardHistory } from "./card-history";
 import { chatTabShown } from "./chat-tab";
@@ -134,7 +134,9 @@ function act(target: Element): void {
   else if (action.kind === "compact") void run("Compact", () => invoke("compact_session", { sessionId: card.sessionId }), "Sent /compact to the terminal");
   else if (action.kind === "close") void run("Close", () => invoke("close_session", { sessionId: card.sessionId }), `Closed ${card.name}`);
   else if (action.kind === "stop") void stop(card, target);
-  else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex, target);
+  else if (action.kind === "answer") void answer(card, action.questionIndex, { kind: "option", index: action.optionIndex }, target);
+  else if (action.kind === "tick") tickOnCard(card, action.questionIndex, action.optionIndex, target);
+  else if (action.kind === "send-ticks") void answer(card, action.questionIndex, { kind: "options", indexes: sessionTicks.ticked(card, action.questionIndex) }, target);
   else open(card);
 }
 
@@ -151,10 +153,12 @@ async function stop(card: Card, target: Element): Promise<void> {
   }
 }
 
-async function answer(card: Card, questionIndex: number, optionIndex: number, button: Element): Promise<void> {
+async function answer(card: Card, questionIndex: number, pick: Pick, button: Element): Promise<void> {
+  if (pick.kind === "options" && pick.indexes.length === 0) return;
   try {
-    const outcome = await answerGuard.answer(card, questionIndex, optionIndex, button as HTMLElement);
+    const outcome = await answerGuard.pick(card, questionIndex, pick, button as HTMLElement);
     if (outcome === "dropped") return;
+    sessionTicks.clear(card);
     progress.advance(card);
     paint();
   } catch (e) {

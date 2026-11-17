@@ -47,4 +47,14 @@ describe("cardActionFor", () => {
     document.body.replaceChildren(el);
     expect(cardActionFor(el.querySelector("button")!)).toEqual({ kind: "answer", sessionId: "s1", askId: 77, questionIndex: 1, optionIndex: 2 });
   });
+
+  it("routes a multi-select's boxes to a tick action and its Send to a send-ticks action", () => {
+    const el = document.createElement("article");
+    el.className = "card";
+    el.dataset.sessionId = "s1";
+    el.innerHTML = '<button data-action="tick" data-ask="77" data-q="1" data-opt="2"><span>x</span></button><button data-action="send-ticks" data-ask="77" data-q="1">Send</button>';
+    document.body.replaceChildren(el);
+    expect(cardActionFor(el.querySelector("span")!)).toEqual({ kind: "tick", sessionId: "s1", askId: 77, questionIndex: 1, optionIndex: 2 });
+    expect(cardActionFor(el.querySelector("button[data-action=send-ticks]")!)).toEqual({ kind: "send-ticks", sessionId: "s1", askId: 77, questionIndex: 1 });
+  });
 });

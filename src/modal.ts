@@ -8,7 +8,7 @@ import { iconElement } from "./icons";
 import { MENU_PICK, renderMenu, type MenuPick } from "./menu";
 import { keepEqualChildren } from "./morph";
 import { CLAUDE_AGENT, renderChoice, type AgentInfo } from "./newsession";
-import { OPEN_DELAY_MS, nextEnableDelay } from "./options";
+import { OPEN_DELAY_MS, nextEnableDelay, sessionTicks } from "./options";
 import type { Progress } from "./progress";
 import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
 import { COMPACT_AT, STATE_LABEL, compactButton, prButton, prRef, remoteTitle, type Card, type Pick, type Turn, type ViewerTheme } from "./types";
@@ -1100,6 +1100,7 @@ async function answerPick(questionIndex: number, pick: Pick, el: HTMLElement): P
   try {
     const outcome = await answerGuard.pick(card, questionIndex, pick, el);
     if (current !== me || outcome === "dropped") return;
+    sessionTicks.clear(card);
     // Chat about this sets the whole ask aside; any other pick answers this question.
     if (pick.kind === "chat") progress?.finish(card);
     else progress?.advance(card);
@@ -1185,9 +1186,13 @@ const composerLock = { inFlight: false };
 
 const guardedSend = makeSendGuard(async (text: string) => {
   if (!current) return;
-  const { card } = current.model;
+  const me = current;
+  const { card } = me.model;
   try {
-    const route = await invoke<"typed" | "inbox" | null>("send_reply", { sessionId: card.sessionId, text, attachments: current.model.attachments?.map((a) => a.path) ?? [] });
+    const route = await invoke<"typed" | "inbox" | null>("send_reply", { sessionId: card.sessionId, text, attachments: me.model.attachments?.map((a) => a.path) ?? [] });
+    drafts.delete(card.sessionId);
+    // Closed, or another session opened, while it went: that window's composer is not this one.
+    if (current !== me) return;
     const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>(".modal__input");
     if (ta) ta.value = "";
     current.model.draft = "";
@@ -1195,7 +1200,7 @@ const guardedSend = makeSendGuard(async (text: string) => {
     current.model.status = replyStatus(route ?? null);
     await loadTurns({ force: true, focusInput: true });
   } catch (e) {
-    setStatus(false, String(e));
+    if (current === me) setStatus(false, String(e));
   }
 }, composerLock);
 
@@ -1210,6 +1215,7 @@ const guardedCommand = makeSendGuard(async (text: string) => {
   }
   try {
     await invoke("send_slash_command", { sessionId: card.sessionId, text });
+    drafts.delete(card.sessionId);
     if (current !== me) return;
     const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>(".modal__input");
     if (ta) ta.value = "";
@@ -1243,6 +1249,9 @@ async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): 
   if (changed || opts.force) paint({ focusInput: opts.focusInput ?? false });
 }
 
+/** Each session's unsent message, kept while its window is closed. */
+const drafts = new Map<string, string>();
+
 export async function openModal(card: Card): Promise<void> {
   closeModal();
   resetToolUi();
@@ -1250,7 +1259,7 @@ export async function openModal(card: Card): Promise<void> {
     // Escape in the live terminal is the program's.
     if (e.key === "Escape" && !(e.target instanceof Element && e.target.closest(".modal__live"))) dismissModal();
   };
-  current = { model: { card, turns: [], status: null, draft: "" }, keyHandler, lastRemoteFetchAt: 0 };
+  current = { model: { card, turns: [], status: null, draft: drafts.get(card.sessionId) ?? "" }, keyHandler, lastRemoteFetchAt: 0 };
   attachments.clear();
   document.addEventListener("keydown", keyHandler);
   void watchDrops();
@@ -1336,6 +1345,11 @@ export function closeModal(): void {
   document.removeEventListener("keydown", current.keyHandler);
   watchPanelSize(null);
   current.live?.handle.dispose();
+  // The composer holds the latest words; while the menu stands in for it, the model does.
+  const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>(".modal__input");
+  const draft = ta ? ta.value : current.model.draft;
+  if (draft.trim()) drafts.set(current.model.card.sessionId, draft);
+  else drafts.delete(current.model.card.sessionId);
   current = null;
   attachments.clear();
   document.getElementById("modal-host")?.replaceChildren();

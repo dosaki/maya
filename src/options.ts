@@ -14,7 +14,11 @@ export const OPEN_DELAY_MS = 1000;
  * `label: false` leaves "Question N of M" to the caller, which shows it
  * above the question.
  */
-export function renderOptions(card: Card, next: number, opts: { descriptions: boolean; enabled: boolean; numbered?: boolean; label?: boolean }): HTMLElement | null {
+/**
+ * On a multi-select question the answers are boxes to tick, `ticked` the
+ * ones ticked so far, and Send fires them together.
+ */
+export function renderOptions(card: Card, next: number, opts: { descriptions: boolean; enabled: boolean; numbered?: boolean; label?: boolean; ticked?: number[] }): HTMLElement | null {
   const aw = card.awaiting;
   if (card.state !== "awaiting" || !aw) return null;
   const q = aw.questions[next];
@@ -34,12 +38,17 @@ export function renderOptions(card: Card, next: number, opts: { descriptions: bo
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "options__btn";
-    btn.dataset.action = "answer";
+    const on = q.multiSelect && (opts.ticked ?? []).includes(i);
+    btn.dataset.action = q.multiSelect ? "tick" : "answer";
     btn.dataset.ask = String(card.stateSince);
     btn.dataset.q = String(next);
     btn.dataset.opt = String(i);
     btn.title = o.description;
-    btn.disabled = !opts.enabled || q.multiSelect;
+    btn.disabled = !opts.enabled;
+    if (q.multiSelect) {
+      btn.classList.toggle("options__btn--on", on);
+      btn.setAttribute("aria-pressed", String(on));
+    }
     if (opts.descriptions && o.description) {
       const name = document.createElement("span");
       name.className = "options__name";
@@ -57,16 +66,34 @@ export function renderOptions(card: Card, next: number, opts: { descriptions: bo
       text.textContent = o.label;
       btn.append(num, text);
     } else {
-      btn.textContent = o.label;
+      const text = document.createElement("span");
+      text.className = "options__text";
+      text.textContent = o.label;
+      btn.append(text);
+    }
+    if (q.multiSelect) {
+      const box = document.createElement("span");
+      box.className = "options__box";
+      box.textContent = on ? "☑" : "☐";
+      btn.querySelector(".options__name, .options__text")!.before(box);
     }
     list.append(btn);
   });
   root.append(list);
   if (q.multiSelect) {
-    const note = document.createElement("div");
-    note.className = "options__note";
-    note.textContent = "Multi-select: open the session to tick several";
-    root.append(note);
+    const line = document.createElement("div");
+    line.className = "options__note options__submit";
+    line.textContent = "Tick one or more, then send them.";
+    const send = document.createElement("button");
+    send.type = "button";
+    send.className = "card__btn options__send";
+    send.textContent = "Send";
+    send.dataset.action = "send-ticks";
+    send.dataset.ask = String(card.stateSince);
+    send.dataset.q = String(next);
+    send.disabled = !opts.enabled || (opts.ticked ?? []).length === 0;
+    line.append(send);
+    root.append(line);
   }
   if (aw.questions.length > 1) {
     // Maya cannot see answers given in the terminal mid-ask; its key
@@ -77,6 +104,58 @@ export function renderOptions(card: Card, next: number, opts: { descriptions: bo
     root.append(warn);
   }
   return root;
+}
+
+/**
+ * The options ticked on each session's multi-select question, kept across
+ * repaints and while the session view is closed. A session's ticks hold for one question of one
+ * ask: once the ask or the question moves on they are gone.
+ */
+export function makeTicks() {
+  const bySession = new Map<string, { at: string; on: Set<number> }>();
+  const at = (card: Card, question: number) => `${card.stateSince}:${question}`;
+  const ticked = (card: Card, question: number): number[] => {
+    const t = bySession.get(card.sessionId);
+    return t && t.at === at(card, question) ? [...t.on].sort((a, b) => a - b) : [];
+  };
+  return {
+    ticked,
+    /** Ticks option `index`, or unticks it if ticked; returns what is ticked now. */
+    toggle(card: Card, question: number, index: number): number[] {
+      let t = bySession.get(card.sessionId);
+      if (!t || t.at !== at(card, question)) {
+        t = { at: at(card, question), on: new Set() };
+        bySession.set(card.sessionId, t);
+      }
+      if (!t.on.delete(index)) t.on.add(index);
+      return ticked(card, question);
+    },
+    clear(card: Card): void {
+      bySession.delete(card.sessionId);
+    },
+  };
+}
+
+/** The ticks of each session's multi-select question, shared by its card and its session view. */
+export const sessionTicks = makeTicks();
+
+/**
+ * Ticks or unticks option `index` of the card's question, from a click on
+ * `target` (in its box), and shows it on the box and its Send at once: the
+ * board does not repaint while the pointer is moving over it.
+ */
+export function tickOnCard(card: Card, question: number, index: number, target: Element): void {
+  const ticked = sessionTicks.toggle(card, question, index);
+  const btn = target.closest<HTMLElement>("[data-action=tick]");
+  if (btn) {
+    const on = ticked.includes(index);
+    btn.classList.toggle("options__btn--on", on);
+    btn.setAttribute("aria-pressed", String(on));
+    const box = btn.querySelector(".options__box");
+    if (box) box.textContent = on ? "☑" : "☐";
+  }
+  const send = target.closest(".options")?.querySelector<HTMLButtonElement>("button[data-action=send-ticks]");
+  if (send) send.disabled = ticked.length === 0;
 }
 
 /**

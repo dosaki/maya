@@ -8,7 +8,7 @@ import { openModal, openTermViewer, refreshModal, setProgress } from "./modal";
 import { bannerCard, endedText, localNativeCard, openStarted, setNativeOpener } from "./nativeopen";
 import { closeNewSession, openNewSession } from "./newsession";
 import { closeResume, openResume } from "./resume";
-import { nextEnableDelay } from "./options";
+import { sessionTicks, nextEnableDelay, tickOnCard } from "./options";
 import { makeProgress } from "./progress";
 import { approvalCount, deploymentActionFor, renderDeployments, withoutRun, type RowUi } from "./deployments";
 import { makeReviewsView, OPEN_SETTINGS_GROUP, reviewActionFor, waitingCount } from "./reviews";
@@ -18,7 +18,7 @@ import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
 import { areas, guardStart, makeWorkItemsView, startWorkItem, workItemActionFor } from "./workitems";
-import { prRef, remoteTerminalToast, type Card, type DeploymentState, type ReviewState, type WorkItemsState } from "./types";
+import { prRef, remoteTerminalToast, type Card, type DeploymentState, type Pick, type ReviewState, type WorkItemsState } from "./types";
 import { initMute } from "./mute";
 import { initVoice } from "./voice";
 import { initChat } from "./chat";
@@ -249,7 +249,9 @@ function act(target: Element): void {
   else if (action.kind === "compact") void compact(card.sessionId);
   else if (action.kind === "close") void closeSession(card);
   else if (action.kind === "stop") void stop(card, target);
-  else if (action.kind === "answer") void answer(card, action.questionIndex, action.optionIndex, target);
+  else if (action.kind === "answer") void answer(card, action.questionIndex, { kind: "option", index: action.optionIndex }, target);
+  else if (action.kind === "tick") tickOnCard(card, action.questionIndex, action.optionIndex, target);
+  else if (action.kind === "send-ticks") void answer(card, action.questionIndex, { kind: "options", indexes: sessionTicks.ticked(card, action.questionIndex) }, target);
   else {
     closeNewSession();
     void openModal(card);
@@ -269,10 +271,12 @@ async function stop(card: Card, target: Element): Promise<void> {
   }
 }
 
-async function answer(card: Card, questionIndex: number, optionIndex: number, button: Element): Promise<void> {
+async function answer(card: Card, questionIndex: number, pick: Pick, button: Element): Promise<void> {
+  if (pick.kind === "options" && pick.indexes.length === 0) return;
   try {
-    const outcome = await answerGuard.answer(card, questionIndex, optionIndex, button as HTMLElement);
+    const outcome = await answerGuard.pick(card, questionIndex, pick, button as HTMLElement);
     if (outcome === "dropped") return;
+    sessionTicks.clear(card);
     progress.advance(card);
     paint();
   } catch (e) {

@@ -1,6 +1,6 @@
 import { stopButton } from "./answer";
 import { formatAge, projectName } from "./format";
-import { OPEN_DELAY_MS, renderOptions } from "./options";
+import { sessionTicks, OPEN_DELAY_MS, renderOptions } from "./options";
 import { capabilitiesOf, harnessBadge } from "./harness";
 import { iconButton, iconElement } from "./icons";
 import { isLinux } from "./platform";
@@ -97,7 +97,7 @@ export function renderCard(card: Card, nowMs: number, next = 0): HTMLElement {
     const question = el("div", "card__question", card.awaiting.detail);
     question.dataset.kind = card.awaiting.kind;
     ask.append(question);
-    const options = renderOptions(card, next, { descriptions: false, enabled: nowMs - card.stateSince >= OPEN_DELAY_MS, numbered: true, label: false });
+    const options = renderOptions(card, next, { descriptions: false, enabled: nowMs - card.stateSince >= OPEN_DELAY_MS, numbered: true, label: false, ticked: sessionTicks.ticked(card, next) });
     if (options) ask.append(options);
     root.append(ask);
   }

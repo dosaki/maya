@@ -1,3 +1,15 @@
+# 0.59.0
+
+## New
+
+- A multi-select question can be answered on its card. Tick the options you want, then press Send. Before, the card greyed out the options and said to open the session. The card and the session view show the same ticks, so you can start on one and finish on the other.
+- A message you were typing in a session's window is kept when you close the window, and is back when you open that session again. It goes once you send it.
+
+## Fixed
+
+- A /command, !shell line or rename of 64 characters or more sent from Maya to a Claude Code session is sent at once. So is one that ends in `\`. Before, both stayed in the session's input with a new line after them.
+- Ticking an answer to a multi-select question in the session view shows a ☑ and a gold border on the row. Before, the row did not change, so ticking looked like it did nothing.
+
 # 0.58.0
 
 ## New

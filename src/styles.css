@@ -490,6 +490,10 @@ body { margin: 0; background: var(--bg); }
 .options--rows .options__btn { flex-direction: row; align-items: baseline; gap: 10px; padding: var(--card-opt-pad-y) var(--card-opt-pad-x); border-color: var(--border); font-size: calc(var(--card-text) - 1.5px); }
 .options--rows .options__btn:hover:not(:disabled) { border-color: var(--awaiting); }
 .options__num { color: var(--awaiting); font-weight: 600; font-size: 11px; flex: none; font-variant-numeric: tabular-nums; }
+.options__box { flex: none; color: var(--muted); }
+.options__btn.options__btn--on { border-color: var(--gold-deep); }
+.options__btn--on .options__box { color: var(--gold); }
+.options__submit { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 
 /* While a session asks, the menu stands in for the composer, laid out as the
    CLI's: numbered options, the own row with its box (or, on a multi-select
@@ -504,7 +508,8 @@ body { margin: 0; background: var(--bg); }
 .menu__row:hover, .menu__row--sel { border-color: var(--gold); background: color-mix(in srgb, var(--gold) 8%, var(--panel)); }
 .menu__rows[aria-disabled=true] .menu__row { cursor: default; opacity: .6; border-color: var(--border); background: none; }
 .menu__row[data-pick=tick] .menu__label::before { content: "☐ "; color: var(--muted); }
-.menu__row--on .menu__label::before { content: "☑ "; color: var(--gold); }
+.menu__row--on { border-color: var(--gold-deep); }
+.menu__row[data-pick=tick].menu__row--on .menu__label::before { content: "☑ "; color: var(--gold); }
 .menu__num { min-width: 16px; color: var(--gold); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .menu__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .menu__desc { color: var(--muted); font-size: 12px; }
@@ -757,7 +762,7 @@ body { margin: 0; background: var(--bg); }
 .modal--terminal .modal__composer [data-action=send]::after { content: "⏎"; font-size: 14px; }
 .modal--terminal .menu { background: #0a0a0a; border-top-color: #2a2824; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
 .modal--terminal .menu__row { border-color: transparent; }
-.modal--terminal .menu__row--sel { border-color: var(--gold-deep); }
+.modal--terminal .menu__row--sel, .modal--terminal .menu__row--on { border-color: var(--gold-deep); }
 .modal--terminal .menu__own { background: transparent; color: #e8e2d4; font-family: inherit; }
 
 /* Tool calls. Chat look: a compact row that opens the output or diff. */
