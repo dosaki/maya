@@ -11,14 +11,14 @@ import { closeResume, openResume } from "./resume";
 import { sessionTicks, nextEnableDelay, tickOnCard } from "./options";
 import { makeProgress } from "./progress";
 import { approvalCount, deploymentActionFor, renderDeployments, withoutRun, type RowUi } from "./deployments";
-import { makeReviewsView, OPEN_SETTINGS_GROUP, reviewActionFor, waitingCount } from "./reviews";
+import { makeReviewsView, OPEN_SETTINGS_GROUP, reviewActionFor, waitingCount, type ReviewUi } from "./reviews";
 import { filterCards, makeSessionSearch } from "./search";
 import { initRemembered } from "./remembered";
 import { makeTabs } from "./tabs";
 import { initSettings } from "./settings";
 import { showToast } from "./toast";
 import { areas, guardStart, makeWorkItemsView, startWorkItem, workItemActionFor } from "./workitems";
-import { prRef, remoteTerminalToast, type Card, type DeploymentState, type Pick, type ReviewState, type WorkItemsState } from "./types";
+import { prRef, remoteTerminalToast, type Card, type DeploymentState, type GitProvider, type Pick, type ReviewState, type WorkItemsState } from "./types";
 import { initMute } from "./mute";
 import { initVoice } from "./voice";
 import { initChat } from "./chat";
@@ -44,13 +44,15 @@ const deployUi: RowUi = { busy: new Set(), errors: new Map() };
 let clonesDir: string | null = null;
 let tabs: ReturnType<typeof makeTabs> | null = null;
 let reviewsView: ReturnType<typeof makeReviewsView> | null = null;
+/** Kept out of the render so a repaint cannot forget an Update branch in flight. */
+const reviewUi: ReviewUi = { busy: new Set(), errors: new Map() };
 let workItemsView: ReturnType<typeof makeWorkItemsView> | null = null;
 let search: ReturnType<typeof makeSessionSearch> | null = null;
 
 function paintReviews(): void {
   const host = document.getElementById("reviews");
   if (!host) return;
-  reviewsView ??= makeReviewsView(host);
+  reviewsView ??= makeReviewsView(host, reviewUi);
   reviewsView.update(reviews, Date.now(), { cards, clonesDir });
   tabs?.setCount(waitingCount(reviews.prs));
 }
@@ -133,6 +135,27 @@ async function deploymentAction(target: Element): Promise<void> {
   }
 }
 
+/**
+ * Merges the base branch into a PR's branch. The row shows it working, and
+ * says so in place when the forge refuses — a merge conflict is the usual
+ * reason, and it needs the person, not a toast that scrolls away.
+ */
+async function updateBranch(action: { forge: GitProvider; repo: string; number: number }): Promise<void> {
+  const url = reviews.prs.find((p) => p.forge === action.forge && p.repo === action.repo && p.number === action.number)?.url;
+  if (!url || reviewUi.busy.has(url)) return;
+  reviewUi.busy.add(url);
+  reviewUi.errors.delete(url);
+  paintReviews();
+  try {
+    await invoke("update_pr_branch", { forge: action.forge, repo: action.repo, number: action.number });
+  } catch (e) {
+    reviewUi.errors.set(url, String(e));
+  } finally {
+    reviewUi.busy.delete(url);
+    paintReviews();
+  }
+}
+
 async function reviewAction(target: Element): Promise<void> {
   const action = reviewActionFor(target);
   if (!action) return;
@@ -144,6 +167,8 @@ async function reviewAction(target: Element): Promise<void> {
       await focus(action.pid);
     } else if (action.kind === "open-pr") {
       await invoke("open_review_pr", { forge: action.forge, repo: action.repo, number: action.number });
+    } else if (action.kind === "update-branch") {
+      await updateBranch(action);
     } else {
       const r = await invoke<{ dir: string; nativeTerm: number | null }>("review_pr", { forge: action.forge, repo: action.repo, number: action.number });
       showToast(`Reviewing ${prRef(action)} in ${r.dir.split("/").filter(Boolean).pop() ?? r.dir}`);

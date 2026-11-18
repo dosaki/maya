@@ -22,19 +22,19 @@
    General → Cards picks Roomy or Spacious. The phone keeps its own card
    padding (mobile.css). */
 :root {
-  --card-pad-y: 10px; --card-pad-x: 12px; --card-gap: 8px; --card-name: 14px;
+  --card-pad-y: 10px; --card-pad-x: 12px; --card-gap: 8px; --card-name: 14px; --pr-gap: 14px;
   --card-text: 13px; --card-leading: 1.4; --card-section: 8px;
   --card-opt-pad-y: 5px; --card-opt-pad-x: 8px; --card-icon: 26px;
   --row-pad-y: 8px; --row-pad-x: 12px;
 }
 :root[data-cards="roomy"] {
-  --card-pad-y: 16px; --card-pad-x: 18px; --card-gap: 14px; --card-name: 15px;
+  --card-pad-y: 16px; --card-pad-x: 18px; --card-gap: 14px; --card-name: 15px; --pr-gap: 18px;
   --card-text: 14px; --card-leading: 1.5; --card-section: 12px;
   --card-opt-pad-y: 8px; --card-opt-pad-x: 12px; --card-icon: 28px;
   --row-pad-y: 11px; --row-pad-x: 14px;
 }
 :root[data-cards="spacious"] {
-  --card-pad-y: 20px; --card-pad-x: 22px; --card-gap: 18px; --card-name: 15.5px;
+  --card-pad-y: 20px; --card-pad-x: 22px; --card-gap: 18px; --card-name: 15.5px; --pr-gap: 22px;
   --card-text: 14.5px; --card-leading: 1.55; --card-section: 16px;
   --card-opt-pad-y: 10px; --card-opt-pad-x: 14px; --card-icon: 30px;
   --row-pad-y: 14px; --row-pad-x: 16px;
@@ -632,6 +632,60 @@ body { margin: 0; background: var(--bg); }
 .pr__title { font-size: 13px; }
 .pr__meta { font-size: 12px; color: var(--muted); }
 .pr__machine { align-self: center; font-size: 12px; color: var(--gold); white-space: nowrap; }
+
+/* A Pull Requests row (`.pr--review`): the head, the title and its meta, the
+   Copilot strip, the reviewers, then the buttons under a hairline. The plain
+   `.pr` row above is the Deployments pane's and stays as it was. Every colour
+   is one of the theme's, mixed towards --text so the small text clears 4.5:1
+   on both themes rather than being spelled out twice. */
+/* Roomier than a plain row, because it stacks five bands rather than one
+   line. Both still scale with Settings → General → Cards. */
+.pr--review { flex-direction: column; align-items: stretch; gap: var(--pr-gap); padding: calc(var(--row-pad-y) + 8px) calc(var(--row-pad-x) + 4px); }
+/* The plain row shrink-wraps its text; these sections span the row, so the
+   behind badge and the approved count sit against its right edge. */
+.pr--review .pr__main { gap: var(--pr-gap); width: 100%; align-items: stretch; }
+.pr--review .pr__kind { color: var(--muted); flex: none; }
+.pr__number { font-weight: 600; }
+.pr--review .pr__repo { font-weight: 400; color: var(--muted); }
+.pr__marks { display: flex; align-items: center; gap: 6px; flex: none; }
+.pr--review .pr__title { font-size: var(--card-name); line-height: 1.4; font-weight: 500; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.pr--review .pr__meta { margin-top: calc(var(--pr-gap) * -0.6); }
+/* Chips: an icon and a word, so a state never rests on its colour alone. */
+.pr--review .pr__chip { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 8px; border: 1px solid transparent; border-radius: 5px; font-size: 12px; font-weight: 500; line-height: 1; }
+.pr--review .pr__chip .icon { flex: none; }
+.pr__chip--ok { color: color-mix(in srgb, var(--completed) 60%, var(--text)); background: color-mix(in srgb, var(--completed) 14%, transparent); }
+.pr__chip--warn { color: color-mix(in srgb, var(--awaiting) 60%, var(--text)); background: color-mix(in srgb, var(--awaiting) 14%, transparent); }
+.pr__chip--running { color: color-mix(in srgb, var(--working) 60%, var(--text)); background: color-mix(in srgb, var(--working) 16%, transparent); }
+.pr__chip--bad { color: color-mix(in srgb, var(--danger) 60%, var(--text)); background: color-mix(in srgb, var(--danger) 14%, transparent); }
+.pr__chip--neutral { color: var(--muted); background: color-mix(in srgb, var(--text) 8%, transparent); }
+/* Asked for and not yet given: a dashed outline, so it reads as an outline of a verdict rather than one. */
+.pr__chip--awaiting { color: var(--muted); background: transparent; border: 1px dashed var(--border); }
+.pr--review .pr__chip--draft { color: color-mix(in srgb, var(--awaiting) 65%, var(--text)); background: transparent; border: 1px solid color-mix(in srgb, var(--awaiting) 45%, transparent); }
+.pr__behind { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--awaiting) 55%, transparent); border-radius: 5px; color: color-mix(in srgb, var(--awaiting) 65%, var(--text)); font-size: 12px; font-weight: 500; line-height: 1; white-space: nowrap; }
+.pr__copilot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; border-radius: 5px; background: color-mix(in srgb, var(--text) 4%, transparent); }
+.pr__copilot-label { font-size: 12px; color: var(--muted); }
+.pr__section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.pr__section-title { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.pr__section-note { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pr__reviewers { display: flex; flex-direction: column; gap: 10px; }
+.pr__reviewer { display: flex; align-items: center; gap: 10px; min-height: 24px; }
+.pr__face { flex: none; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--muted); font-size: 10px; font-weight: 600; }
+.pr__who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.pr__more { color: var(--muted); font-size: 12px; padding-left: 32px; }
+.pr__rowerror { color: var(--danger); font-size: 12px; }
+/* The buttons keep `.card__btn`'s own size, so they match every other
+   button in Maya; only the icon beside a label is new. */
+.pr--review > .pr__foot { margin-top: 0; width: 100%; flex: none; align-items: center; gap: 8px; flex-wrap: wrap; padding-top: var(--pr-gap); border-top: 1px solid var(--rule); }
+.pr--review > .pr__foot .card__btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; }
+.pr--review .pr__review { margin-left: auto; }
+.card__btn--warn { color: color-mix(in srgb, var(--awaiting) 65%, var(--text)); border-color: color-mix(in srgb, var(--awaiting) 45%, transparent); }
+.card__btn--warn:hover:not(:disabled) { border-color: var(--awaiting); }
+.card__btn--warn:disabled { opacity: .6; cursor: default; }
+@keyframes maya-spin { to { transform: rotate(1turn); } }
+.icon--spin, .pr__chip--running .icon { animation: maya-spin 1s linear infinite; transform-origin: 50% 50%; }
+@media (prefers-reduced-motion: reduce) {
+  .icon--spin, .pr__chip--running .icon { animation: none; }
+}
 .issues__bar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .issues__search { width: 220px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; }
 .issues__fetched { color: var(--muted); font-size: 12px; }

@@ -5,7 +5,7 @@
 use super::{scrub, encode, get_json, post_graphql, Forge, Http};
 use crate::config::GitProvider;
 use crate::model::PullRequest;
-use crate::reviews::{merge, Reason, ReviewMark, ReviewPr};
+use crate::reviews::{merge, Reason, ReviewMark, ReviewPr, Reviewer, ReviewerState};
 use serde_json::Value;
 
 pub const QUERY: &str = r#"query {
@@ -53,6 +53,21 @@ fn parse_node(m: &Value, reason: Reason, me: &str) -> Option<ReviewPr> {
         .map(|want| (want, others.iter().filter(|(_, _, k)| *k == Some(want)).map(|(u, _, _)| u.clone()).collect::<Vec<_>>()))
         .find(|(_, who)| !who.is_empty())
         .map_or((None, vec![]), |(k, who)| (Some(k), who));
+    // A reviewer GitLab still lists with no verdict has not reviewed yet.
+    let reviewer_list: Vec<Reviewer> = rs
+        .iter()
+        .filter(|(u, bot, _)| !bot && !u.eq_ignore_ascii_case(&author))
+        .map(|(u, _, k)| Reviewer {
+            login: u.clone(),
+            state: match k {
+                Some(ReviewMark::Approved) => ReviewerState::Approved,
+                Some(ReviewMark::ChangesRequested) => ReviewerState::ChangesRequested,
+                Some(ReviewMark::Commented) => ReviewerState::Commented,
+                None => ReviewerState::Awaiting,
+            },
+            team: false,
+        })
+        .collect();
     Some(ReviewPr {
         number: m["iid"].as_str()?.parse().ok()?,
         forge: GitProvider::Gitlab,
@@ -66,6 +81,12 @@ fn parse_node(m: &Value, reason: Reason, me: &str) -> Option<ReviewPr> {
         my_review,
         pr_review,
         pr_reviewers,
+        reviewers: reviewer_list,
+        // GitLab has no Copilot reviewer, and its branch is not compared here.
+        copilot: None,
+        behind_by: None,
+        base_ref: String::new(),
+        head_oid: String::new(),
         ssh_url: m["project"]["sshUrlToRepo"].as_str().map(String::from),
         https_url: m["project"]["httpUrlToRepo"].as_str().map(String::from),
     })

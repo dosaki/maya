@@ -1,3 +1,7 @@
+import branch from "./assets/icons/branch.svg?raw";
+import checkCircle from "./assets/icons/check-circle.svg?raw";
+import clock from "./assets/icons/clock.svg?raw";
+import comment from "./assets/icons/comment.svg?raw";
 import github from "./assets/icons/github.svg?raw";
 import gitlab from "./assets/icons/gitlab.svg?raw";
 import close from "./assets/icons/close.svg?raw";
@@ -5,16 +9,27 @@ import compact from "./assets/icons/compact.svg?raw";
 import remote from "./assets/icons/remote.svg?raw";
 import reply from "./assets/icons/reply.svg?raw";
 import resume from "./assets/icons/resume.svg?raw";
+import pullRequest from "./assets/icons/pull-request.svg?raw";
+import refresh from "./assets/icons/refresh.svg?raw";
 import search from "./assets/icons/search.svg?raw";
+import spinner from "./assets/icons/spinner.svg?raw";
 import stop from "./assets/icons/stop.svg?raw";
+import team from "./assets/icons/team.svg?raw";
 import terminal from "./assets/icons/terminal.svg?raw";
+import tick from "./assets/icons/tick.svg?raw";
+import xCircle from "./assets/icons/x-circle.svg?raw";
 
 /**
  * Card icons, kept as plain SVG files in src/assets/icons so they can be
  * edited in Inkscape. Draw strokes and fills with `currentColor` so the
  * icon takes the button's text colour.
  */
-const FILES = { terminal, reply, compact, resume, remote, close, search, stop, github, gitlab } as const;
+const FILES = {
+  terminal, reply, compact, resume, remote, close, search, stop, github, gitlab,
+  // The Pull Requests rows: the heading, the behind badge and its button,
+  // and one icon per reviewer state so colour is never the only difference.
+  "pull-request": pullRequest, branch, refresh, "check-circle": checkCircle, "x-circle": xCircle, comment, clock, tick, team, spinner,
+} as const;
 
 export type IconName = keyof typeof FILES;
 

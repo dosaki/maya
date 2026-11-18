@@ -88,12 +88,39 @@ export interface ReviewPr {
   prReview: ReviewMark | null;
   /** Who gave `prReview`. */
   prReviewers: string[];
+  /** Everyone asked to review and where each stands, what waits on someone first. */
+  reviewers?: Reviewer[];
+  /** Copilot's review; absent or null when Copilot is not involved. */
+  copilot?: CopilotReview | null;
+  /** Commits the branch is behind its base. Null when unknown: not a claim that it is up to date. */
+  behindBy?: number | null;
+  /** The base branch the behind count is measured against. */
+  baseRef?: string;
   /** The repo's clone addresses from the forge's API; the page does not use them. */
   sshUrl?: string | null;
   httpsUrl?: string | null;
 }
 
 export type ReviewMark = "approved" | "commented" | "changesRequested";
+
+/** Where one reviewer stands; `awaiting` is a review asked for that has not come. */
+export type ReviewerState = ReviewMark | "awaiting";
+
+export interface Reviewer {
+  /** A GitHub handle, or the team's name when `team`. */
+  login: string;
+  state: ReviewerState;
+  /** A team asked to review, not a person. */
+  team: boolean;
+}
+
+/** Copilot's review of a PR. */
+export interface CopilotReview {
+  /** Asked for a review it has not given yet. */
+  running: boolean;
+  /** The comments its latest review left. */
+  comments: number;
+}
 
 export interface ForgeError {
   forge: GitProvider;
