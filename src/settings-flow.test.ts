@@ -127,6 +127,42 @@ describe("settings flow", () => {
     expect(document.documentElement.dataset.cards).toBe("roomy");
   });
 
+  it.each([
+    [false, "off"],
+    [undefined, undefined],
+  ])("hides Maya beside release notes from the saved choice (%s), and applies and saves a new one", async (stored, marker) => {
+    localStorage.clear();
+    document.documentElement.dataset.art = stored === undefined ? "off" : "";
+    const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", ...(stored === undefined ? {} : { releaseNotesArt: stored }) };
+    let saved: { releaseNotesArt?: boolean } | undefined;
+    invoke.mockImplementation((cmd: string, args?: { config?: { releaseNotesArt?: boolean } }) => {
+      if (cmd === "codex_hook_status") return Promise.resolve(false);
+      if (cmd === "hook_status") return Promise.resolve(true);
+      if (cmd === "get_config") return Promise.resolve({ ...config });
+      if (cmd === "set_config") {
+        saved = args?.config;
+        return Promise.resolve({ ...config, ...args?.config });
+      }
+      if (cmd === "voice_selftest") return Promise.resolve(JSON.stringify({ devices: [] }));
+      if (cmd === "list_whisper_models") return Promise.resolve([]);
+      if (cmd === "list_agents") return Promise.resolve({ agents: [], names: true });
+      return Promise.reject(new Error("unexpected " + cmd));
+    });
+
+    await initSettings();
+    await flush();
+    // A config without the key shows her, even over a stale mark from an earlier start.
+    expect(document.documentElement.dataset.art).toBe(marker);
+    const box = document.querySelector<HTMLInputElement>("input[name=releaseNotesArt]")!;
+    expect(box.checked).toBe(stored !== false);
+
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change"));
+    expect(document.documentElement.dataset.art).toBe(box.checked ? undefined : "off");
+    await flush();
+    expect(saved?.releaseNotesArt).toBe(box.checked);
+  });
+
   it("follows the saved message keys, and applies and saves new ones", async () => {
     const config = { completedTimeoutMinutes: 30, projectsDir: null, clonesDir: null, notifyOnAwaiting: true, speakNotifications: true, voiceProvider: "builtin", elevenlabsVoiceId: null, listen: false, microphone: null, agent: "claude-code", agentModel: "", reviewPrompt: "", keys: { send: ["Meta+Enter"], newLine: ["Enter"] } };
     let saved: { keys?: unknown } | undefined;
