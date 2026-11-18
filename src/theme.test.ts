@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import indexHtml from "../index.html?raw";
-import { CARD_SIZES, CARD_SIZE_KEY, COLOR_THEMES, COLOR_THEME_KEY, applyCardSize, applyColorTheme, asCardSize, asColorTheme } from "./theme";
+import { CARD_SIZES, CARD_SIZE_KEY, COLOR_THEMES, COLOR_THEME_KEY, RELEASE_NOTES_ART_KEY, applyCardSize, applyColorTheme, applyReleaseNotesArt, asCardSize, asColorTheme } from "./theme";
 
 beforeEach(() => {
   localStorage.clear();
   delete document.documentElement.dataset.theme;
   delete document.documentElement.dataset.cards;
+  delete document.documentElement.dataset.art;
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -72,6 +73,29 @@ function bootScript(): string {
   return match[1];
 }
 
+describe("Maya beside the release notes", () => {
+  it("marks the page when she is hidden, and remembers it", () => {
+    applyReleaseNotesArt(false);
+    expect(document.documentElement.dataset.art).toBe("off");
+    expect(localStorage.getItem(RELEASE_NOTES_ART_KEY)).toBe("off");
+  });
+
+  it("takes the mark away when she is shown again", () => {
+    applyReleaseNotesArt(false);
+    applyReleaseNotesArt(true);
+    expect(document.documentElement.dataset.art).toBeUndefined();
+    expect(localStorage.getItem(RELEASE_NOTES_ART_KEY)).toBeNull();
+  });
+
+  it("still hides her when the browser will not store anything", () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("storage is off");
+    });
+    expect(() => applyReleaseNotesArt(false)).not.toThrow();
+    expect(document.documentElement.dataset.art).toBe("off");
+  });
+});
+
 describe("the first paint", () => {
   const boot = () => new Function(bootScript())();
 
@@ -113,6 +137,24 @@ describe("the first paint", () => {
     localStorage.setItem("maya.cardSize", "spacious");
     boot();
     expect(document.documentElement.dataset.cards).toBeUndefined();
+  });
+
+  it("starts with Maya hidden beside the release notes when that was saved", () => {
+    localStorage.setItem(RELEASE_NOTES_ART_KEY, "off");
+    boot();
+    expect(document.documentElement.dataset.art).toBe("off");
+  });
+
+  it("shows Maya when nothing, or anything but off, was saved", () => {
+    boot();
+    expect(document.documentElement.dataset.art).toBeUndefined();
+    localStorage.setItem(RELEASE_NOTES_ART_KEY, "on");
+    boot();
+    expect(document.documentElement.dataset.art).toBeUndefined();
+  });
+
+  it("uses the same release notes art key as the theme module", () => {
+    expect(bootScript()).toContain(`"${RELEASE_NOTES_ART_KEY}"`);
   });
 
   it("uses the same card size key as the theme module", () => {
