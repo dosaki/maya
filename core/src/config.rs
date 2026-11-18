@@ -220,6 +220,10 @@ pub struct Config {
     /// nobody had picked one. `migrate` keeps it only as Compact or Roomy.
     #[serde(default, rename = "cardSize", skip_serializing)]
     pub legacy_card_size: Option<CardSize>,
+    /// Show Maya's full-body picture beside the release notes on the
+    /// desktop: in Settings → Release Notes and the What's new window.
+    #[serde(default = "default_true")]
+    pub release_notes_art: bool,
     /// Where new sessions open: a terminal app (Terminal or iTerm2 on macOS,
     /// the system's one elsewhere), or Native, a terminal Maya hosts herself
     /// on every platform.
@@ -773,6 +777,7 @@ impl Default for Config {
             color_theme: ColorTheme::Dark,
             card_size: None,
             legacy_card_size: None,
+            release_notes_art: true,
             new_session_terminal: NewSessionTerminal::Terminal,
             keys: None,
             network: NetworkConfig::default(),
@@ -1653,6 +1658,15 @@ mod tests {
         assert!(older.notify_on_pr_review, "a file written before the field reads as on");
         let text = serde_json::to_string(&Config { notify_on_pr_review: false, ..Config::default() }).unwrap();
         assert!(text.contains(r#""notifyOnPrReview":false"#));
+    }
+
+    #[test]
+    fn release_notes_art_defaults_on_and_reads_from_older_files() {
+        assert!(Config::default().release_notes_art);
+        let older: Config = serde_json::from_str(r#"{"completedTimeoutMinutes": 30}"#).unwrap();
+        assert!(older.release_notes_art, "a file written before the field shows her");
+        let text = serde_json::to_string(&Config { release_notes_art: false, ..Config::default() }).unwrap();
+        assert!(text.contains(r#""releaseNotesArt":false"#));
     }
 
     #[test]
