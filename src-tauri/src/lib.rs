@@ -648,6 +648,22 @@ fn open_review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo:
     open_in_browser(&pr.url)
 }
 
+/// Merges a listed PR's base branch into it, as GitHub's own Update branch
+/// button does, then looks the list up again so the row stops saying the
+/// branch is behind. The merge GitHub starts may not have finished by then;
+/// the next poll settles it either way.
+#[tauri::command(async)]
+fn update_pr_branch(app: AppHandle, state: TauriState<AppState>, forge: Option<GitProvider>, repo: String, number: u64) -> Result<(), String> {
+    let pr = review_pr_for(&state, forge, &repo, number)?;
+    let conns = state.store.lock().unwrap().config.git_connections();
+    let (forges, _) = git::forges(&conns);
+    let f = forges.iter().find(|f| f.site.provider == pr.forge).ok_or("That forge is switched off.")?;
+    maya_core::forge::update_branch(git::http(), f, &pr.repo, pr.number)?;
+    let handle = app.clone();
+    std::thread::spawn(move || poll_reviews(&handle));
+    Ok(())
+}
+
 /// A review just started: its folder, and the Native terminal it runs in
 /// when it runs in one, for the page to open at once.
 #[derive(serde::Serialize)]
@@ -1933,6 +1949,7 @@ pub fn run() {
             open_pr,
             nudge_limits,
             list_review_prs,
+            update_pr_branch,
             list_deployments,
             deployment_approve,
             deployment_reject,
