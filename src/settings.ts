@@ -2442,6 +2442,7 @@ export async function initSettings(): Promise<void> {
   // One save at a time: each reads the config the one before it wrote, so two
   // quick changes (a status ticked twice) cannot land out of order.
   let workItemsSaves: Promise<void> = Promise.resolve();
+  let artSaves: Promise<void> = Promise.resolve();
   const saveWorkItems = (patch: (w: WorkItemsConfig) => void, saved?: () => void) =>
     (workItemsSaves = workItemsSaves.then(() => run(async () => {
       const fresh = await invoke<ConfigJson>("get_config");
@@ -2674,7 +2675,9 @@ export async function initSettings(): Promise<void> {
       // At once, like the theme: she goes as the switch is flipped.
       model.releaseNotesArt = show;
       applyReleaseNotesArt(show);
-      void run(() => saveConfig({ releaseNotesArt: show }));
+      // One save at a time, like Work Items: a quick off then on cannot land
+      // out of order and leave her hidden.
+      artSaves = artSaves.then(() => run(() => saveConfig({ releaseNotesArt: show })));
     },
     onKeys: (k) => {
       // At once, like the theme: the boxes follow the new keys before the save lands.
