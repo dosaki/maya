@@ -1,7 +1,7 @@
 //! GitHub: the PR of a branch (REST) and the PRs waiting on the user (the
 //! GraphQL search `reviews::QUERY`, parsed by `reviews::parse_graphql`).
 
-use super::{encode, get_json, get_json_as, post_graphql, post_json_as, scrub, Forge, Http, Need};
+use super::{encode, get_json, get_json_as, post_graphql, post_json_as, scrub, send_json_as, Forge, Http, Need};
 use crate::deployments::{approvable, needs_approval, parse_runs, Environment, Run, ACTIVE_WINDOW_MS, REPO_PAGES};
 use crate::config::GitProvider;
 use crate::model::PullRequest;
@@ -37,11 +37,81 @@ pub fn current_pr(http: &dyn Http, forge: &Forge, repo: &str, branch: &str) -> R
 /// GitHub's error text may quote what it was sent, so it is scrubbed here,
 /// where the token is known.
 pub fn review_prs(http: &dyn Http, forge: &Forge) -> Result<Vec<ReviewPr>, String> {
-    let (prs, partial) = crate::reviews::parse_graphql(&post_graphql(http, forge, crate::reviews::QUERY)?).map_err(|e| scrub(&e, &forge.token))?;
+    let (mut prs, partial) = crate::reviews::parse_graphql(&post_graphql(http, forge, crate::reviews::QUERY)?).map_err(|e| scrub(&e, &forge.token))?;
     if let Some(e) = partial {
         crate::log::line("app", format!("pull requests: partial results: {}", scrub(&e, &forge.token)));
     }
+    fill_behind(http, forge, &mut prs);
     Ok(prs)
+}
+
+/// How many PRs are compared in one call. GitHub charges a point for the
+/// whole query however many `compare` fields it holds (each is a single
+/// node, not a connection), so this only keeps the query itself a sane size.
+const COMPARE_BATCH: usize = 50;
+
+/// `"text"` as GraphQL writes it. GraphQL takes JSON's string syntax, and
+/// a branch name may hold a quote or a backslash.
+fn graphql_string(s: &str) -> String {
+    serde_json::Value::String(s.to_string()).to_string()
+}
+
+/// One query comparing each PR's head commit with its base branch, aliased
+/// `b<index>` by the PR's place in `prs`.
+fn compare_query(prs: &[(usize, &str, &str, &str)]) -> String {
+    let mut q = String::from("query {\n");
+    for (at, repo, base, head) in prs {
+        let (owner, name) = repo.split_once('/').unwrap_or((repo, ""));
+        q.push_str(&format!(
+            "  b{at}: repository(owner: {}, name: {}) {{ ref(qualifiedName: {}) {{ compare(headRef: {}) {{ behindBy }} }} }}\n",
+            graphql_string(owner),
+            graphql_string(name),
+            graphql_string(&format!("refs/heads/{base}")),
+            graphql_string(head),
+        ));
+    }
+    q.push('}');
+    q
+}
+
+/// Reads `behindBy` back onto the PRs from a reply to `compare_query`.
+/// Anything GitHub could not answer — a repository the token cannot reach,
+/// a head commit it has since lost — stays None, and the row leaves the
+/// badge out rather than claiming the branch is up to date.
+pub fn apply_behind(json: &str, prs: &mut [ReviewPr]) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return };
+    for (at, pr) in prs.iter_mut().enumerate() {
+        if let Some(n) = v["data"][format!("b{at}")]["ref"]["compare"]["behindBy"].as_u64() {
+            pr.behind_by = Some(n);
+        }
+    }
+}
+
+/// Fills in how far each PR's branch is behind its base branch, in one
+/// query per batch rather than one call per PR. A batch that fails is
+/// logged and skipped: the list is worth showing without the badge.
+pub fn fill_behind(http: &dyn Http, forge: &Forge, prs: &mut [ReviewPr]) {
+    let wanted: Vec<usize> = prs
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.forge == GitProvider::Github && !p.base_ref.is_empty() && !p.head_oid.is_empty())
+        .map(|(at, _)| at)
+        .collect();
+    for batch in wanted.chunks(COMPARE_BATCH) {
+        let asked: Vec<(usize, &str, &str, &str)> = batch.iter().map(|&at| (at, prs[at].repo.as_str(), prs[at].base_ref.as_str(), prs[at].head_oid.as_str())).collect();
+        match post_graphql(http, forge, &compare_query(&asked)) {
+            Ok(body) => apply_behind(&body, prs),
+            Err(e) => crate::log::line("app", format!("pull requests: could not compare branches: {}", scrub(&e, &forge.token))),
+        }
+    }
+}
+
+/// Merges the base branch into the PR's branch, as the Update branch
+/// button on GitHub does. GitHub answers 202 and does the merge after;
+/// a conflict comes back as a 422 with its reason.
+pub fn update_branch(http: &dyn Http, forge: &Forge, repo: &str, number: u64) -> Result<(), String> {
+    let url = format!("{}/repos/{repo}/pulls/{number}/update-branch", forge.site.api_base());
+    send_json_as(http, forge, "PUT", &url, &serde_json::json!({}), Need::PrWrite).map(|_| ()).map_err(|e| scrub(&e, &forge.token))
 }
 
 /// The token's user.
@@ -157,6 +227,81 @@ mod tests {
         assert_eq!(review_prs(&http, &forge()).unwrap(), vec![]);
         assert!(http.seen.lock().unwrap()[0].2.as_deref().unwrap().contains("review-requested:@me"));
         assert_eq!(whoami(&http, &forge()).unwrap(), "tiago");
+    }
+
+    fn pr(repo: &str, base: &str, head: &str) -> ReviewPr {
+        ReviewPr {
+            number: 1,
+            forge: GitProvider::Github,
+            repo: repo.into(),
+            title: "t".into(),
+            author: "jane".into(),
+            url: format!("https://github.com/{repo}/pull/1"),
+            is_draft: false,
+            updated_at: String::new(),
+            reasons: vec![],
+            my_review: None,
+            pr_review: None,
+            pr_reviewers: vec![],
+            reviewers: vec![],
+            copilot: None,
+            behind_by: None,
+            base_ref: base.into(),
+            head_oid: head.into(),
+            ssh_url: None,
+            https_url: None,
+        }
+    }
+
+    #[test]
+    fn the_compare_query_names_the_base_branch_and_the_head_commit_of_each_pr() {
+        let q = compare_query(&[(0, "Org/r", "main", "abc123"), (3, "Org/other", "release/2.0", "def456")]);
+        assert!(q.contains(r#"b0: repository(owner: "Org", name: "r") { ref(qualifiedName: "refs/heads/main") { compare(headRef: "abc123") { behindBy } } }"#), "{q}");
+        assert!(q.contains(r#"b3: repository(owner: "Org", name: "other") { ref(qualifiedName: "refs/heads/release/2.0") { compare(headRef: "def456") { behindBy } } }"#), "{q}");
+    }
+
+    #[test]
+    fn a_branch_name_holding_a_quote_cannot_break_out_of_the_query() {
+        let q = compare_query(&[(0, "Org/r", r#"we"ird\"#, "abc")]);
+        assert!(q.contains(r#""refs/heads/we\"ird\\""#), "{q}");
+    }
+
+    #[test]
+    fn the_behind_counts_land_on_the_pr_they_were_asked_for() {
+        let mut prs = [pr("Org/a", "main", "a1"), pr("Org/b", "main", "b1"), pr("Org/c", "main", "c1")];
+        let reply = r#"{"data":{"b0":{"ref":{"compare":{"behindBy":7}}},"b1":{"ref":{"compare":{"behindBy":0}}},"b2":{"ref":null}}}"#;
+        apply_behind(reply, &mut prs);
+        assert_eq!(prs.iter().map(|p| p.behind_by).collect::<Vec<_>>(), vec![Some(7), Some(0), None], "a base branch GitHub could not find stays unknown");
+    }
+
+    #[test]
+    fn a_compare_that_fails_leaves_the_list_worth_showing() {
+        let http = FakeHttp::new(vec![("/graphql", 500, "nope")]);
+        let mut prs = [pr("Org/a", "main", "a1")];
+        fill_behind(&http, &forge(), &mut prs);
+        assert_eq!(prs[0].behind_by, None);
+    }
+
+    #[test]
+    fn only_github_prs_with_a_base_and_a_head_are_compared() {
+        let http = FakeHttp::new(vec![("/graphql", 200, r#"{"data":{}}"#)]);
+        let mut prs = [ReviewPr { forge: GitProvider::Gitlab, ..pr("grp/r", "main", "a1") }, pr("Org/b", "", ""), pr("Org/c", "main", "c1")];
+        fill_behind(&http, &forge(), &mut prs);
+        let seen = http.seen.lock().unwrap();
+        let body = seen[0].2.as_deref().unwrap();
+        assert!(body.contains("b2:"), "the third PR is asked about: {body}");
+        assert!(!body.contains("b0:") && !body.contains("b1:"), "GitLab and a PR with no head are left out: {body}");
+    }
+
+    #[test]
+    fn update_branch_puts_to_the_pr_and_says_what_went_wrong() {
+        let http = FakeHttp::new(vec![("/update-branch", 202, r#"{"message":"Updating pull request branch."}"#)]);
+        assert_eq!(update_branch(&http, &forge(), "Org/r", 12), Ok(()));
+        let seen = http.seen.lock().unwrap();
+        assert_eq!(seen[0].0, "https://api.github.com/repos/Org/r/pulls/12/update-branch");
+        drop(seen);
+        let http = FakeHttp::new(vec![("/update-branch", 422, r#"{"message":"merge conflict between base and head"}"#)]);
+        assert!(update_branch(&http, &forge(), "Org/r", 12).unwrap_err().contains("merge conflict"));
     }
 
     fn now() -> u64 {

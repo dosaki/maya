@@ -1,3 +1,16 @@
+# 0.60.0
+
+## New
+
+- A row on the Pull Requests page says who the pull request is waiting on. Under the title there is a Reviewers list: everyone asked to review, with their GitHub handle and whether they approved, asked for changes, commented, or have not looked yet, and a count of how many of them approved. A team that was asked shows as one row until one of its members reviews. Every state has its own icon as well as its own colour.
+- A row shows what Copilot made of the pull request, on its own line: running while the review it was asked for is outstanding, reviewed when it found nothing, and reviewed with the number of comments when it had something to say. Pull requests Copilot is not on do not show the line.
+- A row whose branch has fallen behind says how far, for example "12 behind main", and offers an Update branch button that merges the base branch in, the same as GitHub's own. The button says when it is working, and says in the row itself when the forge refuses, which is usually a merge conflict.
+- The rows have more room between their parts, and their buttons are the size every other button in Maya is.
+
+## Fixed
+
+- The Pull Requests page no longer loses what the pointer is on, every ten seconds, when it refreshes the "updated 2h ago" labels.
+
 # 0.59.0
 
 ## New

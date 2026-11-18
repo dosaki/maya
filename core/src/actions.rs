@@ -1683,7 +1683,7 @@ mod tests {
         let store = with_agents(store, vec![agents::claude(), crate::agents::info_for(Harness::Codex, None)]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let pr = crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None };
+        let pr = crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], reviewers: vec![], copilot: None, behind_by: None, base_ref: String::new(), head_oid: String::new(), ssh_url: None, https_url: None };
         assert!(!dir.path().join("clones").exists());
         let folder = start_review(&l, &pr).unwrap();
         assert!(Path::new(&folder).ends_with(Path::new("clones").join("bedrock-451")), "{folder}");
@@ -1708,7 +1708,7 @@ mod tests {
 
     /// The PR `Org/bedrock#451`, as the review tests start it.
     fn bedrock_pr() -> crate::reviews::ReviewPr {
-        crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None }
+        crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], reviewers: vec![], copilot: None, behind_by: None, base_ref: String::new(), head_oid: String::new(), ssh_url: None, https_url: None }
     }
 
     /// A git repository at `dir` whose origin is `origin`.
@@ -1903,7 +1903,7 @@ mod tests {
         }
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let pr = crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None };
+        let pr = crate::reviews::ReviewPr { number: 451, forge: Default::default(), repo: "Org/bedrock".into(), title: "docs".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], reviewers: vec![], copilot: None, behind_by: None, base_ref: String::new(), head_oid: String::new(), ssh_url: None, https_url: None };
         start_review(&l, &pr).unwrap();
         let calls = fake.calls.lock().unwrap();
         let Call::Open { command, .. } = &calls[0] else { panic!("{calls:?}") };
@@ -1915,7 +1915,7 @@ mod tests {
         let (_dir, store) = store_with_projects(&["elsewhere"]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let pr = crate::reviews::ReviewPr { number: 3, forge: crate::config::GitProvider::Gitlab, repo: "grp/r".into(), title: "t".into(), author: "a".into(), url: "u".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None };
+        let pr = crate::reviews::ReviewPr { number: 3, forge: crate::config::GitProvider::Gitlab, repo: "grp/r".into(), title: "t".into(), author: "a".into(), url: "u".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], reviewers: vec![], copilot: None, behind_by: None, base_ref: String::new(), head_oid: String::new(), ssh_url: None, https_url: None };
         assert_eq!(start_review(&l, &pr).unwrap_err(), "Turn on GitLab in Settings → Git first.");
     }
 
@@ -1926,7 +1926,7 @@ mod tests {
         let store = with_agents(store, vec![agents::claude()]);
         let fake = FakeTerminal::default();
         let l = Local { store: &store, terminal: &fake };
-        let pr = crate::reviews::ReviewPr { number: 1, forge: Default::default(), repo: "o/r".into(), title: String::new(), author: String::new(), url: "https://github.com/o/r/pull/1".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None };
+        let pr = crate::reviews::ReviewPr { number: 1, forge: Default::default(), repo: "o/r".into(), title: String::new(), author: String::new(), url: "https://github.com/o/r/pull/1".into(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], reviewers: vec![], copilot: None, behind_by: None, base_ref: String::new(), head_oid: String::new(), ssh_url: None, https_url: None };
         assert_eq!(start_review(&l, &pr).unwrap_err(), "Grok Build is not installed on this machine.");
         assert!(fake.calls.lock().unwrap().is_empty());
     }

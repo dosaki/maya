@@ -23,6 +23,58 @@ pub enum ReviewMark {
     ChangesRequested,
 }
 
+/// Where one reviewer stands, for the row's reviewer list. Unlike
+/// `ReviewMark` this also covers a review that was asked for and has not
+/// come yet, which is most of what the list is for.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ReviewerState {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Awaiting,
+}
+
+impl ReviewerState {
+    /// The order the list shows them in: what waits on someone first, what
+    /// is settled last.
+    fn rank(self) -> u8 {
+        match self {
+            ReviewerState::ChangesRequested => 0,
+            ReviewerState::Awaiting => 1,
+            ReviewerState::Commented => 2,
+            ReviewerState::Approved => 3,
+        }
+    }
+}
+
+/// One reviewer of a PR: a person, or a team the PR was sent to.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Reviewer {
+    /// A GitHub handle, or the team's name when `team`.
+    pub login: String,
+    pub state: ReviewerState,
+    /// A team asked to review, not a person. It can only ever be awaiting:
+    /// GitHub drops the team's request once one of its members reviews.
+    pub team: bool,
+}
+
+/// Copilot's review of a PR, when it is involved at all.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CopilotReview {
+    /// Asked for a review it has not given yet.
+    pub running: bool,
+    /// The comments its latest review left; 0 when it found nothing.
+    pub comments: u64,
+}
+
+/// GitHub's GraphQL login for the Copilot reviewer. The REST API spells the
+/// same bot `copilot-pull-request-reviewer[bot]`; GraphQL leaves the suffix
+/// off, so matching on the REST spelling would never fire.
+pub const COPILOT_LOGIN: &str = "copilot-pull-request-reviewer";
+
 /// A pull request waiting on the user.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +98,24 @@ pub struct ReviewPr {
     pub pr_review: Option<ReviewMark>,
     /// Who gave `pr_review`.
     pub pr_reviewers: Vec<String>,
+    /// Everyone asked to review and where each stands, what waits on
+    /// someone first. Copilot and the other bots are not in it: Copilot has
+    /// its own line, and nothing waits on the rest.
+    #[serde(default)]
+    pub reviewers: Vec<Reviewer>,
+    /// Copilot's review; None when Copilot is not involved in the PR.
+    #[serde(default)]
+    pub copilot: Option<CopilotReview>,
+    /// How many commits the branch is behind the base branch. None when the
+    /// forge was not asked, or could not say: the row then leaves the badge
+    /// and the Update branch button out rather than guessing it is up to date.
+    #[serde(default)]
+    pub behind_by: Option<u64>,
+    /// The base branch, and the head commit to compare against it.
+    #[serde(default)]
+    pub base_ref: String,
+    #[serde(default)]
+    pub head_oid: String,
     /// The repo's SSH and HTTPS clone addresses, as the forge's API gave them.
     #[serde(default)]
     pub ssh_url: Option<String>,
@@ -75,11 +145,12 @@ pub const QUERY: &str = r#"query {
   assigned: search(query: "is:pr is:open assignee:@me sort:updated-desc", type: ISSUE, first: 50) { nodes { ...pr } }
 }
 fragment pr on PullRequest {
-  number title url isDraft updatedAt
+  number title url isDraft updatedAt baseRefName headRefOid
   repository { nameWithOwner sshUrl url }
   author { login }
   latestOpinionatedReviews(first: 100) { nodes { state author { __typename login } } }
-  latestReviews(first: 100) { nodes { state author { __typename login } } }
+  latestReviews(first: 100) { nodes { state author { __typename login } comments { totalCount } } }
+  reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Bot { login } ... on Team { name } } } }
 }"#;
 
 /// The state of `login`'s review in a `{nodes: [{state, author}]}` list.
@@ -128,6 +199,84 @@ fn pr_review(p: &serde_json::Value, login: &str) -> (Option<ReviewMark>, Vec<Str
     (None, vec![])
 }
 
+/// Whether an actor is a bot: GitHub says so on the node, and an app's
+/// login ends in `[bot]` even where it does not.
+fn is_bot(actor: &serde_json::Value) -> bool {
+    actor["__typename"] == "Bot" || actor["login"].as_str().is_some_and(|l| l.ends_with("[bot]"))
+}
+
+/// A review's state as a reviewer's standing. A review still being written
+/// (`PENDING`) or taken back (`DISMISSED`) says nothing about where they stand.
+fn reviewer_state(state: &str) -> Option<ReviewerState> {
+    match state {
+        "APPROVED" => Some(ReviewerState::Approved),
+        "CHANGES_REQUESTED" => Some(ReviewerState::ChangesRequested),
+        "COMMENTED" => Some(ReviewerState::Commented),
+        _ => None,
+    }
+}
+
+/// Everyone asked to review the PR and where each stands: the reviews
+/// GitHub kept as each reviewer's latest, with the people and teams it is
+/// still waiting on. A reviewer asked again after reviewing is awaiting,
+/// not what they said last round — the same reading `parse_graphql` gives
+/// the user's own re-requested review.
+fn reviewers(p: &serde_json::Value) -> Vec<Reviewer> {
+    let author = p["author"]["login"].as_str().unwrap_or("");
+    let mut out: Vec<Reviewer> = Vec::new();
+    let mut add = |login: &str, state: ReviewerState, team: bool| {
+        if login.is_empty() || (!team && login.eq_ignore_ascii_case(author)) {
+            return;
+        }
+        match out.iter_mut().find(|r| r.team == team && r.login.eq_ignore_ascii_case(login)) {
+            // A pending request outranks the review it follows.
+            Some(seen) => {
+                if state == ReviewerState::Awaiting {
+                    seen.state = state;
+                }
+            }
+            None => out.push(Reviewer { login: login.to_string(), state, team }),
+        }
+    };
+    for r in p["latestReviews"]["nodes"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let actor = &r["author"];
+        if is_bot(actor) {
+            continue;
+        }
+        if let (Some(login), Some(state)) = (actor["login"].as_str(), r["state"].as_str().and_then(reviewer_state)) {
+            add(login, state, false);
+        }
+    }
+    for r in p["reviewRequests"]["nodes"].as_array().map(Vec::as_slice).unwrap_or_default() {
+        let who = &r["requestedReviewer"];
+        match who["__typename"].as_str() {
+            // Copilot has its own line, and nothing waits on the other bots.
+            Some("Bot") => {}
+            Some("Team") => add(who["name"].as_str().unwrap_or(""), ReviewerState::Awaiting, true),
+            _ => add(who["login"].as_str().unwrap_or(""), ReviewerState::Awaiting, false),
+        }
+    }
+    out.sort_by(|a, b| a.state.rank().cmp(&b.state.rank()).then_with(|| a.login.to_lowercase().cmp(&b.login.to_lowercase())));
+    out
+}
+
+/// Where Copilot's review stands, or None when it is not involved at all:
+/// running while a request of it is outstanding, else what its latest
+/// review had to say.
+fn copilot(p: &serde_json::Value) -> Option<CopilotReview> {
+    let is_copilot = |actor: &serde_json::Value| actor["login"].as_str().is_some_and(|l| l.eq_ignore_ascii_case(COPILOT_LOGIN));
+    let requested = p["reviewRequests"]["nodes"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|r| is_copilot(&r["requestedReviewer"])));
+    let review = p["latestReviews"]["nodes"].as_array().and_then(|a| a.iter().find(|r| is_copilot(&r["author"])));
+    match (requested, review) {
+        (false, None) => None,
+        // Asked again after reviewing: this round's answer is not in yet.
+        (true, _) => Some(CopilotReview { running: true, comments: 0 }),
+        (false, Some(r)) => Some(CopilotReview { running: false, comments: r["comments"]["totalCount"].as_u64().unwrap_or(0) }),
+    }
+}
+
 fn parse_node(p: &serde_json::Value, reason: Reason, login: &str) -> Option<ReviewPr> {
     let (pr_review, pr_reviewers) = pr_review(p, login);
     Some(ReviewPr {
@@ -143,6 +292,11 @@ fn parse_node(p: &serde_json::Value, reason: Reason, login: &str) -> Option<Revi
         my_review: my_review(p, login),
         pr_review,
         pr_reviewers,
+        reviewers: reviewers(p),
+        copilot: copilot(p),
+        behind_by: None,
+        base_ref: p["baseRefName"].as_str().unwrap_or("").to_string(),
+        head_oid: p["headRefOid"].as_str().unwrap_or("").to_string(),
         ssh_url: p["repository"]["sshUrl"].as_str().map(String::from),
         // `url` is the repo's web address; the clone address adds `.git`.
         https_url: p["repository"]["url"].as_str().map(|u| format!("{}.git", u.trim_end_matches('/'))),
@@ -493,6 +647,128 @@ mod tests {
     #[test]
     fn the_query_asks_for_the_clone_addresses() {
         assert!(QUERY.contains("repository { nameWithOwner sshUrl url }"));
+    }
+
+    #[test]
+    fn the_query_asks_for_what_the_reviewer_list_and_the_behind_badge_need() {
+        for field in ["baseRefName", "headRefOid", "reviewRequests(first: 20)", "comments { totalCount }"] {
+            assert!(QUERY.contains(field), "the query is missing {field}");
+        }
+    }
+
+    /// A review as `latestReviews` gives it, with the comments it left.
+    fn latest(login: &str, typename: &str, state: &str, comments: u64) -> String {
+        format!(r#"{{"state":"{state}","author":{{"__typename":"{typename}","login":"{login}"}},"comments":{{"totalCount":{comments}}}}}"#)
+    }
+
+    fn asked(typename: &str, key: &str, who: &str) -> String {
+        format!(r#"{{"requestedReviewer":{{"__typename":"{typename}","{key}":"{who}"}}}}"#)
+    }
+
+    /// A PR by `jane` with these latest reviews and outstanding requests.
+    fn pr_with(reviews: &[String], requests: &[String]) -> serde_json::Value {
+        serde_json::from_str(&format!(
+            r#"{{"number":1,"title":"t","url":"https://github.com/o/r/pull/1","isDraft":false,"updatedAt":"","repository":{{"nameWithOwner":"o/r"}},"author":{{"login":"jane"}},"latestOpinionatedReviews":{{"nodes":[]}},"latestReviews":{{"nodes":[{}]}},"reviewRequests":{{"nodes":[{}]}}}}"#,
+            reviews.join(","),
+            requests.join(",")
+        ))
+        .unwrap()
+    }
+
+    /// The reviewer list as `(login, state, team)`, in the order it is shown.
+    fn listed(p: &serde_json::Value) -> Vec<(String, ReviewerState, bool)> {
+        reviewers(p).into_iter().map(|r| (r.login, r.state, r.team)).collect()
+    }
+
+    #[test]
+    fn a_requested_reviewer_who_has_not_reviewed_is_awaiting() {
+        let p = pr_with(&[], &[asked("User", "login", "bob")]);
+        assert_eq!(listed(&p), vec![("bob".into(), ReviewerState::Awaiting, false)]);
+    }
+
+    #[test]
+    fn each_reviewers_latest_review_sets_where_they_stand() {
+        let p = pr_with(&[latest("bob", "User", "APPROVED", 0), latest("sue", "User", "CHANGES_REQUESTED", 2), latest("ann", "User", "COMMENTED", 1)], &[]);
+        assert_eq!(
+            listed(&p),
+            vec![
+                ("sue".into(), ReviewerState::ChangesRequested, false),
+                ("ann".into(), ReviewerState::Commented, false),
+                ("bob".into(), ReviewerState::Approved, false),
+            ],
+            "what waits on someone comes first, settled verdicts last"
+        );
+    }
+
+    #[test]
+    fn a_review_still_being_written_or_taken_back_says_nothing() {
+        for state in ["PENDING", "DISMISSED"] {
+            let p = pr_with(&[latest("bob", "User", state, 0)], &[]);
+            assert_eq!(listed(&p), vec![], "a {state} review is not where bob stands");
+        }
+    }
+
+    #[test]
+    fn a_reviewer_asked_again_after_reviewing_is_awaiting_not_their_old_verdict() {
+        let p = pr_with(&[latest("bob", "User", "APPROVED", 0)], &[asked("User", "login", "bob")]);
+        assert_eq!(listed(&p), vec![("bob".into(), ReviewerState::Awaiting, false)]);
+    }
+
+    #[test]
+    fn the_author_and_the_bots_stay_out_of_the_reviewer_list() {
+        let p = pr_with(
+            &[latest("jane", "User", "COMMENTED", 0), latest(COPILOT_LOGIN, "Bot", "COMMENTED", 3), latest("dependabot[bot]", "User", "APPROVED", 0)],
+            &[asked("Bot", "login", COPILOT_LOGIN)],
+        );
+        assert_eq!(listed(&p), vec![], "the author writes it; Copilot has its own line; nothing waits on the rest");
+    }
+
+    #[test]
+    fn a_team_asked_to_review_is_listed_as_awaiting() {
+        let p = pr_with(&[latest("bob", "User", "APPROVED", 0)], &[asked("Team", "name", "QA")]);
+        assert_eq!(listed(&p), vec![("QA".into(), ReviewerState::Awaiting, true), ("bob".into(), ReviewerState::Approved, false)]);
+    }
+
+    #[test]
+    fn a_person_and_a_team_of_the_same_name_are_two_rows() {
+        let p = pr_with(&[], &[asked("Team", "name", "qa"), asked("User", "login", "qa")]);
+        assert_eq!(listed(&p), vec![("qa".into(), ReviewerState::Awaiting, true), ("qa".into(), ReviewerState::Awaiting, false)]);
+    }
+
+    #[test]
+    fn copilot_is_running_while_the_review_it_was_asked_for_is_outstanding() {
+        let p = pr_with(&[], &[asked("Bot", "login", COPILOT_LOGIN)]);
+        assert_eq!(copilot(&p), Some(CopilotReview { running: true, comments: 0 }));
+    }
+
+    #[test]
+    fn copilot_that_reviewed_and_found_nothing_is_reviewed_with_no_comments() {
+        let p = pr_with(&[latest(COPILOT_LOGIN, "Bot", "COMMENTED", 0)], &[]);
+        assert_eq!(copilot(&p), Some(CopilotReview { running: false, comments: 0 }));
+    }
+
+    #[test]
+    fn copilot_that_left_comments_reports_how_many() {
+        let p = pr_with(&[latest(COPILOT_LOGIN, "Bot", "COMMENTED", 9)], &[]);
+        assert_eq!(copilot(&p), Some(CopilotReview { running: false, comments: 9 }));
+    }
+
+    #[test]
+    fn copilot_asked_again_after_reviewing_is_running_again() {
+        let p = pr_with(&[latest(COPILOT_LOGIN, "Bot", "COMMENTED", 9)], &[asked("Bot", "login", COPILOT_LOGIN)]);
+        assert_eq!(copilot(&p), Some(CopilotReview { running: true, comments: 0 }), "the comments are last round's");
+    }
+
+    #[test]
+    fn a_pr_copilot_is_not_on_has_no_copilot_line() {
+        let p = pr_with(&[latest("bob", "User", "APPROVED", 0)], &[asked("User", "login", "sue")]);
+        assert_eq!(copilot(&p), None);
+    }
+
+    #[test]
+    fn the_branch_is_not_compared_until_the_forge_says_so() {
+        let p = parse_node(&pr_with(&[], &[]), Reason::Review, "me").unwrap();
+        assert_eq!(p.behind_by, None, "None leaves the badge out; it does not mean up to date");
     }
 
     fn review(login: &str, state: &str) -> String {
@@ -959,7 +1235,7 @@ mod tests {
     }
 
     fn pr() -> ReviewPr {
-        ReviewPr { number: 451, forge: GitProvider::Github, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None }
+        ReviewPr { number: 451, forge: GitProvider::Github, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None, pr_review: None, pr_reviewers: vec![], reviewers: vec![], copilot: None, behind_by: None, base_ref: String::new(), head_oid: String::new(), ssh_url: None, https_url: None }
     }
 
     #[test]

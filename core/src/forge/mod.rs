@@ -336,6 +336,7 @@ pub(crate) enum Need {
     Deployments,
     Issues,
     IssueWrite,
+    PrWrite,
 }
 
 fn scopes(p: GitProvider, need: Need) -> &'static str {
@@ -344,6 +345,7 @@ fn scopes(p: GitProvider, need: Need) -> &'static str {
         (GitProvider::Github, Need::Deployments) => "repo scope (fine-grained: Actions read, Deployments read and write, Metadata read)",
         (GitProvider::Github, Need::Issues) => "repo scope (fine-grained: Issues read)",
         (GitProvider::Github, Need::IssueWrite) => "repo scope (fine-grained: Issues read and write)",
+        (GitProvider::Github, Need::PrWrite) => "repo scope (fine-grained: Contents read and write, Pull requests read and write)",
         (GitProvider::Gitlab, Need::IssueWrite) => "api scope",
         (GitProvider::Gitlab, _) => "read_api scope",
     }
@@ -465,6 +467,14 @@ pub fn review_prs(http: &dyn Http, forge: &Forge) -> Result<Vec<crate::reviews::
     match forge.site.provider {
         GitProvider::Github => github::review_prs(http, forge),
         GitProvider::Gitlab => gitlab::review_prs(http, forge),
+    }
+}
+
+/// Merges the PR's base branch into its own branch. Only GitHub offers it.
+pub fn update_branch(http: &dyn Http, forge: &Forge, repo: &str, number: u64) -> Result<(), String> {
+    match forge.site.provider {
+        GitProvider::Github => github::update_branch(http, forge, repo, number),
+        GitProvider::Gitlab => Err("Updating the branch is a GitHub feature.".into()),
     }
 }
 
@@ -596,7 +606,7 @@ mod tests {
     }
 
     fn review_pr(repo: &str, ssh: Option<&str>, https: Option<&str>) -> ReviewPr {
-        ReviewPr { number: 1, forge: GitProvider::Github, repo: repo.into(), title: String::new(), author: String::new(), url: String::new(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: ssh.map(Into::into), https_url: https.map(Into::into) }
+        ReviewPr { number: 1, forge: GitProvider::Github, repo: repo.into(), title: String::new(), author: String::new(), url: String::new(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], reviewers: vec![], copilot: None, behind_by: None, base_ref: String::new(), head_oid: String::new(), ssh_url: ssh.map(Into::into), https_url: https.map(Into::into) }
     }
 
     #[test]

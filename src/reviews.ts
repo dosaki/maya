@@ -1,12 +1,24 @@
 import { formatAge } from "./format";
-import { iconButton, iconElement } from "./icons";
-import { STATE_LABEL, prRef, type Card, type GitProvider, type ReviewMark, type ReviewPr, type ReviewState } from "./types";
+import { iconButton, iconElement, type IconName } from "./icons";
+import { morph } from "./morph";
+import {
+  STATE_LABEL,
+  prRef,
+  type Card,
+  type CopilotReview,
+  type GitProvider,
+  type ReviewMark,
+  type Reviewer,
+  type ReviewerState,
+  type ReviewPr,
+  type ReviewState,
+} from "./types";
 
 /** Settings listens for this on `document`; `detail` names the group to open. */
 export const OPEN_SETTINGS_GROUP = "maya:settings-group";
 
 export type ReviewAction =
-  | { kind: "open-pr" | "review"; forge: GitProvider; repo: string; number: number }
+  | { kind: "open-pr" | "review" | "update-branch"; forge: GitProvider; repo: string; number: number }
   | { kind: "terminal"; forge: GitProvider; repo: string; number: number; pid: number }
   | { kind: "git-settings" };
 
@@ -118,12 +130,118 @@ export function waitingCount(prs: ReviewPr[]): number {
   return prs.filter((p) => waitsOnUser(p, "review") || waitsOnUser(p, "assigned")).length;
 }
 
-export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | null = null, tab: ReviewTab = "review"): HTMLElement {
-  const root = el("article", "pr");
+/** What the page remembers about a row between repaints: an Update branch in flight, and why the last one failed. */
+export interface ReviewUi {
+  /** The URLs of PRs whose branch is being updated. */
+  busy: Set<string>;
+  /** The error from the last Update branch, by PR URL. */
+  errors: Map<string, string>;
+}
+
+export const NO_UI: ReviewUi = { busy: new Set(), errors: new Map() };
+
+/** How many reviewers a row lists before it sums the rest up as "+N more". */
+const REVIEWERS_SHOWN = 3;
+
+/** The icon, wording and colour of each reviewer state. Every state has its
+ *  own icon, so the colour is never the only thing telling them apart. */
+const REVIEWER_CHIP: Record<ReviewerState, { icon: IconName; label: string; modifier: string }> = {
+  approved: { icon: "check-circle", label: "Approved", modifier: "ok" },
+  changesRequested: { icon: "x-circle", label: "Changes requested", modifier: "bad" },
+  commented: { icon: "comment", label: "Commented", modifier: "neutral" },
+  awaiting: { icon: "clock", label: "Awaiting", modifier: "awaiting" },
+};
+
+/** A status chip: its icon, then its wording. */
+function chip(className: string, icon: IconName, label: string): HTMLElement {
+  const node = el("span", `pr__chip ${className}`);
+  node.append(iconElement(icon, 12), el("span", "pr__chip-text", label));
+  return node;
+}
+
+/** The initials shown where a reviewer's avatar would go: one letter, or two for a `first-last` handle. */
+export function initials(login: string): string {
+  const parts = login.split(/[-_.]+/).filter(Boolean);
+  const letters = parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : (parts[0] ?? login).slice(0, 2);
+  return letters.toUpperCase();
+}
+
+/** "Reviewed", or "Reviewed · 3 comments": what Copilot's chip says. */
+export function copilotLabel(copilot: CopilotReview): string {
+  if (copilot.running) return "Running";
+  if (copilot.comments === 0) return "Reviewed";
+  return `Reviewed · ${copilot.comments} comment${copilot.comments === 1 ? "" : "s"}`;
+}
+
+/** The Copilot review strip, or null when Copilot is not involved in the PR. */
+function copilotStrip(pr: ReviewPr): HTMLElement | null {
+  const copilot = pr.copilot;
+  if (!copilot) return null;
+  const strip = el("div", "pr__copilot");
+  strip.append(el("span", "pr__copilot-label", "Copilot review"));
+  const label = copilotLabel(copilot);
+  if (copilot.running) strip.append(chip("pr__chip--running", "spinner", label));
+  else if (copilot.comments === 0) strip.append(chip("pr__chip--ok", "tick", label));
+  else strip.append(chip("pr__chip--warn", "comment", label));
+  return strip;
+}
+
+/** One reviewer's row: who they are, and where they stand. */
+function reviewerRow(r: Reviewer): HTMLElement {
+  const row = el("div", "pr__reviewer");
+  const face = el("span", "pr__face");
+  if (r.team) {
+    face.classList.add("pr__face--team");
+    face.append(iconElement("team", 12));
+  } else {
+    face.textContent = initials(r.login);
+  }
+  face.setAttribute("aria-hidden", "true");
+  const who = el("span", "pr__who", r.login);
+  who.title = r.team ? `${r.login} (team)` : r.login;
+  const { icon, label, modifier } = REVIEWER_CHIP[r.state];
+  row.append(face, who, chip(`pr__chip--${modifier}`, icon, label));
+  return row;
+}
+
+/** The Reviewers section, or null when nobody has been asked. */
+function reviewerList(pr: ReviewPr): HTMLElement | null {
+  const all = pr.reviewers ?? [];
+  if (all.length === 0) return null;
+  const section = el("div", "pr__reviewers");
+  const head = el("div", "pr__section-head");
+  const approved = all.filter((r) => r.state === "approved").length;
+  head.append(el("span", "pr__section-title", "Reviewers"), el("span", "pr__section-note", `${approved} of ${all.length} approved`));
+  section.append(head);
+  // Four fit; a fifth would cost more room than it is worth, so three are
+  // shown and the rest counted.
+  const shown = all.length > 4 ? all.slice(0, REVIEWERS_SHOWN) : all;
+  for (const r of shown) section.append(reviewerRow(r));
+  if (shown.length < all.length) section.append(el("div", "pr__reviewer pr__more", `+${all.length - shown.length} more`));
+  return section;
+}
+
+/** How far behind the base branch the PR is, when the forge said. */
+function behindBadge(pr: ReviewPr): HTMLElement | null {
+  if (!pr.behindBy) return null;
+  const badge = el("span", "pr__behind");
+  badge.append(iconElement("branch", 12), el("span", "pr__chip-text", `${pr.behindBy} behind ${pr.baseRef || "base"}`));
+  badge.title = `This branch is ${pr.behindBy} commit${pr.behindBy === 1 ? "" : "s"} behind ${pr.baseRef || "its base branch"}.`;
+  return badge;
+}
+
+export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | null = null, tab: ReviewTab = "review", ui: ReviewUi = NO_UI): HTMLElement {
+  const root = el("article", "pr pr--review");
+  // `morph` matches rows by this, so a repaint keeps each PR's own node even
+  // when the list reorders or one drops off.
+  root.dataset.row = pr.url;
   root.dataset.forge = pr.forge;
   root.dataset.repo = pr.repo;
   root.dataset.number = String(pr.number);
-  const line = el("div", "pr__line");
+  const main = el("div", "pr__main");
+
+  // 1. The head: which PR this is, and whether its branch has fallen behind.
+  const head = el("div", "pr__head");
   const name = el("span", "pr__name");
   const mark = markFor(pr, tab);
   if (mark) {
@@ -135,22 +253,43 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
     dot.setAttribute("aria-label", label);
     name.append(dot);
   }
+  const kind = iconElement("pull-request", 13);
+  kind.classList.add("pr__kind");
+  name.append(kind);
   const forgeMark = iconElement(pr.forge, 12);
   forgeMark.classList.add("pr__forge");
   forgeMark.removeAttribute("aria-hidden");
   forgeMark.setAttribute("role", "img");
   forgeMark.setAttribute("aria-label", pr.forge === "gitlab" ? "GitLab" : "GitHub");
   name.append(forgeMark);
-  const repo = el("span", "pr__repo", `${pr.repo.split("/").pop() ?? pr.repo} ${prRef(pr)}`);
+  const repo = el("span", "pr__repo", pr.repo.split("/").pop() ?? pr.repo);
   repo.title = pr.repo;
-  name.append(repo);
-  line.append(name, el("span", "pr__title", pr.title));
+  name.append(repo, el("span", "pr__number", prRef(pr)));
+  head.append(name);
+  const marks = el("div", "pr__marks");
+  if (pr.isDraft) marks.append(el("span", "pr__chip pr__chip--draft", "draft"));
+  const behind = behindBadge(pr);
+  if (behind) marks.append(behind);
+  head.append(marks);
+  main.append(head);
+
+  // 2. What it is, and when it last moved.
   const updated = Date.parse(pr.updatedAt);
-  const main = el("div", "pr__main");
-  main.append(line, el("div", "pr__meta", `${pr.author} · updated ${Number.isFinite(updated) ? formatAge(updated, nowMs) : "?"} ago`));
+  main.append(el("div", "pr__title", pr.title));
+  main.append(el("div", "pr__meta", `${pr.author} · updated ${Number.isFinite(updated) ? formatAge(updated, nowMs) : "?"} ago`));
+
+  // 3 and 4. Who, or what, is looking at it.
+  const copilot = copilotStrip(pr);
+  if (copilot) main.append(copilot);
+  const reviewers = reviewerList(pr);
+  if (reviewers) main.append(reviewers);
+
+  const failed = ui.errors.get(pr.url);
+  if (failed) main.append(el("div", "pr__rowerror", failed));
   root.append(main);
-  const actions = el("div", "card__actions");
-  if (pr.isDraft) actions.append(el("span", "pr__chip pr__chip--draft", "draft"));
+
+  // 5. The footer, under a hairline.
+  const actions = el("div", "card__actions pr__foot");
   if (related?.machine) {
     // Its terminal is on another Mac: name the machine instead of a button.
     const where = el("span", "pr__machine", `on ${related.machine}`);
@@ -166,11 +305,23 @@ export function renderReviewCard(pr: ReviewPr, nowMs: number, related: Card | nu
   open.type = "button";
   open.dataset.action = "open-pr";
   open.title = pr.url;
-  const review = el("button", "card__btn card__btn--primary", "Review");
+  actions.append(open);
+  if (behind) {
+    const busy = ui.busy.has(pr.url);
+    const update = el("button", "card__btn card__btn--warn");
+    update.type = "button";
+    update.dataset.action = "update-branch";
+    update.disabled = busy;
+    update.title = `Merge ${pr.baseRef || "the base branch"} into this branch, as GitHub's Update branch button does`;
+    update.append(iconElement(busy ? "spinner" : "refresh", 13), el("span", "pr__chip-text", busy ? "Updating…" : "Update branch"));
+    if (busy) update.querySelector(".icon")?.classList.add("icon--spin");
+    actions.append(update);
+  }
+  const review = el("button", "card__btn card__btn--primary pr__review", "Review");
   review.type = "button";
   review.dataset.action = "review";
   review.title = "Open a terminal in the checkout (or a fresh clone) and review it with Maya's agent on the review prompt from Settings";
-  actions.append(open, review);
+  actions.append(review);
   root.append(actions);
   return root;
 }
@@ -185,6 +336,7 @@ export function renderReviews(
   ctx: ReviewContext = { cards: [], clonesDir: null },
   tab: ReviewTab = "review",
   filters: ReviewFilters = { state: "all", repo: null },
+  ui: ReviewUi = NO_UI,
 ): HTMLElement {
   const root = el("section", "reviews");
   if (state.off) {
@@ -210,7 +362,7 @@ export function renderReviews(
     return root;
   }
   const list = el("div", "reviews__list");
-  for (const pr of prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir), tab));
+  for (const pr of prs) list.append(renderReviewCard(pr, nowMs, relatedSession(pr, ctx.cards, ctx.clonesDir), tab, ui));
   root.append(list);
   return root;
 }
@@ -240,7 +392,7 @@ function fillSelect(sel: HTMLSelectElement, options: { value: string; label: str
  * over the list that `update` redraws. Each sub-tab keeps its own filters
  * for the life of the window; only the sub-tab is remembered across starts.
  */
-export function makeReviewsView(host: HTMLElement) {
+export function makeReviewsView(host: HTMLElement, ui: ReviewUi = { busy: new Set(), errors: new Map() }) {
   let tab = storedTab();
   const filters: Record<ReviewTab, ReviewFilters> = { review: { ...DEFAULT_FILTERS.review }, assigned: { ...DEFAULT_FILTERS.assigned } };
   let state: ReviewState = { prs: [], errors: [], off: false, fetchedAt: null };
@@ -307,7 +459,13 @@ export function makeReviewsView(host: HTMLElement) {
       const n = tabCount(state.prs, t);
       b.querySelector(".tab__count")!.textContent = n > 0 ? String(n) : "";
     }
-    body.replaceChildren(renderReviews(state, nowMs, ctx, tab, f));
+    const fresh = renderReviews(state, nowMs, ctx, tab, f, ui);
+    // The pane repaints every ten seconds to keep the age labels true.
+    // Replacing the nodes would lose :hover in WKWebView and restart the
+    // spinner of a review in flight, so the fresh render is morphed in.
+    const shown = body.firstElementChild;
+    if (shown && shown.tagName === fresh.tagName) morph(shown, fresh);
+    else body.replaceChildren(fresh);
   }
 
   return {
@@ -317,6 +475,8 @@ export function makeReviewsView(host: HTMLElement) {
       ctx = context;
       paint();
     },
+    /** Repaints after `ui` changed, with the state the pane already has. */
+    refresh: paint,
   };
 }
 
@@ -331,6 +491,6 @@ export function reviewActionFor(target: Element): ReviewAction | null {
   const repo = card.dataset.repo;
   const number = Number(card.dataset.number);
   if (kind === "terminal") return { kind, forge, repo, number, pid: Number(btn.dataset.pid) };
-  if (kind !== "open-pr" && kind !== "review") return null;
+  if (kind !== "open-pr" && kind !== "review" && kind !== "update-branch") return null;
   return { kind, forge, repo, number };
 }

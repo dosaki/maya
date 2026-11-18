@@ -66,7 +66,8 @@ describe("renderReviews", () => {
     const first = cards[0] as HTMLElement;
     expect(first.dataset.repo).toBe("Org/bedrock");
     expect(first.dataset.number).toBe("451");
-    expect(first.querySelector(".pr__repo")?.textContent).toBe("bedrock #451");
+    expect(first.querySelector(".pr__repo")?.textContent).toBe("bedrock");
+    expect(first.querySelector(".pr__number")?.textContent).toBe("#451");
     expect(first.querySelector(".pr__title")?.textContent).toBe("docs: expand upgrade notes");
     expect(first.querySelector(".pr__meta")?.textContent).toContain("jane");
     expect(first.querySelector(".pr__meta")?.textContent).toContain("2h");
@@ -76,18 +77,21 @@ describe("renderReviews", () => {
     expect(first.querySelector("button[data-action=review]")?.textContent).toBe("Review");
   });
 
-  it("lays a PR out as one row: its text on the left, then the chips and buttons on the right", () => {
+  it("lays a PR out as a column: the head, the title and its meta, then the buttons", () => {
     const live = [session({ sessionId: "a", pid: 42, name: "review bedrock #451", state: "awaiting" })];
     const el = renderReviews({ prs: [pr({ isDraft: true })], errors: [], off: false, fetchedAt: NOW }, NOW, { cards: live, clonesDir: null });
     const row = el.querySelector<HTMLElement>(".reviews__list > .pr")!;
-    expect([...row.children].map((c) => c.className)).toEqual(["pr__main", "card__actions"]);
-    const line = row.querySelector(".pr__main > .pr__line")!;
-    expect(line.querySelector(".pr__repo")?.textContent).toBe("bedrock #451");
-    expect(line.querySelector(".pr__repo")?.getAttribute("title")).toBe("Org/bedrock");
-    expect(line.querySelector(".pr__title")?.textContent).toBe("docs: expand upgrade notes");
+    expect([...row.children].map((c) => c.className)).toEqual(["pr__main", "card__actions pr__foot"]);
+    expect([...row.querySelectorAll(".pr__main > *")].map((c) => c.className)).toEqual(["pr__head", "pr__title", "pr__meta"]);
+    const head = row.querySelector(".pr__main > .pr__head")!;
+    expect(head.querySelector(".pr__repo")?.textContent).toBe("bedrock");
+    expect(head.querySelector(".pr__repo")?.getAttribute("title")).toBe("Org/bedrock");
+    expect(head.querySelector(".pr__number")?.textContent).toBe("#451");
+    expect(row.querySelector(".pr__main > .pr__title")?.textContent).toBe("docs: expand upgrade notes");
     expect(row.querySelector(".pr__main > .pr__meta")?.textContent).toBe("jane · updated 2h ago");
-    const right = [...row.querySelector(":scope > .card__actions")!.children].map((c) => (c as HTMLElement).dataset.action ?? c.className);
-    expect(right).toEqual(["pr__chip pr__chip--draft", "terminal", "open-pr", "review"]);
+    expect([...head.querySelectorAll(".pr__marks > *")].map((c) => c.className)).toEqual(["pr__chip pr__chip--draft"]);
+    const foot = [...row.querySelector(":scope > .pr__foot")!.children].map((c) => (c as HTMLElement).dataset.action ?? c.className);
+    expect(foot).toEqual(["terminal", "open-pr", "review"]);
   });
 
   it("marks the user's own review with a coloured dot, and none when not reviewed", () => {
@@ -302,7 +306,7 @@ describe("forges", () => {
   it("marks each card with its forge and names a merge request with a bang", () => {
     const root = renderReviews({ prs: [mr(), pr()], errors: [], off: false, fetchedAt: NOW }, NOW);
     const cards = [...root.querySelectorAll<HTMLElement>(".pr")];
-    expect(cards.map((c) => c.querySelector(".pr__repo")?.textContent)).toEqual(["bedrock !12", "bedrock #451"]);
+    expect(cards.map((c) => `${c.querySelector(".pr__repo")?.textContent} ${c.querySelector(".pr__number")?.textContent}`)).toEqual(["bedrock !12", "bedrock #451"]);
     expect(cards.map((c) => c.dataset.forge)).toEqual(["gitlab", "github"]);
     expect(cards[0].querySelector(".pr__forge")?.getAttribute("aria-label")).toBe("GitLab");
     expect(cards[0].querySelector(".pr__forge")?.hasAttribute("aria-hidden")).toBe(false);
@@ -340,5 +344,173 @@ describe("reviewActionFor", () => {
     expect(reviewActionFor(el.querySelector("button[data-action=review]")!)).toEqual({ kind: "review", forge: "github", repo: "Org/bedrock", number: 451 });
     expect(reviewActionFor(el.querySelector(".pr__title")!)).toBeNull();
     expect(reviewActionFor(document.body)).toBeNull();
+  });
+});
+
+describe("the Copilot review strip", () => {
+  const strip = (copilot: ReviewPr["copilot"]) => renderReviews({ prs: [pr({ copilot })], errors: [], off: false, fetchedAt: NOW }, NOW).querySelector<HTMLElement>(".pr__copilot");
+
+  it("is left out when Copilot is not involved in the PR", () => {
+    expect(strip(null)).toBeNull();
+    expect(strip(undefined)).toBeNull();
+  });
+
+  it("says Running, with a spinner, while Copilot has not answered", () => {
+    const row = strip({ running: true, comments: 0 })!;
+    expect(row.querySelector(".pr__copilot-label")?.textContent).toBe("Copilot review");
+    expect(row.querySelector(".pr__chip")?.className).toBe("pr__chip pr__chip--running");
+    expect(row.querySelector(".pr__chip-text")?.textContent).toBe("Running");
+    expect(row.querySelector(".icon-spinner")).not.toBeNull();
+  });
+
+  it("says Reviewed, with a tick, when Copilot found nothing", () => {
+    const row = strip({ running: false, comments: 0 })!;
+    expect(row.querySelector(".pr__chip")?.className).toBe("pr__chip pr__chip--ok");
+    expect(row.querySelector(".pr__chip-text")?.textContent).toBe("Reviewed");
+    expect(row.querySelector(".icon-tick")).not.toBeNull();
+  });
+
+  it("counts what Copilot had to say, and keeps one comment singular", () => {
+    const many = strip({ running: false, comments: 3 })!;
+    expect(many.querySelector(".pr__chip")?.className).toBe("pr__chip pr__chip--warn");
+    expect(many.querySelector(".pr__chip-text")?.textContent).toBe("Reviewed · 3 comments");
+    expect(many.querySelector(".icon-comment")).not.toBeNull();
+    expect(strip({ running: false, comments: 1 })!.querySelector(".pr__chip-text")?.textContent).toBe("Reviewed · 1 comment");
+  });
+});
+
+describe("the reviewer list", () => {
+  const listed = (reviewers: ReviewPr["reviewers"]) => renderReviews({ prs: [pr({ reviewers })], errors: [], off: false, fetchedAt: NOW }, NOW).querySelector<HTMLElement>(".pr__reviewers");
+  const rows = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>(".pr__reviewer")].map((r) => [r.querySelector(".pr__who")?.textContent ?? r.textContent, r.querySelector(".pr__chip")?.className ?? ""]);
+
+  it("is left out when nobody has been asked", () => {
+    expect(listed([])).toBeNull();
+    expect(listed(undefined)).toBeNull();
+  });
+
+  it("gives every state its own icon as well as its own colour", () => {
+    const root = listed([
+      { login: "sue", state: "changesRequested", team: false },
+      { login: "ann", state: "awaiting", team: false },
+      { login: "bob", state: "commented", team: false },
+      { login: "kim", state: "approved", team: false },
+    ])!;
+    expect(rows(root)).toEqual([
+      ["sue", "pr__chip pr__chip--bad"],
+      ["ann", "pr__chip pr__chip--awaiting"],
+      ["bob", "pr__chip pr__chip--neutral"],
+      ["kim", "pr__chip pr__chip--ok"],
+    ]);
+    expect([...root.querySelectorAll(".pr__chip .icon")].map((i) => i.getAttribute("class")?.split(" ")[1])).toEqual(["icon-x-circle", "icon-clock", "icon-comment", "icon-check-circle"]);
+  });
+
+  it("counts how many of them approved", () => {
+    const note = (reviewers: ReviewPr["reviewers"]) => listed(reviewers)!.querySelector(".pr__section-note")?.textContent;
+    expect(note([{ login: "bob", state: "approved", team: false }, { login: "sue", state: "awaiting", team: false }])).toBe("1 of 2 approved");
+    expect(note([{ login: "bob", state: "approved", team: false }, { login: "sue", state: "approved", team: false }])).toBe("2 of 2 approved");
+    expect(note([{ login: "sue", state: "changesRequested", team: false }])).toBe("0 of 1 approved");
+  });
+
+  it("shows four reviewers, but three and a count once there are more", () => {
+    const four = ["a", "b", "c", "d"].map((login) => ({ login, state: "awaiting" as const, team: false }));
+    expect(rows(listed(four)!).length).toBe(4);
+    const five = [...four, { login: "e", state: "awaiting" as const, team: false }];
+    const root = listed(five)!;
+    expect(rows(root).map(([who]) => who)).toEqual(["a", "b", "c", "+2 more"]);
+    expect(root.querySelector(".pr__more")?.textContent).toBe("+2 more");
+  });
+
+  it("shows initials for a person and an icon for a team", () => {
+    const root = listed([
+      { login: "jane-doe", state: "awaiting", team: false },
+      { login: "bob", state: "awaiting", team: false },
+      { login: "QA", state: "awaiting", team: true },
+    ])!;
+    const faces = [...root.querySelectorAll<HTMLElement>(".pr__face")];
+    expect(faces.map((f) => f.textContent?.trim())).toEqual(["JD", "BO", ""]);
+    expect(faces[2].querySelector(".icon-team")).not.toBeNull();
+    expect(root.querySelectorAll(".pr__who")[2].getAttribute("title")).toBe("QA (team)");
+  });
+});
+
+describe("a branch behind its base", () => {
+  const row = (over: Partial<ReviewPr>) => renderReviews({ prs: [pr(over)], errors: [], off: false, fetchedAt: NOW }, NOW).querySelector<HTMLElement>(".pr")!;
+
+  it("says nothing when the branch is up to date, or when the forge could not say", () => {
+    for (const over of [{ behindBy: 0, baseRef: "main" }, { behindBy: null }, {}]) {
+      const r = row(over);
+      expect(r.querySelector(".pr__behind"), JSON.stringify(over)).toBeNull();
+      expect(r.querySelector("button[data-action=update-branch]"), JSON.stringify(over)).toBeNull();
+    }
+  });
+
+  it("names the base branch and offers to update it", () => {
+    const r = row({ behindBy: 7, baseRef: "develop" });
+    expect(r.querySelector(".pr__behind .pr__chip-text")?.textContent).toBe("7 behind develop");
+    expect(r.querySelector(".pr__behind")?.getAttribute("title")).toBe("This branch is 7 commits behind develop.");
+    const update = r.querySelector<HTMLButtonElement>("button[data-action=update-branch]")!;
+    expect(update.querySelector(".pr__chip-text")?.textContent).toBe("Update branch");
+    expect(update.disabled).toBe(false);
+    expect(row({ behindBy: 1, baseRef: "main" }).querySelector(".pr__behind")?.getAttribute("title")).toBe("This branch is 1 commit behind main.");
+  });
+
+  it("puts Review last, after Open and Update branch", () => {
+    const foot = [...row({ behindBy: 2, baseRef: "main" }).querySelectorAll<HTMLElement>(".pr__foot button")];
+    expect(foot.map((b) => b.dataset.action)).toEqual(["open-pr", "update-branch", "review"]);
+  });
+});
+
+describe("updating a branch", () => {
+  const behind = pr({ behindBy: 2, baseRef: "main" });
+  const render = (ui: { busy: Set<string>; errors: Map<string, string> }) =>
+    renderReviews({ prs: [behind], errors: [], off: false, fetchedAt: NOW }, NOW, { cards: [], clonesDir: null }, "review", { state: "all", repo: null }, ui);
+
+  it("shows the button working and cannot be pressed twice", () => {
+    const root = render({ busy: new Set([behind.url]), errors: new Map() });
+    const update = root.querySelector<HTMLButtonElement>("button[data-action=update-branch]")!;
+    expect(update.disabled).toBe(true);
+    expect(update.querySelector(".pr__chip-text")?.textContent).toBe("Updating…");
+    expect(update.querySelector(".icon-spinner")).not.toBeNull();
+  });
+
+  it("says in the row itself why the forge refused", () => {
+    const root = render({ busy: new Set(), errors: new Map([[behind.url, "422: merge conflict between base and head"]]) });
+    expect(root.querySelector(".pr__rowerror")?.textContent).toBe("422: merge conflict between base and head");
+    expect(root.querySelector<HTMLButtonElement>("button[data-action=update-branch]")!.disabled).toBe(false);
+  });
+
+  it("reads the button as an action on its PR", () => {
+    const root = render({ busy: new Set(), errors: new Map() });
+    expect(reviewActionFor(root.querySelector("button[data-action=update-branch]")!)).toEqual({ kind: "update-branch", forge: "github", repo: "Org/bedrock", number: 451 });
+  });
+});
+
+describe("a repaint", () => {
+  it("keeps each row's node, so hover and a spinner in flight survive it", () => {
+    try { localStorage.clear(); } catch { /* none */ }
+    const host = document.createElement("div");
+    const view = makeReviewsView(host);
+    const state = { prs: [pr(), pr({ number: 3, url: "https://github.com/Org/bedrock/pull/3" })], errors: [], off: false, fetchedAt: NOW };
+    view.update(state, NOW);
+    const before = [...host.querySelectorAll(".pr")];
+    expect(before.length).toBe(2);
+    // The same list an hour later: the age labels move, the nodes do not.
+    view.update(state, NOW + 3_600_000);
+    const after = [...host.querySelectorAll(".pr")];
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[1]);
+    expect(after[0].querySelector(".pr__meta")?.textContent).toContain("3h");
+  });
+
+  it("keeps a row's node when the one above it drops off the list", () => {
+    try { localStorage.clear(); } catch { /* none */ }
+    const host = document.createElement("div");
+    const view = makeReviewsView(host);
+    const gone = pr({ number: 9, url: "https://github.com/Org/bedrock/pull/9", updatedAt: "2026-09-29T09:00:00Z" });
+    view.update({ prs: [gone, pr()], errors: [], off: false, fetchedAt: NOW }, NOW);
+    const kept = host.querySelectorAll(".pr")[1];
+    view.update({ prs: [pr()], errors: [], off: false, fetchedAt: NOW }, NOW);
+    expect(host.querySelectorAll(".pr").length).toBe(1);
+    expect(host.querySelector(".pr")).toBe(kept);
   });
 });
