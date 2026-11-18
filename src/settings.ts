@@ -5,7 +5,7 @@ import type { VoiceStatus } from "./voice";
 import { builtinVoiceName, isLinux, isWindows, recognizerOptions, secretStore, thisComputerLower } from "./platform";
 import type { CardSize, ColorTheme, CoralItems, CoralStatus, CustomTool, ForgeItems, GitProvider, Harness, ItemRule, NewSessionTerminal, ViewerTheme, WorkItemsConfig } from "./types";
 import { setViewerTheme } from "./modal";
-import { CARD_SIZES, COLOR_THEMES, applyCardSize, applyColorTheme, asCardSize, asColorTheme } from "./theme";
+import { CARD_SIZES, COLOR_THEMES, applyCardSize, applyColorTheme, applyReleaseNotesArt, asCardSize, asColorTheme } from "./theme";
 import { KEY_ACTIONS, addCombo, asKeyBindings, comboLabel, comboOf, defaultKeys, removeCombo, setKeyBindings, type KeyBindings } from "./keys";
 import { OPEN_SETTINGS_GROUP } from "./reviews";
 import { CLAUDE_AGENT, type AgentInfo } from "./newsession";
@@ -98,6 +98,8 @@ export interface SettingsModel {
   /** The colours of the windows; dark when absent. */
   colorTheme?: ColorTheme;
   cardSize?: CardSize;
+  /** Maya's picture beside the release notes; shown when absent. */
+  releaseNotesArt?: boolean;
   /** The keys that send and make a new line; the defaults when absent. */
   keys?: KeyBindings;
   /** The macOS app new sessions open in; Terminal when absent. */
@@ -232,6 +234,7 @@ export interface SettingsHandlers {
   onViewerTheme?(t: ViewerTheme): void;
   onColorTheme?(t: ColorTheme): void;
   onCardSize?(s: CardSize): void;
+  onReleaseNotesArt?(show: boolean): void;
   onKeys?(k: KeyBindings): void;
   onNewSessionTerminal?(t: NewSessionTerminal): void;
   /** One service's Work Items settings, read from the page, to save. */
@@ -435,6 +438,8 @@ interface ConfigJson {
   colorTheme?: ColorTheme;
   /** The card size someone picked; absent until they pick one, when the cards are Compact. */
   cards?: CardSize;
+  /** Whether Maya stands beside the release notes; shown when absent. */
+  releaseNotesArt?: boolean;
   keys?: KeyBindings | null;
   newSessionTerminal?: NewSessionTerminal;
   git?: GitConnectionJson[] | null;
@@ -1268,7 +1273,7 @@ export function renderSettings(model: SettingsModel, h: SettingsHandlers, nowMs:
   }
   general.append(
     group({ title: "Agent" }, card(agentRow, row({ label: "Model", control: agentModelSel }))),
-    group({ title: "Appearance" }, card(row({ label: "Theme", control: themeSel }), row({ label: "Cards", control: sizeSel }))),
+    group({ title: "Appearance" }, card(row({ label: "Theme", control: themeSel }), row({ label: "Cards", control: sizeSel }), row({ label: "Show Maya beside release notes", control: toggle("releaseNotesArt", model.releaseNotesArt !== false, (on) => h.onReleaseNotesArt?.(on)) }))),
     ...(updateRows.length > 0 ? [group({ title: "Updates" }, card(...updateRows))] : []),
   );
 
@@ -2501,6 +2506,8 @@ export async function initSettings(): Promise<void> {
     applyColorTheme(model.colorTheme);
     model.cardSize = asCardSize(c.cards);
     applyCardSize(model.cardSize);
+    model.releaseNotesArt = c.releaseNotesArt !== false;
+    applyReleaseNotesArt(model.releaseNotesArt);
     model.keys = asKeyBindings(c.keys);
     setKeyBindings(model.keys);
     model.newSessionTerminal = c.newSessionTerminal ?? "terminal";
@@ -2662,6 +2669,12 @@ export async function initSettings(): Promise<void> {
       model.cardSize = size;
       applyCardSize(size);
       void run(() => saveConfig({ cards: size }));
+    },
+    onReleaseNotesArt: (show) => {
+      // At once, like the theme: she goes as the switch is flipped.
+      model.releaseNotesArt = show;
+      applyReleaseNotesArt(show);
+      void run(() => saveConfig({ releaseNotesArt: show }));
     },
     onKeys: (k) => {
       // At once, like the theme: the boxes follow the new keys before the save lands.
