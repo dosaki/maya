@@ -606,7 +606,7 @@ mod tests {
     }
 
     fn review_pr(repo: &str, ssh: Option<&str>, https: Option<&str>) -> ReviewPr {
-        ReviewPr { number: 1, forge: GitProvider::Github, repo: repo.into(), title: String::new(), author: String::new(), url: String::new(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: ssh.map(Into::into), https_url: https.map(Into::into) }
+        ReviewPr { number: 1, forge: GitProvider::Github, repo: repo.into(), title: String::new(), author: String::new(), url: String::new(), is_draft: false, updated_at: String::new(), reasons: vec![], my_review: None, pr_review: None, pr_reviewers: vec![], reviewers: vec![], copilot: None, behind_by: None, base_ref: String::new(), head_oid: String::new(), ssh_url: ssh.map(Into::into), https_url: https.map(Into::into) }
     }
 
     #[test]

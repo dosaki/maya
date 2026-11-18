@@ -1235,7 +1235,7 @@ mod tests {
     }
 
     fn pr() -> ReviewPr {
-        ReviewPr { number: 451, forge: GitProvider::Github, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None, pr_review: None, pr_reviewers: vec![], ssh_url: None, https_url: None }
+        ReviewPr { number: 451, forge: GitProvider::Github, repo: "Org/bedrock".into(), title: "docs: notes".into(), author: "jane".into(), url: "https://github.com/Org/bedrock/pull/451".into(), is_draft: false, updated_at: "".into(), reasons: vec![Reason::Review], my_review: None, pr_review: None, pr_reviewers: vec![], reviewers: vec![], copilot: None, behind_by: None, base_ref: String::new(), head_oid: String::new(), ssh_url: None, https_url: None }
     }
 
     #[test]
