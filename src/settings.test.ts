@@ -1735,6 +1735,24 @@ describe("colour theme", () => {
     expect(h.onCardSize).toHaveBeenCalledWith("roomy");
   });
 
+  it("offers to hide Maya beside release notes under Cards, and reports the choice", () => {
+    const h = { ...handlers(), onReleaseNotesArt: vi.fn() };
+    const general = renderSettings({ ...voiceBase }, h).querySelector(".settings__section--general")!;
+    const box = general.querySelector<HTMLInputElement>("input[name=releaseNotesArt]")!;
+    expect(box.checked).toBe(true);
+    const row = box.closest(".settings__row")!;
+    expect(row.querySelector(".settings__label")?.textContent).toBe("Show Maya beside release notes");
+    expect(general.querySelector("select[name=cardSize]")!.closest(".settings__row")!.nextElementSibling).toBe(row);
+    box.checked = false;
+    box.dispatchEvent(new Event("change"));
+    expect(h.onReleaseNotesArt).toHaveBeenCalledWith(false);
+  });
+
+  it("shows the saved choice to hide Maya beside release notes", () => {
+    const box = renderSettings({ ...voiceBase, releaseNotesArt: false }, handlers()).querySelector<HTMLInputElement>("input[name=releaseNotesArt]")!;
+    expect(box.checked).toBe(false);
+  });
+
   it("shows the saved card size", () => {
     const pick = (model: object) => renderSettings({ ...voiceBase, ...model }, handlers()).querySelector<HTMLSelectElement>("select[name=cardSize]")!.value;
     expect(pick({ cardSize: "spacious" })).toBe("spacious");

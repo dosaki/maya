@@ -49,3 +49,19 @@ export function applyCardSize(size: CardSize): void {
     // Without storage the next start paints Compact for a moment; the saved settings still choose the size once they load.
   }
 }
+
+/** Where the page remembers that Maya is hidden beside the release notes, so the next start paints her hidden before the saved settings arrive. */
+export const RELEASE_NOTES_ART_KEY = "maya.releaseNotesArt";
+
+/** Shows or hides Maya's picture beside the release notes (Settings › Release Notes and What's new), and remembers it for the next start's first paint. */
+export function applyReleaseNotesArt(show: boolean): void {
+  const root = document.documentElement;
+  if (show) delete root.dataset.art;
+  else root.dataset.art = "off";
+  try {
+    if (show) localStorage.removeItem(RELEASE_NOTES_ART_KEY);
+    else localStorage.setItem(RELEASE_NOTES_ART_KEY, "off");
+  } catch {
+    // Without storage the next start shows her for a moment; the saved settings still hide her once they load.
+  }
+}

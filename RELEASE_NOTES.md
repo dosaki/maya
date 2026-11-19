@@ -1,3 +1,9 @@
+# 0.61.0
+
+## New
+
+- You can hide Maya's picture beside the release notes: turn off Settings → General → Show Maya beside release notes. She goes from Settings → Release Notes and from the What's new window after an update, and the notes take her space.
+
 # 0.60.0
 
 ## New

@@ -164,3 +164,19 @@ describe("card sizes", () => {
     expect(vars(`:root[data-cards="${size}"]`)).toEqual(SIZES[size]);
   });
 });
+
+describe("Maya hidden beside the release notes", () => {
+  const OFF = ':root[data-art="off"]';
+
+  it("gives the Settings notes the whole width", () => {
+    expect(block(`${OFF} .settings.pane .settings__rn`)).toContain("grid-template-columns: minmax(0, 1fr)");
+  });
+
+  it("hides her in Settings and in What's new", () => {
+    expect(block(`${OFF} .settings.pane .settings__rn-art, ${OFF} .whatsnew__art`)).toContain("display: none");
+  });
+
+  it("drops the room What's new keeps for her", () => {
+    expect(block(`${OFF} .whatsnew .whatsnew__panel`)).toContain("margin-left: 0");
+  });
+});
