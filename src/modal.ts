@@ -31,6 +31,19 @@ export function setComposerOptions(o: Partial<typeof composer>): void {
   Object.assign(composer, o);
 }
 
+/** Whether the panel's edges drag to resize it, and it opens at the size last dragged to. */
+let panelResizable = true;
+
+/**
+ * Turns the panel's resizing off or on. The phone turns it off: its panel is
+ * a pane filling the space under the top bar, a touch at the screen's edge
+ * started a drag, and the size kept from it held every later session at
+ * that height whatever the keyboard did.
+ */
+export function setPanelResizable(on: boolean): void {
+  panelResizable = on;
+}
+
 /** The toggle's title: the look it switches to. */
 export const THEME_TITLE: Record<ViewerTheme, string> = { chat: "Terminal look", terminal: "Chat look" };
 
@@ -405,6 +418,17 @@ export function edgeDrag(start: Required<PanelBox>, e: Edges, dx: number, dy: nu
 export const RESIZE_CLICK_GRACE_MS = 300;
 
 /**
+ * Gives the panel the size last dragged to and edges that drag, when the
+ * panel is resizable. Returns whether a backdrop click at `now` is the
+ * release of such a drag.
+ */
+function makeResizable(root: HTMLElement, panel: HTMLElement): (now: number) => boolean {
+  if (!panelResizable) return () => false;
+  applyPanelSize(panel, loadPanelSize());
+  return installEdgeResize(root, panel);
+}
+
+/**
  * Lets any edge or corner of the panel be dragged, like a window's frame:
  * the pointer shows the resize cursor over the band, the border lights up,
  * and a press there pins the panel and moves only the dragged edges.
@@ -599,8 +623,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
   const panel = el("section", "modal__panel");
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-modal", "true");
-  applyPanelSize(panel, loadPanelSize());
-  const resizing = installEdgeResize(root, panel);
+  const resizing = makeResizable(root, panel);
   // A press just outside the panel starts a resize, not a dismissal.
   backdrop.addEventListener("click", () => {
     if (!resizing(Date.now())) h.onClose();
@@ -1289,8 +1312,7 @@ export function renderTermViewer(dir: string, onClose: () => void): HTMLElement 
   const panel = el("section", "modal__panel");
   panel.setAttribute("role", "dialog");
   panel.setAttribute("aria-modal", "true");
-  applyPanelSize(panel, loadPanelSize());
-  const resizing = installEdgeResize(root, panel);
+  const resizing = makeResizable(root, panel);
   backdrop.addEventListener("click", () => {
     if (!resizing(Date.now())) onClose();
   });
