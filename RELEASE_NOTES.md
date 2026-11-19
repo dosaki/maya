@@ -1,3 +1,9 @@
+# 0.61.1
+
+## Fixed
+
+- On the phone, a session fills the screen again when the keyboard goes down. A swipe that started at the edge of the screen could fix a session's height, and every session opened later kept that height, with gaps above and below.
+
 # 0.61.0
 
 ## New
