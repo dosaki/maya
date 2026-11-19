@@ -1,5 +1,5 @@
 import styles from "./styles.css?raw";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
@@ -12,7 +12,7 @@ vi.mock("./live", () => ({
   },
 }));
 
-import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, openTermViewer, renderTermViewer, RESIZE_CLICK_GRACE_MS, anchorPanel, applyStage, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isLive, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setViewerTheme, statusLine, workingFor } from "./modal";
+import { MAX_ATTACHMENT_BYTES, PANEL_SIZE_KEY, openTermViewer, renderTermViewer, RESIZE_CLICK_GRACE_MS, anchorPanel, applyStage, attachmentTooLarge, closeModal, cursorFor, draggedPanelSize, edgeDrag, edgesAt, fitAnchoredPanel, fitPosition, historyRefetchDue, isLive, isTerminalCommand, openModal, parsePanelSize, patchModal, refreshModal, renderModal, replyStatus, setComposerOptions, setPanelResizable, setViewerTheme, statusLine, workingFor } from "./modal";
 import { comboLabel, defaultKeys, setKeyBindings } from "./keys";
 import type { Card, Turn } from "./types";
 
@@ -229,6 +229,37 @@ describe("panel size", () => {
     expect(sized.style.width).toBe("1000px");
     expect(sized.style.height).toBe("800px");
     localStorage.removeItem(PANEL_SIZE_KEY);
+  });
+
+  describe("on the phone, where the panel is a pane filling the space under the top bar", () => {
+    afterEach(() => {
+      setPanelResizable(true);
+      localStorage.removeItem(PANEL_SIZE_KEY);
+    });
+
+    it("ignores a size kept from a drag, so the pane grows back when the keyboard goes down", () => {
+      // A size kept with the keyboard up held every later session at that
+      // height: with the keyboard down it floated mid-screen.
+      localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify({ width: 480, height: 472 }));
+      setPanelResizable(false);
+      for (const root of [renderModal({ card: base, turns: [], status: null, draft: "" }, handlers()), renderTermViewer("/x/dev/eye", () => undefined)]) {
+        const panel = root.querySelector<HTMLElement>(".modal__panel")!;
+        expect([panel.style.width, panel.style.height]).toEqual(["", ""]);
+      }
+    });
+
+    it("takes a touch at the screen's edge as a touch, not a resize", () => {
+      setPanelResizable(false);
+      const el = renderModal({ card: base, turns: [], status: null, draft: "" }, handlers());
+      const panel = el.querySelector<HTMLElement>(".modal__panel")!;
+      el.getBoundingClientRect = () => rect(0, 46, 412, 434);
+      panel.getBoundingClientRect = () => rect(0, 46, 412, 434);
+      el.dispatchEvent(new MouseEvent("pointerdown", { clientX: 2, clientY: 300, button: 0, bubbles: true }));
+      el.dispatchEvent(new MouseEvent("pointermove", { clientX: 2, clientY: 250, bubbles: true }));
+      el.dispatchEvent(new MouseEvent("pointerup", { clientX: 2, clientY: 250, bubbles: true }));
+      expect(el.classList.contains("modal--anchored")).toBe(false);
+      expect(panel.getAttribute("style")).toBeNull();
+    });
   });
 });
 

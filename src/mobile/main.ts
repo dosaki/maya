@@ -10,7 +10,7 @@ import { makeClickGuard } from "../clickguard";
 import { initChat } from "../chat";
 import { initDebug } from "../debug";
 import { setLocalMachine } from "../machines";
-import { closeModal, openModal, refreshModal, setComposerOptions, setOnDismiss, setProgress } from "../modal";
+import { closeModal, openModal, refreshModal, setComposerOptions, setOnDismiss, setPanelResizable, setProgress } from "../modal";
 import { closeNewSession, openNewSession } from "../newsession";
 import { sessionTicks, nextEnableDelay, tickOnCard } from "../options";
 import { makeProgress } from "../progress";
@@ -33,6 +33,8 @@ import { activeColumn, columnWidth, columnsFor, openingColumn, renderStrip, scro
 
 setLocalMachine(false);
 setComposerOptions({ attachButton: true, keyboardHints: false, terminalKeys: true });
+// A session is a pane under the top bar, sized by the page, not a window to drag.
+setPanelResizable(false);
 
 let cards: Card[] = [];
 let opened = false;
