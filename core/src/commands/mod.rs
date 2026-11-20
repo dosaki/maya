@@ -167,9 +167,15 @@ pub struct Homes {
 
 impl Homes {
     pub fn current() -> Homes {
-        let home = dirs::home_dir().unwrap_or_default();
-        let claude = home.join(".claude");
-        Homes { home, claude }
+        Homes::of(dirs::home_dir())
+    }
+
+    /// The folders for a home folder, or for none known. The Claude folder
+    /// follows `crate::claude_dir`, the one every Maya builds its store on,
+    /// so the lists read the folder the store's sessions come from.
+    fn of(home: Option<PathBuf>) -> Homes {
+        let claude = crate::claude_dir_of(home.clone());
+        Homes { home: home.unwrap_or_default(), claude }
     }
 }
 
@@ -262,6 +268,15 @@ mod tests {
         assert_eq!(description_of("---\nname: x\nDo it"), "name: x");
         assert_eq!(description_of("---  \nname: x\n---\nDo it"), "Do it");
         assert_eq!(front_matter("---  \nname: x\n---\n").name.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn the_claude_folder_is_the_one_maya_keeps_its_sessions_in() {
+        // Every Maya builds its store on `crate::claude_dir()`; the lists must read the same folder.
+        assert_eq!(Homes::current().claude, crate::claude_dir());
+        let home = PathBuf::from("/Users/someone");
+        assert_eq!(Homes::of(Some(home.clone())).claude, crate::claude_dir_of(Some(home)));
+        assert_eq!(Homes::of(None).claude, crate::claude_dir_of(None));
     }
 
     #[test]
