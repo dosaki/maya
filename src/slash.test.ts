@@ -145,4 +145,47 @@ describe("the menu", () => {
     expect(rows()[0]).toBe(first);
     expect(rows()[1].getAttribute("aria-selected")).toBe("true");
   });
+
+  it("opens when the list arrives after the slash was typed", () => {
+    const menu = setup([]);
+    box.focus();
+    type("/");
+    expect(rows()).toHaveLength(0);
+    menu.setCommands([cmd("compact")]);
+    expect(rows()).toHaveLength(1);
+  });
+
+  it("closes on blur, but a row click still fills", () => {
+    setup();
+    box.focus();
+    type("/co");
+    rows()[0].dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    rows()[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(box.value).toBe("/compact ");
+    type("/co");
+    box.dispatchEvent(new Event("blur"));
+    expect(rows()).toHaveLength(0);
+  });
+
+  it("leaves Shift+Tab and modified Enter alone", () => {
+    const menu = setup();
+    type("/co");
+    expect(menu.onKey(key("Tab", { shiftKey: true }))).toBe(false);
+    for (const m of [{ shiftKey: true }, { altKey: true }, { metaKey: true }, { ctrlKey: true }]) expect(menu.onKey(key("Enter", m))).toBe(false);
+    expect(box.value).toBe("/co");
+  });
+
+  it("matches a whole name without regard to case on Enter", () => {
+    const menu = setup();
+    type("/COMPACT");
+    expect(menu.onKey(key("Enter"))).toBe(false);
+  });
+
+  it("a bare modifier key does not reopen the list after Escape", () => {
+    const menu = setup();
+    type("/");
+    menu.onKey(key("Escape"));
+    box.dispatchEvent(new KeyboardEvent("keyup", { key: "Shift" }));
+    expect(rows()).toHaveLength(0);
+  });
 });
