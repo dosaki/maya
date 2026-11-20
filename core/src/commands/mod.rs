@@ -4,9 +4,11 @@
 
 mod builtins;
 mod claude;
+mod others;
 
 pub use builtins::builtins;
 pub use claude::{claude_machine, claude_session};
+pub use others::{for_session, machine_wide, shared};
 
 use crate::model::Harness;
 use serde::{Deserialize, Serialize};
