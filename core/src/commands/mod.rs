@@ -3,12 +3,15 @@
 //! commands (built-ins, skill and command files) goes through.
 
 mod builtins;
+mod claude;
 
 pub use builtins::builtins;
+pub use claude::{claude_machine, claude_session};
 
 use crate::model::Harness;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// The longest description kept, in characters, so a row stays one line.
 const DESCRIPTION_MAX: usize = 100;
@@ -136,18 +139,49 @@ pub fn description_of(text: &str) -> String {
     }
 }
 
-/// The text after the front matter, or all of it when there is none.
+/// The text after the front matter, or all of it when there is none. A
+/// header that is never closed is skipped, so it cannot become a description.
 fn body(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix("---") else { return text };
-    let Some(rest) = rest.strip_prefix('\n').or_else(|| rest.strip_prefix("\r\n")) else { return text };
-    let mut offset = 0;
-    for line in rest.split_inclusive('\n') {
+    let mut lines = text.split_inclusive('\n');
+    let Some(first) = lines.next() else { return text };
+    if first.trim_end() != "---" {
+        return text;
+    }
+    let mut offset = first.len();
+    for line in lines {
         offset += line.len();
         if line.trim_end() == "---" {
-            return &rest[offset..];
+            return &text[offset..];
         }
     }
-    text
+    &text[first.len()..]
+}
+
+/// Where the agents keep their files; tests point these at temp dirs.
+pub struct Homes {
+    pub home: PathBuf,
+    pub claude: PathBuf,
+}
+
+impl Homes {
+    pub fn current() -> Homes {
+        let home = dirs::home_dir().unwrap_or_default();
+        let claude = home.join(".claude");
+        Homes { home, claude }
+    }
+}
+
+/// `cwd`, then its parents up to and including the first holding `.git`;
+/// just `cwd` when none does.
+pub fn project_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for dir in cwd.ancestors() {
+        dirs.push(dir.to_path_buf());
+        if dir.join(".git").exists() {
+            return dirs;
+        }
+    }
+    vec![cwd.to_path_buf()]
 }
 
 /// Keeps the first of each name, in order, so a user's command wins over a
@@ -211,6 +245,13 @@ mod tests {
     #[test]
     fn a_description_falls_back_to_the_body_after_front_matter() {
         assert_eq!(description_of("---\nname: x\n---\n\nDo it\nmore"), "Do it");
+    }
+
+    #[test]
+    fn an_unclosed_header_is_not_the_description() {
+        assert_eq!(description_of("---\nname: x\nDo it"), "name: x");
+        assert_eq!(description_of("---  \nname: x\n---\nDo it"), "Do it");
+        assert_eq!(front_matter("---  \nname: x\n---\n").name.as_deref(), Some("x"));
     }
 
     #[test]
