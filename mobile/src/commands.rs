@@ -53,6 +53,14 @@ pub fn session_commands(hub: H, session_id: String) -> Result<Vec<CommandInfo>, 
     data(hub.send(&session_id, |session| CommandKind::ListCommands { session })?)
 }
 
+/// Every agent's built-in commands, from this phone's own copy: the page
+/// shows them at once, while `list_commands` waits on the main, which an
+/// older main never answers until the request times out.
+#[tauri::command]
+pub fn builtin_commands() -> Vec<AgentCommands> {
+    maya_core::commands::builtin_lists()
+}
+
 /// The slash commands the machine's agents offer everywhere; the built-ins
 /// when the main cannot say.
 #[tauri::command(async)]
@@ -472,6 +480,12 @@ mod tests {
         apply_settings(&mut c, &from);
         assert!(!c.speak_notifications);
         assert!(c.wake_word);
+    }
+
+    #[test]
+    fn the_builtins_need_no_main() {
+        let all = builtin_commands();
+        assert!(all.iter().any(|a| a.harness == Harness::ClaudeCode && a.commands.iter().any(|c| c.name == "compact")));
     }
 
     #[test]

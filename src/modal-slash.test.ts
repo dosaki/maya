@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-import { closeModal, openModal, refreshModal, renderModal } from "./modal";
+import { closeModal, openModal, refreshModal, renderModal, setComposerOptions } from "./modal";
 import { commandsKey, rememberCommands } from "./slash-cache";
 import type { Card, CommandInfo } from "./types";
 
@@ -75,6 +75,55 @@ describe("the slash list in a session window", () => {
     own.resolve([cmd("mine")]);
     await flush();
     expect([...document.querySelectorAll(".slash__name")].map((n) => n.textContent)).toEqual(["/mine"]);
+  });
+
+  it("on the phone, shows the agent's built-ins at once while the main is slow to answer", async () => {
+    setComposerOptions({ builtinCommands: true });
+    try {
+      const shared = deferred<unknown>();
+      const own = deferred<CommandInfo[]>();
+      answer({
+        session_commands: () => own.promise,
+        list_commands: () => shared.promise,
+        builtin_commands: [{ harness: "codex", commands: [cmd("other")] }, { harness: "claude-code", commands: [cmd("compact")] }],
+      });
+      await openModal({ ...card, machine: "box" });
+      await flush();
+      type("/");
+      expect([...document.querySelectorAll(".slash__name")].map((n) => n.textContent)).toEqual(["/compact"]);
+      shared.resolve([{ harness: "claude-code", commands: [cmd("shared")] }]);
+      await flush();
+      expect([...document.querySelectorAll(".slash__name")].map((n) => n.textContent)).toEqual(["/shared"]);
+      own.resolve([cmd("mine")]);
+      await flush();
+      expect([...document.querySelectorAll(".slash__name")].map((n) => n.textContent)).toEqual(["/mine"]);
+    } finally {
+      setComposerOptions({ builtinCommands: false });
+    }
+  });
+
+  it("on the phone, built-ins that land late do not replace a list already shown", async () => {
+    setComposerOptions({ builtinCommands: true });
+    try {
+      const builtins = deferred<unknown>();
+      answer({ session_commands: () => new Promise(() => undefined), list_commands: [{ harness: "claude-code", commands: [cmd("shared")] }], builtin_commands: () => builtins.promise });
+      await openModal(card);
+      await flush();
+      builtins.resolve([{ harness: "claude-code", commands: [cmd("compact")] }]);
+      await flush();
+      type("/");
+      expect([...document.querySelectorAll(".slash__name")].map((n) => n.textContent)).toEqual(["/shared"]);
+    } finally {
+      setComposerOptions({ builtinCommands: false });
+    }
+  });
+
+  it("the desktop does not ask for the built-ins: its own list is at hand", async () => {
+    answer({ session_commands: [cmd("mine")], list_commands: [] });
+    await openModal(card);
+    await flush();
+    expect(invoke).not.toHaveBeenCalledWith("builtin_commands", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("builtin_commands");
   });
 
   it("the shared list does not replace the session's own list that came first", async () => {

@@ -25,9 +25,11 @@ import { folderName } from "./nativeopen";
 /**
  * Composer features the page turns on: the phone has a picker instead of
  * drag-and-drop, no keyboard to hint at in the menu, and a row of the keys
- * its on-screen keyboard lacks under a live terminal.
+ * its on-screen keyboard lacks under a live terminal. It also shows the
+ * agent's built-in commands at once, from its own copy, since its main
+ * (an older one never answers) may be slow to send the machine's list.
  */
-const composer = { attachButton: false, keyboardHints: true, terminalKeys: false };
+const composer = { attachButton: false, keyboardHints: true, terminalKeys: false, builtinCommands: false };
 
 export function setComposerOptions(o: Partial<typeof composer>): void {
   Object.assign(composer, o);
@@ -1304,8 +1306,9 @@ function setCommands(me: NonNullable<typeof current>, list: CommandInfo[]): void
 
 /**
  * Fills the window's command list: the one remembered for this folder at
- * once, else the machine's shared list for the agent, then the session's own
- * list, which replaces both and is remembered. Errors leave the list as it is.
+ * once, else the agent's built-ins (on the phone) and then the machine's
+ * shared list for the agent, then the session's own list, which replaces
+ * them and is remembered. Errors leave the list as it is.
  */
 function loadCommands(me: NonNullable<typeof current>): void {
   const { card } = me.model;
@@ -1313,12 +1316,23 @@ function loadCommands(me: NonNullable<typeof current>): void {
   const key = commandsKey(card);
   const cached = cachedCommands(key);
   let answered = false;
+  let listed = false;
+  const mine = (all: AgentCommands[]) => all.find((a) => a.harness === card.harness)?.commands;
   if (cached) setCommands(me, cached);
   else {
+    if (composer.builtinCommands) {
+      void invoke<AgentCommands[]>("builtin_commands")
+        .then((all) => {
+          const list = mine(all);
+          if (list && !answered && !listed) setCommands(me, list);
+        })
+        .catch(() => undefined);
+    }
     void invoke<AgentCommands[]>("list_commands", { machine: card.machine ?? "" })
       .then((all) => {
-        const mine = all.find((a) => a.harness === card.harness);
-        if (mine && !answered) setCommands(me, mine.commands);
+        const list = mine(all);
+        listed = true;
+        if (list && !answered) setCommands(me, list);
       })
       .catch(() => undefined);
   }
