@@ -683,8 +683,9 @@ fn review_pr(state: TauriState<AppState>, forge: Option<GitProvider>, repo: Stri
     Ok(Reviewing { dir: dir?, native_term })
 }
 
+/// The store's folder: the same rule as the slash lists' (`maya_core::claude_dir`).
 fn claude_dir() -> std::path::PathBuf {
-    dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")).join(".claude")
+    maya_core::claude_dir()
 }
 
 /// A remote voice the config asks for, before any key is looked up.
