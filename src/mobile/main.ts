@@ -32,7 +32,7 @@ import { showWhatsNew } from "../whatsnew";
 import { activeColumn, columnWidth, columnsFor, openingColumn, renderStrip, scrollLeftFor, visibleColumns } from "./strip";
 
 setLocalMachine(false);
-setComposerOptions({ attachButton: true, keyboardHints: false, terminalKeys: true });
+setComposerOptions({ attachButton: true, keyboardHints: false, terminalKeys: true, builtinCommands: true });
 // A session is a pane under the top bar, sized by the page, not a window to drag.
 setPanelResizable(false);
 

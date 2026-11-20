@@ -494,3 +494,16 @@ export interface WorkItemsConfig {
   prompt: string;
   custom: CustomTool[];
 }
+
+/** One slash command an assistant offers; `source` is "builtin", "user", "plugin", "project" or "other". */
+export interface CommandInfo {
+  name: string;
+  description: string;
+  source: string;
+}
+
+/** The commands an assistant offers, with the harness they belong to. */
+export interface AgentCommands {
+  harness: Harness;
+  commands: CommandInfo[];
+}

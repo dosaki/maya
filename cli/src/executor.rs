@@ -83,6 +83,7 @@ impl Executor for CliExecutor {
             CommandKind::Resume { dir, session, agent, .. } => done(actions::resume_relayed(&l, agent, &dir, &session)),
             CommandKind::ListResumable { dir, agent } => data(actions::list_resumable_sessions(&l, agent, &dir)),
             CommandKind::History { session } => data(actions::remote_history(&l, &session)),
+            CommandKind::ListCommands { session } => data(actions::session_commands(&l, &session)),
             CommandKind::Forget { sessions } => {
                 self.store.lock().unwrap().forget_remembered(&sessions);
                 self.board_due.store(true, Ordering::SeqCst);
@@ -120,6 +121,10 @@ impl Executor for CliExecutor {
 
     fn agents(&self) -> Option<Vec<AgentInfo>> {
         Some((self.agents)())
+    }
+
+    fn commands(&self) -> Option<Vec<maya_core::commands::AgentCommands>> {
+        Some(maya_core::commands::shared())
     }
 
     fn remembered(&self) -> Option<Vec<maya_core::remembered::Remembered>> {

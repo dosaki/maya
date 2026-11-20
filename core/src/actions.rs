@@ -615,6 +615,18 @@ pub fn remote_history(l: &Local, session_id: &str) -> Result<Vec<transcript::Tur
     session_history(l, session_id).map(transcript::for_remote)
 }
 
+/// The slash commands the session can run: its agent's, its project's and
+/// the user's.
+pub fn session_commands(l: &Local, session_id: &str) -> Result<Vec<crate::commands::CommandInfo>, String> {
+    let (card, claude) = {
+        let mut store = l.store.lock().unwrap();
+        (store.card_for(session_id, now_ms()), store.claude_dir().to_path_buf())
+    };
+    let card = card.ok_or("Session is no longer running.")?;
+    let homes = crate::commands::Homes { home: crate::commands::Homes::current().home, claude };
+    Ok(crate::commands::for_session(card.harness, Path::new(&card.cwd), &homes))
+}
+
 /// The folders of the projects directory.
 pub fn list_project_dirs(l: &Local) -> Result<Vec<String>, String> {
     let root = projects_root(&l.store.lock().unwrap())?;
@@ -1117,8 +1129,13 @@ pub mod test_support {
 
     /// A temp `~/.claude` with one live registry session (`tty: Some("/dev/pts/3")`, idle) and a store over it.
     pub fn store_with_session(id: &str, pid: i32) -> (tempfile::TempDir, Mutex<Store>) {
+        store_with_session_in(id, pid, "/Users/x/dev/eye")
+    }
+
+    /// The same, with the session running in `cwd`.
+    pub fn store_with_session_in(id: &str, pid: i32, cwd: &str) -> (tempfile::TempDir, Mutex<Store>) {
         let (dir, claude) = temp_claude();
-        write_session(&claude, id, pid, "/Users/x/dev/eye");
+        write_session(&claude, id, pid, cwd);
         (dir, store(claude, None))
     }
 
@@ -2467,6 +2484,27 @@ mod tests {
         let there = remote_history(&l, "s1").unwrap();
         assert_eq!(there[0].output.as_deref().unwrap().lines().count(), transcript::REMOTE_OUTPUT_LINES);
         assert_eq!(there[0].output_lines, 100, "the page still says how many lines there were");
+    }
+
+    #[test]
+    fn session_commands_lists_the_sessions_project_commands() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".claude/commands")).unwrap();
+        std::fs::write(repo.path().join(".claude/commands/ship.md"), "Ship it").unwrap();
+        let (_d, store) = store_with_session_in("s1", 4242, &repo.path().to_string_lossy());
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        let list = session_commands(&l, "s1").unwrap();
+        let ship = list.iter().find(|c| c.name == "ship").expect("the project's command");
+        assert_eq!(ship.source, crate::commands::CommandSource::Project);
+    }
+
+    #[test]
+    fn session_commands_for_an_unknown_session_is_an_error() {
+        let (_d, store) = store_with_session("s1", 4242);
+        let fake = FakeTerminal::default();
+        let l = Local { store: &store, terminal: &fake };
+        assert_eq!(session_commands(&l, "nope"), Err("Session is no longer running.".into()));
     }
 
     #[test]

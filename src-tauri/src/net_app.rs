@@ -12,7 +12,7 @@ use crate::net::promote;
 use crate::net::merge;
 use crate::net::protocol::{CommandKind, Down, Request, CAP_ASK_BRAIN, CAP_FOLLOW, CAP_LEAD, CAP_PICK_TERMINAL, CAP_TERMINAL, CAP_WORKTREE};
 use maya_core::net::live::LiveTerms;
-use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, check_remote_terminal, check_remote_worktree, target_of, Target, ROUTE_TIMEOUT};
+use maya_core::net::routing::{agent_of, agents_reply, check_remote_agent, check_remote_commands, check_remote_terminal, check_remote_worktree, target_of, Target, ROUTE_TIMEOUT};
 use crate::net::server::{send_command_with, start_with, ServerHandle};
 use crate::net::AssistantLink;
 use crate::config::{self, NetworkRole};
@@ -340,6 +340,10 @@ impl Executor for TauriExecutor {
         Some(maya_core::agents::snapshot())
     }
 
+    fn commands(&self) -> Option<Vec<maya_core::commands::AgentCommands>> {
+        Some(maya_core::commands::shared())
+    }
+
     fn terminals(&self) -> Option<maya_core::terminal_choice::TerminalChoices> {
         Some(maya_core::terminal_choice::local(self.app.state::<AppState>().store.lock().unwrap().config.new_session_terminal))
     }
@@ -524,6 +528,10 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
         }
         // The main's server answers this itself, before any request reaches here.
         Request::RemoveMember { .. } => Err("The main Maya answers this itself.".into()),
+        Request::ListCommands => to_data(match machine {
+            Some(m) => merge::commands_of(&crate::remote_boards(&state), m).unwrap_or_else(maya_core::commands::builtin_lists),
+            None => maya_core::commands::shared(),
+        }),
         Request::ListDirs => match machine {
             Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),
@@ -540,7 +548,12 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
         },
         Request::Command(kind) => match target_of(&kind) {
             Target::Session(session) => match crate::remote_machine_of(&state, &session) {
-                Some(m) => send_command(app, &m, kind, ROUTE_TIMEOUT),
+                Some(m) => {
+                    if matches!(kind, CommandKind::ListCommands { .. }) {
+                        check_remote_commands(&crate::remote_boards(&state), &m)?;
+                    }
+                    send_command(app, &m, kind, ROUTE_TIMEOUT)
+                }
                 None => execute(app, kind),
             },
             Target::Machine => match machine {
@@ -619,6 +632,7 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
         CommandKind::Resume { dir, session, agent, terminal } => done(crate::open_with_pick(terminal, || actions::resume_relayed(&l, agent, &dir, &session))),
         CommandKind::ListResumable { dir, agent } => to_data(actions::list_resumable_sessions(&l, agent, &dir)?),
         CommandKind::History { session } => to_data(actions::remote_history(&l, &session)?),
+        CommandKind::ListCommands { session } => to_data(actions::session_commands(&l, &session)?),
         CommandKind::Forget { sessions } => {
             state.store.lock().unwrap().forget_remembered(&sessions);
             // The banner here and the board the main holds catch up at once.

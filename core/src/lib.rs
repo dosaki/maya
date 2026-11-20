@@ -9,6 +9,7 @@ pub mod claude_menus;
 pub mod codex;
 pub mod codex_hooks;
 pub mod collect;
+pub mod commands;
 pub mod config;
 pub mod context;
 pub mod deployments;
@@ -66,7 +67,12 @@ pub mod win_process;
 
 /// `~/.claude`, or `/.claude` when the home directory is unknown.
 pub fn claude_dir() -> std::path::PathBuf {
-    dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")).join(".claude")
+    claude_dir_of(dirs::home_dir())
+}
+
+/// The Claude folder of `home`, or `/.claude` when there is none.
+pub fn claude_dir_of(home: Option<std::path::PathBuf>) -> std::path::PathBuf {
+    home.unwrap_or_else(|| std::path::PathBuf::from("/")).join(".claude")
 }
 
 /// A `Command` for `program` that, on Windows, opens no console window:

@@ -11,9 +11,11 @@ import { CLAUDE_AGENT, renderChoice, type AgentInfo } from "./newsession";
 import { OPEN_DELAY_MS, nextEnableDelay, sessionTicks } from "./options";
 import type { Progress } from "./progress";
 import { capabilitiesOf, harnessBadge, type Capabilities } from "./harness";
-import { COMPACT_AT, STATE_LABEL, compactButton, prButton, prRef, remoteTitle, type Card, type Pick, type Turn, type ViewerTheme } from "./types";
+import { COMPACT_AT, STATE_LABEL, compactButton, prButton, prRef, remoteTitle, type AgentCommands, type Card, type CommandInfo, type Pick, type Turn, type ViewerTheme } from "./types";
 import { renderToolTurn, resetToolUi } from "./toolturn";
 import { composerKey, sendShortcut } from "./keys";
+import { attachSlashMenu, type SlashMenu } from "./slash";
+import { cachedCommands, commandsKey, rememberCommands } from "./slash-cache";
 import { costText, hasReset, stageFor, usageStrip, type Stage } from "./usage";
 import { renderAnsi } from "./ansi";
 import type { LiveHandle, LiveTarget } from "./live";
@@ -23,9 +25,11 @@ import { folderName } from "./nativeopen";
 /**
  * Composer features the page turns on: the phone has a picker instead of
  * drag-and-drop, no keyboard to hint at in the menu, and a row of the keys
- * its on-screen keyboard lacks under a live terminal.
+ * its on-screen keyboard lacks under a live terminal. It also shows the
+ * agent's built-in commands at once, from its own copy, since its main
+ * (an older one never answers) may be slow to send the machine's list.
  */
-const composer = { attachButton: false, keyboardHints: true, terminalKeys: false };
+const composer = { attachButton: false, keyboardHints: true, terminalKeys: false, builtinCommands: false };
 
 export function setComposerOptions(o: Partial<typeof composer>): void {
   Object.assign(composer, o);
@@ -103,6 +107,8 @@ export interface ModalModel {
   theme?: ViewerTheme;
   /** The card's agent with its model list, for the Model and Effort pickers; absent until listed. */
   agent?: AgentInfo;
+  /** The session's slash commands for the list above the message box; absent until known. */
+  commands?: CommandInfo[];
 }
 
 export interface ModalHandlers {
@@ -792,7 +798,15 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
       ev.preventDefault();
       h.onPasteFiles?.(files);
     });
-    ta.addEventListener("keydown", (ev) => composerKey(ev, ta, trySend));
+    const menu = caps.slashLines ? attachSlashMenu(ta) : null;
+    if (menu) {
+      menu.setCommands(m.commands ?? []);
+      slashMenus.set(menu.element, menu);
+    }
+    ta.addEventListener("keydown", (ev) => {
+      if (menu?.onKey(ev)) return;
+      composerKey(ev, ta, trySend);
+    });
     const send = el("button", "card__btn card__btn--primary", "Send");
     send.type = "button";
     send.dataset.action = "send";
@@ -817,6 +831,7 @@ export function renderModal(m: ModalModel, h: ModalHandlers, nowMs: number = Dat
     }
     if (stop) form.append(stop);
     form.append(send);
+    if (menu) form.append(menu.element);
     panel.append(form);
     panel.append(statusFoot(m.card, nowMs));
   }
@@ -1113,6 +1128,8 @@ function paint(opts: { focusInput: boolean } = { focusInput: false }): void {
   syncLive(host, opts.focusInput);
   const hist = host.querySelector(".modal__history");
   if (hist) hist.scrollTop = wasAtBottom ? hist.scrollHeight : oldScroll;
+  const list = host.querySelector<HTMLElement>(".modal__composer .slash");
+  slash = (list && slashMenus.get(list)) ?? null;
   if (opts.focusInput) host.querySelector<HTMLTextAreaElement>(".modal__input")?.focus();
 }
 
@@ -1218,6 +1235,8 @@ const guardedSend = makeSendGuard(async (text: string) => {
     if (current !== me) return;
     const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>(".modal__input");
     if (ta) ta.value = "";
+    // Clearing the box fires no input event: the list would stay over it.
+    slash?.close();
     current.model.draft = "";
     attachments.clear();
     current.model.status = replyStatus(route ?? null);
@@ -1242,6 +1261,7 @@ const guardedCommand = makeSendGuard(async (text: string) => {
     if (current !== me) return;
     const ta = document.getElementById("modal-host")?.querySelector<HTMLTextAreaElement>(".modal__input");
     if (ta) ta.value = "";
+    slash?.close();
     me.model.draft = "";
     me.model.status = { ok: true, text: `Sent ${text} to the terminal` };
     await loadTurns({ force: true, focusInput: true });
@@ -1272,6 +1292,60 @@ async function loadTurns(opts: { force?: boolean; focusInput?: boolean } = {}): 
   if (changed || opts.force) paint({ focusInput: opts.focusInput ?? false });
 }
 
+/** The slash menu each rendered composer built, found again from its list element. */
+const slashMenus = new WeakMap<HTMLElement, SlashMenu>();
+/** The open window's slash menu: the one in the composer on screen, which a repaint may keep. */
+let slash: SlashMenu | null = null;
+
+/** Sets the open window's command list on its model and on the list on screen. */
+function setCommands(me: NonNullable<typeof current>, list: CommandInfo[]): void {
+  if (current !== me) return;
+  me.model.commands = list;
+  slash?.setCommands(list);
+}
+
+/**
+ * Fills the window's command list: the one remembered for this folder at
+ * once, else the agent's built-ins (on the phone) and then the machine's
+ * shared list for the agent, then the session's own list, which replaces
+ * them and is remembered. Errors leave the list as it is.
+ */
+function loadCommands(me: NonNullable<typeof current>): void {
+  const { card } = me.model;
+  if (!capabilitiesOf(card.harness).slashLines) return;
+  const key = commandsKey(card);
+  const cached = cachedCommands(key);
+  let answered = false;
+  let listed = false;
+  const mine = (all: AgentCommands[]) => all.find((a) => a.harness === card.harness)?.commands;
+  if (cached) setCommands(me, cached);
+  else {
+    if (composer.builtinCommands) {
+      void invoke<AgentCommands[]>("builtin_commands")
+        .then((all) => {
+          const list = mine(all);
+          if (list && !answered && !listed) setCommands(me, list);
+        })
+        .catch(() => undefined);
+    }
+    void invoke<AgentCommands[]>("list_commands", { machine: card.machine ?? "" })
+      .then((all) => {
+        const list = mine(all);
+        listed = true;
+        if (list && !answered) setCommands(me, list);
+      })
+      .catch(() => undefined);
+  }
+  void invoke<CommandInfo[]>("session_commands", { sessionId: card.sessionId })
+    .then((list) => {
+      answered = true;
+      // Right for its own folder even when its window has closed.
+      rememberCommands(key, list);
+      setCommands(me, list);
+    })
+    .catch(() => undefined);
+}
+
 /** Each session's unsent message, kept while its window is closed. */
 const drafts = new Map<string, string>();
 
@@ -1287,6 +1361,7 @@ export async function openModal(card: Card): Promise<void> {
   document.addEventListener("keydown", keyHandler);
   void watchDrops();
   paint({ focusInput: true });
+  loadCommands(current);
   // A window opening on stale account limits has them read again.
   void invoke("nudge_limits", { sessionId: card.sessionId }).catch(() => undefined);
   if (card.harness !== "claude-code") {
@@ -1373,6 +1448,7 @@ export function closeModal(): void {
   if (draft.trim()) drafts.set(current.model.card.sessionId, draft);
   else drafts.delete(current.model.card.sessionId);
   current = null;
+  slash = null;
   attachments.clear();
   document.getElementById("modal-host")?.replaceChildren();
 }
