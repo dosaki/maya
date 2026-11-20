@@ -117,6 +117,16 @@ pub fn check_remote_terminal(pick: Option<NewSessionTerminal>, remote: &Option<T
     }
 }
 
+/// Before a session's command list goes to its machine: a connected machine
+/// that never sent its commands runs an older Maya, so say so at once. One
+/// that is not connected gets the usual routing error, not this one.
+pub fn check_remote_commands(boards: &[super::merge::RemoteBoard], machine: &str) -> Result<(), String> {
+    if super::merge::is_connected(boards, machine) && super::merge::commands_of(boards, machine).is_none() {
+        return Err(NO_COMMANDS.into());
+    }
+    Ok(())
+}
+
 /// The pickers' machine list from the network status: the display names
 /// the cards use (`name (address)` for assistants sharing a name).
 pub fn machines_of(status: &NetworkStatus) -> Vec<MachineInfo> {
@@ -273,6 +283,16 @@ mod tests {
         assert!(check_remote_terminal(None, &None, true, "laptop").is_ok());
         assert_eq!(check_remote_terminal(Some(Terminal), &None, false, "laptop").unwrap_err(), "laptop is not connected");
         assert!(check_remote_terminal(None, &None, false, "laptop").is_ok());
+    }
+
+    #[test]
+    fn check_remote_commands_refuses_only_a_connected_older_maya() {
+        use super::super::merge::RemoteBoard;
+        let board = |machine: &str, connected: bool, commands: Option<Vec<crate::commands::AgentCommands>>| RemoteBoard { machine: machine.into(), hostname: "h".into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: vec![], dirs: vec![], agents: None, remembered: None, worktrees: false, terminals: false, terminal_choices: None, commands, received_at: 0, connected };
+        let boards = vec![board("old", true, None), board("away", false, None), board("new", true, Some(vec![]))];
+        assert_eq!(check_remote_commands(&boards, "old"), Err(NO_COMMANDS.into()));
+        assert_eq!(check_remote_commands(&boards, "away"), Ok(()), "not connected: routing says so");
+        assert_eq!(check_remote_commands(&boards, "new"), Ok(()));
     }
 
     #[test]

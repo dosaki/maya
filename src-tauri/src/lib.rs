@@ -1250,6 +1250,26 @@ fn session_history(app: AppHandle, state: TauriState<AppState>, session_id: Stri
     actions::session_history(&local(&state), &session_id)
 }
 
+/// The slash commands a session can run: its machine's, its project's and the user's.
+#[tauri::command(async)]
+fn session_commands(app: AppHandle, state: TauriState<AppState>, session_id: String) -> Result<Vec<maya_core::commands::CommandInfo>, String> {
+    if let Some(machine) = remote_machine_of(&state, &session_id) {
+        maya_core::net::routing::check_remote_commands(&remote_boards(&state), &machine)?;
+        return route_data(&app, &machine, CommandKind::ListCommands { session: session_id });
+    }
+    actions::session_commands(&local(&state), &session_id)
+}
+
+/// The slash commands the chosen machine's agents offer everywhere: this
+/// machine's own, or what a remote last sent (the built-ins for an older one).
+#[tauri::command(async)]
+fn list_commands(state: TauriState<AppState>, machine: Option<String>) -> Vec<maya_core::commands::AgentCommands> {
+    if is_local(&machine) {
+        return maya_core::commands::shared();
+    }
+    merge::commands_of(&remote_boards(&state), machine.as_deref().unwrap_or_default()).unwrap_or_else(maya_core::commands::builtin_lists)
+}
+
 #[tauri::command(async)]
 fn send_reply(app: AppHandle, state: TauriState<AppState>, session_id: String, text: String, attachments: Vec<String>) -> Result<Option<actions::Route>, String> {
     if let Some(machine) = remote_machine_of(&state, &session_id) {
@@ -1965,6 +1985,8 @@ pub fn run() {
             remembered_app::forget_remembered,
             start_session,
             list_agents,
+            list_commands,
+            session_commands,
             codex_hook_status,
             install_codex_hook,
             remove_codex_hook,
