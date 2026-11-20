@@ -524,6 +524,8 @@ pub fn serve_request(app: &AppHandle, machine: Option<&str>, request: Request) -
         }
         // The main's server answers this itself, before any request reaches here.
         Request::RemoveMember { .. } => Err("The main Maya answers this itself.".into()),
+        // Answered from Task 5 on.
+        Request::ListCommands => Err("not yet".into()),
         Request::ListDirs => match machine {
             Some(m) => to_data(merge::dirs_of(&crate::remote_boards(&state), m)),
             None => to_data(actions::list_project_dirs(&crate::local(&state))?),
@@ -619,6 +621,8 @@ pub fn execute(app: &AppHandle, kind: CommandKind) -> Result<Option<Value>, Stri
         CommandKind::Resume { dir, session, agent, terminal } => done(crate::open_with_pick(terminal, || actions::resume_relayed(&l, agent, &dir, &session))),
         CommandKind::ListResumable { dir, agent } => to_data(actions::list_resumable_sessions(&l, agent, &dir)?),
         CommandKind::History { session } => to_data(actions::remote_history(&l, &session)?),
+        // Answered from Task 5 on.
+        CommandKind::ListCommands { .. } => Err("not yet".into()),
         CommandKind::Forget { sessions } => {
             state.store.lock().unwrap().forget_remembered(&sessions);
             // The banner here and the board the main holds catch up at once.

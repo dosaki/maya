@@ -142,6 +142,9 @@ struct Peer {
     /// The terminals it can open a session in, as its `hello` or its last
     /// `terminals` said; None for an older Maya. Kept in memory only.
     terminals: Option<crate::terminal_choice::TerminalChoices>,
+    /// Its machine-wide slash commands, as its last `commands` said; None
+    /// until it sends them, and always from an older Maya. Kept in memory only.
+    commands: Option<Vec<crate::commands::AgentCommands>>,
 }
 
 pub(crate) const UNREADABLE_BOARD: &str = "sent a board this version cannot read; update Maya on both machines";
@@ -426,7 +429,7 @@ impl Server {
             .filter_map(|(p, (id, label))| {
                 self.by_id.get(&id).map(|b| {
                     let can = |cap: &str| self.peers.get(&id).is_some_and(|p| p.caps.iter().any(|c| c == cap));
-                    RemoteBoard { machine: label, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), worktrees: can(CAP_WORKTREE), terminals: self.terminals && can(CAP_TERMINAL), terminal_choices: self.peers.get(&id).and_then(|p| p.terminals.clone()).filter(|_| b.connected && can(CAP_PICK_TERMINAL)), ..b.clone() }
+                    RemoteBoard { machine: label, hostname: p.hostname.clone(), platform: p.platform.clone(), address: p.address.clone(), worktrees: can(CAP_WORKTREE), terminals: self.terminals && can(CAP_TERMINAL), terminal_choices: self.peers.get(&id).and_then(|p| p.terminals.clone()).filter(|_| b.connected && can(CAP_PICK_TERMINAL)), commands: self.peers.get(&id).and_then(|p| p.commands.clone()), ..b.clone() }
                 })
             })
             .collect();
@@ -1251,7 +1254,7 @@ fn admit(ctx: &Ctx, ch: &mut Chan, addr: SocketAddr, accepted: &secure::Accepted
                         s.send_group_to_all();
                     }
                     let serial = s.next();
-                    s.peers.insert(id.clone(), Peer { app, caps: caps.into_iter().map(|c| clean(&c)).collect(), last_seen: now, unreadable_board: false, brain_dormant_since, terminals });
+                    s.peers.insert(id.clone(), Peer { app, caps: caps.into_iter().map(|c| clean(&c)).collect(), last_seen: now, unreadable_board: false, brain_dormant_since, terminals, commands: None });
                     // A newer connection replaces an older one; dropping its sender ends it.
                     s.conns.insert(id.clone(), Conn { tx, serial });
                     if let Some(b) = s.by_id.get_mut(&id) {
@@ -1545,7 +1548,7 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
                 if current {
                     s.touch(&link.id);
                     // `sync_boards` fills in the label, hostname, platform and address.
-                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, agents, remembered, worktrees: false, terminals: false, terminal_choices: None, received_at: now_ms(), connected: true });
+                    s.by_id.insert(link.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards, dirs, agents, remembered, worktrees: false, terminals: false, terminal_choices: None, commands: None, received_at: now_ms(), connected: true });
                     s.sync_boards();
                 }
                 current
@@ -1649,6 +1652,16 @@ fn handle(ctx: &Ctx, ch: &mut Chan, link: &Link, up: Up) -> Result<(), String> {
                 s.sync_boards();
                 drop(s);
                 ctx.announce();
+            }
+        }
+        Up::Commands { agents } => {
+            let mut s = lock(&ctx.shared);
+            if s.conns.get(&link.id).is_some_and(|c| c.serial == link.serial) {
+                if let Some(p) = s.peers.get_mut(&link.id) {
+                    p.commands = Some(agents);
+                }
+                // Read when a reply box asks, so nothing is announced.
+                s.sync_boards();
             }
         }
     }
@@ -1924,6 +1937,7 @@ pub(crate) fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::Resume { .. } => "resume",
         CommandKind::ListResumable { .. } => "list_resumable",
         CommandKind::History { .. } => "history",
+        CommandKind::ListCommands { .. } => "list_commands",
         CommandKind::Promote { .. } => "promote",
         CommandKind::AskBrain { .. } => "ask_brain",
     }
@@ -2448,6 +2462,26 @@ mod tests {
         drop(ch);
         wait_until(|| handle.boards().iter().any(|b| b.machine == "desk" && !b.connected));
         assert_eq!(super::super::merge::terminal_choices_of(&handle.boards(), "desk"), None);
+        handle.stop();
+    }
+
+    #[test]
+    fn a_main_keeps_an_assistants_commands_on_its_board() {
+        use crate::commands::{AgentCommands, CommandInfo, CommandSource};
+        use crate::model::Harness;
+        let (handle, port) = test_server();
+        let (mut ch, _) = pair_with_terminals(&handle, port, "desk", &[], None);
+        send(&mut ch, &empty_board());
+        wait_until(|| handle.boards().iter().any(|b| b.machine == "desk" && b.connected));
+        assert_eq!(super::super::merge::commands_of(&handle.boards(), "desk"), None, "none before it says");
+        let list = vec![AgentCommands { harness: Harness::ClaudeCode, commands: vec![CommandInfo::new("compact", "Compact the chat", CommandSource::Builtin)] }];
+        send(&mut ch, &Up::Commands { agents: list.clone() });
+        wait_until(|| super::super::merge::commands_of(&handle.boards(), "desk") == Some(list.clone()));
+        // A later board keeps them.
+        send(&mut ch, &empty_board());
+        let later = vec![AgentCommands { harness: Harness::Codex, commands: vec![] }];
+        send(&mut ch, &Up::Commands { agents: later.clone() });
+        wait_until(|| super::super::merge::commands_of(&handle.boards(), "desk") == Some(later.clone()));
         handle.stop();
     }
 
@@ -3070,7 +3104,7 @@ mod tests {
         let mut s = Server::new(GroupCopy::default(), group::me(&NetworkConfig::default(), "bWFpbg=="), "desk".into());
         let (first, previous, _) = s.record_pairing("a2V5", "192.168.55.70", "Gnowee", "TKC-0176", "macos", false);
         assert!(previous.is_none());
-        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None, worktrees: false, terminals: false, terminal_choices: None, received_at: 0, connected: false });
+        s.by_id.insert(first.id.clone(), RemoteBoard { machine: String::new(), hostname: String::new(), platform: String::new(), address: String::new(), cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None, worktrees: false, terminals: false, terminal_choices: None, commands: None, received_at: 0, connected: false });
         // The same key from another address: the same machine, at its new address.
         let (second, previous, _) = s.record_pairing("a2V5", "192.168.55.80", "Gnowee", "TKC-0176", "macos", false);
         assert_eq!(previous.as_ref(), Some(&first));

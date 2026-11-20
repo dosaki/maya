@@ -83,6 +83,8 @@ impl Executor for CliExecutor {
             CommandKind::Resume { dir, session, agent, .. } => done(actions::resume_relayed(&l, agent, &dir, &session)),
             CommandKind::ListResumable { dir, agent } => data(actions::list_resumable_sessions(&l, agent, &dir)),
             CommandKind::History { session } => data(actions::remote_history(&l, &session)),
+            // Answered from Task 5 on.
+            CommandKind::ListCommands { .. } => Err("not yet".into()),
             CommandKind::Forget { sessions } => {
                 self.store.lock().unwrap().forget_remembered(&sessions);
                 self.board_due.store(true, Ordering::SeqCst);
