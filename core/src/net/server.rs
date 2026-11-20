@@ -2477,8 +2477,10 @@ mod tests {
         let list = vec![AgentCommands { harness: Harness::ClaudeCode, commands: vec![CommandInfo::new("compact", "Compact the chat", CommandSource::Builtin)] }];
         send(&mut ch, &Up::Commands { agents: list.clone() });
         wait_until(|| super::super::merge::commands_of(&handle.boards(), "desk") == Some(list.clone()));
-        // A later board keeps them.
-        send(&mut ch, &empty_board());
+        // A later board keeps them: wait until it is the one held, then look.
+        send(&mut ch, &Up::Board { cards: vec![card("r1", "x")], dirs: vec![], agents: None, remembered: None });
+        wait_until(|| handle.boards().iter().any(|b| b.machine == "desk" && b.cards.iter().any(|c| c.session_id == "r1")));
+        assert_eq!(super::super::merge::commands_of(&handle.boards(), "desk"), Some(list.clone()), "a board does not drop them");
         let later = vec![AgentCommands { harness: Harness::Codex, commands: vec![] }];
         send(&mut ch, &Up::Commands { agents: later.clone() });
         wait_until(|| super::super::merge::commands_of(&handle.boards(), "desk") == Some(later.clone()));
