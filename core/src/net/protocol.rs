@@ -80,6 +80,13 @@ pub enum Up {
     },
     /// This machine's terminals changed (a Settings change); sent only to a main with `CAP_PICK_TERMINAL`.
     Terminals { terminals: crate::terminal_choice::TerminalChoices },
+    /// This machine's machine-wide slash commands, per agent: sent once on
+    /// connecting and again when they change. Needs no cap: an older main
+    /// ignores it.
+    Commands {
+        #[serde(deserialize_with = "known_commands")]
+        agents: Vec<crate::commands::AgentCommands>,
+    },
     Board {
         cards: Vec<Card>,
         dirs: Vec<String>,
@@ -111,6 +118,14 @@ pub enum Up {
 fn known_agents<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<crate::agents::AgentInfo>>, D::Error> {
     let raw: Option<Vec<Value>> = Option::deserialize(d)?;
     Ok(raw.map(|list| list.into_iter().filter_map(|a| serde_json::from_value::<crate::agents::AgentInfo>(a).ok()).filter(|a| a.harness != crate::model::Harness::Other).collect()))
+}
+
+/// A machine's command lists, without the ones this Maya cannot read: an
+/// agent it has never heard of, or an entry it cannot parse, is dropped
+/// rather than failing the whole message.
+fn known_commands<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<crate::commands::AgentCommands>, D::Error> {
+    let raw: Vec<Value> = Vec::deserialize(d)?;
+    Ok(raw.into_iter().filter_map(|a| serde_json::from_value::<crate::commands::AgentCommands>(a).ok()).filter(|a| a.harness != crate::model::Harness::Other).collect())
 }
 
 /// Main → assistant.
@@ -203,6 +218,9 @@ pub enum Request {
     BrainStop,
     /// Removes a device from the group, by its public key.
     RemoveMember { key: String },
+    /// The machine-wide slash commands, per agent, of `Up::Request.machine`
+    /// (the main's own when none).
+    ListCommands,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -233,6 +251,9 @@ pub enum CommandKind {
     },
     ListResumable { dir: String, #[serde(default)] agent: crate::model::Harness },
     History { session: String },
+    /// The slash commands the session's agent offers there: the machine-wide
+    /// ones plus its project's.
+    ListCommands { session: String },
     /// Forget these remembered sessions (Dismiss, Forget unticked).
     Forget { sessions: Vec<(crate::model::Harness, String)> },
     /// Become the main with this paired list (public keys only), and what
@@ -648,6 +669,32 @@ mod tests {
         assert!(s.contains(r#""type":"terminals""#), "{s}");
         assert_eq!(decode_up(&s).unwrap(), up);
         assert_eq!(CAP_PICK_TERMINAL, "pick-terminal");
+    }
+
+    #[test]
+    fn commands_round_trip_and_drop_unknown_agents() {
+        let text = r#"{"type":"commands","agents":[{"harness":"future","commands":[]},{"harness":"claude-code","commands":[{"name":"compact","source":"builtin"}]}]}"#;
+        let Up::Commands { agents } = decode_up(text).unwrap() else { panic!() };
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].harness, crate::model::Harness::ClaudeCode);
+        assert_eq!(agents[0].commands[0].name, "compact");
+        let up = Up::Commands { agents };
+        assert_eq!(decode_up(&encode(&up)).unwrap(), up);
+        // A broken entry is dropped too, never the whole message.
+        let Up::Commands { agents } = decode_up(r#"{"type":"commands","agents":[{"harness":"codex"},{"harness":"codex","commands":[]}]}"#).unwrap() else { panic!() };
+        assert_eq!(agents.len(), 1);
+    }
+
+    #[test]
+    fn list_commands_round_trips_as_a_command_and_a_request() {
+        let down = Down::Command { id: 3, kind: CommandKind::ListCommands { session: "s1".into() } };
+        let s = encode(&down);
+        assert!(s.contains(r#""kind":"list_commands","session":"s1""#), "{s}");
+        assert_eq!(decode_down(&s).unwrap(), down);
+        let up = Up::Request { id: 4, machine: Some("desk".into()), request: Request::ListCommands };
+        let s = encode(&up);
+        assert!(s.contains(r#""request":"list_commands""#), "{s}");
+        assert_eq!(decode_up(&s).unwrap(), up);
     }
 
     fn was(id: &str) -> crate::remembered::Remembered {

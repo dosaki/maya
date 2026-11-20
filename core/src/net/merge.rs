@@ -31,6 +31,10 @@ pub struct RemoteBoard {
     /// The terminals a new or resumed session there can open in: it is
     /// connected and announced `CAP_PICK_TERMINAL`; `None` otherwise.
     pub terminal_choices: Option<crate::terminal_choice::TerminalChoices>,
+    /// Its machine-wide slash commands, per agent, as its last `commands`
+    /// said; `None` for an older Maya, which never sends them. Kept in
+    /// memory for this run only.
+    pub commands: Option<Vec<crate::commands::AgentCommands>>,
     pub received_at: u64,
     pub connected: bool,
 }
@@ -44,6 +48,12 @@ pub fn is_connected(remotes: &[RemoteBoard], machine: &str) -> bool {
 /// and announced them.
 pub fn terminal_choices_of(remotes: &[RemoteBoard], machine: &str) -> Option<crate::terminal_choice::TerminalChoices> {
     remotes.iter().find(|b| b.machine == machine).and_then(|b| b.terminal_choices.clone())
+}
+
+/// The machine-wide slash commands of the assistant shown as `machine`, as
+/// it last sent them; `None` when its Maya is too old to send them.
+pub fn commands_of(remotes: &[RemoteBoard], machine: &str) -> Option<Vec<crate::commands::AgentCommands>> {
+    remotes.iter().find(|b| b.machine == machine).and_then(|b| b.commands.clone())
 }
 
 /// Local cards first, then each machine's cards with `machine` set and
@@ -162,7 +172,7 @@ mod tests {
     }
 
     fn board(machine: &str, hostname: &str, ids: &[&str], received_at: u64, connected: bool) -> RemoteBoard {
-        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, remembered: None, worktrees: false, terminals: false, terminal_choices: None, received_at, connected }
+        RemoteBoard { machine: machine.into(), hostname: hostname.into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: ids.iter().map(|i| card(i, i)).collect(), dirs: vec!["proj".into()], agents: None, remembered: None, worktrees: false, terminals: false, terminal_choices: None, commands: None, received_at, connected }
     }
 
     #[test]
@@ -285,6 +295,19 @@ mod tests {
         assert_eq!(agents_of(&boards, "a").unwrap()[0].harness, crate::model::Harness::ClaudeCode);
         assert_eq!(agents_of(&boards, "b"), None);
         assert_eq!(agents_of(&boards, "zzz"), None);
+    }
+
+    #[test]
+    fn commands_of_is_none_for_an_older_maya() {
+        use crate::commands::{AgentCommands, CommandInfo, CommandSource};
+        let list = vec![AgentCommands { harness: Harness::ClaudeCode, commands: vec![CommandInfo::new("compact", "Compact the chat", CommandSource::Builtin)] }];
+        let mut newer = board("newer", "h", &[], 0, true);
+        newer.commands = Some(list.clone());
+        let older = board("older", "h", &[], 0, true);
+        let boards = vec![newer, older];
+        assert_eq!(commands_of(&boards, "newer"), Some(list));
+        assert_eq!(commands_of(&boards, "older"), None, "an older Maya never sends its commands");
+        assert_eq!(commands_of(&boards, "zzz"), None);
     }
 
     #[test]

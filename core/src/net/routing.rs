@@ -16,6 +16,10 @@ use std::time::Duration;
 /// How long a main waits for a command's result from an assistant.
 pub const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// What a session's command list answers when its machine never sent its
+/// commands: its Maya predates them and would not know `ListCommands`.
+pub const NO_COMMANDS: &str = "That machine's Maya is too old to list its commands.";
+
 /// The command must fit in one frame: one file, and all of them together.
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -131,7 +135,7 @@ pub enum Target {
 pub fn target_of(kind: &super::protocol::CommandKind) -> Target {
     use super::protocol::CommandKind::*;
     match kind {
-        Reply { session, .. } | Answer { session, .. } | Stop { session } | Pick { session, .. } | Compact { session } | Close { session } | Rename { session, .. } | SetOption { session, .. } | CycleMode { session } | Slash { session, .. } | History { session } => Target::Session(session.clone()),
+        Reply { session, .. } | Answer { session, .. } | Stop { session } | Pick { session, .. } | Compact { session } | Close { session } | Rename { session, .. } | SetOption { session, .. } | CycleMode { session } | Slash { session, .. } | History { session } | ListCommands { session } => Target::Session(session.clone()),
         Start { .. } | Resume { .. } | ListResumable { .. } | Promote { .. } | Forget { .. } | AskBrain { .. } => Target::Machine,
     }
 }
@@ -173,6 +177,14 @@ mod tests {
         use crate::net::protocol::CommandKind;
         assert_eq!(target_of(&CommandKind::Stop { session: "s1".into() }), Target::Session("s1".into()));
         assert_eq!(target_of(&CommandKind::Pick { session: "s2".into(), ask_id: 1, question: 0, pick: Pick::Chat }), Target::Session("s2".into()));
+    }
+
+    #[test]
+    fn list_commands_targets_its_session() {
+        use crate::net::protocol::CommandKind;
+        assert_eq!(target_of(&CommandKind::ListCommands { session: "s1".into() }), Target::Session("s1".into()));
+        assert_eq!(agent_of(&CommandKind::ListCommands { session: "s1".into() }), None);
+        assert_eq!(NO_COMMANDS, "That machine's Maya is too old to list its commands.");
     }
 
     #[test]
