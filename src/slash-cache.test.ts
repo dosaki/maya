@@ -33,6 +33,13 @@ describe("the commands cache", () => {
     expect(cachedCommands("k6")).toBeNull();
   });
 
+  it("leaves out a damaged entry, and fills a missing description or source", () => {
+    localStorage.setItem("maya.slashCommands.v1", JSON.stringify([["bad", [null]], ["noname", [{ description: "x" }]], ["ok", [{ name: "a" }]]]));
+    expect(cachedCommands("bad")).toBeNull();
+    expect(cachedCommands("noname")).toBeNull();
+    expect(cachedCommands("ok")).toEqual([{ name: "a", description: "", source: "other" }]);
+  });
+
   it("reads nothing, and throws nothing, when storage throws", () => {
     const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("no"); });
     const set = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("no"); });
