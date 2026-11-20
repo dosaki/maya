@@ -52,7 +52,7 @@ describe("matchCommands", () => {
   });
 
   it("counts the start of a plugin command's own name, after its last colon, as a start", () => {
-    expect(matchCommands([cmd("unbrain"), cmd("superpowers:brainstorming")], "brain").map((c) => c.name)).toEqual(["superpowers:brainstorming", "unbrain"]);
+    expect(matchCommands([cmd("unbrain"), cmd("superpowers:brainstorming", "plugin")], "brain").map((c) => c.name)).toEqual(["superpowers:brainstorming", "unbrain"]);
   });
 });
 
@@ -201,6 +201,36 @@ describe("the menu", () => {
     type("/Brainstorming");
     expect(menu.onKey(key("Enter"))).toBe(false);
     expect(box.value).toBe("/brainstorming");
+  });
+
+  it("a project command in a folder has no short name", () => {
+    const menu = setup([cmd("frontend:component", "project"), cmd("compact")]);
+    expect(matchCommands([cmd("frontend:component", "project"), cmd("compo")], "comp").map((c) => c.name)).toEqual(["compo", "frontend:component"]);
+    type("/frontend:component");
+    expect(menu.onKey(key("Enter"))).toBe(false);
+    type("/component");
+    expect(menu.onKey(key("Tab"))).toBe(true);
+    expect(box.value).toBe("/frontend:component ");
+  });
+
+  it("a synced skill is taken by its own name too", () => {
+    const menu = setup([cmd("anthropic-skills:docx", "user"), cmd("compact")]);
+    type("/docx");
+    expect(menu.onKey(key("Enter"))).toBe(false);
+    expect(box.value).toBe("/docx");
+  });
+
+  it("a list that lands after Escape does not reopen it until the next edit", () => {
+    const menu = setup();
+    box.focus();
+    type("/c");
+    menu.onKey(key("Escape"));
+    menu.setCommands([cmd("compact"), cmd("clear"), cmd("config")]);
+    expect(rows()).toHaveLength(0);
+    box.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowLeft", bubbles: true }));
+    expect(rows()).toHaveLength(0);
+    type("/co");
+    expect(rows().map((r) => r.dataset.row)).toEqual(["compact", "config"]);
   });
 
   it("Enter still fills the start of a plugin command's own name", () => {

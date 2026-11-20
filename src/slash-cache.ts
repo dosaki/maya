@@ -11,11 +11,24 @@ export function commandsKey(card: Pick<Card, "machine" | "harness" | "cwd">): st
   return [card.machine ?? "", card.harness, card.cwd].join("\u0000");
 }
 
-/** Entries oldest first; a damaged or missing store reads as empty. */
+/** A stored command, read back with the shape the list needs; null when it is damaged. */
+function command(raw: unknown): CommandInfo | null {
+  if (!raw || typeof raw !== "object") return null;
+  const { name, description, source } = raw as Record<string, unknown>;
+  if (typeof name !== "string" || name === "") return null;
+  return { name, description: typeof description === "string" ? description : "", source: typeof source === "string" ? source : "other" };
+}
+
+/** Entries oldest first; a damaged or missing store, or a damaged entry, reads as empty. */
 function read(): [string, CommandInfo[]][] {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(KEY) ?? "[]");
-    return Array.isArray(parsed) ? (parsed as [string, CommandInfo[]][]).filter((e) => Array.isArray(e) && typeof e[0] === "string" && Array.isArray(e[1])) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((e): [string, CommandInfo[]][] => {
+      if (!Array.isArray(e) || typeof e[0] !== "string" || !Array.isArray(e[1])) return [];
+      const list = e[1].map(command);
+      return list.every((c): c is CommandInfo => c !== null) ? [[e[0], list]] : [];
+    });
   } catch {
     return [];
   }

@@ -18,10 +18,19 @@ function ownName(name: string): string {
   return name.slice(name.lastIndexOf(":") + 1);
 }
 
+/**
+ * Whether Claude Code also takes the command by its own name: a plugin's, or
+ * a synced skill's. A project command in a folder (`frontend:component`) has
+ * no such short name.
+ */
+function hasOwnName(c: CommandInfo): boolean {
+  return c.source === "plugin" || c.name.startsWith("anthropic-skills:");
+}
+
 /** Whether `typed` (lower case) starts the name, or the plugin command's own name. */
 function startsName(c: CommandInfo, typed: string): boolean {
   const name = c.name.toLowerCase();
-  return name.startsWith(typed) || ownName(name).startsWith(typed);
+  return name.startsWith(typed) || (hasOwnName(c) && ownName(name).startsWith(typed));
 }
 
 /** Names starting with `typed` first, then names containing it, each in list order; all for "". */
@@ -41,7 +50,7 @@ function wholeName(list: CommandInfo[], typed: string): string | null {
   const t = typed.toLowerCase();
   const exact = list.find((c) => c.name.toLowerCase() === t);
   if (exact) return exact.name;
-  const own = list.find((c) => ownName(c.name).toLowerCase() === t);
+  const own = list.find((c) => hasOwnName(c) && ownName(c.name).toLowerCase() === t);
   return own ? ownName(own.name) : null;
 }
 
@@ -70,6 +79,8 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
   let typed = "";
   let active = 0;
   let open = false;
+  // Closed with Escape: a list that arrives, or a caret move, does not reopen it until the next edit.
+  let dismissed = false;
 
   const rowId = (c: CommandInfo) => `${id}-${c.name}`;
 
@@ -111,6 +122,7 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
   }
 
   function refresh(): void {
+    if (dismissed && !open) return;
     const q = slashQuery(box.value, box.selectionStart ?? 0);
     // An ordinary message, with no list open: nothing to do on each key.
     if (q === null && !open) return;
@@ -144,7 +156,10 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
     box.setSelectionRange(at, at);
   }
 
-  box.addEventListener("input", refresh);
+  box.addEventListener("input", () => {
+    dismissed = false;
+    refresh();
+  });
   box.addEventListener("click", refresh);
   box.addEventListener("blur", close);
   box.addEventListener("keyup", (ev) => {
@@ -195,6 +210,7 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
         ev.preventDefault();
         ev.stopPropagation();
         close();
+        dismissed = true;
         return true;
       default:
         return false;
