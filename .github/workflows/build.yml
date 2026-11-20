@@ -117,6 +117,8 @@ jobs:
           # cache from before scripts/build-ear.sh set it would keep a
           # whisper.cpp tuned for the runner's CPU.
           key: ggml-portable
+          # The defaults, plus the runner image (see the Windows job).
+          env-vars: CARGO CC CFLAGS CXX CMAKE RUST ImageVersion
       - name: Install the GTK, audio and desktop tools
         timeout-minutes: 20
         run: |
@@ -208,6 +210,12 @@ jobs:
           # whisper.cpp tuned for the runner's CPU. "-tests": the cache main
           # saves holds the test build too (see "Build the tests").
           key: ggml-portable-tests
+          # The defaults, plus the runner image: whisper.cpp's CMake cache in
+          # target/ records the compilers' full paths, and an image that
+          # moves MSVC to a new version leaves them pointing at nothing
+          # ("CMAKE_ASM_COMPILER ... is not a full path to an existing
+          # compiler tool"). A new image starts a new cache.
+          env-vars: CARGO CC CFLAGS CXX CMAKE RUST ImageVersion
           # Only main saves: a pull request reads main's cache, and its own
           # (about 1 GB here) would push main's out of the 10 GB the repo gets.
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -287,6 +295,8 @@ jobs:
           workspaces: .
           # One cache per architecture: the two jobs build different targets.
           key: ${{ matrix.target }}
+          # The defaults, plus the runner image (see the Windows job).
+          env-vars: CARGO CC CFLAGS CXX CMAKE RUST ImageVersion
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Build the listener
@@ -407,6 +417,8 @@ jobs:
         with:
           workspaces: .
           key: android
+          # The defaults, plus the runner image (see the Windows job).
+          env-vars: CARGO CC CFLAGS CXX CMAKE RUST ImageVersion
       - name: Install the desktop libraries the host-side tests link against
         timeout-minutes: 20
         run: |
