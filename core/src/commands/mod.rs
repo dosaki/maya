@@ -186,6 +186,14 @@ pub fn project_dirs(cwd: &Path) -> Vec<PathBuf> {
     vec![cwd.to_path_buf()]
 }
 
+/// Whether a name read from a file or folder can be typed after "/": not
+/// empty, no space or control character, and no part (between ":" or "/")
+/// empty or starting with "." (a hidden file or folder in a cloned repo).
+pub fn usable_name(name: &str) -> bool {
+    !name.chars().any(|c| c.is_whitespace() || c.is_control())
+        && name.split([':', '/']).all(|part| !part.is_empty() && !part.starts_with('.'))
+}
+
 /// Keeps the first of each name, in order, so a user's command wins over a
 /// built-in of the same name.
 pub fn dedupe(list: Vec<CommandInfo>) -> Vec<CommandInfo> {
@@ -254,6 +262,16 @@ mod tests {
         assert_eq!(description_of("---\nname: x\nDo it"), "name: x");
         assert_eq!(description_of("---  \nname: x\n---\nDo it"), "Do it");
         assert_eq!(front_matter("---  \nname: x\n---\n").name.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn a_usable_name_can_be_typed() {
+        for ok in ["compact", "team/review", "superpowers:brainstorming", "a.b"] {
+            assert!(usable_name(ok), "{ok}");
+        }
+        for bad in ["", ".hidden", "two words", "tab\there", "bell\u{7}", "ns:.x", "a::b", "x/", "ns: y"] {
+            assert!(!usable_name(bad), "{bad:?}");
+        }
     }
 
     #[test]

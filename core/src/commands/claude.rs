@@ -2,7 +2,7 @@
 //! commands of installed plugins.
 
 use super::{
-    dedupe, description_of, builtins, front_matter, project_dirs, CommandInfo, CommandSource, Homes,
+    dedupe, description_of, builtins, front_matter, project_dirs, usable_name, CommandInfo, CommandSource, Homes,
 };
 use crate::model::Harness;
 use serde_json::Value;
@@ -90,7 +90,7 @@ fn skill_file(path: &Path, fallback: &str, prefix: Option<&str>, source: Command
         Some(p) => format!("{p}:{name}"),
         None => name,
     };
-    Some(CommandInfo::new(&name, &description_of(&text), source))
+    usable_name(&name).then(|| CommandInfo::new(&name, &description_of(&text), source))
 }
 
 /// `<root>/<dir>/SKILL.md` for each folder of `root`.
@@ -139,6 +139,9 @@ fn walk(dir: &Path, below: &mut Vec<String>, opts: (CommandSource, &str, usize),
             // A link to a file counts; a link to a folder does not.
             if kind.is_file() || (kind.is_symlink() && e.path().is_file()) {
                 let full = below.iter().map(String::as_str).chain([stem]).collect::<Vec<_>>().join(sep);
+                if !usable_name(&full) {
+                    continue;
+                }
                 if let Some(text) = read(&e.path()) {
                     list.push(CommandInfo::new(&full, &description_of(&text), source));
                 }
@@ -222,8 +225,12 @@ fn one_plugin(id: &str, root: &Path) -> Vec<CommandInfo> {
         let files = if path.is_dir() { entries(&path).into_iter().map(|e| e.path()).collect() } else { vec![path] };
         for file in files {
             let Some(stem) = file.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".md")) else { continue };
+            let name = format!("{ns}:{stem}");
+            if !usable_name(&name) {
+                continue;
+            }
             if let Some(text) = read(&file) {
-                list.push(CommandInfo::new(&format!("{ns}:{stem}"), &description_of(&text), source));
+                list.push(CommandInfo::new(&name, &description_of(&text), source));
             }
         }
     }
@@ -430,6 +437,28 @@ mod tests {
         assert!(start.elapsed().as_secs() < 5);
         assert!(find(&list, "evil").is_none() && find(&list, "zero").is_none() && find(&list, "pipe").is_none());
         assert!(find(&list, "compact").is_some());
+    }
+
+    #[test]
+    fn names_that_cannot_be_typed_are_left_out() {
+        let e = env();
+        let repo = e.root.join("repo");
+        write(repo.join(".claude/commands/.hidden.md"), "Hidden");
+        write(repo.join(".claude/commands/two words.md"), "Spaced");
+        write(repo.join(".claude/commands/bell\u{7}.md"), "Control");
+        write(repo.join(".claude/commands/.git/inside.md"), "In a dot folder");
+        write(repo.join(".claude/commands/ok.md"), "Fine");
+        write(repo.join(".claude/skills/named/SKILL.md"), "---\nname: \"has space\"\n---\n");
+        write(repo.join(".claude/skills/dotted/SKILL.md"), "---\nname: .dot\n---\n");
+        write(repo.join(".claude/skills/blank/SKILL.md"), "---\nname: \"\"\n---\n");
+        write(repo.join(".claude/skills/tab\tdir/SKILL.md"), "---\ndescription: T\n---\n");
+        let p = install(&e, "tools@tkc", "user", None);
+        write(p.join("commands/ bad.md"), "Leading space");
+        write(p.join("skills/fine/SKILL.md"), "---\nname: \"a\tb\"\n---\n");
+        let list = claude_session(&e.homes, &repo);
+        let mine: Vec<&str> = list.iter().filter(|c| c.source != Builtin).map(|c| c.name.as_str()).collect();
+        // A front matter name that cannot be typed falls back to nothing, not to the folder.
+        assert_eq!(mine, ["blank", "ok"], "{list:?}");
     }
 
     #[test]
