@@ -7,10 +7,14 @@ use super::{
 use crate::model::Harness;
 use serde_json::Value;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Command folders go no deeper than this below their root.
 const MAX_DEPTH: usize = 4;
+/// The most read of a skill or command file, and of a JSON file.
+const TEXT_MAX_BYTES: u64 = 64 * 1024;
+const JSON_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// What Claude Code offers anywhere: user and plugin commands, no project's.
 pub fn claude_machine(h: &Homes) -> Vec<CommandInfo> {
@@ -38,12 +42,33 @@ fn collect(h: &Homes, cwd: Option<&Path>) -> Vec<CommandInfo> {
     dedupe(list)
 }
 
+/// Up to `cap` bytes of a regular file, or None for anything else (a FIFO or
+/// `/dev/zero` in a cloned repo would hang or fill memory) or on any error.
+/// Text that is not UTF-8 is skipped; a cut that splits a last character is
+/// dropped back to the character before it.
+fn read_capped(path: &Path, cap: u64) -> Option<String> {
+    if !fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path).ok()?.take(cap).read_to_end(&mut bytes).ok()?;
+    match String::from_utf8(bytes) {
+        Ok(text) => Some(text),
+        Err(e) if e.utf8_error().error_len().is_none() => {
+            let keep = e.utf8_error().valid_up_to();
+            String::from_utf8(e.into_bytes()[..keep].to_vec()).ok()
+        }
+        Err(_) => None,
+    }
+}
+
+/// A skill or command file: only its front matter and first line matter.
 fn read(path: &Path) -> Option<String> {
-    fs::read_to_string(path).ok()
+    read_capped(path, TEXT_MAX_BYTES)
 }
 
 fn read_json(path: &Path) -> Option<Value> {
-    serde_json::from_str(&read(path)?).ok()
+    serde_json::from_str(&read_capped(path, JSON_MAX_BYTES)?).ok()
 }
 
 /// The entries of a folder, by name, so the list does not depend on the disk.
@@ -368,6 +393,36 @@ mod tests {
         let list = claude_machine(&e.homes);
         assert_eq!(list.iter().filter(|c| c.name == "compact").count(), 1);
         assert!(has(&list, "compact", "Mine", User));
+    }
+
+    #[test]
+    fn a_file_is_read_only_up_to_the_cap_and_only_when_regular() {
+        let e = env();
+        write(e.root.join("big.md"), &"x".repeat(1000));
+        assert_eq!(read_capped(&e.root.join("big.md"), 100).unwrap().len(), 100);
+        assert!(read_capped(&e.root, 100).is_none());
+        assert!(read_capped(&e.root.join("missing"), 100).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_or_device_in_place_of_a_skill_is_skipped_without_hanging() {
+        let e = env();
+        let repo = e.root.join("repo");
+        let fifo = repo.join(".claude/skills/evil/SKILL.md");
+        fs::create_dir_all(fifo.parent().unwrap()).unwrap();
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let zero = repo.join(".claude/skills/zero/SKILL.md");
+        fs::create_dir_all(zero.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+        let cmd = repo.join(".claude/commands/pipe.md");
+        fs::create_dir_all(cmd.parent().unwrap()).unwrap();
+        assert!(std::process::Command::new("mkfifo").arg(&cmd).status().unwrap().success());
+        let start = std::time::Instant::now();
+        let list = claude_session(&e.homes, &repo);
+        assert!(start.elapsed().as_secs() < 5);
+        assert!(find(&list, "evil").is_none() && find(&list, "zero").is_none() && find(&list, "pipe").is_none());
+        assert!(find(&list, "compact").is_some());
     }
 
     #[test]
