@@ -1,3 +1,9 @@
+# 0.62.0
+
+## New
+
+- Type `/` in a session's message box to see the commands that session has: the agent's own, your skills and commands, your plugins', and the project's, each with what it does. Tab or Enter fills one in. It works for sessions on your other machines, and on the phone.
+
 # 0.61.1
 
 ## Fixed
