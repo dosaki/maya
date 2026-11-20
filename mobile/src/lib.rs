@@ -121,6 +121,8 @@ pub fn run() {
             commands::list_machines,
             commands::list_project_dirs,
             commands::list_agents,
+            commands::list_commands,
+            commands::session_commands,
             commands::list_resumable_sessions,
             commands::resume_session,
             commands::remembered_sessions,
