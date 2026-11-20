@@ -1,4 +1,11 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const morphed = vi.hoisted(() => ({ count: 0 }));
+vi.mock("./morph", async (actual) => {
+  const real = await actual<typeof import("./morph")>();
+  return { ...real, morph: (...args: Parameters<typeof real.morph>) => (morphed.count++, real.morph(...args)) };
+});
+
 import { attachSlashMenu, matchCommands, slashQuery } from "./slash";
 import type { CommandInfo } from "./types";
 
@@ -42,6 +49,10 @@ describe("matchCommands", () => {
   it("matches the start of a name first, then anywhere", () => {
     expect(matchCommands([cmd("code-review"), cmd("review"), cmd("rename")], "re").map((c) => c.name)).toEqual(["review", "rename", "code-review"]);
     expect(matchCommands([cmd("a"), cmd("b")], "")).toHaveLength(2);
+  });
+
+  it("counts the start of a plugin command's own name, after its last colon, as a start", () => {
+    expect(matchCommands([cmd("unbrain"), cmd("superpowers:brainstorming")], "brain").map((c) => c.name)).toEqual(["superpowers:brainstorming", "unbrain"]);
   });
 });
 
@@ -175,10 +186,53 @@ describe("the menu", () => {
     expect(box.value).toBe("/co");
   });
 
-  it("matches a whole name without regard to case on Enter", () => {
+  it("matches a whole name without regard to case on Enter, and sends the name as listed", () => {
     const menu = setup();
-    type("/COMPACT");
+    type("/COMPACT keep the plan", 8);
     expect(menu.onKey(key("Enter"))).toBe(false);
+    expect(box.value).toBe("/compact keep the plan");
+  });
+
+  it("Enter sends a plugin command typed by its own name, as Claude Code takes it", () => {
+    const menu = setup([cmd("compact"), cmd("superpowers:brainstorming", "plugin")]);
+    type("/brainstorming");
+    expect(menu.onKey(key("Enter"))).toBe(false);
+    expect(box.value).toBe("/brainstorming");
+    type("/Brainstorming");
+    expect(menu.onKey(key("Enter"))).toBe(false);
+    expect(box.value).toBe("/brainstorming");
+  });
+
+  it("Enter still fills the start of a plugin command's own name", () => {
+    const menu = setup([cmd("compact"), cmd("superpowers:brainstorming", "plugin")]);
+    type("/brain");
+    expect(menu.onKey(key("Enter"))).toBe(true);
+    expect(box.value).toBe("/superpowers:brainstorming ");
+  });
+
+  it("Enter sends a word only found inside names, which Tab still fills", () => {
+    const menu = setup([cmd("compact"), cmd("code-review")]);
+    type("/view");
+    expect(menu.onKey(key("Enter"))).toBe(false);
+    expect(box.value).toBe("/view");
+    expect(menu.onKey(key("Tab"))).toBe(true);
+    expect(box.value).toBe("/code-review ");
+  });
+
+  it("typing an ordinary message does no list work", () => {
+    setup();
+    box.focus();
+    type("hello");
+    morphed.count = 0;
+    type("hello there");
+    box.dispatchEvent(new KeyboardEvent("keyup", { key: "e" }));
+    expect(morphed.count).toBe(0);
+    // A list that is open still closes when the slash goes.
+    type("/co");
+    expect(rows()).toHaveLength(1);
+    type("co");
+    expect(rows()).toHaveLength(0);
+    expect(box.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("a bare modifier key does not reopen the list after Escape", () => {

@@ -13,13 +13,36 @@ export function slashQuery(value: string, caret: number): string | null {
   return value.slice(1, wordEnd);
 }
 
+/** A plugin command's own name, after its last ":"; the whole name when it has none. */
+function ownName(name: string): string {
+  return name.slice(name.lastIndexOf(":") + 1);
+}
+
+/** Whether `typed` (lower case) starts the name, or the plugin command's own name. */
+function startsName(c: CommandInfo, typed: string): boolean {
+  const name = c.name.toLowerCase();
+  return name.startsWith(typed) || ownName(name).startsWith(typed);
+}
+
 /** Names starting with `typed` first, then names containing it, each in list order; all for "". */
 export function matchCommands(list: CommandInfo[], typed: string): CommandInfo[] {
   const t = typed.toLowerCase();
   if (!t) return [...list];
-  const starts = list.filter((c) => c.name.toLowerCase().startsWith(t));
-  const inside = list.filter((c) => !c.name.toLowerCase().startsWith(t) && c.name.toLowerCase().includes(t));
+  const starts = list.filter((c) => startsName(c, t));
+  const inside = list.filter((c) => !startsName(c, t) && c.name.toLowerCase().includes(t));
   return [...starts, ...inside];
+}
+
+/**
+ * The command `typed` names in full, as listed: a listed name, or a plugin
+ * command's own name, which Claude Code also takes; case aside. Else null.
+ */
+function wholeName(list: CommandInfo[], typed: string): string | null {
+  const t = typed.toLowerCase();
+  const exact = list.find((c) => c.name.toLowerCase() === t);
+  if (exact) return exact.name;
+  const own = list.find((c) => ownName(c.name).toLowerCase() === t);
+  return own ? ownName(own.name) : null;
 }
 
 export interface SlashMenu {
@@ -89,6 +112,8 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
 
   function refresh(): void {
     const q = slashQuery(box.value, box.selectionStart ?? 0);
+    // An ordinary message, with no list open: nothing to do on each key.
+    if (q === null && !open) return;
     const found = q === null ? [] : matchCommands(commands, q);
     if (q === null || !found.length) return close();
     const keep = open && shown[active] ? found.findIndex((c) => c.name === shown[active].name) : -1;
@@ -107,6 +132,16 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
     box.setSelectionRange(head.length, head.length);
     close();
     box.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  /** Puts `name` in place of the typed first word, keeping the rest and the caret's place after it. */
+  function rename(name: string): void {
+    const end = box.value.search(/\s/);
+    const wordEnd = end < 0 ? box.value.length : end;
+    const caret = box.selectionStart ?? wordEnd;
+    box.value = `/${name}${box.value.slice(wordEnd)}`;
+    const at = caret >= wordEnd ? caret + name.length + 1 - wordEnd : Math.min(caret, name.length + 1);
+    box.setSelectionRange(at, at);
   }
 
   box.addEventListener("input", refresh);
@@ -143,11 +178,19 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
         ev.preventDefault();
         fill(shown[active]);
         return true;
-      case "Enter":
-        if (commands.some((c) => c.name.toLowerCase() === typed.toLowerCase())) return false;
+      case "Enter": {
+        // A whole name is sent, as listed, so the agent gets the name it knows.
+        const whole = wholeName(commands, typed);
+        if (whole !== null) {
+          if (whole !== typed) rename(whole);
+          return false;
+        }
+        // Only names containing the word: a suggestion, not a completion.
+        if (!shown.some((c) => startsName(c, typed.toLowerCase()))) return false;
         ev.preventDefault();
         fill(shown[active]);
         return true;
+      }
       case "Escape":
         ev.preventDefault();
         ev.stopPropagation();
