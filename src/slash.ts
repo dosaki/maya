@@ -111,7 +111,9 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
 
   box.addEventListener("input", refresh);
   box.addEventListener("click", refresh);
+  box.addEventListener("blur", close);
   box.addEventListener("keyup", (ev) => {
+    if (ev.key === "Shift" || ev.key === "Meta" || ev.key === "Control" || ev.key === "Alt") return;
     if (ev.key === "ArrowDown" || ev.key === "ArrowUp" || ev.key === "Enter" || ev.key === "Tab" || ev.key === "Escape") return;
     refresh();
   });
@@ -128,6 +130,7 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
 
   function onKey(ev: KeyboardEvent): boolean {
     if (ev.isComposing || !open || !shown.length) return false;
+    if ((ev.key === "Tab" || ev.key === "Enter") && (ev.shiftKey || ev.ctrlKey || ev.metaKey || ev.altKey)) return false;
     switch (ev.key) {
       case "ArrowDown":
       case "ArrowUp": {
@@ -141,7 +144,7 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
         fill(shown[active]);
         return true;
       case "Enter":
-        if (commands.some((c) => c.name === typed)) return false;
+        if (commands.some((c) => c.name.toLowerCase() === typed.toLowerCase())) return false;
         ev.preventDefault();
         fill(shown[active]);
         return true;
@@ -159,7 +162,7 @@ export function attachSlashMenu(box: HTMLTextAreaElement): SlashMenu {
     element,
     setCommands(list) {
       commands = list;
-      if (open) refresh();
+      if (open || document.activeElement === box) refresh();
     },
     onKey,
     close,
