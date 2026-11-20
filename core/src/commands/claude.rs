@@ -94,7 +94,7 @@ fn skill_file(path: &Path, fallback: &str, prefix: Option<&str>, source: Command
 }
 
 /// `<root>/<dir>/SKILL.md` for each folder of `root`.
-fn skills_in(root: &Path, source: CommandSource, prefix: Option<&str>, skip_synced: bool) -> Vec<CommandInfo> {
+pub(super) fn skills_in(root: &Path, source: CommandSource, prefix: Option<&str>, skip_synced: bool) -> Vec<CommandInfo> {
     entries(root)
         .into_iter()
         .filter(|e| !(skip_synced && e.file_name() == "synced"))
@@ -112,26 +112,33 @@ fn synced_skills(root: &Path) -> Vec<CommandInfo> {
 
 /// `<root>/**/*.md`, named by the path below `root` with folders joined by `:`.
 fn commands_in(root: &Path, source: CommandSource) -> Vec<CommandInfo> {
+    command_files(root, source, ":", MAX_DEPTH)
+}
+
+/// `<root>/**/*.md` down to `depth` levels (1 is the folder itself), named by
+/// the path below `root` with folders joined by `sep`.
+pub(super) fn command_files(root: &Path, source: CommandSource, sep: &str, depth: usize) -> Vec<CommandInfo> {
     let mut list = Vec::new();
-    walk(root, &mut Vec::new(), source, &mut list);
+    walk(root, &mut Vec::new(), (source, sep, depth), &mut list);
     list
 }
 
-fn walk(dir: &Path, below: &mut Vec<String>, source: CommandSource, list: &mut Vec<CommandInfo>) {
+fn walk(dir: &Path, below: &mut Vec<String>, opts: (CommandSource, &str, usize), list: &mut Vec<CommandInfo>) {
+    let (source, sep, depth) = opts;
     for e in entries(dir) {
         let name = e.file_name().to_string_lossy().into_owned();
         let Ok(kind) = e.file_type() else { continue };
         if kind.is_dir() {
             // A symlinked folder reads as a symlink here, so it is not followed.
-            if below.len() + 1 < MAX_DEPTH {
+            if below.len() + 1 < depth {
                 below.push(name);
-                walk(&e.path(), below, source, list);
+                walk(&e.path(), below, opts, list);
                 below.pop();
             }
         } else if let Some(stem) = name.strip_suffix(".md") {
             // A link to a file counts; a link to a folder does not.
             if kind.is_file() || (kind.is_symlink() && e.path().is_file()) {
-                let full = below.iter().map(String::as_str).chain([stem]).collect::<Vec<_>>().join(":");
+                let full = below.iter().map(String::as_str).chain([stem]).collect::<Vec<_>>().join(sep);
                 if let Some(text) = read(&e.path()) {
                     list.push(CommandInfo::new(&full, &description_of(&text), source));
                 }
