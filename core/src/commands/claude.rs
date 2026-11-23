@@ -445,13 +445,18 @@ mod tests {
         let repo = e.root.join("repo");
         write(repo.join(".claude/commands/.hidden.md"), "Hidden");
         write(repo.join(".claude/commands/two words.md"), "Spaced");
-        write(repo.join(".claude/commands/bell\u{7}.md"), "Control");
+        // Windows allows no control characters in a file name, so these
+        // files can exist only elsewhere; the front matter "a\tb" below
+        // covers a control character on every platform.
+        if cfg!(unix) {
+            write(repo.join(".claude/commands/bell\u{7}.md"), "Control");
+            write(repo.join(".claude/skills/tab\tdir/SKILL.md"), "---\ndescription: T\n---\n");
+        }
         write(repo.join(".claude/commands/.git/inside.md"), "In a dot folder");
         write(repo.join(".claude/commands/ok.md"), "Fine");
         write(repo.join(".claude/skills/named/SKILL.md"), "---\nname: \"has space\"\n---\n");
         write(repo.join(".claude/skills/dotted/SKILL.md"), "---\nname: .dot\n---\n");
         write(repo.join(".claude/skills/blank/SKILL.md"), "---\nname: \"\"\n---\n");
-        write(repo.join(".claude/skills/tab\tdir/SKILL.md"), "---\ndescription: T\n---\n");
         let p = install(&e, "tools@tkc", "user", None);
         write(p.join("commands/ bad.md"), "Leading space");
         write(p.join("skills/fine/SKILL.md"), "---\nname: \"a\tb\"\n---\n");
