@@ -107,6 +107,11 @@ pub trait Executor: Send + Sync {
     fn terminals(&self) -> Option<TerminalChoices> {
         None
     }
+    /// This machine's machine-wide slash commands, per agent, for the main's
+    /// reply boxes; `None` from a Maya that lists none.
+    fn commands(&self) -> Option<Vec<crate::commands::AgentCommands>> {
+        None
+    }
     /// The terminals this Maya streams to the main; `None` from a Maya with none.
     fn live_terms(&self) -> Option<Arc<dyn LiveTerms>> {
         None
@@ -692,6 +697,8 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
     // The first board goes out right after `welcome`.
     let mut board_wanted = true;
     let mut streams = Streams { terms: exec.live_terms(), subs: HashMap::new() };
+    // The commands this connection's main was last sent; none yet, so the first board turn sends them.
+    let mut last_commands: Option<Vec<crate::commands::AgentCommands>> = None;
     let mut tick = TICK;
     loop {
         if stopped(stop) {
@@ -728,6 +735,11 @@ fn pump(ch: &mut Chan, exec: &Arc<dyn Executor>, notify: &Arc<dyn ClientNotify>,
                     send_up(ch, &Up::Terminals { terminals: now.clone() })?;
                     last_terminals = Some(now);
                 }
+            }
+            // Any main may be sent them: an older one ignores the message.
+            if let Some(now) = exec.commands().filter(|c| last_commands.as_ref() != Some(c)) {
+                send_up(ch, &Up::Commands { agents: now.clone() })?;
+                last_commands = Some(now);
             }
         }
         if last_ping.elapsed() >= PING_EVERY {
@@ -1317,6 +1329,7 @@ mod tests {
     struct Choosing {
         now: Mutex<Option<TerminalChoices>>,
         board: AtomicBool,
+        commands: Mutex<Option<Vec<crate::commands::AgentCommands>>>,
     }
 
     impl Executor for Choosing {
@@ -1331,6 +1344,9 @@ mod tests {
         }
         fn terminals(&self) -> Option<TerminalChoices> {
             self.now.lock().unwrap().clone()
+        }
+        fn commands(&self) -> Option<Vec<crate::commands::AgentCommands>> {
+            self.commands.lock().unwrap().clone()
         }
     }
 
@@ -1367,6 +1383,66 @@ mod tests {
             }
         }
         seen
+    }
+
+    /// Reads the main's end for `window`, returning the commands frames seen.
+    fn commands_within(main: &mut Chan, window: Duration) -> Vec<Vec<crate::commands::AgentCommands>> {
+        let end = Instant::now() + window;
+        let mut seen = vec![];
+        while Instant::now() < end {
+            if let Ok(Got::Text(t)) = main.read() {
+                if let Ok(Up::Commands { agents }) = crate::net::protocol::decode_up(&t) {
+                    seen.push(agents);
+                }
+            }
+        }
+        seen
+    }
+
+    /// Reads the main's end until the first commands frame, or panics after 10 s.
+    fn first_commands(main: &mut Chan) -> Vec<crate::commands::AgentCommands> {
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < end, "an Up::Commands within 10 s");
+            if let Ok(Got::Text(t)) = main.read() {
+                if let Ok(Up::Commands { agents }) = crate::net::protocol::decode_up(&t) {
+                    return agents;
+                }
+            }
+        }
+    }
+
+    fn command_list(name: &str) -> Vec<crate::commands::AgentCommands> {
+        use crate::commands::{AgentCommands, CommandInfo, CommandSource};
+        vec![AgentCommands { harness: crate::model::Harness::ClaudeCode, commands: vec![CommandInfo::new(name, "", CommandSource::Builtin)] }]
+    }
+
+    #[test]
+    fn commands_go_up_once_and_again_only_when_they_change() {
+        let exec = Arc::new(Choosing { commands: Mutex::new(Some(command_list("compact"))), ..Default::default() });
+        let stop = Arc::new(AtomicBool::new(false));
+        // A main without `CAP_PICK_TERMINAL`: the commands need no cap.
+        let (mut main, run) = serving_exec(exec.clone(), false, None, stop.clone());
+        assert_eq!(first_commands(&mut main), command_list("compact"));
+        for _ in 0..2 {
+            exec.board.store(true, Ordering::SeqCst);
+            assert!(commands_within(&mut main, QUIET).is_empty(), "the same list is not sent again");
+        }
+        *exec.commands.lock().unwrap() = Some(command_list("review"));
+        exec.board.store(true, Ordering::SeqCst);
+        assert_eq!(first_commands(&mut main), command_list("review"));
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn a_maya_with_no_commands_sends_none() {
+        let exec = Arc::new(Choosing::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (mut main, run) = serving_exec(exec.clone(), true, None, stop.clone());
+        assert!(commands_within(&mut main, QUIET).is_empty());
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(run.join().unwrap(), Ok(()));
     }
 
     #[test]

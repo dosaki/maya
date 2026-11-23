@@ -7,6 +7,7 @@ use crate::hub::Hub;
 use crate::android;
 use maya_core::actions::{Route, StartResult};
 use maya_core::answer::Pick;
+use maya_core::commands::{AgentCommands, CommandInfo};
 use maya_core::config::{Config, NewSessionTerminal};
 use maya_core::launch::LaunchOptions;
 use maya_core::model::{Card, Harness};
@@ -44,6 +45,31 @@ pub fn list_sessions(hub: H) -> Vec<Card> {
 #[tauri::command(async)]
 pub fn session_history(hub: H, session_id: String) -> Result<Vec<Turn>, String> {
     data(hub.send(&session_id, |session| CommandKind::History { session })?)
+}
+
+/// The slash commands a session can run, from the machine that runs it.
+#[tauri::command(async)]
+pub fn session_commands(hub: H, session_id: String) -> Result<Vec<CommandInfo>, String> {
+    data(hub.send(&session_id, |session| CommandKind::ListCommands { session })?)
+}
+
+/// Every agent's built-in commands, from this phone's own copy: the page
+/// shows them at once, while `list_commands` waits on the main, which an
+/// older main never answers until the request times out.
+#[tauri::command]
+pub fn builtin_commands() -> Vec<AgentCommands> {
+    maya_core::commands::builtin_lists()
+}
+
+/// The slash commands the machine's agents offer everywhere; the built-ins
+/// when the main cannot say.
+#[tauri::command(async)]
+pub fn list_commands(hub: H, machine: Option<String>) -> Vec<AgentCommands> {
+    let machine = machine.filter(|m| !m.is_empty());
+    hub.request(machine.as_deref(), Request::ListCommands).and_then(data).unwrap_or_else(|e| {
+        log::line("network", format!("could not list the commands: {e}"));
+        maya_core::commands::builtin_lists()
+    })
 }
 
 #[tauri::command(async)]
@@ -454,6 +480,12 @@ mod tests {
         apply_settings(&mut c, &from);
         assert!(!c.speak_notifications);
         assert!(c.wake_word);
+    }
+
+    #[test]
+    fn the_builtins_need_no_main() {
+        let all = builtin_commands();
+        assert!(all.iter().any(|a| a.harness == Harness::ClaudeCode && a.commands.iter().any(|c| c.name == "compact")));
     }
 
     #[test]

@@ -16,6 +16,10 @@ use std::time::Duration;
 /// How long a main waits for a command's result from an assistant.
 pub const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// What a session's command list answers when its machine never sent its
+/// commands: its Maya predates them and would not know `ListCommands`.
+pub const NO_COMMANDS: &str = "That machine's Maya is too old to list its commands.";
+
 /// The command must fit in one frame: one file, and all of them together.
 const MAX_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -113,6 +117,16 @@ pub fn check_remote_terminal(pick: Option<NewSessionTerminal>, remote: &Option<T
     }
 }
 
+/// Before a session's command list goes to its machine: a connected machine
+/// that never sent its commands runs an older Maya, so say so at once. One
+/// that is not connected gets the usual routing error, not this one.
+pub fn check_remote_commands(boards: &[super::merge::RemoteBoard], machine: &str) -> Result<(), String> {
+    if super::merge::is_connected(boards, machine) && super::merge::commands_of(boards, machine).is_none() {
+        return Err(NO_COMMANDS.into());
+    }
+    Ok(())
+}
+
 /// The pickers' machine list from the network status: the display names
 /// the cards use (`name (address)` for assistants sharing a name).
 pub fn machines_of(status: &NetworkStatus) -> Vec<MachineInfo> {
@@ -131,7 +145,7 @@ pub enum Target {
 pub fn target_of(kind: &super::protocol::CommandKind) -> Target {
     use super::protocol::CommandKind::*;
     match kind {
-        Reply { session, .. } | Answer { session, .. } | Stop { session } | Pick { session, .. } | Compact { session } | Close { session } | Rename { session, .. } | SetOption { session, .. } | CycleMode { session } | Slash { session, .. } | History { session } => Target::Session(session.clone()),
+        Reply { session, .. } | Answer { session, .. } | Stop { session } | Pick { session, .. } | Compact { session } | Close { session } | Rename { session, .. } | SetOption { session, .. } | CycleMode { session } | Slash { session, .. } | History { session } | ListCommands { session } => Target::Session(session.clone()),
         Start { .. } | Resume { .. } | ListResumable { .. } | Promote { .. } | Forget { .. } | AskBrain { .. } => Target::Machine,
     }
 }
@@ -173,6 +187,14 @@ mod tests {
         use crate::net::protocol::CommandKind;
         assert_eq!(target_of(&CommandKind::Stop { session: "s1".into() }), Target::Session("s1".into()));
         assert_eq!(target_of(&CommandKind::Pick { session: "s2".into(), ask_id: 1, question: 0, pick: Pick::Chat }), Target::Session("s2".into()));
+    }
+
+    #[test]
+    fn list_commands_targets_its_session() {
+        use crate::net::protocol::CommandKind;
+        assert_eq!(target_of(&CommandKind::ListCommands { session: "s1".into() }), Target::Session("s1".into()));
+        assert_eq!(agent_of(&CommandKind::ListCommands { session: "s1".into() }), None);
+        assert_eq!(NO_COMMANDS, "That machine's Maya is too old to list its commands.");
     }
 
     #[test]
@@ -261,6 +283,16 @@ mod tests {
         assert!(check_remote_terminal(None, &None, true, "laptop").is_ok());
         assert_eq!(check_remote_terminal(Some(Terminal), &None, false, "laptop").unwrap_err(), "laptop is not connected");
         assert!(check_remote_terminal(None, &None, false, "laptop").is_ok());
+    }
+
+    #[test]
+    fn check_remote_commands_refuses_only_a_connected_older_maya() {
+        use super::super::merge::RemoteBoard;
+        let board = |machine: &str, connected: bool, commands: Option<Vec<crate::commands::AgentCommands>>| RemoteBoard { machine: machine.into(), hostname: "h".into(), platform: "macos".into(), address: "10.0.0.9".into(), cards: vec![], dirs: vec![], agents: None, remembered: None, worktrees: false, terminals: false, terminal_choices: None, commands, received_at: 0, connected };
+        let boards = vec![board("old", true, None), board("away", false, None), board("new", true, Some(vec![]))];
+        assert_eq!(check_remote_commands(&boards, "old"), Err(NO_COMMANDS.into()));
+        assert_eq!(check_remote_commands(&boards, "away"), Ok(()), "not connected: routing says so");
+        assert_eq!(check_remote_commands(&boards, "new"), Ok(()));
     }
 
     #[test]
