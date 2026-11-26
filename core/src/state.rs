@@ -210,30 +210,40 @@ fn awaiting_for_tool(e: &HookEvent) -> Awaiting {
     }
 }
 
-pub fn derive(i: &DeriveInput) -> Card {
+/// An awaited prompt: what is awaited, when, which agent asked (None = the
+/// main agent), and the call that asked (None for the bare fallback).
+type Open<'a> = (Awaiting, u64, Option<String>, Option<&'a HookEvent>);
+
+pub fn derive<'a>(i: &DeriveInput<'a>) -> Card {
     let r = i.registry;
-    // (what is awaited, when, which agent asked: None = the main agent, the call that asked)
-    let mut awaiting: Option<(Awaiting, u64, Option<String>, Option<&HookEvent>)> = None;
-    // A prompt that a different call of the same agent finishing cleared: one
-    // that ran beside it, such as an Agent launch or another question. A later
-    // permission_prompt Notification says it is still on screen.
-    let mut displaced: Option<(Awaiting, u64, Option<String>, Option<&HookEvent>)> = None;
+    let mut awaiting: Option<Open> = None;
+    // Prompts that may still be open though the card moved on, oldest first:
+    // one a newer prompt replaced (a subagent's, or a second question), or one
+    // a different call of the same agent finishing cleared (an Agent launched
+    // beside it). A permission_prompt Notification with nothing awaited says
+    // one is still on screen.
+    let mut displaced: Vec<Open> = Vec::new();
     // (is_stop, timestamp) of the most recent main-agent Stop or UserPromptSubmit.
     let mut last_turn: Option<(bool, u64)> = None;
     // An Esc after the latest turn start or end: the ask that turn left is over.
     let mut interrupted = false;
 
+    let raise = |awaiting: &mut Option<Open<'a>>, displaced: &mut Vec<Open<'a>>, e: &'a HookEvent| {
+        if let Some(old) = awaiting.take() {
+            if old.3.is_some_and(|c| !same_call(c, e)) {
+                displaced.push(old);
+            }
+        }
+        *awaiting = Some((awaiting_for_tool(e), e.received_at, e.agent_id.clone(), Some(e)));
+    };
+
     for e in i.events {
         match e.hook_event_name.as_str() {
-            "PermissionRequest" => {
-                awaiting = Some((awaiting_for_tool(e), e.received_at, e.agent_id.clone(), Some(e)));
-            }
-            "PreToolUse" if matches!(e.tool_name.as_deref(), Some("AskUserQuestion") | Some("ExitPlanMode")) => {
-                awaiting = Some((awaiting_for_tool(e), e.received_at, e.agent_id.clone(), Some(e)));
-            }
+            "PermissionRequest" => raise(&mut awaiting, &mut displaced, e),
+            "PreToolUse" if matches!(e.tool_name.as_deref(), Some("AskUserQuestion") | Some("ExitPlanMode")) => raise(&mut awaiting, &mut displaced, e),
             "Notification" if e.notification_type.as_deref() == Some("permission_prompt") => {
                 if awaiting.is_none() {
-                    awaiting = displaced.take().or_else(|| Some((Awaiting { kind: AwaitKind::Permission, detail: "Permission prompt".to_string(), questions: vec![] }, e.received_at, e.agent_id.clone(), None)));
+                    awaiting = displaced.pop().or_else(|| Some((Awaiting { kind: AwaitKind::Permission, detail: "Permission prompt".to_string(), questions: vec![] }, e.received_at, e.agent_id.clone(), None)));
                 }
             }
             // A tool finishing only resolves a prompt raised by the same agent:
@@ -242,31 +252,30 @@ pub fn derive(i: &DeriveInput) -> Card {
             // terminal), so any call of that agent finishing clears it; one
             // cleared by a different call is kept in case it is still open.
             "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
-                if displaced.as_ref().map_or(false, |(_, _, _, call)| call.map_or(false, |c| same_call(c, e))) {
-                    displaced = None;
-                }
+                displaced.retain(|(_, _, _, call)| call.is_none_or(|c| !same_call(c, e)));
                 if awaiting.as_ref().map_or(false, |(_, _, agent, _)| *agent == e.agent_id) {
-                    let cleared = awaiting.take();
-                    if cleared.as_ref().map_or(false, |(_, _, _, call)| call.map_or(false, |c| !same_call(c, e))) {
-                        displaced = cleared;
+                    if let Some(cleared) = awaiting.take() {
+                        if cleared.3.is_some_and(|c| !same_call(c, e)) {
+                            displaced.push(cleared);
+                        }
                     }
                 }
             }
             "Stop" if e.agent_id.is_none() => {
                 awaiting = None;
-                displaced = None;
+                displaced.clear();
                 interrupted = false;
                 last_turn = Some((true, e.received_at));
             }
             // Written by Maya when it presses Esc: Claude's hooks say nothing of an interrupt.
             "MayaInterrupt" if e.agent_id.is_none() => {
                 awaiting = None;
-                displaced = None;
+                displaced.clear();
                 interrupted = true;
             }
             "UserPromptSubmit" if e.agent_id.is_none() => {
                 awaiting = None;
-                displaced = None;
+                displaced.clear();
                 interrupted = false;
                 last_turn = Some((false, e.received_at));
             }
@@ -670,6 +679,25 @@ use crate::events::HookEvent;
         let aw = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 50).awaiting.unwrap();
         assert_eq!(aw.detail, "Plan OK?");
         assert_eq!(aw.questions.len(), 1);
+    }
+
+    #[test]
+    fn the_newer_question_answered_first_leaves_the_older_on_the_card() {
+        let evs = [ask("PermissionRequest", "Spec OK?", 10), ask("PermissionRequest", "Plan OK?", 20), ask("PostToolUse", "Plan OK?", 30), prompt_notification(40)];
+        let c = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 50);
+        assert_eq!(c.state_since, 10);
+        assert_eq!(c.awaiting.unwrap().detail, "Spec OK?");
+    }
+
+    #[test]
+    fn a_subagent_prompt_answered_leaves_the_main_agent_prompt_on_the_card() {
+        let main = tool_ev("PermissionRequest", "Bash", serde_json::json!({"command": "git push"}), 10);
+        let mut sub = tool_ev("PermissionRequest", "Bash", serde_json::json!({"command": "ls"}), 20);
+        sub.agent_id = Some("agent-x".into());
+        let mut sub_done = tool_ev("PostToolUse", "Bash", serde_json::json!({"command": "ls"}), 30);
+        sub_done.agent_id = Some("agent-x".into());
+        let evs = [main, sub, sub_done, prompt_notification(40)];
+        assert_eq!(run(&reg("busy", 0), &evs, &TranscriptTail::default(), 50).awaiting.unwrap().detail, "Bash: git push");
     }
 
     #[test]
