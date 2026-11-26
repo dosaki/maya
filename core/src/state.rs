@@ -182,6 +182,12 @@ fn question_detail(e: &HookEvent) -> String {
         .to_string()
 }
 
+/// Whether `done` is the call that `asked` raised a prompt for. The hook trims
+/// both events' tool_input the same way, so one call's events match.
+fn same_call(asked: &HookEvent, done: &HookEvent) -> bool {
+    asked.agent_id == done.agent_id && asked.tool_name == done.tool_name && asked.tool_input == done.tool_input
+}
+
 fn awaiting_for_tool(e: &HookEvent) -> Awaiting {
     match e.tool_name.as_deref() {
         Some("AskUserQuestion") => Awaiting {
@@ -206,8 +212,12 @@ fn awaiting_for_tool(e: &HookEvent) -> Awaiting {
 
 pub fn derive(i: &DeriveInput) -> Card {
     let r = i.registry;
-    // (what is awaited, when, which agent asked: None = the main agent)
-    let mut awaiting: Option<(Awaiting, u64, Option<String>)> = None;
+    // (what is awaited, when, which agent asked: None = the main agent, the call that asked)
+    let mut awaiting: Option<(Awaiting, u64, Option<String>, Option<&HookEvent>)> = None;
+    // A prompt that a different call of the same agent finishing cleared: one
+    // that ran beside it, such as an Agent launch or another question. A later
+    // permission_prompt Notification says it is still on screen.
+    let mut displaced: Option<(Awaiting, u64, Option<String>, Option<&HookEvent>)> = None;
     // (is_stop, timestamp) of the most recent main-agent Stop or UserPromptSubmit.
     let mut last_turn: Option<(bool, u64)> = None;
     // An Esc after the latest turn start or end: the ask that turn left is over.
@@ -216,35 +226,47 @@ pub fn derive(i: &DeriveInput) -> Card {
     for e in i.events {
         match e.hook_event_name.as_str() {
             "PermissionRequest" => {
-                awaiting = Some((awaiting_for_tool(e), e.received_at, e.agent_id.clone()));
+                awaiting = Some((awaiting_for_tool(e), e.received_at, e.agent_id.clone(), Some(e)));
             }
             "PreToolUse" if matches!(e.tool_name.as_deref(), Some("AskUserQuestion") | Some("ExitPlanMode")) => {
-                awaiting = Some((awaiting_for_tool(e), e.received_at, e.agent_id.clone()));
+                awaiting = Some((awaiting_for_tool(e), e.received_at, e.agent_id.clone(), Some(e)));
             }
             "Notification" if e.notification_type.as_deref() == Some("permission_prompt") => {
                 if awaiting.is_none() {
-                    awaiting = Some((Awaiting { kind: AwaitKind::Permission, detail: "Permission prompt".to_string(), questions: vec![] }, e.received_at, e.agent_id.clone()));
+                    awaiting = displaced.take().or_else(|| Some((Awaiting { kind: AwaitKind::Permission, detail: "Permission prompt".to_string(), questions: vec![] }, e.received_at, e.agent_id.clone(), None)));
                 }
             }
             // A tool finishing only resolves a prompt raised by the same agent:
             // a background subagent's tool calls must not hide the main agent's prompt.
+            // A prompt can end with no event of its own (turned down in the
+            // terminal), so any call of that agent finishing clears it; one
+            // cleared by a different call is kept in case it is still open.
             "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
-                if awaiting.as_ref().map_or(false, |(_, _, agent)| *agent == e.agent_id) {
-                    awaiting = None;
+                if displaced.as_ref().map_or(false, |(_, _, _, call)| call.map_or(false, |c| same_call(c, e))) {
+                    displaced = None;
+                }
+                if awaiting.as_ref().map_or(false, |(_, _, agent, _)| *agent == e.agent_id) {
+                    let cleared = awaiting.take();
+                    if cleared.as_ref().map_or(false, |(_, _, _, call)| call.map_or(false, |c| !same_call(c, e))) {
+                        displaced = cleared;
+                    }
                 }
             }
             "Stop" if e.agent_id.is_none() => {
                 awaiting = None;
+                displaced = None;
                 interrupted = false;
                 last_turn = Some((true, e.received_at));
             }
             // Written by Maya when it presses Esc: Claude's hooks say nothing of an interrupt.
             "MayaInterrupt" if e.agent_id.is_none() => {
                 awaiting = None;
+                displaced = None;
                 interrupted = true;
             }
             "UserPromptSubmit" if e.agent_id.is_none() => {
                 awaiting = None;
+                displaced = None;
                 interrupted = false;
                 last_turn = Some((false, e.received_at));
             }
@@ -264,7 +286,7 @@ pub fn derive(i: &DeriveInput) -> Card {
 
     if i.events.is_empty() {
         if let Some(q) = &i.transcript.open_question {
-            awaiting = Some((Awaiting { kind: q.kind, detail: q.detail.clone(), questions: q.questions.clone() }, r.status_updated_at, None));
+            awaiting = Some((Awaiting { kind: q.kind, detail: q.detail.clone(), questions: q.questions.clone() }, r.status_updated_at, None, None));
         }
     }
 
@@ -285,7 +307,7 @@ pub fn derive(i: &DeriveInput) -> Card {
         _ => None,
     };
 
-    let (state, state_since, aw) = if let Some((a, ts, _)) = awaiting {
+    let (state, state_since, aw) = if let Some((a, ts, _, _)) = awaiting {
         (State::Awaiting, ts, Some(a))
     } else if is_busy {
         (State::Working, r.status_updated_at, None)
@@ -619,6 +641,47 @@ use crate::events::HookEvent;
         let c = run(&reg("busy", 0), &[e], &TranscriptTail::default(), 20);
         assert_eq!(c.state, State::Awaiting);
         assert_eq!(c.awaiting.unwrap().kind, AwaitKind::Permission);
+    }
+
+    fn prompt_notification(ts: u64) -> HookEvent {
+        HookEvent { notification_type: Some("permission_prompt".into()), ..ev("Notification", ts) }
+    }
+
+    fn ask(name: &str, question: &str, ts: u64) -> HookEvent {
+        tool_ev(name, "AskUserQuestion", serde_json::json!({"questions": [{"question": question, "header": "H", "options": [{"label": "Yes", "description": ""}]}]}), ts)
+    }
+
+    #[test]
+    fn a_sibling_call_finishing_does_not_lose_the_prompt_the_notification_reports() {
+        // An Agent launched beside the question returns while the question waits.
+        let evs = [ask("PreToolUse", "Which stack?", 10), ask("PermissionRequest", "Which stack?", 10), tool_ev("PostToolUse", "Agent", serde_json::json!({}), 10), prompt_notification(16)];
+        let c = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 20);
+        assert_eq!(c.state, State::Awaiting);
+        assert_eq!(c.state_since, 10);
+        let aw = c.awaiting.unwrap();
+        assert_eq!(aw.kind, AwaitKind::Question);
+        assert_eq!(aw.detail, "Which stack?");
+        assert_eq!(aw.questions[0].options[0].label, "Yes");
+    }
+
+    #[test]
+    fn one_question_answered_leaves_the_other_open_question_on_the_card() {
+        let evs = [ask("PermissionRequest", "Spec OK?", 10), ask("PermissionRequest", "Plan OK?", 20), ask("PostToolUse", "Spec OK?", 30), prompt_notification(40)];
+        let aw = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 50).awaiting.unwrap();
+        assert_eq!(aw.detail, "Plan OK?");
+        assert_eq!(aw.questions.len(), 1);
+    }
+
+    #[test]
+    fn a_prompt_that_ended_is_not_brought_back_by_a_later_notification() {
+        let bash = || tool_ev("PermissionRequest", "Bash", serde_json::json!({"command": "ls"}), 10);
+        let sibling = tool_ev("PostToolUse", "Read", serde_json::json!({"file_path": "/a"}), 11);
+        let own = tool_ev("PostToolUse", "Bash", serde_json::json!({"command": "ls"}), 12);
+        for ended in [own, ev("UserPromptSubmit", 12), ev("Stop", 12), ev("MayaInterrupt", 12)] {
+            let evs = [bash(), sibling.clone(), ended.clone(), prompt_notification(30)];
+            let aw = run(&reg("busy", 0), &evs, &TranscriptTail::default(), 40).awaiting.unwrap();
+            assert_eq!(aw.detail, "Permission prompt", "after {}", ended.hook_event_name);
+        }
     }
 
     #[test]
