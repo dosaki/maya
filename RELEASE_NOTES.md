@@ -1,3 +1,9 @@
+# 0.62.1
+
+## Fixed
+
+- A session waiting on a question or a permission shows its options again when Claude was running another step beside it, so you can answer in Maya. It showed only "Permission prompt", and you had to answer in the terminal.
+
 # 0.62.0
 
 ## New
