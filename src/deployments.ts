@@ -1,10 +1,11 @@
 import { formatAge } from "./format";
 import type { DeploymentRun, DeploymentState } from "./types";
 
-/** What the pane remembers per run between repaints: a click in flight, and why the last one failed. */
+/** What the pane remembers between repaints: a click in flight and why the last one failed, per run, and whether the dismissed rows show. */
 export interface RowUi {
   busy: Set<number>;
   errors: Map<number, string>;
+  showDismissed: boolean;
 }
 
 export type DeploymentAction =
@@ -13,6 +14,10 @@ export type DeploymentAction =
   /** `environmentIds` are the environments the row showed; the backend refuses if they changed. */
   | { kind: "approve"; repo: string; runId: number; environmentIds: number[] }
   | { kind: "reject"; repo: string; runId: number; environmentIds: number[] }
+  /** Off the list, and back: Maya only, GitHub is not told. */
+  | { kind: "dismiss"; repo: string; runId: number }
+  | { kind: "undismiss"; repo: string; runId: number }
+  | { kind: "toggle-dismissed" }
   | { kind: "git-settings" };
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
@@ -39,9 +44,10 @@ export function withoutRun(state: DeploymentState, repo: string, runId: number):
   return { ...state, runs: state.runs.filter((r) => !(r.repo === repo && r.runId === runId)) };
 }
 
-function renderRun(run: DeploymentRun, nowMs: number, ui: RowUi): HTMLElement {
+/** A row; a dismissed one is greyed and only offers Undismiss. */
+function renderRun(run: DeploymentRun, nowMs: number, ui: RowUi, dismissed = false): HTMLElement {
   const wait = run.wait;
-  const root = el("article", wait.kind === "blocked" ? "pr deploy deploy--blocked" : "pr deploy");
+  const root = el("article", dismissed ? "pr deploy deploy--dismissed" : wait.kind === "blocked" ? "pr deploy deploy--blocked" : "pr deploy");
   root.dataset.repo = run.repo;
   root.dataset.runId = String(run.runId);
   if (wait.kind === "approval") root.dataset.environmentIds = wait.environments.map((e) => e.id).join(",");
@@ -67,19 +73,30 @@ function renderRun(run: DeploymentRun, nowMs: number, ui: RowUi): HTMLElement {
   const since = Date.parse(run.since);
   main.append(el("div", "pr__meta", `${run.actor} · waiting ${Number.isFinite(since) ? formatAge(since, nowMs) : "?"}`));
   root.append(main);
-  if (wait.kind === "approval") {
+  if (wait.kind === "approval" || dismissed) {
     const busy = ui.busy.has(run.runId);
     const error = ui.errors.get(run.runId);
     if (error) main.append(el("div", "deploy__error", error));
     const actions = el("div", "card__actions");
-    for (const env of wait.environments) actions.append(el("span", "pr__chip", env.name));
-    const reject = button("card__btn", "reject", "Reject");
-    const approve = button("card__btn card__btn--primary", "approve", "Approve");
-    reject.disabled = approve.disabled = busy;
-    actions.append(reject, approve);
+    if (wait.kind === "approval") for (const env of wait.environments) actions.append(el("span", "pr__chip", env.name));
+    const buttons = dismissed
+      ? [button("card__btn", "undismiss", "Undismiss")]
+      : [button("card__btn card__btn--quiet", "dismiss", "Dismiss"), button("card__btn", "reject", "Reject"), button("card__btn card__btn--primary", "approve", "Approve")];
+    for (const b of buttons) b.disabled = busy;
+    actions.append(...buttons);
     root.append(actions);
   }
   return root;
+}
+
+/** "2 dismissed · Show", then the dismissed rows when shown. */
+function renderDismissed(runs: DeploymentRun[], nowMs: number, ui: RowUi): HTMLElement[] {
+  const line = el("div", "deploy__dismissed", `${runs.length} dismissed · `);
+  line.append(button("deploy__link", "toggle-dismissed", ui.showDismissed ? "Hide" : "Show"));
+  if (!ui.showDismissed) return [line];
+  const list = el("div", "reviews__list");
+  for (const run of runs) list.append(renderRun(run, nowMs, ui, true));
+  return [line, list];
 }
 
 /**
@@ -101,11 +118,12 @@ export function renderDeployments(state: DeploymentState, nowMs: number, ui: Row
   if (state.error) root.append(el("div", "reviews__error", state.error));
   if (state.runs.length === 0) {
     root.append(el("div", "reviews__empty", state.fetchedAt === null ? "Checking…" : "No deployments are waiting on you."));
-    return root;
+  } else {
+    const list = el("div", "reviews__list");
+    for (const run of state.runs) list.append(renderRun(run, nowMs, ui));
+    root.append(list);
   }
-  const list = el("div", "reviews__list");
-  for (const run of state.runs) list.append(renderRun(run, nowMs, ui));
-  root.append(list);
+  if (state.dismissed.length > 0) root.append(...renderDismissed(state.dismissed, nowMs, ui));
   return root;
 }
 
@@ -113,11 +131,13 @@ export function renderDeployments(state: DeploymentState, nowMs: number, ui: Row
 export function deploymentActionFor(target: Element): DeploymentAction | null {
   const btn = target.closest<HTMLElement>("button[data-action]");
   if (btn?.dataset.action === "git-settings") return { kind: "git-settings" };
+  if (btn?.dataset.action === "toggle-dismissed") return { kind: "toggle-dismissed" };
   const row = target.closest<HTMLElement>(".deploy");
   const kind = btn?.dataset.action;
   if (!row?.dataset.repo || !row.dataset.runId) return null;
-  if (kind !== "approve" && kind !== "reject" && kind !== "open-run" && kind !== "open-blocker") return null;
   const runId = Number(row.dataset.runId);
+  if (kind === "dismiss" || kind === "undismiss") return { kind, repo: row.dataset.repo, runId };
+  if (kind !== "approve" && kind !== "reject" && kind !== "open-run" && kind !== "open-blocker") return null;
   if (kind === "approve" || kind === "reject") {
     const environmentIds = (row.dataset.environmentIds ?? "").split(",").filter(Boolean).map(Number);
     return { kind, repo: row.dataset.repo, runId, environmentIds };

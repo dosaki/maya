@@ -25,9 +25,10 @@ const state = (runs: DeploymentRun[], over: Partial<DeploymentState> = {}): Depl
   off: false,
   assistant: false,
   fetchedAt: 1,
+  dismissed: [],
   ...over,
 });
-const ui = (busy: number[] = [], errors: [number, string][] = []): RowUi => ({ busy: new Set(busy), errors: new Map(errors) });
+const ui = (busy: number[] = [], errors: [number, string][] = [], showDismissed = false): RowUi => ({ busy: new Set(busy), errors: new Map(errors), showDismissed });
 
 describe("renderDeployments", () => {
   it("paints an approval row with its environments and both buttons", () => {
@@ -39,7 +40,8 @@ describe("renderDeployments", () => {
     expect(row.querySelector(".pr__meta")?.textContent).toBe("jane · waiting 2h");
     expect([...row.children].map((c) => c.className)).toEqual(["pr__main", "card__actions"]);
     const right = [...row.querySelector(":scope > .card__actions")!.children].map((c) => (c as HTMLElement).dataset.action ?? c.className);
-    expect(right).toEqual(["pr__chip", "reject", "approve"]);
+    expect(right).toEqual(["pr__chip", "dismiss", "reject", "approve"]);
+    expect(row.querySelector("[data-action=dismiss]")?.textContent).toBe("Dismiss");
     expect(row.querySelector("[data-action=open-run]")?.textContent).toBe("Deploy");
     expect(row.querySelector(".pr__title")?.textContent).toBe("change 7");
   });
@@ -51,6 +53,7 @@ describe("renderDeployments", () => {
     expect(row.querySelector("[data-action=open-blocker]")?.textContent).toBe("Waiting on a1b2c3d fix login redirect");
     expect(row.querySelector("[data-action=approve]")).toBeNull();
     expect(row.querySelector("[data-action=reject]")).toBeNull();
+    expect(row.querySelector("[data-action=dismiss]")).toBeNull();
     expect(row.querySelector(".pr__chip")).toBeNull();
     expect(row.querySelector(":scope > .pr__main [data-action=open-blocker]")).not.toBeNull();
     expect(deploymentActionFor(row.querySelector("[data-action=open-blocker]")!)).toEqual({ kind: "open-blocker", repo: "O/r", runId: 9 });
@@ -68,10 +71,38 @@ describe("renderDeployments", () => {
     const mine = root.querySelector<HTMLElement>("[data-run-id='7']")!;
     expect(mine.querySelector<HTMLButtonElement>("[data-action=approve]")!.disabled).toBe(true);
     expect(mine.querySelector<HTMLButtonElement>("[data-action=reject]")!.disabled).toBe(true);
+    expect(mine.querySelector<HTMLButtonElement>("[data-action=dismiss]")!.disabled).toBe(true);
     expect(mine.querySelector(".deploy__error")?.textContent).toBe("403: nope");
     const other = root.querySelector<HTMLElement>("[data-run-id='8']")!;
     expect(other.querySelector<HTMLButtonElement>("[data-action=approve]")!.disabled).toBe(false);
     expect(other.querySelector(".deploy__error")).toBeNull();
+  });
+
+  it("hides the dismissed rows behind a line that counts them", () => {
+    const root = renderDeployments(state([approval(7, ["production"])], { dismissed: [approval(8, ["production"]), approval(9, ["eu"])] }), NOW, ui());
+    expect(root.querySelector("[data-run-id='8']")).toBeNull();
+    expect(root.querySelector(".deploy__dismissed")?.textContent).toBe("2 dismissed · Show");
+    expect(root.lastElementChild?.classList.contains("deploy__dismissed")).toBe(true);
+    expect(deploymentActionFor(root.querySelector("[data-action=toggle-dismissed]")!)).toEqual({ kind: "toggle-dismissed" });
+  });
+
+  it("shows the dismissed rows, greyed, with only Undismiss, once asked", () => {
+    const root = renderDeployments(state([], { dismissed: [approval(8, ["production"])] }), NOW, ui([], [[8, "could not save"]], true));
+    expect(root.querySelector(".reviews__empty")?.textContent).toBe("No deployments are waiting on you.");
+    expect(root.querySelector(".deploy__dismissed")?.textContent).toBe("1 dismissed · Hide");
+    const row = root.querySelector<HTMLElement>("[data-run-id='8']")!;
+    expect(row.classList.contains("deploy--dismissed")).toBe(true);
+    expect(row.querySelector("[data-action=approve]")).toBeNull();
+    expect(row.querySelector("[data-action=reject]")).toBeNull();
+    expect(row.querySelector("[data-action=dismiss]")).toBeNull();
+    expect(row.querySelector(".pr__chip")?.textContent).toBe("production");
+    expect(row.querySelector(".deploy__error")?.textContent).toBe("could not save");
+    expect(deploymentActionFor(row.querySelector("[data-action=undismiss]")!)).toEqual({ kind: "undismiss", repo: "O/r", runId: 8 });
+    expect(deploymentActionFor(row.querySelector("[data-action=open-run]")!)).toEqual({ kind: "open-run", repo: "O/r", runId: 8 });
+  });
+
+  it("has no dismissed line when nothing is dismissed", () => {
+    expect(renderDeployments(state([approval(7, ["p"])]), NOW, ui([], [], true)).querySelector(".deploy__dismissed")).toBeNull();
   });
 
   it("shows the empty, checking, off and assistant states", () => {
@@ -93,6 +124,7 @@ describe("deploymentActionFor", () => {
     const pick = (sel: string) => root.querySelector<HTMLElement>(sel)!;
     expect(deploymentActionFor(pick("[data-run-id='7'] [data-action=approve]"))).toEqual({ kind: "approve", repo: "O/r", runId: 7, environmentIds: [0] });
     expect(deploymentActionFor(pick("[data-run-id='7'] [data-action=reject]"))).toEqual({ kind: "reject", repo: "O/r", runId: 7, environmentIds: [0] });
+    expect(deploymentActionFor(pick("[data-run-id='7'] [data-action=dismiss]"))).toEqual({ kind: "dismiss", repo: "O/r", runId: 7 });
     expect(deploymentActionFor(pick("[data-run-id='7'] [data-action=open-run]"))).toEqual({ kind: "open-run", repo: "O/r", runId: 7 });
     expect(deploymentActionFor(pick("[data-run-id='9'] [data-action=open-blocker]"))).toEqual({ kind: "open-blocker", repo: "O/r", runId: 9 });
     expect(deploymentActionFor(pick("[data-run-id='7'] .pr__title"))).toBeNull();
