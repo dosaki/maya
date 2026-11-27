@@ -1,3 +1,4 @@
+use crate::config::DismissedRun;
 use crate::forge::github::{active_repos, pending_deployments, repo_needs_approval, runs};
 use crate::forge::{is_rate_limit, is_refusal, Forge, Http};
 use serde::Serialize;
@@ -212,6 +213,25 @@ pub fn approval_count(runs: &[DeploymentRun]) -> usize {
     runs.iter().filter(|r| matches!(r.wait, RunWait::Approval { .. })).count()
 }
 
+fn dismissed(run: &DeploymentRun, dismissed: &[DismissedRun]) -> bool {
+    dismissed.iter().any(|d| d.repo == run.repo && d.run_id == run.run_id)
+}
+
+/// `runs` split into the rows to show and the rows the user dismissed, each in order.
+pub fn split_dismissed(runs: Vec<DeploymentRun>, dismissals: &[DismissedRun]) -> (Vec<DeploymentRun>, Vec<DeploymentRun>) {
+    runs.into_iter().partition(|r| !dismissed(r, dismissals))
+}
+
+/// The dismissals worth keeping after a check: a run that still waits, or
+/// one in a repo the check did not hear from, which may still wait.
+pub fn keep_dismissed(dismissals: &[DismissedRun], runs: &[DeploymentRun], answered: &[String]) -> Vec<DismissedRun> {
+    dismissals
+        .iter()
+        .filter(|d| !answered.contains(&d.repo) || runs.iter().any(|r| r.repo == d.repo && r.run_id == d.run_id))
+        .cloned()
+        .collect()
+}
+
 /// What was last learned about a repo's environments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Answer {
@@ -344,10 +364,18 @@ fn check_one(http: &dyn Http, forge: &Forge, cache: &ApprovalRepos, repo: &str, 
     out
 }
 
+/// What a check found: the rows, and the repos that answered it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Fetched {
+    pub rows: Vec<DeploymentRun>,
+    /// The repos whose check went through, so their rows are complete.
+    pub answered: Vec<String>,
+}
+
 /// Every row across the user's active repos, ordered. Fails when the repo
 /// list fails, when the rate limit ran out (the rows would be partial), or
 /// when every repo the check tried refused the token.
-pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: u64) -> Result<Vec<DeploymentRun>, String> {
+pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: u64) -> Result<Fetched, String> {
     let repos = active_repos(http, forge, now_ms)?;
     let next = AtomicUsize::new(0);
     let shared: &ApprovalRepos = cache;
@@ -371,13 +399,16 @@ pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: 
     });
     let mut outcomes: Vec<(usize, Outcome)> = joined?.into_iter().flatten().collect();
     outcomes.sort_by_key(|(i, _)| *i);
-    let (mut rows, mut attempted, mut refused, mut first_refusal, mut used_up) = (Vec::new(), 0, 0, None, None);
+    let (mut rows, mut answered, mut attempted, mut refused, mut first_refusal, mut used_up) = (Vec::new(), Vec::new(), 0, 0, None, None);
     for (i, out) in outcomes {
         let repo = &repos[i];
         if let Some(answer) = out.asked {
             cache.set(repo, answer, now_ms);
         }
         attempted += usize::from(out.attempted);
+        if out.error.is_none() {
+            answered.push(repo.clone());
+        }
         if let Some(e) = out.error {
             if is_rate_limit(&e) {
                 // Said once, by the caller, rather than once per repo.
@@ -399,7 +430,7 @@ pub fn fetch(http: &dyn Http, forge: &Forge, cache: &mut ApprovalRepos, now_ms: 
     }
     match first_refusal {
         Some(e) if attempted > 0 && refused == attempted => Err(e),
-        _ => Ok(order(rows)),
+        _ => Ok(Fetched { rows: order(rows), answered }),
     }
 }
 
@@ -431,6 +462,29 @@ mod tests {
     fn blocked(repo: &str, id: u64, since: &str, by_run_id: Option<u64>) -> DeploymentRun {
         let by = by_run_id.map(|b| Blocker { run_id: b, sha: "s".into(), title: "t".into(), url: "u".into() });
         row(repo, &run(id, id, 3, "pending", since), RunWait::Blocked { by })
+    }
+
+    fn dismissal(repo: &str, run_id: u64) -> DismissedRun {
+        DismissedRun { repo: repo.into(), run_id }
+    }
+
+    #[test]
+    fn split_dismissed_moves_only_the_dismissed_runs_and_keeps_the_order() {
+        let runs = vec![approval("O/a", 1, "t1"), approval("O/a", 2, "t2"), approval("O/b", 3, "t3"), approval("O/b", 4, "t4")];
+        // The same run id in another repo is another run.
+        let (shown, hidden) = split_dismissed(runs, &[dismissal("O/a", 2), dismissal("O/b", 4), dismissal("O/b", 1)]);
+        assert_eq!(shown.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(hidden.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![2, 4]);
+    }
+
+    #[test]
+    fn keep_dismissed_forgets_a_run_that_stopped_waiting_only_when_its_repo_answered() {
+        let runs = vec![approval("O/a", 1, "t1")];
+        let dismissals = [dismissal("O/a", 1), dismissal("O/a", 2), dismissal("O/b", 3)];
+        // O/a answered: run 2 no longer waits. O/b failed: run 3 may still wait.
+        assert_eq!(keep_dismissed(&dismissals, &runs, &["O/a".into()]), vec![dismissal("O/a", 1), dismissal("O/b", 3)]);
+        assert_eq!(keep_dismissed(&dismissals, &runs, &["O/a".into(), "O/b".into()]), vec![dismissal("O/a", 1)]);
+        assert_eq!(keep_dismissed(&dismissals, &[], &[]), dismissals.to_vec(), "a check nobody answered forgets nothing");
     }
 
     #[test]
@@ -536,7 +590,7 @@ mod tests {
             ("status=waiting", 200, &waiting),
             ("status=pending", 200, r#"{"workflow_runs":[]}"#),
         ]);
-        let rows = fetch(&http, &forge(), &mut ApprovalRepos::default(), now()).unwrap();
+        let rows = fetch(&http, &forge(), &mut ApprovalRepos::default(), now()).unwrap().rows;
         assert_eq!(rows.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![7]);
         assert_eq!(rows[0].wait, RunWait::Approval { environments: vec![Environment { id: 1, name: "production".into() }] });
         assert_eq!(rows[0].repo, "O/a");
@@ -582,7 +636,7 @@ mod tests {
         ]);
         let mut cache = ApprovalRepos::default();
         let t = now();
-        assert_eq!(fetch(&http, &forge(), &mut cache, t).unwrap(), vec![]);
+        assert_eq!(fetch(&http, &forge(), &mut cache, t).unwrap().rows, vec![]);
         assert_eq!((asked(&http, "/environments"), asked(&http, "/actions/runs")), (1, 0));
         fetch(&http, &forge(), &mut cache, t + 59 * 60_000).unwrap();
         assert_eq!(asked(&http, "/environments"), 1);
@@ -602,8 +656,9 @@ mod tests {
             ("/repos/O/b/actions/runs?status=waiting", 200, &waiting),
             ("/repos/O/b/actions/runs?status=pending", 200, r#"{"workflow_runs":[]}"#),
         ]);
-        let rows = fetch(&http, &forge(), &mut ApprovalRepos::default(), now()).unwrap();
-        assert_eq!(rows.iter().map(|r| (r.repo.as_str(), r.run_id)).collect::<Vec<_>>(), vec![("O/b", 7)]);
+        let fetched = fetch(&http, &forge(), &mut ApprovalRepos::default(), now()).unwrap();
+        assert_eq!(fetched.rows.iter().map(|r| (r.repo.as_str(), r.run_id)).collect::<Vec<_>>(), vec![("O/b", 7)]);
+        assert_eq!(fetched.answered, vec!["O/b".to_string()], "the failing repo did not answer");
     }
 
     #[test]
@@ -639,7 +694,7 @@ mod tests {
         ]);
         let mut cache = ApprovalRepos::default();
         cache.set("O/a", Answer::Needs, now());
-        let rows = fetch(&http, &forge(), &mut cache, now()).unwrap();
+        let rows = fetch(&http, &forge(), &mut cache, now()).unwrap().rows;
         assert_eq!(rows.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![7]);
         assert_eq!((asked(&http, "/environments"), asked(&http, "status=waiting")), (0, 1));
     }
@@ -754,7 +809,7 @@ mod tests {
             ("/repos/O/b/actions/runs?status=waiting", 200, &waiting),
             ("/repos/O/b/actions/runs?status=pending", 200, r#"{"workflow_runs":[]}"#),
         ]);
-        let rows = fetch(&http, &forge(), &mut ApprovalRepos::default(), now()).unwrap();
+        let rows = fetch(&http, &forge(), &mut ApprovalRepos::default(), now()).unwrap().rows;
         assert_eq!(rows.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![7]);
     }
 }

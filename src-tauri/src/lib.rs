@@ -312,6 +312,8 @@ pub(crate) fn remote_boards(state: &AppState) -> Vec<merge::RemoteBoard> {
 #[serde(rename_all = "camelCase")]
 pub struct DeploymentState {
     pub runs: Vec<deployments::DeploymentRun>,
+    /// Rows the user dismissed: still waiting, left to someone else.
+    pub dismissed: Vec<deployments::DeploymentRun>,
     /// The last check failed, or GitHub has no token; the runs are the last good ones.
     pub error: Option<String>,
     /// GitHub is switched off.
@@ -366,6 +368,18 @@ pub(crate) fn poll_reviews(app: &AppHandle) {
     let _ = app.emit("reviews", &snapshot);
 }
 
+impl DeploymentState {
+    /// Every row, shown or dismissed, ordered.
+    fn all_runs(&self) -> Vec<deployments::DeploymentRun> {
+        deployments::order(self.runs.iter().chain(&self.dismissed).cloned().collect())
+    }
+
+    /// Sorts `all` into the shown and the dismissed rows.
+    fn set_runs(&mut self, all: Vec<deployments::DeploymentRun>, dismissals: &[config::DismissedRun]) {
+        (self.runs, self.dismissed) = deployments::split_dismissed(all, dismissals);
+    }
+}
+
 /// Stores `next` as the deployments state and tells the page.
 fn publish_deployments(app: &AppHandle, next: DeploymentState) {
     *app.state::<AppState>().deployments.lock().unwrap() = next.clone();
@@ -409,8 +423,22 @@ pub(crate) fn poll_deployments(app: &AppHandle) {
     *state.deployment_repos.lock().unwrap() = cache;
     let mut next = current.clone();
     match result {
-        Ok(runs) => {
-            next.runs = runs;
+        Ok(fetched) => {
+            // Read and saved under the deployments lock, as a dismiss does, so neither undoes the other.
+            let kept = {
+                let mut store = state.store.lock().unwrap();
+                let kept = deployments::keep_dismissed(&store.config.dismissed_deployments, &fetched.rows, &fetched.answered);
+                if kept != store.config.dismissed_deployments {
+                    let mut after = store.config.clone();
+                    after.dismissed_deployments = kept.clone();
+                    match config::save(&store.config_path(), &after) {
+                        Ok(()) => store.config = after,
+                        Err(e) => log::line("app", format!("deployments: could not forget the finished dismissed runs: {e}")),
+                    }
+                }
+                kept
+            };
+            next.set_runs(fetched.rows, &kept);
             next.error = None;
         }
         Err(e) => {
@@ -609,7 +637,9 @@ fn review_deployment_cmd(app: &AppHandle, repo: &str, run_id: u64, shown: &[u64]
         Ok(fresh) => {
             let next = {
                 let mut d = state.deployments.lock().unwrap();
-                d.runs = deployments::replace_repo(&d.runs, repo, fresh);
+                let all = deployments::replace_repo(&d.all_runs(), repo, fresh);
+                let dismissals = state.store.lock().unwrap().config.dismissed_deployments.clone();
+                d.set_runs(all, &dismissals);
                 d.clone()
             };
             let _ = app.emit("deployments", &next);
@@ -629,10 +659,48 @@ fn deployment_reject(app: AppHandle, repo: String, run_id: u64, environment_ids:
     review_deployment_cmd(&app, &repo, run_id, &environment_ids, false)
 }
 
+/// Takes a listed run off the list, or puts a dismissed one back, without
+/// telling GitHub anything: the run stays for someone else to answer.
+fn dismiss_deployment_cmd(app: &AppHandle, repo: &str, run_id: u64, dismiss: bool) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let next = {
+        let mut d = state.deployments.lock().unwrap();
+        let all = d.all_runs();
+        if !all.iter().any(|r| r.repo == repo && r.run_id == run_id) {
+            return Err(DEPLOYMENT_GONE.to_string());
+        }
+        let dismissals = {
+            let mut store = state.store.lock().unwrap();
+            let mut after = store.config.clone();
+            after.dismissed_deployments.retain(|x| !(x.repo == repo && x.run_id == run_id));
+            if dismiss {
+                after.dismissed_deployments.push(config::DismissedRun { repo: repo.to_string(), run_id });
+            }
+            config::save(&store.config_path(), &after).map_err(|e| format!("Could not save the dismissed deployments: {e}"))?;
+            store.config = after;
+            store.config.dismissed_deployments.clone()
+        };
+        d.set_runs(all, &dismissals);
+        d.clone()
+    };
+    let _ = app.emit("deployments", &next);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn deployment_dismiss(app: AppHandle, repo: String, run_id: u64) -> Result<(), String> {
+    dismiss_deployment_cmd(&app, &repo, run_id, true)
+}
+
+#[tauri::command(async)]
+fn deployment_undismiss(app: AppHandle, repo: String, run_id: u64) -> Result<(), String> {
+    dismiss_deployment_cmd(&app, &repo, run_id, false)
+}
+
 /// Opens a listed run, or the run holding it back, in the browser.
 #[tauri::command(async)]
 fn open_deployment(state: TauriState<AppState>, repo: String, run_id: u64, blocker: bool) -> Result<(), String> {
-    let url = deployment_url(&state.deployments.lock().unwrap().runs, &repo, run_id, blocker).ok_or(DEPLOYMENT_GONE)?;
+    let url = deployment_url(&state.deployments.lock().unwrap().all_runs(), &repo, run_id, blocker).ok_or(DEPLOYMENT_GONE)?;
     open_in_browser(&url)
 }
 
@@ -1785,6 +1853,8 @@ fn keep_backend_owned(before: &Config, config: &mut Config) {
     }
     // What's new saves the last version it showed.
     config.last_shown_version = before.last_shown_version.clone();
+    // The Deployments tab's Dismiss saves these.
+    config.dismissed_deployments = before.dismissed_deployments.clone();
 }
 
 #[tauri::command(async)]
@@ -1974,6 +2044,8 @@ pub fn run() {
             list_deployments,
             deployment_approve,
             deployment_reject,
+            deployment_dismiss,
+            deployment_undismiss,
             open_deployment,
             clones_dir,
             open_review_pr,
@@ -2277,6 +2349,28 @@ mod route_tests {
         keep_backend_owned(&before, &mut config);
         assert_eq!(config.last_shown_version.as_deref(), Some("0.50.0"));
         assert_eq!(config.network.group_version, 7);
+    }
+
+    #[test]
+    fn a_settings_save_keeps_the_dismissed_deployments() {
+        let before = Config { dismissed_deployments: vec![config::DismissedRun { repo: "O/r".into(), run_id: 7 }], ..Config::default() };
+        let mut config = Config::default();
+        keep_backend_owned(&before, &mut config);
+        assert_eq!(config.dismissed_deployments, before.dismissed_deployments);
+    }
+
+    #[test]
+    fn deployment_state_splits_by_the_dismissals_and_joins_back_in_order() {
+        let run = |id: u64, since: &str| deployments::DeploymentRun {
+            repo: "O/r".into(), run_id: id, run_number: id, workflow: "Deploy".into(), branch: "main".into(), sha: "s".into(),
+            title: "t".into(), actor: "jane".into(), url: "u".into(), since: since.into(),
+            wait: deployments::RunWait::Approval { environments: vec![] },
+        };
+        let mut d = DeploymentState::default();
+        d.set_runs(vec![run(1, "t1"), run(2, "t2"), run(3, "t3")], &[config::DismissedRun { repo: "O/r".into(), run_id: 2 }]);
+        assert_eq!(d.runs.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(d.dismissed.iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![2]);
+        assert_eq!(d.all_runs().iter().map(|r| r.run_id).collect::<Vec<_>>(), vec![1, 2, 3]);
     }
 
     #[test]

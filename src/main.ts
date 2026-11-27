@@ -39,8 +39,8 @@ let known = new Set<string>();
 let pointer: { x: number; y: number } | null = null;
 let reviews: ReviewState = { prs: [], errors: [], off: false, fetchedAt: null };
 let workItems: WorkItemsState = { items: [], started: [], errors: [], sourceLabels: {}, gitOff: false, off: false, fetchedAt: null };
-let deployments: DeploymentState = { runs: [], error: null, off: false, assistant: false, fetchedAt: null };
-const deployUi: RowUi = { busy: new Set(), errors: new Map() };
+let deployments: DeploymentState = { runs: [], dismissed: [], error: null, off: false, assistant: false, fetchedAt: null };
+const deployUi: RowUi = { busy: new Set(), errors: new Map(), showDismissed: false };
 let clonesDir: string | null = null;
 let tabs: ReturnType<typeof makeTabs> | null = null;
 let reviewsView: ReturnType<typeof makeReviewsView> | null = null;
@@ -110,12 +110,30 @@ async function deploymentAction(target: Element): Promise<void> {
   if (action.kind === "git-settings") {
     document.dispatchEvent(new CustomEvent(OPEN_SETTINGS_GROUP, { detail: "git" }));
     tabs?.show("settings");
+  } else if (action.kind === "toggle-dismissed") {
+    deployUi.showDismissed = !deployUi.showDismissed;
+    paintDeployments();
   } else if (action.kind === "open-run" || action.kind === "open-blocker") {
     try {
       await invoke("open_deployment", { repo: action.repo, runId: action.runId, blocker: action.kind === "open-blocker" });
     } catch (e) {
       showToast(String(e));
     }
+  } else if (action.kind === "dismiss" || action.kind === "undismiss") {
+    // The backend sends the list back with the row moved; only a failure needs saying here.
+    const { repo, runId } = action;
+    if (deployUi.busy.has(runId)) return;
+    deployUi.busy.add(runId);
+    deployUi.errors.delete(runId);
+    paintDeployments();
+    try {
+      await invoke(action.kind === "dismiss" ? "deployment_dismiss" : "deployment_undismiss", { repo, runId });
+    } catch (e) {
+      deployUi.errors.set(runId, String(e));
+      if (![...deployments.runs, ...deployments.dismissed].some((r) => r.repo === repo && r.runId === runId)) showToast(String(e));
+    }
+    deployUi.busy.delete(runId);
+    paintDeployments();
   } else {
     const { repo, runId, environmentIds } = action;
     if (deployUi.busy.has(runId)) return;

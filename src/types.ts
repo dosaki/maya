@@ -154,6 +154,8 @@ export interface DeploymentRun {
 }
 export interface DeploymentState {
   runs: DeploymentRun[];
+  /** Still waiting, but left to someone else: off the list and the count. */
+  dismissed: DeploymentRun[];
   error: string | null;
   off: boolean;
   assistant: boolean;

@@ -615,6 +615,12 @@ body { margin: 0; background: var(--bg); }
 .deploy__link:hover { text-decoration-color: currentColor; }
 .deploy__branch { color: var(--muted); font-size: 12px; }
 .deploy__error { color: #e5484d; font-size: 13px; }
+.card__btn--quiet { color: var(--muted); border-color: transparent; background: none; }
+.card__btn--quiet:hover:not(:disabled) { color: var(--text); border-color: var(--border); }
+.deploy__dismissed { color: var(--muted); font-size: 13px; padding: 12px 0 4px; text-align: center; }
+.deploy__dismissed .deploy__link { color: var(--muted); }
+.pr.deploy--dismissed { opacity: .6; }
+.pr.deploy--dismissed:hover { opacity: 1; }
 .pr { display: flex; align-items: center; gap: 12px; padding: var(--row-pad-y) var(--row-pad-x); }
 .pr + .pr { border-top: 1px solid var(--rule); }
 .pr__main { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }

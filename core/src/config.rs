@@ -110,6 +110,15 @@ impl NetworkConfig {
     }
 }
 
+/// A workflow run the user dismissed from the Deployments tab.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DismissedRun {
+    /// `owner/name`.
+    pub repo: String,
+    pub run_id: u64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -204,6 +213,11 @@ pub struct Config {
     /// from it. The backend owns it: a page saving Settings keeps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_shown_version: Option<String>,
+    /// The deployments the user took off the Deployments tab without
+    /// approving or rejecting them. The backend owns it: a page saving
+    /// Settings keeps it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dismissed_deployments: Vec<DismissedRun>,
     /// The session viewer's look; the phone keeps its own.
     #[serde(default)]
     pub viewer_theme: ViewerTheme,
@@ -773,6 +787,7 @@ impl Default for Config {
             whisper_model: DEFAULT_MODEL.into(),
             git: None,
             last_shown_version: None,
+            dismissed_deployments: Vec::new(),
             viewer_theme: ViewerTheme::Chat,
             color_theme: ColorTheme::Dark,
             card_size: None,
@@ -1231,6 +1246,20 @@ mod tests {
         assert_eq!(g.rules[0].repos, vec!["acme/api", "acme/web"]);
         assert_eq!(g.status_labels, vec!["todo"]);
         assert_eq!(g.start_status, None, "not one of the status labels");
+    }
+
+    #[test]
+    fn dismissed_deployments_round_trip_and_default_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let c = Config { dismissed_deployments: vec![DismissedRun { repo: "O/r".into(), run_id: 7 }], ..Config::default() };
+        save(&path, &c).unwrap();
+        assert_eq!(load(&path).dismissed_deployments, c.dismissed_deployments);
+        let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["dismissedDeployments"], serde_json::json!([{"repo": "O/r", "runId": 7}]));
+        let old = serde_json::from_str::<Config>(r#"{"completedTimeoutMinutes":5}"#).unwrap();
+        assert!(old.dismissed_deployments.is_empty());
+        assert!(!serde_json::to_string(&Config::default()).unwrap().contains("dismissedDeployments"), "none is not written");
     }
 
     #[test]
