@@ -1,3 +1,9 @@
+# 0.63.0
+
+## New
+
+- A deployment waiting for someone else's approval can leave your Deployments list: click Dismiss on its row. Maya does not approve or reject it, so the person who owns it still decides. It stops counting on the Deployments tab, stays dismissed when Maya restarts, and is forgotten once it no longer waits. "2 dismissed · Show" at the bottom of the list shows the dismissed deployments again, each with Undismiss to put it back.
+
 # 0.62.1
 
 ## Fixed
